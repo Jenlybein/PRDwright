@@ -1,0 +1,5 @@
+/* Tailwind v4：一条指令即可引入 base / components / utilities 三层样式 */
+@import "tailwindcss";
+
+/* 加载 JS 配置（自定义 primary 色系），路径相对于本文件 */
+@config "../tailwind.config.js";
