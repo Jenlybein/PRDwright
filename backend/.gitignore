@@ -1,0 +1,70 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.egg
+*.so
+.installed.cfg
+
+# Virtual environments
+.venv
+venv/
+env/
+ENV/
+
+# 环境变量（含密钥，绝不入库；仅保留 .env.example 模板）
+.env
+.env.*
+.envrc
+!.env.example
+!.env.sample
+
+# 工具缓存 / 覆盖率 / 类型检查
+.uv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 本地数据库与运行时数据
+*.sqlite3
+*.sqlite
+*.db
+*.db-journal
+data/**
+!data/.gitkeep
+uploads/**
+!uploads/.gitkeep
+
+# 日志
+logs/
+*.log
+
+# 编辑器与系统文件
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+
+# 注意：uv.lock 与 .python-version 用于锁定依赖与解释器版本，必须提交到仓库

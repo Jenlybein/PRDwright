@@ -1,0 +1,183 @@
+# ---------------------------------------------------------------------------
+# HarnessPRD - 根目录 .gitignore
+# monorepo：backend = Python(uv) + FastAPI，frontend = Node + Vite + Vue 3
+# 子目录 backend/ 与 frontend/ 另有各自的 .gitignore 做细粒度补充。
+# ---------------------------------------------------------------------------
+
+# ============================== 环境变量 ==================================
+# 任何含密钥/本地配置的文件都不入库，只保留模板文件
+.env
+.env.*
+.envrc
+!.env.example
+!.env.sample
+
+# ============================== 操作系统 ==================================
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.stackdump
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ============================= 编辑器 / IDE ===============================
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.ntvs*
+*.njsproj
+*.swp
+*.swo
+*.sw?
+.history/
+*.sublime-workspace
+*.sublime-project
+.project
+.pydevproject
+.settings/
+
+# ============================= Python / uv ================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境（.venv / venv 不入库；.python-version 与 uv.lock 必须入库）
+.venv/
+venv/
+env/
+ENV/
+
+# 工具缓存
+.uv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+profile_default/
+
+# ========================= Node / 前端构建产物 ============================
+node_modules/
+dist/
+dist-ssr/
+.output/
+.vite/
+.cache/
+.temp/
+.tmp/
+*.local
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+.npm
+.pnpm-store/
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+.parcel-cache/
+
+# ============================== 日志与调试 ================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ================================ 测试产物 ================================
+coverage/
+__screenshots__/
+/cypress/videos/
+/cypress/screenshots/
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/
+
+# ======================= 数据库 / 本地数据 / 上传文件 ======================
+*.sqlite3
+*.sqlite
+*.db
+*.db-journal
+data/**
+!data/.gitkeep
+uploads/**
+!uploads/.gitkeep
+
+# ================================ 其他 ===================================
+# WorkBuddy 工作区状态（会话缓存、记忆草稿等），非项目源码
+.workbuddy/
+
+# 证书与私钥
+*.pem
+*.p12
+*.pfx
+*.key
+
+# 归档与大型媒体文件（如需随库发布请按需调整）
+*.zip
+*.tar.gz
+*.7z
+*.rar
+*.mp4
+*.mov
+
+# 静态资源不忽略
+!**/public/**
+!**/src/assets/**
