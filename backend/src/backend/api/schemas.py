@@ -16,38 +16,23 @@ from pydantic import BaseModel, ConfigDict, Field
 # ============================================================================
 
 
-class QuestionOption(BaseModel):
-    """选择题的可选项。"""
+class QuestionConfig(BaseModel):
+    """问卷中的单个问题，字段与前端 `types/index.ts` 的 `QuestionConfig` 保持一致。"""
 
-    value: str = Field(description="选项值，提交答案时使用")
-    label: str = Field(description="选项展示文案")
-
-
-class Question(BaseModel):
-    """问卷中的单个问题。"""
-
-    id: str = Field(description="问题唯一标识，作为答案字典的 key")
-    label: str = Field(description="问题短标题")
-    question: str = Field(description="问题正文")
-    description: str = Field(default="", description="补充说明，解释为什么要问这个")
+    name: str = Field(description="字段名称，作为提交答案时字典的 key")
+    label: str = Field(description="展示给用户的题目文案")
     type: Literal["text", "textarea", "select", "radio"] = Field(
         description="题型：单行文本 / 多行文本 / 下拉选择 / 单选"
     )
     required: bool = Field(default=False, description="是否必填")
-    placeholder: str = Field(default="", description="输入框占位提示")
-    max_length: int | None = Field(default=None, description="文本最大长度")
-    rows: int | None = Field(default=None, description="多行文本框行数")
-    multiple: bool = Field(default=False, description="选择题是否允许多选")
-    min_selected: int | None = Field(default=None, description="多选时至少选择的项数")
-    options: list[QuestionOption] = Field(default_factory=list, description="可选项列表")
+    options: list[str] = Field(default_factory=list, description="选择类题型的选项文案列表")
 
 
 class QuestionsConfig(BaseModel):
-    """问卷配置整体结构。"""
+    """问卷配置整体结构，按基础题 / 进阶题分组。"""
 
-    form_version: str = Field(description="问卷版本号，前端可用于缓存失效判断")
-    title: str = Field(description="问卷标题")
-    questions: list[Question] = Field(description="问题列表")
+    base_questions: list[QuestionConfig] = Field(description="基础问题，创建会话时必答")
+    advanced_questions: list[QuestionConfig] = Field(description="进阶问题，可按需补充")
 
 
 # ============================================================================
@@ -61,7 +46,7 @@ class ConversationCreateRequest(BaseModel):
     title: str = Field(default="", description="会话标题，留空则由服务层自动生成")
     answers: dict[str, Any] = Field(
         default_factory=dict,
-        description="问卷答案，key 为 Question.id",
+        description="问卷答案，key 为 QuestionConfig.name",
     )
 
 

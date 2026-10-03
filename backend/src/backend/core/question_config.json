@@ -1,140 +1,104 @@
 {
-  "form_version": "1.0",
-  "title": "产品需求基础信息",
-  "questions": [
+  "base_questions": [
     {
-      "id": "product_name",
-      "label": "产品名称",
-      "question": "你想做的产品叫什么名字？",
-      "description": "还没定稿可以先用代号，后续随时可改。名称会作为三份文档的标题和 AI 对话的上下文锚点。",
+      "name": "product_name",
+      "label": "你想做的产品叫什么名字？",
       "type": "text",
-      "required": true,
-      "placeholder": "例如：智能会议纪要助手",
-      "max_length": 50
+      "required": true
     },
     {
-      "id": "problem_to_solve",
-      "label": "要解决的问题",
-      "question": "这个产品是为了解决什么问题？用户现在没有它时是怎么做的？",
-      "description": "用一到三句说清「谁在什么场景下遇到什么麻烦」。这是 AI 判断需求边界、避免生成泛泛而谈内容的最关键输入。",
+      "name": "problem_to_solve",
+      "label": "这个产品是为了解决什么问题？用户现在没有它时是怎么做的？",
       "type": "textarea",
-      "required": true,
-      "placeholder": "例如：运营每周要手动整理 20 场会议录音，耗时 6 小时且容易漏掉待办事项。",
-      "max_length": 500,
-      "rows": 3
+      "required": true
     },
     {
-      "id": "target_users",
-      "label": "目标用户",
-      "question": "谁会主要使用这个产品？",
-      "description": "建议按「角色 + 特征」描述，例如「中小电商公司的运营，1-3 年经验，不懂 SQL」。有多个用户角色可换行分开写。",
+      "name": "target_users",
+      "label": "谁会主要使用这个产品？",
       "type": "textarea",
-      "required": true,
-      "placeholder": "例如：中小企业项目负责人，35 岁以下，日常用飞书和微信，对 AI 工具接受度高。",
-      "max_length": 500,
-      "rows": 3
+      "required": true
     },
     {
-      "id": "core_features",
-      "label": "核心功能",
-      "question": "请列出产品的核心功能，建议 3-5 条，一行一条。",
-      "description": "只写最关键的能力，细节留到 AI 对话中展开。避免写「用户管理」这类过于笼统的词，写成「支持企业微信扫码加入团队并自动同步部门」会更有效。",
+      "name": "core_features",
+      "label": "请列出产品的核心功能，建议 3-5 条，一行一条。",
       "type": "textarea",
-      "required": true,
-      "placeholder": "1. 上传录音自动转写为文字\n2. 自动提取待办事项和负责人\n3. 一键生成纪要并推送到飞书群",
-      "max_length": 800,
-      "rows": 5
+      "required": true
     },
     {
-      "id": "platform_type",
-      "label": "产品形态",
-      "question": "这个产品运行在哪些端？（可多选）",
-      "description": "直接决定技术方案、PRD 中的兼容性/性能等非功能需求，以及接口文档的组织方式。",
+      "name": "platform_type",
+      "label": "这个产品运行在哪些端？（可多选）",
       "type": "select",
       "required": true,
-      "multiple": true,
-      "min_selected": 1,
       "options": [
-        { "value": "web_app", "label": "Web 网页应用" },
-        { "value": "mobile_app", "label": "移动 App（iOS / Android）" },
-        { "value": "mini_program", "label": "小程序（微信 / 支付宝等）" },
-        { "value": "desktop", "label": "桌面客户端（Mac / Windows）" },
-        { "value": "api_only", "label": "纯 API 服务（无界面，供其他系统调用）" },
-        { "value": "ai_agent", "label": "AI 应用 / 智能体（对话为主要交互）" },
-        { "value": "unsure", "label": "不确定，希望 AI 给出建议" }
+        "Web 网页应用",
+        "移动 App（iOS / Android）",
+        "小程序（微信 / 支付宝等）",
+        "桌面客户端（Mac / Windows）",
+        "纯 API 服务（无界面，供其他系统调用）",
+        "AI 应用 / 智能体（对话为主要交互）",
+        "不确定，希望 AI 给出建议"
       ]
-    },
+    }
+  ],
+  "advanced_questions": [
     {
-      "id": "auth_required",
-      "label": "账号体系",
-      "question": "用户是否需要登录才能使用？",
-      "description": "决定是否需要设计注册/登录流程、会话与权限模块；接口文档也会相应包含鉴权约定和 Token 说明。",
+      "name": "auth_required",
+      "label": "用户是否需要登录才能使用？",
       "type": "radio",
       "required": true,
       "options": [
-        { "value": "full_account", "label": "需要，自建账号体系（手机号/邮箱 + 密码）" },
-        { "value": "third_party", "label": "需要，但只用第三方登录（微信 / 企业微信 / Google 等）" },
-        { "value": "admin_only", "label": "仅后台管理员登录，用户端免登录" },
-        { "value": "no_login", "label": "完全不需要登录，打开即用" },
-        { "value": "unsure", "label": "不确定，希望 AI 给出建议" }
+        "需要，自建账号体系（手机号/邮箱 + 密码）",
+        "需要，但只用第三方登录（微信 / 企业微信 / Google 等）",
+        "仅后台管理员登录，用户端免登录",
+        "完全不需要登录，打开即用",
+        "不确定，希望 AI 给出建议"
       ]
     },
     {
-      "id": "data_storage",
-      "label": "数据存储需求",
-      "question": "产品是否需要持久化存储数据？",
-      "description": "决定是否需要数据库设计、数据模型章节和 CRUD 接口。选「不确定」时 AI 会在对话中进一步确认。",
+      "name": "data_storage",
+      "label": "产品是否需要持久化存储数据？",
       "type": "radio",
       "required": true,
       "options": [
-        { "value": "business_db", "label": "需要，要存业务数据（用户、订单、内容、关系等）" },
-        { "value": "light_storage", "label": "只需轻量存储（本地缓存、配置文件、单个表格即可）" },
-        { "value": "no_storage", "label": "不需要，实时处理完即返回结果" },
-        { "value": "unsure", "label": "不确定，希望 AI 给出建议" }
+        "需要，要存业务数据（用户、订单、内容、关系等）",
+        "只需轻量存储（本地缓存、配置文件、单个表格即可）",
+        "不需要，实时处理完即返回结果",
+        "不确定，希望 AI 给出建议"
       ]
     },
     {
-      "id": "page_count",
-      "label": "页面数量预估",
-      "question": "你预计产品大概有多少个页面（或核心界面）？",
-      "description": "用于估算 PRD 篇幅和生成时的章节拆分粒度。粗略估计即可，不必精确。",
+      "name": "page_count",
+      "label": "你预计产品大概有多少个页面（或核心界面）？",
       "type": "select",
       "required": true,
       "options": [
-        { "value": "1-5", "label": "1-5 个（极简工具型）" },
-        { "value": "6-10", "label": "6-10 个（单一流程型产品）" },
-        { "value": "11-20", "label": "11-20 个（多模块业务系统）" },
-        { "value": "21-50", "label": "21-50 个（中大型平台）" },
-        { "value": "50+", "label": "50 个以上（复杂系统）" },
-        { "value": "unsure", "label": "不确定，希望 AI 帮我估算" }
+        "1-5 个（极简工具型）",
+        "6-10 个（单一流程型产品）",
+        "11-20 个（多模块业务系统）",
+        "21-50 个（中大型平台）",
+        "50 个以上（复杂系统）",
+        "不确定，希望 AI 帮我估算"
       ]
     },
     {
-      "id": "style_preference",
-      "label": "页面风格偏好",
-      "question": "你希望产品的界面风格偏向哪种？",
-      "description": "影响 PRD 中的设计约束与视觉描述，也让 AI 生成的页面结构建议更贴合预期。",
+      "name": "style_preference",
+      "label": "你希望产品的界面风格偏向哪种？",
       "type": "select",
       "required": true,
       "options": [
-        { "value": "minimal_modern", "label": "极简现代（参考 Linear、Notion）" },
-        { "value": "enterprise_console", "label": "企业级后台（参考阿里云控制台、飞书管理后台）" },
-        { "value": "consumer_lively", "label": "消费级活泼（参考小红书、抖音）" },
-        { "value": "dark_tech", "label": "暗色科技感（参考各类 AI 工具官网）" },
-        { "value": "reference_product", "label": "参考某个具体产品（AI 会在对话中追问是哪个）" },
-        { "value": "unsure", "label": "不确定，希望 AI 给出建议" }
+        "极简现代（参考 Linear、Notion）",
+        "企业级后台（参考阿里云控制台、飞书管理后台）",
+        "消费级活泼（参考小红书、抖音）",
+        "暗色科技感（参考各类 AI 工具官网）",
+        "参考某个具体产品（AI 会在对话中追问是哪个）",
+        "不确定，希望 AI 给出建议"
       ]
     },
     {
-      "id": "constraints_or_extra",
-      "label": "补充说明（选填）",
-      "question": "还有哪些约束或背景信息是我们必须知道的？",
-      "description": "例如工期节点、必须使用的技术栈、合规要求、已确定的第三方服务、明确不做的事。留空也可以继续，AI 会在对话中补充确认。",
+      "name": "constraints_or_extra",
+      "label": "还有哪些约束或背景信息是我们必须知道的？",
       "type": "textarea",
-      "required": false,
-      "placeholder": "例如：两周内要出demo；后端必须用 Go；数据不能出境；第一版不做支付。",
-      "max_length": 500,
-      "rows": 3
+      "required": false
     }
   ]
 }
