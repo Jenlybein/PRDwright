@@ -1,12 +1,12 @@
 [project]
 name = "backend"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "HarnessPRD 后端服务"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.142.2",
     "langchain>=1.4.3",
+    "langchain-anthropic>=1.7.5",
     "langchain-openai>=1.6.7",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.4",

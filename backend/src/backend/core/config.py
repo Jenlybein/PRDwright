@@ -45,6 +45,15 @@ class Settings(BaseSettings):
         default="",
         description="OpenAI API 密钥。",
     )
+    # 自定义 API 地址：用于自建网关 / 中转代理 / 兼容服务，留空则用官方默认地址
+    anthropic_api_url: str = Field(
+        default="",
+        description="Anthropic API 地址；留空则使用官方默认地址。",
+    )
+    openai_api_url: str = Field(
+        default="",
+        description="OpenAI API 地址；留空则使用官方默认地址。",
+    )
 
     # --- 默认模型选择 --------------------------------------------------------
     default_llm_provider: Literal["anthropic", "openai"] = Field(
