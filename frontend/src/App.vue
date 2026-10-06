@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import FormStep from '@/components/FormStep.vue'
 import { getQuestions } from '@/services/api'
-import type { QuestionsConfig } from '@/types'
+import { STEPS, STEP_OF_STATE } from '@/types'
+import type { QuestionsConfig, ViewState } from '@/types'
 
 /** localStorage 中保存表单草稿的键名 */
 const STORAGE_KEY = 'harnessprd:form-data'
+
+/** 当前所处阶段 */
+const viewState = ref<ViewState>('form')
 
 const questions = ref<QuestionsConfig | null>(null)
 const loading = ref(true)
@@ -54,14 +58,45 @@ watch(formData, (value) => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
 })
 
-/** 接收子组件提交的数据并落盘 */
+/** 接收子组件提交的数据并落盘，随后进入 AI 对话阶段 */
 function handleSubmit(data: Record<string, string>): void {
   Object.assign(formData, data)
   localStorage.setItem(STORAGE_KEY, JSON.stringify(formData))
   savedTip.value = '表单已保存到本地'
+  viewState.value = 'chatting'
+  window.scrollTo({ top: 0, behavior: 'smooth' })
   window.setTimeout(() => {
     savedTip.value = ''
   }, 2000)
+}
+
+/** 当前阶段在进度条上的下标 */
+const currentStepIndex = computed(() =>
+  STEPS.findIndex((step) => step.id === STEP_OF_STATE[viewState.value]),
+)
+
+/** 是否处于文档生成中 */
+const isGenerating = computed(() => viewState.value.startsWith('generating-'))
+
+/** 是否处于文档待确认 */
+const isReviewing = computed(() => viewState.value.startsWith('review-'))
+
+/** 生成中 / 待确认阶段对应的文档名，用于占位文案 */
+const docName = computed(() => {
+  const map: Record<string, string> = {
+    'generating-prd': 'PRD',
+    'review-prd': 'PRD',
+    'generating-api-docs': '接口文档',
+    'review-api-docs': '接口文档',
+    'generating-prompts': '提示词文档',
+    'review-prompts': '提示词文档',
+  }
+  return map[viewState.value] ?? '文档'
+})
+
+/** 判断某个步骤是否已走完 */
+function isFinished(index: number): boolean {
+  return index < currentStepIndex.value
 }
 </script>
 
@@ -107,8 +142,60 @@ function handleSubmit(data: Record<string, string>): void {
     </header>
 
     <main class="mx-auto max-w-3xl px-4 py-10">
-      <!-- 页面标题区 -->
-      <div class="mb-8">
+      <!-- 步骤进度条 -->
+      <nav class="mb-8" aria-label="生成进度">
+        <ol class="flex items-start">
+          <li v-for="(step, index) in STEPS" :key="step.id" class="flex flex-1 items-center">
+            <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+              <!-- 已完成显示对勾；当前步骤在生成中时呼吸高亮，否则实心高亮 -->
+              <span
+                class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold transition"
+                :class="[
+                  isFinished(index)
+                    ? 'bg-primary-500 text-white'
+                    : index === currentStepIndex
+                      ? isGenerating
+                        ? 'bg-primary-100 text-primary-700 ring-2 ring-primary-500 animate-pulse'
+                        : 'bg-primary-500 text-white ring-4 ring-primary-100'
+                      : 'bg-slate-100 text-slate-400',
+                ]"
+              >
+                <svg
+                  v-if="isFinished(index)"
+                  class="h-4 w-4"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path
+                    fill-rule="evenodd"
+                    d="M16.704 5.29a1 1 0 0 1 .006 1.414l-7.5 7.5a1 1 0 0 1-1.414 0l-4-4a1 1 0 1 1 1.414-1.414l3.293 3.293 6.793-6.793a1 1 0 0 1 1.408 0Z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
+                <template v-else>{{ index + 1 }}</template>
+              </span>
+              <span
+                class="whitespace-nowrap text-[11px] font-medium transition"
+                :class="
+                  index <= currentStepIndex ? 'text-primary-700' : 'text-slate-400'
+                "
+              >
+                {{ step.label }}
+              </span>
+            </div>
+            <!-- 步骤之间的连接线 -->
+            <div
+              v-if="index < STEPS.length - 1"
+              class="mx-1 mb-5 h-0.5 flex-1 rounded-full transition"
+              :class="isFinished(index) ? 'bg-primary-400' : 'bg-slate-200'"
+            ></div>
+          </li>
+        </ol>
+      </nav>
+
+      <!-- 页面标题区（仅问卷阶段展示） -->
+      <div v-if="viewState === 'form'" class="mb-8">
         <h1 class="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
           告诉我们你的产品想法
         </h1>
@@ -156,13 +243,99 @@ function handleSubmit(data: Record<string, string>): void {
         </button>
       </div>
 
-      <!-- 问卷表单，表单数据与 formData 双向绑定 -->
+      <!-- 阶段一：填写问卷 -->
       <FormStep
-        v-else-if="questions"
+        v-else-if="viewState === 'form'"
         v-model="formData"
-        :questions="questions"
+        :questions="questions!"
         @submit="handleSubmit"
       />
+
+      <!-- 阶段二：与 AI 对话补充需求（待实现） -->
+      <section
+        v-else-if="viewState === 'chatting'"
+        class="rounded-2xl border border-slate-200/80 bg-white p-8 text-center shadow-sm"
+      >
+        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary-50">
+          <svg class="h-6 w-6 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M10 2a8 8 0 1 0 8 8 3 3 0 0 1-2-2 4 4 0 0 0-4-2c-1.5 0-2.5 1-3 2a6 6 0 0 0 1 6 8 8 0 0 1 0-12Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+        </div>
+        <h2 class="mt-4 text-base font-semibold text-slate-900">AI 对话（待实现）</h2>
+        <p class="mx-auto mt-2 max-w-md text-sm leading-relaxed text-slate-500">
+          接下来 AI 会基于你的回答追问关键信息，确认无误后开始生成文档。该阶段尚未接入后端会话接口。
+        </p>
+        <button
+          type="button"
+          class="mt-5 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+          @click="viewState = 'form'"
+        >
+          返回修改问卷
+        </button>
+      </section>
+
+      <!-- 文档生成中（PRD / 接口文档 / 提示词共用） -->
+      <section
+        v-else-if="isGenerating"
+        class="rounded-2xl border border-slate-200/80 bg-white p-8 text-center shadow-sm"
+      >
+        <div class="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-slate-200 border-t-primary-500"></div>
+        <h2 class="mt-4 text-base font-semibold text-slate-900">正在生成{{ docName }}</h2>
+        <p class="mx-auto mt-2 max-w-md text-sm text-slate-500">
+          AI 正在整理你的需求并撰写文档，生成完成后会在这里展示，你可以逐段确认或修改。
+        </p>
+      </section>
+
+      <!-- 文档待确认（PRD / 接口文档 / 提示词共用） -->
+      <section
+        v-else-if="isReviewing"
+        class="rounded-2xl border border-slate-200/80 bg-white p-8 text-center shadow-sm"
+      >
+        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50">
+          <svg class="h-6 w-6 text-emerald-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+        </div>
+        <h2 class="mt-4 text-base font-semibold text-slate-900">{{ docName }}已生成，等待确认</h2>
+        <p class="mx-auto mt-2 max-w-md text-sm text-slate-500">
+          文档编辑与确认界面尚未实现，后端接口就绪后会在这里渲染 Markdown 内容。
+        </p>
+        <button
+          type="button"
+          class="mt-5 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+          @click="viewState = 'chatting'"
+        >
+          返回对话
+        </button>
+      </section>
+
+      <!-- 全部完成 -->
+      <section
+        v-else-if="viewState === 'done'"
+        class="rounded-2xl border border-slate-200/80 bg-white p-8 text-center shadow-sm"
+      >
+        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary-50">
+          <svg class="h-6 w-6 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 0-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+        </div>
+        <h2 class="mt-4 text-base font-semibold text-slate-900">三份文档已全部完成</h2>
+        <p class="mx-auto mt-2 max-w-md text-sm text-slate-500">
+          你可以继续修改需求重新生成，或导出已有内容。
+        </p>
+      </section>
     </main>
 
     <footer class="pb-10 text-center text-xs text-slate-400">

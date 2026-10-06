@@ -17,3 +17,43 @@ export interface QuestionsConfig {
   base_questions: QuestionConfig[]
   advanced_questions: QuestionConfig[]
 }
+
+/**
+ * 页面所处的阶段。
+ * `generating-*` 表示文档正在生成中，`review-*` 表示文档已生成、待用户确认。
+ */
+export type ViewState =
+  | 'form'
+  | 'chatting'
+  | 'generating-prd'
+  | 'review-prd'
+  | 'generating-api-docs'
+  | 'review-api-docs'
+  | 'generating-prompts'
+  | 'review-prompts'
+  | 'done'
+
+/** 顶部进度条展示的步骤（生成中状态不单独占一步，而是归并到对应文档的确认步骤） */
+export const STEPS = [
+  { id: 'form', label: '描述产品' },
+  { id: 'chatting', label: 'AI 对话' },
+  { id: 'review-prd', label: 'PRD' },
+  { id: 'review-api-docs', label: '接口文档' },
+  { id: 'review-prompts', label: '提示词' },
+] as const
+
+/** 步骤 id 的联合类型，取自 STEPS */
+export type StepId = (typeof STEPS)[number]['id']
+
+/** ViewState → 所属步骤，用于定位进度条当前位置 */
+export const STEP_OF_STATE: Record<ViewState, StepId> = {
+  form: 'form',
+  chatting: 'chatting',
+  'generating-prd': 'review-prd',
+  'review-prd': 'review-prd',
+  'generating-api-docs': 'review-api-docs',
+  'review-api-docs': 'review-api-docs',
+  'generating-prompts': 'review-prompts',
+  'review-prompts': 'review-prompts',
+  done: 'review-prompts',
+}
