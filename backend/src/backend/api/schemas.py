@@ -75,16 +75,44 @@ class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, description="用户输入的消息内容")
 
 
+class MessageItem(BaseModel):
+    """单条聊天消息，用于前端回传历史（无状态接续对话）。"""
+
+    role: Literal["system", "user", "assistant"] = Field(description="消息角色")
+    content: str = Field(default="", description="消息正文")
+
+
+class ConversationContinueRequest(BaseModel):
+    """接续对话请求。会话 ID 与历史至少提供一种。"""
+
+    conversation_id: str = Field(
+        default="",
+        description="会话 ID；留空则由前端回传 history 走无状态模式",
+    )
+    content: str = Field(min_length=1, description="本轮用户输入的消息内容")
+    history: list[MessageItem] = Field(
+        default_factory=list,
+        description="前端回传的历史消息；传入时优先于服务端保存的历史",
+    )
+
+
 # ============================================================================
 # SSE 流式响应
 # ============================================================================
 
 
 class StreamEvent(BaseModel):
-    """SSE 推送的单个事件。"""
+    """SSE 推送的单个事件。
 
-    type: Literal["status", "delta", "tool_call", "document", "error", "done"] = Field(
-        description="事件类型：状态提示 / 增量文本 / 工具调用 / 文档更新 / 错误 / 结束"
+    事件类型与 SSE 的 `event:` 行一一对应，前端既可以用
+    `addEventListener('<type>')` 监听，也可以只解析 `data` 里的 `type` 字段。
+    """
+
+    type: Literal["status", "chunk", "done", "error", "tool_call", "document"] = Field(
+        description=(
+            "事件类型：状态提示 status / 增量文本 chunk / 结束 done / 错误 error，"
+            "tool_call 与 document 为后续扩展预留"
+        )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
     data: dict[str, Any] = Field(default_factory=dict, description="事件附加数据")

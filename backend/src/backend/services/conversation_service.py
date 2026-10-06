@@ -447,7 +447,7 @@ class ConversationService:
             extra_data: 附加到 `done` 事件的数据，如会话 ID。
 
         Yields:
-            `StreamEvent`，依次为 `status` / 若干 `delta` / `done`，出错时为 `error`。
+            `StreamEvent`，依次为 `status` / 若干 `chunk` / `done`，出错时为 `error`。
         """
         if status_text:
             yield StreamEvent(type="status", content=status_text)
@@ -456,7 +456,7 @@ class ConversationService:
         try:
             async for text in self._astream_text(messages):
                 chunks.append(text)
-                yield StreamEvent(type="delta", content=text)
+                yield StreamEvent(type="chunk", content=text)
         except Exception as exc:  # noqa: BLE001 - 流式接口需要把异常转成事件而不是抛出
             yield StreamEvent(
                 type="error",
@@ -625,5 +625,48 @@ async def stream_reply(
     async for event in get_service().continue_conversation_stream(
         user_message=content,
         conversation_id=conversation_id,
+    ):
+        yield event
+
+
+async def start_stream(
+    form_data: dict[str, Any],
+    title: str = "",
+) -> AsyncIterator[StreamEvent]:
+    """提交问卷答案、创建会话，并以事件流形式产出模型的第一轮回复。
+
+    Args:
+        form_data: 问卷答案。
+        title: 会话标题，留空则自动推断。
+
+    Yields:
+        `StreamEvent`，首个 `status` 事件的 `data` 里带 `conversation_id`。
+    """
+    async for event in get_service().start_conversation_stream(
+        form_data=form_data,
+        title=title,
+    ):
+        yield event
+
+
+async def continue_stream(
+    user_message: str,
+    conversation_id: str | None = None,
+    history: list[FrontendMessage] | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """接续对话，以事件流形式产出模型对本轮输入的回复。
+
+    Args:
+        user_message: 本轮用户输入。
+        conversation_id: 会话 ID；为 `None` 时走无状态模式。
+        history: 前端回传的历史消息；传入时优先于服务端保存的历史。
+
+    Yields:
+        `StreamEvent`，`done` 事件的 `data` 带 `conversation_id` 与完整 `reply`。
+    """
+    async for event in get_service().continue_conversation_stream(
+        user_message=user_message,
+        conversation_id=conversation_id,
+        history=history,
     ):
         yield event
