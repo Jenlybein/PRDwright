@@ -15,16 +15,11 @@ import {
   startConversationStream,
 } from '@/services/api'
 import { STEPS, STEP_OF_STATE } from '@/types'
-import type { ChatMessage, QuestionsConfig, ViewState } from '@/types'
+import type { ChatMessage, QuestionsConfig, SessionData, StepId, ViewState } from '@/types'
+import { downloadFile } from '@/utils/download'
 
-/** localStorage 中保存表单草稿的键名 */
-const STORAGE_KEY = 'harnessprd:form-data'
-
-/** localStorage 中保存对话记录的键名 */
-const CHAT_STORAGE_KEY = 'harnessprd:conversation'
-
-/** localStorage 中保存文档内容的键名 */
-const DOC_STORAGE_KEY = 'harnessprd:documents'
+/** localStorage 中保存整份会话快照的键名（阶段 / 对话 / 问卷 / 文档统一存这里） */
+const SESSION_KEY = 'harnessprd:session'
 
 /** 当前所处阶段 */
 const viewState = ref<ViewState>('form')
@@ -84,22 +79,14 @@ const docError = ref('')
 /** 当前正在处理的文档 key，用于定位流式内容与错误应落到哪一份 */
 const activeDocKey = ref<'prd' | 'api-docs' | 'prompts'>('prd')
 
-// ---------------------------------------------------------------------------
-// 本地持久化
-// ---------------------------------------------------------------------------
+// 表单数据：初始为空对象，稍后由 `loadSession` 恢复；填写过程中由 FormStep 通过
+// v-model 双向写入。这里用 let 是因为 v-model 编译后需要可赋值的绑定；FormStep 只修改
+// 字段、不整体替换对象，所以 formData 的响应式引用不会被改写。
+let formData = reactive<Record<string, string>>({})
 
-/** 读取本地草稿；草稿缺失或损坏时返回空对象 */
-function loadDraft(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : {}
-    return typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, string>)
-      : {}
-  } catch {
-    return {}
-  }
-}
+// ---------------------------------------------------------------------------
+// 本地持久化（统一会话快照）
+// ---------------------------------------------------------------------------
 
 /** 判断任意值是否为合法的聊天消息（用于校验本地缓存的完整性） */
 function isChatMessage(value: unknown): value is ChatMessage {
@@ -109,100 +96,123 @@ function isChatMessage(value: unknown): value is ChatMessage {
   return typeof item.content === 'string' && roles.includes(item.role as ChatMessage['role'])
 }
 
-/** 读取本地保存的对话；缺失或损坏时返回 null */
-function loadConversation(): { conversationId: string; messages: ChatMessage[] } | null {
+/** 判断一个 ViewState 是否为合法的阶段值 */
+function isViewState(value: unknown): value is ViewState {
+  return (
+    typeof value === 'string' &&
+    [
+      'form',
+      'chatting',
+      'generating-prd',
+      'review-prd',
+      'generating-api-docs',
+      'review-api-docs',
+      'generating-prompts',
+      'review-prompts',
+      'done',
+    ].includes(value)
+  )
+}
+
+/**
+ * 生成中状态刷新后无法继续（流式请求已随页面销毁），需要降级为对应的「待确认」状态，
+ * 让用户看到已生成 / 未生成的结果并决定下一步。映射关系：
+ *   generating-prd → review-prd、generating-api-docs → review-api-docs、
+ *   generating-prompts → review-prompts。
+ */
+const GENERATING_TO_REVIEW: Partial<Record<ViewState, ViewState>> = {
+  'generating-prd': 'review-prd',
+  'generating-api-docs': 'review-api-docs',
+  'generating-prompts': 'review-prompts',
+}
+
+/** 把当前所有相关状态组装成一份会话快照 */
+function collectSession(): SessionData {
+  return {
+    viewState: viewState.value,
+    messages: messages.value,
+    conversationId: conversationId.value,
+    formData: { ...formData },
+    prdContent: prdContent.value,
+    apiDocsContent: apiDocsContent.value,
+    promptsContent: promptsContent.value,
+  }
+}
+
+/** 把整份会话快照写入 localStorage；写入失败（隐私模式 / 超限）时静默跳过 */
+function saveSession(): void {
   try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY)
-    if (!raw) return null
+    localStorage.setItem(SESSION_KEY, JSON.stringify(collectSession()))
+  } catch {
+    // 隐私模式或存储超限时静默跳过，不影响使用
+  }
+}
+
+/**
+ * 从 localStorage 读取会话快照；缺失或损坏时返回 null。
+ * 读取时会对 `viewState` 做降级处理：若上次停留在 `generating-*`，
+ * 则归位到对应的 `review-*`，避免刷新后卡在无法继续的生成中界面。
+ */
+function loadSession(): SessionData | null {
+  let raw: string | null
+  try {
+    raw = localStorage.getItem(SESSION_KEY)
+  } catch {
+    return null
+  }
+  if (!raw) return null
+
+  try {
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed !== 'object' || parsed === null) return null
+    const record = parsed as Partial<SessionData>
 
-    const record = parsed as { conversationId?: unknown; messages?: unknown }
+    // 阶段校验 + 生成中状态降级
+    let viewState: ViewState = 'form'
+    if (isViewState(record.viewState)) {
+      viewState = GENERATING_TO_REVIEW[record.viewState] ?? record.viewState
+    }
+
     return {
-      conversationId: typeof record.conversationId === 'string' ? record.conversationId : '',
+      viewState,
       messages: Array.isArray(record.messages) ? record.messages.filter(isChatMessage) : [],
+      conversationId: typeof record.conversationId === 'string' ? record.conversationId : '',
+      formData:
+        typeof record.formData === 'object' && record.formData !== null
+          ? (record.formData as Record<string, string>)
+          : {},
+      prdContent: typeof record.prdContent === 'string' ? record.prdContent : '',
+      apiDocsContent: typeof record.apiDocsContent === 'string' ? record.apiDocsContent : '',
+      promptsContent: typeof record.promptsContent === 'string' ? record.promptsContent : '',
     }
   } catch {
     return null
   }
 }
 
+/** 初始化：加载会话快照并回填各状态；无快照时保持默认（问卷阶段） */
+const restoredSession = loadSession()
+if (restoredSession) {
+  viewState.value = restoredSession.viewState
+  messages.value = restoredSession.messages
+  conversationId.value = restoredSession.conversationId
+  Object.assign(formData, restoredSession.formData)
+  prdContent.value = restoredSession.prdContent
+  apiDocsContent.value = restoredSession.apiDocsContent
+  promptsContent.value = restoredSession.promptsContent
+}
+
 /** 是否已有本地草稿（用于页面提示「已为你恢复上次填写的内容」） */
-const hasDraft = Object.keys(loadDraft()).length > 0
+const hasDraft = Object.keys(formData).length > 0
 
-/** 读取本地保存的文档正文；缺失或损坏时返回空对象 */
-function loadDocuments(): { prd: string; apiDocs: string; prompts: string } {
-  try {
-    const raw = localStorage.getItem(DOC_STORAGE_KEY)
-    if (!raw) return { prd: '', apiDocs: '', prompts: '' }
-    const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed !== 'object' || parsed === null) return { prd: '', apiDocs: '', prompts: '' }
-    const record = parsed as { prd?: unknown; apiDocs?: unknown; prompts?: unknown }
-    return {
-      prd: typeof record.prd === 'string' ? record.prd : '',
-      apiDocs: typeof record.apiDocs === 'string' ? record.apiDocs : '',
-      prompts: typeof record.prompts === 'string' ? record.prompts : '',
-    }
-  } catch {
-    return { prd: '', apiDocs: '', prompts: '' }
-  }
-}
-
-// 刷新后恢复已生成的文档内容
-const savedDocs = loadDocuments()
-prdContent.value = savedDocs.prd
-apiDocsContent.value = savedDocs.apiDocs
-promptsContent.value = savedDocs.prompts
-
-// 表单数据：初始取自本地草稿，填写过程中由 FormStep 通过 v-model 双向写入。
-// 这里用 let 是因为 v-model 编译后需要可赋值的绑定；FormStep 只修改字段、不整体替换对象，
-// 所以 formData 的响应式引用不会被改写。
-let formData = reactive<Record<string, string>>(loadDraft())
-
-// 刷新后若本地存有对话，直接回到对话阶段继续，不丢上下文
-const savedConversation = loadConversation()
-if (savedConversation && savedConversation.messages.length > 0) {
-  messages.value = savedConversation.messages
-  conversationId.value = savedConversation.conversationId
-  viewState.value = 'chatting'
-}
-
-// 消息或会话 ID 变化时落盘；流式过程中的临时文本不写，避免高频写存储
+// 状态变化时整体落盘：阶段、对话、会话 ID、问卷、三份文档统一写入一份快照。
+// 用 deep watch 覆盖 formData 内部字段与 messages 数组元素的变更；流式过程中的临时
+// 文本（streamingContent / docStreamingContent）不在此列，因此不会高频写存储。
 watch(
-  [messages, conversationId],
-  () => {
-    try {
-      localStorage.setItem(
-        CHAT_STORAGE_KEY,
-        JSON.stringify({ conversationId: conversationId.value, messages: messages.value }),
-      )
-    } catch {
-      // 隐私模式或存储超限时静默跳过，不影响对话本身
-    }
-  },
+  [viewState, messages, conversationId, formData, prdContent, apiDocsContent, promptsContent],
+  () => saveSession(),
   { deep: true },
 )
-
-// 表单内容变化时写入 localStorage，刷新或误关页面都不丢草稿
-watch(formData, (value) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
-})
-
-// 文档正文变化时落盘，刷新后能恢复已生成的文档
-watch([prdContent, apiDocsContent, promptsContent], () => {
-  try {
-    localStorage.setItem(
-      DOC_STORAGE_KEY,
-      JSON.stringify({
-        prd: prdContent.value,
-        apiDocs: apiDocsContent.value,
-        prompts: promptsContent.value,
-      }),
-    )
-  } catch {
-    // 隐私模式或存储超限时静默跳过
-  }
-})
 
 /** 「已保存」提示的定时器 */
 let savedTipTimer: number | undefined
@@ -315,7 +325,6 @@ async function runStream(
  */
 async function handleStartConversation(data: Record<string, string>): Promise<void> {
   Object.assign(formData, data)
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(formData))
 
   const invalid = validateForm()
   if (invalid) {
@@ -328,9 +337,8 @@ async function handleStartConversation(data: Record<string, string>): Promise<vo
   messages.value = []
   conversationId.value = ''
   chatError.value = ''
-  viewState.value = 'chatting'
+  goTo('chatting')
   flashSavedTip('需求已提交，正在生成回复')
-  window.scrollTo({ top: 0, behavior: 'smooth' })
 
   await runStream(() =>
     startConversationStream({ answers: { ...formData } }, { onChunk: handleChunk }),
@@ -372,16 +380,51 @@ async function handleSendMessage(content: string): Promise<void> {
   })
 }
 
-/** 清空当前对话，回到问卷阶段重新开始 */
-function restart(): void {
+/**
+ * 统一的状态导航入口，收口所有 viewState 赋值，做流程安全校验：
+ * - 流式生成 / 对话进行中时禁止跳转（防止中途切换导致状态错乱）。
+ * - 跳转后统一回到页面顶部。
+ *
+ * @param target 目标阶段
+ */
+function goTo(target: ViewState): void {
+  // 流式进行中禁止跳转，避免请求与界面状态脱节
+  if (streaming.value || isGenerating.value) return
+  docError.value = ''
+  docStreamingContent.value = ''
+  viewState.value = target
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+/** 清空全部数据并回到问卷阶段重新开始（含清除本地持久化的会话快照） */
+function handleRestart(): void {
   messages.value = []
   conversationId.value = ''
   streamingContent.value = ''
   chatError.value = ''
   streaming.value = false
   formError.value = ''
+  prdContent.value = ''
+  apiDocsContent.value = ''
+  promptsContent.value = ''
+  docError.value = ''
+  docStreamingContent.value = ''
+  isGenerating.value = false
+  activeDocKey.value = 'prd'
   viewState.value = 'form'
+
+  // 清空本地快照，避免刷新后再次恢复旧会话
+  try {
+    localStorage.removeItem(SESSION_KEY)
+  } catch {
+    // 隐私模式等场景下静默忽略
+  }
   window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+/** 兼容旧调用：重新开始（等价于 handleRestart） */
+function restart(): void {
+  handleRestart()
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +488,9 @@ async function runDocumentStream(
 
 /** 生成 PRD：需求澄清 + 对话历史一起交给模型 */
 async function generatePrd(): Promise<void> {
+  // 重新生成 PRD 会让基于它的后续文档失效，进度回退到 PRD
+  apiDocsContent.value = ''
+  promptsContent.value = ''
   const history = messages.value.map(({ role, content }) => ({ role, content }))
   const { reply, ok } = await runDocumentStream('prd', () =>
     generatePrdStream(
@@ -456,12 +502,14 @@ async function generatePrd(): Promise<void> {
   const content = reply.trim()
   if (content) {
     prdContent.value = content
-    viewState.value = 'review-prd'
+    goTo('review-prd')
   }
 }
 
 /** 生成接口文档：以 PRD 正文为输入 */
 async function generateApiDocs(): Promise<void> {
+  // 重新生成接口文档会让基于它的提示词失效，进度回退到接口文档
+  promptsContent.value = ''
   const { reply, ok } = await runDocumentStream('api-docs', () =>
     generateApiDocsStream(
       { prdContent: prdContent.value },
@@ -472,7 +520,7 @@ async function generateApiDocs(): Promise<void> {
   const content = reply.trim()
   if (content) {
     apiDocsContent.value = content
-    viewState.value = 'review-api-docs'
+    goTo('review-api-docs')
   }
 }
 
@@ -488,7 +536,7 @@ async function generatePrompts(): Promise<void> {
   const content = reply.trim()
   if (content) {
     promptsContent.value = content
-    viewState.value = 'review-prompts'
+    goTo('review-prompts')
   }
 }
 
@@ -534,25 +582,20 @@ async function onAiOptimize(content: string): Promise<void> {
 /** 审阅页「生成接口文档」入口：先切到生成中状态再生成 */
 async function handleGenerateApiDocs(): Promise<void> {
   if (!prdContent.value.trim()) return
-  viewState.value = 'generating-api-docs'
-  window.scrollTo({ top: 0, behavior: 'smooth' })
+  goTo('generating-api-docs')
   await generateApiDocs()
 }
 
-/** 审阅页「生成提示词套件」入口：先切到生成中状态再生成 */
+/** 审阅页「生成提示词套件」入口：接口文档完成后才能生成，先切到生成中状态再生成 */
 async function handleGeneratePrompts(): Promise<void> {
-  if (!prdContent.value.trim()) return
-  viewState.value = 'generating-prompts'
-  window.scrollTo({ top: 0, behavior: 'smooth' })
+  if (!apiDocsContent.value.trim()) return
+  goTo('generating-prompts')
   await generatePrompts()
 }
 
 /** 回到对话页，并清空文档生成相关的错误与流式残留 */
 function backToChat(): void {
-  docError.value = ''
-  docStreamingContent.value = ''
-  isGenerating.value = false
-  viewState.value = 'chatting'
+  goTo('chatting')
 }
 
 // ---------------------------------------------------------------------------
@@ -564,17 +607,83 @@ const currentStepIndex = computed(() =>
   STEPS.findIndex((step) => step.id === STEP_OF_STATE[viewState.value]),
 )
 
+/**
+ * 历史中实际到达过的最远步骤下标。
+ * 进度条的可点击范围以「已生成内容 + 当前所处」的最远位置为准，而非当前所处
+ * 步骤——这样回看前面的阶段后，已经生成好的后续阶段依然能点回去。
+ */
+const reachedStepIndex = computed<number>(() => {
+  let reached = 0
+  if (messages.value.length > 0) reached = 1 // 已对话
+  if (prdContent.value.trim()) reached = 2 // 已生成 PRD
+  if (apiDocsContent.value.trim()) reached = 3 // 已生成接口文档
+  if (promptsContent.value.trim()) reached = 4 // 已生成提示词
+  return Math.max(reached, currentStepIndex.value)
+})
+
 /** 当前阶段是否为「文档生成中」（进度条呼吸高亮用） */
 const isGeneratingPhase = computed(() => viewState.value.startsWith('generating-'))
 
 /** 是否处于文档待确认 */
 const isReviewing = computed(() => viewState.value.startsWith('review-'))
 
-/** 对话阶段是否满足「生成 PRD」条件：已有至少一轮 AI 回复 */
+/** 对话阶段是否满足「生成 PRD」条件：已有至少一轮 AI 回复且当前未在流式中 */
 const canGeneratePrd = computed(() => {
   if (streaming.value) return false
   return messages.value.some((message) => message.role === 'assistant' && message.content.trim())
 })
+
+/** 三份文档是否都已生成（用于「完成」入口的可用性判断） */
+const allDocsReady = computed(
+  () =>
+    prdContent.value.trim() !== '' &&
+    apiDocsContent.value.trim() !== '' &&
+    promptsContent.value.trim() !== '',
+)
+
+/** 是否允许进入完成页：三份文档齐备且无正在进行的流式请求 */
+const canFinishTask = computed(() => allDocsReady.value && !streaming.value && !isGenerating.value)
+
+/**
+ * 进入完成页：校验三份文档齐备后切到 `done`。
+ * 不满足条件时不跳转（前置守卫），保证不会落到空白的完成态。
+ */
+function handleEndTask(): void {
+  if (!canFinishTask.value) return
+  goTo('done')
+}
+
+// ---------------------------------------------------------------------------
+// 文档下载
+// ---------------------------------------------------------------------------
+
+/** 各文档下载时的默认文件名（带日期后缀，避免同名覆盖） */
+function buildFilename(docType: 'prd' | 'api-docs' | 'prompts'): string {
+  const date = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
+  const base: Record<typeof docType, string> = {
+    prd: 'PRD',
+    'api-docs': 'API文档',
+    prompts: '提示词套件',
+  }
+  return `${base[docType]}_${stamp}.md`
+}
+
+/** 下载 PRD 文档 */
+function downloadPrd(): void {
+  downloadFile(prdContent.value, buildFilename('prd'))
+}
+
+/** 下载接口文档 */
+function downloadApiDocs(): void {
+  downloadFile(apiDocsContent.value, buildFilename('api-docs'))
+}
+
+/** 下载提示词套件 */
+function downloadPrompts(): void {
+  downloadFile(promptsContent.value, buildFilename('prompts'))
+}
 
 /**
  * 从对话页点击「生成 PRD」：切到生成中状态并开始生成。
@@ -582,8 +691,7 @@ const canGeneratePrd = computed(() => {
  */
 async function handleGeneratePrd(): Promise<void> {
   if (!canGeneratePrd.value) return
-  viewState.value = 'generating-prd'
-  window.scrollTo({ top: 0, behavior: 'smooth' })
+  goTo('generating-prd')
   await generatePrd()
 }
 
@@ -608,9 +716,26 @@ const activeDocContent = computed(() => {
   return ''
 })
 
-/** 判断某个步骤是否已走完 */
-function isFinished(index: number): boolean {
-  return index < currentStepIndex.value
+/** 步骤 id → 点击进度条时应跳转到的 ViewState（已完成的步骤回看用） */
+const STEP_TO_STATE: Record<StepId, ViewState> = {
+  form: 'form',
+  chatting: 'chatting',
+  'review-prd': 'review-prd',
+  'review-api-docs': 'review-api-docs',
+  'review-prompts': 'review-prompts',
+}
+
+/**
+ * 某个步骤是否可点击跳转：必须已经到达过（`reachedStepIndex` 之内），且不是
+ * 当前所在步骤。尚未到达的步骤与当前步骤都不可点，避免跳到空白或原地刷新。
+ */
+function canClickStep(index: number): boolean {
+  return index <= reachedStepIndex.value && index !== currentStepIndex.value
+}
+
+/** 点击进度条中已完成的步骤，跳回对应阶段查看之前的内容 */
+function handleStepClick(stepId: StepId): void {
+  goTo(STEP_TO_STATE[stepId])
 }
 </script>
 
@@ -660,22 +785,27 @@ function isFinished(index: number): boolean {
       <nav class="mb-8" aria-label="生成进度">
         <ol class="flex items-start">
           <li v-for="(step, index) in STEPS" :key="step.id" class="flex flex-1 items-center">
-            <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+            <div
+              class="flex w-16 shrink-0 flex-col items-center gap-1.5"
+              :class="canClickStep(index) ? 'cursor-pointer group' : ''"
+              @click="canClickStep(index) && handleStepClick(step.id)"
+            >
               <!-- 已完成显示对勾；当前步骤在生成中时呼吸高亮，否则实心高亮 -->
               <span
                 class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold transition"
                 :class="[
-                  isFinished(index)
-                    ? 'bg-primary-500 text-white'
-                    : index === currentStepIndex
-                      ? isGeneratingPhase
-                        ? 'bg-primary-100 text-primary-700 ring-2 ring-primary-500 animate-pulse'
-                        : 'bg-primary-500 text-white ring-4 ring-primary-100'
+                  index === currentStepIndex
+                    ? isGeneratingPhase
+                      ? 'bg-primary-100 text-primary-700 ring-2 ring-primary-500 animate-pulse'
+                      : 'bg-primary-500 text-white ring-4 ring-primary-100'
+                    : index <= reachedStepIndex
+                      ? 'bg-primary-500 text-white'
                       : 'bg-slate-100 text-slate-400',
+                  canClickStep(index) ? 'group-hover:ring-4 group-hover:ring-primary-200' : '',
                 ]"
               >
                 <svg
-                  v-if="isFinished(index)"
+                  v-if="index <= reachedStepIndex && index !== currentStepIndex"
                   class="h-4 w-4"
                   viewBox="0 0 20 20"
                   fill="currentColor"
@@ -691,9 +821,10 @@ function isFinished(index: number): boolean {
               </span>
               <span
                 class="whitespace-nowrap text-[11px] font-medium transition"
-                :class="
-                  index <= currentStepIndex ? 'text-primary-700' : 'text-slate-400'
-                "
+                :class="[
+                  index <= reachedStepIndex ? 'text-primary-700' : 'text-slate-400',
+                  canClickStep(index) ? 'group-hover:text-primary-600' : '',
+                ]"
               >
                 {{ step.label }}
               </span>
@@ -702,7 +833,7 @@ function isFinished(index: number): boolean {
             <div
               v-if="index < STEPS.length - 1"
               class="mx-1 mb-5 h-0.5 flex-1 rounded-full transition"
-              :class="isFinished(index) ? 'bg-primary-400' : 'bg-slate-200'"
+              :class="index < reachedStepIndex ? 'bg-primary-400' : 'bg-slate-200'"
             ></div>
           </li>
         </ol>
@@ -799,14 +930,14 @@ function isFinished(index: number): boolean {
             <button
               type="button"
               class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-              @click="viewState = 'form'"
+              @click="goTo('form')"
             >
               改问卷
             </button>
             <button
               type="button"
               class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-red-300 hover:text-red-600"
-              @click="restart"
+              @click="handleRestart"
             >
               重新开始
             </button>
@@ -927,55 +1058,243 @@ function isFinished(index: number): boolean {
             返回对话
           </button>
 
-          <!-- PRD 完成后：生成接口文档 / 提示词 -->
-          <template v-if="viewState === 'review-prd'">
-            <button
-              type="button"
-              class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
-              @click="handleGenerateApiDocs"
-            >
-              生成接口文档
-            </button>
-            <button
-              type="button"
-              class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
-              @click="handleGeneratePrompts"
-            >
-              生成提示词套件
-            </button>
-          </template>
+          <div class="flex flex-wrap items-center gap-2">
+            <!-- 各阶段按顺序推进：PRD 完成 → 生成接口文档；接口文档完成 → 生成提示词套件 -->
+            <template v-if="viewState === 'review-prd'">
+              <button
+                type="button"
+                class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
+                @click="handleGenerateApiDocs"
+              >
+                生成接口文档
+              </button>
+            </template>
 
-          <!-- 接口文档 / 提示词完成后：回到 PRD 或标记完成 -->
-          <template v-else>
+            <template v-else-if="viewState === 'review-api-docs'">
+              <button
+                type="button"
+                class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
+                @click="handleGeneratePrompts"
+              >
+                生成提示词套件
+              </button>
+            </template>
+
+            <!-- 其它已生成的文档的查看入口（当前阶段除外） -->
+            <template v-if="viewState !== 'review-prd'">
+              <button
+                type="button"
+                class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+                @click="goTo('review-prd')"
+              >
+                查看 PRD
+              </button>
+            </template>
+            <template v-if="viewState !== 'review-api-docs' && apiDocsContent.trim()">
+              <button
+                type="button"
+                class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+                @click="goTo('review-api-docs')"
+              >
+                查看接口文档
+              </button>
+            </template>
+            <template v-if="viewState !== 'review-prompts' && promptsContent.trim()">
+              <button
+                type="button"
+                class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+                @click="goTo('review-prompts')"
+              >
+                查看提示词
+              </button>
+            </template>
+
+            <!-- 完成入口：三份文档齐备才可用 -->
             <button
               type="button"
-              class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-              @click="viewState = 'review-prd'"
+              class="rounded-lg px-3 py-1.5 text-xs font-medium text-white shadow-sm transition"
+              :class="
+                canFinishTask
+                  ? 'bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700'
+                  : 'cursor-not-allowed bg-slate-300'
+              "
+              :disabled="!canFinishTask"
+              @click="handleEndTask"
             >
-              查看 PRD
+              完成
             </button>
-          </template>
+          </div>
         </div>
       </section>
 
       <!-- 全部完成 -->
-      <section
-        v-else-if="viewState === 'done'"
-        class="rounded-2xl border border-slate-200/80 bg-white p-8 text-center shadow-sm"
-      >
-        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary-50">
-          <svg class="h-6 w-6 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path
-              fill-rule="evenodd"
-              d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 0-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
-              clip-rule="evenodd"
-            />
-          </svg>
+      <section v-else-if="viewState === 'done'" class="space-y-4">
+        <!-- 完成提示头 -->
+        <div class="rounded-2xl border border-slate-200/80 bg-white p-6 text-center shadow-sm">
+          <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary-50">
+            <svg class="h-6 w-6 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 0-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </div>
+          <h2 class="mt-3 text-base font-semibold text-slate-900">三份文档已全部完成</h2>
+          <p class="mx-auto mt-1 max-w-md text-sm text-slate-500">
+            以下文档已生成完毕，可分别下载为 Markdown 文件，或返回查看与修改。
+          </p>
         </div>
-        <h2 class="mt-4 text-base font-semibold text-slate-900">三份文档已全部完成</h2>
-        <p class="mx-auto mt-2 max-w-md text-sm text-slate-500">
-          你可以继续修改需求重新生成，或导出已有内容。
-        </p>
+
+        <!-- 三份文档卡片 -->
+        <div class="grid gap-4">
+          <article
+            class="flex items-center justify-between gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm"
+          >
+            <div class="flex min-w-0 items-center gap-3">
+              <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary-50">
+                <svg class="h-5 w-5 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path
+                    fill-rule="evenodd"
+                    d="M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
+              </div>
+              <div class="min-w-0">
+                <h3 class="text-sm font-semibold text-slate-900">PRD 文档</h3>
+                <p class="truncate text-xs text-slate-500">{{ prdContent.length }} 字符 · Markdown</p>
+              </div>
+            </div>
+            <div class="flex shrink-0 gap-2">
+              <button
+                type="button"
+                class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+                @click="goTo('review-prd')"
+              >
+                查看
+              </button>
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
+                @click="downloadPrd"
+              >
+                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path
+                    fill-rule="evenodd"
+                    d="M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
+                下载
+              </button>
+            </div>
+          </article>
+
+          <article
+            class="flex items-center justify-between gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm"
+          >
+            <div class="flex min-w-0 items-center gap-3">
+              <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-sky-50">
+                <svg class="h-5 w-5 text-sky-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path
+                    fill-rule="evenodd"
+                    d="M2 4.75A2.75 2.75 0 0 1 4.75 2h6.5A.75.75 0 0 1 12 2v3.25h3.25a.75.75 0 0 1 .75.75v9.25A2.75 2.75 0 0 1 13.25 18h-8.5A2.75 2.75 0 0 1 2 15.25V4.75Zm8.5 3.5h3.5v-2.5h-3.5v2.5ZM6 7.75A.75.75 0 0 0 5.25 8.5v3a.75.75 0 0 0 1.5 0v-3A.75.75 0 0 0 6 7.75Zm3 0a.75.75 0 0 0-.75.75v3a.75.75 0 0 0 1.5 0v-3A.75.75 0 0 0 9 7.75Z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
+              </div>
+              <div class="min-w-0">
+                <h3 class="text-sm font-semibold text-slate-900">接口文档</h3>
+                <p class="truncate text-xs text-slate-500">{{ apiDocsContent.length }} 字符 · Markdown</p>
+              </div>
+            </div>
+            <div class="flex shrink-0 gap-2">
+              <button
+                type="button"
+                class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+                @click="goTo('review-api-docs')"
+              >
+                查看
+              </button>
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
+                @click="downloadApiDocs"
+              >
+                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path
+                    fill-rule="evenodd"
+                    d="M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
+                下载
+              </button>
+            </div>
+          </article>
+
+          <article
+            class="flex items-center justify-between gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm"
+          >
+            <div class="flex min-w-0 items-center gap-3">
+              <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50">
+                <svg class="h-5 w-5 text-emerald-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path
+                    fill-rule="evenodd"
+                    d="M9.25 2.5a.75.75 0 0 1 .75.75v6.94l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 1 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75Zm-6.5 10a.75.75 0 0 1 .75.75v1h13v-1a.75.75 0 0 1 1.5 0v1.75a.75.75 0 0 1-.75.75h-14.5a.75.75 0 0 1-.75-.75v-1.75a.75.75 0 0 1 .75-.75Z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
+              </div>
+              <div class="min-w-0">
+                <h3 class="text-sm font-semibold text-slate-900">提示词套件</h3>
+                <p class="truncate text-xs text-slate-500">{{ promptsContent.length }} 字符 · Markdown</p>
+              </div>
+            </div>
+            <div class="flex shrink-0 gap-2">
+              <button
+                type="button"
+                class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+                @click="goTo('review-prompts')"
+              >
+                查看
+              </button>
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
+                @click="downloadPrompts"
+              >
+                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path
+                    fill-rule="evenodd"
+                    d="M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
+                下载
+              </button>
+            </div>
+          </article>
+        </div>
+
+        <!-- 底部操作 -->
+        <div class="flex flex-wrap items-center justify-center gap-3 pt-1">
+          <button
+            type="button"
+            class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+            @click="goTo('chatting')"
+          >
+            返回对话
+          </button>
+          <button
+            type="button"
+            class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
+            @click="handleRestart"
+          >
+            重新开始
+          </button>
+        </div>
       </section>
     </main>
 

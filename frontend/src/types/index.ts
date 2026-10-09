@@ -43,6 +43,27 @@ export type ViewState =
   | 'review-prompts'
   | 'done'
 
+/**
+ * 一份完整会话的持久化快照，用于刷新 / 关闭页面后整体恢复。
+ * 覆盖当前阶段、对话、会话 ID、问卷答案与三份文档正文。
+ */
+export interface SessionData {
+  /** 当前所处阶段 */
+  viewState: ViewState
+  /** 已固化的聊天消息 */
+  messages: ChatMessage[]
+  /** 后端会话 ID（可为空，接续时退化无状态模式） */
+  conversationId: string
+  /** 问卷答案（字段名 → 答案文本） */
+  formData: Record<string, string>
+  /** PRD 正文 */
+  prdContent: string
+  /** 接口文档正文 */
+  apiDocsContent: string
+  /** 提示词套件正文 */
+  promptsContent: string
+}
+
 /** 顶部进度条展示的步骤（生成中状态不单独占一步，而是归并到对应文档的确认步骤） */
 export const STEPS = [
   { id: 'form', label: '描述产品' },
