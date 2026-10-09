@@ -1,7 +1,7 @@
 """会话相关路由。
 
 **本层只做参数解析与响应封装，不写业务逻辑**，具体实现委托给
-`conversation_service` / `document_service`。
+`conversation_service` 与 `document_service`。
 """
 
 from __future__ import annotations
@@ -80,11 +80,6 @@ def _make_sse_generator(events: AsyncIterator[schemas.StreamEvent]) -> AsyncIter
     return generator()
 
 
-# ============================================================================
-# 已实现
-# ============================================================================
-
-
 @router.get("/questions", response_model=schemas.QuestionsConfig, summary="获取需求澄清问卷")
 async def get_questions() -> schemas.QuestionsConfig:
     """读取问卷配置并返回，前端据此渲染表单。"""
@@ -151,58 +146,9 @@ async def continue_conversation_stream(
 
 
 # ============================================================================
-# 空壳路由：仅解析参数并转发给服务层，业务逻辑待实现
+# 文档（document）：基于会话上下文生成 / 读取 / 更新文档
+# 当前接口已接线，但 `document_service` 尚未实现，调用会返回 500
 # ============================================================================
-
-
-@router.post(
-    "",
-    response_model=schemas.ConversationResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="创建会话",
-)
-async def create_conversation(
-    payload: schemas.ConversationCreateRequest,
-) -> schemas.ConversationResponse:
-    """创建会话（空壳）。"""
-    return await conversation_service.create_conversation(
-        title=payload.title,
-        answers=payload.answers,
-    )
-
-
-@router.get("", response_model=schemas.ConversationListResponse, summary="获取会话列表")
-async def list_conversations() -> schemas.ConversationListResponse:
-    """获取会话列表（空壳）。"""
-    items = await conversation_service.list_conversations()
-    return schemas.ConversationListResponse(items=items, total=len(items))
-
-
-@router.get(
-    "/{conversation_id}",
-    response_model=schemas.ConversationResponse,
-    summary="获取会话详情",
-)
-async def get_conversation(conversation_id: str) -> schemas.ConversationResponse:
-    """获取会话详情（空壳）。"""
-    return await conversation_service.get_conversation(conversation_id)
-
-
-@router.post("/{conversation_id}/messages", summary="发送消息（SSE 流式返回）")
-async def send_message(
-    conversation_id: str,
-    payload: schemas.SendMessageRequest,
-) -> StreamingResponse:
-    """发送消息并以 SSE 流式返回回复（空壳）。"""
-    events = conversation_service.stream_reply(
-        conversation_id=conversation_id,
-        content=payload.content,
-    )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
 
 
 @router.post(
@@ -214,7 +160,7 @@ async def generate_document(
     conversation_id: str,
     payload: schemas.DocumentGenerateRequest,
 ) -> schemas.DocumentResponse:
-    """基于会话上下文生成文档（空壳）。"""
+    """基于会话上下文生成文档（尚未实现）。"""
     return await document_service.generate_document(
         conversation_id=conversation_id,
         doc_type=payload.doc_type,
@@ -230,7 +176,7 @@ async def get_document(
     conversation_id: str,
     doc_type: schemas.DocumentType = "prd",
 ) -> schemas.DocumentResponse:
-    """读取会话下的文档（空壳）。"""
+    """读取会话下的文档（尚未实现）。"""
     return await document_service.get_document(
         conversation_id=conversation_id,
         doc_type=doc_type,
@@ -247,7 +193,7 @@ async def update_document(
     payload: schemas.DocumentUpdateRequest,
     doc_type: schemas.DocumentType = "prd",
 ) -> schemas.DocumentResponse:
-    """更新文档内容（空壳）。"""
+    """更新文档内容（尚未实现）。"""
     return await document_service.update_document(
         conversation_id=conversation_id,
         doc_type=doc_type,

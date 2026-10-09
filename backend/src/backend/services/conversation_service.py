@@ -4,7 +4,7 @@
 把模型回复逐字推送给前端。路由层只做参数解析，业务逻辑集中在这里。
 
 对前端暴露的消息格式统一为 `FrontendMessage`（`{"role": ..., "content": ...}`），
-`_build_lc_messages()` 负责转成 LangChain 消息，`_serialize_messages()` 负责转回来。
+`_build_lc_messages()` 负责把历史与本轮输入组装成 LangChain 消息列表。
 """
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from backend.api.schemas import ConversationResponse, QuestionsConfig, StreamEvent
+from backend.api.schemas import QuestionsConfig, StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import SYSTEM_PROMPT
 
@@ -229,51 +229,9 @@ def _build_lc_messages(
     return messages
 
 
-def _serialize_messages(
-    messages: Iterable[BaseMessage],
-    include_system: bool = False,
-) -> list[FrontendMessage]:
-    """把 LangChain 消息转换回前端消息格式。
-
-    Args:
-        messages: LangChain 消息列表。
-        include_system: 是否保留系统消息；默认丢弃，因为系统提示词不需要
-            展示在聊天界面里。
-
-    Returns:
-        `FrontendMessage` 列表，内容为空的消息会被跳过。
-    """
-    result: list[FrontendMessage] = []
-
-    for message in messages:
-        if isinstance(message, SystemMessage):
-            role: MessageRole = "system"
-        elif isinstance(message, (AIMessage, AIMessageChunk)):
-            role = "assistant"
-        elif isinstance(message, HumanMessage):
-            role = "user"
-        else:
-            role = _normalize_role(getattr(message, "type", "user"))
-
-        if role == "system" and not include_system:
-            continue
-
-        content = _extract_text(message.content)
-        if not content:
-            continue
-
-        result.append({"role": role, "content": content})
-
-    return result
-
-
 # ----------------------------------------------------------------------------
 # 会话记录
 # ----------------------------------------------------------------------------
-
-
-class ConversationNotFoundError(RuntimeError):
-    """会话 ID 不存在。"""
 
 
 @dataclass
@@ -365,58 +323,6 @@ class ConversationService:
         )
         self._conversations[record.id] = record
         return record
-
-    @staticmethod
-    def _to_response(record: _ConversationRecord) -> ConversationResponse:
-        """把内存记录转成响应模型。"""
-        return ConversationResponse.model_validate(record)
-
-    def create_conversation(
-        self,
-        title: str = "",
-        form_data: dict[str, Any] | None = None,
-    ) -> ConversationResponse:
-        """创建会话并保存问卷答案。
-
-        Args:
-            title: 会话标题，留空则根据答案自动推断。
-            form_data: 问卷答案。
-
-        Returns:
-            新建会话的信息。
-        """
-        return self._to_response(self._create_record(form_data or {}, title))
-
-    def get_conversation(self, conversation_id: str) -> ConversationResponse:
-        """按 ID 获取会话。
-
-        Raises:
-            ConversationNotFoundError: 会话 ID 不存在。
-        """
-        record = self._conversations.get(conversation_id)
-        if record is None:
-            raise ConversationNotFoundError(f"会话不存在：{conversation_id}")
-        return self._to_response(record)
-
-    def list_conversations(self) -> list[ConversationResponse]:
-        """获取会话列表，按更新时间倒序。"""
-        records = sorted(
-            self._conversations.values(),
-            key=lambda r: r.updated_at or r.created_at or datetime.min,
-            reverse=True,
-        )
-        return [self._to_response(r) for r in records]
-
-    def get_messages(self, conversation_id: str) -> list[FrontendMessage]:
-        """获取会话的完整消息历史（前端格式）。
-
-        Raises:
-            ConversationNotFoundError: 会话 ID 不存在。
-        """
-        record = self._conversations.get(conversation_id)
-        if record is None:
-            raise ConversationNotFoundError(f"会话不存在：{conversation_id}")
-        return list(record.messages)
 
     # ------------------------------------------------------------------
     # 流式对话
@@ -596,36 +502,6 @@ def get_service() -> ConversationService:
     if _default_service is None:
         _default_service = ConversationService()
     return _default_service
-
-
-async def create_conversation(
-    title: str = "",
-    answers: dict[str, Any] | None = None,
-) -> ConversationResponse:
-    """创建会话并初始化上下文。"""
-    return get_service().create_conversation(title=title, form_data=answers or {})
-
-
-async def get_conversation(conversation_id: str) -> ConversationResponse:
-    """按 ID 获取会话详情。"""
-    return get_service().get_conversation(conversation_id)
-
-
-async def list_conversations() -> list[ConversationResponse]:
-    """获取会话列表。"""
-    return get_service().list_conversations()
-
-
-async def stream_reply(
-    conversation_id: str,
-    content: str,
-) -> AsyncIterator[StreamEvent]:
-    """处理用户消息，以事件流形式逐步产出回复。"""
-    async for event in get_service().continue_conversation_stream(
-        user_message=content,
-        conversation_id=conversation_id,
-    ):
-        yield event
 
 
 async def start_stream(

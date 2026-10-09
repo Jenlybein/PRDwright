@@ -50,31 +50,6 @@ class ConversationCreateRequest(BaseModel):
     )
 
 
-class ConversationResponse(BaseModel):
-    """会话信息响应。"""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str = Field(description="会话 ID")
-    title: str = Field(default="", description="会话标题")
-    status: str = Field(default="active", description="会话状态")
-    created_at: datetime | None = Field(default=None, description="创建时间")
-    updated_at: datetime | None = Field(default=None, description="更新时间")
-
-
-class ConversationListResponse(BaseModel):
-    """会话列表响应。"""
-
-    items: list[ConversationResponse] = Field(default_factory=list, description="会话列表")
-    total: int = Field(default=0, description="会话总数")
-
-
-class SendMessageRequest(BaseModel):
-    """发送消息请求。会话 ID 来自路径参数，不在这里重复声明。"""
-
-    content: str = Field(min_length=1, description="用户输入的消息内容")
-
-
 class MessageItem(BaseModel):
     """单条聊天消息，用于前端回传历史（无状态接续对话）。"""
 
@@ -149,3 +124,4 @@ class DocumentResponse(BaseModel):
     content: str = Field(default="", description="文档正文，Markdown 格式")
     version: int = Field(default=1, description="文档版本号")
     updated_at: datetime | None = Field(default=None, description="更新时间")
+
