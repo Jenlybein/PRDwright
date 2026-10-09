@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     )
     openai_api_key: str = Field(
         default="",
-        description="OpenAI API 密钥。",
+        description="OpenAI API 密钥（通用 OpenAI 兼容分支使用）。",
     )
     # 自定义 API 地址：用于自建网关 / 中转代理 / 兼容服务，留空则用官方默认地址
     anthropic_api_url: str = Field(
@@ -52,16 +52,32 @@ class Settings(BaseSettings):
     )
     openai_api_url: str = Field(
         default="",
-        description="OpenAI API 地址；留空则使用官方默认地址。",
+        description="OpenAI API 地址（通用 OpenAI 兼容分支使用）；留空则使用官方默认地址。",
+    )
+
+    # 火山方舟（Volcano Ark）：调用豆包等模型走官方 SDK，而不是 OpenAI 兼容伪装
+    ark_api_key: str = Field(
+        default="",
+        description="火山方舟（Volcano Ark）API 密钥，用于调用豆包系列模型。",
+    )
+    ark_base_url: str = Field(
+        default="https://ark.cn-beijing.volces.com/api/v3",
+        description="火山方舟 API 地址；一般无需修改。",
+    )
+    ark_thinking_enabled: bool = Field(
+        default=False,
+        description="是否开启方舟混合思考模型的深度思考（reasoning）。"
+        "默认关闭，模型直接回答，避免先吐一大段思考再出正文导致的「首字极慢 + 正文爆发」观感。"
+        "后续若接入自主可控的思考机制，与此开关无关。",
     )
 
     # --- 默认模型选择 --------------------------------------------------------
-    default_llm_provider: Literal["anthropic", "openai"] = Field(
-        default="anthropic",
+    default_llm_provider: Literal["anthropic", "openai", "ark"] = Field(
+        default="ark",
         description="默认使用的 LLM 供应商。",
     )
     default_llm_model: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="doubao-seed-2-1-turbo-260628",
         description="所选供应商下的默认模型名称。",
     )
 
@@ -98,17 +114,16 @@ class Settings(BaseSettings):
         Raises:
             RuntimeError: 所选供应商的密钥未配置时抛出。
         """
-        key = (
-            self.anthropic_api_key
-            if self.default_llm_provider == "anthropic"
-            else self.openai_api_key
-        )
+        if self.default_llm_provider == "anthropic":
+            key = self.anthropic_api_key
+            env_var = "ANTHROPIC_API_KEY"
+        elif self.default_llm_provider == "ark":
+            key = self.ark_api_key
+            env_var = "ARK_API_KEY"
+        else:
+            key = self.openai_api_key
+            env_var = "OPENAI_API_KEY"
         if not key:
-            env_var = (
-                "ANTHROPIC_API_KEY"
-                if self.default_llm_provider == "anthropic"
-                else "OPENAI_API_KEY"
-            )
             raise RuntimeError(
                 f"尚未配置 {env_var}，但当前请求的供应商是 '{self.default_llm_provider}'。"
                 f"请在 {ENV_FILE} 中设置（可参考 .env.example）。"

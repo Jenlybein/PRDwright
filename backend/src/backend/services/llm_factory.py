@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from langchain_core.language_models.chat_models import BaseChatModel
+from typing import AsyncIterator, Protocol
+
+from langchain_core.messages import AIMessageChunk, BaseMessage
 
 from backend.core.config import get_settings
 
@@ -14,11 +16,23 @@ from backend.core.config import get_settings
 DEFAULT_TEMPERATURE = 0.7
 
 
+class StreamingChatModel(Protocol):
+    """只需满足异步流式产出 `AIMessageChunk` 的聊天模型协议。
+
+    用于解耦业务层与具体供应商 SDK：LangChain 模型与火山方舟封装
+    （`VolcanoArkChatModel`）都实现了 `astream`，可互换使用。
+    """
+
+    def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
+        """异步流式产出回复，每块为 `AIMessageChunk`。"""
+        ...
+
+
 def get_llm(
     model: str | None = None,
     temperature: float = DEFAULT_TEMPERATURE,
     **kwargs: object,
-) -> BaseChatModel:
+) -> StreamingChatModel:
     """按配置创建 LLM 实例。
 
     供应商由 `DEFAULT_LLM_PROVIDER` 决定，模型默认取 `DEFAULT_LLM_MODEL`，
@@ -31,7 +45,8 @@ def get_llm(
             `base_url`（显式传入时优先于环境变量里的自定义地址）。
 
     Returns:
-        LangChain 聊天模型实例（`ChatAnthropic` 或 `ChatOpenAI`）。
+        LangChain 聊天模型实例（`ChatAnthropic` / `ChatOpenAI`）或火山方舟封装
+        （`VolcanoArkChatModel`）。
 
     Raises:
         RuntimeError: 所选供应商的 API 密钥未配置。
@@ -44,6 +59,18 @@ def get_llm(
     api_key = settings.require_api_key()
     # 自定义地址只在配置了时才注入，留空则交给 SDK 使用官方默认地址
     extra: dict[str, object] = dict(kwargs)
+
+    if provider == "ark":
+        # 火山方舟走官方 SDK，而不是 OpenAI 兼容伪装
+        from backend.services.ark_llm import VolcanoArkChatModel
+
+        return VolcanoArkChatModel(
+            api_key=api_key,
+            model=model,
+            base_url=settings.ark_base_url or None,
+            temperature=temperature,
+            thinking_enabled=settings.ark_thinking_enabled,
+        )
 
     if provider == "anthropic":
         # 延迟导入：只加载当前用到的供应商依赖

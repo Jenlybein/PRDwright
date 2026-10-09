@@ -66,10 +66,29 @@ wheels = [
 ]
 
 [[package]]
+name = "arkruntime"
+version = "0.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+    { name = "volcengine-python-sdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2e/37/2de7c9317c88ae2d5dd87a0765cef2360fc31565eb66df4087f9fa6f7607/arkruntime-0.8.0.tar.gz", hash = "sha256:0ee4aec768fbc29d32fe9771484b264c928cdf86268b8d68ca5dab9e8571722f", size = 257795, upload-time = "2026-09-17T06:58:57.567Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/af/17845e5a80912446ce5e9ccc8617fbe430d3891374cadeb59d3ffc5456c8/arkruntime-0.8.0-py3-none-any.whl", hash = "sha256:bde4b5f2623f1db91814281f9bf3f80b513a33f43e87e4f0bda5a659bf5b2847", size = 683619, upload-time = "2026-09-17T06:58:56.223Z" },
+]
+
+[[package]]
 name = "backend"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "arkruntime" },
     { name = "fastapi", extra = ["standard"] },
     { name = "langchain" },
     { name = "langchain-anthropic" },
@@ -80,6 +99,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "arkruntime", specifier = ">=0.8.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.142.2" },
     { name = "langchain", specifier = ">=1.4.3" },
     { name = "langchain-anthropic", specifier = ">=1.7.5" },
@@ -1402,6 +1422,18 @@ wheels = [
 ]
 
 [[package]]
+name = "python-dateutil"
+version = "2.9.0.post0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+]
+
+[[package]]
 name = "python-dotenv"
 version = "1.2.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1750,6 +1782,15 @@ wheels = [
 ]
 
 [[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
 name = "sniffio"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2019,6 +2060,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9f/83/f421a077712c1e87603bfec62744c3cd3a2f4b47378025db3d740df9af0d/uvloop-0.23.0-cp315-cp315t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:12634f15e6625f78b3f2922f91404c4d7173487eba11746764153f556e9852dc", size = 4661763, upload-time = "2026-10-01T03:16:38.719Z" },
     { url = "https://files.pythonhosted.org/packages/f5/62/25dcaa6b7e7b48f82ce633854ce96597ab768f9650931f4f86c572de392c/uvloop-0.23.0-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:378188efbb1524f2219d05246a3e1e5907217848d2882144dff59585f1b81d55", size = 4421324, upload-time = "2026-10-01T03:16:40.488Z" },
     { url = "https://files.pythonhosted.org/packages/05/46/04628239b43dcef703af314202a3307d6060918e2d76aa86c5b1188f5551/uvloop-0.23.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:4b8e207c67d207a8608fec57e116511030af3495dc0109b8c333cf9cb412b16f", size = 4462501, upload-time = "2026-10-01T03:16:42.359Z" },
+]
+
+[[package]]
+name = "volcengine-python-sdk"
+version = "5.0.51"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "python-dateutil" },
+    { name = "six" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f2/fc/45f8536ab2ef812805ae210cdedc8b07e0fd8aa50d66bcc74ad55fd3c5e8/volcengine_python_sdk-5.0.51.tar.gz", hash = "sha256:28e6e7ad6ea970a2cce223ea0c0ef256009c73d869d73845822143de354619db", size = 10837943, upload-time = "2026-10-09T10:04:25.87Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/82/dcaf281227c93890c9e5425cc557397a6a92824ad6aec9dcc75724e04add/volcengine_python_sdk-5.0.51-py2.py3-none-any.whl", hash = "sha256:c9ecd028593f54fc51a9a1130ea770fa05d447c6e701a4df309e4db300443fc0", size = 43514266, upload-time = "2026-10-09T10:04:20.01Z" },
 ]
 
 [[package]]

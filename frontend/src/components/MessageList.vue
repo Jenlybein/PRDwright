@@ -29,6 +29,59 @@ const visibleMessages = computed(() =>
   props.messages.filter((message) => message.role !== 'system'),
 )
 
+/** 思考中的轮换提示语：长时间等待首字时给用户可感知的进度反馈，避免干等静止文案 */
+const THINKING_PHRASES = [
+  '正在理解你的需求要点…',
+  '正在梳理产品结构与边界…',
+  '正在组织文档内容…',
+  '正在撰写详细回复…',
+]
+
+/** 当前展示的思考提示语 */
+const thinkingPhrase = ref(THINKING_PHRASES[0] ?? '')
+
+/** 思考提示语的当前下标 */
+const thinkingIndex = ref(0)
+
+/** 是否存在「正在思考、尚未收到任何内容」的助手消息 */
+const isThinking = computed(() =>
+  visibleMessages.value.some(
+    (message) => message.role === 'assistant' && message.streaming && !message.content.trim(),
+  ),
+)
+
+/** 思考提示语的轮换定时器 */
+let thinkingTimer: number | undefined
+
+/** 启动提示语轮换（已运行时直接重置到首条） */
+function startThinkingCycle(): void {
+  thinkingIndex.value = 0
+  thinkingPhrase.value = THINKING_PHRASES[thinkingIndex.value] ?? ''
+  if (thinkingTimer !== undefined) return
+  thinkingTimer = window.setInterval(() => {
+    thinkingIndex.value = (thinkingIndex.value + 1) % THINKING_PHRASES.length
+    thinkingPhrase.value = THINKING_PHRASES[thinkingIndex.value] ?? ''
+  }, 2200)
+}
+
+/** 停止轮换并清理定时器 */
+function stopThinkingCycle(): void {
+  if (thinkingTimer !== undefined) {
+    window.clearInterval(thinkingTimer)
+    thinkingTimer = undefined
+  }
+}
+
+// 进入思考态（开始等待首字）时启动轮换，收到首字或流结束时停止
+watch(
+  isThinking,
+  (active) => {
+    if (active) startThinkingCycle()
+    else stopThinkingCycle()
+  },
+  { immediate: true },
+)
+
 function isNearBottom(): boolean {
   const el = scrollRef.value
   if (!el) return true
@@ -108,18 +161,40 @@ defineExpose({ scrollToBottom })
             <span v-if="message.streaming" class="animate-pulse opacity-80">▍</span>
           </div>
 
-          <!-- AI 消息走 Markdown 渲染；prose 由 @tailwindcss/typography 提供 -->
-          <div
-            v-else
-            class="prose prose-sm prose-slate max-w-none rounded-2xl rounded-tl-sm bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70"
-          >
-            <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
-            <div v-html="renderMarkdown(message.content)" />
-            <span
-              v-if="message.streaming"
-              class="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-primary-500 align-text-bottom"
-            />
-          </div>
+          <!-- AI 消息：尚未收到任何内容时显示「思考中」动画，收到内容后走 Markdown 渲染 -->
+          <template v-else-if="message.role === 'assistant'">
+            <!-- 思考中：跳动圆点 + 轮换提示语，缓解首字等待期的空洞感 -->
+            <div
+              v-if="message.streaming && !message.content.trim()"
+              class="flex items-center gap-3 rounded-2xl rounded-tl-sm bg-white px-4 py-3.5 shadow-sm ring-1 ring-slate-200/70"
+            >
+              <span class="flex items-end gap-1" aria-hidden="true">
+                <span
+                  class="h-2 w-2 animate-bounce rounded-full bg-slate-400"
+                  style="animation-delay: -0.32s"
+                ></span>
+                <span
+                  class="h-2 w-2 animate-bounce rounded-full bg-slate-400"
+                  style="animation-delay: -0.16s"
+                ></span>
+                <span class="h-2 w-2 animate-bounce rounded-full bg-slate-400"></span>
+              </span>
+              <span class="text-sm text-slate-500">{{ thinkingPhrase }}</span>
+            </div>
+
+            <!-- 已有内容：Markdown 渲染 + 流式光标 -->
+            <div
+              v-else
+              class="prose prose-sm prose-slate max-w-none rounded-2xl rounded-tl-sm bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70"
+            >
+              <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
+              <div v-html="renderMarkdown(message.content)" />
+              <span
+                v-if="message.streaming"
+                class="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-primary-500 align-text-bottom"
+              />
+            </div>
+          </template>
         </div>
       </div>
     </div>

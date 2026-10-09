@@ -16,11 +16,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
 
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import ConversationResponse, QuestionsConfig, StreamEvent
-from backend.services.llm_factory import get_llm
+from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import SYSTEM_PROMPT
 
 # 问卷配置文件：backend/src/backend/core/question_config.json
@@ -303,7 +302,7 @@ class ConversationService:
 
     def __init__(
         self,
-        llm: BaseChatModel | None = None,
+        llm: StreamingChatModel | None = None,
         system_prompt: str = SYSTEM_PROMPT,
     ) -> None:
         """初始化服务。
@@ -321,7 +320,7 @@ class ConversationService:
     # ------------------------------------------------------------------
 
     @property
-    def llm(self) -> BaseChatModel:
+    def llm(self) -> StreamingChatModel:
         """LLM 实例，首次访问时才创建（避免在服务初始化阶段就要求密钥）。"""
         if self._llm is None:
             self._llm = get_llm()

@@ -45,7 +45,7 @@
       "name": "auth_required",
       "label": "用户是否需要登录才能使用？",
       "type": "radio",
-      "required": true,
+      "required": false,
       "options": [
         "需要，自建账号体系（手机号/邮箱 + 密码）",
         "需要，但只用第三方登录（微信 / 企业微信 / Google 等）",
@@ -58,7 +58,7 @@
       "name": "data_storage",
       "label": "产品是否需要持久化存储数据？",
       "type": "radio",
-      "required": true,
+      "required": false,
       "options": [
         "需要，要存业务数据（用户、订单、内容、关系等）",
         "只需轻量存储（本地缓存、配置文件、单个表格即可）",
@@ -70,7 +70,7 @@
       "name": "page_count",
       "label": "你预计产品大概有多少个页面（或核心界面）？",
       "type": "select",
-      "required": true,
+      "required": false,
       "options": [
         "1-5 个（极简工具型）",
         "6-10 个（单一流程型产品）",
@@ -84,7 +84,7 @@
       "name": "style_preference",
       "label": "你希望产品的界面风格偏向哪种？",
       "type": "select",
-      "required": true,
+      "required": false,
       "options": [
         "极简现代（参考 Linear、Notion）",
         "企业级后台（参考阿里云控制台、飞书管理后台）",

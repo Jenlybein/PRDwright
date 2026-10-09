@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "HarnessPRD 后端服务"
 requires-python = ">=3.12"
 dependencies = [
+    "arkruntime>=0.8.0",
     "fastapi[standard]>=0.142.2",
     "langchain>=1.4.3",
     "langchain-anthropic>=1.7.5",
