@@ -18,6 +18,16 @@ export interface QuestionsConfig {
   advanced_questions: QuestionConfig[]
 }
 
+/** 聊天消息，角色取值与后端 conversation_service 的 FrontendMessage 一致 */
+export interface ChatMessage {
+  /** 消息角色；`system` 消息不展示在聊天界面里 */
+  role: 'system' | 'user' | 'assistant'
+  /** 消息正文；assistant 的消息为 Markdown 源码 */
+  content: string
+  /** 是否正在流式生成中，用于显示光标 */
+  streaming?: boolean
+}
+
 /**
  * 页面所处的阶段。
  * `generating-*` 表示文档正在生成中，`review-*` 表示文档已生成、待用户确认。
