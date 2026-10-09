@@ -125,3 +125,40 @@ class DocumentResponse(BaseModel):
     version: int = Field(default=1, description="文档版本号")
     updated_at: datetime | None = Field(default=None, description="更新时间")
 
+
+# ============================================================================
+# 文档流式生成（对应 document_service 的 *_stream 方法）
+# ============================================================================
+
+
+class GeneratePrdStreamRequest(BaseModel):
+    """生成 PRD 的流式请求。"""
+
+    requirements: str = Field(
+        min_length=1,
+        description="需求澄清结果（问卷答案整理成的文本）",
+    )
+    history: list[MessageItem] = Field(
+        default_factory=list,
+        description="补充对话记录；为空则按无对话处理",
+    )
+
+
+class GenerateApiDocsStreamRequest(BaseModel):
+    """生成接口文档的流式请求。"""
+
+    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+
+
+class GeneratePromptsStreamRequest(BaseModel):
+    """生成提示词套件的流式请求。"""
+
+    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+
+
+class OptimizeDocumentStreamRequest(BaseModel):
+    """优化文档的流式请求。"""
+
+    document: str = Field(min_length=1, description="待优化的原文档正文（Markdown）")
+    instruction: str = Field(min_length=1, description="用户的优化要求")
+

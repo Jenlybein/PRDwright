@@ -103,18 +103,18 @@ function parseSseBlock(block: string): StreamEventPayload | null {
 }
 
 /**
- * 执行一次流式对话请求。
+ * 执行一次 SSE 流式请求，读取并消费事件流。
  *
  * axios 不支持读取流式响应体，所以这里直接用 `fetch` + `ReadableStream` 消费
- * SSE：按空行切分事件块，逐块解析后把增量文本回调给调用方。
+ * SSE：按空行切分事件块，逐块解析后把状态提示与增量文本回调给调用方。
  *
  * @param path 接口路径，如 `/api/conversation/start-stream`
  * @param body 请求体
  * @param handlers 状态提示与增量文本的回调
- * @returns 会话 ID 与完整回复
+ * @returns 完整回复文本与事件附加数据里出现过的字段（如 conversation_id）
  * @throws 网络异常、HTTP 非 2xx，以及后端下发的 `error` 事件
  */
-async function streamChat(
+async function readStream(
   path: string,
   body: unknown,
   handlers: StreamHandlers = {},
@@ -195,7 +195,7 @@ export async function startConversationStream(
   payload: { answers: Record<string, string>; title?: string },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
-  return streamChat(
+  return readStream(
     '/api/conversation/start-stream',
     { title: payload.title ?? '', answers: payload.answers },
     handlers,
@@ -213,13 +213,95 @@ export async function continueConversationStream(
   payload: { content: string; conversationId?: string; history?: ChatMessage[] },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
-  return streamChat(
+  return readStream(
     '/api/conversation/continue-stream',
     {
       conversation_id: payload.conversationId ?? '',
       content: payload.content,
       // 只保留后端认识的 role / content 两个字段
       history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+    },
+    handlers,
+  )
+}
+
+// ============================================================================
+// 文档流式生成（SSE）
+// ============================================================================
+
+/** 文档流式生成的请求体，字段与后端 schemas 的对应请求模型一致 */
+export interface GeneratePrdStreamPayload {
+  /** 需求澄清结果（问卷答案整理成的文本） */
+  requirements: string
+  /** 补充对话记录；为空则按无对话处理 */
+  history?: ChatMessage[]
+}
+
+/** 文档流式生成的结果：仅关心完整正文，会话 ID 恒为空串 */
+export type DocumentStreamResult = StreamResult
+
+/**
+ * 根据对话生成 PRD，SSE 流式接收正文。
+ * 对应后端 `POST /api/conversation/generate-prd-stream`。
+ */
+export function generatePrdStream(
+  payload: GeneratePrdStreamPayload,
+  handlers?: StreamHandlers,
+): Promise<DocumentStreamResult> {
+  return readStream(
+    '/api/conversation/generate-prd-stream',
+    {
+      requirements: payload.requirements,
+      // 只保留后端认识的 role / content 两个字段
+      history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+    },
+    handlers,
+  )
+}
+
+/**
+ * 根据 PRD 正文生成接口文档，SSE 流式接收正文。
+ * 对应后端 `POST /api/conversation/generate-api-docs-stream`。
+ */
+export function generateApiDocsStream(
+  payload: { prdContent: string },
+  handlers?: StreamHandlers,
+): Promise<DocumentStreamResult> {
+  return readStream(
+    '/api/conversation/generate-api-docs-stream',
+    { prd_content: payload.prdContent },
+    handlers,
+  )
+}
+
+/**
+ * 根据 PRD 正文生成提示词套件，SSE 流式接收正文。
+ * 对应后端 `POST /api/conversation/generate-prompts-stream`。
+ */
+export function generatePromptsStream(
+  payload: { prdContent: string },
+  handlers?: StreamHandlers,
+): Promise<DocumentStreamResult> {
+  return readStream(
+    '/api/conversation/generate-prompts-stream',
+    { prd_content: payload.prdContent },
+    handlers,
+  )
+}
+
+/**
+ * 按用户指令优化文档，SSE 流式接收优化后的正文。
+ * 对应后端 `POST /api/conversation/optimize-document-stream`。
+ */
+export function optimizeDocumentStream(
+  payload: { document: string; instruction: string },
+  handlers?: StreamHandlers,
+): Promise<DocumentStreamResult> {
+  return readStream(
+    '/api/conversation/optimize-document-stream',
+    {
+      document: payload.document,
+      instruction: payload.instruction,
     },
     handlers,
   )

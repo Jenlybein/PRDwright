@@ -146,6 +146,79 @@ async def continue_conversation_stream(
 
 
 # ============================================================================
+# 文档流式生成（document_service 的 *_stream 方法，SSE 流式返回）
+# ============================================================================
+
+
+@router.post("/generate-prd-stream", summary="根据对话生成 PRD（SSE 流式返回）")
+async def generate_prd_stream(
+    payload: schemas.GeneratePrdStreamRequest,
+) -> StreamingResponse:
+    """根据需求澄清结果与补充对话，流式返回 PRD 正文。
+
+    事件序列：`status` → 若干 `chunk` → `done`（`data` 带完整 `reply` 与
+    `doc_type=prd`）；出错时为 `error`。
+    """
+    # 空列表视为「无补充对话」
+    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    events = document_service.generate_prd_stream(
+        requirements=payload.requirements,
+        history=history,
+    )
+    return StreamingResponse(
+        _make_sse_generator(events),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
+
+@router.post("/generate-api-docs-stream", summary="根据 PRD 生成接口文档（SSE 流式返回）")
+async def generate_api_docs_stream(
+    payload: schemas.GenerateApiDocsStreamRequest,
+) -> StreamingResponse:
+    """根据 PRD 正文流式返回接口文档。"""
+    events = document_service.generate_api_docs_stream(
+        prd_content=payload.prd_content,
+    )
+    return StreamingResponse(
+        _make_sse_generator(events),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
+
+@router.post("/generate-prompts-stream", summary="根据 PRD 生成提示词套件（SSE 流式返回）")
+async def generate_prompts_stream(
+    payload: schemas.GeneratePromptsStreamRequest,
+) -> StreamingResponse:
+    """根据 PRD 正文流式返回提示词套件。"""
+    events = document_service.generate_prompts_stream(
+        prd_content=payload.prd_content,
+    )
+    return StreamingResponse(
+        _make_sse_generator(events),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
+
+@router.post("/optimize-document-stream", summary="优化文档（SSE 流式返回）")
+async def optimize_document_stream(
+    payload: schemas.OptimizeDocumentStreamRequest,
+) -> StreamingResponse:
+    """按用户指令流式返回优化后的文档。"""
+    events = document_service.optimize_document_stream(
+        document=payload.document,
+        instruction=payload.instruction,
+    )
+    return StreamingResponse(
+        _make_sse_generator(events),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
+
+# ============================================================================
 # 文档（document）：基于会话上下文生成 / 读取 / 更新文档
 # 当前接口已接线，但 `document_service` 尚未实现，调用会返回 500
 # ============================================================================

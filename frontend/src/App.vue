@@ -2,9 +2,18 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import ChatInput from '@/components/ChatInput.vue'
+import DocumentReview from '@/components/DocumentReview.vue'
 import FormStep from '@/components/FormStep.vue'
 import MessageList from '@/components/MessageList.vue'
-import { continueConversationStream, getQuestions, startConversationStream } from '@/services/api'
+import {
+  continueConversationStream,
+  generateApiDocsStream,
+  generatePrdStream,
+  generatePromptsStream,
+  getQuestions,
+  optimizeDocumentStream,
+  startConversationStream,
+} from '@/services/api'
 import { STEPS, STEP_OF_STATE } from '@/types'
 import type { ChatMessage, QuestionsConfig, ViewState } from '@/types'
 
@@ -13,6 +22,9 @@ const STORAGE_KEY = 'harnessprd:form-data'
 
 /** localStorage 中保存对话记录的键名 */
 const CHAT_STORAGE_KEY = 'harnessprd:conversation'
+
+/** localStorage 中保存文档内容的键名 */
+const DOC_STORAGE_KEY = 'harnessprd:documents'
 
 /** 当前所处阶段 */
 const viewState = ref<ViewState>('form')
@@ -46,6 +58,31 @@ const chatError = ref('')
 
 /** 聊天输入框，一轮回复结束后把焦点交还给用户 */
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null)
+
+// ---------------------------------------------------------------------------
+// 文档状态
+// ---------------------------------------------------------------------------
+
+/** 已生成的 PRD 正文（Markdown 源码） */
+const prdContent = ref('')
+
+/** 已生成的接口文档正文（Markdown 源码） */
+const apiDocsContent = ref('')
+
+/** 已生成的提示词套件正文（Markdown 源码） */
+const promptsContent = ref('')
+
+/** 是否有文档正在生成中（PRD / 接口文档 / 提示词 / 优化共用） */
+const isGenerating = ref(false)
+
+/** 文档生成中的流式增量文本，实时展示在审阅区 */
+const docStreamingContent = ref('')
+
+/** 文档生成 / 优化过程中的错误提示 */
+const docError = ref('')
+
+/** 当前正在处理的文档 key，用于定位流式内容与错误应落到哪一份 */
+const activeDocKey = ref<'prd' | 'api-docs' | 'prompts'>('prd')
 
 // ---------------------------------------------------------------------------
 // 本地持久化
@@ -93,6 +130,30 @@ function loadConversation(): { conversationId: string; messages: ChatMessage[] }
 /** 是否已有本地草稿（用于页面提示「已为你恢复上次填写的内容」） */
 const hasDraft = Object.keys(loadDraft()).length > 0
 
+/** 读取本地保存的文档正文；缺失或损坏时返回空对象 */
+function loadDocuments(): { prd: string; apiDocs: string; prompts: string } {
+  try {
+    const raw = localStorage.getItem(DOC_STORAGE_KEY)
+    if (!raw) return { prd: '', apiDocs: '', prompts: '' }
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return { prd: '', apiDocs: '', prompts: '' }
+    const record = parsed as { prd?: unknown; apiDocs?: unknown; prompts?: unknown }
+    return {
+      prd: typeof record.prd === 'string' ? record.prd : '',
+      apiDocs: typeof record.apiDocs === 'string' ? record.apiDocs : '',
+      prompts: typeof record.prompts === 'string' ? record.prompts : '',
+    }
+  } catch {
+    return { prd: '', apiDocs: '', prompts: '' }
+  }
+}
+
+// 刷新后恢复已生成的文档内容
+const savedDocs = loadDocuments()
+prdContent.value = savedDocs.prd
+apiDocsContent.value = savedDocs.apiDocs
+promptsContent.value = savedDocs.prompts
+
 // 表单数据：初始取自本地草稿，填写过程中由 FormStep 通过 v-model 双向写入。
 // 这里用 let 是因为 v-model 编译后需要可赋值的绑定；FormStep 只修改字段、不整体替换对象，
 // 所以 formData 的响应式引用不会被改写。
@@ -125,6 +186,22 @@ watch(
 // 表单内容变化时写入 localStorage，刷新或误关页面都不丢草稿
 watch(formData, (value) => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
+})
+
+// 文档正文变化时落盘，刷新后能恢复已生成的文档
+watch([prdContent, apiDocsContent, promptsContent], () => {
+  try {
+    localStorage.setItem(
+      DOC_STORAGE_KEY,
+      JSON.stringify({
+        prd: prdContent.value,
+        apiDocs: apiDocsContent.value,
+        prompts: promptsContent.value,
+      }),
+    )
+  } catch {
+    // 隐私模式或存储超限时静默跳过
+  }
 })
 
 /** 「已保存」提示的定时器 */
@@ -308,6 +385,158 @@ function restart(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 文档生成与优化
+// ---------------------------------------------------------------------------
+
+/**
+ * 把问卷答案整理成 PRD 生成所需的「需求澄清」文本。
+ * 逐条拼成 `问题：答案` 的行，供模型理解用户的产品想法。
+ */
+function buildRequirements(): string {
+  const all = [
+    ...(questions.value?.base_questions ?? []),
+    ...(questions.value?.advanced_questions ?? []),
+  ]
+  return all
+    .map((question) => {
+      const answer = String(formData[question.name] ?? '').trim()
+      return answer ? `${question.label}：${answer}` : ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+/**
+ * 执行一次文档流式生成，并把增量实时写入 `docStreamingContent`。
+ *
+ * @param docKey 目标文档 key，用于在出错时定位提示
+ * @param request 实际发起请求的闭包
+ */
+async function runDocumentStream(
+  docKey: 'prd' | 'api-docs' | 'prompts',
+  request: () => Promise<{ reply: string }>,
+): Promise<string> {
+  activeDocKey.value = docKey
+  isGenerating.value = true
+  docStreamingContent.value = ''
+  docError.value = ''
+
+  let reply = ''
+  try {
+    const result = await request()
+    reply = result.reply
+  } catch (error) {
+    docError.value = error instanceof Error ? error.message : String(error)
+    // 报错时保留已经流出的半截内容
+    reply = docStreamingContent.value
+  } finally {
+    isGenerating.value = false
+    docStreamingContent.value = ''
+  }
+  return reply
+}
+
+/** 生成 PRD：需求澄清 + 对话历史一起交给模型 */
+async function generatePrd(): Promise<void> {
+  const history = messages.value.map(({ role, content }) => ({ role, content }))
+  const reply = await runDocumentStream('prd', () =>
+    generatePrdStream(
+      { requirements: buildRequirements(), history },
+      { onChunk: (chunk) => (docStreamingContent.value += chunk) },
+    ),
+  )
+  const content = reply.trim()
+  if (content) {
+    prdContent.value = content
+    viewState.value = 'review-prd'
+  }
+}
+
+/** 生成接口文档：以 PRD 正文为输入 */
+async function generateApiDocs(): Promise<void> {
+  const reply = await runDocumentStream('api-docs', () =>
+    generateApiDocsStream(
+      { prdContent: prdContent.value },
+      { onChunk: (chunk) => (docStreamingContent.value += chunk) },
+    ),
+  )
+  const content = reply.trim()
+  if (content) {
+    apiDocsContent.value = content
+    viewState.value = 'review-api-docs'
+  }
+}
+
+/** 生成提示词套件：以 PRD 正文为输入 */
+async function generatePrompts(): Promise<void> {
+  const reply = await runDocumentStream('prompts', () =>
+    generatePromptsStream(
+      { prdContent: prdContent.value },
+      { onChunk: (chunk) => (docStreamingContent.value += chunk) },
+    ),
+  )
+  const content = reply.trim()
+  if (content) {
+    promptsContent.value = content
+    viewState.value = 'review-prompts'
+  }
+}
+
+/** 优化当前正在审阅的文档（按用户指令） */
+async function optimizeCurrentDocument(instruction: string): Promise<void> {
+  const docKey = activeDocKey.value
+  const current = docKey === 'prd' ? prdContent.value : docKey === 'api-docs' ? apiDocsContent.value : promptsContent.value
+  if (!current.trim() || !instruction.trim()) return
+
+  const reply = await runDocumentStream(docKey, () =>
+    optimizeDocumentStream(
+      { document: current, instruction },
+      { onChunk: (chunk) => (docStreamingContent.value += chunk) },
+    ),
+  )
+  const content = reply.trim()
+  if (!content) return
+  if (docKey === 'prd') prdContent.value = content
+  else if (docKey === 'api-docs') apiDocsContent.value = content
+  else promptsContent.value = content
+}
+
+/** 审阅页「保存」：把编辑后的原文写回对应的文档状态 */
+function onSaveDocument(content: string): void {
+  if (viewState.value === 'review-prd') prdContent.value = content
+  else if (viewState.value === 'review-api-docs') apiDocsContent.value = content
+  else if (viewState.value === 'review-prompts') promptsContent.value = content
+  flashSavedTip('文档已保存到本地')
+}
+
+/**
+ * 审阅页「AI 优化」：弹窗让用户输入优化指令，再走流式优化。
+ * 这里用浏览器 prompt 保持轻量，无需额外弹窗组件。
+ */
+async function onAiOptimize(content: string): Promise<void> {
+  if (!content.trim()) return
+  const instruction = window.prompt('请输入优化指令（例如：把语气改得更正式、压缩到 500 字以内）')
+  if (!instruction?.trim()) return
+  await optimizeCurrentDocument(instruction)
+}
+
+/** 审阅页「生成接口文档」入口：先切到生成中状态再生成 */
+async function handleGenerateApiDocs(): Promise<void> {
+  if (!prdContent.value.trim()) return
+  viewState.value = 'generating-api-docs'
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  await generateApiDocs()
+}
+
+/** 审阅页「生成提示词套件」入口：先切到生成中状态再生成 */
+async function handleGeneratePrompts(): Promise<void> {
+  if (!prdContent.value.trim()) return
+  viewState.value = 'generating-prompts'
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  await generatePrompts()
+}
+
+// ---------------------------------------------------------------------------
 // 进度条
 // ---------------------------------------------------------------------------
 
@@ -316,23 +545,48 @@ const currentStepIndex = computed(() =>
   STEPS.findIndex((step) => step.id === STEP_OF_STATE[viewState.value]),
 )
 
-/** 是否处于文档生成中 */
-const isGenerating = computed(() => viewState.value.startsWith('generating-'))
+/** 当前阶段是否为「文档生成中」（进度条呼吸高亮用） */
+const isGeneratingPhase = computed(() => viewState.value.startsWith('generating-'))
 
 /** 是否处于文档待确认 */
 const isReviewing = computed(() => viewState.value.startsWith('review-'))
 
-/** 生成中 / 待确认阶段对应的文档名，用于占位文案 */
-const docName = computed(() => {
+/** 对话阶段是否满足「生成 PRD」条件：已有至少一轮 AI 回复 */
+const canGeneratePrd = computed(() => {
+  if (streaming.value) return false
+  return messages.value.some((message) => message.role === 'assistant' && message.content.trim())
+})
+
+/**
+ * 从对话页点击「生成 PRD」：切到生成中状态并开始生成。
+ * 生成完成后 `generatePrd` 内部会把状态推进到 review-prd。
+ */
+async function handleGeneratePrd(): Promise<void> {
+  if (!canGeneratePrd.value) return
+  viewState.value = 'generating-prd'
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  await generatePrd()
+}
+
+/** 当前审阅阶段对应的文档标题 */
+const activeDocTitle = computed(() => {
   const map: Record<string, string> = {
-    'generating-prd': 'PRD',
-    'review-prd': 'PRD',
+    'generating-prd': 'PRD 文档',
+    'review-prd': 'PRD 文档',
     'generating-api-docs': '接口文档',
     'review-api-docs': '接口文档',
-    'generating-prompts': '提示词文档',
-    'review-prompts': '提示词文档',
+    'generating-prompts': '提示词套件',
+    'review-prompts': '提示词套件',
   }
   return map[viewState.value] ?? '文档'
+})
+
+/** 当前审阅阶段对应的文档正文（非生成态） */
+const activeDocContent = computed(() => {
+  if (viewState.value === 'review-prd') return prdContent.value
+  if (viewState.value === 'review-api-docs') return apiDocsContent.value
+  if (viewState.value === 'review-prompts') return promptsContent.value
+  return ''
 })
 
 /** 判断某个步骤是否已走完 */
@@ -395,7 +649,7 @@ function isFinished(index: number): boolean {
                   isFinished(index)
                     ? 'bg-primary-500 text-white'
                     : index === currentStepIndex
-                      ? isGenerating
+                      ? isGeneratingPhase
                         ? 'bg-primary-100 text-primary-700 ring-2 ring-primary-500 animate-pulse'
                         : 'bg-primary-500 text-white ring-4 ring-primary-100'
                       : 'bg-slate-100 text-slate-400',
@@ -554,45 +808,110 @@ function isFinished(index: number): boolean {
           <MessageList :messages="displayMessages" />
           <ChatInput ref="inputRef" :loading="streaming" @send="handleSendMessage" />
         </div>
-      </section>
 
-      <!-- 文档生成中（PRD / 接口文档 / 提示词共用） -->
-      <section
-        v-else-if="isGenerating"
-        class="rounded-2xl border border-slate-200/80 bg-white p-8 text-center shadow-sm"
-      >
-        <div class="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-slate-200 border-t-primary-500"></div>
-        <h2 class="mt-4 text-base font-semibold text-slate-900">正在生成{{ docName }}</h2>
-        <p class="mx-auto mt-2 max-w-md text-sm text-slate-500">
-          AI 正在整理你的需求并撰写文档，生成完成后会在这里展示，你可以逐段确认或修改。
-        </p>
-      </section>
-
-      <!-- 文档待确认（PRD / 接口文档 / 提示词共用） -->
-      <section
-        v-else-if="isReviewing"
-        class="rounded-2xl border border-slate-200/80 bg-white p-8 text-center shadow-sm"
-      >
-        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50">
-          <svg class="h-6 w-6 text-emerald-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path
-              fill-rule="evenodd"
-              d="M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z"
-              clip-rule="evenodd"
-            />
-          </svg>
+        <!-- 满足条件后显示「生成 PRD」入口 -->
+        <div v-if="canGeneratePrd" class="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
+          <p class="text-xs text-slate-500">需求已澄清，可以据此生成 PRD 文档了。</p>
+          <button
+            type="button"
+            class="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
+            @click="handleGeneratePrd"
+          >
+            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z"
+                clip-rule="evenodd"
+              />
+            </svg>
+            生成 PRD
+          </button>
         </div>
-        <h2 class="mt-4 text-base font-semibold text-slate-900">{{ docName }}已生成，等待确认</h2>
-        <p class="mx-auto mt-2 max-w-md text-sm text-slate-500">
-          文档编辑与确认界面尚未实现，后端接口就绪后会在这里渲染 Markdown 内容。
+      </section>
+
+      <!-- 文档生成中（PRD / 接口文档 / 提示词 / 优化共用） -->
+      <section v-else-if="isGenerating" class="space-y-3">
+        <!-- 生成 / 优化出错提示 -->
+        <p
+          v-if="docError"
+          class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600"
+          role="alert"
+        >
+          {{ docError }}
         </p>
+        <DocumentReview
+          :title="activeDocTitle"
+          :streaming-content="docStreamingContent"
+          :generating="true"
+        />
         <button
           type="button"
-          class="mt-5 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+          class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
           @click="viewState = 'chatting'"
         >
           返回对话
         </button>
+      </section>
+
+      <!-- 文档待确认（PRD / 接口文档 / 提示词共用） -->
+      <section v-else-if="isReviewing" class="space-y-3">
+        <DocumentReview
+          :title="activeDocTitle"
+          :content="activeDocContent"
+          @save="onSaveDocument"
+          @ai-optimize="onAiOptimize"
+        >
+          <template #actions="{ save }">
+            <!-- 保存 -->
+            <button
+              type="button"
+              class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
+              @click="save"
+            >
+              保存
+            </button>
+          </template>
+        </DocumentReview>
+
+        <!-- 各文档对应的后续操作 -->
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+            @click="viewState = 'chatting'"
+          >
+            返回对话
+          </button>
+
+          <!-- PRD 完成后：生成接口文档 / 提示词 -->
+          <template v-if="viewState === 'review-prd'">
+            <button
+              type="button"
+              class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
+              @click="handleGenerateApiDocs"
+            >
+              生成接口文档
+            </button>
+            <button
+              type="button"
+              class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
+              @click="handleGeneratePrompts"
+            >
+              生成提示词套件
+            </button>
+          </template>
+
+          <!-- 接口文档 / 提示词完成后：回到 PRD 或标记完成 -->
+          <template v-else>
+            <button
+              type="button"
+              class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+              @click="viewState = 'review-prd'"
+            >
+              查看 PRD
+            </button>
+          </template>
+        </div>
       </section>
 
       <!-- 全部完成 -->
