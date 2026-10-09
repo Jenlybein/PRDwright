@@ -69,6 +69,7 @@ def get_llm(
             model=model,
             base_url=settings.ark_base_url or None,
             temperature=temperature,
+            max_tokens=settings.ark_max_tokens,
             thinking_enabled=settings.ark_thinking_enabled,
         )
 
@@ -78,6 +79,8 @@ def get_llm(
 
         if settings.anthropic_api_url:
             extra.setdefault("base_url", settings.anthropic_api_url)
+        # Anthropic 用 max_tokens 控制单次回复上限，避免长文档被截断
+        extra.setdefault("max_tokens", settings.anthropic_max_tokens)
 
         return ChatAnthropic(
             model=model,
@@ -91,6 +94,8 @@ def get_llm(
 
         if settings.openai_api_url:
             extra.setdefault("base_url", settings.openai_api_url)
+        # OpenAI 用 max_tokens 控制单次回复上限（新版本也支持 max_completion_tokens）
+        extra.setdefault("max_tokens", settings.openai_max_tokens)
 
         return ChatOpenAI(
             model=model,

@@ -411,40 +411,48 @@ function buildRequirements(): string {
  *
  * @param docKey 目标文档 key，用于在出错时定位提示
  * @param request 实际发起请求的闭包
+ * @returns `{ reply, ok }`：`ok` 为 false 表示生成失败（如被截断），
+ *   此时 `reply` 为已流出的半截内容，调用方不应把它当作完整文档推进流程。
  */
 async function runDocumentStream(
   docKey: 'prd' | 'api-docs' | 'prompts',
   request: () => Promise<{ reply: string }>,
-): Promise<string> {
+): Promise<{ reply: string; ok: boolean }> {
   activeDocKey.value = docKey
   isGenerating.value = true
   docStreamingContent.value = ''
   docError.value = ''
 
   let reply = ''
+  let ok = true
   try {
     const result = await request()
     reply = result.reply
   } catch (error) {
+    ok = false
     docError.value = error instanceof Error ? error.message : String(error)
-    // 报错时保留已经流出的半截内容
+    // 报错时保留已经流出的半截内容，供用户查看已生成到哪一步
     reply = docStreamingContent.value
   } finally {
     isGenerating.value = false
-    docStreamingContent.value = ''
+    if (ok) {
+      // 成功才清空流式缓冲；失败时保留，让失败分支里仍能看到半截内容
+      docStreamingContent.value = ''
+    }
   }
-  return reply
+  return { reply, ok }
 }
 
 /** 生成 PRD：需求澄清 + 对话历史一起交给模型 */
 async function generatePrd(): Promise<void> {
   const history = messages.value.map(({ role, content }) => ({ role, content }))
-  const reply = await runDocumentStream('prd', () =>
+  const { reply, ok } = await runDocumentStream('prd', () =>
     generatePrdStream(
       { requirements: buildRequirements(), history },
       { onChunk: (chunk) => (docStreamingContent.value += chunk) },
     ),
   )
+  if (!ok) return // 失败时留在当前状态，由调用方处理错误展示
   const content = reply.trim()
   if (content) {
     prdContent.value = content
@@ -454,12 +462,13 @@ async function generatePrd(): Promise<void> {
 
 /** 生成接口文档：以 PRD 正文为输入 */
 async function generateApiDocs(): Promise<void> {
-  const reply = await runDocumentStream('api-docs', () =>
+  const { reply, ok } = await runDocumentStream('api-docs', () =>
     generateApiDocsStream(
       { prdContent: prdContent.value },
       { onChunk: (chunk) => (docStreamingContent.value += chunk) },
     ),
   )
+  if (!ok) return
   const content = reply.trim()
   if (content) {
     apiDocsContent.value = content
@@ -469,12 +478,13 @@ async function generateApiDocs(): Promise<void> {
 
 /** 生成提示词套件：以 PRD 正文为输入 */
 async function generatePrompts(): Promise<void> {
-  const reply = await runDocumentStream('prompts', () =>
+  const { reply, ok } = await runDocumentStream('prompts', () =>
     generatePromptsStream(
       { prdContent: prdContent.value },
       { onChunk: (chunk) => (docStreamingContent.value += chunk) },
     ),
   )
+  if (!ok) return
   const content = reply.trim()
   if (content) {
     promptsContent.value = content
@@ -488,12 +498,13 @@ async function optimizeCurrentDocument(instruction: string): Promise<void> {
   const current = docKey === 'prd' ? prdContent.value : docKey === 'api-docs' ? apiDocsContent.value : promptsContent.value
   if (!current.trim() || !instruction.trim()) return
 
-  const reply = await runDocumentStream(docKey, () =>
+  const { reply, ok } = await runDocumentStream(docKey, () =>
     optimizeDocumentStream(
       { document: current, instruction },
       { onChunk: (chunk) => (docStreamingContent.value += chunk) },
     ),
   )
+  if (!ok) return // 优化失败：保留原文档，错误已写入 docError
   const content = reply.trim()
   if (!content) return
   if (docKey === 'prd') prdContent.value = content
@@ -534,6 +545,14 @@ async function handleGeneratePrompts(): Promise<void> {
   viewState.value = 'generating-prompts'
   window.scrollTo({ top: 0, behavior: 'smooth' })
   await generatePrompts()
+}
+
+/** 回到对话页，并清空文档生成相关的错误与流式残留 */
+function backToChat(): void {
+  docError.value = ''
+  docStreamingContent.value = ''
+  isGenerating.value = false
+  viewState.value = 'chatting'
 }
 
 // ---------------------------------------------------------------------------
@@ -829,17 +848,27 @@ function isFinished(index: number): boolean {
         </div>
       </section>
 
-      <!-- 文档生成中（PRD / 接口文档 / 提示词 / 优化共用） -->
-      <section v-else-if="isGenerating" class="space-y-3">
-        <!-- 生成 / 优化出错提示 -->
+      <!-- 文档生成中 / 生成失败（PRD / 接口文档 / 提示词 / 优化共用） -->
+      <section v-else-if="isGeneratingPhase" class="space-y-3">
+        <!-- 生成 / 优化出错提示：非正常结尾（如被截断）时展示原因 -->
         <p
           v-if="docError"
-          class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600"
+          class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700"
           role="alert"
         >
-          {{ docError }}
+          <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495ZM10 6a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          <span>{{ docError }}</span>
         </p>
+
+        <!-- 生成中：只读流式展示；失败后不再展示空的审阅区，仅提示原因 -->
         <DocumentReview
+          v-if="isGenerating"
           :title="activeDocTitle"
           :streaming-content="docStreamingContent"
           :generating="true"
@@ -847,7 +876,7 @@ function isFinished(index: number): boolean {
         <button
           type="button"
           class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-          @click="viewState = 'chatting'"
+          @click="backToChat"
         >
           返回对话
         </button>
@@ -855,6 +884,21 @@ function isFinished(index: number): boolean {
 
       <!-- 文档待确认（PRD / 接口文档 / 提示词共用） -->
       <section v-else-if="isReviewing" class="space-y-3">
+        <!-- 优化失败等非正常结尾时展示原因（原文档内容保留不变） -->
+        <p
+          v-if="docError"
+          class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+          role="alert"
+        >
+          <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495ZM10 6a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          <span>{{ docError }}</span>
+        </p>
         <DocumentReview
           :title="activeDocTitle"
           :content="activeDocContent"
@@ -878,7 +922,7 @@ function isFinished(index: number): boolean {
           <button
             type="button"
             class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-            @click="viewState = 'chatting'"
+            @click="backToChat"
           >
             返回对话
           </button>

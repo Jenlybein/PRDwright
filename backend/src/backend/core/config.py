@@ -70,6 +70,20 @@ class Settings(BaseSettings):
         "默认关闭，模型直接回答，避免先吐一大段思考再出正文导致的「首字极慢 + 正文爆发」观感。"
         "后续若接入自主可控的思考机制，与此开关无关。",
     )
+    ark_max_tokens: int = Field(
+        default=4096,
+        description="火山方舟模型单次回复的最大 token 数。默认 4096 会截断较长文档"
+        "（finish_reason=length），生成 PRD 等长文时需调大（如 131072 即 128k）。",
+    )
+    anthropic_max_tokens: int = Field(
+        default=4096,
+        description="Anthropic Claude 单次回复的最大 token 数。注意 Anthropic 的"
+        "截断标记为 stop_reason=max_tokens。",
+    )
+    openai_max_tokens: int = Field(
+        default=4096,
+        description="OpenAI（兼容协议）单次回复的最大 token 数。",
+    )
 
     # --- 默认模型选择 --------------------------------------------------------
     default_llm_provider: Literal["anthropic", "openai", "ark"] = Field(

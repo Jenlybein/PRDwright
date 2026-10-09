@@ -68,6 +68,7 @@ class VolcanoArkChatModel:
         model: str,
         base_url: str | None = None,
         temperature: float = 0.7,
+        max_tokens: int | None = None,
         *,
         thinking_enabled: bool = False,
     ) -> None:
@@ -75,6 +76,7 @@ class VolcanoArkChatModel:
         self.model = model
         self.base_url = base_url
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.thinking_enabled = thinking_enabled
 
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
@@ -99,6 +101,9 @@ class VolcanoArkChatModel:
                 "stream": True,
                 "temperature": self.temperature,
             }
+            # 显式指定单次回复的 token 上限，避免长文档被默认上限截断
+            if self.max_tokens is not None:
+                kwargs["max_tokens"] = self.max_tokens
             # 仅对自带思考的方舟模型下发；默认关闭，直接回答。
             if not self.thinking_enabled:
                 kwargs["thinking"] = {"type": "disabled"}
@@ -107,9 +112,18 @@ class VolcanoArkChatModel:
             async for chunk in stream:
                 if not chunk.choices:
                     continue
-                delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
+                delta = choice.delta
                 text = getattr(delta, "content", None)
+                # 把结束原因写进 response_metadata，供上游统一做截断检测
+                finish_reason = getattr(choice, "finish_reason", None)
+                metadata: dict[str, Any] = {}
+                if finish_reason is not None:
+                    metadata["finish_reason"] = str(finish_reason)
                 if text:
-                    yield AIMessageChunk(content=text)
+                    yield AIMessageChunk(content=text, response_metadata=metadata)
+                elif metadata:
+                    # 结束帧没有正文也要把结束原因透出，供业务层判断是否截断
+                    yield AIMessageChunk(content="", response_metadata=metadata)
         finally:
             await client.close()

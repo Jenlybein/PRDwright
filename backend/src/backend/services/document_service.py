@@ -32,6 +32,7 @@ from backend.services.prompts import (
     PROMPTS_GENERATION_PROMPT,
     SYSTEM_PROMPT,
 )
+from backend.services.stream_guard import ensure_not_truncated
 
 class DocumentService:
     """文档生成 / 优化服务。
@@ -157,11 +158,16 @@ class DocumentService:
 
         chunks: list[str] = []
         try:
+            last_chunk = None
             async for chunk in self.llm.astream(messages):
                 text = self._extract_text(chunk.content)
+                last_chunk = chunk
                 if text:
                     chunks.append(text)
                     yield StreamEvent(type="chunk", content=text)
+            # 流结束后检查是否因 max_tokens 被截断，是则抛出转 error 事件
+            if last_chunk is not None:
+                ensure_not_truncated(last_chunk)
         except Exception as exc:  # noqa: BLE001 - 流式接口需把异常转成事件而非抛出
             yield StreamEvent(
                 type="error",

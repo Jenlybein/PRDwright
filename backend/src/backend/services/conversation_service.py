@@ -16,11 +16,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import QuestionsConfig, StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import SYSTEM_PROMPT
+from backend.services.stream_guard import ensure_not_truncated
 
 # 问卷配置文件：backend/src/backend/core/question_config.json
 QUESTION_CONFIG_PATH = Path(__file__).resolve().parents[1] / "core" / "question_config.json"
@@ -329,11 +330,19 @@ class ConversationService:
     # ------------------------------------------------------------------
 
     async def _astream_text(self, messages: list[BaseMessage]) -> AsyncIterator[str]:
-        """调用模型流式生成，逐段产出纯文本。"""
+        """调用模型流式生成，逐段产出纯文本。
+
+        遍历结束时检查最后一个分块的结束原因，若因达到 max_tokens 被截断
+        则抛出 `OutputTruncatedError`，由上游 `_stream_reply` 转成 error 事件。
+        """
+        last_chunk: AIMessageChunk | None = None
         async for chunk in self.llm.astream(messages):
             text = _extract_text(chunk.content)
+            last_chunk = chunk
             if text:
                 yield text
+        if last_chunk is not None:
+            ensure_not_truncated(last_chunk)
 
     async def _stream_reply(
         self,
