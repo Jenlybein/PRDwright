@@ -15,10 +15,18 @@
 
 提示词模板集中在 `services/prompts.py`，本模块只负责「加载模板 + 拼接变量
 + 调用模型流式生成」，不维护大段提示词文本。
+
+PRD 生成走技能包驱动：额外读取 `skills/prd-generator/references/` 下的字段契约、
+六章节模板与写作规范，拼进提示词（见 `_load_skill_artifact` 与 `_build_prd_prompt`）；
+技能包缺失时自动降级为 `prompts.py` 里的内置提示词。
 """
 
 from __future__ import annotations
 
+import logging
+import os
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -29,10 +37,98 @@ from backend.services.prompts import (
     API_DOCS_GENERATION_PROMPT,
     OPTIMIZE_DOCUMENT_PROMPT_TEMPLATE,
     PRD_GENERATION_PROMPT,
+    PRD_SKILL_GENERATION_PROMPT,
     PROMPTS_GENERATION_PROMPT,
     SYSTEM_PROMPT,
 )
 from backend.services.stream_guard import ensure_not_truncated
+
+logger = logging.getLogger(__name__)
+
+# ----------------------------------------------------------------------------
+# 技能包资源加载
+# ----------------------------------------------------------------------------
+
+# PRD 生成依赖的技能包目录名（仓库根/skills/<名称>/）
+PRD_SKILL_NAME = "prd-generator"
+
+# PRD 生成所需的技能资源：`键 -> 技能包内相对路径`
+PRD_SKILL_ARTIFACTS: dict[str, str] = {
+    "field_schema": "references/field-schema.json",
+    "prd_template": "references/prd-template.md",
+    "writing_rules": "references/writing-rules.md",
+}
+
+
+def _resolve_skill_dir(skill_name: str) -> Path:
+    """定位技能包根目录。
+
+    查找顺序：
+    1. 环境变量 `HARNESSPRD_SKILLS_DIR` 指向的目录下查找（部署时后端与 skills
+       目录可能不在同一棵目录树里，用它显式指定 skills 根目录）。
+    2. 从当前文件向上逐级查找 `<祖先目录>/skills/<skill_name>`。
+
+    Args:
+        skill_name: 技能包目录名，如 `prd-generator`。
+
+    Returns:
+        技能包根目录路径。找不到时返回按目录层级推算的默认路径，读取时会报错。
+    """
+    env_dir = os.environ.get("HARNESSPRD_SKILLS_DIR")
+    if env_dir:
+        return Path(env_dir) / skill_name
+
+    here = Path(__file__).resolve()
+    for parent in here.parents[:6]:
+        candidate = parent / "skills" / skill_name
+        if candidate.is_dir():
+            return candidate
+    # 兜底：services/ → backend/ → src/ → backend/ → 仓库根
+    return here.parents[4] / "skills" / skill_name
+
+
+@lru_cache(maxsize=None)
+def _load_skill_artifact(skill_name: str, relative_path: str) -> str:
+    """读取技能包内的资源文件（模板、规范、字段契约等）。
+
+    结果按 `(skill_name, relative_path)` 缓存，避免每轮生成都重复读盘。
+    注意：异常不会被缓存，文件补齐后下一次调用会重新读取。
+
+    Args:
+        skill_name: 技能包目录名，如 `prd-generator`。
+        relative_path: 资源在技能包内的相对路径，如 `references/prd-template.md`。
+
+    Returns:
+        文件文本内容（UTF-8，行尾统一为 `\\n`）。
+
+    Raises:
+        FileNotFoundError: 技能包目录或资源文件不存在。
+    """
+    path = _resolve_skill_dir(skill_name) / relative_path
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"技能资源缺失：{path}"
+            "（可设置环境变量 HARNESSPRD_SKILLS_DIR 指定 skills 根目录）"
+        ) from exc
+
+
+def _load_prd_skill_artifacts() -> dict[str, str] | None:
+    """加载 PRD 生成所需的三份技能资源。
+
+    Returns:
+        键为 `field_schema` / `prd_template` / `writing_rules` 的资源字典；
+        任一资源缺失时返回 `None`，由调用方降级到内置提示词。
+    """
+    try:
+        return {
+            key: _load_skill_artifact(PRD_SKILL_NAME, relative_path)
+            for key, relative_path in PRD_SKILL_ARTIFACTS.items()
+        }
+    except FileNotFoundError:
+        logger.warning("PRD 技能资源加载失败，本次改用内置提示词生成", exc_info=True)
+        return None
 
 class DocumentService:
     """文档生成 / 优化服务。
@@ -134,6 +230,51 @@ class DocumentService:
         ]
 
     # ------------------------------------------------------------------
+    # PRD 提示词组装（技能包驱动）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_prd_prompt(requirements: str, conversation: str) -> tuple[str, str]:
+        """组装 PRD 生成的系统提示词与用户消息。
+
+        优先使用 `skills/prd-generator` 技能包的三份资源：
+        - `field-schema.json`：作为字段契约放进用户消息，供模型校验输入与归一化；
+        - `prd-template.md`：作为章节骨架放进用户消息，约束输出结构；
+        - `writing-rules.md`：作为写作规范追加进系统提示词，约束表达与禁编造。
+
+        资源缺失（如部署时未打包 skills 目录）时降级为 `prompts.py` 的内置提示词，
+        保证服务不中断。
+
+        Args:
+            requirements: 需求澄清结果（问卷答案整理成的文本）。
+            conversation: 已格式化好的补充对话记录文本。
+
+        Returns:
+            `(系统提示词, 用户消息正文)` 二元组。
+        """
+        artifacts = _load_prd_skill_artifacts()
+        if artifacts is None:
+            # 降级：沿用内置提示词
+            user_content = DocumentService._load_template("prd").format(
+                requirements=requirements,
+                conversation=conversation,
+            )
+            return SYSTEM_PROMPT, user_content
+
+        system_prompt = (
+            f"{SYSTEM_PROMPT}\n\n---\n\n"
+            "# PRD 写作规范（生成时必须逐条遵守）\n\n"
+            f"{artifacts['writing_rules']}"
+        )
+        user_content = PRD_SKILL_GENERATION_PROMPT.format(
+            requirements=requirements,
+            conversation=conversation,
+            field_schema=artifacts["field_schema"],
+            prd_template=artifacts["prd_template"],
+        )
+        return system_prompt, user_content
+
+    # ------------------------------------------------------------------
     # 通用流式生成
     # ------------------------------------------------------------------
 
@@ -213,11 +354,11 @@ class DocumentService:
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（PRD 正文）。
         """
-        user_content = self._load_template("prd").format(
+        system_prompt, user_content = self._build_prd_prompt(
             requirements=requirements,
             conversation=self._format_conversation(history or []),
         )
-        messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        messages = self._build_messages(system_prompt, user_content)
         async for event in self._stream_reply(
             messages,
             status_text="正在生成 PRD…",
