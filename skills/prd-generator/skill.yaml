@@ -1,0 +1,63 @@
+# prd-generator 技能包元数据
+# 与 SKILL.md 的 frontmatter 保持一致；SKILL.md 负责执行流程，本文件负责声明式描述。
+
+name: prd-generator
+version: 0.1.0
+description: >-
+  把问卷答案、对话澄清结果或零散需求描述整理成结构化 PRD（六章节 Markdown），
+  并可选输出质量检查报告。适用于需求文档生成、PRD 评审与需求输入字段校验。
+entry: SKILL.md
+agent_created: true
+
+tags:
+  - prd
+  - product
+  - documentation
+  - requirements
+
+# 输入：需求结构化字段，契约定义见 references/field-schema.json
+inputs:
+  required:
+    - product_name
+    - product_goal
+    - target_users
+    - platform
+    - mvp_features
+  optional:
+    - v2_features
+    - ui_pages
+    - technical_constraints
+
+# 输出产物
+outputs:
+  - path: "{{output_dir}}/{{product_name}}-PRD.md"
+    description: PRD 正文，六章节结构，依据 references/prd-template.md 渲染。
+  - path: "{{output_dir}}/{{product_name}}-PRD-review.md"
+    description: 质量检查报告，依据 assets/review-report.md 渲染，可选输出。
+
+references:
+  - path: references/field-schema.json
+    purpose: 输入字段契约、字段别名映射、归一化规则。
+    load_at: [validate-input, normalize-requirements]
+  - path: references/prd-template.md
+    purpose: PRD 六章节正文骨架与渲染说明。
+    load_at: [render-sections]
+  - path: references/writing-rules.md
+    purpose: 写作规范（结构化表达、内容去重、事实与建议区分、缺失信息处理、禁止编造）与自检清单。
+    load_at: [render-sections, quality-check]
+
+assets:
+  - path: assets/review-report.md
+    purpose: 质量检查报告模板，仅在需要输出评审报告时使用。
+    load_at: [quality-check]
+
+# 工作流阶段，与 SKILL.md 的四个阶段一一对应
+workflow:
+  - id: validate-input
+    description: 校验输入字段是否齐全、类型是否合规；必填缺失时先向用户提问。
+  - id: normalize-requirements
+    description: 按 field-schema.json 的别名表与归一化规则统一字段结构，只改名不补内容。
+  - id: render-sections
+    description: 按 prd-template.md 渲染六个章节，遵循 writing-rules.md。
+  - id: quality-check
+    description: 按自检清单核对，必要时用 assets/review-report.md 输出检查报告。
