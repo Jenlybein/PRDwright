@@ -34,3 +34,43 @@ export function downloadFile(
   // 尽快释放对象 URL，避免内存占用
   URL.revokeObjectURL(url)
 }
+
+/** 支持的文档类型 → 文件名中使用的类型名 */
+export const DOC_TYPE_LABELS = {
+  prd: 'PRD',
+  'api-docs': '接口文档',
+  prompts: '提示词套件',
+} as const
+
+/** 文档类型 */
+export type DocType = keyof typeof DOC_TYPE_LABELS
+
+/**
+ * 去掉文件名中的非法字符。
+ *
+ * 覆盖 Windows 的 `\ / : * ? " < > |` 以及 C0 控制符：这些字符会让下载失败，
+ * 或在落盘时被系统静默改写。用户填的产品名是自由文本，必须过滤。
+ */
+function sanitizeFilenamePart(value: string): string {
+  return value.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').trim()
+}
+
+/**
+ * 按「产品名称-文档类型」拼装下载文件名。
+ *
+ * 产品名缺失、或清洗后为空时退回「文档类型_日期」的形式，避免产出
+ * `-PRD.md` 这种没有主名的文件；日期后缀也能避免多次下载互相覆盖。
+ *
+ * @param docType 文档类型
+ * @param productName 产品名称，通常取结构化摘要的 `product_name`
+ */
+export function buildDocFilename(docType: DocType, productName?: string): string {
+  const label = DOC_TYPE_LABELS[docType]
+  const name = sanitizeFilenamePart(productName ?? '')
+  if (name) return `${name}-${label}.md`
+
+  const date = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
+  return `${label}_${stamp}.md`
+}

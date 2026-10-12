@@ -33,8 +33,14 @@ export interface ChatMessage {
  * `generating-*` 表示文档正在生成中，`review-*` 表示文档已生成、待用户确认。
  * `summary-diff` / `rag-preview` 是两道**确认闸门**：前者让用户先确认「对话中补充的
  * 信息回填到摘要」的结果，后者让用户先确认「检索到的团队接口规范」；确认后才继续生成。
+ *
+ * 三个入口相关的阶段：
+ * - `entry`：入口选择页（还没选走哪条入口）；
+ * - `prd-quick`：PRD 快捷入口的录入页（一段话描述 → 直接生成 PRD）；
+ * - `prompt-debug`：提示词调试入口的录入页（贴一份 PRD → 生成提示词套件）。
  */
 export type ViewState =
+  | 'entry'
   | 'form'
   | 'chatting'
   | 'summary-diff'
@@ -45,7 +51,29 @@ export type ViewState =
   | 'review-api-docs'
   | 'generating-prompts'
   | 'review-prompts'
+  | 'prd-quick'
+  | 'prompt-debug'
   | 'done'
+
+/**
+ * 入口模式：三条链路的起点不同，但汇合到同一套「生成 → 审阅 → 下载」流程。
+ *
+ * - `structured`：完整流程——结构化表单 → AI 对话澄清 → PRD → 接口文档 → 提示词；
+ * - `prd-quick`：只想快速拿到 PRD——一段话描述 + 产品名，跳过表单与对话；
+ * - `prompt-debug`：手头已有 PRD——贴进来直接生成提示词套件，再用「AI 优化」反复迭代。
+ *
+ * 模式只决定「输入怎么来、进度条显示哪几步、需要哪几份文档才算完成」，
+ * 不决定文档怎么写——写作规范始终来自 `skills/prd-generator`。
+ */
+export type EntryMode = 'structured' | 'prd-quick' | 'prompt-debug'
+
+/** PRD 快捷入口的录入内容 */
+export interface QuickPrdInput {
+  /** 产品名称；为空时文档头退化为「未命名产品」 */
+  productName: string
+  /** 用户用自然语言写下的一段话需求 */
+  requirements: string
+}
 
 /**
  * 一份完整会话的持久化快照，用于刷新 / 关闭页面后整体恢复。
@@ -80,8 +108,19 @@ export const STEPS = [
 /** 步骤 id 的联合类型，取自 STEPS */
 export type StepId = (typeof STEPS)[number]['id']
 
-/** ViewState → 所属步骤，用于定位进度条当前位置 */
+/** 单个步骤（id + 展示名）；进度条按入口模式从 `STEPS` 里筛子集 */
+export type Step = (typeof STEPS)[number]
+
+/**
+ * ViewState → 所属步骤，用于定位进度条当前位置。
+ *
+ * 注意：这里给的是**全局**步骤归属，进度条实际展示哪几步由
+ * `utils/workflow.ts` 的 `stepsForMode()` 按入口模式裁剪——
+ * 例如 PRD 快捷入口没有「描述产品 / AI 对话」两步，提示词调试入口只有「提示词」一步。
+ */
 export const STEP_OF_STATE: Record<ViewState, StepId> = {
+  // 入口页还没选模式，先按完整流程展示，避免进度条出现空档
+  entry: 'form',
   form: 'form',
   chatting: 'chatting',
   // 摘要确认发生在生成 PRD 之前，仍归属「AI 对话」这一步
@@ -94,6 +133,10 @@ export const STEP_OF_STATE: Record<ViewState, StepId> = {
   'review-api-docs': 'review-api-docs',
   'generating-prompts': 'review-prompts',
   'review-prompts': 'review-prompts',
+  // 快捷入口的录入产物就是 PRD
+  'prd-quick': 'review-prd',
+  // 调试入口的录入产物就是提示词套件
+  'prompt-debug': 'review-prompts',
   done: 'review-prompts',
 }
 
@@ -210,18 +253,76 @@ export interface RagHit {
 }
 
 /**
+ * PRD 分章节生成的阶段。
+ *
+ * 与后端 `prd_section_writer` 的 `stage` 事件一一对应：
+ * 逐章撰写（writing）→ 章节审核（reviewing）→ 有问题则改写（rewriting）→ 全部完成（done）。
+ * 其它文档（接口文档 / 提示词 / 优化）走整篇生成，恒为 `idle`。
+ */
+export type PrdGenerationStage = 'idle' | 'writing' | 'reviewing' | 'rewriting' | 'done'
+
+/**
+ * 一次分章节生成的进度快照，由 `stage` 事件累积得出。
+ *
+ * `sectionId` 是前端丢弃「被改写章节」已接收文本的依据：改写会把该章重新流一遍，
+ * 用户看到的应该是「这一章在重写」，而不是内容凭空被撤回。
+ */
+export interface PrdStageProgress {
+  /** 当前阶段 */
+  stage: PrdGenerationStage
+  /** 当前章节 id；未开始时为空串 */
+  sectionId: string
+  /** 当前章节名称，如「功能需求」 */
+  sectionTitle: string
+  /** 当前章节标题行，如 `## 2. 功能需求` */
+  sectionHeading: string
+  /** 当前章节下标（从 0 开始）；未知为 0 */
+  index: number
+  /** 章节总数；未知为 0（例如后端降级为整篇生成时） */
+  total: number
+  /** 触发改写时的原因摘要；无则为空串 */
+  note: string
+}
+
+/**
+ * 一条 `stage` 事件解析出的结果。
+ * 字段与后端 `prd_section_writer._section_stage_event` 的 `data` 一致。
+ */
+export interface StreamStageEvent {
+  /** 原始阶段名，可能是后端新增的取值；未知值由消费方归一为 `writing` */
+  stage: string
+  sectionId: string
+  sectionTitle: string
+  sectionHeading: string
+  index: number
+  total: number
+  note: string
+  /** 改写原因（审核给出的问题清单） */
+  issues: { severity: string; detail: string }[]
+}
+
+/**
  * V2 完整流程的本地快照。
  * 与 V1 的 `SessionData` 分开存储，避免两套流程共用同一份缓存互相覆盖。
+ *
+ * 「还没提交、但已经敲了字」的两处录入内容（快捷入口的一段话、调试入口的 PRD）
+ * 也一并落盘：它们是用户的手工输入，刷新一次就丢干净最让人恼火。
  */
 export interface SessionDataV2 {
   /** 当前所处阶段 */
   viewState: ViewState
+  /** 所选入口模式；未选择为 null（视为完整流程，兼容旧快照） */
+  entryMode: EntryMode | null
   /** 结构化需求摘要；未提交过为 null */
   summary: RequirementsSummary | null
   /** 已固化的聊天消息 */
   messages: ChatMessage[]
   /** 后端会话 ID（可为空，接续时退化无状态模式） */
   conversationId: string
+  /** PRD 快捷入口的录入内容 */
+  quickInput: QuickPrdInput
+  /** 提示词调试入口里用户贴入的 PRD 正文 */
+  debugPrdText: string
   /** PRD 正文 */
   prdContent: string
   /** 接口文档正文 */

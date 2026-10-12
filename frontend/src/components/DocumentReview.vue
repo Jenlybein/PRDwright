@@ -32,8 +32,8 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  /** 点击「AI 优化」时触发，载荷为当前可编辑原文 */
-  'ai-optimize': [content: string]
+  /** 提交 AI 优化指令时触发，载荷为当前可编辑原文与用户输入的指令 */
+  'ai-optimize': [payload: { content: string; instruction: string }]
   /** 点击底部「保存」按钮时触发，载荷为当前可编辑原文 */
   save: [content: string]
   /** 底部自定义按钮被点击时触发，载荷为按钮标识 */
@@ -107,11 +107,43 @@ async function copyContent(): Promise<void> {
   }, 2000)
 }
 
-/** 触发 AI 优化：把当前原文交给父组件处理 */
+/** 是否展开优化指令输入区 */
+const showOptimize = ref(false)
+
+/** 用户输入的优化指令 */
+const optimizeInstruction = ref('')
+
+/**
+ * 展开优化指令输入区。
+ *
+ * 此前用浏览器原生 `prompt()` 收集指令，样式脱离页面、移动端体验差，
+ * 且在 jsdom 里无法直接测试；改为页内输入区。
+ */
 function requestOptimize(): void {
   if (!draft.value.trim()) return
-  emit('ai-optimize', draft.value)
+  showOptimize.value = true
 }
+
+/** 提交优化指令：把原文与指令一起交给父组件 */
+function submitOptimize(): void {
+  const instruction = optimizeInstruction.value.trim()
+  if (!instruction || props.generating) return
+  emit('ai-optimize', { content: draft.value, instruction })
+}
+
+/** 收起优化输入区并清空指令 */
+function cancelOptimize(): void {
+  showOptimize.value = false
+  optimizeInstruction.value = ''
+}
+
+// 优化结束后（无论成功或失败）自动收起输入区，避免指令残留导致误触重复提交
+watch(
+  () => props.generating,
+  (now, before) => {
+    if (before && !now) cancelOptimize()
+  },
+)
 
 /** 保存：把当前原文回传给父组件 */
 function save(): void {
@@ -200,6 +232,44 @@ function runAction(action: string): void {
           placeholder="在此编辑文档的 Markdown 原文"
         ></textarea>
       </template>
+    </div>
+
+    <!-- AI 优化指令输入区：点击「AI 优化」后展开 -->
+    <div v-if="showOptimize" class="border-t border-primary-200 bg-primary-50/70 px-4 py-3 sm:px-6">
+      <label
+        for="document-optimize-instruction"
+        class="mb-1.5 block text-xs font-medium text-primary-900"
+      >
+        告诉 AI 要怎么改，例如：语气更正式 / 压缩到 500 字以内 / 把未确认的技术选型改为待确认
+      </label>
+      <textarea
+        id="document-optimize-instruction"
+        v-model="optimizeInstruction"
+        rows="2"
+        :disabled="generating"
+        class="w-full resize-y rounded-lg border border-primary-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-800 shadow-sm outline-none transition-colors focus:border-primary-400 focus:ring-2 focus:ring-primary-100 disabled:bg-slate-50 disabled:text-slate-400"
+        placeholder="输入优化指令，Ctrl / ⌘ + Enter 直接提交"
+        @keydown.ctrl.enter.prevent="submitOptimize"
+        @keydown.meta.enter.prevent="submitOptimize"
+      ></textarea>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          :disabled="generating || !optimizeInstruction.trim()"
+          class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400"
+          @click="submitOptimize"
+        >
+          {{ generating ? '正在优化…' : '开始优化' }}
+        </button>
+        <button
+          type="button"
+          :disabled="generating"
+          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+          @click="cancelOptimize"
+        >
+          取消
+        </button>
+      </div>
     </div>
 
     <!-- 底部操作栏 -->

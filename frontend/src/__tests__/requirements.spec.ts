@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import type { RequirementsSummary } from '../types'
 import {
   buildAnswers,
-  buildRequirementsText,
   diffSummaries,
   fieldLabel,
   formatSummaryValue,
@@ -154,7 +153,7 @@ describe('fieldLabel / formatSummaryValue', () => {
   })
 })
 
-describe('buildAnswers / buildRequirementsText（既有契约回归）', () => {
+describe('buildAnswers（既有契约回归）', () => {
   it('结构化摘要映射到后端已有题目的字段名', () => {
     const answers = buildAnswers({
       ...BASE,
@@ -171,11 +170,5 @@ describe('buildAnswers / buildRequirementsText（既有契约回归）', () => {
     expect(answers.data_storage).toBe('轻量存储')
     expect(String(answers.constraints_or_extra)).toContain('技术选型约束：前端 Vue 3')
     expect(String(answers.constraints_or_extra)).toContain('不在范围内：登录')
-  })
-
-  it('PRD 需求文本是带围栏的结构化 JSON', () => {
-    const text = buildRequirementsText(BASE)
-    expect(text).toContain('```json')
-    expect(text).toContain('"product_name": "HarnessPRD"')
   })
 })

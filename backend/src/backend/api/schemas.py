@@ -97,10 +97,12 @@ class StreamEvent(BaseModel):
     `addEventListener('<type>')` 监听，也可以只解析 `data` 里的 `type` 字段。
     """
 
-    type: Literal["status", "chunk", "done", "error", "tool_call", "document"] = Field(
+    type: Literal["status", "chunk", "done", "error", "stage", "tool_call", "document"] = Field(
         description=(
-            "事件类型：状态提示 status / 增量文本 chunk / 结束 done / 错误 error，"
-            "tool_call 与 document 为后续扩展预留"
+            "事件类型：状态提示 status / 增量文本 chunk / 阶段进度 stage / 结束 done / 错误 error，"
+            "tool_call 与 document 为后续扩展预留。"
+            "`stage` 用于分章节生成：`data.stage` 取 writing / reviewing / rewriting / done，"
+            "`data.section_id` 标识当前章节（前端据此丢弃被改写章节已接收的文本）。"
         )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
@@ -188,6 +190,39 @@ class GeneratePrdStreamRequest(BaseModel):
     requirements: str = Field(
         min_length=1,
         description="需求澄清结果（问卷答案整理成的文本）",
+    )
+    history: list[MessageItem] = Field(
+        default_factory=list,
+        description="补充对话记录；为空则按无对话处理",
+    )
+
+
+class GeneratePrdFromSummaryStreamRequest(BaseModel):
+    """生成 PRD 的流式请求（需求输入二选一）。
+
+    `summary` 与 `requirements` 都必须支持，因为入口不止一个：
+
+    - **完整流程**传 `summary`——与 `field-schema.json` 对齐的结构化摘要；
+    - **PRD 快捷入口**传 `requirements`——用户直接用自然语言写下的一段话。
+
+    两者在服务层汇合到同一条技能包驱动链路（分章节撰写 → 审核 → 改写），
+    因此「入口」只决定输入怎么来，不决定文档怎么写。
+    """
+
+    summary: dict[str, Any] | None = Field(
+        default=None,
+        description="结构化需求摘要（与 field-schema.json 对齐）；与 requirements 二选一",
+    )
+    requirements: str = Field(
+        default="",
+        description="自由文本需求（PRD 快捷入口）；仅在未传 summary 时使用",
+    )
+    product_name: str = Field(
+        default="",
+        description=(
+            "产品名称，仅用于 PRD 文档头与 1.1 节；快捷入口传用户填写值。"
+            "摘要里已有 product_name 时以摘要为准"
+        ),
     )
     history: list[MessageItem] = Field(
         default_factory=list,

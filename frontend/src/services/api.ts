@@ -6,6 +6,7 @@ import type {
   RagHit,
   RequirementAnswers,
   RequirementsSummary,
+  StreamStageEvent,
 } from '@/types'
 
 /**
@@ -35,8 +36,8 @@ export async function getQuestions(): Promise<QuestionsConfig> {
 
 /** 后端推送的 SSE 事件，字段与 `backend/api/schemas.py` 的 `StreamEvent` 一一对应 */
 export interface StreamEventPayload {
-  /** 事件类型：状态提示 / 增量文本 / 结束 / 错误，后两种为后续扩展预留 */
-  type: 'status' | 'chunk' | 'done' | 'error' | 'tool_call' | 'document'
+  /** 事件类型：状态提示 / 增量文本 / 阶段进度 / 结束 / 错误，后两种为后续扩展预留 */
+  type: 'status' | 'chunk' | 'stage' | 'done' | 'error' | 'tool_call' | 'document'
   /** 文本内容（增量文本或提示语） */
   content: string
   /** 事件附加数据，如 conversation_id 与完整 reply */
@@ -49,6 +50,12 @@ export interface StreamHandlers {
   onStatus?: (text: string) => void
   /** 收到增量文本时触发 */
   onChunk?: (text: string) => void
+  /**
+   * 收到 `stage` 阶段事件时触发。
+   * 目前只有「分章节生成 PRD」会下发该事件，用于驱动前端的阶段指示与
+   * 「改写时丢弃该章已接收文本」。
+   */
+  onStage?: (event: StreamStageEvent) => void
 }
 
 /** 一次流式对话的结果 */
@@ -66,6 +73,41 @@ const SSE_DONE = '[DONE]'
 function readString(data: Record<string, unknown>, key: string): string {
   const value = data[key]
   return typeof value === 'string' ? value : ''
+}
+
+/** 从事件附加数据里安全地取数字字段（缺失或类型不对时返回 0） */
+function readNumber(data: Record<string, unknown>, key: string): number {
+  const value = data[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/**
+ * 把 `stage` 事件的 `data` 归一成 `StreamStageEvent`。
+ *
+ * 后端字段是 snake_case，前端类型是 camelCase，转换收口在这里；
+ * 任何一个字段缺失都不会让整条流断掉，只把那一个字段退化为默认值。
+ */
+function parseStageEvent(data: Record<string, unknown>): StreamStageEvent {
+  const rawIssues = data.issues
+  const issues = Array.isArray(rawIssues)
+    ? rawIssues
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => ({
+          severity: readString(item, 'severity'),
+          detail: readString(item, 'detail'),
+        }))
+    : []
+
+  return {
+    stage: readString(data, 'stage'),
+    sectionId: readString(data, 'section_id'),
+    sectionTitle: readString(data, 'section_title'),
+    sectionHeading: readString(data, 'section_heading'),
+    index: readNumber(data, 'index'),
+    total: readNumber(data, 'total'),
+    note: readString(data, 'note'),
+    issues,
+  }
 }
 
 /**
@@ -160,6 +202,9 @@ async function readStream(
         break
       case 'chunk':
         handlers.onChunk?.(event.content)
+        break
+      case 'stage':
+        handlers.onStage?.(parseStageEvent(event.data))
         break
       case 'done':
         conversationId = readString(event.data, 'conversation_id') || conversationId
@@ -304,6 +349,24 @@ export interface GeneratePrdStreamPayload {
   history?: ChatMessage[]
 }
 
+/**
+ * 生成 PRD 的请求体（需求输入二选一）。
+ *
+ * `summary` 与 `requirements` 对应两条入口：完整流程传结构化摘要，
+ * PRD 快捷入口传用户写下的一段话。后端把它们汇合到同一条生成链路，
+ * 因此前端只需要按入口填其中一个字段。
+ */
+export interface GeneratePrdFromSummaryPayload {
+  /** 结构化需求摘要（与 field-schema.json 对齐）；与 requirements 二选一 */
+  summary?: RequirementsSummary
+  /** 自由文本需求（PRD 快捷入口） */
+  requirements?: string
+  /** 产品名称，仅用于 PRD 文档头；摘要里已有 product_name 时以摘要为准 */
+  productName?: string
+  /** 补充对话记录；为空则按无对话处理 */
+  history?: ChatMessage[]
+}
+
 /** 文档流式生成的结果：仅关心完整正文，会话 ID 恒为空串 */
 export type DocumentStreamResult = StreamResult
 
@@ -319,6 +382,34 @@ export function generatePrdStream(
     '/api/conversation/generate-prd-stream',
     {
       requirements: payload.requirements,
+      // 只保留后端认识的 role / content 两个字段
+      history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+    },
+    handlers,
+  )
+}
+
+/**
+ * 由**需求**生成 PRD，SSE 流式接收正文。
+ * 对应后端 `POST /api/conversation/generate-prd-from-summary-stream`。
+ *
+ * 需求可以是结构化摘要（完整流程）或自由文本（PRD 快捷入口），后端按输入形态
+ * 选格式化函数后走同一条「分章节撰写 → 审核 → 改写」链路——「需求 → PRD」
+ * 只有一个实现，多入口复用同一份契约。
+ *
+ * 流式过程中会下发 `stage` 事件（`onStage`），用于展示「写到第几章、是否在改写」。
+ */
+export function generatePrdFromSummaryStream(
+  payload: GeneratePrdFromSummaryPayload,
+  handlers?: StreamHandlers,
+): Promise<DocumentStreamResult> {
+  return readStream(
+    '/api/conversation/generate-prd-from-summary-stream',
+    {
+      // 二选一只下发有值的那个字段：显式传 null 会让后端的两条分支都要处理空对象
+      summary: payload.summary ?? null,
+      requirements: payload.requirements ?? '',
+      product_name: payload.productName ?? '',
       // 只保留后端认识的 role / content 两个字段
       history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
     },

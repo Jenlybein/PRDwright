@@ -109,21 +109,6 @@ export function buildAnswers(summary: RequirementsSummary): RequirementAnswers {
   return answers
 }
 
-/**
- * 结构化摘要 → `generate-prd-stream` 的 `requirements`。
- *
- * 输出为与 `field-schema.json` 一致的 fenced JSON，交给技能包做归一化与渲染。
- */
-export function buildRequirementsText(summary: RequirementsSummary): string {
-  return [
-    '以下为结构化需求（字段与「输入字段契约」一致，数组为逐项录入结果）：',
-    '',
-    '```json',
-    JSON.stringify(summary, null, 2),
-    '```',
-  ].join('\n')
-}
-
 // ============================================================================
 // 摘要 Diff（用于「回填结果确认」面板）
 // ============================================================================

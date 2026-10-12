@@ -95,6 +95,23 @@ class Settings(BaseSettings):
         description="所选供应商下的默认模型名称。",
     )
 
+    # --- PRD 分章节生成 ------------------------------------------------------
+    # 模板本身就是「6 章 + 待确认附录」，逐章撰写可以让每章都带上已定稿的前序章节，
+    # 从而保证 6.1 引用的功能编号、附录汇总的「待确认」与前文一致；
+    # 代价是 LLM 调用次数从 1 次变成「章节数 × (1 + 审核 + 改写)」次。
+    prd_section_review_enabled: bool = Field(
+        default=True,
+        description="生成 PRD 时是否启用「写作 → 审核 → 改写」中的审核环节。"
+        "关闭后只逐章撰写，不再调用审核 Agent，可显著降低时延与费用。",
+    )
+    prd_section_max_rewrites: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        description="单个章节最多改写的轮数。0 表示只审核不改写；"
+        "达到上限即保留当前版本，避免审核与改写互相拉扯导致无限循环。",
+    )
+
     # --- 服务配置 ------------------------------------------------------------
     cors_origins: str = Field(
         default="http://localhost:5173",

@@ -21,8 +21,16 @@
 + 调用模型流式生成」，不维护大段提示词文本。
 
 PRD 生成走技能包驱动：额外读取 `skills/prd-generator/references/` 下的字段契约、
-六章节模板与写作规范，拼进提示词（见 `_load_skill_artifact` 与 `_build_prd_prompt`）；
+六章节模板与写作规范，拼进提示词（见 `_build_prd_prompt`）；
 技能包缺失时自动降级为 `prompts.py` 里的内置提示词。
+
+按摘要生成 PRD 时优先走**分章节生成 + 写作/审核双 Agent**（`services/prd_section_writer.py`），
+只有技能包缺失时才降级为整篇一次性生成。
+
+模块划分（避免循环依赖）：
+- `llm_utils`：模型输出 → 纯文本 / JSON 的通用处理；
+- `prd_skill`：技能包资源定位与输入材料格式化；
+- `prd_section_writer`：分章节生成器（依赖上面两个）。
 """
 
 from __future__ import annotations
@@ -31,7 +39,6 @@ import copy
 import json
 import logging
 import math
-import os
 import re
 from collections import Counter
 from functools import lru_cache
@@ -42,6 +49,15 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import DocumentResponse, DocumentType, StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
+from backend.services.llm_utils import extract_json_object, extract_text
+from backend.services.prd_section_writer import PrdSectionWriter, is_available as prd_sections_available
+from backend.services.prd_skill import (
+    build_prd_system_prompt,
+    format_conversation,
+    format_freeform_requirements,
+    format_summary_as_requirements,
+    load_prd_skill_artifacts,
+)
 from backend.services.prompts import (
     API_DOCS_GENERATION_PROMPT,
     API_DOCS_RAG_REFERENCE_TEMPLATE,
@@ -58,92 +74,6 @@ from backend.services.stream_guard import ensure_not_truncated
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------------
-# 技能包资源加载
-# ----------------------------------------------------------------------------
-
-# PRD 生成依赖的技能包目录名（仓库根/skills/<名称>/）
-PRD_SKILL_NAME = "prd-generator"
-
-# PRD 生成所需的技能资源：`键 -> 技能包内相对路径`
-PRD_SKILL_ARTIFACTS: dict[str, str] = {
-    "field_schema": "references/field-schema.json",
-    "prd_template": "references/prd-template.md",
-    "writing_rules": "references/writing-rules.md",
-}
-
-
-def _resolve_skill_dir(skill_name: str) -> Path:
-    """定位技能包根目录。
-
-    查找顺序：
-    1. 环境变量 `HARNESSPRD_SKILLS_DIR` 指向的目录下查找（部署时后端与 skills
-       目录可能不在同一棵目录树里，用它显式指定 skills 根目录）。
-    2. 从当前文件向上逐级查找 `<祖先目录>/skills/<skill_name>`。
-
-    Args:
-        skill_name: 技能包目录名，如 `prd-generator`。
-
-    Returns:
-        技能包根目录路径。找不到时返回按目录层级推算的默认路径，读取时会报错。
-    """
-    env_dir = os.environ.get("HARNESSPRD_SKILLS_DIR")
-    if env_dir:
-        return Path(env_dir) / skill_name
-
-    here = Path(__file__).resolve()
-    for parent in here.parents[:6]:
-        candidate = parent / "skills" / skill_name
-        if candidate.is_dir():
-            return candidate
-    # 兜底：services/ → backend/ → src/ → backend/ → 仓库根
-    return here.parents[4] / "skills" / skill_name
-
-
-@lru_cache(maxsize=None)
-def _load_skill_artifact(skill_name: str, relative_path: str) -> str:
-    """读取技能包内的资源文件（模板、规范、字段契约等）。
-
-    结果按 `(skill_name, relative_path)` 缓存，避免每轮生成都重复读盘。
-    注意：异常不会被缓存，文件补齐后下一次调用会重新读取。
-
-    Args:
-        skill_name: 技能包目录名，如 `prd-generator`。
-        relative_path: 资源在技能包内的相对路径，如 `references/prd-template.md`。
-
-    Returns:
-        文件文本内容（UTF-8，行尾统一为 `\\n`）。
-
-    Raises:
-        FileNotFoundError: 技能包目录或资源文件不存在。
-    """
-    path = _resolve_skill_dir(skill_name) / relative_path
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"技能资源缺失：{path}"
-            "（可设置环境变量 HARNESSPRD_SKILLS_DIR 指定 skills 根目录）"
-        ) from exc
-
-
-def _load_prd_skill_artifacts() -> dict[str, str] | None:
-    """加载 PRD 生成所需的三份技能资源。
-
-    Returns:
-        键为 `field_schema` / `prd_template` / `writing_rules` 的资源字典；
-        任一资源缺失时返回 `None`，由调用方降级到内置提示词。
-    """
-    try:
-        return {
-            key: _load_skill_artifact(PRD_SKILL_NAME, relative_path)
-            for key, relative_path in PRD_SKILL_ARTIFACTS.items()
-        }
-    except FileNotFoundError:
-        logger.warning("PRD 技能资源加载失败，本次改用内置提示词生成", exc_info=True)
-        return None
-
-
-# ----------------------------------------------------------------------------
 # 接口文档检索库（RAG）
 # ----------------------------------------------------------------------------
 
@@ -154,8 +84,6 @@ API_DOC_KNOWLEDGE_PATH = Path(__file__).resolve().parents[1] / "core" / "api_doc
 _ASCII_TOKEN = re.compile(r"[a-z0-9_]{2,}")
 # 连续汉字串
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
-# 模型输出里常见的 Markdown 代码块围栏
-_JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -435,38 +363,6 @@ def _merge_summary(original: dict[str, Any], candidate: dict[str, Any]) -> dict[
     return result
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    """从模型输出里尽力取出一个 JSON 对象。
-
-    依次尝试：代码块围栏内容 → 首个 `{` 到最后一个 `}` 的片段。都失败时返回
-    `None`，由调用方保持原摘要不变（不因为一次解析失败就把数据搞坏）。
-
-    Args:
-        text: 模型原始输出。
-
-    Returns:
-        解析出的字典；无法解析时返回 `None`。
-    """
-    candidates: list[str] = []
-    fenced = _JSON_FENCE.search(text)
-    if fenced:
-        candidates.append(fenced.group(1))
-    candidates.append(text)
-
-    for candidate in candidates:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start == -1 or end <= start:
-            continue
-        try:
-            parsed = json.loads(candidate[start : end + 1])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
-
-
 class DocumentService:
     """文档生成 / 优化服务。
 
@@ -482,6 +378,8 @@ class DocumentService:
             llm: 自定义 LLM 实例；不传则在首次使用时通过 `get_llm()` 惰性创建。
         """
         self._llm = llm
+        # 分章节生成器。惰性创建：它自己也会惰性获取 LLM，且只有在技能包可用时才会用到。
+        self._section_writer: PrdSectionWriter | None = None
 
     # ------------------------------------------------------------------
     # LLM 惰性获取
@@ -493,6 +391,16 @@ class DocumentService:
         if self._llm is None:
             self._llm = get_llm()
         return self._llm
+
+    def _get_section_writer(self) -> PrdSectionWriter:
+        """获取 PRD 分章节生成器（惰性创建，与本源共用同一个 LLM 实例）。
+
+        Returns:
+            `PrdSectionWriter` 实例。
+        """
+        if self._section_writer is None:
+            self._section_writer = PrdSectionWriter(llm=self.llm)
+        return self._section_writer
 
     # ------------------------------------------------------------------
     # 模板加载与 Prompt 拼接
@@ -523,29 +431,6 @@ class DocumentService:
         if name not in templates:
             raise ValueError(f"未知的文档模板：{name}")
         return templates[name]
-
-    @staticmethod
-    def _format_conversation(history: list[dict[str, Any]]) -> str:
-        """把对话历史（`{role, content}` 列表）拼成易读的 Markdown 文本。
-
-        Args:
-            history: 前端回传的对话消息，元素形如 `{"role": ..., "content": ...}`。
-
-        Returns:
-            形如 `**用户**：...` / `**AI**：...` 的多行文本；空历史返回占位文案。
-        """
-        if not history:
-            return "（无补充对话记录）"
-
-        lines: list[str] = []
-        for item in history:
-            role = str(item.get("role", "")).strip().lower()
-            content = str(item.get("content", "")).strip()
-            if not content:
-                continue
-            speaker = "用户" if role == "user" else "AI" if role == "assistant" else role or "系统"
-            lines.append(f"**{speaker}**：{content}")
-        return "\n\n".join(lines) if lines else "（无补充对话记录）"
 
     def _build_messages(
         self,
@@ -589,7 +474,7 @@ class DocumentService:
         Returns:
             `(系统提示词, 用户消息正文)` 二元组。
         """
-        artifacts = _load_prd_skill_artifacts()
+        artifacts = load_prd_skill_artifacts()
         if artifacts is None:
             # 降级：沿用内置提示词
             user_content = DocumentService._load_template("prd").format(
@@ -598,11 +483,7 @@ class DocumentService:
             )
             return SYSTEM_PROMPT, user_content
 
-        system_prompt = (
-            f"{SYSTEM_PROMPT}\n\n---\n\n"
-            "# PRD 写作规范（生成时必须逐条遵守）\n\n"
-            f"{artifacts['writing_rules']}"
-        )
+        system_prompt = build_prd_system_prompt(artifacts["writing_rules"])
         user_content = PRD_SKILL_GENERATION_PROMPT.format(
             requirements=requirements,
             conversation=conversation,
@@ -644,12 +525,12 @@ class DocumentService:
 
         user_content = SUMMARY_SYNC_PROMPT_TEMPLATE.format(
             summary=json.dumps(summary, ensure_ascii=False, indent=2),
-            conversation=self._format_conversation(history or []),
+            conversation=format_conversation(history or []),
         )
         messages = self._build_messages(SUMMARY_SYNC_SYSTEM_PROMPT, user_content)
         raw = await self._collect_reply(messages)
 
-        candidate = _extract_json_object(raw)
+        candidate = extract_json_object(raw)
         if candidate is None:
             logger.warning("摘要回填未返回合法 JSON，保持原摘要不变。原始输出：%s", raw[:500])
             return copy.deepcopy(summary)
@@ -681,7 +562,7 @@ class DocumentService:
             `score` / `matched_terms`；无命中时返回空列表。
         """
         query_parts = [prd_content or ""]
-        conversation = self._format_conversation(history or [])
+        conversation = format_conversation(history or [])
         if conversation and conversation != "（无补充对话记录）":
             query_parts.append(conversation)
         query = "\n".join(part for part in query_parts if part)
@@ -735,7 +616,7 @@ class DocumentService:
         chunks: list[str] = []
         last_chunk = None
         async for chunk in self.llm.astream(messages):
-            text = self._extract_text(chunk.content)
+            text = extract_text(chunk.content)
             last_chunk = chunk
             if text:
                 chunks.append(text)
@@ -766,7 +647,7 @@ class DocumentService:
         try:
             last_chunk = None
             async for chunk in self.llm.astream(messages):
-                text = self._extract_text(chunk.content)
+                text = extract_text(chunk.content)
                 last_chunk = chunk
                 if text:
                     chunks.append(text)
@@ -786,23 +667,8 @@ class DocumentService:
         data: dict[str, Any] = {**(extra_data or {}), "reply": reply}
         yield StreamEvent(type="done", content="", data=data)
 
-    @staticmethod
-    def _extract_text(content: Any) -> str:
-        """从分块内容里取出纯文本，兼容字符串与结构化列表两种格式。"""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(str(item.get("text", "")))
-                elif isinstance(item, str):
-                    parts.append(item)
-            return "".join(parts)
-        return "" if content is None else str(content)
-
     # ------------------------------------------------------------------
-    # 三个流式生成方法
+    # PRD 生成（整篇 / 分章节）
     # ------------------------------------------------------------------
 
     async def generate_prd_stream(
@@ -821,13 +687,72 @@ class DocumentService:
         """
         system_prompt, user_content = self._build_prd_prompt(
             requirements=requirements,
-            conversation=self._format_conversation(history or []),
+            conversation=format_conversation(history or []),
         )
         messages = self._build_messages(system_prompt, user_content)
         async for event in self._stream_reply(
             messages,
             status_text="正在生成 PRD…",
             extra_data={"doc_type": "prd"},
+        ):
+            yield event
+
+    async def generate_prd_from_summary_stream(
+        self,
+        summary: dict[str, Any] | None = None,
+        requirements: str = "",
+        product_name: str = "",
+        history: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """根据**结构化需求摘要**或**自由文本需求**生成 PRD。
+
+        与 `generate_prd_stream` 的区别是入口形态：这里吃的是「与 `field-schema.json`
+        对齐的摘要字典」或「用户随手写下的一段话」，需求文本由 `prd_skill` 统一格式化。
+
+        实现上优先走**分章节生成**（`PrdSectionWriter`：逐章撰写 → 审核 → 必要时改写，
+        并通过 `stage` 事件把阶段回报给前端）；技能包资源缺失时降级为整篇一次性生成
+        （`generate_prd_stream`），保证服务不中断。
+
+        因为入参是「需求本身」而不是「某次会话」，这条链路可被任意入口复用：
+        完整流程（传 `summary`）、PRD 快捷入口（传 `requirements` + `product_name`）
+        共用同一份契约与同一套写作规范。
+
+        Args:
+            summary: 结构化需求摘要（与 field-schema.json 对齐）；给出时优先使用。
+            requirements: 自由文本需求；仅在 `summary` 为空时使用。
+            product_name: 产品名称，仅用于 PRD 文档头；摘要里已有名称时以摘要为准。
+            history: 补充对话记录（`{role, content}` 列表），可为空。
+
+        Yields:
+            `StreamEvent`：分章节路径下为 `status` / `chunk` / 若干 `stage` / `done`；
+            降级路径下为 `status` / `chunk` / `done`。`done` 的 `data` 带完整 `reply`。
+
+        Raises:
+            ValueError: 两种需求输入都为空（路由层已拦一次，这里再兜一层）。
+        """
+        if not summary and not requirements.strip():
+            raise ValueError("summary 与 requirements 至少需要提供一个")
+
+        if prd_sections_available():
+            writer = self._get_section_writer()
+            async for event in writer.stream(
+                summary=summary,
+                requirements=requirements,
+                product_name=product_name,
+                history=history,
+            ):
+                yield event
+            return
+
+        # 降级：技能包缺失或模板章节对不上，退回整篇一次性生成
+        logger.warning("PRD 分章节生成不可用，本次降级为整篇生成")
+        if summary:
+            requirements_text = format_summary_as_requirements(summary)
+        else:
+            requirements_text = format_freeform_requirements(requirements, product_name)
+        async for event in self.generate_prd_stream(
+            requirements=requirements_text,
+            history=history,
         ):
             yield event
 
@@ -929,6 +854,22 @@ async def generate_prd_stream(
     """生成 PRD 的流式入口。"""
     async for event in get_service().generate_prd_stream(
         requirements=requirements,
+        history=history,
+    ):
+        yield event
+
+
+async def generate_prd_from_summary_stream(
+    summary: dict[str, Any] | None = None,
+    requirements: str = "",
+    product_name: str = "",
+    history: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """根据结构化摘要（或自由文本需求）生成 PRD 的流式入口。"""
+    async for event in get_service().generate_prd_from_summary_stream(
+        summary=summary,
+        requirements=requirements,
+        product_name=product_name,
         history=history,
     ):
         yield event

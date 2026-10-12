@@ -249,6 +249,44 @@ async def generate_prd_stream(
     )
 
 
+@router.post(
+    "/generate-prd-from-summary-stream",
+    summary="根据需求（结构化摘要或自由文本）生成 PRD（SSE 流式返回）",
+)
+async def generate_prd_from_summary_stream(
+    payload: schemas.GeneratePrdFromSummaryStreamRequest,
+) -> StreamingResponse:
+    """根据结构化需求摘要**或**自由文本需求，流式返回 PRD 正文。
+
+    相比 `/generate-prd-stream`（入参是已整理好的需求文本，走整篇生成），这里直接吃
+    与 `field-schema.json` 对齐的摘要字典或快捷入口的一段话，服务层按输入形态选格式化
+    函数后统一走「分章节撰写 → 审核 → 改写」链路——「需求 → PRD」在后端是一个自洽的
+    能力，可被多个入口复用，前端不必自己拼需求文本。
+
+    事件序列：`status` → `chunk`（文档头）→ 若干 `stage`/`chunk`（每章）→
+    `stage: done` → `done`（`data` 带完整 `reply` 与 `doc_type=prd`）；出错时为 `error`。
+    """
+    if not payload.summary and not payload.requirements.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="summary 与 requirements 至少需要提供一个",
+        )
+
+    # 空列表视为「无补充对话」
+    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    events = document_service.generate_prd_from_summary_stream(
+        summary=payload.summary,
+        requirements=payload.requirements,
+        product_name=payload.product_name,
+        history=history,
+    )
+    return StreamingResponse(
+        _make_sse_generator(events),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
+
 @router.post("/generate-api-docs-stream", summary="根据 PRD 生成接口文档（SSE 流式返回）")
 async def generate_api_docs_stream(
     payload: schemas.GenerateApiDocsStreamRequest,
