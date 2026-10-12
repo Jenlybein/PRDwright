@@ -1,6 +1,12 @@
-import { describe, expect, it, vi, afterEach } from 'vitest'
+import axios, { type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { generatePrdFromSummaryStream } from '../services/api'
+import http, {
+  generatePrdFromSummaryStream,
+  onUnauthorized,
+  retrieveApiDocsRag,
+  UnauthorizedError,
+} from '../services/api'
 import type { StreamStageEvent, RequirementsSummary } from '../types'
 
 /**
@@ -125,5 +131,84 @@ describe('SSE 事件解析', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(generatePrdFromSummaryStream({ summary: SUMMARY })).rejects.toThrow('生成失败：被截断')
+  })
+})
+
+// ============================================================================
+// 登录凭据的传递与 401 处理
+//
+// 这两件事出错时的症状都是「静默的」：不报错，只是表现为一直 401，
+// 或者用户看到一句毫无信息量的「请求失败」。所以值得单独占一组用例。
+// ============================================================================
+
+describe('登录凭据与未登录处理', () => {
+  const originalAdapter = http.defaults.adapter
+
+  afterEach(() => {
+    http.defaults.adapter = originalAdapter
+  })
+
+  /**
+   * 造一个「返回 401」的 axios 适配器，用来驱动响应拦截器。
+   *
+   * 请求的 URL 由实际调用决定，这样每个用例测的就是它自己那个接口的真实路径。
+   */
+  function rejectWith401(detail: string) {
+    return (async (config: InternalAxiosRequestConfig) => {
+      const response = {
+        status: 401,
+        statusText: 'Unauthorized',
+        headers: {},
+        config,
+        data: { detail },
+      } as AxiosResponse
+      throw new axios.AxiosError(detail, 'ERR_BAD_REQUEST', config, undefined, response)
+    }) as never
+  }
+
+  it('axios 全局开启 withCredentials：将来直连后端时 Cookie 才会被带上', () => {
+    expect(http.defaults.withCredentials).toBe(true)
+  })
+
+  it('SSE 请求带 credentials: same-origin，否则流式接口会稳定地 401', async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        streamResponse([sseFrame('done', { type: 'done', content: '', data: { reply: 'ok' } })]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await generatePrdFromSummaryStream({ summary: SUMMARY })
+
+    const [firstCall] = fetchMock.mock.calls
+    expect(firstCall?.[1]).toMatchObject({ credentials: 'same-origin' })
+  })
+
+  it('流式接口 401 时抛 UnauthorizedError，并通知上层弹登录窗', async () => {
+    const messages: string[] = []
+    onUnauthorized((message) => messages.push(message))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })))
+
+    await expect(generatePrdFromSummaryStream({ summary: SUMMARY })).rejects.toBeInstanceOf(
+      UnauthorizedError,
+    )
+    expect(messages).toEqual(['请先登录后再使用该功能'])
+  })
+
+  it('业务接口 401 时抛 UnauthorizedError，并把后端文案原样交给上层', async () => {
+    const messages: string[] = []
+    onUnauthorized((message) => messages.push(message))
+    http.defaults.adapter = rejectWith401('请先登录后再使用该功能')
+
+    await expect(retrieveApiDocsRag({ prdContent: 'x' })).rejects.toBeInstanceOf(UnauthorizedError)
+    expect(messages).toEqual(['请先登录后再使用该功能'])
+  })
+
+  it('认证接口自身的 401 不触发登录弹窗（密码错误不是「未登录」）', async () => {
+    const messages: string[] = []
+    onUnauthorized((message) => messages.push(message))
+    http.defaults.adapter = rejectWith401('用户名或密码错误')
+
+    await expect(http.post('/api/auth/login', {})).rejects.toThrow()
+    expect(messages).toEqual([])
   })
 })

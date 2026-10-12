@@ -5,22 +5,47 @@
     uv run uvicorn backend.main:app --reload
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api.auth import router as auth_router
 from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
+from backend.api.deps import AuthMiddleware
 from backend.core.config import get_settings
+from backend.core.db import init_schema
+from backend.services import auth_service
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """应用生命周期：启动时建库、补初始数据。
+
+    放在 lifespan 而不是 `@app.on_event` 的原因：后者已在新版本 FastAPI 中标记弃用。
+    """
+    init_schema()
+    auth_service.ensure_bootstrap()
+    # 开发模式下预先备好内置用户，业务数据落归属时才有恒非空的 user_id
+    if not settings.auth_enabled:
+        auth_service.ensure_dev_user()
+    yield
+
 
 app = FastAPI(
     title="HarnessPRD API",
     description="HarnessPRD 后端服务",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
-# 跨域配置：允许的来源来自 .env 中的 CORS_ORIGINS（多个用逗号分隔）
+# 中间件注册顺序：Starlette 的 add_middleware 是「后加的在外层」。
+# 因此先注册认证（内层），后注册 CORS（外层）——跨域预检请求由 CORS 直接应答，
+# 不会误闯认证层；同时 CORS 会给认证拒绝的 401 也补上跨域头，前端才读得到错误详情。
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -30,6 +55,7 @@ app.add_middleware(
 )
 
 # 注册业务路由（各自在 Router 上声明了完整 prefix）
+app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(config_router)
 

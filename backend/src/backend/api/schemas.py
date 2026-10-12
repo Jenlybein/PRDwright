@@ -6,10 +6,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 # ============================================================================
 # 问题配置（对应 core/question_config.json）
@@ -107,39 +106,6 @@ class StreamEvent(BaseModel):
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
     data: dict[str, Any] = Field(default_factory=dict, description="事件附加数据")
-
-
-# ============================================================================
-# 文档（document）
-# ============================================================================
-
-DocumentType = Literal["prd", "tech_spec", "api_doc"]
-
-
-class DocumentGenerateRequest(BaseModel):
-    """生成文档请求。"""
-
-    doc_type: DocumentType = Field(default="prd", description="文档类型")
-
-
-class DocumentUpdateRequest(BaseModel):
-    """更新文档请求（整篇覆盖）。"""
-
-    content: str = Field(description="文档正文，Markdown 格式")
-
-
-class DocumentResponse(BaseModel):
-    """文档响应。"""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str = Field(description="文档 ID")
-    conversation_id: str = Field(description="所属会话 ID")
-    doc_type: DocumentType = Field(description="文档类型")
-    title: str = Field(default="", description="文档标题")
-    content: str = Field(default="", description="文档正文，Markdown 格式")
-    version: int = Field(default=1, description="文档版本号")
-    updated_at: datetime | None = Field(default=None, description="更新时间")
 
 
 # ============================================================================
@@ -282,4 +248,40 @@ class SummarySyncResponse(BaseModel):
 
     summary: dict[str, Any] = Field(description="更新后的完整结构化需求摘要")
     changed: bool = Field(default=False, description="是否存在任何字段变化")
+
+
+# ============================================================================
+# 认证（登录 / 注册 / 会话）
+# ============================================================================
+
+
+class LoginRequest(BaseModel):
+    """登录请求。"""
+
+    username: str = Field(min_length=1, description="用户名")
+    password: str = Field(min_length=1, description="密码")
+
+
+class RegisterRequest(BaseModel):
+    """注册请求。
+
+    注册**需要邀请码**——当前是开放注册，但用邀请码挡住随手批量注册的滥用。
+    """
+
+    username: str = Field(min_length=3, max_length=32, description="用户名，3-32 个字符")
+    password: str = Field(min_length=8, description="密码，至少 8 位")
+    invite_code: str = Field(min_length=1, description="邀请码")
+
+
+class AuthUserResponse(BaseModel):
+    """用户基本信息。刻意**不含**任何敏感字段（如密码哈希、salt）。"""
+
+    id: int = Field(description="用户 ID")
+    username: str = Field(description="用户名")
+
+
+class LogoutResponse(BaseModel):
+    """登出响应。"""
+
+    ok: bool = Field(default=True, description="是否成功登出")
 

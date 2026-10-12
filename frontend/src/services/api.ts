@@ -12,14 +12,88 @@ import type {
 /**
  * 全局 axios 实例。
  * 请求走 Vite 的 /api 代理转发到后端，所以这里保持同源、不写死后端地址。
+ *
+ * `withCredentials` 是登录态的前提：后端把会话放在 HttpOnly Cookie 里，
+ * 同源请求默认就会带上，但一旦将来接口跨域（或后端换到别的端口直连），
+ * 少了这一项 Cookie 就不会被发送，表现为「明明登录了却一直 401」。
  */
 const http = axios.create({
   baseURL: '/',
   timeout: 30_000,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
 })
+
+// ============================================================================
+// 未登录的统一处理
+// ============================================================================
+
+/**
+ * 未登录（HTTP 401）错误。
+ *
+ * 单独建一个类型，是为了让调用方能区分「功能出故障了」与「你还没登录」——
+ * 后者不该报错横幅，而应该弹登录窗。
+ */
+export class UnauthorizedError extends Error {
+  constructor(message = '请先登录后再使用该功能') {
+    super(message)
+    this.name = 'UnauthorizedError'
+  }
+}
+
+/** 认证接口自身的前缀。它们返回 401 是**正常业务结果**，不能当成「需要弹登录窗」 */
+const AUTH_PREFIX = '/api/auth'
+
+/** 收到 401 时的回调；由 AppV2 注册 */
+let unauthorizedListener: ((message: string) => void) | null = null
+
+/**
+ * 注册「接口返回 401」的处理函数。
+ *
+ * 触发登录弹窗的是这个回调，而不是每个调用点各自判断——否则只要新增一个接口
+ * 忘了处理，用户就只会看到一个莫名其妙的「请求失败」。
+ */
+export function onUnauthorized(listener: (message: string) => void): void {
+  unauthorizedListener = listener
+}
+
+/**
+ * 认证接口自己返回的 401 不通知上层。
+ *
+ * `/api/auth/login` 密码错误时返回 401（那是给用户的表单错误提示），
+ * `/api/auth/me` 未登录时也返回 401（那是探测登录态的正常结果）——
+ * 这两种都不该反过来再弹一次登录窗。
+ */
+function isAuthEndpoint(url: string | undefined): boolean {
+  return typeof url === 'string' && url.startsWith(AUTH_PREFIX)
+}
+
+/** 从后端响应体里取出可直接展示给用户的错误说明 */
+function readDetail(data: unknown): string {
+  if (data && typeof data === 'object' && 'detail' in data) {
+    const detail = (data as { detail: unknown }).detail
+    if (typeof detail === 'string') return detail
+  }
+  return '请先登录后再使用该功能'
+}
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (!axios.isAxiosError(error) || error.response?.status !== 401) {
+      return Promise.reject(error)
+    }
+
+    const message = readDetail(error.response.data)
+    if (!isAuthEndpoint(error.config?.url)) {
+      unauthorizedListener?.(message)
+      return Promise.reject(new UnauthorizedError(message))
+    }
+    return Promise.reject(error)
+  },
+)
 
 /**
  * 获取需求澄清问卷配置。
@@ -169,6 +243,9 @@ async function readStream(
 ): Promise<StreamResult> {
   const response = await fetch(path, {
     method: 'POST',
+    // 这里不能省：fetch 默认不发送 Cookie，而登录态就在 Cookie 里。
+    // 少了它，流式接口会稳定地 401，且因为「普通接口没事」而极难定位。
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
@@ -176,6 +253,10 @@ async function readStream(
     body: JSON.stringify(body),
   })
 
+  if (response.status === 401) {
+    unauthorizedListener?.('请先登录后再使用该功能')
+    throw new UnauthorizedError()
+  }
   if (!response.ok) {
     throw new Error(`请求失败（HTTP ${response.status}）`)
   }

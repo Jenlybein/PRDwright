@@ -112,6 +112,48 @@ class Settings(BaseSettings):
         "达到上限即保留当前版本，避免审核与改写互相拉扯导致无限循环。",
     )
 
+    # --- 认证（登录 / 注册） --------------------------------------------------
+    auth_enabled: bool = Field(
+        default=True,
+        description="是否启用登录鉴权。开启时除白名单接口外一律要求登录；"
+        "关闭时所有接口放行，并以内置的 dev 用户身份运行，便于本地功能调试。"
+        "**生产环境必须保持开启**。",
+    )
+    auth_session_ttl_hours: int = Field(
+        default=168,
+        ge=1,
+        description="登录会话的有效时长（小时），默认 7 天。过期后需要重新登录。",
+    )
+    auth_cookie_name: str = Field(
+        default="harnessprd_session",
+        description="存放会话 token 的 Cookie 名称。",
+    )
+    auth_cookie_secure: bool = Field(
+        default=False,
+        description="会话 Cookie 是否只允许通过 HTTPS 传输。"
+        "本地 http 调试必须为 false，部署到 HTTPS 环境后应改为 true。",
+    )
+    invite_code: str = Field(
+        default="123456",
+        description="初始邀请码。首次启动且 invite_codes 表为空时自动播种这一条"
+        "（不限使用次数、永不过期）；注册时必须填写有效的邀请码。",
+    )
+    init_admin_user: str = Field(
+        default="",
+        description="初始管理员用户名，仅在 users 表为空时自动创建，用于初始化首个账号。"
+        "留空则不自动创建。",
+    )
+    init_admin_password: str = Field(
+        default="",
+        description="初始管理员密码，配合 init_admin_user 使用。",
+    )
+
+    # --- 数据库 --------------------------------------------------------------
+    db_path: str = Field(
+        default="",
+        description="SQLite 数据库文件路径；留空则使用后端项目根目录下的 harnessprd.db。",
+    )
+
     # --- 服务配置 ------------------------------------------------------------
     cors_origins: str = Field(
         default="http://localhost:5173",
@@ -138,6 +180,16 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> list[str]:
         """把 cors_origins 按逗号拆分并清洗，返回来源列表。"""
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def db_file(self) -> Path:
+        """SQLite 数据库文件的绝对路径。
+
+        未显式配置 `db_path` 时，放在后端项目根目录下的 `harnessprd.db`。
+        """
+        if self.db_path:
+            return Path(self.db_path).expanduser().resolve()
+        return BACKEND_ROOT / "harnessprd.db"
 
     def require_api_key(self) -> str:
         """返回当前所选供应商对应的 API 密钥。

@@ -301,6 +301,39 @@ export interface StreamStageEvent {
   issues: { severity: string; detail: string }[]
 }
 
+// ============================================================================
+// 认证（登录 / 注册）
+// ============================================================================
+
+/**
+ * 当前登录用户。
+ *
+ * 只含展示所需的字段——后端响应模型（`AuthUserResponse`）刻意不带密码哈希与 salt，
+ * 前端也就不该有地方能拿到它们。
+ */
+export interface AuthUser {
+  /** 用户 ID */
+  id: number
+  /** 用户名，顶栏展示的就是它 */
+  username: string
+}
+
+/** 登录请求参数 */
+export interface LoginPayload {
+  username: string
+  password: string
+}
+
+/** 注册请求参数 */
+export interface RegisterPayload {
+  /** 3-32 个字符 */
+  username: string
+  /** 至少 8 位 */
+  password: string
+  /** 邀请码。后端用限量 / 限时码控制注册，前端不做本地校验 */
+  inviteCode: string
+}
+
 /**
  * V2 完整流程的本地快照。
  * 与 V1 的 `SessionData` 分开存储，避免两套流程共用同一份缓存互相覆盖。

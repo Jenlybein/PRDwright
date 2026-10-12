@@ -14,8 +14,6 @@
   或修正**的字段，回填成一份完整摘要，供前端做 Diff 与确认。
 - **检索增强（RAG）**（`retrieve_api_docs_rag_hits`）：在本地接口规范库里检索与 PRD 相关的
   团队规范与历史接口示例，用户确认后作为生成接口文档时的对齐依据。
-- **同步占位**（`generate_document` / `get_document` / `update_document`）：
-  为兼容旧的路由契约保留，当前尚未实现，调用会抛出 `NotImplementedError`。
 
 提示词模板集中在 `services/prompts.py`，本模块只负责「加载模板 + 拼接变量
 + 调用模型流式生成」，不维护大段提示词文本。
@@ -47,7 +45,7 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from backend.api.schemas import DocumentResponse, DocumentType, StreamEvent
+from backend.api.schemas import StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object, extract_text
 from backend.services.prd_section_writer import PrdSectionWriter, is_available as prd_sections_available
@@ -929,33 +927,3 @@ async def optimize_document_stream(
         instruction=instruction,
     ):
         yield event
-
-
-# ----------------------------------------------------------------------------
-# 同步占位接口（兼容旧路由契约，尚未实现）
-# ----------------------------------------------------------------------------
-
-
-async def generate_document(
-    conversation_id: str,
-    doc_type: DocumentType = "prd",
-) -> DocumentResponse:
-    """基于会话上下文生成指定类型的文档（尚未实现）。"""
-    raise NotImplementedError("document_service.generate_document 尚未实现")
-
-
-async def get_document(
-    conversation_id: str,
-    doc_type: DocumentType = "prd",
-) -> DocumentResponse:
-    """读取指定会话下的文档（尚未实现）。"""
-    raise NotImplementedError("document_service.get_document 尚未实现")
-
-
-async def update_document(
-    conversation_id: str,
-    doc_type: DocumentType,
-    content: str,
-) -> DocumentResponse:
-    """整篇更新文档内容（尚未实现）。"""
-    raise NotImplementedError("document_service.update_document 尚未实现")

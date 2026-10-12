@@ -1,13 +1,17 @@
 # HarnessPRD 架构演进与重构路线图
 
-> 状态：Proposed
+> 状态：**部分已实施**（P0 大部分完成、登录系统已上线；P1 方案持久化待开工）
 > 依据：2026-10-12 代码库快照（后端 2227 行 Python / 前端 2780 行 TS+Vue）
+> 2026-10-13 修订：登录提前于持久化实施，新增 3 条 ADR。进度见文末「八、实施进度」。
 > 前提约束：
 > 1. 项目当前处于**功能开发期**，架构目标优先服务「加功能的速度」，而非「多人部署的完备性」。
-> 2. 终局形态是**少量人使用 + 简单登录**，登录系统在功能开发完成后才实施。
-> 3. 因此本路线图把登录需要的 `user_id` **提前埋进 schema**，让 P4 变成「填坑」而不是「重构」。
+> 2. 终局形态是**少量人使用 + 简单登录**。~~登录系统在功能开发完成后才实施~~
+>    → **已调整**：登录**提前到持久化之前**实施（理由见第四节）。
+> 3. 因此本路线图把登录需要的 `user_id` 提前埋进 schema。~~让 P4 变成「填坑」而不是「重构」~~
+>    → **插槽已提前兑现**：持久化落地时 `user_id` 直接是 `NOT NULL` 外键，不再需要 NULL 回填阶段
+>    （见 ADR-005 修订）。埋插槽的价值在于让两者的顺序可以自由调换而不返工。
 
-配套文档：`ADR.md`（6 条架构决策记录及其权衡）。
+配套文档：`ADR.md`（9 条架构决策记录及其权衡）。
 
 ---
 
@@ -19,8 +23,8 @@
 | --- | --- |
 | 后端 | 2227 行 / 11 个模块。FastAPI + LangChain，src layout，`uv` 管理依赖 |
 | 前端 | 2780 行 / 10 个文件。Vue 3 + Vite 8 + Tailwind v4，**无 router、无 store**（`pinia` 已装未用） |
-| 存储 | **无数据库**。会话 = 进程内存 dict；文档正文 = 浏览器本地快照 |
-| 测试 | 后端 0 用例（无 pytest 依赖）；前端 vitest 已装但 0 用例 |
+| 存储 | **SQLite**（2026-10-13 引入）：`users` / `auth_sessions` / `invite_codes` 已建表；会话仍为内存 dict，方案持久化待做 |
+| 测试 | 后端 **58** 用例（pytest，含认证与「默认拒绝」门禁不变量）；前端 **145** 用例（vitest / 10 文件） |
 | 工程化 | 无 CI、无 Docker、无结构化日志；部署靠本机 `uvicorn` + `vite dev` |
 | 交付 | V1 已收尾：问卷 → 需求澄清对话 → PRD → 接口文档 → 提示词套件 |
 
@@ -34,6 +38,7 @@
 - **路由层与 service 层分离**：`api/` 只做参数解析与响应封装，`schemas.py` 集中声明数据契约。
 - **SSE 事件协议**：`status / chunk / done / error` + 末尾 `[DONE]`，前后端一致，且异常在流内转事件、两层兜底（`_make_sse_generator` 与服务层各一层）。
 - **技能包驱动的 PRD 生成**：`skills/prd-generator` 提供字段契约、模板、写作规范，缺失时自动降级到内置提示词，服务不中断。
+- **默认拒绝的认证中间件**（2026-10-13 新增）：白名单放行、其余一律校验登录态，新增接口自动受保护；由一条遍历 `app.openapi()["paths"]` 的不变量测试守护（见 ADR-008）。
 
 ### 1.3 债务清单（按处理优先级排序）
 
@@ -41,10 +46,10 @@
 | --- | --- | --- | --- | --- |
 | D1 | **状态双真相**：后端内存 dict（重启即丢）+ 浏览器本地快照，靠回传 history 缝合 | `conversation_service._conversations`；`App.vue` 的 SESSION_KEY | 无法重启保活、无法跨设备、无法回溯历史会话；改一次后端代码就要重填问卷才能调试 | P1 |
 | D2 | **流式编排被抄两遍**：`_stream_reply` 与 `_extract_text` 各两份，逻辑几乎逐行相同 | `conversation_service.py:347` vs `document_service.py:281`；`:102` vs `:325` | 改一处漏一处，且两处行为会静默漂移 | P0 |
-| D3 | **死接口在线**：3 条 REST 路由调用后抛 `NotImplementedError`，线上返回 500 | `api/conversation.py:227-274`；`document_service.py:498-520` | 接口契约自相矛盾，`DocumentResponse` 是为不存在的 DB 设计的 | P0（删）→ P1（重定义） |
+| ~~D3~~ | ~~**死接口在线**：3 条 REST 路由调用后抛 `NotImplementedError`~~ | `api/conversation.py` / `schemas.py` / `document_service.py` | 接口契约自相矛盾，`DocumentResponse` 是为不存在的 DB 设计的 | **✅ 已解决**（2026-10-13 删除；OpenAPI 路径 18 → 15）→ P1 用 ADR-009 的快照范式重新定义 |
 | D4 | **错误契约靠中文字符串匹配** | `App.vue:374` `message.includes('会话不存在')` | 后端改一个字，前端降级逻辑静默失效 | P0 |
 | D5 | **App.vue 巨石**：1305 行混着编排、9 态状态机、持久化、文档生成、下载 | `frontend/src/App.vue` | 加一种文档类型要同时改状态、视图、进度条、下载四处 | P2 |
-| D6 | **零测试护栏** | 后端无 pytest；前端 0 用例 | 任何重构都是裸奔，回归靠手动点全流程 | P0 |
+| ~~D6~~ | ~~**零测试护栏**~~ | 后端无 pytest；前端 0 用例 | 任何重构都是裸奔，回归靠手动点全流程 | **✅ 已解决**（2026-10-13：后端 58 / 前端 145）→ 持续按阶段增长 |
 | D7 | **长文生成不可续传**：单次 `astream` 出整篇 PRD，`ark_max_tokens` 默认 4096 | `core/config.py:73-77`（注释已自认会截断）；`document_service.generate_prd_stream` | 中断即全废；PRD 越长越危险 | P3 |
 | D8 | **提示词资产定位脆弱**：靠「向上找 6 层目录」找 `skills/`，部署时目录不在同一棵树就失效 | `document_service._resolve_skill_dir` | 换部署方式就可能静默降级到内置提示词，输出质量悄悄下降 | P3 |
 | D9 | **无可观测性与成本计量**：只有 `/health`，无 request_id，无 token 打点 | 全局 | 出问题时无法归因；成本不可见 | P3 |
@@ -76,10 +81,11 @@
 | --- | --- | --- |
 | 会话状态 | 内存 dict + 浏览器快照，双真相 | SQLite 唯一真相；浏览器快照降级为离线草稿 |
 | 流式编排 | 两份重复实现 | `services/streaming.py` 一份，两个 service 共用 |
-| 文档 | 生成后只存在前端内存 | 落库 `documents` 表，带版本号 |
+| 文档 | 生成后只存在前端内存 | 随方案快照落 `solutions.data_json`，不单独建 `documents` 表（ADR-009） |
 | 错误 | 中文字符串 | `error_code` 枚举 + 人类可读 message |
-| 阶段流转 | 散在 `goTo` / 多个 computed 里 | `workflow.ts` 纯函数，可单测 |
-| 登录 | 无 | `user_id` 已预留（NULL），P4 只填值 |
+| 阶段流转 | 散在 `goTo` / 多个 computed 里 | ✅ 已抽为 `workflow.ts` 纯函数（P2-T1 完成） |
+| 登录 | 无 | ✅ **已实施**（自建账号密码 + HttpOnly Cookie + 邀请码，ADR-007）；`user_id` 为 NOT NULL 外键 |
+| 接口鉴权 | 无，全部裸奔 | ✅ **已实施**：默认拒绝中间件 + 白名单，新增接口自动受保护（ADR-008） |
 
 ---
 
@@ -97,10 +103,10 @@
 
 | 任务 | 具体动作 |
 | --- | --- |
-| T1 补后端测试（pytest） | 新增 `pytest` 依赖。首批锁住：`format_form_data`（空值/多选/配置外字段）、`_build_lc_messages`（角色归一化、user/assistant 严格交替）、`_format_sse_block`（帧格式、`[DONE]`）、技能资源加载的降级路径 |
-| T2 补前端测试（vitest） | 首批锁住：`parseSseBlock`（**重点覆盖中文多字节被切断**与坏帧容错）、`STEP_OF_STATE` 映射完整性、会话快照的校验与 `generating-*` 降级 |
+| T1 补后端测试（pytest） ✅ 已完成 | 新增 `pytest` 依赖。首批锁住：`format_form_data`（空值/多选/配置外字段）、`_build_lc_messages`（角色归一化、user/assistant 严格交替）、`_format_sse_block`（帧格式、`[DONE]`）、技能资源加载的降级路径 |
+| T2 补前端测试（vitest） ✅ 已完成 | 首批锁住：`parseSseBlock`（**重点覆盖中文多字节被切断**与坏帧容错）、`STEP_OF_STATE` 映射完整性、会话快照的校验与 `generating-*` 降级 |
 | T3 合并流式编排 | 新建 `services/streaming.py`，把两份 `_stream_reply` 与 `_extract_text` 收敛为一份；两个 service 改为调用它。行为必须逐字保持一致 |
-| T4 删死接口 | 移除 `api/conversation.py` 的 3 条 `NotImplementedError` 路由与 `DocumentResponse`（P1 会用真实持久化重新定义） |
+| T4 删死接口 ✅ 已完成 | 移除 `api/conversation.py` 的 3 条 `NotImplementedError` 路由与 `DocumentResponse`（P1 会用 ADR-009 的快照范式重新定义） |
 | T5 错误契约码化 | `StreamEvent.data` 增加 `error_code`：`conversation_not_found` / `output_truncated` / `llm_error` / `invalid_input`。前端改判 code，删掉 `includes('会话不存在')` |
 
 **验收**：
@@ -114,30 +120,38 @@
 
 ---
 
-### P1 · 状态真相统一：会话可回溯
+### P1 · 方案持久化：可列表、可回溯、可继续
 
-**周期**：2-3 周　**风险**：中（改动面最大）
+**周期**：2-3 周　**风险**：中（改动面最大）　**依赖**：登录已实施（建表即可写 `user_id`）
 
-**目标**：会话与文档成为可持久化、可列表、可回溯的实体。这是开发期摩擦最大的一环——现在每改一次后端代码（`--reload`）会话就丢，得重填问卷才能测 PRD 生成。
+**目标**：方案（会话 + 文档 + 阶段）成为可持久化、可列表、可回溯的实体。这是开发期摩擦最大的一环——现在每改一次后端代码（`--reload`）会话就丢，得重填问卷才能测 PRD 生成。
+
+采用 **ADR-009 的快照范式**：单表存全量 `SessionDataV2` JSON，不拆 `messages` / `documents`。
 
 | 任务 | 具体动作 |
 | --- | --- |
-| T1 引入 Repository 层 | 新建 `repositories/`，定义 `ConversationRepository` / `DocumentRepository` 协议（Protocol 或 ABC）。服务层只依赖接口，不依赖具体 DB |
-| T2 SQLite 建表 | `conversations(id, title, user_id NULL, form_data JSON, created_at, updated_at)`、`messages(id, conversation_id, role, content, seq)`、`documents(id, conversation_id, doc_type, content, version, skill_version)`。**`user_id` 允许 NULL**，这是给 P4 的插槽 |
-| T3 会话服务改造 | `ConversationService._conversations` 内存 dict 替换为 Repository 调用；`_ConversationRecord` 退化为领域对象 |
-| T4 文档落库 | 三份文档生成后写入 `documents`，支持版本叠加（优化一次 +1 版） |
-| T5 新增恢复接口 | `GET /api/conversations`（列表）、`GET /api/conversations/{id}`（含消息 + 文档）、`DELETE /api/conversations/{id}` |
-| T6 前端恢复逻辑 | 刷新后按 `conversation_id` 从后端拉回完整状态；浏览器本地快照**降级为离线草稿**（后端不可用时才用） |
-| T7 开启 WAL | SQLite 开 `journal_mode=WAL`，为 P4 的少量并发写预留 |
+| T1 Repository 层 | `repositories/` 已随登录建立（认证用，全项目唯一写 SQL 的地方）。本阶段新增 `SolutionRepository`，沿用同一约定：服务层只依赖接口 |
+| T2 建 `solutions` 表 | `solutions(id, user_id NOT NULL 外键, title, summary_json, data_json, created_at, updated_at)`。**不拆** `conversations` / `messages` / `documents` 三表（ADR-009） |
+| T3 方案服务 | 新增 `services/solution_service.py`：保存 = 一次 UPSERT 全量快照；读取 = 一次 SELECT + 反序列化；列表 = 只读冗余摘要列，**不反序列化 `data_json`** |
+| T4 四个接口 | `GET /api/solutions`、`GET /api/solutions/{id}`、`PUT /api/solutions/{id}`、`DELETE /api/solutions/{id}`。Repository **强制 `owner_id` 过滤**，越权返回 **404 而非 403** |
+| T5 前端页面级路由 | 启用 `vue-router`：`/v2`（新建）、`/v2/list`（列表）、`/v2/:id`（编辑）。**阶段流转仍走状态机，不进 URL**（ADR-006 修订） |
+| T6 方案列表页 | 展示标题 / 更新时间 / 阶段摘要；支持新建、进入、删除 |
+| T7 自动保存 | `AppV2` 状态变更后**防抖**落库（约 1.5s）；进入下一阶段时即时保存并加锁；离开页面前 `flushPendingSave()` |
+| T8 开启 WAL | SQLite 开 `journal_mode=WAL`，为少量并发写预留 |
+
+> 接口前缀用 `/api/solutions/*` 而非 `/api/session/*`：引入登录后「session」会与「登录会话」语义撞车。
+> 前端 service 文件同步命名 `solutionService.ts`。
 
 **验收**：
-- `kill` 后端再启动，用同一个 `conversation_id` 能继续对话，上下文完整。
-- 刷新页面后状态与后端一致；断网时本地快照仍能显示上次内容。
-- 历史会话可列表、可点进去回溯、可删除。
+- `kill` 后端再启动，从列表页点进上次方案，阶段、消息、四份文档全部与离开时一致。
+- 刷新页面后状态与后端一致；列表页渲染无需反序列化大 JSON。
+- 账号 A 创建的方案，账号 B 直接访问其 id 返回 404，列表里也看不到。
+- 方案可删除。
 
-**不做**：不做鉴权、不做多用户隔离（P4 再做）；不迁移任何历史数据（当前无持久数据）。
+**不做**：不迁移历史数据（当前无持久数据）；不做消息级检索（ADR-009 已权衡）；**不改动 `conversation_service` 的内存 dict**——对话进行中的临时态仍在内存，只在保存 / 进入下一阶段时落库，避免把流式生成的热路径绑上 DB 写。
 
-**风险**：T3 改造后，「前端传 history 的无状态模式」会与「后端真相」产生歧义。决策见 ADR-001：**后端历史为唯一权威，前端传入的 history 仅在会话不存在时作为恢复来源**，且需要在响应里明确告知前端用的是哪一份。
+**风险**：T7 自动保存若与流式生成并发，可能写入半成品快照。**缓解**：`generating-*` 态不触发保存，生成结束进入 review 态后再存；保存期间加锁，避免并发覆盖。
+次要风险：前端曾靠「回传 history」做无状态恢复，持久化上线后两者会冲突。决策见 ADR-001：**后端快照为唯一权威，前端传入的 history 仅在方案不存在时作为恢复来源**。
 
 ---
 
@@ -193,21 +207,32 @@
 
 ---
 
-### P4 · 登录与少量人使用
+### P4 · 登录与少量人使用（**登录部分已实施**）
 
-**周期**：功能开发完成后　**依赖**：P1 已预留 `user_id`
+**周期**：功能开发完成后 → **已提前到 P1 之前**（2026-10-13 拍板，见第四节）
 
-**目标**：几个人能各自用自己的会话，互不干扰。
+**目标**：几个人能各自用自己的方案，互不干扰。
+
+**已完成（2026-10-13）**：
 
 | 任务 | 具体动作 |
 | --- | --- |
-| T1 极简账号 | 账号密码 + Session Cookie。或直接用托管后端（邮箱/手机验证码）省掉自建 |
-| T2 填上 user_id | 登录写入 `user_id`；Repository 查询加 owner 过滤。既有 NULL 数据归属到一个默认用户 |
+| T1 自建账号密码 ✅ | 账号密码 + 服务端不透明 token + HttpOnly Cookie，**不上 JWT**（ADR-007）。密码 `hashlib.scrypt` 零新增依赖；开放注册但需邀请码（`invite_codes` 表，原子核销） |
+| T1a 接口可见性 ✅ | 默认拒绝中间件 + 白名单，新增接口自动受保护；一条不变量测试遍历 OpenAPI 全部路径守护（ADR-008） |
+| T1b 前端接入 ✅ | 顶栏右侧「登录 / 昵称」容器 + 登录注册弹窗（**不新增登录页**）；未登录禁止创建任务，登录后只关弹窗、由用户重新选入口（不做自动进入） |
+| T1c 运维入口 ✅ | `scripts/auth_cli.py`：列用户/邀请码、直接建号、改密、删号、发码 |
+
+**待做（随 P1 持久化落地）**：
+
+| 任务 | 具体动作 |
+| --- | --- |
+| T2 数据隔离 | `solutions.user_id` NOT NULL 外键；Repository **强制 owner 过滤**，越权返回 404（已并入 P1-T4） |
 | T3 部署打包 | Docker Compose 起全栈；`skills/` 目录随镜像打包，消除「向上找 6 层目录」的脆弱定位 |
 | T4 CI | GitHub Actions 跑 `pytest` + `vitest` + `vue-tsc` 类型检查 |
 | T5 健康检查加料 | `/health` 返回 DB 连通性与当前供应商可用性 |
+| T6 生产加固 | `AUTH_ENABLED=true` 与 `AUTH_COOKIE_SECURE=true` 写入部署配置；轮换默认邀请码 `123456` |
 
-**验收**：两个账号互不可见对方会话；一条命令起全栈；CI 红灯能拦住破坏性改动。
+**验收**：两个账号互不可见对方方案；一条命令起全栈；CI 红灯能拦住破坏性改动。
 
 **不做**：不做计费、不做角色权限体系、不做租户隔离（少量人场景，owner 过滤足够）。
 
@@ -218,16 +243,17 @@
 | 决策 | 理由 |
 | --- | --- |
 | **P0 最先** | 它是后面所有重构的保险，且**零功能变化、当天可见效**。没有护栏就动 P1/P2，等于在没有网的情况下走钢丝 |
-| **P1 先于 P2** | 持久化会**改变后端接口形态**（新增会话列表/恢复/删除接口）。先定后端契约再拆前端，否则前端刚拆完就要因为接口变动再改一遍 |
+| **P1 先于 P2** | 持久化会**改变后端接口形态**（新增 `/api/solutions/*` 列表 / 读取 / 保存 / 删除）。先定后端契约再拆前端，否则前端刚拆完就要因为接口变动再改一遍 |
 | **P2 紧随** | 你正处于功能开发期，会不断加文档类型、改流程。巨石组件此时的改动成本最高，越早拆越省 |
 | **P3 在 P1 之后** | 断点续传依赖「文档中间产物落库」，而落库是 P1 的产出。顺序不可颠倒 |
-| **P4 最后** | 你已明确「功能开发完再做登录」。且 P1 已把 `user_id` 埋好，届时是填坑不是重构——这正是**可逆性优先**的价值 |
+| **登录提前到 P1 之前**（2026-10-13 修订） | 原计划「功能开发完再做登录」，现改为**先登录、后持久化**。理由：① 持久化要建的 `solutions` 表必须有 owner，**先有 `users` 表，外键才能一次建对**，否则要先建可空列、日后回填；② 登录是「一次性、边界清晰、与业务流程无耦合」的横切关注点，先做完能让后续每批代码**天生带上 `owner`**；③ 「每次调试都要登录」的摩擦由 `AUTH_ENABLED=false` 的 dev 兜底用户消解，而不是靠推迟登录来躲。代价是 P1 的验收多一层「两个账号互不可见」——但这本来就是要做的，只是提前 |
+| **P4 的部署部分仍在最后** | Docker / CI / 健康检查不阻塞任何开发，等全栈形态稳定后一次性做 |
 
 **替代方案及其被否理由**：
 
 - **先拆前端再搞持久化**：接口未定就拆组件，前端会返工两次。否决。
 - **直接上 Postgres + Docker**：当前单用户本地开发，SQLite 单文件的运维成本近乎为零，且通过 Repository 隔离后切换成本很低（见 ADR-002）。否决。
-- **现在就做登录**：功能开发期每次调试都要登录，拖慢迭代；且 `user_id` 已预留，晚做不产生额外成本。否决。
+- ~~**现在就做登录**：功能开发期每次调试都要登录，拖慢迭代~~ → **已改为采纳**（2026-10-13）：调试摩擦由开关与 dev 兜底用户消解，不值得为它推迟一个能简化后续所有批次的前置工作。
 
 ---
 
@@ -240,6 +266,10 @@
 3. **依赖方向**：`api → services → repositories`，无反向 import；services 之间无横向 import。
 4. **契约一致**：后端 `schemas.py` 与前端 `types/index.ts` 字段名一致。
 5. **错误码化**：新增错误必须带 `error_code`，前端不得新增字符串匹配。
+6. **鉴权默认关闭**（2026-10-13 新增）：新增接口若在白名单内，必须说明为什么它可以公开。
+   不在白名单的接口**自动受保护**，由遍历 OpenAPI 路径的不变量测试守卫（ADR-008）。
+7. **owner 强制过滤**（P1 起生效）：任何查方案 / 文档的 Repository 方法都必须带 `owner_id` 参数，
+   且不允许「传 None 表示不过滤」的逃生口。
 
 ---
 
@@ -262,6 +292,26 @@
 - 微服务拆分。单体足够，拆了只会增加部署负担。
 - CQRS / 事件溯源。读写负载都很轻，引入是纯负担。
 - GraphQL。当前 9 条 REST + SSE 接口完全够用。
-- 前端引入 `vue-router`。当前是 Wizard 形态，状态机比 URL 更契合（ADR-006）。
+- ~~前端引入 `vue-router`~~ → **已改为引入**（2026-10-13）：但**只用于页面级导航**（`/v2` / `/v2/list` / `/v2/:id`），9 个阶段的流转仍由 `workflow.ts` 状态机驱动、**不进 URL**。即 ADR-006 的决策主体未变，只是行动项作废。
 - 自研 Agent 编排框架。LangChain 的抽象当前够用，不要为了「可控」提前造轮子。
 - 多租户、计费、角色权限。少量人场景，owner 过滤足够。
+
+---
+
+## 八、实施进度（截至 2026-10-13）
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| P0-T1 后端测试 | ✅ | 58 用例（pytest）：认证服务、认证接口、**门禁不变量**（遍历 OpenAPI 路径） |
+| P0-T2 前端测试 | ✅ | 145 用例 / 10 文件（vitest）：api 凭据、auth store、登录弹窗、AppV2 门禁 |
+| P0-T3 合并流式编排 | ⬜ | 待做 |
+| P0-T4 删死接口 | ✅ | 3 条 document 路由 + 4 个 schema + 3 个 service 占位已删；OpenAPI 路径 18 → 15 |
+| P0-T5 错误契约码化 | ⬜ | 待做 |
+| P2-T1 状态机外置 | ✅ | `workflow.ts` 纯函数 + `STATE_DOWNGRADE` 降级表，已配单测 |
+| P4 登录系统 | ✅ | 后端认证 + 默认拒绝中间件 + 前端接入 + 运维 CLI，见 ADR-007 / 008 |
+| ADR 增补 | ✅ | 新增 007 / 008 / 009；修订 005（`user_id` 插槽）、006（vue-router） |
+| P1 方案持久化 | ⬜ | **下一批**，设计见 ADR-009 与本文 P1 节 |
+
+**当前入口形态**：`/v2` 可匿名浏览三个入口，但选择任一入口都会提示先登录；登录成功后**只关弹窗**
+并提示「已登录，请选择入口开始」，**不自动进入刚才选的入口**——刻意如此，避免用户登录完忘了自己选过什么
+（这条行为已有前端测试锁定）。

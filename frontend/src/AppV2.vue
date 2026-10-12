@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 
+import AuthDialog from '@/components/AuthDialog.vue'
 import RagResultPanel from '@/components/RagResultPanel.vue'
 import RequirementsForm from '@/components/RequirementsForm.vue'
 import SummaryDiffPanel from '@/components/SummaryDiffPanel.vue'
+import UserMenu from '@/components/UserMenu.vue'
 import ChatStage from '@/components/stages/ChatStage.vue'
 import DoneStage from '@/components/stages/DoneStage.vue'
 import EntryStage from '@/components/stages/EntryStage.vue'
@@ -15,6 +17,8 @@ import QuickPrdStage from '@/components/stages/QuickPrdStage.vue'
 import ReviewStage from '@/components/stages/ReviewStage.vue'
 import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
+import { onUnauthorized } from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { EntryMode, RequirementsSummary, StepId } from '@/types'
 
@@ -33,9 +37,13 @@ import type { EntryMode, RequirementsSummary, StepId } from '@/types'
  * 完整流程另有两道**确认闸门**：生成 PRD 前先确认「对话补充信息回填到摘要」的 Diff；
  * 生成接口文档前先确认「检索到的团队接口规范」。这两道闸门只属于完整流程。
  *
- * 本文件只做三件事：路由（阶段 → 视图）、跨流程的提示语、以及把两个流程
- * （对话 / 文档）拼装起来。会话数据与阶段在 `stores/workflow.ts`，对话编排在
- * `composables/useClarificationChat.ts`，文档编排在 `composables/useDocumentPipeline.ts`，
+ * **未登录不允许创建任务**：选择任意入口前都会先检查登录态，拦下时弹登录窗并停在入口页；
+ * 登录成功后只给一句提示，不自动进入——用户可能已经忘了刚才想选哪个入口。
+ * 接口（含 SSE）返回 401 时同样弹登录窗，注册回调见 `services/api.ts` 的 `onUnauthorized`。
+ *
+ * 本文件做四件事：路由（阶段 → 视图）、跨流程的提示语、登录态的接线，以及把两个流程
+ * （对话 / 文档）拼装起来。会话数据与阶段在 `stores/workflow.ts`，登录态在 `stores/auth.ts`，
+ * 对话编排在 `composables/useClarificationChat.ts`，文档编排在 `composables/useDocumentPipeline.ts`，
  * 各阶段视图在 `components/stages/`。
  */
 
@@ -75,6 +83,34 @@ function flashSavedTip(text: string): void {
     savedTip.value = ''
   }, 2500)
 }
+
+// ---------------------------------------------------------------------------
+// 登录态
+// ---------------------------------------------------------------------------
+
+const auth = useAuthStore()
+
+/**
+ * 任何接口返回 401（包括 SSE 流式接口）都弹登录窗并说明原因。
+ *
+ * 在应用根部注册一次，而不是每个调用点各自判断：漏掉一处，用户看到的就是
+ * 一句莫名其妙的「请求失败」，而不是「请先登录」。
+ */
+onUnauthorized((message) => auth.requireLogin(message))
+
+// 会话是 HttpOnly Cookie，前端读不到，登录态只能问后端
+void auth.load()
+
+/**
+ * 登录成功只给一句提示，**不自动进入之前选的入口**。
+ * 用户可能在填账号密码的过程中已经忘了自己要选哪个，交还选择权更省事。
+ */
+watch(
+  () => auth.isLoggedIn,
+  (now, before) => {
+    if (now && !before) flashSavedTip('已登录，请选择入口开始')
+  },
+)
 
 // ---------------------------------------------------------------------------
 // 文档流水线：生成 / 审阅 / 两道确认闸门 / 下载
@@ -150,8 +186,19 @@ function handleSummaryChange(value: RequirementsSummary): void {
   summary.value = value
 }
 
-/** 选择入口：记下模式并进入该入口的第一个界面 */
+/**
+ * 选择入口：未登录时拦下，登录后才真正进入。
+ *
+ * 创建任务会调用模型，属于必须登录的操作，因此这里**停在入口页**而不是先放行再报错。
+ *
+ * 刻意不把选中的入口暂存下来等登录完自动进入：填完账号密码多半已经忘了刚才想选哪个，
+ * 登录完让他重新选一次反而更清楚。
+ */
 function handleSelectEntry(mode: EntryMode): void {
+  if (!auth.isLoggedIn) {
+    auth.requireLogin('创建任务需要先登录，登录后回到这里重新选择入口')
+    return
+  }
   store.chooseEntry(mode)
 }
 
@@ -196,27 +243,32 @@ function handleStepClick(stepId: StepId): void {
           </div>
         </div>
 
-        <!-- 状态提示徽章，自动淡出 -->
-        <Transition
-          enter-active-class="transition duration-200"
-          enter-from-class="opacity-0 translate-y-1"
-          leave-active-class="transition duration-500"
-          leave-to-class="opacity-0"
-        >
-          <span
-            v-if="savedTip"
-            class="flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600 ring-1 ring-emerald-200"
+        <div class="flex items-center gap-2">
+          <!-- 状态提示徽章，自动淡出 -->
+          <Transition
+            enter-active-class="transition duration-200"
+            enter-from-class="opacity-0 translate-y-1"
+            leave-active-class="transition duration-500"
+            leave-to-class="opacity-0"
           >
-            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path
-                fill-rule="evenodd"
-                d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 1-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
-                clip-rule="evenodd"
-              />
-            </svg>
-            {{ savedTip }}
-          </span>
-        </Transition>
+            <span
+              v-if="savedTip"
+              class="flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600 ring-1 ring-emerald-200"
+            >
+              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 1-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+              {{ savedTip }}
+            </span>
+          </Transition>
+
+          <!-- 登录入口：未登录显示「登录」，已登录显示昵称并可退出 -->
+          <UserMenu />
+        </div>
       </div>
     </header>
 
@@ -357,5 +409,8 @@ function handleStepClick(stepId: StepId): void {
     <footer class="pb-10 text-center text-xs text-slate-400">
       HarnessPRD · 由 AI 驱动的产品文档生成器
     </footer>
+
+    <!-- 登录 / 注册弹窗。挂在根部，顶栏点击与接口 401 都通过 store 打开它 -->
+    <AuthDialog />
   </div>
 </template>

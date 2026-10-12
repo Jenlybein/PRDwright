@@ -1,10 +1,11 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
-import { createPinia } from 'pinia'
+import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppV2 from '../AppV2.vue'
 import * as api from '../services/api'
+import { useAuthStore } from '../stores/auth'
 import type { RagHit, RequirementsSummary, StreamStageEvent } from '../types'
 
 /**
@@ -21,6 +22,20 @@ vi.mock('../services/api', () => ({
   optimizeDocumentStream: vi.fn(),
   syncSummaryFromConversation: vi.fn(),
   retrieveApiDocsRag: vi.fn(),
+  onUnauthorized: vi.fn(),
+}))
+
+/**
+ * 登录态 mock：默认**已登录**。
+ *
+ * 本文件测的是流程编排，登录门禁单独在 `auth.spec.ts` 里覆盖；
+ * 这里若按未登录跑，所有用例都会被「请先登录」拦在第一关。
+ */
+vi.mock('../services/authService', () => ({
+  fetchCurrentUser: vi.fn(async () => ({ id: 1, username: 'tester' })),
+  login: vi.fn(async () => ({ id: 1, username: 'tester' })),
+  register: vi.fn(async () => ({ id: 1, username: 'tester' })),
+  logout: vi.fn(async () => undefined),
 }))
 
 /** 快照存储键（与 AppV2 内部保持一致，便于构造/断言） */
@@ -142,9 +157,25 @@ beforeEach(() => {
   })
 })
 
+/**
+ * 造一个**已登录**的 Pinia 实例。
+ *
+ * 登录态探测（`auth.load()`）是异步的，若让每个用例都等它落地，挂载辅助函数
+ * 就得全部改成 async。这里直接预置「已探测完 + 已登录」，把登录门禁这一层
+ * 从编排测试中摘出去——它有自己的 `auth.spec.ts`。
+ */
+function loggedInPinia(): Pinia {
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const auth = useAuthStore(pinia)
+  auth.user = { id: 1, username: 'tester' }
+  auth.ready = true
+  return pinia
+}
+
 /** 挂载应用，停在入口选择页 */
 function mountEntry(): VueWrapper {
-  return mount(AppV2, { global: { plugins: [createPinia()] } })
+  return mount(AppV2, { global: { plugins: [loggedInPinia()] } })
 }
 
 /**

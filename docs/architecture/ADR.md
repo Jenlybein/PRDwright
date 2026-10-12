@@ -2,6 +2,8 @@
 
 > 配套：`roadmap.md`（五阶段演进路线图）
 > 每条记录只回答一件事：**我们为什么这么选，以及放弃了什么。**
+> 2026-10-13 更新：新增 ADR-007 / 008 / 009（认证、接口可见性、持久化范式），
+> 并按已落地的事实修订了 ADR-005（`user_id` 插槽）与 ADR-006（vue-router）。
 
 ---
 
@@ -42,7 +44,7 @@
 
 ## ADR-002：持久化用 SQLite 起步，通过 Repository 隔离
 
-**状态**：Proposed（P1 实施）
+**状态**：Accepted（2026-10-13 已落地，首用于认证；P1 扩展至方案持久化）
 
 ### Context
 
@@ -58,7 +60,11 @@
 
 ### Decision
 
-**选 A。** 服务层只依赖 `ConversationRepository` / `DocumentRepository` 协议，具体实现默认 SQLite。开启 `journal_mode=WAL`。
+**选 A。** 服务层只依赖 Repository 协议（`UserRepository` / `AuthSessionRepository` / `InviteCodeRepository`
+已落地；P1 再补 `SolutionRepository`），具体实现默认 SQLite。开启 `journal_mode=WAL`。
+
+落地情况（2026-10-13）：`core/db.py` 负责连接与建表，`repositories/` 是**全项目唯一出现 SQL 的地方**，
+服务层与路由层一律不得 import `sqlite3`。这条约束靠 review 与目录约定维持。
 
 ### Consequences
 
@@ -70,7 +76,7 @@
 
 ## ADR-003：前端状态承载选 Pinia，但真正的解耦靠状态机外置
 
-**状态**：Proposed（P2 实施）
+**状态**：Accepted（已实施：`stores/workflow.ts` 状态机 + `stores/auth.ts` 登录态）
 
 ### Context
 
@@ -96,7 +102,7 @@
 
 - 变容易：跨视图共享、devtools 调试、状态机单测。
 - 变困难：多一层文件；需要约定「store 不放业务逻辑」并靠 review 维持。
-- 中立：`vue-router` 依然不引入（见 ADR-006）。
+- 中立：`vue-router` 的取舍与本文无关，单独见 ADR-006（2026-10-13 已修订为「引入，但只做页面级导航」）。
 
 ---
 
@@ -134,7 +140,7 @@ PRD 生成目前是一次 `astream` 出整篇。默认 `ark_max_tokens=4096`（`
 
 ## ADR-005：现在就把 `user_id` 埋进 schema，但不做鉴权
 
-**状态**：Accepted（方向已定，P1 建表时落地）
+**状态**：Superseded by ADR-007 / ADR-009（原决策已于 2026-10-13 修订，见文末）
 
 ### Context
 
@@ -152,11 +158,24 @@ PRD 生成目前是一次 `astream` 出整篇。默认 `ark_max_tokens=4096`（`
 - 变困难：schema 里有一个当前恒为 NULL 的列，需要一个注释说明它为何存在（否则后来者会以为是遗留字段而删掉）。
 - 中立：这是典型的「为可逆性多花一点点」，成本接近于零。
 
+### 修订（2026-10-13）：插槽被提前兑现，`user_id` 改为 NOT NULL
+
+原先「P4 才做登录、期间 `user_id` 恒为 NULL」的安排已被推翻：**登录提前到持久化之前实施**
+（顺序变更见 `roadmap.md` 第四节）。于是：
+
+- 建表时不再需要「先留 NULL、日后回填」这一步。持久化落地即 `user_id NOT NULL`，
+  外键指向 `users(id)`；**没有任何历史 NULL 数据需要迁移**（当前尚无持久数据）。
+- 「预留插槽」的收益没有兑现，但也**没有变成损失**——它让登录与持久化的顺序可以自由调换
+  而不产生返工，这正是当初埋插槽的价值所在。
+
+原决策的其余部分（Repository 接受 `owner_id` 参数）继续有效，并在 ADR-009 中升级为
+**强制过滤**而非「可选过滤」。
+
 ---
 
 ## ADR-006：不引入 vue-router，阶段流转用状态机而非 URL
 
-**状态**：Accepted（维持现状）
+**状态**：Amended（2026-10-13 修订：保留并启用 router，但仅用于页面级导航）
 
 ### Context
 
@@ -177,4 +196,153 @@ PRD 生成目前是一次 `astream` 出整篇。默认 `ark_max_tokens=4096`（`
 
 - 变容易：非法状态在状态机一处收口（`workflow.ts` 可单测）；不用处理路由守卫与数据竞态。
 - 变困难：将来若要「分享某个会话链接」或「多标签页独立流程」，需要重新评估——届时引入 router 的成本主要在把状态机映射到路由守卫，可控。
-- 行动项：从 `package.json` 移除未使用的 `vue-router`（与已移除的脚手架代码保持一致），避免后来者误以为应当用它。
+### 修订（2026-10-13）：引入 router，但只做页面级导航，阶段流转仍用状态机
+
+原决策里的**行动项作废**（`vue-router` 保留并启用），但决策主体**依然成立**：
+
+- 新增「方案列表」这一真实页面后，Wizard 之外出现了**第二个页面级入口**。
+  若继续用 `viewState` 之外的布尔开关切换页面，`AppV2.vue` 会重新长成巨石。
+- 因此引入 `vue-router`，路由表只有三条：`/v2`（新建）、`/v2/list`（列表）、`/v2/:id`（编辑）。
+- **不变的是**：9 个 `ViewState` 的阶段流转**仍完全由 `workflow.ts` 状态机驱动，不映射到 URL**。
+  用户不会看到 `/v2/xxx/chat` 这样的地址；刷新后一律按 `conversation_id` 从后端恢复数据，
+  再由状态机决定展示哪个阶段，而不是试图从 URL 恢复到某个中间阶段。
+
+一句话：**router 管「在哪一页」，状态机管「在这一页的哪一步」**，两者职责不重叠。
+
+ADR-006 原有风险（直接访问中间步骤但数据不存在）因此**没有被引入**——URL 里从来不出现阶段。
+
+---
+
+## ADR-007：认证用服务端不透明会话 token + HttpOnly Cookie，不上 JWT
+
+**状态**：Accepted（2026-10-13 已实施）
+
+### Context
+
+需要自建账号密码登录（少量人使用）。争议点只有一个：**会话凭据用无状态的 JWT，还是有状态的服务端 token**。
+
+曾经考虑过 JWT，动机是「将来可能扩大用户范围」。但扩大用户范围真正带来的是**多实例部署**压力，
+而当前连单机并发都不存在；为了一个尚未出现的约束提前引入密钥管理与吊销复杂度，是典型的过度设计。
+
+### Options
+
+| 方案 | 优点 | 代价 |
+| --- | --- | --- |
+| **A. 服务端不透明 token + 会话表 + HttpOnly Cookie** | 登出**即时失效**（删一行即可）；无签名密钥要管理；密码学攻击面小 | 每次请求多一次会话表读；多实例部署时会话表要共享 |
+| B. JWT（无状态） | 无需查库，天然适配多实例 | 登出无法即时失效（要黑名单，等于又变回有状态）；密钥轮换复杂；当前无多实例需求 |
+| C. 托管认证（邮箱 / 手机验证码） | 不用存密码 | 引入外部依赖与费用；本地开发必须联网；离线不可用 |
+
+### Decision
+
+**选 A，但把签发 / 校验 / 吊销封成 `TokenIssuer` 协议**（`issue` / `verify` / `revoke`），
+当前实现是 `OpaqueSessionIssuer`。将来若真要换 JWT，只换一个实现类，业务代码零改动。
+
+配套：
+- 随机 token 用 `secrets.token_urlsafe(32)`，库里**只存 SHA-256**，不存明文——拖库也拿不到可用凭据。
+- Cookie 设 `HttpOnly` + `SameSite=Lax` + `Path=/`；`Secure` 由 `AUTH_COOKIE_SECURE` 控制（本地 HTTP 开发默认关）。
+- 密码用标准库 `hashlib.scrypt` + 每用户独立 salt，比对用 `hmac.compare_digest`；**零新增依赖**。
+- 用户不存在时照常执行一次 dummy scrypt 再返回，抹平时序差异；登录失败统一文案「用户名或密码错误」，防账号枚举。
+- 开放注册但需邀请码（`invite_codes` 表，支持 `max_uses` / `expires_at`）；核销走**单条原子 UPDATE**
+  靠 `rowcount` 判定，防并发超发。注册顺序为「查重 → 核销邀请码 → 建号」，避免用户因重名白亏一次额度。
+
+### Consequences
+
+- 变容易：登出即时生效（已有测试覆盖：登出后偷回 cookie 仍 401）；无密钥轮换负担；`AUTH_ENABLED=false`
+  时回落内置 dev 用户，保证 `user_id` 恒非空，将来开启鉴权**零迁移**。
+- 变困难：每次请求一次会话表读（SQLite 本地读，成本可忽略）；横向扩展时会话表需共享——
+  那正是换掉 `TokenIssuer` 实现的时机。
+- 中立：不做角色权限体系。少量人场景，owner 过滤足够（见 ADR-009）。
+
+---
+
+## ADR-008：接口可见性用「默认拒绝 + 白名单」中间件，而不是逐接口挂依赖
+
+**状态**：Accepted（2026-10-13 已实施）
+
+### Context
+
+需要一个「哪些接口要登录」的规则。**逐个接口挂 `Depends(get_current_user)` 的写法，漏一个就是裸奔，
+而且没有任何机制能发现漏了**——接口越多，review 越容易疲劳，风险单调上升。
+
+### Options
+
+| 方案 | 优点 | 代价 |
+| --- | --- | --- |
+| **A. 中间件默认拦截 + 白名单** | 新增接口**自动受保护**；漏保护在结构上不可能发生 | 白名单是唯一改动点，放开接口必须显式改它 |
+| B. 逐接口 `Depends` | 意图显式，读代码即知 | 漏挂即裸奔且无法自动检测；接口变多后 review 必然疲劳 |
+| C. 路由前缀分组（`/api/public` vs `/api/private`） | 结构清晰 | 现有路径已定型，改名成本高；且仍依赖开发者放对位置 |
+
+### Decision
+
+**选 A。** 中间件必须用**纯 ASGI** 实现，不能用 `BaseHTTPMiddleware`——后者会把下游响应体重新包装成
+`StreamingResponse`，而本项目有 6 条 SSE 流式接口（`/api/conversation/*-stream`），这是额外风险。
+纯 ASGI 只在返回 401 时自己 `send` 两条消息，**放行时完全不碰响应体**。
+
+配套约定（都是踩过坑才定下来的）：
+
+- 白名单 = 精确路径集合（`/`、`/health`、`/api/conversation/questions`、`/docs`、`/redoc`、`/openapi.json`）
+  + 前缀集合（`/api/auth`）。
+- `OPTIONS` 预检**直接放行**：预检按规范不带凭据，拦它的表现是「接口凭空 401」，极难定位。
+- 中间件注册顺序：`add_middleware(AuthMiddleware)` **在前**、`add_middleware(CORSMiddleware)` **在后**。
+  Starlette 是「后加的在外层」，这样 CORS 才在最外层先应答预检。
+- 中间件把用户写进 `scope["state"]["user"]`，路由层用 `request.state.user` 读。
+- 前端 axios 加 `withCredentials: true`；**SSE 的 `fetch` 必须加 `credentials: 'same-origin'`**
+  （`fetch` 默认不发 Cookie，漏了的表现是「普通接口没事、流式一直 401」）。
+- 全局 401 拦截器**排除 `/api/auth/*` 前缀自身**：登录失败与 `me` 探测登录态都会正常返回 401，
+  一并触发弹窗会导致「登录失败后又弹一次登录窗」。
+
+**接口可见性分级**：
+- 公开：`/health`、问卷配置、`/api/auth/*`。
+- 需登录：**其余全部，包括 RAG 检索**（它返回的是团队内部接口规范资产，属内部资料，不应对匿名开放）。
+
+**测试护栏**：遍历 `app.openapi()["paths"]`，断言任何非白名单路径未登录必须返回 401。
+新增接口若忘了考虑鉴权，会被这条不变量测试直接拦下。
+
+### Consequences
+
+- 变容易：新增接口默认安全；可用性由测试保证，**不依赖 review 自觉**。
+- 变困难：放开一个接口必须显式改白名单（这是刻意的摩擦）；排查 401 时第一直觉要想到白名单。
+- 踩坑已固化：FastAPI 0.142 起 `app.routes` 里的 `include_router` 是惰性的 `_IncludedRouter`，
+  **列路由必须用 `app.openapi()["paths"]`**，直接遍历 `app.routes` 看不到业务路由。
+
+---
+
+## ADR-009：方案持久化用「单表全量快照」，不拆 messages / documents 表
+
+**状态**：Accepted（2026-10-13 定，待实施）
+
+### Context
+
+原路线图 P1 计划建 `conversations` / `messages` / `documents` 三张表。但 V2 前端的状态模型本来就是
+**一份全量快照** `SessionDataV2`（`viewState` / `entryMode` / `summary` / `messages` / `conversationId`
+/ 四份文档内容）。拆表意味着每次自动保存都要做差集同步，而它带来的收益（按消息 / 文档粒度查询）
+**当前没有任何需求用到**。
+
+### Options
+
+| 方案 | 优点 | 代价 |
+| --- | --- | --- |
+| **A. 单表 `solutions` 存全量 JSON + 冗余摘要列** | 保存就是一次 UPSERT，天然契合前端快照模型；防抖自动保存实现简单 | 无法按消息粒度查询统计；单行较大（一份 PRD 数十 KB） |
+| B. 三表范式化 | 查询灵活，可做消息级统计 | 每次保存做差集同步；自动保存逻辑复杂；当前无查询需求 |
+| C. 每方案一个 JSON 文件 | 最简单 | 无列表 / 排序 / 权限过滤能力，与「方案列表页」需求直接冲突 |
+
+### Decision
+
+**选 A。** `solutions(id, user_id NOT NULL 外键, title, summary_json, data_json, created_at, updated_at)`。
+`title` 与摘要冗余成独立列，是为了列表页**不反序列化大 JSON** 就能渲染。
+
+配套：
+- 越权访问返回 **404 而非 403**——403 会泄露「这个资源确实存在」这一信息。
+- 数据隔离**在 Repository 层强制 `owner_id` 过滤**，而不是靠每个路由记得检查：漏一次就是越权，
+  不能把安全边界寄托在「每个写接口的人都记得」。
+- **不改动 `conversation_service` 的内存 dict**：对话进行中的临时态仍在内存，只在用户保存 /
+  进入下一阶段时落库，避免把流式生成的热路径绑上 DB 写。
+- 接口前缀用 **`/api/solutions/*` 而非 `/api/session/*`**：引入登录后，「session」会和
+  「登录会话（auth session）」语义撞车，两者是完全不同的东西。前端 service 文件同步命名
+  `solutionService.ts`。
+
+### Consequences
+
+- 变容易：自动保存（防抖 UPSERT）实现直接；列表页查询轻量；权限只在一处强制。
+- 变困难：将来若要「跨方案搜索某句话」需要扫描 JSON（届时再考虑 FTS5 或拆表）。
+- 中立：单行体积可控——SQLite 单行上限远超需求，且少量人使用的场景下方案数量级有限。

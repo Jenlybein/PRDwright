@@ -19,3 +19,13 @@ backend = "backend:main"
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 测试用 SQLite 文件库，每个用例走 tmp_path 隔离，故不需要额外插件
+
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
