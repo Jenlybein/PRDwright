@@ -88,3 +88,90 @@ export const STEP_OF_STATE: Record<ViewState, StepId> = {
   'review-prompts': 'review-prompts',
   done: 'review-prompts',
 }
+
+// ============================================================================
+// V2：结构化需求（与 skills/prd-generator/references/field-schema.json 对齐）
+// ============================================================================
+
+/** MVP 功能项：对应 schema 中 `mvp_features` 的对象数组项 */
+export interface MvpFeature {
+  /** 功能名称（必填） */
+  name: string
+  /** 功能描述：做什么、给谁用 */
+  description?: string
+  /** 对用户的价值 */
+  user_value?: string
+}
+
+/** 页面结构项：对应 schema 中 `ui_pages` 的对象数组项 */
+export interface UiPage {
+  /** 页面名称（必填） */
+  name: string
+  /** 页面包含的模块 / 区块 */
+  modules: string[]
+  /** 备注 */
+  notes?: string
+}
+
+/**
+ * 结构化需求摘要：V2 结构化表单产出的标准 JSON。
+ *
+ * 前五个字段对应 schema 的 required，恒定出现；其余为可选字段，仅在填写了
+ * 对应内容时才出现。schema 顶层 `additionalProperties: true`，允许携带
+ * `key_interactions` / `llm_usage` / `non_functional` / `scope` 这些扩展字段。
+ */
+export interface RequirementsSummary {
+  product_name: string
+  product_goal: string
+  target_users: string[]
+  platform: string
+  mvp_features: MvpFeature[]
+  v2_features?: string[]
+  ui_pages?: UiPage[]
+  key_interactions?: string[]
+  technical_constraints?: {
+    auth?: string
+    storage?: string
+    frontend?: string
+    backend?: string
+    deployment?: string
+  }
+  llm_usage?: string
+  non_functional?: {
+    security?: string
+    performance?: string
+    availability?: string
+  }
+  scope?: {
+    in_scope: string[]
+    out_of_scope: string[]
+  }
+}
+
+/**
+ * 提交给后端 `start-stream` 的问卷答案。
+ * 值允许是字符串或字符串数组——后端 `format_form_data` 会把数组用「、」连接。
+ */
+export type RequirementAnswers = Record<string, string | string[]>
+
+/**
+ * V2 完整流程的本地快照。
+ * 与 V1 的 `SessionData` 分开存储，避免两套流程共用同一份缓存互相覆盖。
+ */
+export interface SessionDataV2 {
+  /** 当前所处阶段 */
+  viewState: ViewState
+  /** 结构化需求摘要；未提交过为 null */
+  summary: RequirementsSummary | null
+  /** 已固化的聊天消息 */
+  messages: ChatMessage[]
+  /** 后端会话 ID（可为空，接续时退化无状态模式） */
+  conversationId: string
+  /** PRD 正文 */
+  prdContent: string
+  /** 接口文档正文 */
+  apiDocsContent: string
+  /** 提示词套件正文 */
+  promptsContent: string
+}
+

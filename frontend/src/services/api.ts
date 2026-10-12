@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-import type { ChatMessage, QuestionsConfig } from '@/types'
+import type { ChatMessage, QuestionsConfig, RequirementAnswers } from '@/types'
 
 /**
  * 全局 axios 实例。
@@ -190,9 +190,12 @@ async function readStream(
 /**
  * 提交问卷、开启会话，并以 SSE 流式接收模型的第一轮回复。
  * 对应后端 `POST /api/conversation/start-stream`。
+ *
+ * `answers` 的值允许是字符串数组：后端拿到的是 `dict[str, Any]`，
+ * 服务层 `_normalize_value` 会把数组拼成「、」连接的文本。
  */
 export async function startConversationStream(
-  payload: { answers: Record<string, string>; title?: string },
+  payload: { answers: RequirementAnswers; title?: string },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
   return readStream(
