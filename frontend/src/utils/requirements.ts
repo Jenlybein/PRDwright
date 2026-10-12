@@ -1,4 +1,9 @@
-import type { MvpFeature, RequirementAnswers, RequirementsSummary } from '@/types'
+import type {
+  MvpFeature,
+  RequirementAnswers,
+  RequirementsSummary,
+  SummaryChange,
+} from '@/types'
 
 /**
  * 结构化需求 → 后端接口载荷的转换工具。
@@ -117,4 +122,154 @@ export function buildRequirementsText(summary: RequirementsSummary): string {
     JSON.stringify(summary, null, 2),
     '```',
   ].join('\n')
+}
+
+// ============================================================================
+// 摘要 Diff（用于「回填结果确认」面板）
+// ============================================================================
+
+/** 字段 → 中文名，用于把 `technical_constraints.auth` 这类路径翻成人话 */
+const FIELD_LABELS: Record<string, string> = {
+  product_name: '产品名称',
+  product_goal: '产品目标',
+  target_users: '目标用户',
+  platform: '运行平台',
+  mvp_features: 'MVP 功能',
+  v2_features: '未来规划',
+  ui_pages: '页面结构',
+  key_interactions: '关键交互',
+  technical_constraints: '技术约束',
+  llm_usage: 'LLM 使用',
+  non_functional: '非功能要求',
+  scope: '项目范围',
+  name: '名称',
+  description: '描述',
+  user_value: '对用户的价值',
+  modules: '包含模块',
+  notes: '备注',
+  auth: '认证方式',
+  storage: '存储需求',
+  frontend: '前端',
+  backend: '后端',
+  deployment: '部署方式',
+  security: '安全',
+  performance: '性能',
+  availability: '可用性',
+  in_scope: '范围内',
+  out_of_scope: '不在范围内',
+}
+
+/** 把字段名转成中文展示名；未登记的字段原样返回 */
+export function fieldLabel(key: string): string {
+  return FIELD_LABELS[key] ?? key
+}
+
+/** 判断值是否「相当于没填」：undefined / null / 空串（空数组、空对象仍参与逐项比对） */
+function isAbsent(value: unknown): boolean {
+  return value === undefined || value === null || value === ''
+}
+
+/** 判断是否为可递归比对的普通对象（排除数组与 null） */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** 递归比对两个值，把差异写进 out */
+function diffValues(
+  before: unknown,
+  after: unknown,
+  path: string,
+  crumbs: string[],
+  out: SummaryChange[],
+): void {
+  const beforeAbsent = isAbsent(before)
+  const afterAbsent = isAbsent(after)
+
+  if (beforeAbsent && afterAbsent) return
+  if (beforeAbsent) {
+    out.push({ path, label: crumbs.join(' · '), changeType: 'added', before: null, after })
+    return
+  }
+  if (afterAbsent) {
+    out.push({ path, label: crumbs.join(' · '), changeType: 'removed', before, after: null })
+    return
+  }
+
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const length = Math.max(before.length, after.length)
+    for (let index = 0; index < length; index += 1) {
+      diffValues(
+        before[index],
+        after[index],
+        `${path}[${index}]`,
+        [...crumbs, `第 ${index + 1} 项`],
+        out,
+      )
+    }
+    return
+  }
+
+  if (isPlainObject(before) && isPlainObject(after)) {
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)])
+    for (const key of keys) {
+      diffValues(before[key], after[key], path ? `${path}.${key}` : key, [...crumbs, fieldLabel(key)], out)
+    }
+    return
+  }
+
+  // 类型不同（如数组被整体替换成字符串）也算修改
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    out.push({ path, label: crumbs.join(' · '), changeType: 'modified', before, after })
+  }
+}
+
+/**
+ * 比对两份结构化摘要，列出逐字段的差异。
+ *
+ * 递归下钻到标量级别：数组逐个下标比对、对象逐键比对，因此前端能把变更精确定位到
+ * 诸如 `mvp_features[0].user_value` 这样的叶子字段。判断一字段是否变更时先做
+ * `JSON.stringify` 比较，避免对象/数组引用不同但内容相同被误报。
+ *
+ * @param before 原始摘要（用户当前填写的）
+ * @param after  回填后的摘要（后端返回的）
+ * @returns 变更列表，顺序与字段遍历顺序一致；无变更时为空数组。
+ */
+export function diffSummaries(
+  before: RequirementsSummary | null | undefined,
+  after: RequirementsSummary | null | undefined,
+): SummaryChange[] {
+  const changes: SummaryChange[] = []
+  if (!before || !after) return changes
+
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)])
+  const beforeRecord = before as unknown as Record<string, unknown>
+  const afterRecord = after as unknown as Record<string, unknown>
+  for (const key of keys) {
+    const beforeValue = beforeRecord[key]
+    const afterValue = afterRecord[key]
+    if (isAbsent(beforeValue) && isAbsent(afterValue)) continue
+    diffValues(beforeValue, afterValue, key, [fieldLabel(key)], changes)
+  }
+  return changes
+}
+
+/**
+ * 把摘要里的任意取值渲染成一行可读文本，供 Diff 面板展示。
+ *
+ * @param value 任意字段值
+ * @returns 字符串；空值返回「（空）」，数组用「、」连接，对象转 JSON。
+ */
+export function formatSummaryValue(value: unknown): string {
+  if (isAbsent(value)) return '（空）'
+  if (Array.isArray(value)) {
+    if (!value.length) return '（空）'
+    return value.map((item) => formatSummaryValue(item)).join('、')
+  }
+  if (isPlainObject(value)) {
+    const parts = Object.entries(value)
+      .filter(([, item]) => !isAbsent(item))
+      .map(([key, item]) => `${fieldLabel(key)}：${formatSummaryValue(item)}`)
+    return parts.length ? parts.join('；') : '（空）'
+  }
+  return String(value)
 }

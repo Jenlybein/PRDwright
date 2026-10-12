@@ -4,30 +4,69 @@ import { computed, nextTick, ref, watch } from 'vue'
 import ChatInput from '@/components/ChatInput.vue'
 import DocumentReview from '@/components/DocumentReview.vue'
 import MessageList from '@/components/MessageList.vue'
+import RagResultPanel from '@/components/RagResultPanel.vue'
 import RequirementsForm from '@/components/RequirementsForm.vue'
+import SummaryDiffPanel from '@/components/SummaryDiffPanel.vue'
 import {
   continueConversationStream,
   generateApiDocsStream,
   generatePrdStream,
   generatePromptsStream,
   optimizeDocumentStream,
+  retrieveApiDocsRag,
   startConversationStream,
+  syncSummaryFromConversation,
 } from '@/services/api'
 import { STEP_OF_STATE, STEPS } from '@/types'
-import type { ChatMessage, RequirementsSummary, SessionDataV2, StepId, ViewState } from '@/types'
+import type {
+  ChatMessage,
+  RagHit,
+  RequirementsSummary,
+  SessionDataV2,
+  StepId,
+  SummaryChange,
+  ViewState,
+} from '@/types'
 import { downloadFile } from '@/utils/download'
-import { buildAnswers, buildRequirementsText } from '@/utils/requirements'
+import { buildAnswers, buildRequirementsText, diffSummaries } from '@/utils/requirements'
 
 /**
  * 完整应用（V2）。
  *
  * 流程与 V1 一致：描述产品 → AI 对话澄清 → 生成 PRD → 接口文档 → 提示词 → 完成；
- * 区别只在**第一步**：不再拉取后端问卷做动态渲染，而是用固定的结构化录入表单
- * （`RequirementsForm`）逐项收集，前端直接产出与 `field-schema.json` 对齐的 JSON。
+ * 区别在两处：
+ * 1. **第一步**不再拉取后端问卷做动态渲染，而是用固定的结构化录入表单
+ *    （`RequirementsForm`）逐项收集，前端直接产出与 `field-schema.json` 对齐的 JSON。
+ * 2. 生成链路中间插了**两道确认闸门**：生成 PRD 前先让用户确认「对话补充信息回填到
+ *    摘要」的 Diff；生成接口文档前先让用户确认「检索到的团队接口规范」。
  */
 
 /** localStorage 中保存整份会话快照的键名（与 V1 分开，避免两套流程互相覆盖） */
 const SESSION_KEY = 'harnessprd:v2:session'
+
+/**
+ * 澄清对话专用系统提示词。
+ *
+ * 通过 `system_prompt_override` 下发给后端，替换服务默认人设：只做澄清 / 补充 /
+ * 确认 / 纠偏，一次只问 1-3 个关键问题，绝不代写 PRD 或任何完整文档。
+ * 后端会把它存进会话记录，后续接续对话自动沿用；无状态重试时由前端重新下发。
+ */
+const CLARIFICATION_SYSTEM_PROMPT = `你是一位资深产品经理，专注把用户填写的结构化需求摘要补齐、确认。
+
+## 任务边界
+- 只做四件事：澄清（问清没说清的关键点）、补充（引导用户给出缺失信息）、确认（复述你的理解并与用户对齐）、纠偏（指出与已有摘要矛盾或明显不合理的地方）。
+- 绝不生成 PRD、接口文档、提示词或任何完整文档；不要输出文档章节标题，也不要写长段正文。
+- 用户明确要求「直接出文档」时，也只用一句话说明需要先补齐哪些信息。
+
+## 提问规则
+- 每次只提 1-3 个关键问题，按对 PRD 质量的影响从高到低排序，不要贪多。
+- 问题要具体、可直接回答；避免「请详细描述一下」这类空泛提问。
+- 不要重复已经问过并被回答过的问题。
+
+## 信息足够时
+- 停止追问，只回一句话：「信息已经足够，可以点击生成 PRD」。不要再展开新的问题或补充长篇总结。
+
+全程使用中文回答，语气专业、简洁。`
 
 /** 当前所处阶段 */
 const viewState = ref<ViewState>('form')
@@ -92,6 +131,35 @@ const docError = ref('')
 const activeDocKey = ref<'prd' | 'api-docs' | 'prompts'>('prd')
 
 // ---------------------------------------------------------------------------
+// 确认闸门 1：摘要回填 Diff（生成 PRD 之前）
+// ---------------------------------------------------------------------------
+
+/** 从对话里回填出的候选摘要；用户确认后才会写回 `summary` */
+const pendingSummary = ref<RequirementsSummary | null>(null)
+
+/** 逐字段差异，交给 SummaryDiffPanel 展示 */
+const summaryChanges = ref<SummaryChange[]>([])
+
+/** 是否正在回填摘要 */
+const summarySyncing = ref(false)
+
+/** 摘要回填失败原因 */
+const summarySyncError = ref('')
+
+// ---------------------------------------------------------------------------
+// 确认闸门 2：接口规范检索（生成接口文档之前）
+// ---------------------------------------------------------------------------
+
+/** 检索到的团队接口规范与历史接口示例 */
+const ragHits = ref<RagHit[]>([])
+
+/** 是否正在检索 */
+const ragRetrieving = ref(false)
+
+/** 检索失败原因 */
+const ragError = ref('')
+
+// ---------------------------------------------------------------------------
 // 本地持久化（统一会话快照）
 // ---------------------------------------------------------------------------
 
@@ -104,31 +172,47 @@ function isChatMessage(value: unknown): value is ChatMessage {
 }
 
 /** 判断一个值是否为合法的阶段 */
+const VIEW_STATES: readonly ViewState[] = [
+  'form',
+  'chatting',
+  'summary-diff',
+  'generating-prd',
+  'review-prd',
+  'rag-preview',
+  'generating-api-docs',
+  'review-api-docs',
+  'generating-prompts',
+  'review-prompts',
+  'done',
+]
+
 function isViewState(value: unknown): value is ViewState {
-  return (
-    typeof value === 'string' &&
-    [
-      'form',
-      'chatting',
-      'generating-prd',
-      'review-prd',
-      'generating-api-docs',
-      'review-api-docs',
-      'generating-prompts',
-      'review-prompts',
-      'done',
-    ].includes(value)
-  )
+  return typeof value === 'string' && (VIEW_STATES as readonly string[]).includes(value)
 }
 
+/** 刷新降级的类型：生成中断 / 确认步骤中断 */
+type DowngradeKind = 'generating' | 'pending'
+
 /**
- * 生成中状态刷新后无法继续（流式请求已随页面销毁），需要降级为对应的「待确认」状态，
- * 让用户看到已生成 / 未生成的结果并决定下一步。
+ * 刷新时无法继续的状态 → 回退到的最近可操作状态。
+ *
+ * - `generating-*`：流式请求随页面销毁而中断，回退到对应的「待确认」，让用户看到已生成
+ *   的结果并决定下一步。
+ * - `summary-diff` / `rag-preview`：这两道确认闸门依赖内存里的一次性结果（Diff 与检索
+ *   命中），刷新后无从恢复，回退到发起它们的步骤，让用户重新发起。
  */
-const GENERATING_TO_REVIEW: Partial<Record<ViewState, ViewState>> = {
-  'generating-prd': 'review-prd',
-  'generating-api-docs': 'review-api-docs',
-  'generating-prompts': 'review-prompts',
+const STATE_DOWNGRADE: Partial<Record<ViewState, { state: ViewState; kind: DowngradeKind }>> = {
+  'generating-prd': { state: 'review-prd', kind: 'generating' },
+  'generating-api-docs': { state: 'review-api-docs', kind: 'generating' },
+  'generating-prompts': { state: 'review-prompts', kind: 'generating' },
+  'summary-diff': { state: 'chatting', kind: 'pending' },
+  'rag-preview': { state: 'review-prd', kind: 'pending' },
+}
+
+/** 降级说明文案 */
+const DOWNGRADE_NOTICE: Record<DowngradeKind, string> = {
+  generating: '上次的生成未完成（页面已刷新），已为你恢复到最近一次的结果，可继续操作。',
+  pending: '上次的确认步骤未完成（页面已刷新），已为你回到对应的步骤，可重新发起。',
 }
 
 /** 把当前所有相关状态组装成一份会话快照 */
@@ -155,10 +239,10 @@ function saveSession(): void {
 
 /**
  * 从 localStorage 读取会话快照；缺失或损坏时返回 null。
- * 读取时会对 `viewState` 做降级：若上次停留在 `generating-*`，归位到对应的 `review-*`，
- * 并把这一次降级记录在 `downgraded` 里，供界面解释为什么不是原状态。
+ * 读取时会对 `viewState` 做降级：若上次停留在无法恢复的状态（生成中 / 确认闸门），
+ * 归位到最近的可操作状态，并把降级类型记录在 `downgrade` 里，供界面解释为什么不是原状态。
  */
-function loadSession(): { session: SessionDataV2; downgraded: boolean } | null {
+function loadSession(): { session: SessionDataV2; downgrade: DowngradeKind | null } | null {
   let raw: string | null
   try {
     raw = localStorage.getItem(SESSION_KEY)
@@ -172,17 +256,21 @@ function loadSession(): { session: SessionDataV2; downgraded: boolean } | null {
     if (typeof parsed !== 'object' || parsed === null) return null
     const record = parsed as Partial<SessionDataV2>
 
-    // 阶段校验 + 生成中状态降级
+    // 阶段校验 + 不可恢复状态降级
     let viewState: ViewState = 'form'
-    let downgraded = false
+    let downgrade: DowngradeKind | null = null
     if (isViewState(record.viewState)) {
-      const target = GENERATING_TO_REVIEW[record.viewState]
-      viewState = target ?? record.viewState
-      downgraded = target !== undefined
+      const fallback = STATE_DOWNGRADE[record.viewState]
+      if (fallback) {
+        viewState = fallback.state
+        downgrade = fallback.kind
+      } else {
+        viewState = record.viewState
+      }
     }
 
     return {
-      downgraded,
+      downgrade,
       session: {
         viewState,
         summary:
@@ -214,8 +302,8 @@ if (restoredSession) {
   promptsContent.value = restoredSession.promptsContent
 }
 
-/** 刷新时正处于生成中：给用户一句解释，说明为什么落到了待确认态 */
-const wasGenerating = restored?.downgraded ?? false
+/** 刷新时正处于生成中 / 确认步骤：给用户一句解释，说明为什么落到了别的状态 */
+const downgradeKind = restored?.downgrade ?? null
 
 // 状态变化时整体落盘：阶段、需求摘要、对话、会话 ID、三份文档统一写入一份快照。
 // 流式过程中的临时文本（streamingContent / docStreamingContent）不在此列，
@@ -251,7 +339,8 @@ function handleSummaryChange(value: RequirementsSummary): void {
  * 提交需求并开启会话：切到对话阶段 → 调流式接口 → 实时展示 AI 的第一轮追问。
  *
  * 表单内部已完成校验，这里只负责推进流程；`answers` 由结构化摘要映射到后端
- * 已有题目的字段名（见 `utils/requirements.ts`）。
+ * 已有题目的字段名（见 `utils/requirements.ts`）。同时下发澄清对话专用的系统提示词，
+ * 让这一轮（以及后续接续对话）都只做澄清与追问，不代写文档。
  */
 async function handleStartConversation(value: RequirementsSummary): Promise<void> {
   summary.value = value
@@ -264,7 +353,10 @@ async function handleStartConversation(value: RequirementsSummary): Promise<void
   flashSavedTip('需求已提交，正在生成回复')
 
   await runStream(() =>
-    startConversationStream({ answers: buildAnswers(value) }, { onChunk: handleChunk }),
+    startConversationStream(
+      { answers: buildAnswers(value), systemPrompt: CLARIFICATION_SYSTEM_PROMPT },
+      { onChunk: handleChunk },
+    ),
   )
 }
 
@@ -332,7 +424,8 @@ async function runStream(
  * 发送一条消息并接续对话。
  *
  * 后端会话存在内存里，服务重启后 ID 会失效；收到「会话不存在」时清掉 ID，
- * 改用前端回传的完整历史重试一次（无状态模式）。
+ * 改用前端回传的完整历史重试一次（无状态模式）。无状态模式下后端拿不到会话记录里
+ * 保存的人设，因此每次都要把澄清专用提示词重新下发一遍。
  */
 async function handleSendMessage(content: string): Promise<void> {
   const text = content.trim()
@@ -349,7 +442,12 @@ async function handleSendMessage(content: string): Promise<void> {
   await runStream(async () => {
     try {
       return await continueConversationStream(
-        { content: text, conversationId: conversationId.value || undefined, history },
+        {
+          content: text,
+          conversationId: conversationId.value || undefined,
+          history,
+          systemPrompt: CLARIFICATION_SYSTEM_PROMPT,
+        },
         { onChunk: handleChunk },
       )
     } catch (error) {
@@ -358,7 +456,10 @@ async function handleSendMessage(content: string): Promise<void> {
       // 会话已失效：丢掉旧 ID 与半截输出，退回无状态模式重试
       conversationId.value = ''
       streamingContent.value = ''
-      return continueConversationStream({ content: text, history }, { onChunk: handleChunk })
+      return continueConversationStream(
+        { content: text, history, systemPrompt: CLARIFICATION_SYSTEM_PROMPT },
+        { onChunk: handleChunk },
+      )
     }
   })
 }
@@ -373,6 +474,8 @@ function goTo(target: ViewState): void {
   if (streaming.value || isGenerating.value) return
   docError.value = ''
   docStreamingContent.value = ''
+  summarySyncError.value = ''
+  ragError.value = ''
   viewState.value = target
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
@@ -392,6 +495,13 @@ function handleRestart(): void {
   docStreamingContent.value = ''
   isGenerating.value = false
   activeDocKey.value = 'prd'
+  pendingSummary.value = null
+  summaryChanges.value = []
+  summarySyncing.value = false
+  summarySyncError.value = ''
+  ragHits.value = []
+  ragRetrieving.value = false
+  ragError.value = ''
   viewState.value = 'form'
   // 表单是 v-show 常驻组件，自增 key 强制重建，保证编辑器回到空状态
   formKey.value += 1
@@ -471,13 +581,13 @@ async function generatePrd(): Promise<void> {
   }
 }
 
-/** 生成接口文档：以 PRD 正文为输入 */
-async function generateApiDocs(): Promise<void> {
+/** 生成接口文档：以 PRD 正文为输入，可带上用户确认过的检索命中作为参考规范 */
+async function generateApiDocs(hits: RagHit[] = []): Promise<void> {
   // 重新生成接口文档会让基于它的提示词失效，进度回退到接口文档
   promptsContent.value = ''
   const { reply, ok } = await runDocumentStream('api-docs', () =>
     generateApiDocsStream(
-      { prdContent: prdContent.value },
+      { prdContent: prdContent.value, ragHits: hits },
       { onChunk: (chunk) => (docStreamingContent.value += chunk) },
     ),
   )
@@ -549,11 +659,11 @@ async function onAiOptimize(content: string): Promise<void> {
   await optimizeCurrentDocument(instruction)
 }
 
-/** 审阅页「生成接口文档」入口：先切到生成中状态再生成 */
+/** 审阅页「生成接口文档」入口：先去检索团队规范，用户确认后再生成 */
 async function handleGenerateApiDocs(): Promise<void> {
   if (!prdContent.value.trim()) return
-  goTo('generating-api-docs')
-  await generateApiDocs()
+  goTo('rag-preview')
+  await runRagRetrieve()
 }
 
 /** 审阅页「生成提示词套件」入口：接口文档完成后才能生成，先切到生成中状态再生成 */
@@ -656,13 +766,109 @@ function downloadPrompts(): void {
 }
 
 /**
- * 从对话页点击「生成 PRD」：切到生成中状态并开始生成。
+ * 从对话页点击「生成 PRD」：先做摘要回填并让用户确认，确认后才真正生成。
  * 生成完成后 `generatePrd` 内部会把状态推进到 review-prd。
  */
 async function handleGeneratePrd(): Promise<void> {
   if (!canGeneratePrd.value) return
+  goTo('summary-diff')
+  await runSummarySync()
+}
+
+// ---------------------------------------------------------------------------
+// 确认闸门 1：摘要回填 Diff
+// ---------------------------------------------------------------------------
+
+/**
+ * 调用回填接口，拿到「更新后的完整摘要」，再在前端算出逐字段 Diff。
+ *
+ * Diff 放在前端算而不是后端算：后端只负责产出完整结构，前端掌握自己表单的字段
+ * 语义，能给出中文路径面包屑，也便于把变更定位到具体子输入框。
+ */
+async function runSummarySync(): Promise<void> {
+  if (!summary.value) return
+
+  summarySyncing.value = true
+  summarySyncError.value = ''
+  summaryChanges.value = []
+  pendingSummary.value = null
+
+  try {
+    const history = messages.value.map(({ role, content }) => ({ role, content }))
+    const result = await syncSummaryFromConversation({ summary: summary.value, history })
+    pendingSummary.value = result.summary
+    summaryChanges.value = diffSummaries(summary.value, result.summary)
+  } catch (error) {
+    summarySyncError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    summarySyncing.value = false
+  }
+}
+
+/**
+ * 确认更新：把回填出的摘要写回本地摘要，再进入 PRD 生成流程。
+ * 回填失败（没有候选摘要）时跳过写入，直接用当前摘要生成——不能因为一步锦上添花的
+ * 回填卡住主流程。
+ */
+async function confirmSummaryDiff(): Promise<void> {
+  if (summarySyncing.value) return
+
+  if (pendingSummary.value) {
+    summary.value = pendingSummary.value
+    flashSavedTip('需求摘要已更新')
+  }
+  pendingSummary.value = null
+  summaryChanges.value = []
+
   goTo('generating-prd')
   await generatePrd()
+}
+
+/** 拒绝更改：摘要保持原样，也不进入生成流程，回到对话继续补充 */
+function rejectSummaryDiff(): void {
+  if (summarySyncing.value) return
+  pendingSummary.value = null
+  summaryChanges.value = []
+  summarySyncError.value = ''
+  goTo('chatting')
+  flashSavedTip('已拒绝本次摘要更新，摘要保持不变')
+}
+
+// ---------------------------------------------------------------------------
+// 确认闸门 2：接口规范检索（RAG）
+// ---------------------------------------------------------------------------
+
+/** 按当前 PRD 与对话检索团队接口规范与历史接口示例 */
+async function runRagRetrieve(): Promise<void> {
+  ragRetrieving.value = true
+  ragError.value = ''
+  ragHits.value = []
+
+  try {
+    const history = messages.value.map(({ role, content }) => ({ role, content }))
+    const result = await retrieveApiDocsRag({ prdContent: prdContent.value, history })
+    ragHits.value = result.hits
+  } catch (error) {
+    ragError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    ragRetrieving.value = false
+  }
+}
+
+/** 确认：带着勾选的命中条目去生成接口文档 */
+async function confirmRag(hits: RagHit[]): Promise<void> {
+  if (ragRetrieving.value) return
+  goTo('generating-api-docs')
+  await generateApiDocs(hits)
+}
+
+/** 取消：不调用生成接口，回到 PRD 待确认状态 */
+function cancelRag(): void {
+  if (ragRetrieving.value) return
+  ragHits.value = []
+  ragError.value = ''
+  goTo('review-prd')
+  flashSavedTip('已取消生成接口文档')
 }
 
 /** 当前审阅阶段对应的文档标题 */
@@ -811,12 +1017,12 @@ function handleStepClick(stepId: StepId): void {
         </ol>
       </nav>
 
-      <!-- 刷新时正处于生成中：说明为什么停在了待确认态 -->
+      <!-- 刷新时落在无法恢复的状态：说明为什么不是原来的阶段 -->
       <p
-        v-if="wasGenerating"
+        v-if="downgradeKind"
         class="mb-4 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500"
       >
-        上次的生成未完成（页面已刷新），已为你恢复到最近一次的结果，可继续操作。
+        {{ DOWNGRADE_NOTICE[downgradeKind] }}
       </p>
 
       <!-- ============ 第一步：填写结构化需求（常驻组件，离开时仅隐藏，来回切换不丢内容） ============ -->
@@ -828,9 +1034,29 @@ function handleStepClick(stepId: StepId): void {
         @update:summary="handleSummaryChange"
       />
 
+      <!-- ============ 确认闸门 1：摘要回填结果 Diff（生成 PRD 之前） ============ -->
+      <SummaryDiffPanel
+        v-if="viewState === 'summary-diff'"
+        :changes="summaryChanges"
+        :loading="summarySyncing"
+        :error="summarySyncError"
+        @confirm="confirmSummaryDiff"
+        @reject="rejectSummaryDiff"
+      />
+
+      <!-- ============ 确认闸门 2：接口规范检索结果（生成接口文档之前） ============ -->
+      <RagResultPanel
+        v-else-if="viewState === 'rag-preview'"
+        :hits="ragHits"
+        :loading="ragRetrieving"
+        :error="ragError"
+        @confirm="confirmRag"
+        @cancel="cancelRag"
+      />
+
       <!-- ================= 第二步：与 AI 对话补充需求 ================= -->
       <section
-        v-if="viewState === 'chatting'"
+        v-else-if="viewState === 'chatting'"
         class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm"
       >
         <div class="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-6">
@@ -876,7 +1102,7 @@ function handleStepClick(stepId: StepId): void {
           v-if="canGeneratePrd"
           class="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3 sm:px-6"
         >
-          <p class="text-xs text-slate-500">需求已澄清，可以据此生成 PRD 文档了。</p>
+          <p class="text-xs text-slate-500">需求已澄清。生成前会先让你确认「补充信息回填到需求摘要」的变更。</p>
           <button
             type="button"
             class="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"

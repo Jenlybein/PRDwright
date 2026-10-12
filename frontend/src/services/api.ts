@@ -1,6 +1,12 @@
 import axios from 'axios'
 
-import type { ChatMessage, QuestionsConfig, RequirementAnswers } from '@/types'
+import type {
+  ChatMessage,
+  QuestionsConfig,
+  RagHit,
+  RequirementAnswers,
+  RequirementsSummary,
+} from '@/types'
 
 /**
  * 全局 axios 实例。
@@ -193,14 +199,21 @@ async function readStream(
  *
  * `answers` 的值允许是字符串数组：后端拿到的是 `dict[str, Any]`，
  * 服务层 `_normalize_value` 会把数组拼成「、」连接的文本。
+ *
+ * `systemPrompt` 用于给本次会话换一套人设（如澄清对话专用提示词），后端会把它
+ * 存在会话记录里，后续接续对话自动沿用。
  */
 export async function startConversationStream(
-  payload: { answers: RequirementAnswers; title?: string },
+  payload: { answers: RequirementAnswers; title?: string; systemPrompt?: string },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
   return readStream(
     '/api/conversation/start-stream',
-    { title: payload.title ?? '', answers: payload.answers },
+    {
+      title: payload.title ?? '',
+      answers: payload.answers,
+      system_prompt_override: payload.systemPrompt ?? '',
+    },
     handlers,
   )
 }
@@ -210,10 +223,11 @@ export async function startConversationStream(
  * 对应后端 `POST /api/conversation/continue-stream`。
  *
  * 不传 `conversationId` 时后端走无状态模式，需要由 `history` 回传完整历史；
- * 两者都传时以后端收到的 `history` 为准。
+ * 两者都传时以后端收到的 `history` 为准。无状态模式下后端拿不到会话记录，
+ * 因此系统提示词人设要靠 `systemPrompt` 重新下发。
  */
 export async function continueConversationStream(
-  payload: { content: string; conversationId?: string; history?: ChatMessage[] },
+  payload: { content: string; conversationId?: string; history?: ChatMessage[]; systemPrompt?: string },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
   return readStream(
@@ -223,9 +237,59 @@ export async function continueConversationStream(
       content: payload.content,
       // 只保留后端认识的 role / content 两个字段
       history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+      system_prompt_override: payload.systemPrompt ?? '',
     },
     handlers,
   )
+}
+
+// ============================================================================
+// 结构化摘要回填与接口规范检索（一次性 JSON 接口）
+// ============================================================================
+
+/** 摘要回填响应：后端返回的是**完整**摘要（含未改动字段），Diff 由前端计算 */
+export interface SummarySyncResult {
+  summary: RequirementsSummary
+  /** 后端给出的便利标志；判定是否有变更仍以前端 Diff 结果为准 */
+  changed: boolean
+}
+
+/**
+ * 从对话历史回填结构化需求摘要。
+ * 对应后端 `POST /api/conversation/sync-summary-from-conversation`。
+ */
+export async function syncSummaryFromConversation(payload: {
+  summary: RequirementsSummary
+  history?: ChatMessage[]
+}): Promise<SummarySyncResult> {
+  const { data } = await http.post<SummarySyncResult>('/api/conversation/sync-summary-from-conversation', {
+    summary: payload.summary,
+    // 只保留后端认识的 role / content 两个字段
+    history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+  })
+  return data
+}
+
+/** 接口规范检索响应 */
+export interface ApiDocsRagResult {
+  hits: RagHit[]
+}
+
+/**
+ * 检索与 PRD 相关的团队接口规范与历史接口示例。
+ * 对应后端 `POST /api/conversation/retrieve-api-docs-rag`。
+ */
+export async function retrieveApiDocsRag(payload: {
+  prdContent: string
+  history?: ChatMessage[]
+  limit?: number
+}): Promise<ApiDocsRagResult> {
+  const { data } = await http.post<ApiDocsRagResult>('/api/conversation/retrieve-api-docs-rag', {
+    prd_content: payload.prdContent,
+    history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+    limit: payload.limit ?? 5,
+  })
+  return data
 }
 
 // ============================================================================
@@ -265,14 +329,19 @@ export function generatePrdStream(
 /**
  * 根据 PRD 正文生成接口文档，SSE 流式接收正文。
  * 对应后端 `POST /api/conversation/generate-api-docs-stream`。
+ *
+ * `ragHits` 为用户在前端确认过的检索命中，会作为「参考规范」随请求下发。
  */
 export function generateApiDocsStream(
-  payload: { prdContent: string },
+  payload: { prdContent: string; ragHits?: RagHit[] },
   handlers?: StreamHandlers,
 ): Promise<DocumentStreamResult> {
   return readStream(
     '/api/conversation/generate-api-docs-stream',
-    { prd_content: payload.prdContent },
+    {
+      prd_content: payload.prdContent,
+      rag_hits: payload.ragHits ?? [],
+    },
     handlers,
   )
 }

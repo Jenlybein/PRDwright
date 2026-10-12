@@ -31,12 +31,16 @@ export interface ChatMessage {
 /**
  * 页面所处的阶段。
  * `generating-*` 表示文档正在生成中，`review-*` 表示文档已生成、待用户确认。
+ * `summary-diff` / `rag-preview` 是两道**确认闸门**：前者让用户先确认「对话中补充的
+ * 信息回填到摘要」的结果，后者让用户先确认「检索到的团队接口规范」；确认后才继续生成。
  */
 export type ViewState =
   | 'form'
   | 'chatting'
+  | 'summary-diff'
   | 'generating-prd'
   | 'review-prd'
+  | 'rag-preview'
   | 'generating-api-docs'
   | 'review-api-docs'
   | 'generating-prompts'
@@ -80,8 +84,12 @@ export type StepId = (typeof STEPS)[number]['id']
 export const STEP_OF_STATE: Record<ViewState, StepId> = {
   form: 'form',
   chatting: 'chatting',
+  // 摘要确认发生在生成 PRD 之前，仍归属「AI 对话」这一步
+  'summary-diff': 'chatting',
   'generating-prd': 'review-prd',
   'review-prd': 'review-prd',
+  // 规范检索发生在生成接口文档之前，仍归属「PRD」这一步
+  'rag-preview': 'review-prd',
   'generating-api-docs': 'review-api-docs',
   'review-api-docs': 'review-api-docs',
   'generating-prompts': 'review-prompts',
@@ -153,6 +161,53 @@ export interface RequirementsSummary {
  * 值允许是字符串或字符串数组——后端 `format_form_data` 会把数组用「、」连接。
  */
 export type RequirementAnswers = Record<string, string | string[]>
+
+// ============================================================================
+// 摘要回填 Diff 与接口规范检索（RAG）
+// ============================================================================
+
+/** 变更类型：新增 / 修改 / 删除 */
+export type SummaryChangeType = 'added' | 'modified' | 'removed'
+
+/**
+ * 一条摘要字段变更，由 `diffSummaries` 逐字段比对新旧摘要得出。
+ *
+ * `path` 是机器可读路径（如 `mvp_features[0].user_value`），`label` 是给用户看的
+ * 中文面包屑（如「MVP 功能 · 第 1 项 · 对用户的价值」）。
+ */
+export interface SummaryChange {
+  /** 机器可读的字段路径，如 `technical_constraints.auth` */
+  path: string
+  /** 中文可读路径，用于展示 */
+  label: string
+  /** 变更类型 */
+  changeType: SummaryChangeType
+  /** 变更前的值；新增时为 null */
+  before: unknown
+  /** 变更后的值；删除时为 null */
+  after: unknown
+}
+
+/**
+ * 一条 RAG 检索命中（团队接口规范 / 历史接口示例）。
+ * 字段与后端 `schemas.RagHit` 一致。
+ */
+export interface RagHit {
+  /** 条目 ID */
+  id: string
+  /** 来源，如「团队接口规范」「历史接口示例」 */
+  source: string
+  /** 条目标题 */
+  title: string
+  /** 条目正文 */
+  content: string
+  /** 标签 */
+  tags: string[]
+  /** 相似度得分，越大越相关 */
+  score: number
+  /** 命中的关键词，用于解释「为什么检索到这条」 */
+  matched_terms: string[]
+}
 
 /**
  * V2 完整流程的本地快照。

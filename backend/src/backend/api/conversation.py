@@ -102,6 +102,75 @@ async def get_questions() -> schemas.QuestionsConfig:
     return schemas.QuestionsConfig.model_validate(config)
 
 
+# ============================================================================
+# 结构化摘要回填 & 接口规范检索（一次性 JSON 接口，非流式）
+# ============================================================================
+
+
+@router.post(
+    "/sync-summary-from-conversation",
+    response_model=schemas.SummarySyncResponse,
+    summary="从对话历史回填结构化需求摘要",
+)
+async def sync_summary_from_conversation(
+    payload: schemas.SummarySyncRequest,
+) -> schemas.SummarySyncResponse:
+    """从对话历史里抽取用户**明确补充或修正**的字段，回填成一份完整摘要。
+
+    返回的是完整摘要（含未改动字段），前端据此与本地摘要做 Diff，弹面板让用户
+    确认后才进入 PRD 生成流程。回填规则（保持原值 / 不新增字段 / 返回完整结构）
+    由 `document_service` 的提示词与本地合并逻辑共同保证。
+    """
+    if not payload.summary:
+        return schemas.SummarySyncResponse(summary={}, changed=False)
+
+    # 空列表视为「无对话」，交给服务层按无补充对话处理
+    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    try:
+        updated = await document_service.sync_summary_from_conversation(
+            summary=payload.summary,
+            history=history,
+        )
+    except Exception as exc:  # noqa: BLE001 - 模型调用失败统一转成 502
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"需求摘要回填失败：{exc}",
+        ) from exc
+
+    return schemas.SummarySyncResponse(summary=updated, changed=updated != payload.summary)
+
+
+@router.post(
+    "/retrieve-api-docs-rag",
+    response_model=schemas.ApiDocsRagResponse,
+    summary="检索与 PRD 相关的接口规范与历史示例（RAG）",
+)
+async def retrieve_api_docs_rag(
+    payload: schemas.ApiDocsRagRequest,
+) -> schemas.ApiDocsRagResponse:
+    """在团队接口规范库里检索与当前 PRD 相关的规范条文与历史接口示例。
+
+    前端拿到命中列表后展示给用户确认，确认的条目再随
+    `/generate-api-docs-stream` 下发，作为生成接口文档时的对齐依据。
+    """
+    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    try:
+        hits = await document_service.retrieve_api_docs_rag_hits(
+            prd_content=payload.prd_content,
+            history=history,
+            limit=payload.limit,
+        )
+    except Exception as exc:  # noqa: BLE001 - 检索异常统一转成 500
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"接口规范检索失败：{exc}",
+        ) from exc
+
+    return schemas.ApiDocsRagResponse(
+        hits=[schemas.RagHit.model_validate(hit) for hit in hits]
+    )
+
+
 @router.post("/start-stream", summary="提交问卷并开启会话（SSE 流式返回）")
 async def start_conversation_stream(
     payload: schemas.ConversationCreateRequest,
@@ -110,10 +179,14 @@ async def start_conversation_stream(
 
     事件序列：`status`（`data` 里带本次的 `conversation_id`，前端需立即记录）
     → 若干 `chunk`（增量文本）→ `done`（带完整 `reply`）；出错时为 `error`。
+
+    `system_prompt_override` 用于给本次会话换一套人设（如前端下发的「需求澄清对话」
+    专用提示词），会在会话记录里保存下来供后续接续对话沿用。
     """
     events = conversation_service.start_stream(
         form_data=payload.answers,
         title=payload.title,
+        system_prompt=payload.system_prompt_override or None,
     )
     return StreamingResponse(
         _make_sse_generator(events),
@@ -130,6 +203,9 @@ async def continue_conversation_stream(
 
     `conversation_id` 与 `history` 至少提供一种：给出 ID 时用服务端保存的
     历史；不给出则由前端回传完整历史走无状态模式。两者都给时以 `history` 为准。
+
+    系统提示词默认沿用创建会话时保存的人设；无状态模式（服务端会话已丢失）下
+    需要前端在 `system_prompt_override` 里重新下发。
     """
     # 空列表视为「未传」，交给服务层回退到服务端历史
     history = [{"role": m.role, "content": m.content} for m in payload.history] or None
@@ -137,6 +213,7 @@ async def continue_conversation_stream(
         user_message=payload.content,
         conversation_id=payload.conversation_id or None,
         history=history,
+        system_prompt=payload.system_prompt_override or None,
     )
     return StreamingResponse(
         _make_sse_generator(events),
@@ -176,9 +253,14 @@ async def generate_prd_stream(
 async def generate_api_docs_stream(
     payload: schemas.GenerateApiDocsStreamRequest,
 ) -> StreamingResponse:
-    """根据 PRD 正文流式返回接口文档。"""
+    """根据 PRD 正文流式返回接口文档。
+
+    `rag_hits` 为用户在前端确认过的检索命中（团队接口规范 / 历史接口示例），
+    会作为「参考规范」拼进提示词，要求模型对齐团队既有约定。
+    """
     events = document_service.generate_api_docs_stream(
         prd_content=payload.prd_content,
+        rag_hits=[hit.model_dump() for hit in payload.rag_hits] or None,
     )
     return StreamingResponse(
         _make_sse_generator(events),

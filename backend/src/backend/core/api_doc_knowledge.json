@@ -1,0 +1,218 @@
+{
+  "version": "1.0",
+  "description": "接口文档生成的检索库（团队接口规范 + 历史接口示例）。retrieve_api_docs_rag_hits 在这里做词法检索，命中的条目会随生成请求下发给模型做风格与结构对齐。新增条目只需追加 documents 项，重启后端生效。",
+  "documents": [
+    {
+      "id": "spec-response-envelope",
+      "source": "团队接口规范",
+      "title": "统一响应结构与字段命名",
+      "tags": [
+        "响应结构",
+        "code",
+        "message",
+        "data",
+        "命名",
+        "驼峰"
+      ],
+      "content": "所有 HTTP 接口统一返回如下信封结构：`code`（业务状态码，0 表示成功，非 0 表示业务失败）、`message`（面向用户的提示文案）、`data`（业务数据，失败时为 null）、`trace_id`（链路追踪 ID，便于排障）。HTTP 状态码只表达传输层语义（200/401/403/404/500），业务失败一律用 200 + 非 0 的 `code` 表达，避免 4xx/5xx 与业务码语义混淆。\n请求与响应体的字段名一律使用 lowerCamelCase（如 `userId`、`createdAt`），数据库列名与内部变量用 snake_case，两者不混用。布尔字段用 `is_` / `has_` 前缀。禁止用 `flag`、`type` 这类无语义的字段名。"
+    },
+    {
+      "id": "spec-pagination",
+      "source": "团队接口规范",
+      "title": "列表与分页规范",
+      "tags": [
+        "分页",
+        "page",
+        "pageSize",
+        "total",
+        "列表",
+        "游标"
+      ],
+      "content": "列表类接口的 Query 参数统一为 `page`（从 1 开始）与 `pageSize`（默认 20，上限 100），不使用 `offset` / `limit` / `rows` 等别名。响应体固定为 `{ list: [...], total: <总条数>, page: <当前页>, pageSize: <每页条数> }`，`total` 是该查询条件下的全量条数而非当前页条数。\n需要稳定顺序时在 Query 里显式声明 `sortBy` 与 `order`（`asc` / `desc`），不要依赖数据库默认排序。数据量可能超过万级、或需要滚动加载的场景改用游标分页：请求 `cursor` + `pageSize`，响应返回 `nextCursor`（为空表示没有更多）。筛选项一律用 Query 参数扁平传递（如 `status=active&keyword=abc`），不要把筛选条件塞进 POST body。"
+    },
+    {
+      "id": "spec-auth",
+      "source": "团队接口规范",
+      "title": "鉴权与令牌规范",
+      "tags": [
+        "鉴权",
+        "认证",
+        "token",
+        "Authorization",
+        "Bearer",
+        "刷新",
+        "登录"
+      ],
+      "content": "除登录、注册、健康检查外，所有接口都必须在请求头带 `Authorization: Bearer <access_token>`。`access_token` 有效期 2 小时，配套的 `refresh_token` 有效期 30 天，刷新接口为 `POST /auth/refresh`（请求体传 `refreshToken`，响应返回新的 `accessToken` 与 `refreshToken`）。\n令牌过期返回 HTTP 401 且 `code=40100`，前端据此静默刷新并重放原请求；刷新令牌也失效时返回 `code=40101`，前端跳转登录。权限不足返回 HTTP 403 且 `code=40300`。\n服务端不信任前端传来的 `userId`，用户身份一律从令牌解析，业务接口不接收 `userId` 作为入参。"
+    },
+    {
+      "id": "spec-error-codes",
+      "source": "团队接口规范",
+      "title": "错误码编码与错误响应规范",
+      "tags": [
+        "错误码",
+        "code",
+        "错误响应",
+        "异常",
+        "message",
+        "参数校验"
+      ],
+      "content": "错误码使用 5 位整数，按「HTTP 语义前缀 + 业务序号」编码：`40xxx` 为客户端错误（参数、权限、资源不存在），`41xxx` 为业务规则拒绝（额度不足、状态不允许），`50xxx` 为服务端错误。\n通用码固定为：`40000` 参数校验失败、`40100` 令牌过期、`40101` 令牌无效、`40300` 无权限、`40400` 资源不存在、`42900` 请求过于频繁、`50000` 服务内部错误。\n参数校验失败时 `data` 里返回 `errors` 数组，每项形如 `{ field: \"pageSize\", reason: \"必须在 1-100 之间\" }`，`message` 只给一句概括文案。错误响应中禁止暴露 SQL、堆栈、内部服务名等实现细节。同一个 `code` 在全站必须语义一致，不得复用。"
+    },
+    {
+      "id": "spec-path-naming",
+      "source": "团队接口规范",
+      "title": "路径与 HTTP 方法规范",
+      "tags": [
+        "RESTful",
+        "路径",
+        "资源",
+        "HTTP方法",
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "content": "接口路径统一以 `/api/v1/` 开头，版本号放在路径里而不是请求头。资源名用复数名词（`/api/v1/orders`），不要出现动词（禁止 `/api/v1/getOrderList`）；确需表达动作时用子资源或动作后缀（`POST /api/v1/orders/{id}/submit`）。\nHTTP 方法语义：GET 查询（不得有副作用、不得带请求体）、POST 创建或动作、PUT 全量更新、PATCH 局部更新、DELETE 删除。路径参数用 `{id}` 形式。层级不超过三层，超过时退化为 Query 参数（用 `/api/v1/orders?userId=1` 而不是 `/api/v1/users/1/orders`）。"
+    },
+    {
+      "id": "spec-format",
+      "source": "团队接口规范",
+      "title": "时间、金额与编码格式规范",
+      "tags": [
+        "时间",
+        "日期",
+        "金额",
+        "时区",
+        "ISO8601",
+        "格式",
+        "编码",
+        "枚举"
+      ],
+      "content": "时间字段统一使用 ISO 8601 带时区的字符串（如 `2026-10-12T18:00:00+08:00`），字段名以 `At` 结尾（`createdAt`、`updatedAt`）；只有日期含义的字段（如生日）用 `YYYY-MM-DD`，字段名以 `Date` 结尾。时间戳一律用毫秒，禁止秒级与毫秒级混用。\n金额用分为单位的整数（`amountInCents: 1990` 表示 19.90 元），字段名带单位后缀，禁止用浮点数表示金额。ID 统一用字符串类型，避免前端大整数精度丢失。\n枚举值使用大写下划线（`PENDING_PAYMENT`），并在接口文档里列出全部取值与含义。可选字段为空时返回 null 而不是省略该键，保证结构稳定。"
+    },
+    {
+      "id": "spec-sse",
+      "source": "团队接口规范",
+      "title": "流式接口（SSE）规范",
+      "tags": [
+        "SSE",
+        "流式",
+        "text/event-stream",
+        "chunk",
+        "打字机",
+        "长连接",
+        "生成"
+      ],
+      "content": "需要逐字返回的生成类接口统一使用 SSE：`Content-Type: text/event-stream`，响应头必须带 `Cache-Control: no-cache`、`Connection: keep-alive`、`X-Accel-Buffering: no`（避免 Nginx 缓冲导致「憋很久再一次性吐出」）。\n事件格式固定为 `event: <type>` + `data: <json>` + 空行，事件类型约定为 `status`（阶段提示）、`chunk`（增量文本）、`done`（结束，`data` 里带完整正文与业务 ID）、`error`（失败原因）。事件体统一为 JSON 且不带换行，保证 `data:` 始终单行、不破坏 SSE 帧边界。\n流末尾必须补一条 `data: [DONE]` 作为哨兵，前端据此主动关闭连接。任何异常都要转成 `error` 事件而不是直接断开连接，否则前端收不到失败原因。"
+    },
+    {
+      "id": "spec-idempotency",
+      "source": "团队接口规范",
+      "title": "幂等、重试与限流规范",
+      "tags": [
+        "幂等",
+        "重试",
+        "限流",
+        "Idempotency-Key",
+        "并发",
+        "重复提交",
+        "429"
+      ],
+      "content": "创建类接口（POST）必须支持幂等：客户端在请求头传 `Idempotency-Key`（UUID），服务端以该键缓存 24 小时内的首次响应，重复请求直接返回缓存结果而不是重复创建。\n同一用户的并发写操作按资源加锁，冲突时返回 `code=41001`（资源正在处理中）并提示稍后重试。\n限流：单用户单接口 60 次/分钟，超限返回 HTTP 429 + `code=42900`，响应头带 `Retry-After` 指明重试秒数。\n客户端重试策略：只对网络超时与 5xx 重试，指数退避（1s / 2s / 4s），最多 3 次；4xx 一律不重试。"
+    },
+    {
+      "id": "example-login",
+      "source": "历史接口示例",
+      "title": "用户登录与令牌刷新",
+      "tags": [
+        "登录",
+        "token",
+        "auth",
+        "refresh",
+        "密码",
+        "会话",
+        "账号"
+      ],
+      "content": "POST /api/v1/auth/login\n请求体：{ \"account\": \"zhangsan@example.com\", \"password\": \"******\", \"deviceId\": \"web-8f2c\" }\n响应：{ \"code\": 0, \"message\": \"ok\", \"data\": { \"accessToken\": \"eyJhbGciOi...\", \"refreshToken\": \"rt_9f3c...\", \"expiresIn\": 7200, \"user\": { \"id\": \"10086\", \"name\": \"张三\", \"avatarUrl\": \"https://cdn.example.com/a.png\" } }, \"trace_id\": \"7f2c9d\" }\n错误：`40000` 参数缺失、`40102` 账号或密码错误（文案统一为「账号或密码错误」，不区分账号是否存在）、`42900` 尝试过于频繁（连续 5 次失败后锁定 10 分钟）。\n\nPOST /api/v1/auth/refresh\n请求体：{ \"refreshToken\": \"rt_9f3c...\" }\n响应：{ \"code\": 0, \"data\": { \"accessToken\": \"...\", \"refreshToken\": \"...\", \"expiresIn\": 7200 } }\n说明：刷新成功后旧 refreshToken 立即失效（轮换式刷新）；同一 refreshToken 被重复使用时视为泄露，清空该用户全部会话。"
+    },
+    {
+      "id": "example-conversation",
+      "source": "历史接口示例",
+      "title": "会话式对话（创建会话与接续对话）",
+      "tags": [
+        "会话",
+        "对话",
+        "conversation",
+        "history",
+        "接续",
+        "聊天",
+        "LLM",
+        "历史消息"
+      ],
+      "content": "会话数据存在服务端内存里（无数据库），服务重启即失效，因此接续对话接口必须同时支持「有状态」与「无状态」两种用法。\n\nPOST /api/v1/conversations\n请求体：{ \"title\": \"周报助手需求澄清\", \"answers\": { \"product_name\": \"周报助手\", \"target_users\": [\"产品经理\", \"研发负责人\"] } }\n响应：{ \"code\": 0, \"data\": { \"conversationId\": \"c_7f2c9d\", \"title\": \"周报助手需求澄清\", \"createdAt\": \"2026-10-12T18:00:00+08:00\" } }\n说明：`answers` 的值允许是字符串或字符串数组，服务端归一化时数组用「、」连接；空值题目直接跳过，不要写入 `null` 占位。\n\nPOST /api/v1/conversations/{id}/messages\n请求体：{ \"content\": \"目标用户还包括测试同学\", \"history\": [ { \"role\": \"user\", \"content\": \"...\" }, { \"role\": \"assistant\", \"content\": \"...\" } ] }\n响应（同步）：{ \"code\": 0, \"data\": { \"conversationId\": \"c_7f2c9d\", \"reply\": \"...\", \"messageId\": \"m_31a\" } }\n说明：`history` 与路径里的 `{id}` 至少提供一种；`history` 非空时以它为准（无状态模式，适合多实例部署）。会话不存在返回 `40410`，前端应清掉本地 ID 并改用 `history` 重试一次。消息角色只允许 `system` / `user` / `assistant` 三值，服务端做别名归一（`ai` / `bot` → `assistant`）。"
+    },
+    {
+      "id": "example-sse-generate",
+      "source": "历史接口示例",
+      "title": "流式生成文档接口（SSE 事件序列）",
+      "tags": [
+        "SSE",
+        "流式",
+        "生成",
+        "文档",
+        "chunk",
+        "done",
+        "打字机",
+        "事件序列"
+      ],
+      "content": "POST /api/v1/documents/generate-stream\n请求体：{ \"docType\": \"prd\", \"requirements\": \"…结构化需求 JSON…\", \"history\": [] }\n响应：`Content-Type: text/event-stream`，事件序列如下：\n\n1. 阶段提示（告知前端大概要等多久、在做什么）\nevent: status\ndata: {\"type\":\"status\",\"content\":\"正在生成 PRD…\",\"data\":{\"conversationId\":\"c_7f2c9d\"}}\n\n2. 增量文本（前端逐字追加渲染）\nevent: chunk\ndata: {\"type\":\"chunk\",\"content\":\"## 1. 项目背景\\n\"}\n\n3. 结束（data 里给完整正文，支持断流后对齐）\nevent: done\ndata: {\"type\":\"done\",\"content\":\"\",\"data\":{\"reply\":\"# 完整正文…\",\"docType\":\"prd\"}}\n\n4. 失败（不要直接断开连接）\nevent: error\ndata: {\"type\":\"error\",\"content\":\"生成失败：模型返回被截断\",\"data\":{\"errorType\":\"OutputTruncatedError\"}}\n\n5. 哨兵，前端收到后关闭连接\ndata: [DONE]\n\n注意：`conversationId` 这类业务 ID 必须放在 **首个** `status` 事件的 `data` 里，前端要立刻记录下来。请求体字段名用 snake_case（与后端模型一致），响应体字段名用 lowerCamelCase，两者不要混。"
+    },
+    {
+      "id": "example-crud",
+      "source": "历史接口示例",
+      "title": "资源 CRUD 与批量操作",
+      "tags": [
+        "CRUD",
+        "创建",
+        "更新",
+        "删除",
+        "批量",
+        "PATCH",
+        "PUT",
+        "软删除"
+      ],
+      "content": "POST /api/v1/projects —— 创建，请求体为完整字段，返回 201 与 `{ code: 0, data: { id: \"p_1\" } }`；必须带 `Idempotency-Key` 请求头。\nGET /api/v1/projects/{id} —— 详情，不存在返回 `40400`。\nPUT /api/v1/projects/{id} —— 全量覆盖，请求体必须包含全部可写字段，缺字段视为置空（语义危险，优先用 PATCH）。\nPATCH /api/v1/projects/{id} —— 局部更新，请求体只传要改的字段；用 `null` 显式清空值，用省略表示不改。\nDELETE /api/v1/projects/{id} —— 软删除，返回 200 与 `{ code: 0 }`；重复删除同一 ID 返回成功（幂等）。\nPOST /api/v1/projects/batch-delete —— 批量删除，请求体 `{ ids: [\"p_1\", \"p_2\"] }`，上限 100 个，响应 `data: { succeeded: [\"p_1\"], failed: [{ id: \"p_2\", code: 40300, message: \"无权限\" }] }`，部分失败不回滚已成功的项。\n批量接口一律「部分成功」语义并逐项回报，不要因为一项失败整批拒绝。"
+    },
+    {
+      "id": "example-upload",
+      "source": "历史接口示例",
+      "title": "文件上传与下载",
+      "tags": [
+        "上传",
+        "下载",
+        "文件",
+        "multipart",
+        "预签名",
+        "OSS",
+        "附件"
+      ],
+      "content": "小文件（≤ 10MB）：POST /api/v1/files，`Content-Type: multipart/form-data`，表单字段 `file` + `bizType`（`avatar` / `attachment` / `import`）。响应：{ \"code\": 0, \"data\": { \"fileId\": \"f_2a9\", \"url\": \"https://cdn.example.com/x.pdf\", \"size\": 204800, \"mimeType\": \"application/pdf\" } }。\n大文件：先调 POST /api/v1/files/presign 拿预签名上传地址（返回 `uploadUrl` 与 `fileId` 以及 5 分钟有效期），客户端直传对象存储，再调 POST /api/v1/files/{fileId}/complete 通知服务端落库；超过有效期未 complete 的 `fileId` 会被清理。\n下载统一返回 `url` 而不是二进制流（走 CDN），鉴权资源用带签名的临时 URL（有效期 10 分钟）。\n限制：单文件 50MB，单次最多 9 个；不接收可执行文件类型；服务端对 `mimeType` 做白名单校验，不只看扩展名。"
+    },
+    {
+      "id": "example-async-task",
+      "source": "历史接口示例",
+      "title": "耗时任务与轮询（异步作业）",
+      "tags": [
+        "异步",
+        "任务",
+        "轮询",
+        "job",
+        "进度",
+        "导出",
+        "状态机"
+      ],
+      "content": "预计超过 5 秒的操作（如批量导出、数据重建）走异步作业，不要占着 HTTP 连接等：\n1. POST /api/v1/jobs —— 提交作业，请求体 `{ jobType: \"export_orders\", params: { from: \"2026-10-01\", to: \"2026-10-12\" } }`，立即返回 202 与 `{ code: 0, data: { jobId: \"j_88\", status: \"QUEUED\" } }`。\n2. GET /api/v1/jobs/{jobId} —— 轮询，响应 `data: { jobId, status: \"RUNNING\"|\"SUCCEEDED\"|\"FAILED\", progress: 42, resultUrl: null, errorMessage: null }`；`status` 为大写枚举，`progress` 为 0-100 整数。\n3. 完成后再调 GET /api/v1/jobs/{jobId}/result 取结果（`resultUrl` 为带签名的临时下载地址）。\n轮询建议间隔 2 秒起、逐步退避到 10 秒，避免高频打爆服务端；状态机不允许从 `SUCCEEDED` 回退到 `RUNNING`。同一用户同时运行的同类作业上限为 3 个，超限返回 `code=41002`。"
+    }
+  ]
+}

@@ -48,6 +48,13 @@ class ConversationCreateRequest(BaseModel):
         default_factory=dict,
         description="问卷答案，key 为 QuestionConfig.name",
     )
+    system_prompt_override: str = Field(
+        default="",
+        description=(
+            "本轮会话专用的系统提示词覆盖。传入时用它替代服务层的默认系统提示词，"
+            "例如前端为「需求澄清对话」下发的专用人设；留空则沿用默认。"
+        ),
+    )
 
 
 class MessageItem(BaseModel):
@@ -68,6 +75,13 @@ class ConversationContinueRequest(BaseModel):
     history: list[MessageItem] = Field(
         default_factory=list,
         description="前端回传的历史消息；传入时优先于服务端保存的历史",
+    )
+    system_prompt_override: str = Field(
+        default="",
+        description=(
+            "系统提示词覆盖。有状态模式下会沿用创建会话时保存的人设，"
+            "无状态模式（只传 history）下需由前端重新下发。"
+        ),
     )
 
 
@@ -127,6 +141,43 @@ class DocumentResponse(BaseModel):
 
 
 # ============================================================================
+# 接口文档检索增强（RAG）
+# ============================================================================
+
+
+class RagHit(BaseModel):
+    """一条检索命中（团队接口规范 / 历史接口示例）。"""
+
+    id: str = Field(default="", description="条目 ID")
+    source: str = Field(default="", description="来源，如「团队接口规范」「历史接口示例」")
+    title: str = Field(default="", description="条目标题")
+    content: str = Field(description="条目正文（规范条文或历史接口示例）")
+    tags: list[str] = Field(default_factory=list, description="标签，便于前端分组展示")
+    score: float = Field(default=0.0, description="相似度得分，越大越相关")
+    matched_terms: list[str] = Field(
+        default_factory=list,
+        description="命中的关键词，用于向用户解释「为什么检索到这条」",
+    )
+
+
+class ApiDocsRagRequest(BaseModel):
+    """接口文档检索请求。"""
+
+    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+    history: list[MessageItem] = Field(
+        default_factory=list,
+        description="对话历史，作为检索查询的补充",
+    )
+    limit: int = Field(default=5, ge=1, le=20, description="返回条数上限")
+
+
+class ApiDocsRagResponse(BaseModel):
+    """接口文档检索响应。"""
+
+    hits: list[RagHit] = Field(default_factory=list, description="命中列表，按相关度降序")
+
+
+# ============================================================================
 # 文档流式生成（对应 document_service 的 *_stream 方法）
 # ============================================================================
 
@@ -148,6 +199,13 @@ class GenerateApiDocsStreamRequest(BaseModel):
     """生成接口文档的流式请求。"""
 
     prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+    rag_hits: list[RagHit] = Field(
+        default_factory=list,
+        description=(
+            "用户确认后的检索命中（团队接口规范 / 历史接口示例）。"
+            "传入时作为「参考规范」参与生成，要求模型按团队约定对齐接口风格。"
+        ),
+    )
 
 
 class GeneratePromptsStreamRequest(BaseModel):
@@ -161,4 +219,32 @@ class OptimizeDocumentStreamRequest(BaseModel):
 
     document: str = Field(min_length=1, description="待优化的原文档正文（Markdown）")
     instruction: str = Field(min_length=1, description="用户的优化要求")
+
+
+# ============================================================================
+# 结构化摘要回填（对话 → 摘要）
+# ============================================================================
+
+
+class SummarySyncRequest(BaseModel):
+    """摘要回填请求。"""
+
+    summary: dict[str, Any] = Field(
+        description="当前结构化需求摘要（与 field-schema.json 对齐）",
+    )
+    history: list[MessageItem] = Field(
+        default_factory=list,
+        description="用于回填的对话历史；为空时摘要原样返回",
+    )
+
+
+class SummarySyncResponse(BaseModel):
+    """摘要回填响应。
+
+    返回的是**完整**摘要（含所有未改动的字段），前端据此与本地摘要做 Diff 后
+    弹面板给用户确认；`changed` 只是便利标志，判定仍以 Diff 结果为准。
+    """
+
+    summary: dict[str, Any] = Field(description="更新后的完整结构化需求摘要")
+    changed: bool = Field(default=False, description="是否存在任何字段变化")
 
