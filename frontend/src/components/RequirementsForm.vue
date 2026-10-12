@@ -18,8 +18,14 @@ const props = withDefaults(
   defineProps<{
     /** 初始需求摘要：用于从本地快照恢复上次填写的内容；只在挂载时生效 */
     initial?: RequirementsSummary | null
+    /**
+     * 返回按钮的文案。
+     * 由父组件按上下文决定：流程开头是「返回入口」，从对话页点「修改需求」
+     * 进来时是「返回对话」——落点不同，文案必须跟着变。
+     */
+    backLabel?: string
   }>(),
-  { initial: null },
+  { initial: null, backLabel: '返回入口' },
 )
 
 const emit = defineEmits<{
@@ -27,6 +33,8 @@ const emit = defineEmits<{
   submit: [summary: RequirementsSummary]
   /** 编辑器内容变化时触发，供父组件实时保存草稿 */
   'update:summary': [summary: RequirementsSummary]
+  /** 点击返回按钮；具体落到哪一页由父组件决定 */
+  back: []
 }>()
 
 // ============================================================================
@@ -1741,6 +1749,19 @@ defineExpose({ getSummary: () => currentSummary.value })
         <p class="mt-3 text-center text-xs text-slate-400">
           提交前自动校验必填项、字段完整性与范围冲突 · 可随时打开 JSON 预览核对
         </p>
+        <!--
+          返回入口。放在主操作下方而不是并排：主操作是「提交」，返回只是退路，
+          并排会把它抬到和提交同等的视觉权重上。
+        -->
+        <div class="mt-4 flex justify-center">
+          <button
+            type="button"
+            class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+            @click="emit('back')"
+          >
+            {{ backLabel }}
+          </button>
+        </div>
       </div>
     </form>
   </div>

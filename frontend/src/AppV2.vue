@@ -88,6 +88,7 @@ const {
   activeDocTitle,
   activeDocContent,
   backLabel,
+  formBackLabel,
   docStreamingContent,
   docError,
   prdStatus,
@@ -105,6 +106,7 @@ const {
   handleGenerateQuickPrd,
   handleGeneratePromptsFromDebugPrd,
   backToInput,
+  backFromForm,
   handleEndTask,
   downloadDocument,
   handleGeneratePrd,
@@ -345,8 +347,10 @@ function handleStepClick(stepId: StepId): void {
         v-show="viewState === 'form'"
         :key="formKey"
         :initial="summary"
+        :back-label="formBackLabel"
         @submit="handleStartConversation"
         @update:summary="handleSummaryChange"
+        @back="backFromForm"
       />
     </main>
 

@@ -670,6 +670,34 @@ describe('AppV2 入口模式', () => {
     // 换了入口，进度条口径也跟着换回五步
     expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(5)
   })
+
+  it('完整流程的表单也有返回按钮，默认回到入口页', async () => {
+    const wrapper = await mountApp()
+    expect(wrapper.text()).toContain('告诉我们你的产品想法')
+
+    await clickButton(wrapper, '返回入口', true)
+    expect(wrapper.text()).toContain('选择一种开始方式')
+  })
+
+  it('从对话页「改需求」回到表单时，返回按钮改为回到对话', async () => {
+    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
+      handlers?.onChunk?.('已理解需求。')
+      return { conversationId: 'conv-1', reply: '已理解需求。' }
+    })
+
+    const wrapper = await mountApp()
+    await submitSampleForm(wrapper)
+    expect(wrapper.text()).toContain('需求澄清对话')
+
+    await clickButton(wrapper, '改需求')
+    expect(wrapper.text()).toContain('告诉我们你的产品想法')
+    // 已经进过对话：落点与文案都要跟着变，不能把用户送回入口页丢掉对话位置
+    expect(wrapper.text()).not.toContain('返回入口')
+    expect(wrapper.text()).toContain('返回对话')
+
+    await clickButton(wrapper, '返回对话', true)
+    expect(wrapper.text()).toContain('需求澄清对话')
+  })
 })
 
 /**

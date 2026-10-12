@@ -446,4 +446,26 @@ describe('RequirementsForm 结构化录入表单', () => {
     const last = events?.[events.length - 1]?.[0] as RequirementsSummary
     expect(last.product_name).toBe('草稿产品')
   })
+
+  it('返回按钮默认文案为「返回入口」，点击抛出 back', async () => {
+    const wrapper = mountForm()
+    const back = findByText(wrapper, '返回入口')
+    expect(back).toBeDefined()
+
+    await back?.trigger('click')
+    expect(wrapper.emitted('back')).toHaveLength(1)
+    // 返回不触发提交，也不清空用户填的内容
+    expect(wrapper.emitted('submit')).toBeUndefined()
+  })
+
+  it('返回按钮文案可由父组件按上下文覆盖', async () => {
+    const wrapper = mount(RequirementsForm, { props: { backLabel: '返回对话' } })
+    expect(findByText(wrapper, '返回对话')).toBeDefined()
+    expect(findByText(wrapper, '返回入口')).toBeUndefined()
+  })
 })
+
+/** 按按钮文案精确查找（返回类按钮文案短，避免子串误命中） */
+function findByText(wrapper: VueWrapper, text: string): DOMWrapper<Element> | undefined {
+  return wrapper.findAll('button').find((item) => item.text().trim() === text)
+}

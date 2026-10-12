@@ -448,6 +448,24 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   })
 
   /**
+   * 结构化表单的返回落点。
+   *
+   * 表单不只出现在流程开头——对话页有「修改需求」会回到这里。所以已经进过对话时
+   * 要回到对话（否则用户会被莫名其妙送回入口页、丢掉对话位置），
+   * 还没开始对话时才回到入口选择页。
+   */
+  function backFromForm(): void {
+    if (messages.value.length > 0) {
+      backToInput()
+      return
+    }
+    goTo('entry')
+  }
+
+  /** 表单返回按钮的文案，与 `backFromForm` 的落点保持一一对应 */
+  const formBackLabel = computed(() => (messages.value.length > 0 ? '返回对话' : '返回入口'))
+
+  /**
    * 进入完成页：校验三份文档齐备后切到 `done`。
    * 不满足条件时不跳转（前置守卫），保证不会落到空白的完成态。
    */
@@ -630,6 +648,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     activeDocTitle,
     activeDocContent,
     backLabel,
+    formBackLabel,
     // 临时状态
     docStreamingContent,
     docError,
@@ -651,6 +670,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     handleGenerateQuickPrd,
     handleGeneratePromptsFromDebugPrd,
     backToInput,
+    backFromForm,
     handleEndTask,
     downloadDocument,
     // 闸门 1
