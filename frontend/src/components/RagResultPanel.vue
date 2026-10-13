@@ -2,6 +2,9 @@
 import { computed, ref, watch } from 'vue'
 
 import type { RagHit } from '@/types'
+import AppButton from '@/components/ui/AppButton.vue'
+import AppSpinner from '@/components/ui/AppSpinner.vue'
+import AppBadge from '@/components/ui/AppBadge.vue'
 
 /**
  * 接口规范检索结果确认面板（RAG）。
@@ -95,14 +98,14 @@ const confirmLabel = computed(() => {
 
 <template>
   <section
-    class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm"
+    class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900"
     aria-label="接口规范检索结果"
   >
     <!-- 头部 -->
-    <div class="border-b border-slate-200 px-4 py-3 sm:px-6">
+    <div class="border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-6">
       <div class="flex items-start gap-3">
-        <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50">
-          <svg class="h-5 w-5 text-sky-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-50 dark:bg-primary-950/40">
+          <svg class="h-5 w-5 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path
               fill-rule="evenodd"
               d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z"
@@ -111,33 +114,34 @@ const confirmLabel = computed(() => {
           </svg>
         </div>
         <div class="min-w-0 flex-1">
-          <h2 class="text-sm font-semibold text-slate-900">接口规范检索结果</h2>
-          <p class="mt-0.5 text-xs text-slate-500">
+          <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">接口规范检索结果</h2>
+          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
             生成前先从团队规范库检索相关规范与历史接口示例；勾选的条目会作为「参考规范」参与生成，
             让接口风格与团队既有约定对齐。不勾选的条目不会被使用。
           </p>
         </div>
-        <button
+        <AppButton
           v-if="hits.length && !loading"
-          type="button"
-          class="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+          variant="ghost"
+          size="sm"
+          class="shrink-0"
           @click="toggleAll"
         >
           {{ allSelected ? '全不选' : '全选' }}
-        </button>
+        </AppButton>
       </div>
     </div>
 
     <!-- 检索中 -->
-    <div v-if="loading" class="flex items-center justify-center gap-2 bg-slate-50/60 px-4 py-12 text-sm text-slate-500">
-      <span class="h-4 w-4 animate-spin rounded-full border-2 border-primary-300 border-t-primary-600"></span>
+    <div v-if="loading" class="flex items-center justify-center gap-2 bg-slate-50/60 px-4 py-12 text-sm text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+      <AppSpinner />
       正在检索团队接口规范…
     </div>
 
     <!-- 检索失败 -->
-    <div v-else-if="error" class="bg-slate-50/60 px-4 py-6 sm:px-6">
+    <div v-else-if="error" class="bg-slate-50/60 px-4 py-6 dark:bg-slate-800/60 sm:px-6">
       <p
-        class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+        class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
         role="alert"
       >
         <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -149,45 +153,43 @@ const confirmLabel = computed(() => {
         </svg>
         <span>{{ error }}</span>
       </p>
-      <p class="mt-2 text-xs text-slate-500">检索失败不影响生成，你可以跳过检索直接生成接口文档。</p>
+      <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">检索失败不影响生成，你可以跳过检索直接生成接口文档。</p>
     </div>
 
     <!-- 无命中 -->
-    <div v-else-if="!hits.length" class="bg-slate-50/60 px-4 py-10 text-center sm:px-6">
-      <p class="text-sm text-slate-500">没有检索到相关规范，可以直接生成接口文档。</p>
+    <div v-else-if="!hits.length" class="bg-slate-50/60 px-4 py-10 text-center dark:bg-slate-800/60 sm:px-6">
+      <p class="text-sm text-slate-500 dark:text-slate-400">没有检索到相关规范，可以直接生成接口文档。</p>
     </div>
 
     <!-- 命中列表（按来源分组） -->
-    <div v-else class="max-h-[min(56vh,520px)] space-y-4 overflow-y-auto bg-slate-50/60 p-4 sm:p-6">
+    <div v-else class="max-h-[min(56vh,520px)] space-y-4 overflow-y-auto bg-slate-50/60 p-4 dark:bg-slate-800/60 sm:p-6">
       <div v-for="group in groups" :key="group.source">
         <div class="mb-2 flex items-center gap-2">
-          <h3 class="text-xs font-semibold text-slate-600">{{ group.source }}</h3>
-          <span class="rounded-full bg-white px-2 py-0.5 text-[11px] text-slate-500 ring-1 ring-slate-200">
-            {{ group.items.length }} 条
-          </span>
+          <h3 class="text-xs font-semibold text-slate-600 dark:text-slate-300">{{ group.source }}</h3>
+          <AppBadge variant="neutral">{{ group.items.length }} 条</AppBadge>
         </div>
 
         <ul class="space-y-2">
           <li
             v-for="hit in group.items"
             :key="keyOf(hit)"
-            class="rounded-xl border border-slate-200 bg-white px-3 py-2.5 transition"
-            :class="selected.has(keyOf(hit)) ? 'ring-1 ring-primary-200' : 'opacity-70'"
+            class="rounded-xl border border-slate-200 bg-white px-3 py-2.5 transition dark:border-slate-700 dark:bg-slate-800"
+            :class="selected.has(keyOf(hit)) ? 'ring-1 ring-primary-200 dark:ring-primary-800' : 'opacity-70'"
           >
             <label class="flex cursor-pointer items-start gap-2.5">
               <input
                 type="checkbox"
-                class="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-primary-600 focus:ring-primary-400"
+                class="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-primary-600 focus:ring-primary-400 dark:border-slate-600"
                 :checked="selected.has(keyOf(hit))"
                 :aria-label="hit.title || keyOf(hit)"
                 @change="toggle(hit)"
               />
               <span class="min-w-0 flex-1">
                 <span class="flex flex-wrap items-center gap-2">
-                  <span class="text-sm font-medium text-slate-800">{{ hit.title || '未命名条目' }}</span>
+                  <span class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ hit.title || '未命名条目' }}</span>
                   <span
                     v-if="hit.score"
-                    class="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-500"
+                    class="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-500 dark:bg-slate-700 dark:text-slate-300"
                   >
                     相关度 {{ hit.score.toFixed(2) }}
                   </span>
@@ -198,7 +200,7 @@ const confirmLabel = computed(() => {
                   <span
                     v-for="term in hit.matched_terms"
                     :key="term"
-                    class="rounded bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-600"
+                    class="rounded bg-primary-50 px-1.5 py-0.5 text-[11px] text-primary-600 dark:bg-primary-950/40 dark:text-primary-300"
                   >
                     {{ term }}
                   </span>
@@ -207,7 +209,7 @@ const confirmLabel = computed(() => {
             </label>
 
             <pre
-              class="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-600"
+              class="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-600 dark:bg-slate-900 dark:text-slate-300"
             >{{ hit.content }}</pre>
           </li>
         </ul>
@@ -215,25 +217,15 @@ const confirmLabel = computed(() => {
     </div>
 
     <!-- 底部操作 -->
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
-      <p class="text-xs text-slate-500">取消则不会调用生成接口，接口文档保持原样。</p>
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900 sm:px-6">
+      <p class="text-xs text-slate-500 dark:text-slate-400">取消则不会调用生成接口，接口文档保持原样。</p>
       <div class="flex items-center gap-2">
-        <button
-          type="button"
-          :disabled="loading"
-          class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-          @click="emit('cancel')"
-        >
+        <AppButton variant="secondary" :disabled="loading" @click="emit('cancel')">
           取消
-        </button>
-        <button
-          type="button"
-          :disabled="loading"
-          class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400"
-          @click="emit('confirm', selectedHits)"
-        >
+        </AppButton>
+        <AppButton variant="primary" :disabled="loading" @click="emit('confirm', selectedHits)">
           {{ confirmLabel }}
-        </button>
+        </AppButton>
       </div>
     </div>
   </section>

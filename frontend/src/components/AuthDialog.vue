@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { useAuthStore } from '@/stores/auth'
+import AppButton from '@/components/ui/AppButton.vue'
 
 /**
  * 登录 / 注册弹窗。
@@ -144,18 +145,13 @@ watch(
                 }}
               </p>
             </div>
-            <button
-              type="button"
-              class="-mr-1 -mt-1 rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-              aria-label="关闭"
-              @click="close"
-            >
+            <AppButton variant="ghost" size="sm" class="-mr-1 -mt-1 !px-1.5 !py-1.5" aria-label="关闭" @click="close">
               <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                 <path
                   d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
                 />
               </svg>
-            </button>
+            </AppButton>
           </div>
 
           <!-- 为什么弹出来：例如「创建任务需要先登录」，被动弹出时才显示 -->
@@ -245,13 +241,15 @@ watch(
               {{ errorText }}
             </p>
 
-            <button
+            <AppButton
               type="submit"
+              variant="primary"
+              block
+              :loading="auth.submitting"
               :disabled="auth.submitting"
-              class="w-full rounded-xl bg-primary-600 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {{ auth.submitting ? '处理中…' : isRegister ? '注册并登录' : '登录' }}
-            </button>
+            </AppButton>
           </form>
         </div>
       </div>

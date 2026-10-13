@@ -3,6 +3,8 @@ import { computed } from 'vue'
 
 import type { SummaryChange, SummaryChangeType } from '@/types'
 import { formatSummaryValue } from '@/utils/requirements'
+import AppButton from '@/components/ui/AppButton.vue'
+import AppSpinner from '@/components/ui/AppSpinner.vue'
 
 /**
  * 摘要更新确认面板。
@@ -46,21 +48,21 @@ const CHANGE_META: Record<
 > = {
   added: {
     text: '新增',
-    badge: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
-    card: 'border-emerald-200 bg-emerald-50/50',
-    label: 'text-emerald-700',
+    badge: 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-800',
+    card: 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/30',
+    label: 'text-emerald-700 dark:text-emerald-300',
   },
   modified: {
     text: '修改',
-    badge: 'bg-sky-50 text-sky-700 ring-sky-200',
-    card: 'border-sky-200 bg-sky-50/50',
-    label: 'text-sky-700',
+    badge: 'bg-primary-50 text-primary-700 ring-primary-200 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800',
+    card: 'border-primary-200 bg-primary-50/50 dark:border-primary-800 dark:bg-primary-950/30',
+    label: 'text-primary-700 dark:text-primary-300',
   },
   removed: {
     text: '删除',
-    badge: 'bg-rose-50 text-rose-700 ring-rose-200',
-    card: 'border-rose-200 bg-rose-50/50',
-    label: 'text-rose-700',
+    badge: 'bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-800',
+    card: 'border-rose-200 bg-rose-50/50 dark:border-rose-800 dark:bg-rose-950/30',
+    label: 'text-rose-700 dark:text-rose-300',
   },
 }
 
@@ -89,13 +91,13 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
 
 <template>
   <section
-    class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm"
+    class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900"
     aria-label="摘要更新确认"
   >
     <!-- 头部 -->
-    <div class="border-b border-slate-200 px-4 py-3 sm:px-6">
+    <div class="border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-6">
       <div class="flex items-start gap-3">
-        <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-50">
+        <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-50 dark:bg-primary-950/40">
           <svg class="h-5 w-5 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path
               fill-rule="evenodd"
@@ -105,8 +107,8 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
           </svg>
         </div>
         <div class="min-w-0 flex-1">
-          <h2 class="text-sm font-semibold text-slate-900">需求摘要更新确认</h2>
-          <p class="mt-0.5 text-xs text-slate-500">
+          <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">需求摘要更新确认</h2>
+          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
             AI 只把你在对话里「明确补充或修正」的内容回填到摘要；确认后才会据此生成 PRD。
           </p>
         </div>
@@ -114,7 +116,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
 
       <!-- 变更统计 -->
       <div v-if="hasChanges && !loading" class="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        <span class="font-medium text-slate-600">共 {{ changes.length }} 处变更</span>
+        <span class="font-medium text-slate-600 dark:text-slate-300">共 {{ changes.length }} 处变更</span>
         <span
           v-if="counts.added"
           class="rounded-full bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700 ring-1 ring-emerald-200"
@@ -123,7 +125,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
         </span>
         <span
           v-if="counts.modified"
-          class="rounded-full bg-sky-50 px-2 py-0.5 font-medium text-sky-700 ring-1 ring-sky-200"
+          class="rounded-full bg-primary-50 px-2 py-0.5 font-medium text-primary-700 ring-1 ring-primary-200"
         >
           修改 {{ counts.modified }}
         </span>
@@ -137,15 +139,15 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     </div>
 
     <!-- 回填中 -->
-    <div v-if="loading" class="flex items-center justify-center gap-2 bg-slate-50/60 px-4 py-12 text-sm text-slate-500">
-      <span class="h-4 w-4 animate-spin rounded-full border-2 border-primary-300 border-t-primary-600"></span>
+    <div v-if="loading" class="flex items-center justify-center gap-2 bg-slate-50/60 px-4 py-12 text-sm text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+      <AppSpinner />
       正在从对话中整理需求摘要…
     </div>
 
     <!-- 回填失败 -->
-    <div v-else-if="error" class="bg-slate-50/60 px-4 py-6 sm:px-6">
+    <div v-else-if="error" class="bg-slate-50/60 px-4 py-6 dark:bg-slate-800/60 sm:px-6">
       <p
-        class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+        class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
         role="alert"
       >
         <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -160,16 +162,16 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     </div>
 
     <!-- 无变更 -->
-    <div v-else-if="!hasChanges" class="bg-slate-50/60 px-4 py-10 text-center sm:px-6">
-      <p class="text-sm text-slate-500">对话里没有检测到需要回填的补充信息，摘要保持不变。</p>
+    <div v-else-if="!hasChanges" class="bg-slate-50/60 px-4 py-10 text-center dark:bg-slate-800/60 sm:px-6">
+      <p class="text-sm text-slate-500 dark:text-slate-400">对话里没有检测到需要回填的补充信息，摘要保持不变。</p>
     </div>
 
     <!-- 变更列表 -->
-    <ul v-else class="max-h-[min(52vh,480px)] space-y-2 overflow-y-auto bg-slate-50/60 p-4 sm:p-6">
+    <ul v-else class="max-h-[min(52vh,480px)] space-y-2 overflow-y-auto bg-slate-50/60 p-4 dark:bg-slate-800/60 sm:p-6">
       <li
         v-for="change in changes"
         :key="change.path"
-        class="rounded-xl border bg-white px-3 py-2.5"
+        class="rounded-xl border bg-white px-3 py-2.5 dark:bg-slate-800"
         :class="metaOf(change.changeType).card"
       >
         <div class="flex flex-wrap items-center gap-2">
@@ -182,19 +184,19 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
           <span class="text-sm font-medium" :class="metaOf(change.changeType).label">
             {{ change.label || change.path }}
           </span>
-          <code class="truncate font-mono text-[11px] text-slate-400">{{ change.path }}</code>
+          <code class="truncate font-mono text-[11px] text-slate-400 dark:text-slate-500">{{ change.path }}</code>
         </div>
 
         <div class="mt-2 space-y-1 text-xs leading-relaxed">
           <p v-if="change.changeType !== 'added'" class="flex gap-1.5">
-            <span class="shrink-0 text-slate-400">变更前</span>
-            <span class="min-w-0 whitespace-pre-wrap break-words text-slate-500 line-through decoration-slate-400">
+            <span class="shrink-0 text-slate-400 dark:text-slate-500">变更前</span>
+            <span class="min-w-0 whitespace-pre-wrap break-words text-slate-500 line-through decoration-slate-400 dark:text-slate-400">
               {{ formatSummaryValue(change.before) }}
             </span>
           </p>
           <p v-if="change.changeType !== 'removed'" class="flex gap-1.5">
-            <span class="shrink-0 text-slate-400">变更后</span>
-            <span class="min-w-0 whitespace-pre-wrap break-words font-medium text-slate-800">
+            <span class="shrink-0 text-slate-400 dark:text-slate-500">变更后</span>
+            <span class="min-w-0 whitespace-pre-wrap break-words font-medium text-slate-800 dark:text-slate-100">
               {{ formatSummaryValue(change.after) }}
             </span>
           </p>
@@ -203,27 +205,17 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     </ul>
 
     <!-- 底部操作 -->
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
-      <p class="text-xs text-slate-500">
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900 sm:px-6">
+      <p class="text-xs text-slate-500 dark:text-slate-400">
         拒绝后不会修改摘要，也不会进入生成流程，你可以回到对话继续补充。
       </p>
       <div class="flex items-center gap-2">
-        <button
-          type="button"
-          :disabled="loading"
-          class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-          @click="emit('reject')"
-        >
+        <AppButton variant="secondary" :disabled="loading" @click="emit('reject')">
           拒绝更改
-        </button>
-        <button
-          type="button"
-          :disabled="loading"
-          class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400"
-          @click="emit('confirm')"
-        >
+        </AppButton>
+        <AppButton variant="primary" :disabled="loading" @click="emit('confirm')">
           {{ confirmLabel }}
-        </button>
+        </AppButton>
       </div>
     </div>
   </section>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import DocumentReview from '@/components/DocumentReview.vue'
 import PrdProgress from '@/components/stages/PrdProgress.vue'
+import AppButton from '@/components/ui/AppButton.vue'
 import type { PrdStageProgress } from '@/types'
 
 /**
@@ -61,12 +62,8 @@ const emit = defineEmits<{
       :streaming-content="streamingContent"
       :generating="true"
     />
-    <button
-      type="button"
-      class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-      @click="emit('back')"
-    >
+    <AppButton variant="secondary" @click="emit('back')">
       {{ backLabel ?? '返回对话' }}
-    </button>
+    </AppButton>
   </section>
 </template>

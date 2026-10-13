@@ -2,22 +2,25 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { useAuthStore } from '@/stores/auth'
 import { useSolutionsStore } from '@/stores/solutions'
 import type { SolutionSummary } from '@/types'
+import AppButton from '@/components/ui/AppButton.vue'
+import UserMenu from '@/components/UserMenu.vue'
 
 /**
- * 左侧方案侧边栏。
+ * 左侧方案侧边栏（常驻 chrome，而非独立列表页）。
  *
- * 做成侧边栏而不是独立列表页：列表是**工作台的一部分**，用户写方案时随时要切到
- * 另一份、看一下最近几条，若每次都得「离开当前页面 → 看列表 → 再点回来」，
- * 来回两次导航的代价远大于它带来的空间收益。
+ * 这里是整个工作台的固定外壳：顶端放品牌 + 主题切换，底部放登录入口，
+ * 中间是「新建任务」+ 方案列表。列表是工作台的一部分，用户写方案时随时要切到
+ * 另一份、看一下最近几条，做成侧栏比独立列表页少两次来回导航。
  *
- * 窄屏（< lg）下默认收起，用顶栏的按钮唤出抽屉——手机上常驻侧栏会把内容挤没。
- *
- * 本组件只负责展示与派发事件，数据与动作都在 `stores/solutions.ts`。
+ * lg 以上常驻左侧且 `sticky`，不随右侧内容滚动；窄屏（< lg）下默认收起为抽屉，
+ * 用悬浮按钮唤出。本组件只负责展示与派发事件，数据与动作都在 `stores/solutions.ts`。
  */
 
 const solutions = useSolutionsStore()
+const auth = useAuthStore()
 const router = useRouter()
 
 /** 窄屏抽屉是否展开 */
@@ -27,7 +30,8 @@ const drawerOpen = ref(false)
 const pendingDeleteId = ref<number | null>(null)
 
 onMounted(() => {
-  if (!solutions.loaded) void solutions.loadList()
+  // 未登录不拉列表：那只会换来一次 401 与无意义的弹窗
+  if (auth.isLoggedIn && !solutions.loaded) void solutions.loadList()
 })
 
 /** 当前打开的方案在列表里的位置，用于高亮 */
@@ -82,13 +86,45 @@ function open(item: SolutionSummary): void {
   // 结果就是在列表里多出一份重复方案。改地址后由 AppV2 的 watch 负责加载。
   void router.push(`/v2/${item.id}`)
 }
+
+// ---------------------------------------------------------------------------
+// 主题（明 / 暗）：手动开关，持久化到 localStorage，缺省跟随系统偏好
+// ---------------------------------------------------------------------------
+const isDark = ref(false)
+
+function applyTheme(dark: boolean): void {
+  isDark.value = dark
+  document.documentElement.classList.toggle('dark', dark)
+  try {
+    localStorage.setItem('theme', dark ? 'dark' : 'light')
+  } catch {
+    // localStorage 不可用时忽略，不影响本次切换
+  }
+}
+
+function toggleTheme(): void {
+  applyTheme(!isDark.value)
+}
+
+// 初始化：优先读取用户上次的选择，否则跟随系统偏好
+const storedTheme = (() => {
+  try {
+    return localStorage.getItem('theme')
+  } catch {
+    return null
+  }
+})()
+const prefersDark =
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(prefers-color-scheme: dark)').matches
+applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
 </script>
 
 <template>
   <!-- 窄屏唤出按钮：lg 以上不需要 -->
   <button
     type="button"
-    class="fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-white shadow-lg shadow-sky-500/30 lg:hidden"
+    class="fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-white shadow-lg shadow-primary-500/30 lg:hidden"
     aria-label="打开方案列表"
     @click="drawerOpen = true"
   >
@@ -110,56 +146,95 @@ function open(item: SolutionSummary): void {
 
   <aside
     :class="[
-      'flex flex-col border-slate-200/70 bg-white/70 backdrop-blur',
-      // 窄屏：抽屉；lg 以上：常驻左侧栏
-      'fixed inset-y-0 left-0 z-40 w-64 border-r transition-transform lg:static lg:z-auto lg:translate-x-0',
+      'flex flex-col border-slate-200/70 bg-white/70 backdrop-blur dark:border-slate-800/70 dark:bg-slate-900/80',
+      // 窄屏：抽屉；lg 以上：常驻左侧且 sticky，不随右侧内容滚动
+      'fixed inset-y-0 left-0 z-40 w-64 border-r transition-transform lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0',
       drawerOpen ? 'translate-x-0' : '-translate-x-full',
     ]"
     aria-label="方案列表"
   >
-    <div class="flex items-center justify-between px-4 py-3 lg:hidden">
-      <span class="text-sm font-medium text-slate-700">我的方案</span>
-      <button
-        type="button"
-        class="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-        aria-label="收起方案列表"
-        @click="drawerOpen = false"
+    <!-- 顶端：品牌 + 主题切换 -->
+    <div class="flex items-center justify-between gap-2 border-b border-slate-200/70 px-4 py-3 dark:border-slate-800/70">
+      <div class="flex items-center gap-2.5">
+        <div
+          class="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 text-sm font-bold text-white shadow-md shadow-primary-500/30"
+        >
+          H
+        </div>
+        <div class="leading-tight">
+          <div class="text-sm font-bold text-slate-900 dark:text-slate-100">HarnessPRD</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400">需求 → PRD / 接口 / 提示词</div>
+        </div>
+      </div>
+
+      <AppButton
+        variant="ghost"
+        size="sm"
+        class="!px-2"
+        :aria-label="isDark ? '切换到亮色模式' : '切换到暗色模式'"
+        :title="isDark ? '切换到亮色模式' : '切换到暗色模式'"
+        @click="toggleTheme"
       >
-        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <svg v-if="isDark" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
-            d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
+            d="M10 2a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 2ZM10 15a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 15Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.06 1.06a.75.75 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-11.314 0a.75.75 0 0 1 1.06 0l1.06 1.06a.75.75 0 0 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.06Zm9.9 4.243a.75.75 0 0 1 1.06 0 .75.75 0 0 1 0 1.061l-1.061 1.06a.75.75 0 1 1-1.06-1.06l1.06-1.06Zm-9.9-4.243a.75.75 0 0 1 0 1.06L5.66 9.22a.75.75 0 1 1-1.06-1.06l1.06-1.06Zm-1.06 7.07a.75.75 0 0 1 1.06 0 .75.75 0 0 1 0 1.06l-1.06 1.06a.75.75 0 1 1-1.06-1.06l1.06-1.06Zm1.06-7.07a.75.75 0 0 1-1.06 0 .75.75 0 0 1 0-1.06l1.06-1.06a.75.75 0 1 1 1.06 1.06l-1.06 1.06Z"
+          />
+          <path
+            fill-rule="evenodd"
+            d="M10 1.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Zm0 2.5a6 6 0 1 0 0 12 6 6 0 0 0 0-12Z"
+            clip-rule="evenodd"
           />
         </svg>
-      </button>
+        <svg v-else class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            fill-rule="evenodd"
+            d="M7.455 2.004a.75.75 0 0 1 .26.77 7 7 0 0 0 9.958 7.967.75.75 0 0 1 1.067.853A8.5 8.5 0 1 1 6.647 1.921a.75.75 0 0 1 .808 1.083Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </AppButton>
     </div>
 
-    <div class="px-3 pt-4 lg:pt-5">
-      <button
-        type="button"
-        class="flex w-full items-center justify-center gap-2 rounded-xl bg-primary-500 px-3 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-primary-600"
-        @click="openNew"
-      >
+    <!-- 新建任务（仅登录后） -->
+    <div v-if="auth.isLoggedIn" class="px-3 pt-4">
+      <AppButton variant="primary" block @click="openNew">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
           />
         </svg>
         新建任务
-      </button>
+      </AppButton>
     </div>
 
-    <div class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
-      <div class="mb-2 px-2 text-xs font-medium text-slate-400">我的方案</div>
+    <!-- 方案列表（仅登录后；列表区独立滚动，不影响侧栏固定） -->
+    <div v-if="auth.isLoggedIn" class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+      <div class="mb-2 flex items-center justify-between px-2">
+        <span class="text-xs font-medium text-slate-400 dark:text-slate-500">我的方案</span>
+        <!-- 窄屏抽屉的收起按钮；lg 以上侧栏常驻，不需要 -->
+        <button
+          type="button"
+          class="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 lg:hidden"
+          aria-label="收起方案列表"
+          @click="drawerOpen = false"
+        >
+          <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
+            />
+          </svg>
+        </button>
+      </div>
 
       <!-- 加载中 -->
-      <p v-if="solutions.loading && solutions.items.length === 0" class="px-2 py-6 text-center text-xs text-slate-400">
+      <p v-if="solutions.loading && solutions.items.length === 0" class="px-2 py-6 text-center text-xs text-slate-400 dark:text-slate-500">
         加载中…
       </p>
 
       <!-- 空态 -->
       <p
         v-else-if="solutions.items.length === 0"
-        class="px-2 py-6 text-center text-xs leading-relaxed text-slate-400"
+        class="px-2 py-6 text-center text-xs leading-relaxed text-slate-400 dark:text-slate-500"
       >
         还没有方案<br />写下第一句话就会自动创建
       </p>
@@ -170,8 +245,8 @@ function open(item: SolutionSummary): void {
             :class="[
               'group relative rounded-lg px-2.5 py-2 transition',
               item.id === activeId
-                ? 'bg-sky-50 ring-1 ring-sky-200'
-                : 'hover:bg-slate-100/80',
+                ? 'bg-primary-50 ring-1 ring-primary-200 dark:bg-primary-950/40 dark:ring-primary-800'
+                : 'hover:bg-slate-100/80 dark:hover:bg-slate-800/80',
             ]"
           >
             <button
@@ -231,6 +306,18 @@ function open(item: SolutionSummary): void {
           </div>
         </li>
       </ul>
+    </div>
+
+    <!-- 未登录占位：登录后才看得到方案列表 -->
+    <div v-else class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+      <p class="px-2 py-6 text-center text-xs leading-relaxed text-slate-400 dark:text-slate-500">
+        登录后查看<br />你的方案列表
+      </p>
+    </div>
+
+    <!-- 底端：登录入口；未登录显示「登录」，已登录显示昵称并可退出 -->
+    <div class="border-t border-slate-200/70 px-3 py-3 dark:border-slate-800/70">
+      <UserMenu />
     </div>
   </aside>
 </template>

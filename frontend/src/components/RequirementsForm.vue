@@ -1,13 +1,23 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import type { MvpFeature, RequirementsSummary, UiPage } from '@/types'
+import type { FormState, ListKey, SectionConfig, FieldConfig, MvpFeatureItem, UiPageItem } from './form/types'
+import { normalizeList, parseMvpFeatures, parseModules, parsePages } from './form/parsers'
+import { rowErrorKey } from './form/fieldStyles'
+import AppButton from '@/components/ui/AppButton.vue'
+import FormFieldRenderer from './form/FormFieldRenderer.vue'
+import MvpFeatureEditor from './form/MvpFeatureEditor.vue'
+import UiPageEditor from './form/UiPageEditor.vue'
 
 /**
  * 结构化需求录入表单（V2 流程的第一步）。
  *
  * 设计原则：**不让用户填格式**。所有「格式类」字段都是 GUI 编辑器，用户逐项
  * 填写，前端负责组装成与 `field-schema.json` 对齐的结构化 JSON 后抛给父组件。
+ *
+ * 字段渲染已拆分到 `form/` 下的子组件（FormFieldRenderer / MvpFeatureEditor /
+ * UiPageEditor），本组件只保留表单状态、校验与提交编排。
  */
 
 // ============================================================================
@@ -38,120 +48,8 @@ const emit = defineEmits<{
 }>()
 
 // ============================================================================
-// 表单内部类型
-// ============================================================================
-
-/** MVP 功能的一行录入数据（GUI 行编辑器用，提交前转换成 MvpFeature） */
-interface MvpFeatureItem {
-  /** 功能名称 */
-  name: string
-  /** 功能描述 */
-  description: string
-  /** 用户价值 */
-  value: string
-}
-
-/** 页面结构的一行录入数据（GUI 卡片编辑器用，提交前转换成 UiPage） */
-interface UiPageItem {
-  /** 页面名称 */
-  name: string
-  /** 已确认的模块列表（标签形式展示） */
-  modules: string[]
-  /** 备注 */
-  notes: string
-  /** 模块输入框里尚未确认的草稿值；仅界面使用，提交前合并进 modules 后丢弃 */
-  moduleDraft: string
-}
-
-/**
- * 字符串列表字段的 key。
- * 这些字段全部由「列表编辑器」逐条录入，用户不需要手写任何分隔或换行格式。
- */
-type ListKey = 'target_users' | 'v2_features' | 'key_interactions' | 'scope_in' | 'scope_out'
-
-/**
- * 表单原始输入。
- * 列表类字段一律用数组承载（逐条录入），结构化字段用行对象数组承载，
- * 界面层不出现「按换行 / 按竖线手写」的格式要求。
- */
-interface FormState {
-  product_name: string
-  platform: string
-  product_goal: string
-  /** 目标用户：逐条录入 */
-  target_users: string[]
-  /** MVP 功能：行编辑器 */
-  mvp_features: MvpFeatureItem[]
-  /** 未来规划：逐条录入 */
-  v2_features: string[]
-  /** 页面结构：卡片编辑器 */
-  ui_pages: UiPageItem[]
-  /** 关键交互：逐条录入 */
-  key_interactions: string[]
-  tech_auth: string
-  tech_storage: string
-  tech_frontend: string
-  tech_backend: string
-  tech_deployment: string
-  llm_usage: string
-  nf_security: string
-  nf_performance: string
-  nf_availability: string
-  /** 在范围内：逐条录入 */
-  scope_in: string[]
-  /** 不在范围内：逐条录入 */
-  scope_out: string[]
-}
-
-/** 表单控件的渲染类型 */
-type FieldType = 'input' | 'textarea' | 'select' | 'list' | 'mvp' | 'pages'
-
-/** 单个表单字段的渲染配置 */
-interface FieldConfig {
-  /** 字段 key：同时是 form 的属性名与 errors 的键 */
-  key: keyof FormState
-  label: string
-  type: FieldType
-  /** 占位提示：格式说明 + 示例；select 场景下作为空选项文案 */
-  placeholder?: string
-  /** 下拉选项（type 为 select 时使用） */
-  options?: string[]
-  /** 输入建议（type 为 input 时以 datalist 形式提供，可自由覆写） */
-  suggestions?: string[]
-  required?: boolean
-  /** textarea 行数 */
-  rows?: number
-  /** 字段标题右侧的极简说明（结构化编辑器用） */
-  hint?: string
-  /** list 编辑器：单条输入框的占位提示 */
-  itemPlaceholder?: string
-  /** list 编辑器：新增按钮文案 */
-  addLabel?: string
-  /** list 编辑器：空状态文案 */
-  emptyText?: string
-}
-
-/** 一个折叠区块的配置 */
-interface SectionConfig {
-  key: string
-  /** 标题徽章编号 */
-  no: number
-  title: string
-  hint: string
-  /** 区块内是否包含必填字段 */
-  required?: boolean
-  fields: FieldConfig[]
-}
-
-// ============================================================================
 // 常量配置
 // ============================================================================
-
-/** 结构化字段分隔符：全角竖线。仅用于「批量粘贴导入」解析历史文本，日常录入不需要 */
-const FIELD_SEPARATOR = '｜'
-
-/** 模块列表分隔符：半角 / 全角逗号、顿号均可 */
-const MODULE_SEPARATOR = /[,，、]/
 
 /** 平台选项 */
 const PLATFORM_OPTIONS = ['网页应用', '微信小程序', 'App', 'CLI']
@@ -415,18 +313,6 @@ const errors = reactive<Record<string, string>>({})
 /** JSON 预览是否展开 */
 const showJsonPreview = ref(false)
 
-/** MVP 功能的「批量粘贴导入」面板是否展开（可选兜底录入方式） */
-const showFeaturePaste = ref(false)
-
-/** MVP 功能批量粘贴的原始文本 */
-const featurePasteText = ref('')
-
-/** 页面结构的「批量粘贴导入」面板是否展开（可选兜底录入方式） */
-const showPagePaste = ref(false)
-
-/** 页面结构批量粘贴的原始文本 */
-const pagePasteText = ref('')
-
 /** 操作成功的短暂提示 */
 const successTip = ref('')
 
@@ -439,81 +325,6 @@ let successTipTimer: number | undefined
 // ============================================================================
 // 解析 / 规范化工具函数
 // ============================================================================
-
-/**
- * 多行文本 → 字符串数组。
- * 按换行分割，逐行去首尾空白并丢弃空行。
- * 主流程已改为列表编辑器，本函数仅服务于「粘贴多行自动拆分」与批量导入。
- */
-function parseList(text: string): string[] {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-/** 模块文本 → 模块数组：按逗号 / 顿号切分，去空白与空项 */
-function parseModules(text: string): string[] {
-  return text
-    .split(MODULE_SEPARATOR)
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
-
-/** 按全角竖线拆分一行，并逐段去首尾空白 */
-function splitFields(line: string): string[] {
-  return line.split(FIELD_SEPARATOR).map((part) => part.trim())
-}
-
-/**
- * 字符串数组 → 规范化数组：逐项去空白、丢弃空项、去掉完全重复项（保留首次出现）。
- * 输出直接进入 JSON，保证不会把用户误敲的空行或重复项带给后端。
- */
-function normalizeList(items: readonly string[]): string[] {
-  const result: string[] = []
-  for (const raw of items) {
-    const text = String(raw ?? '').trim()
-    if (!text || result.includes(text)) continue
-    result.push(text)
-  }
-  return result
-}
-
-/**
- * MVP 功能文本 → 结构化功能数组。
- * 每行格式「功能名｜描述｜价值」，描述与价值可省略；
- * 输出与后端 schema 的 mvp_features 数组项对齐（name 必有，其余有值才带）。
- *
- * 主录入路径是 GUI 行编辑器；本函数服务于可选的「批量粘贴导入」。
- */
-function parseMvpFeatures(text: string): MvpFeature[] {
-  return parseList(text).map((line) => {
-    const [name, description, userValue] = splitFields(line)
-    const feature: MvpFeature = { name: name ?? '' }
-    if (description) feature.description = description
-    if (userValue) feature.user_value = userValue
-    return feature
-  })
-}
-
-/**
- * 页面结构文本 → 结构化页面数组。
- * 每行格式「页面名｜模块1,模块2｜备注」，模块列表按逗号拆分，备注可省略；
- * 输出与后端 schema 的 ui_pages 数组项对齐。
- *
- * 主录入路径是 GUI 卡片编辑器；本函数服务于可选的「批量粘贴导入」。
- */
-function parsePages(text: string): UiPage[] {
-  return parseList(text).map((line) => {
-    const [name, modules, notes] = splitFields(line)
-    const page: UiPage = {
-      name: name ?? '',
-      modules: parseModules(modules ?? ''),
-    }
-    if (notes) page.notes = notes
-    return page
-  })
-}
 
 /** 结构化行是否填了内容（用于折叠头计数与空行过滤） */
 function rowHasContent(row: object): boolean {
@@ -660,106 +471,8 @@ async function copyJson(): Promise<void> {
 }
 
 // ============================================================================
-// 结构化编辑器：行级错误键
+// 页面结构卡片编辑器：模块相关操作（父组件权威，参与提交前草稿入库）
 // ============================================================================
-
-/** 结构化行内子字段的错误键，如 `mvp_features.0.name`；同时用作输入框 id 便于定位 */
-function rowErrorKey(prefix: string, index: number, field: string): string {
-  return `${prefix}.${index}.${field}`
-}
-
-/** 把焦点交给指定错误键对应的输入框 */
-async function focusRowInput(key: string): Promise<void> {
-  await nextTick()
-  document.getElementById(`field-${key}`)?.focus()
-}
-
-// ============================================================================
-// 字符串列表编辑器（目标用户 / 未来规划 / 关键交互 / 范围）
-// ============================================================================
-
-/** 追加一个空列表项，并把焦点交给新行 */
-async function addListItem(key: ListKey): Promise<void> {
-  form[key].push('')
-  await focusRowInput(`${key}.${form[key].length - 1}`)
-}
-
-/** 删除一个列表项 */
-function removeListItem(key: ListKey, index: number): void {
-  form[key].splice(index, 1)
-  clearError(key)
-}
-
-/** 列表项输入回写（显式写法避免数组下标的联合类型告警） */
-function setListItem(key: ListKey, index: number, value: string): void {
-  const items = form[key]
-  if (index < 0 || index >= items.length) return
-  items[index] = value
-  clearError(key)
-}
-
-/**
- * 列表行内粘贴多行文本：自动拆成多条，用户不必先自己整理格式。
- * 单行粘贴不拦截，交给浏览器默认行为。
- */
-function handleListPaste(event: ClipboardEvent, key: ListKey, index: number): void {
-  const text = event.clipboardData?.getData('text') ?? ''
-  if (!text || !/[\r\n]/.test(text)) return
-  event.preventDefault()
-  const items = parseList(text)
-  if (items.length === 0) return
-  form[key].splice(index, 1, ...items)
-  clearError(key)
-}
-
-// ============================================================================
-// MVP 功能行编辑器
-// ============================================================================
-
-/** 添加一个空白功能行，并把焦点交给新行的功能名称输入框 */
-async function addFeature(): Promise<void> {
-  form.mvp_features.push({ name: '', description: '', value: '' })
-  await focusRowInput(rowErrorKey('mvp_features', form.mvp_features.length - 1, 'name'))
-}
-
-/** 删除指定下标的功能行 */
-function removeFeature(index: number): void {
-  form.mvp_features.splice(index, 1)
-  clearError('mvp_features')
-}
-
-/** 批量粘贴导入：把「功能名｜描述｜价值」多行文本解析成结构化行，追加到列表末尾 */
-function importFeatures(): void {
-  const imported = parseMvpFeatures(featurePasteText.value)
-  if (imported.length === 0) return
-  for (const feature of imported) {
-    form.mvp_features.push({
-      name: feature.name,
-      description: feature.description ?? '',
-      value: feature.user_value ?? '',
-    })
-  }
-  featurePasteText.value = ''
-  showFeaturePaste.value = false
-  clearError('mvp_features')
-  flashSuccessTip(`已导入 ${imported.length} 个功能`)
-}
-
-// ============================================================================
-// 页面结构卡片编辑器
-// ============================================================================
-
-/** 添加一张空白页面卡片，并把焦点交给页面名称输入框 */
-async function addPage(): Promise<void> {
-  form.ui_pages.push({ name: '', modules: [], notes: '', moduleDraft: '' })
-  await focusRowInput(rowErrorKey('ui_pages', form.ui_pages.length - 1, 'name'))
-}
-
-/** 删除一张页面卡片 */
-function removePage(index: number): void {
-  form.ui_pages.splice(index, 1)
-  clearError('ui_pages')
-}
 
 /** 把某张卡片模块输入框里的草稿确认为标签（支持一次输入多个，逗号分隔） */
 function addModule(index: number): void {
@@ -815,9 +528,24 @@ function commitModuleDrafts(): void {
   form.ui_pages.forEach((_, index) => addModule(index))
 }
 
+/** 批量粘贴导入：把「功能名｜描述｜价值」多行文本解析成结构化行，追加到列表末尾 */
+function importFeatures(text: string): void {
+  const imported = parseMvpFeatures(text)
+  if (imported.length === 0) return
+  for (const feature of imported) {
+    form.mvp_features.push({
+      name: feature.name,
+      description: feature.description ?? '',
+      value: feature.user_value ?? '',
+    })
+  }
+  clearError('mvp_features')
+  flashSuccessTip(`已导入 ${imported.length} 个功能`)
+}
+
 /** 批量粘贴导入：把「页面名｜模块1,模块2｜备注」多行文本解析成页面卡片 */
-function importPages(): void {
-  const imported = parsePages(pagePasteText.value)
+function importPages(text: string): void {
+  const imported = parsePages(text)
   if (imported.length === 0) return
   for (const page of imported) {
     form.ui_pages.push({
@@ -827,8 +555,6 @@ function importPages(): void {
       moduleDraft: '',
     })
   }
-  pagePasteText.value = ''
-  showPagePaste.value = false
   clearError('ui_pages')
   flashSuccessTip(`已导入 ${imported.length} 个页面`)
 }
@@ -992,21 +718,19 @@ function fillExample(): void {
 function resetForm(): void {
   Object.assign(form, emptyForm())
   for (const key of Object.keys(errors)) delete errors[key]
-  showFeaturePaste.value = false
-  showPagePaste.value = false
-  featurePasteText.value = ''
-  pagePasteText.value = ''
+  showJsonPreview.value = false
   restored.value = false
+}
+
+/** 通用字段（input / textarea / select / list）值变化时回写并清错 */
+function onFieldUpdate(key: keyof FormState, value: string | string[]): void {
+  form[key] = value as never
+  clearError(key)
 }
 
 /** 普通控件（input / textarea / select）需要 label 的 for 指向控件本身 */
 function isPlainField(field: FieldConfig): boolean {
   return field.type === 'input' || field.type === 'textarea' || field.type === 'select'
-}
-
-/** 取列表字段的数组值（模板中收窄类型用） */
-function listValue(key: keyof FormState): string[] {
-  return form[key] as string[]
 }
 
 /** 某字段是否已填写（用于折叠头计数） */
@@ -1033,21 +757,6 @@ function hasError(section: SectionConfig): boolean {
   )
 }
 
-/** 表单控件样式：有错误时切换为红色边框与红色聚焦环 */
-function controlClass(key: string): string {
-  const base =
-    'w-full rounded-xl border bg-slate-50/50 px-3.5 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:bg-white focus:ring-4'
-  const state = errors[key]
-    ? 'border-red-400 focus:border-red-500 focus:ring-red-100'
-    : 'border-slate-200 focus:border-primary-500 focus:ring-primary-100'
-  return `${base} ${state}`
-}
-
-/** 结构化编辑器里较小的输入框样式（与 controlClass 同一套配色） */
-function rowControlClass(key: string): string {
-  return controlClass(key).replace('px-3.5 py-2.5', 'px-3 py-2')
-}
-
 /** 暴露给父组件：读取当前摘要（父组件需要时可直接取，无需等 submit） */
 defineExpose({ getSummary: () => currentSummary.value })
 </script>
@@ -1056,11 +765,12 @@ defineExpose({ getSummary: () => currentSummary.value })
   <div>
     <!-- 页面标题与说明 -->
     <div class="mb-6">
-      <h1 class="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+      <h1 class="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100 sm:text-3xl">
         告诉我们你的产品想法
       </h1>
-      <p class="mt-2 max-w-xl text-sm leading-relaxed text-slate-600">
-        按字段逐项填写下面的表单，列表类内容逐条添加即可，<span class="font-medium text-slate-700"
+      <p class="mt-2 max-w-xl text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+        按字段逐项填写下面的表单，列表类内容逐条添加即可，<span
+          class="font-medium text-slate-700 dark:text-slate-300"
           >不需要自己拼格式或写分隔符</span
         >，前端会实时转换成后端 Skill 可直接使用的结构化 JSON。带
         <span class="text-red-500">*</span> 的字段为必填。
@@ -1070,11 +780,7 @@ defineExpose({ getSummary: () => currentSummary.value })
 
     <!-- 操作栏：JSON 预览开关 / 示例 / 清空 -->
     <div class="mb-6 flex flex-wrap items-center gap-2">
-      <button
-        type="button"
-        class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-primary-400 hover:text-primary-700"
-        @click="showJsonPreview = !showJsonPreview"
-      >
+      <AppButton variant="secondary" size="sm" @click="showJsonPreview = !showJsonPreview">
         <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             fill-rule="evenodd"
@@ -1083,21 +789,9 @@ defineExpose({ getSummary: () => currentSummary.value })
           />
         </svg>
         {{ showJsonPreview ? '关闭 JSON 预览' : '查看 JSON 预览' }}
-      </button>
-      <button
-        type="button"
-        class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-primary-400 hover:text-primary-700"
-        @click="fillExample"
-      >
-        填充示例
-      </button>
-      <button
-        type="button"
-        class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-red-300 hover:text-red-600"
-        @click="resetForm"
-      >
-        清空
-      </button>
+      </AppButton>
+      <AppButton variant="secondary" size="sm" @click="fillExample">填充示例</AppButton>
+      <AppButton variant="ghost" size="sm" @click="resetForm">清空</AppButton>
 
       <!-- 操作成功的短暂提示，自动淡出 -->
       <Transition
@@ -1108,7 +802,7 @@ defineExpose({ getSummary: () => currentSummary.value })
       >
         <span
           v-if="successTip"
-          class="ml-auto flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600 ring-1 ring-emerald-200"
+          class="ml-auto flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:ring-emerald-800/60"
         >
           <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path
@@ -1125,33 +819,29 @@ defineExpose({ getSummary: () => currentSummary.value })
     <!-- JSON 预览面板：实时反映表单内容，等宽字体便于阅读与排查 -->
     <section
       v-if="showJsonPreview"
-      class="mb-6 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm"
+      class="mb-6 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900"
     >
-      <div class="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
+      <div class="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3 dark:border-slate-800">
         <div class="min-w-0">
-          <h2 class="text-sm font-semibold text-slate-900">结构化 JSON 预览</h2>
-          <p class="mt-0.5 text-xs text-slate-500">
+          <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">结构化 JSON 预览</h2>
+          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
             实时反映表单内容 · 与后端 Skill 字段结构一致 · {{ jsonSize }}
           </p>
         </div>
-        <button
-          type="button"
-          class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-          @click="copyJson"
-        >
+        <AppButton variant="secondary" size="sm" @click="copyJson">
           <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path
-              d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.12A1.5 1.5 0 0 1 17 6.622V12.5A1.5 1.5 0 0 1 15.5 14h-1v-3.379a3 3 0 0 0-.879-2.121L10.5 5.379A3 3 0 0 0 8.379 4.5H7v-1Z"
+              d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.12A1.5 1.5 0 0 1 17 6.622V12.5A1.5 1.5 0 0 1 15.5 14h-1v-3.379a3 3 0 0 0-.879-2.121L10.5 5.379A3 3 0 0 0 8.378 4.5H7v-1Z"
             />
             <path
               d="M4.5 6A1.5 1.5 0 0 0 3 7.5v9A1.5 1.5 0 0 0 4.5 18h7a1.5 1.5 0 0 0 1.5-1.5v-5.879a1.5 1.5 0 0 0-.44-1.06L9.44 6.439A1.5 1.5 0 0 0 8.378 6H4.5Z"
             />
           </svg>
           复制 JSON
-        </button>
+        </AppButton>
       </div>
       <pre
-        class="max-h-96 overflow-auto bg-slate-50 px-5 py-4 font-mono text-xs leading-relaxed text-slate-700"
+        class="max-h-96 overflow-auto bg-slate-50 px-5 py-4 font-mono text-xs leading-relaxed text-slate-700 dark:bg-slate-800/60 dark:text-slate-300"
         >{{ jsonPreview }}</pre
       >
     </section>
@@ -1162,36 +852,36 @@ defineExpose({ getSummary: () => currentSummary.value })
       <section
         v-for="section in SECTIONS"
         :key="section.key"
-        class="rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-200/50"
+        class="rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-200/50 dark:border-slate-700/80 dark:bg-slate-900 dark:shadow-none"
       >
         <!-- 区块标题：点击折叠 / 展开 -->
         <button
           type="button"
-          class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-slate-50 sm:px-6"
+          class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-slate-50 dark:hover:bg-slate-800/60 sm:px-6"
           :aria-expanded="expanded[section.key]"
           @click="expanded[section.key] = !expanded[section.key]"
         >
           <span class="flex items-center gap-3">
             <span
-              class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-100 text-sm font-bold text-primary-700"
+              class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-100 text-sm font-bold text-primary-700 dark:bg-primary-950/50 dark:text-primary-300"
             >
               {{ section.no }}
             </span>
             <span class="min-w-0">
-              <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-slate-900">
+              <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-slate-900 dark:text-slate-100">
                 {{ section.title }}
                 <span
                   v-if="section.required"
-                  class="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500 ring-1 ring-red-200"
+                  class="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-400 dark:ring-red-900/50"
                   >必填</span
                 >
                 <span
                   v-if="!expanded[section.key] && hasError(section)"
-                  class="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500 ring-1 ring-red-200"
+                  class="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-400 dark:ring-red-900/50"
                   >有错误</span
                 >
               </span>
-              <span class="block text-xs text-slate-500">
+              <span class="block text-xs text-slate-500 dark:text-slate-400">
                 {{ section.hint }}
                 <template v-if="!expanded[section.key]">
                   · 已填 {{ filledCount(section) }}/{{ section.fields.length }}
@@ -1200,7 +890,7 @@ defineExpose({ getSummary: () => currentSummary.value })
             </span>
           </span>
           <svg
-            class="h-4 w-4 shrink-0 text-slate-400 transition-transform"
+            class="h-4 w-4 shrink-0 text-slate-400 transition-transform dark:text-slate-500"
             :class="expanded[section.key] ? 'rotate-180' : ''"
             viewBox="0 0 20 20"
             fill="currentColor"
@@ -1217,14 +907,14 @@ defineExpose({ getSummary: () => currentSummary.value })
         <!-- 区块字段 -->
         <div
           v-show="expanded[section.key]"
-          class="space-y-5 border-t border-slate-100 px-5 pb-6 pt-5 sm:px-6"
+          class="space-y-5 border-t border-slate-100 px-5 pb-6 pt-5 dark:border-slate-800 sm:px-6"
         >
           <div v-for="field in section.fields" :key="field.key">
             <!-- 普通控件：label 关联到控件 -->
             <label
               v-if="isPlainField(field)"
               :for="`field-${field.key}`"
-              class="mb-2 block text-sm font-medium text-slate-800"
+              class="mb-2 block text-sm font-medium text-slate-800 dark:text-slate-200"
             >
               {{ field.label }}
               <span v-if="field.required" class="ml-0.5 text-red-500" aria-hidden="true">*</span>
@@ -1232,497 +922,50 @@ defineExpose({ getSummary: () => currentSummary.value })
 
             <!-- 结构化编辑器：整体作为一组，label 不加 for -->
             <div v-else class="mb-2 flex flex-wrap items-baseline gap-x-2">
-              <span class="text-sm font-medium text-slate-800">
+              <span class="text-sm font-medium text-slate-800 dark:text-slate-200">
                 {{ field.label }}
                 <span v-if="field.required" class="ml-0.5 text-red-500" aria-hidden="true">*</span>
               </span>
-              <span v-if="field.hint" class="text-xs text-slate-400">{{ field.hint }}</span>
+              <span v-if="field.hint" class="text-xs text-slate-400 dark:text-slate-500">{{ field.hint }}</span>
             </div>
 
-            <!-- 单行文本（含输入建议，仍可自由填写） -->
-            <template v-if="field.type === 'input'">
-              <input
-                :id="`field-${field.key}`"
-                v-model="form[field.key] as string"
-                type="text"
-                :class="controlClass(field.key)"
-                :placeholder="field.placeholder"
-                :list="field.suggestions ? `${field.key}-suggestions` : undefined"
-                @input="clearError(field.key)"
-              />
-              <!-- 常见选项建议：点击选择或直接输入自定义值 -->
-              <datalist v-if="field.suggestions" :id="`${field.key}-suggestions`">
-                <option v-for="option in field.suggestions" :key="option" :value="option" />
-              </datalist>
-            </template>
+            <!-- 通用字段（input / textarea / select / list）交给 FormFieldRenderer -->
+            <FormFieldRenderer
+              v-if="field.type !== 'mvp' && field.type !== 'pages'"
+              :field="field"
+              :model-value="(form[field.key] as string | string[])"
+              :error="errors[field.key]"
+              @update:model-value="(v) => onFieldUpdate(field.key, v as string | string[])"
+            />
 
-            <!-- 多行文本 -->
-            <textarea
-              v-else-if="field.type === 'textarea'"
-              :id="`field-${field.key}`"
-              v-model="form[field.key] as string"
-              :rows="field.rows ?? 4"
-              :class="controlClass(field.key)"
-              :placeholder="field.placeholder"
-              @input="clearError(field.key)"
-            ></textarea>
-
-            <!-- 下拉选择（自定义箭头） -->
-            <div v-else-if="field.type === 'select'" class="relative">
-              <select
-                :id="`field-${field.key}`"
-                v-model="form[field.key] as string"
-                :class="controlClass(field.key) + ' appearance-none pr-10'"
-                @change="clearError(field.key)"
-              >
-                <option value="">{{ field.placeholder }}</option>
-                <option v-for="option in field.options ?? []" :key="option" :value="option">
-                  {{ option }}
-                </option>
-              </select>
-              <svg
-                class="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <path
-                  fill-rule="evenodd"
-                  d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
-                  clip-rule="evenodd"
-                />
-              </svg>
-            </div>
-
-            <!--
-              字符串列表编辑器（目标用户 / 未来规划 / 关键交互 / 范围）。
-              一条一行、逐条添加，用户不需要关心换行或分隔符；粘贴多行会自动拆分。
-            -->
-            <div
-              v-else-if="field.type === 'list'"
-              :id="`field-${field.key}`"
-              class="space-y-2"
-              role="group"
-              :aria-label="field.label"
-            >
-              <p
-                v-if="listValue(field.key).length === 0"
-                class="rounded-xl border border-dashed border-slate-300 bg-slate-50/50 px-4 py-5 text-center text-xs text-slate-400"
-              >
-                {{ field.emptyText }}
-              </p>
-
-              <div
-                v-for="(item, index) in listValue(field.key)"
-                :key="index"
-                class="flex items-center gap-2"
-              >
-                <span class="w-5 shrink-0 text-center text-xs font-medium text-slate-400">
-                  {{ index + 1 }}
-                </span>
-                <input
-                  :id="`field-${field.key}.${index}`"
-                  :value="item"
-                  type="text"
-                  :class="rowControlClass(field.key)"
-                  :placeholder="field.itemPlaceholder"
-                  @input="
-                    setListItem(
-                      field.key as ListKey,
-                      index,
-                      ($event.target as HTMLInputElement).value,
-                    )
-                  "
-                  @paste="handleListPaste($event, field.key as ListKey, index)"
-                />
-                <button
-                  type="button"
-                  title="删除该条"
-                  class="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-red-50 hover:text-red-600"
-                  @click="removeListItem(field.key as ListKey, index)"
-                >
-                  删除
-                </button>
-              </div>
-
-              <button
-                type="button"
-                class="w-full rounded-xl border border-dashed border-slate-300 px-4 py-2.5 text-xs font-medium text-slate-500 transition hover:border-primary-400 hover:text-primary-600"
-                @click="addListItem(field.key as ListKey)"
-              >
-                ＋ {{ field.addLabel }}
-              </button>
-            </div>
-
-            <!--
-              MVP 功能：结构化行编辑器。
-              用户按字段逐项填写，无需手写分隔符格式，前端直接组装结构化数据。
-            -->
-            <div
+            <!-- MVP 功能行编辑器 -->
+            <MvpFeatureEditor
               v-else-if="field.type === 'mvp'"
-              :id="`field-${field.key}`"
-              class="space-y-2.5"
-              role="group"
-              :aria-label="field.label"
-            >
-              <!-- 空状态引导 -->
-              <div
-                v-if="form.mvp_features.length === 0"
-                class="rounded-xl border border-dashed border-slate-300 bg-slate-50/50 px-4 py-6 text-center text-xs text-slate-400"
-              >
-                还没有功能项，点击下方「添加功能」逐项填写
-              </div>
+              v-model="form.mvp_features"
+              :errors="errors"
+              :clear-error="clearError"
+              :import-features="importFeatures"
+              :field-id="`field-${field.key}`"
+            />
 
-              <!-- 功能行卡片 -->
-              <div
-                v-for="(item, index) in form.mvp_features"
-                :key="index"
-                class="rounded-xl border border-slate-200 bg-slate-50/40 p-3.5"
-              >
-                <div class="mb-2.5 flex items-center justify-between">
-                  <span class="text-xs font-semibold text-slate-500">功能 {{ index + 1 }}</span>
-                  <button
-                    type="button"
-                    title="删除该功能"
-                    class="rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-red-50 hover:text-red-600"
-                    @click="removeFeature(index)"
-                  >
-                    删除
-                  </button>
-                </div>
-
-                <div class="space-y-2.5">
-                  <div>
-                    <label
-                      :for="`field-mvp_features.${index}.name`"
-                      class="mb-1.5 block text-xs font-medium text-slate-700"
-                    >
-                      功能名称
-                      <span class="text-red-500" aria-hidden="true">*</span>
-                    </label>
-                    <input
-                      :id="`field-mvp_features.${index}.name`"
-                      v-model="item.name"
-                      type="text"
-                      :class="rowControlClass(rowErrorKey('mvp_features', index, 'name'))"
-                      placeholder="例如：问卷填写"
-                      @input="clearError(rowErrorKey('mvp_features', index, 'name'))"
-                    />
-                    <p
-                      v-if="errors[rowErrorKey('mvp_features', index, 'name')]"
-                      class="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-red-600"
-                    >
-                      <svg
-                        class="mt-0.5 h-3.5 w-3.5 shrink-0"
-                        viewBox="0 0 20 20"
-                        fill="currentColor"
-                        aria-hidden="true"
-                      >
-                        <path
-                          fill-rule="evenodd"
-                          d="M18 10A8 8 0 1 1 2 10a8 8 0 0 1 16 0Zm-8-4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
-                          clip-rule="evenodd"
-                        />
-                      </svg>
-                      <span>{{ errors[rowErrorKey('mvp_features', index, 'name')] }}</span>
-                    </p>
-                  </div>
-
-                  <div>
-                    <label
-                      :for="`field-mvp_features.${index}.description`"
-                      class="mb-1.5 block text-xs font-medium text-slate-700"
-                    >
-                      功能描述
-                      <span class="text-red-500" aria-hidden="true">*</span>
-                    </label>
-                    <input
-                      :id="`field-mvp_features.${index}.description`"
-                      v-model="item.description"
-                      type="text"
-                      :class="rowControlClass(rowErrorKey('mvp_features', index, 'description'))"
-                      placeholder="例如：分基础与进阶两组收集产品信息"
-                      @input="clearError(rowErrorKey('mvp_features', index, 'description'))"
-                    />
-                    <p
-                      v-if="errors[rowErrorKey('mvp_features', index, 'description')]"
-                      class="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-red-600"
-                    >
-                      <svg
-                        class="mt-0.5 h-3.5 w-3.5 shrink-0"
-                        viewBox="0 0 20 20"
-                        fill="currentColor"
-                        aria-hidden="true"
-                      >
-                        <path
-                          fill-rule="evenodd"
-                          d="M18 10A8 8 0 1 1 2 10a8 8 0 0 1 16 0Zm-8-4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
-                          clip-rule="evenodd"
-                        />
-                      </svg>
-                      <span>{{ errors[rowErrorKey('mvp_features', index, 'description')] }}</span>
-                    </p>
-                  </div>
-
-                  <div>
-                    <label
-                      :for="`field-mvp_features.${index}.value`"
-                      class="mb-1.5 block text-xs font-medium text-slate-700"
-                    >
-                      价值（选填）
-                    </label>
-                    <input
-                      :id="`field-mvp_features.${index}.value`"
-                      v-model="item.value"
-                      type="text"
-                      :class="rowControlClass(`mvp_features.${index}.value`)"
-                      placeholder="例如：降低填写门槛"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <!-- 添加功能行 -->
-              <button
-                type="button"
-                class="w-full rounded-xl border border-dashed border-slate-300 px-4 py-2.5 text-xs font-medium text-slate-500 transition hover:border-primary-400 hover:text-primary-600"
-                @click="addFeature"
-              >
-                ＋ 添加功能
-              </button>
-
-              <!-- 批量粘贴导入（可选）：兼容「功能名｜描述｜价值」旧格式文本 -->
-              <div class="pt-0.5">
-                <button
-                  type="button"
-                  class="text-xs text-slate-400 underline-offset-2 transition hover:text-primary-600 hover:underline"
-                  @click="showFeaturePaste = !showFeaturePaste"
-                >
-                  {{ showFeaturePaste ? '收起批量粘贴' : '批量粘贴导入（可选）' }}
-                </button>
-                <div v-if="showFeaturePaste" class="mt-2 space-y-2">
-                  <textarea
-                    v-model="featurePasteText"
-                    rows="3"
-                    class="w-full resize-y rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-primary-500 focus:bg-white focus:ring-4 focus:ring-primary-100"
-                    placeholder="每行一个功能：功能名｜描述｜价值，例如：&#10;问卷填写｜分基础与进阶两组收集产品信息｜降低填写门槛"
-                  ></textarea>
-                  <button
-                    type="button"
-                    class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-primary-400 hover:text-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="!featurePasteText.trim()"
-                    @click="importFeatures"
-                  >
-                    解析并导入
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!--
-              页面结构：卡片 + 模块标签编辑器。
-              页面名称、模块、备注各自独立输入；模块回车/逗号即成标签，无需手写格式。
-            -->
-            <div
-              v-else-if="field.type === 'pages'"
-              :id="`field-${field.key}`"
-              class="space-y-3"
-              role="group"
-              :aria-label="field.label"
-            >
-              <!-- 空状态引导 -->
-              <div
-                v-if="form.ui_pages.length === 0"
-                class="rounded-xl border border-dashed border-slate-300 bg-slate-50/50 px-4 py-6 text-center text-xs text-slate-400"
-              >
-                还没有页面，点击下方「添加页面」逐张填写
-              </div>
-
-              <!-- 页面卡片 -->
-              <div
-                v-for="(page, index) in form.ui_pages"
-                :key="index"
-                class="rounded-xl border border-slate-200 bg-slate-50/40 p-3.5"
-              >
-                <div class="mb-2.5 flex items-center justify-between">
-                  <span class="text-xs font-semibold text-slate-500">页面 {{ index + 1 }}</span>
-                  <button
-                    type="button"
-                    title="删除该页面"
-                    class="rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-red-50 hover:text-red-600"
-                    @click="removePage(index)"
-                  >
-                    删除
-                  </button>
-                </div>
-
-                <div class="space-y-2.5">
-                  <!-- 页面名称 -->
-                  <div>
-                    <label
-                      :for="`field-ui_pages.${index}.name`"
-                      class="mb-1.5 block text-xs font-medium text-slate-700"
-                    >
-                      页面名称
-                      <span class="text-red-500" aria-hidden="true">*</span>
-                    </label>
-                    <input
-                      :id="`field-ui_pages.${index}.name`"
-                      v-model="page.name"
-                      type="text"
-                      :class="rowControlClass(rowErrorKey('ui_pages', index, 'name'))"
-                      placeholder="例如：首页"
-                      @input="clearError(rowErrorKey('ui_pages', index, 'name'))"
-                    />
-                    <p
-                      v-if="errors[rowErrorKey('ui_pages', index, 'name')]"
-                      class="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-red-600"
-                    >
-                      <svg
-                        class="mt-0.5 h-3.5 w-3.5 shrink-0"
-                        viewBox="0 0 20 20"
-                        fill="currentColor"
-                        aria-hidden="true"
-                      >
-                        <path
-                          fill-rule="evenodd"
-                          d="M18 10A8 8 0 1 1 2 10a8 8 0 0 1 16 0Zm-8-4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
-                          clip-rule="evenodd"
-                        />
-                      </svg>
-                      <span>{{ errors[rowErrorKey('ui_pages', index, 'name')] }}</span>
-                    </p>
-                  </div>
-
-                  <!-- 模块标签 -->
-                  <div>
-                    <label
-                      :for="`field-ui_pages.${index}.modules`"
-                      class="mb-1.5 block text-xs font-medium text-slate-700"
-                    >
-                      模块 / 区块
-                      <span class="text-red-500" aria-hidden="true">*</span>
-                      <span class="ml-1 font-normal text-slate-400">回车或逗号确认一个模块</span>
-                    </label>
-
-                    <!-- 已确认的模块标签 -->
-                    <div v-if="page.modules.length > 0" class="mb-2 flex flex-wrap gap-1.5">
-                      <span
-                        v-for="(module, moduleIndex) in page.modules"
-                        :key="`${module}-${moduleIndex}`"
-                        class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100"
-                      >
-                        {{ module }}
-                        <button
-                          type="button"
-                          :title="`移除模块：${module}`"
-                          class="text-primary-400 transition hover:text-red-600"
-                          @click="removeModule(index, moduleIndex)"
-                        >
-                          ×
-                        </button>
-                      </span>
-                    </div>
-
-                    <div class="flex items-center gap-2">
-                      <input
-                        :id="`field-ui_pages.${index}.modules`"
-                        v-model="page.moduleDraft"
-                        type="text"
-                        :class="rowControlClass(rowErrorKey('ui_pages', index, 'modules'))"
-                        placeholder="例如：产品介绍（可连续输入，用逗号分隔）"
-                        @keydown="onModuleKeydown($event, index)"
-                        @paste="handleModulePaste($event, index)"
-                        @input="clearError(rowErrorKey('ui_pages', index, 'modules'))"
-                      />
-                      <button
-                        type="button"
-                        class="shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-                        @click="addModule(index)"
-                      >
-                        添加模块
-                      </button>
-                    </div>
-                    <p
-                      v-if="errors[rowErrorKey('ui_pages', index, 'modules')]"
-                      class="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-red-600"
-                    >
-                      <svg
-                        class="mt-0.5 h-3.5 w-3.5 shrink-0"
-                        viewBox="0 0 20 20"
-                        fill="currentColor"
-                        aria-hidden="true"
-                      >
-                        <path
-                          fill-rule="evenodd"
-                          d="M18 10A8 8 0 1 1 2 10a8 8 0 0 1 16 0Zm-8-4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
-                          clip-rule="evenodd"
-                        />
-                      </svg>
-                      <span>{{ errors[rowErrorKey('ui_pages', index, 'modules')] }}</span>
-                    </p>
-                  </div>
-
-                  <!-- 备注 -->
-                  <div>
-                    <label
-                      :for="`field-ui_pages.${index}.notes`"
-                      class="mb-1.5 block text-xs font-medium text-slate-700"
-                    >
-                      备注（选填）
-                    </label>
-                    <input
-                      :id="`field-ui_pages.${index}.notes`"
-                      v-model="page.notes"
-                      type="text"
-                      :class="rowControlClass(`ui_pages.${index}.notes`)"
-                      placeholder="例如：面向新用户"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <!-- 添加页面卡片 -->
-              <button
-                type="button"
-                class="w-full rounded-xl border border-dashed border-slate-300 px-4 py-2.5 text-xs font-medium text-slate-500 transition hover:border-primary-400 hover:text-primary-600"
-                @click="addPage"
-              >
-                ＋ 添加页面
-              </button>
-
-              <!-- 批量粘贴导入（可选）：兼容「页面名｜模块1,模块2｜备注」旧格式文本 -->
-              <div class="pt-0.5">
-                <button
-                  type="button"
-                  class="text-xs text-slate-400 underline-offset-2 transition hover:text-primary-600 hover:underline"
-                  @click="showPagePaste = !showPagePaste"
-                >
-                  {{ showPagePaste ? '收起批量粘贴' : '批量粘贴导入（可选）' }}
-                </button>
-                <div v-if="showPagePaste" class="mt-2 space-y-2">
-                  <textarea
-                    v-model="pagePasteText"
-                    rows="3"
-                    class="w-full resize-y rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-primary-500 focus:bg-white focus:ring-4 focus:ring-primary-100"
-                    placeholder="每行一个页面：页面名｜模块1,模块2｜备注，例如：&#10;首页｜产品介绍,快速开始｜面向新用户"
-                  ></textarea>
-                  <button
-                    type="button"
-                    class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-primary-400 hover:text-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="!pagePasteText.trim()"
-                    @click="importPages"
-                  >
-                    解析并导入
-                  </button>
-                </div>
-              </div>
-            </div>
+            <!-- 页面结构卡片编辑器 -->
+            <UiPageEditor
+              v-else
+              v-model="form.ui_pages"
+              :errors="errors"
+              :clear-error="clearError"
+              :add-module="addModule"
+              :remove-module="removeModule"
+              :on-module-keydown="onModuleKeydown"
+              :handle-module-paste="handleModulePaste"
+              :import-pages="importPages"
+              :field-id="`field-${field.key}`"
+            />
 
             <!-- 红色错误提示（字段级，如「至少添加一个目标用户角色」） -->
             <p
               v-if="errors[field.key]"
-              class="mt-2 flex items-start gap-1.5 text-xs font-medium text-red-600"
+              class="mt-2 flex items-start gap-1.5 text-xs font-medium text-red-600 dark:text-red-400"
             >
               <svg class="mt-0.5 h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                 <path
@@ -1739,14 +982,10 @@ defineExpose({ getSummary: () => currentSummary.value })
 
       <!-- 提交区 -->
       <div class="pt-2">
-        <button
-          type="button"
-          class="w-full rounded-xl bg-gradient-to-r from-primary-500 to-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-500/25 transition hover:from-primary-600 hover:to-sky-700 hover:shadow-sky-500/35 focus:outline-none focus:ring-4 focus:ring-primary-200 active:scale-[0.99]"
-          @click="handleSubmit"
-        >
+        <AppButton variant="primary" block size="md" @click="handleSubmit">
           提交需求，开始 AI 澄清
-        </button>
-        <p class="mt-3 text-center text-xs text-slate-400">
+        </AppButton>
+        <p class="mt-3 text-center text-xs text-slate-400 dark:text-slate-500">
           提交前自动校验必填项、字段完整性与范围冲突 · 可随时打开 JSON 预览核对
         </p>
         <!--
@@ -1754,13 +993,9 @@ defineExpose({ getSummary: () => currentSummary.value })
           并排会把它抬到和提交同等的视觉权重上。
         -->
         <div class="mt-4 flex justify-center">
-          <button
-            type="button"
-            class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-            @click="emit('back')"
-          >
+          <AppButton variant="secondary" size="md" @click="emit('back')">
             {{ backLabel }}
-          </button>
+          </AppButton>
         </div>
       </div>
     </form>

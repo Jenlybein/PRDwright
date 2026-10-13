@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import SolutionSidebar from '../components/SolutionSidebar.vue'
 import * as solutionApi from '../services/solutionService'
+import { useAuthStore } from '../stores/auth'
 import { useSolutionsStore } from '../stores/solutions'
 import type { SolutionSummary } from '../types'
 
@@ -63,6 +64,9 @@ function makeRouter(): Router {
 /** 挂载侧边栏并等首次列表请求落地 */
 async function mountSidebar(router: Router = makeRouter()): Promise<VueWrapper> {
   await router.push('/v2')
+  // 侧边栏常驻，但「新建任务」与方案列表只在登录后展示，因此这里预置登录态
+  const auth = useAuthStore()
+  auth.user = { id: 1, username: 'tester' }
   // 组件与用例共用同一个 pinia（`beforeEach` 里已激活），
   // 否则用例改 `solutions.currentId` 影响不到已挂载的组件
   const wrapper = mount(SolutionSidebar, { global: { plugins: [router] } })

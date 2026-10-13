@@ -80,7 +80,7 @@ describe('SummaryDiffPanel', () => {
     const rows = wrapper.findAll('li')
 
     expect(rows[0]?.html()).toContain('emerald')
-    expect(rows[1]?.html()).toContain('sky')
+    expect(rows[1]?.html()).toContain('primary')
     expect(rows[2]?.html()).toContain('rose')
   })
 

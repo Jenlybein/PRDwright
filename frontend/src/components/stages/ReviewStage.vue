@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import DocumentReview from '@/components/DocumentReview.vue'
+import AppButton from '@/components/ui/AppButton.vue'
 import type { ViewState } from '@/types'
 
 /**
@@ -57,7 +58,7 @@ const emit = defineEmits<{
     <!-- 优化失败等非正常结尾时展示原因（原文档内容保留不变） -->
     <p
       v-if="error"
-      class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+      class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
       role="alert"
     >
       <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -78,87 +79,69 @@ const emit = defineEmits<{
     >
       <template #actions="{ save }">
         <!-- 保存 -->
-        <button
-          type="button"
-          class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
-          @click="save"
-        >
-          保存
-        </button>
+        <AppButton variant="primary" size="sm" @click="save">保存</AppButton>
       </template>
     </DocumentReview>
 
     <!-- 各文档对应的后续操作 -->
     <div class="flex flex-wrap items-center justify-between gap-2">
-      <button
-        type="button"
-        class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-        @click="emit('back')"
-      >
+      <AppButton variant="secondary" size="sm" @click="emit('back')">
         {{ backLabel ?? '返回对话' }}
-      </button>
+      </AppButton>
 
       <div class="flex flex-wrap items-center gap-2">
         <!-- 各阶段按顺序推进：PRD 完成 → 生成接口文档；接口文档完成 → 生成提示词套件 -->
-        <button
+        <AppButton
           v-if="viewState === 'review-prd'"
-          type="button"
-          class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
+          variant="secondary"
+          size="sm"
+          class="!border-primary-300 !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
           @click="emit('generateApiDocs')"
         >
           生成接口文档
-        </button>
+        </AppButton>
 
-        <button
+        <AppButton
           v-else-if="viewState === 'review-api-docs'"
-          type="button"
-          class="rounded-lg border border-primary-300 px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:bg-primary-50"
+          variant="secondary"
+          size="sm"
+          class="!border-primary-300 !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
           @click="emit('generatePrompts')"
         >
           生成提示词套件
-        </button>
+        </AppButton>
 
         <!-- 其它已生成的文档的查看入口（当前阶段除外）。
              没有正文的文档不出现入口：点进去只会看到一片空白 -->
-        <button
+        <AppButton
           v-if="viewState !== 'review-prd' && hasPrd"
-          type="button"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+          variant="secondary"
+          size="sm"
           @click="emit('navigate', 'review-prd')"
         >
           查看 PRD
-        </button>
-        <button
+        </AppButton>
+        <AppButton
           v-if="viewState !== 'review-api-docs' && hasApiDocs"
-          type="button"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+          variant="secondary"
+          size="sm"
           @click="emit('navigate', 'review-api-docs')"
         >
           查看接口文档
-        </button>
-        <button
+        </AppButton>
+        <AppButton
           v-if="viewState !== 'review-prompts' && hasPrompts"
-          type="button"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+          variant="secondary"
+          size="sm"
           @click="emit('navigate', 'review-prompts')"
         >
           查看提示词
-        </button>
+        </AppButton>
 
         <!-- 完成入口：三份文档齐备才可用 -->
-        <button
-          type="button"
-          class="rounded-lg px-3 py-1.5 text-xs font-medium text-white shadow-sm transition"
-          :class="
-            canFinish
-              ? 'bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700'
-              : 'cursor-not-allowed bg-slate-300'
-          "
-          :disabled="!canFinish"
-          @click="emit('finish')"
-        >
+        <AppButton variant="primary" size="sm" :disabled="!canFinish" @click="emit('finish')">
           完成
-        </button>
+        </AppButton>
       </div>
     </div>
   </section>

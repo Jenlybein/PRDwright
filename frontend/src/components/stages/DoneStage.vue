@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import type { ViewState } from '@/types'
 import type { DocType } from '@/utils/download'
+import AppButton from '@/components/ui/AppButton.vue'
 
 /**
  * 全部完成阶段视图。
@@ -53,7 +54,7 @@ const ALL_CARDS = computed<DoneCard[]>(() => [
     docType: 'prd',
     title: 'PRD 文档',
     state: 'review-prd',
-    iconWrap: 'bg-primary-50',
+    iconWrap: 'bg-primary-50 dark:bg-primary-950/40',
     iconColor: 'text-primary-600',
     iconPath:
       'M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z',
@@ -63,8 +64,8 @@ const ALL_CARDS = computed<DoneCard[]>(() => [
     docType: 'api-docs',
     title: '接口文档',
     state: 'review-api-docs',
-    iconWrap: 'bg-sky-50',
-    iconColor: 'text-sky-600',
+    iconWrap: 'bg-primary-50 dark:bg-primary-950/40',
+    iconColor: 'text-primary-600',
     iconPath:
       'M2 4.75A2.75 2.75 0 0 1 4.75 2h6.5A.75.75 0 0 1 12 2v3.25h3.25a.75.75 0 0 1 .75.75v9.25A2.75 2.75 0 0 1 13.25 18h-8.5A2.75 2.75 0 0 1 2 15.25V4.75Zm8.5 3.5h3.5v-2.5h-3.5v2.5ZM6 7.75A.75.75 0 0 0 5.25 8.5v3a.75.75 0 0 0 1.5 0v-3A.75.75 0 0 0 6 7.75Zm3 0a.75.75 0 0 0-.75.75v3a.75.75 0 0 0 1.5 0v-3A.75.75 0 0 0 9 7.75Z',
     length: props.apiDocsContent.length,
@@ -73,7 +74,7 @@ const ALL_CARDS = computed<DoneCard[]>(() => [
     docType: 'prompts',
     title: '提示词套件',
     state: 'review-prompts',
-    iconWrap: 'bg-emerald-50',
+    iconWrap: 'bg-emerald-50 dark:bg-emerald-950/40',
     iconColor: 'text-emerald-600',
     iconPath:
       'M9.25 2.5a.75.75 0 0 1 .75.75v6.94l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 1 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75Zm-6.5 10a.75.75 0 0 1 .75.75v1h13v-1a.75.75 0 0 1 1.5 0v1.75a.75.75 0 0 1-.75.75h-14.5a.75.75 0 0 1-.75-.75v-1.75a.75.75 0 0 1 .75-.75Z',
@@ -97,8 +98,8 @@ const DOWNLOAD_ICON =
 <template>
   <section class="space-y-4">
     <!-- 完成提示头 -->
-    <div class="rounded-2xl border border-slate-200/80 bg-white p-6 text-center shadow-sm">
-      <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary-50">
+    <div class="rounded-2xl border border-slate-200/80 bg-white p-6 text-center shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
+      <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary-50 dark:bg-primary-950/40">
         <svg class="h-6 w-6 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             fill-rule="evenodd"
@@ -107,8 +108,8 @@ const DOWNLOAD_ICON =
           />
         </svg>
       </div>
-      <h2 class="mt-3 text-base font-semibold text-slate-900">{{ headline }}</h2>
-      <p class="mx-auto mt-1 max-w-md text-sm text-slate-500">
+      <h2 class="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">{{ headline }}</h2>
+      <p class="mx-auto mt-1 max-w-md text-sm text-slate-500 dark:text-slate-400">
         以下文档已生成完毕，可分别下载为 Markdown 文件，或返回查看与修改。
       </p>
     </div>
@@ -118,7 +119,7 @@ const DOWNLOAD_ICON =
       <article
         v-for="card in cards"
         :key="card.docType"
-        class="flex items-center justify-between gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm"
+        class="flex items-center justify-between gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm dark:border-slate-700/80 dark:bg-slate-900"
       >
         <div class="flex min-w-0 items-center gap-3">
           <div
@@ -130,48 +131,32 @@ const DOWNLOAD_ICON =
             </svg>
           </div>
           <div class="min-w-0">
-            <h3 class="text-sm font-semibold text-slate-900">{{ card.title }}</h3>
-            <p class="truncate text-xs text-slate-500">{{ card.length }} 字符 · Markdown</p>
+            <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ card.title }}</h3>
+            <p class="truncate text-xs text-slate-500 dark:text-slate-400">{{ card.length }} 字符 · Markdown</p>
           </div>
         </div>
         <div class="flex shrink-0 gap-2">
-          <button
-            type="button"
-            class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-            @click="emit('view', card.state)"
-          >
+          <AppButton variant="secondary" size="sm" @click="emit('view', card.state)">
             查看
-          </button>
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
-            @click="emit('download', card.docType)"
-          >
+          </AppButton>
+          <AppButton variant="primary" size="sm" @click="emit('download', card.docType)">
             <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
               <path fill-rule="evenodd" :d="DOWNLOAD_ICON" clip-rule="evenodd" />
             </svg>
             下载
-          </button>
+          </AppButton>
         </div>
       </article>
     </div>
 
     <!-- 底部操作 -->
     <div class="flex flex-wrap items-center justify-center gap-3 pt-1">
-      <button
-        type="button"
-        class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-        @click="emit('back')"
-      >
+      <AppButton variant="secondary" @click="emit('back')">
         {{ backLabel ?? '返回对话' }}
-      </button>
-      <button
-        type="button"
-        class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
-        @click="emit('restart')"
-      >
+      </AppButton>
+      <AppButton variant="primary" @click="emit('restart')">
         重新开始
-      </button>
+      </AppButton>
     </div>
   </section>
 </template>

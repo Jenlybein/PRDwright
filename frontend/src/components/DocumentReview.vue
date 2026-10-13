@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 import { renderMarkdown } from '@/utils/markdown'
+import AppButton from '@/components/ui/AppButton.vue'
 
 /**
  * 文档审阅组件。
@@ -157,14 +158,14 @@ function runAction(action: string): void {
 </script>
 
 <template>
-  <div class="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+  <div class="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
     <!-- 头部：标题 + 状态徽章 + 视图切换 -->
-    <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-6">
+    <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-6 dark:border-slate-800">
       <div class="flex min-w-0 items-center gap-2">
-        <h2 class="truncate text-sm font-semibold text-slate-900">{{ title || '文档' }}</h2>
+        <h2 class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ title || '文档' }}</h2>
         <span
           v-if="generating"
-          class="inline-flex items-center gap-1 rounded-full bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-700 ring-1 ring-primary-200"
+          class="inline-flex items-center gap-1 rounded-full bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-700 ring-1 ring-primary-200 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800"
         >
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
           生成中
@@ -172,11 +173,11 @@ function runAction(action: string): void {
       </div>
 
       <!-- 视图切换：仅在非生成态可用 -->
-      <div v-if="!generating" class="flex shrink-0 items-center gap-1 rounded-lg bg-slate-100 p-0.5">
+      <div v-if="!generating" class="flex shrink-0 items-center gap-1 rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800">
         <button
           type="button"
           class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'preview' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+          :class="viewMode === 'preview' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'"
           @click="viewMode = 'preview'"
         >
           预览
@@ -184,7 +185,7 @@ function runAction(action: string): void {
         <button
           type="button"
           class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'edit' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+          :class="viewMode === 'edit' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'"
           @click="viewMode = 'edit'"
         >
           编辑
@@ -193,11 +194,11 @@ function runAction(action: string): void {
     </div>
 
     <!-- 正文区域 -->
-    <div class="flex-1 overflow-y-auto bg-slate-50/40 p-4 sm:p-6">
+    <div class="flex-1 overflow-y-auto bg-slate-50/40 p-4 dark:bg-slate-950/40 sm:p-6">
       <!-- 空状态 -->
       <div
         v-if="!hasContent"
-        class="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-400"
+        class="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-400 dark:text-slate-500"
       >
         {{ generating ? '正在准备文档…' : '暂无内容' }}
       </div>
@@ -205,7 +206,7 @@ function runAction(action: string): void {
       <!-- 生成中：只读展示流式内容（Markdown 实时渲染） -->
       <div
         v-else-if="generating"
-        class="prose prose-sm prose-slate max-w-none rounded-xl bg-white px-5 py-4 shadow-sm ring-1 ring-slate-200/70"
+        class="prose prose-sm prose-slate max-w-none rounded-xl bg-white px-5 py-4 shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-800 dark:prose-invert dark:ring-slate-700"
       >
         <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
         <div v-html="renderMarkdown(streamingContent)" />
@@ -217,7 +218,7 @@ function runAction(action: string): void {
         <!-- 预览视图：渲染缓存后的 HTML -->
         <div
           v-if="viewMode === 'preview'"
-          class="prose prose-sm prose-slate max-w-none rounded-xl bg-white px-5 py-4 shadow-sm ring-1 ring-slate-200/70"
+          class="prose prose-sm prose-slate max-w-none rounded-xl bg-white px-5 py-4 shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-800 dark:prose-invert dark:ring-slate-700"
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
           <div v-html="renderedHtml" />
@@ -228,17 +229,17 @@ function runAction(action: string): void {
           v-else
           v-model="draft"
           rows="20"
-          class="min-h-[320px] w-full resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 font-mono text-sm leading-relaxed text-slate-800 shadow-sm outline-none transition-colors focus:border-primary-400 focus:ring-2 focus:ring-primary-100"
+          class="min-h-[320px] w-full resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 font-mono text-sm leading-relaxed text-slate-800 shadow-sm outline-none transition-colors focus:border-primary-400 focus:ring-2 focus:ring-primary-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-primary-900/50"
           placeholder="在此编辑文档的 Markdown 原文"
         ></textarea>
       </template>
     </div>
 
     <!-- AI 优化指令输入区：点击「AI 优化」后展开 -->
-    <div v-if="showOptimize" class="border-t border-primary-200 bg-primary-50/70 px-4 py-3 sm:px-6">
+    <div v-if="showOptimize" class="border-t border-primary-200 bg-primary-50/70 px-4 py-3 dark:border-primary-800 dark:bg-primary-950/40 sm:px-6">
       <label
         for="document-optimize-instruction"
-        class="mb-1.5 block text-xs font-medium text-primary-900"
+        class="mb-1.5 block text-xs font-medium text-primary-900 dark:text-primary-300"
       >
         告诉 AI 要怎么改，例如：语气更正式 / 压缩到 500 字以内 / 把未确认的技术选型改为待确认
       </label>
@@ -247,39 +248,39 @@ function runAction(action: string): void {
         v-model="optimizeInstruction"
         rows="2"
         :disabled="generating"
-        class="w-full resize-y rounded-lg border border-primary-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-800 shadow-sm outline-none transition-colors focus:border-primary-400 focus:ring-2 focus:ring-primary-100 disabled:bg-slate-50 disabled:text-slate-400"
+        class="w-full resize-y rounded-lg border border-primary-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-800 shadow-sm outline-none transition-colors focus:border-primary-400 focus:ring-2 focus:ring-primary-100 disabled:bg-slate-50 disabled:text-slate-400 dark:border-primary-800 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-primary-900/50 dark:disabled:bg-slate-900 dark:disabled:text-slate-500"
         placeholder="输入优化指令，Ctrl / ⌘ + Enter 直接提交"
         @keydown.ctrl.enter.prevent="submitOptimize"
         @keydown.meta.enter.prevent="submitOptimize"
       ></textarea>
       <div class="mt-2 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
+        <AppButton
+          variant="primary"
+          size="sm"
           :disabled="generating || !optimizeInstruction.trim()"
-          class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400"
           @click="submitOptimize"
         >
           {{ generating ? '正在优化…' : '开始优化' }}
-        </button>
-        <button
-          type="button"
+        </AppButton>
+        <AppButton
+          variant="ghost"
+          size="sm"
           :disabled="generating"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
           @click="cancelOptimize"
         >
           取消
-        </button>
+        </AppButton>
       </div>
     </div>
 
     <!-- 底部操作栏 -->
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900 sm:px-6">
       <!-- 左侧：AI 优化 + 复制 -->
       <div class="flex items-center gap-2">
-        <button
-          type="button"
+        <AppButton
+          variant="secondary"
+          size="sm"
           :disabled="generating"
-          class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
           @click="requestOptimize"
         >
           <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -288,10 +289,10 @@ function runAction(action: string): void {
             />
           </svg>
           AI 优化
-        </button>
-        <button
-          type="button"
-          class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
+        </AppButton>
+        <AppButton
+          variant="secondary"
+          size="sm"
           @click="copyContent"
         >
           <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -301,20 +302,20 @@ function runAction(action: string): void {
             <path d="M5 3a2 2 0 00-2 2v6a2 2 0 002 2h1V7a2 2 0 012-2h6V5a2 2 0 00-2-2H5z" />
           </svg>
           {{ copyTip || '复制' }}
-        </button>
+        </AppButton>
       </div>
 
       <!-- 右侧：自定义操作按钮（父组件通过默认插槽注入） -->
       <div class="flex items-center gap-2">
         <slot name="actions" :run-action="runAction" :save="save" :content="draft">
-          <button
-            type="button"
+          <AppButton
+            variant="primary"
+            size="sm"
             :disabled="generating"
-            class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400"
             @click="save"
           >
             保存
-          </button>
+          </AppButton>
         </slot>
       </div>
     </div>

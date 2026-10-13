@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import AppButton from '@/components/ui/AppButton.vue'
+
 /**
  * 提示词调试入口的录入页。
  *
@@ -60,16 +62,16 @@ const previewLine = computed(() => {
 <template>
   <section class="space-y-4">
     <header>
-      <h1 class="text-lg font-bold text-slate-900">从现有 PRD 生成提示词套件</h1>
-      <p class="mt-1 text-sm text-slate-500">
+      <h1 class="text-lg font-bold text-slate-900 dark:text-slate-100">从现有 PRD 生成提示词套件</h1>
+      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
         把手头这份 PRD 贴进来，直接生成配套的提示词套件；生成后可继续用「AI 优化」
         逐轮调整，直到提示词可用为止。
       </p>
     </header>
 
-    <div class="space-y-3 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm">
+    <div class="space-y-3 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
       <div>
-        <label for="field-debug-prd" class="mb-1.5 block text-xs font-medium text-slate-700">
+        <label for="field-debug-prd" class="mb-1.5 block text-xs font-medium text-slate-700 dark:text-slate-300">
           PRD 正文（Markdown）
           <span class="ml-1 text-rose-500">*</span>
         </label>
@@ -77,11 +79,11 @@ const previewLine = computed(() => {
           id="field-debug-prd"
           ref="textareaRef"
           rows="14"
-          class="w-full resize-y rounded-lg border px-3 py-2 font-mono text-xs leading-relaxed text-slate-900 outline-none transition placeholder:text-slate-400 focus:ring-2"
+          class="w-full resize-y rounded-lg border px-3 py-2 font-mono text-xs leading-relaxed text-slate-900 outline-none transition placeholder:text-slate-400 focus:ring-2 dark:text-slate-100 dark:bg-slate-800"
           :class="
             prdMissing
-              ? 'border-slate-300 focus:border-primary-400 focus:ring-primary-100'
-              : 'border-primary-300 focus:border-primary-400 focus:ring-primary-100'
+              ? 'border-slate-300 focus:border-primary-400 focus:ring-primary-100 dark:border-slate-600 dark:focus:ring-primary-900/50'
+              : 'border-primary-300 focus:border-primary-400 focus:ring-primary-100 dark:border-primary-700 dark:focus:ring-primary-900/50'
           "
           placeholder="# 小账本 产品需求文档（PRD）&#10;&#10;## 1. 产品概述&#10;…"
           :value="prdText"
@@ -89,53 +91,49 @@ const previewLine = computed(() => {
         ></textarea>
 
         <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
-          <p v-if="prdMissing" class="text-xs text-amber-600" role="status">
+          <p v-if="prdMissing" class="text-xs text-amber-600 dark:text-amber-400" role="status">
             请先贴入 PRD 正文，否则没有可依据的内容。
           </p>
-          <p v-else-if="!looksLikeMarkdown" class="text-xs text-amber-600">
+          <p v-else-if="!looksLikeMarkdown" class="text-xs text-amber-600 dark:text-amber-400">
             没检测到 Markdown 标题（`#`）。纯文本也能生成，只是章节结构可能不如原文清晰。
           </p>
-          <p v-else class="text-xs text-slate-400">支持任意 Markdown 文本，不做格式校验。</p>
-          <span class="shrink-0 text-xs text-slate-400">{{ prdText.length }} 字</span>
+          <p v-else class="text-xs text-slate-400 dark:text-slate-500">支持任意 Markdown 文本，不做格式校验。</p>
+          <span class="shrink-0 text-xs text-slate-400 dark:text-slate-500">{{ prdText.length }} 字</span>
         </div>
       </div>
 
       <!-- 已录入内容的确认条：给一个「我刚贴进来的是什么」的回执 -->
       <p
         v-if="previewLine"
-        class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500"
+        class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400"
       >
         已录入：{{ previewLine }}{{ prdText.length > 40 ? '…' : '' }}
       </p>
 
-      <div class="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
-        <button
-          type="button"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700 disabled:cursor-not-allowed disabled:opacity-40"
+      <div class="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+        <AppButton
+          variant="ghost"
+          size="sm"
           :disabled="!prdText"
           @click="clearAll"
         >
           清空
-        </button>
+        </AppButton>
       </div>
     </div>
 
     <div class="flex flex-wrap items-center justify-between gap-2">
-      <button
-        type="button"
-        class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-        @click="emit('back')"
-      >
+      <AppButton variant="secondary" size="md" @click="emit('back')">
         返回入口
-      </button>
-      <button
-        type="button"
-        class="rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-5 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700 disabled:cursor-not-allowed disabled:from-slate-300 disabled:to-slate-300"
+      </AppButton>
+      <AppButton
+        variant="primary"
+        size="md"
         :disabled="!canGenerate"
         @click="emit('generate')"
       >
         生成提示词套件
-      </button>
+      </AppButton>
     </div>
   </section>
 </template>

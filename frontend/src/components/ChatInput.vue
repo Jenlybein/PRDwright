@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 
+import AppButton from '@/components/ui/AppButton.vue'
+
 /**
  * 聊天输入框。
  *
@@ -75,10 +77,10 @@ defineExpose({ focus })
 </script>
 
 <template>
-  <div class="border-t border-slate-200 bg-white/80 px-4 py-3 backdrop-blur-sm sm:px-6">
+  <div class="border-t border-slate-200 bg-white/80 px-4 py-3 backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/80 sm:px-6">
     <div
-      class="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border bg-white p-2 shadow-sm transition-colors"
-      :class="props.loading ? 'border-slate-200' : 'border-slate-300 focus-within:border-primary-400'"
+      class="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border bg-white p-2 shadow-sm transition-colors dark:bg-slate-800"
+      :class="props.loading ? 'border-slate-200 dark:border-slate-700' : 'border-slate-300 focus-within:border-primary-400 dark:border-slate-700'"
     >
       <textarea
         ref="textareaRef"
@@ -86,41 +88,23 @@ defineExpose({ focus })
         rows="1"
         :placeholder="props.placeholder"
         :disabled="props.loading"
-        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:opacity-60"
+        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:opacity-60 dark:text-slate-100"
         @keydown="handleKeydown"
       />
 
-      <button
+      <AppButton
         type="button"
+        variant="primary"
         :disabled="!canSend"
-        class="flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-gradient-to-r from-primary-500 to-primary-600 px-4 text-sm font-medium text-white shadow-sm transition-all hover:from-primary-600 hover:to-primary-700 active:scale-95 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400 disabled:shadow-none"
+        :loading="props.loading"
+        class="h-9 shrink-0"
         @click="submit"
       >
-        <svg
-          v-if="props.loading"
-          class="h-4 w-4 animate-spin"
-          viewBox="0 0 24 24"
-          fill="none"
-        >
-          <circle
-            class="opacity-25"
-            cx="12"
-            cy="12"
-            r="10"
-            stroke="currentColor"
-            stroke-width="4"
-          />
-          <path
-            class="opacity-90"
-            fill="currentColor"
-            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-          />
-        </svg>
-        <span v-else>发送</span>
-      </button>
+        <span v-if="!props.loading">发送</span>
+      </AppButton>
     </div>
 
-    <p class="mx-auto mt-1.5 max-w-3xl px-1 text-xs text-slate-400">
+    <p class="mx-auto mt-1.5 max-w-3xl px-1 text-xs text-slate-400 dark:text-slate-500">
       回车发送，Shift+Enter 换行
     </p>
   </div>

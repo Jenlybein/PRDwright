@@ -166,7 +166,7 @@ defineExpose({ scrollToBottom })
             <!-- 思考中：跳动圆点 + 轮换提示语，缓解首字等待期的空洞感 -->
             <div
               v-if="message.streaming && !message.content.trim()"
-              class="flex items-center gap-3 rounded-2xl rounded-tl-sm bg-white px-4 py-3.5 shadow-sm ring-1 ring-slate-200/70"
+              class="flex items-center gap-3 rounded-2xl rounded-tl-sm bg-white px-4 py-3.5 shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-800 dark:ring-slate-700"
             >
               <span class="flex items-end gap-1" aria-hidden="true">
                 <span
@@ -179,13 +179,13 @@ defineExpose({ scrollToBottom })
                 ></span>
                 <span class="h-2 w-2 animate-bounce rounded-full bg-slate-400"></span>
               </span>
-              <span class="text-sm text-slate-500">{{ thinkingPhrase }}</span>
+              <span class="text-sm text-slate-500 dark:text-slate-400">{{ thinkingPhrase }}</span>
             </div>
 
             <!-- 已有内容：Markdown 渲染 + 流式光标 -->
             <div
               v-else
-              class="prose prose-sm prose-slate max-w-none rounded-2xl rounded-tl-sm bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70"
+              class="prose prose-sm prose-slate max-w-none rounded-2xl rounded-tl-sm bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70 dark:prose-invert dark:bg-slate-800 dark:ring-slate-700"
             >
               <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
               <div v-html="renderMarkdown(message.content)" />

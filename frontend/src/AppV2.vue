@@ -4,11 +4,11 @@ import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 
 import AuthDialog from '@/components/AuthDialog.vue'
+import AppBadge from '@/components/ui/AppBadge.vue'
 import RagResultPanel from '@/components/RagResultPanel.vue'
 import RequirementsForm from '@/components/RequirementsForm.vue'
 import SolutionSidebar from '@/components/SolutionSidebar.vue'
 import SummaryDiffPanel from '@/components/SummaryDiffPanel.vue'
-import UserMenu from '@/components/UserMenu.vue'
 import ChatStage from '@/components/stages/ChatStage.vue'
 import DoneStage from '@/components/stages/DoneStage.vue'
 import EntryStage from '@/components/stages/EntryStage.vue'
@@ -56,6 +56,9 @@ import type { EntryMode, RequirementsSummary, StepId } from '@/types'
  * 各阶段视图在 `components/stages/`。
  */
 
+// ---------------------------------------------------------------------------
+// 路由与方案参数
+// ---------------------------------------------------------------------------
 const route = useRoute()
 const router = useRouter()
 
@@ -349,68 +352,37 @@ function handleStepClick(stepId: StepId): void {
 </script>
 
 <template>
-  <div class="flex min-h-screen bg-gradient-to-b from-sky-50 via-slate-50 to-slate-100 text-slate-900">
-    <!-- 左侧：方案侧边栏（顶部「新建任务」+ 方案列表；窄屏为抽屉） -->
-    <SolutionSidebar v-if="auth.isLoggedIn" />
+  <div class="flex min-h-screen bg-gradient-to-b from-primary-50 via-slate-50 to-slate-100 text-slate-900 dark:from-slate-900 dark:via-slate-950 dark:to-slate-950 dark:text-slate-100">
+    <!-- 左侧：方案侧边栏（窄屏为抽屉；lg 以上常驻，含品牌 / 主题 / 列表 / 登录） -->
+    <SolutionSidebar />
 
     <div class="flex min-w-0 flex-1 flex-col">
-    <!-- 顶部导航栏 -->
-    <header class="sticky top-0 z-10 border-b border-slate-200/70 bg-white/80 backdrop-blur">
-      <div class="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
-        <div class="flex items-center gap-3">
-          <div
-            class="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-sky-600 text-sm font-bold text-white shadow-md shadow-sky-500/30"
-          >
-            H
-          </div>
-          <div>
-            <div class="text-sm font-bold leading-tight text-slate-900">HarnessPRD</div>
-            <div class="text-xs leading-tight text-slate-500">
-              填写需求 · 生成 PRD / 接口文档 / 提示词
-            </div>
-          </div>
-        </div>
-
-        <div class="flex items-center gap-2">
-          <!-- 保存状态：只在「保存中 / 保存失败」时出现，正常时不该占注意力 -->
-          <span
-            v-if="solutions.saving"
-            class="hidden text-xs text-slate-400 sm:inline"
-          >保存中…</span>
-          <span
-            v-else-if="solutions.saveError"
-            class="hidden text-xs text-red-500 sm:inline"
-          >{{ solutions.saveError }}</span>
-
-          <!-- 状态提示徽章，自动淡出 -->
-          <Transition
-            enter-active-class="transition duration-200"
-            enter-from-class="opacity-0 translate-y-1"
-            leave-active-class="transition duration-500"
-            leave-to-class="opacity-0"
-          >
-            <span
-              v-if="savedTip"
-              class="flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600 ring-1 ring-emerald-200"
-            >
-              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                <path
-                  fill-rule="evenodd"
-                  d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 1-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
-                  clip-rule="evenodd"
-                />
-              </svg>
-              {{ savedTip }}
-            </span>
-          </Transition>
-
-          <!-- 登录入口：未登录显示「登录」，已登录显示昵称并可退出 -->
-          <UserMenu />
-        </div>
-      </div>
-    </header>
-
     <main class="mx-auto max-w-3xl px-4 py-10">
+      <!-- 保存状态 / 提示：原顶栏的信息下沉到内容区右上角，无状态时不占空间 -->
+      <div
+        v-if="solutions.saving || solutions.saveError || savedTip"
+        class="mb-4 flex items-center justify-end gap-3 text-xs"
+      >
+        <span v-if="solutions.saving" class="text-slate-400">保存中…</span>
+        <span v-else-if="solutions.saveError" class="text-red-500">{{ solutions.saveError }}</span>
+        <Transition
+          enter-active-class="transition duration-200"
+          enter-from-class="opacity-0 translate-y-1"
+          leave-active-class="transition duration-500"
+          leave-to-class="opacity-0"
+        >
+          <AppBadge v-if="savedTip" variant="success">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 1-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+            {{ savedTip }}
+          </AppBadge>
+        </Transition>
+      </div>
       <!-- 步骤进度条：展示哪几步由入口模式决定，因此整条由 store 推导后传入 -->
       <ProgressSteps
         v-if="!isChoosingEntry"
@@ -424,7 +396,7 @@ function handleStepClick(stepId: StepId): void {
       <!-- 刷新时落在无法恢复的状态：说明为什么不是原来的阶段 -->
       <p
         v-if="downgradeNotice"
-        class="mb-4 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500"
+        class="mb-4 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
       >
         {{ downgradeNotice }}
       </p>
@@ -544,7 +516,7 @@ function handleStepClick(stepId: StepId): void {
       />
     </main>
 
-    <footer class="pb-10 text-center text-xs text-slate-400">
+    <footer class="pb-10 text-center text-xs text-slate-400 dark:text-slate-500">
       HarnessPRD · 由 AI 驱动的产品文档生成器
     </footer>
     </div>

@@ -50,7 +50,7 @@ onBeforeUnmount(() => document.removeEventListener('click', handleOutsideClick))
   <div ref="root" class="relative">
     <button
       type="button"
-      class="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-slate-300 hover:text-slate-900"
+      class="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-slate-100"
       :aria-expanded="menuOpen"
       :aria-label="auth.isLoggedIn ? `已登录：${auth.displayName}` : '登录'"
       @click="handleClick"
@@ -87,15 +87,15 @@ onBeforeUnmount(() => document.removeEventListener('click', handleOutsideClick))
     >
       <div
         v-if="menuOpen"
-        class="absolute right-0 mt-2 w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
+        class="absolute bottom-full right-0 mb-2 w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800"
       >
-        <div class="border-b border-slate-100 px-3 py-2">
-          <div class="text-xs font-semibold text-slate-900">{{ auth.displayName }}</div>
-          <div class="text-[11px] text-slate-400">已登录</div>
+        <div class="border-b border-slate-100 px-3 py-2 dark:border-slate-700">
+          <div class="text-xs font-semibold text-slate-900 dark:text-slate-100">{{ auth.displayName }}</div>
+          <div class="text-[11px] text-slate-400 dark:text-slate-500">已登录</div>
         </div>
         <button
           type="button"
-          class="w-full px-3 py-2 text-left text-xs text-slate-600 transition hover:bg-slate-50 hover:text-rose-600"
+          class="w-full px-3 py-2 text-left text-xs text-slate-600 transition hover:bg-slate-50 hover:text-rose-600 dark:text-slate-300 dark:hover:bg-slate-700"
           @click="handleLogout"
         >
           退出登录

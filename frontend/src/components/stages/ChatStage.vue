@@ -3,6 +3,7 @@ import { nextTick, ref, watch } from 'vue'
 
 import ChatInput from '@/components/ChatInput.vue'
 import MessageList from '@/components/MessageList.vue'
+import AppButton from '@/components/ui/AppButton.vue'
 import type { ChatMessage } from '@/types'
 
 /**
@@ -48,23 +49,17 @@ watch(
 </script>
 
 <template>
-  <section class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-    <div class="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-6">
+  <section class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
+    <div class="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-6">
       <div class="min-w-0">
-        <h2 class="text-sm font-semibold text-slate-900">需求澄清对话</h2>
-        <p class="mt-0.5 text-xs text-slate-500">AI 会追问关键细节，信息补齐后再生成文档</p>
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">需求澄清对话</h2>
+        <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">AI 会追问关键细节，信息补齐后再生成文档</p>
       </div>
       <div class="flex shrink-0 gap-2">
+        <AppButton variant="secondary" size="sm" @click="emit('editRequirements')">改需求</AppButton>
         <button
           type="button"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700"
-          @click="emit('editRequirements')"
-        >
-          改需求
-        </button>
-        <button
-          type="button"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-red-300 hover:text-red-600"
+          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-red-300 hover:text-red-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-red-500 dark:hover:text-red-400"
           @click="emit('restart')"
         >
           重新开始
@@ -75,14 +70,14 @@ watch(
     <!-- 出错时把原因贴在会话区顶部，不打断已有消息 -->
     <p
       v-if="error"
-      class="border-b border-red-200 bg-red-50 px-4 py-2 text-xs leading-relaxed text-red-600 sm:px-6"
+      class="border-b border-red-200 bg-red-50 px-4 py-2 text-xs leading-relaxed text-red-600 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300 sm:px-6"
       role="alert"
     >
       {{ error }}
     </p>
 
     <!-- 固定高度的会话区：消息列表内部滚动，输入框常驻底部 -->
-    <div class="flex h-[min(68vh,620px)] flex-col bg-slate-50/60">
+    <div class="flex h-[min(68vh,620px)] flex-col bg-slate-50/60 dark:bg-slate-800/60">
       <MessageList :messages="messages" />
       <ChatInput ref="inputRef" :loading="loading" @send="emit('send', $event)" />
     </div>
@@ -90,16 +85,12 @@ watch(
     <!-- 满足条件后显示「生成 PRD」入口 -->
     <div
       v-if="canGeneratePrd"
-      class="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3 sm:px-6"
+      class="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900 sm:px-6"
     >
-      <p class="text-xs text-slate-500">
+      <p class="text-xs text-slate-500 dark:text-slate-400">
         需求已澄清。生成前会先让你确认「补充信息回填到需求摘要」的变更。
       </p>
-      <button
-        type="button"
-        class="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:from-primary-600 hover:to-primary-700"
-        @click="emit('generatePrd')"
-      >
+      <AppButton variant="primary" shrink-0 @click="emit('generatePrd')">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             fill-rule="evenodd"
@@ -108,7 +99,7 @@ watch(
           />
         </svg>
         生成 PRD
-      </button>
+      </AppButton>
     </div>
   </section>
 </template>
