@@ -6,6 +6,7 @@ import type {
   RagHit,
   RequirementAnswers,
   RequirementsSummary,
+  StreamDocumentPart,
   StreamStageEvent,
 } from '@/types'
 
@@ -110,8 +111,16 @@ export async function getQuestions(): Promise<QuestionsConfig> {
 
 /** 后端推送的 SSE 事件，字段与 `backend/api/schemas.py` 的 `StreamEvent` 一一对应 */
 export interface StreamEventPayload {
-  /** 事件类型：状态提示 / 增量文本 / 阶段进度 / 结束 / 错误，后两种为后续扩展预留 */
-  type: 'status' | 'chunk' | 'stage' | 'done' | 'error' | 'tool_call' | 'document'
+  /** 事件类型：状态提示 / 增量文本 / 定稿正文 / 阶段进度 / 结束 / 错误 */
+  type:
+    | 'status'
+    | 'chunk'
+    | 'part'
+    | 'stage'
+    | 'done'
+    | 'error'
+    | 'tool_call'
+    | 'document'
   /** 文本内容（增量文本或提示语） */
   content: string
   /** 事件附加数据，如 conversation_id 与完整 reply */
@@ -125,9 +134,14 @@ export interface StreamHandlers {
   /** 收到增量文本时触发 */
   onChunk?: (text: string) => void
   /**
+   * 收到 `part` 定稿正文事件时触发。
+   * 目前只有「分章节生成 PRD」会下发：文档头一次、每一章一次。
+   */
+  onPart?: (part: StreamDocumentPart) => void
+  /**
    * 收到 `stage` 阶段事件时触发。
-   * 目前只有「分章节生成 PRD」会下发该事件，用于驱动前端的阶段指示与
-   * 「改写时丢弃该章已接收文本」。
+   * 目前只有「分章节生成 PRD」会下发该事件，用于驱动前端的阶段指示，并在换章 /
+   * 改写时重置本章的实时缓冲。
    */
   onStage?: (event: StreamStageEvent) => void
 }
@@ -181,6 +195,24 @@ function parseStageEvent(data: Record<string, unknown>): StreamStageEvent {
     total: readNumber(data, 'total'),
     note: readString(data, 'note'),
     issues,
+  }
+}
+
+/**
+ * 把 `part` 事件的 `data` 归一成 `StreamDocumentPart`。
+ *
+ * 与 `parseStageEvent` 同样的口径：字段缺失或类型不对只把那一个字段退化为默认值，
+ * 绝不让一个坏字段打断整条流。`text` 是唯一的必需要素，缺了就退化成空串，
+ * 由调用方决定是否忽略。
+ */
+function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
+  return {
+    text: readString(data, 'text'),
+    sectionId: readString(data, 'section_id'),
+    sectionTitle: readString(data, 'section_title'),
+    sectionHeading: readString(data, 'section_heading'),
+    index: readNumber(data, 'index'),
+    total: readNumber(data, 'total'),
   }
 }
 
@@ -283,6 +315,9 @@ async function readStream(
         break
       case 'chunk':
         handlers.onChunk?.(event.content)
+        break
+      case 'part':
+        handlers.onPart?.(parsePartEvent(event.data))
         break
       case 'stage':
         handlers.onStage?.(parseStageEvent(event.data))
@@ -478,7 +513,9 @@ export function generatePrdStream(
  * 选格式化函数后走同一条「分章节撰写 → 审核 → 改写」链路——「需求 → PRD」
  * 只有一个实现，多入口复用同一份契约。
  *
- * 流式过程中会下发 `stage` 事件（`onStage`），用于展示「写到第几章、是否在改写」。
+ * 流式过程中下发两类事件：`stage`（`onStage`）展示「写到第几章、是否在改写」，
+ * `part`（`onPart`）在每段正文定稿时给出**可直接追加**的权威文本——预览由
+ * 「已定稿部分 + 当前章实时缓冲」拼成，因此与最终 `reply` 逐字一致。
  */
 export function generatePrdFromSummaryStream(
   payload: GeneratePrdFromSummaryPayload,

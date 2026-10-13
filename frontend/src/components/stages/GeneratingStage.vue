@@ -25,6 +25,8 @@ defineProps<{
   generating?: boolean
   /** PRD 分章节生成的阶段进度；非 PRD 时为 null */
   prd?: PrdStageProgress | null
+  /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
+  draftOnly?: boolean
   /** 「返回」按钮的文案（返回目标随入口模式而变，由上层决定） */
   backLabel?: string
 }>()
@@ -62,6 +64,7 @@ const emit = defineEmits<{
       :title="title"
       :streaming-content="streamingContent"
       :generating="true"
+      :draft-only="draftOnly"
     />
     <!-- 页面级操作栏：生成中 / 失败时只有「返回」这一条退路，主操作区留空 -->
     <AppActionBar>

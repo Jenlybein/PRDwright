@@ -248,6 +248,7 @@ const {
   docStreamingContent,
   docError,
   prdStatus,
+  prdShowingDraft,
   summaryChanges,
   summarySyncing,
   summarySyncError,
@@ -473,6 +474,7 @@ function handleStepClick(stepId: StepId): void {
         :error="docError"
         :generating="isGenerating"
         :prd="prdStatus"
+        :draft-only="prdShowingDraft"
         :back-label="backLabel"
         @back="backToInput"
       />

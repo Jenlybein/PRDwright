@@ -7,13 +7,14 @@ import http, {
   retrieveApiDocsRag,
   UnauthorizedError,
 } from '../services/api'
-import type { StreamStageEvent, RequirementsSummary } from '../types'
+import type { StreamDocumentPart, StreamStageEvent, RequirementsSummary } from '../types'
 
 /**
  * SSE 解析测试。
  *
- * 重点覆盖新加的 `stage` 事件：后端发的是 snake_case（`section_id` / `section_title`），
- * 前端类型是 camelCase，映射错了不会报错、只会静默显示错章节——所以值得单独测。
+ * 重点覆盖 `stage` 与 `part` 两类事件：后端发的是 snake_case（`section_id` /
+ * `section_title`），前端类型是 camelCase，映射错了不会报错、只会静默显示错章节
+ * ——所以值得单独测。
  */
 
 /** 用给定的 SSE 文本块构造一个流式响应（每块是完整的 `event:` + `data:` 帧） */
@@ -92,6 +93,75 @@ describe('SSE 事件解析', () => {
     expect(stages[1]?.stage).toBe('rewriting')
     expect(stages[1]?.note).toBe('编造了指标')
     expect(stages[1]?.issues).toEqual([{ severity: 'high', detail: '出现输入中没有的数据' }])
+  })
+
+  it('把 part 事件映射成前端字段：定稿文本可直接按序拼回最终正文', async () => {
+    const fetchMock = vi.fn(async () =>
+      streamResponse([
+        sseFrame('part', { type: 'part', content: '', data: { text: '# 标题\n\n' } }),
+        sseFrame('part', {
+          type: 'part',
+          content: '',
+          data: {
+            text: '## 2. 功能需求\n\n正文\n\n',
+            section_id: 'features',
+            section_title: '功能需求',
+            section_heading: '## 2. 功能需求',
+            index: 1,
+            total: 7,
+          },
+        }),
+        sseFrame('done', {
+          type: 'done',
+          content: '',
+          data: { reply: '# 标题\n\n## 2. 功能需求\n\n正文' },
+        }),
+        'data: [DONE]\n\n',
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const parts: StreamDocumentPart[] = []
+    const result = await generatePrdFromSummaryStream(
+      { summary: SUMMARY },
+      { onPart: (part) => parts.push(part) },
+    )
+
+    expect(parts).toHaveLength(2)
+    // 文档头不属于任何章节：章节字段全部退化为默认值
+    expect(parts[0]).toEqual({
+      text: '# 标题\n\n',
+      sectionId: '',
+      sectionTitle: '',
+      sectionHeading: '',
+      index: 0,
+      total: 0,
+    })
+    expect(parts[1]?.sectionId).toBe('features')
+    expect(parts[1]?.sectionTitle).toBe('功能需求')
+    expect(parts[1]?.index).toBe(1)
+    // 契约：part 文本按序拼接后即最终正文（前端预览与落库正文同源）
+    expect(parts.map((part) => part.text).join('').trim()).toBe(result.reply)
+  })
+
+  it('part 事件缺 text 时退化为空串，不影响后续事件', async () => {
+    const fetchMock = vi.fn(async () =>
+      streamResponse([
+        sseFrame('part', { type: 'part', content: '', data: { section_id: 'features' } }),
+        sseFrame('done', { type: 'done', content: '', data: { reply: '正文' } }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const parts: StreamDocumentPart[] = []
+    const result = await generatePrdFromSummaryStream(
+      { summary: SUMMARY },
+      { onPart: (part) => parts.push(part) },
+    )
+
+    expect(parts).toHaveLength(1)
+    expect(parts[0]?.text).toBe('')
+    expect(result.reply).toBe('正文')
   })
 
   it('stage 事件字段缺失或类型不对时退化为默认值，不打断整条流', async () => {

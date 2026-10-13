@@ -20,12 +20,28 @@
    改写后重新审核；改写轮数上限由 `PRD_SECTION_MAX_REWRITES` 控制（默认 1 轮），
    达到上限就保留当前版本，绝不无限循环。
 
-阶段事件
+事件契约
 --------
-每一步都通过 `stage` 事件上报，与前端 `prdGenerationStage`
-（idle / writing / reviewing / rewriting / done）五态一一对应。改写时会重新流式输出
-整章，前端按 `section_id` 丢弃该章已接收的文本——用户看到的是「这一章在重写」，
-而不是「内容凭空被撤回」。
+两类事件共同驱动前端的实时预览：
+
+- `stage`：上报「写到第几章、当前在写还是审」，与前端 `prdGenerationStage`
+  （idle / writing / reviewing / rewriting / done）五态一一对应；
+- `part`：**一段正文一被定稿就整段下发**（文档头一次、每章一次），
+  `data.text` 是可直接追加到文档末尾的字符串。
+
+为什么正文要「定稿后再整段下发」
+--------------------------------
+`chunk` 是模型的**原始输出**，而最终正文还要过两道加工：`_ensure_heading()`
+补标题行（模型偶尔漏写，尤其改写时）、以及章与章之间补 `\n\n` 分隔。前端若只
+按 `chunk` 逐字拼接，这两道加工它就看不到，表现为「某一章的标题凭空消失」
+「标题与上一段的文字粘在同一行」（粘住后 markdown 不再认它是标题）。
+
+所以这里让后端做正文的唯一来源：前端维护「已定稿部分 + 当前章实时缓冲」，
+`part` 一到就用权威文本覆盖该段、清空缓冲。于是「预览与最终 `done.reply`
+逐字一致」成为**结构性保证**，而不是靠前后端各自拼得一样。
+
+`stage: rewriting` 时该章还没有 `part`，前端只需丢弃自己的实时缓冲即可，
+**不需要按字符数回退**——按累加长度猜截断点非常脆，任何计数漂移都会切偏。
 
 文档头由代码生成，不交给模型：产品名取自结构化摘要、日期取服务器当天，都是确定的事实
 （模板明确要求「无法确定当天日期时写『待确认』，禁止编造日期」，交给模型反而容易编）。
@@ -348,7 +364,7 @@ class PrdSectionWriter:
             history: 补充对话记录（`{role, content}` 列表），可为空。
 
         Yields:
-            `status` → `chunk`（文档头）→ 每章 `stage`/`chunk`… → `stage: done` → `done`；
+            `status` → `part`（文档头）→ 每章 `stage`/`chunk`…/`part` → `stage: done` → `done`；
             中途失败时产出 `error` 并结束（已流出的内容保留在前端）。
 
         Raises:
@@ -379,9 +395,11 @@ class PrdSectionWriter:
             data={"doc_type": "prd", "total_sections": total},
         )
 
-        # 文档头由代码产出：它不属于任何一章，因此不能被「改写某章」波及
+        # 文档头由代码产出：它不属于任何一章，因此不能被「改写某章」波及。
+        # 走 part 事件而不是 chunk：前端据此把它归入「已定稿部分」，否则它会被
+        # 当成第一章的实时缓冲，在第一章开始时被一并清掉。
         header = build_document_header(name)
-        yield StreamEvent(type="chunk", content=header)
+        yield _part_event(header)
         parts: list[str] = [header]
 
         # 已定稿章节的正文，作为后续章节的上下文（含标题行）
@@ -468,7 +486,11 @@ class PrdSectionWriter:
             section_text = _ensure_heading(section_text, section.heading)
             if section_text:
                 written.append(section_text)
-                parts.append(section_text + "\n\n")
+                # 加工后的定稿正文整段下发：前端的实时缓冲只见过未加工的原始
+                # chunk（可能漏标题、章间没空行），这里把它替换成权威文本
+                part = f"{section_text}\n\n"
+                parts.append(part)
+                yield _part_event(part, section=section, index=index, total=total)
 
         yield StreamEvent(
             type="stage",
@@ -664,6 +686,42 @@ def _ensure_heading(section_text: str, heading: str) -> str:
     return f"{heading}\n\n{text}"
 
 
+def _part_event(
+    text: str,
+    *,
+    section: PrdSection | None = None,
+    index: int = 0,
+    total: int = 0,
+) -> StreamEvent:
+    """构造「一段正文已定稿」的 `part` 事件。
+
+    `data.text` 是**可直接追加到文档末尾**的字符串——文档头自带结尾空行，
+    章节正文也在这里补好章间分隔空行。把这些容易写岔的细节收在产出侧，
+    是「前端预览与最终 `done.reply` 逐字一致」的前提。
+
+    Args:
+        text: 可直接追加的定稿文本。
+        section: 所属章节；文档头等不属于任何章节的部分传 `None`。
+        index: 章节下标（从 0 开始）；仅章节事件携带。
+        total: 章节总数；仅章节事件携带。
+
+    Returns:
+        形如 `{"text": "…", "section_id": "features", …}` 的 `part` 事件。
+    """
+    data: dict[str, Any] = {"text": text}
+    if section is not None:
+        data.update(
+            {
+                "section_id": section.id,
+                "section_title": section.title,
+                "section_heading": section.heading,
+                "index": index,
+                "total": total,
+            }
+        )
+    return StreamEvent(type="part", content="", data=data)
+
+
 def _section_stage_event(
     stage: str,
     section: PrdSection,
@@ -675,7 +733,9 @@ def _section_stage_event(
 ) -> StreamEvent:
     """构造章节级的 `stage` 事件。
 
-    `data.section_id` 是前端丢弃「被改写那一章」已接收文本的依据，必须稳定。
+    `data.section_id` 标识当前章节，前端据此判定「是否换章、要不要重置实时缓冲」，
+    必须稳定。改写（rewriting）时该章尚无 `part`，前端只需丢弃自己的缓冲即可，
+    不需要按字符数回退。
     """
     labels = {
         "writing": "正在撰写",

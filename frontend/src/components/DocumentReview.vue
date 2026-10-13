@@ -26,12 +26,20 @@ const props = withDefaults(
     streamingContent?: string
     /** 是否正在生成中；为 true 时展示只读流式内容 */
     generating?: boolean
+    /**
+     * 流式内容是否为「上一版草稿」。
+     *
+     * 章节被判为需要改写时会重流整章，中间隔着一次完整的模型往返；那段时间里
+     * 展示的是改写前的草稿，需要明确标出来，否则用户会以为文档出了故障。
+     */
+    draftOnly?: boolean
   }>(),
   {
     title: '',
     content: '',
     streamingContent: '',
     generating: false,
+    draftOnly: false,
   },
 )
 
@@ -182,13 +190,25 @@ defineExpose({
       </div>
 
       <!-- 生成中：只读展示流式内容（Markdown 实时渲染） -->
-      <div
-        v-else-if="generating"
-        class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
-      >
-        <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
-        <div v-html="renderMarkdown(streamingContent)" />
-        <span class="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-primary-500 align-text-bottom"></span>
+      <div v-else-if="generating" class="space-y-2">
+        <!--
+          改写期间旧草稿不撤下、只降透明度：直接清空会让用户看到「这一章突然没了」，
+          而按设计这里想表达的是「正在重写」。新内容一流出就会被顶替，不会并存。
+        -->
+        <p v-if="draftOnly" class="flex items-center gap-1.5 text-xs text-muted">
+          <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500"></span>
+          以下为上一版草稿，正在按审核意见重写…
+        </p>
+        <div
+          class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
+          :class="draftOnly ? 'opacity-60' : ''"
+        >
+          <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
+          <div v-html="renderMarkdown(streamingContent)" />
+          <span
+            class="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-primary-500 align-text-bottom"
+          ></span>
+        </div>
       </div>
 
       <!-- 生成完成：预览 / 编辑 切换 -->

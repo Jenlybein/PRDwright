@@ -17,6 +17,7 @@ import type {
   PrdStageProgress,
   RagHit,
   RequirementsSummary,
+  StreamDocumentPart,
   StreamStageEvent,
   SummaryChange,
   ViewState,
@@ -68,7 +69,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // 交互态
   // -------------------------------------------------------------------------
 
-  /** 文档生成中的流式增量文本，实时展示在审阅区 */
+  /**
+   * 生成中实时展示在审阅区的预览文本——**流式预览的唯一出口**。
+   *
+   * 接口文档 / 提示词 / AI 优化直接往里追加 `chunk`；分章节 PRD 则由
+   * `syncPrdPreview()` 把「已定稿部分 + 当前章缓冲」拼好写进来。两条路径互不干扰，
+   * 消费方（`GeneratingStage`）也只需要读这一个值。
+   */
   const docStreamingContent = ref('')
 
   /** 文档生成 / 优化过程中的错误提示 */
@@ -84,21 +91,59 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /** 分章节生成的进度快照；null 表示未走该链路（整篇生成或其它文档） */
   const prdProgress = ref<PrdStageProgress | null>(null)
 
-  /** 当前章节已接收的字符数：改写时据此把流式缓冲回退到本章之前 */
-  let currentSectionChars = 0
+  /**
+   * 分章节生成：**已定稿**部分的累积文本（文档头 + 各章定稿正文）。
+   *
+   * 内容全部来自后端的 `part` 事件——也就是最终会写进 `done.reply` 的那份文本。
+   * 不用 `chunk` 自己拼的原因：`chunk` 是模型原始输出，还差「补标题行」
+   * 「补章间空行」两道加工，前端看不到它们（曾表现为标题消失、与上一段粘成一行）。
+   */
+  const prdFinalizedText = ref('')
 
-  /** 是否已有章节开始。文档头不属于任何章节，不能计入 `currentSectionChars` */
-  let sectionStarted = false
+  /** 当前章节的实时缓冲：本章 `chunk` 的原始增量，定稿时被 `part` 整段替换 */
+  const prdLiveBuffer = ref('')
+
+  /**
+   * 改写期间留着的上一版草稿。
+   *
+   * 改写要重新流一整章，中间隔着一次完整的模型往返（十几秒甚至更久）。若此时直接
+   * 清空缓冲，用户看到的就是「这一章突然没了」——按设计它只是想表达「正在重写」。
+   * 这里把旧文本留下（审阅区会降透明度并标注），新内容一流出就顶替它。
+   */
+  const prdRewriteGhost = ref('')
 
   /** 分章节生成是否处于「写入中」等阶段（非 PRD 文档恒为 false） */
   const prdStatus = computed<PrdStageProgress | null>(() =>
     activeDocKey.value === 'prd' ? prdProgress.value : null,
   )
 
+  /** 预览当前显示的是否是「上一版草稿」（供审阅区降透明度提示） */
+  const prdShowingDraft = computed(
+    () => !prdLiveBuffer.value && prdRewriteGhost.value.trim().length > 0,
+  )
+
+  /**
+   * 把「已定稿部分 + 当前缓冲」拼成预览，写进 `docStreamingContent`。
+   *
+   * 三段状态都在本文件内变更，因此由变更处主动同步，而不是派生成 computed：
+   * `docStreamingContent` 同时被接口文档 / 提示词 / AI 优化直接追加使用，
+   * 保持它作为「预览的唯一出口」可以不动那些路径。
+   */
+  function syncPrdPreview(): void {
+    docStreamingContent.value =
+      prdFinalizedText.value + (prdLiveBuffer.value || prdRewriteGhost.value)
+  }
+
+  /** 清空分章节预览的三段缓冲 */
+  function clearPrdPreview(): void {
+    prdFinalizedText.value = ''
+    prdLiveBuffer.value = ''
+    prdRewriteGhost.value = ''
+  }
+
   /** 进入 PRD 生成前的复位：先按「撰写中」占位，等后端 stage 事件再细化 */
   function beginPrdStages(): void {
-    currentSectionChars = 0
-    sectionStarted = false
+    clearPrdPreview()
     prdProgress.value = {
       stage: 'writing',
       sectionId: '',
@@ -110,10 +155,25 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
   }
 
-  /** PRD 正文的增量追加：同时按「当前章节」计数，供改写时回退使用 */
+  /**
+   * 一段正文已定稿：以权威文本整段并入「已定稿部分」。
+   *
+   * 同时丢掉实时缓冲——它装的是这一段的原始 `chunk`，此刻已被加工后的版本取代。
+   * 这样预览与最终 `reply` 逐字一致，「标题凭空消失」「与上一段粘连」这类偏差
+   * 从结构上不可能再出现，而不是靠两边各自拼得一样。
+   */
+  function handlePrdPart(part: StreamDocumentPart): void {
+    if (!part.text) return
+    prdFinalizedText.value += part.text
+    prdLiveBuffer.value = ''
+    prdRewriteGhost.value = ''
+    syncPrdPreview()
+  }
+
+  /** PRD 正文的增量追加：只进「当前章节缓冲」，本章定稿时由 `part` 整段替换 */
   function appendPrdChunk(chunk: string): void {
-    docStreamingContent.value += chunk
-    if (sectionStarted) currentSectionChars += chunk.length
+    prdLiveBuffer.value += chunk
+    syncPrdPreview()
   }
 
   /** 把后端下发的阶段名归一成前端联合类型（未知取值按「撰写中」处理） */
@@ -125,8 +185,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 处理 `stage` 阶段事件。
    *
-   * 改写（rewriting）时会**丢弃当前章节已接收的文本**——这一章马上会被重新流一遍。
-   * 若不做丢弃，用户会看到同一章出现两次、或内容凭空被追加，观感上像是文档错乱。
+   * 前端只维护「已定稿部分 + 当前章缓冲」，所以这里**不需要按字符数猜截断点**：
+   * - `writing`：新的一章开始，丢掉上一章的缓冲（它要么已 `part` 定稿，
+   *   要么是被放弃的草稿）；
+   * - `rewriting`：把当前缓冲留作「上一版草稿」，避免中间十几秒的空白期。
    */
   function handlePrdStage(event: StreamStageEvent): void {
     const stage = toPrdStage(event.stage)
@@ -141,18 +203,16 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
 
     if (stage === 'writing') {
-      // 新的一章开始：从这里起接收的文本才算本章的
-      sectionStarted = true
-      currentSectionChars = 0
+      prdLiveBuffer.value = ''
+      prdRewriteGhost.value = ''
+      syncPrdPreview()
       return
     }
 
     if (stage === 'rewriting') {
-      docStreamingContent.value = docStreamingContent.value.slice(
-        0,
-        docStreamingContent.value.length - currentSectionChars,
-      )
-      currentSectionChars = 0
+      prdRewriteGhost.value = prdLiveBuffer.value
+      prdLiveBuffer.value = ''
+      syncPrdPreview()
     }
   }
 
@@ -193,6 +253,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   function clearTransient(): void {
     docError.value = ''
     docStreamingContent.value = ''
+    clearPrdPreview()
     summarySyncError.value = ''
     ragError.value = ''
   }
@@ -222,17 +283,22 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * @param docKey 目标文档 key，用于在出错时定位提示
    * @param request 实际发起请求的闭包
+   * @param options.sectioned 本次是否走「分章节 PRD」链路；只有它才需要保留
+   *   阶段进度条。其它情况（含对 **PRD 正文本身**的 AI 优化）都要把上一轮残留的
+   *   进度清掉，否则会显示一个语义无关的「全部章节已完成」。
    * @returns `{ reply, ok }`：`ok` 为 false 表示生成失败（如被截断），
    *   此时 `reply` 为已流出的半截内容，调用方不应把它当作完整文档推进流程。
    */
   async function runDocumentStream(
     docKey: DocKey,
     request: () => Promise<{ reply: string }>,
+    options: { sectioned?: boolean } = {},
   ): Promise<{ reply: string; ok: boolean }> {
     activeDocKey.value = docKey
     isGenerating.value = true
     docStreamingContent.value = ''
     docError.value = ''
+    if (!options.sectioned) prdProgress.value = null
 
     let reply = ''
     let ok = true
@@ -287,11 +353,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     apiDocsContent.value = ''
     promptsContent.value = ''
     beginPrdStages()
-    const { reply, ok } = await runDocumentStream('prd', () =>
-      generatePrdFromSummaryStream(payload, {
-        onChunk: appendPrdChunk,
-        onStage: handlePrdStage,
-      }),
+    const { reply, ok } = await runDocumentStream(
+      'prd',
+      () =>
+        generatePrdFromSummaryStream(payload, {
+          onChunk: appendPrdChunk,
+          onPart: handlePrdPart,
+          onStage: handlePrdStage,
+        }),
+      { sectioned: true },
     )
     if (!ok) {
       // 失败时收掉阶段条：原因由错误提示说明，留着一个「进行中」的指示反而误导
@@ -630,8 +700,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     clearTransient()
     activeDocKey.value = 'prd'
     prdProgress.value = null
-    currentSectionChars = 0
-    sectionStarted = false
     pendingSummary.value = null
     summaryChanges.value = []
     summarySyncing.value = false
@@ -653,6 +721,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     docStreamingContent,
     docError,
     prdStatus,
+    prdShowingDraft,
     summaryChanges,
     summarySyncing,
     summarySyncError,

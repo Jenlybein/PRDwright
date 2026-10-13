@@ -9,7 +9,7 @@ import * as api from '../services/api'
 import * as solutionApi from '../services/solutionService'
 import { useAuthStore } from '../stores/auth'
 import { useWorkflowStore } from '../stores/workflow'
-import type { RagHit, RequirementsSummary, StreamStageEvent } from '../types'
+import type { RagHit, RequirementsSummary, StreamDocumentPart, StreamStageEvent } from '../types'
 
 /**
  * 编排层测试：把流式接口整体 mock 掉，专注验证「第一步换成结构化表单」后
@@ -906,6 +906,24 @@ describe('AppV2 分章节生成的阶段展示', () => {
     await nextTick()
   }
 
+  /** 推送一段「已定稿正文」（文档头或某一章） */
+  async function pushPart(
+    stream: ControlledStream,
+    text: string,
+    extra: Partial<StreamDocumentPart> = {},
+  ): Promise<void> {
+    stream.handlers?.onPart?.({
+      text,
+      sectionId: '',
+      sectionTitle: '',
+      sectionHeading: '',
+      index: 0,
+      total: 0,
+      ...extra,
+    })
+    await nextTick()
+  }
+
   it('按 stage 事件展示阶段与章节计数', async () => {
     const wrapper = await mountApp()
     const stream = await startControlledPrdGeneration(wrapper)
@@ -935,15 +953,39 @@ describe('AppV2 分章节生成的阶段展示', () => {
     expect(wrapper.text()).toContain('PRD 文档')
   })
 
-  it('改写时丢弃该章已接收的文本，并给出原因', async () => {
+  it('用 part 事件的定稿文本替换本章缓冲：模型漏写的标题由后端补上', async () => {
     const wrapper = await mountApp()
     const stream = await startControlledPrdGeneration(wrapper)
 
-    // 文档头先到（此时还没有章节开始）
+    await pushStage(stream, 'writing')
+    // 这一版的模型输出漏了标题行：原始增量里根本没有标题
+    stream.handlers?.onChunk?.('需求里没写标题\n')
+    await nextTick()
+    expect(wrapper.text()).toContain('需求里没写标题')
+    expect(wrapper.text()).not.toContain('1. 产品概述')
+
+    // 定稿事件带来补好标题的权威文本，预览直接换用它
+    await pushPart(stream, '## 1. 产品概述\n\n需求里没写标题\n\n', {
+      sectionId: 'overview',
+      sectionTitle: '产品概述',
+      sectionHeading: '## 1. 产品概述',
+      total: 7,
+    })
+    expect(wrapper.text()).toContain('1. 产品概述')
+    expect(wrapper.text()).toContain('需求里没写标题')
+
+    await stream.finish('# 产品需求文档\n\n## 1. 产品概述\n\n需求里没写标题')
+    expect(wrapper.text()).toContain('PRD 文档')
+  })
+
+  it('改写时保留上一版草稿（不出现空白期），新内容流出后原地替换', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledPrdGeneration(wrapper)
+
     await pushStage(stream, 'writing')
     stream.handlers?.onChunk?.('## 1. 产品概述\n\n第一版内容（编造了指标）\n')
     await nextTick()
-    expect(wrapper.text()).toContain('第一版内容')
+    expect(wrapper.text()).toContain('第一版内容（编造了指标）')
 
     await pushStage(stream, 'reviewing')
     await pushStage(stream, 'rewriting', {
@@ -951,16 +993,17 @@ describe('AppV2 分章节生成的阶段展示', () => {
       issues: [{ severity: 'high', detail: '出现了输入中没有的性能指标' }],
     })
 
-    // 被改写的那一章已流出的文本必须消失，否则用户会看到同一章出现两次
-    expect(wrapper.text()).not.toContain('第一版内容')
-    expect(wrapper.text()).toContain('本章审核未通过，正在重写')
+    // 旧草稿不撤下：直接清空会让用户看到「这一章突然没了」，而它只是想表达「正在重写」
+    expect(wrapper.text()).toContain('第一版内容（编造了指标）')
+    expect(wrapper.text()).toContain('以下为上一版草稿，正在按审核意见重写')
     expect(wrapper.text()).toContain('出现了输入中没有的性能指标')
 
-    // 重写后的内容重新流进来
+    // 重写内容一流出就顶替旧草稿，不会与新文本并存
     stream.handlers?.onChunk?.('## 1. 产品概述\n\n重写后的内容\n')
     await nextTick()
     expect(wrapper.text()).toContain('重写后的内容')
     expect(wrapper.text()).not.toContain('编造了指标')
+    expect(wrapper.text()).not.toContain('以下为上一版草稿')
 
     await stream.finish('# 产品需求文档\n\n## 1. 产品概述\n\n重写后的内容')
     expect(wrapper.text()).toContain('PRD 文档')

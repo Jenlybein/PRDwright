@@ -264,8 +264,8 @@ export type PrdGenerationStage = 'idle' | 'writing' | 'reviewing' | 'rewriting' 
 /**
  * 一次分章节生成的进度快照，由 `stage` 事件累积得出。
  *
- * `sectionId` 是前端丢弃「被改写章节」已接收文本的依据：改写会把该章重新流一遍，
- * 用户看到的应该是「这一章在重写」，而不是内容凭空被撤回。
+ * `sectionId` 标识当前正在处理的章节：换章（`writing`）时前端要丢弃本章的实时缓冲，
+ * 改写（`rewriting`）时则把缓冲留作「上一版草稿」提示。
  */
 export interface PrdStageProgress {
   /** 当前阶段 */
@@ -282,6 +282,29 @@ export interface PrdStageProgress {
   total: number
   /** 触发改写时的原因摘要；无则为空串 */
   note: string
+}
+
+/**
+ * 一段**已定稿正文**，由 `part` 事件下发。
+ *
+ * 后端每完成一段就把加工好的正文整段发下来：文档头一次、每一章一次。
+ * `text` 已含必要的分隔空行，**可直接追加到文档末尾**——前端据此累积出与最终
+ * `done.reply` 逐字一致的预览。之所以不按 `chunk` 自己拼：`chunk` 是模型原始输出，
+ * 还差「补标题行」「补章间空行」两道加工，那是前端看不到的。
+ */
+export interface StreamDocumentPart {
+  /** 可直接追加到文档末尾的定稿文本（含分隔空行） */
+  text: string
+  /** 所属章节 id；文档头等不属于任何章节的部分为空串 */
+  sectionId: string
+  /** 所属章节名称，如「功能需求」；非章节部分为空串 */
+  sectionTitle: string
+  /** 所属章节标题行，如 `## 2. 功能需求`；非章节部分为空串 */
+  sectionHeading: string
+  /** 章节下标（从 0 开始）；非章节部分为 0 */
+  index: number
+  /** 章节总数；非章节部分为 0 */
+  total: number
 }
 
 /**

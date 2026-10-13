@@ -96,12 +96,16 @@ class StreamEvent(BaseModel):
     `addEventListener('<type>')` 监听，也可以只解析 `data` 里的 `type` 字段。
     """
 
-    type: Literal["status", "chunk", "done", "error", "stage", "tool_call", "document"] = Field(
+    type: Literal[
+        "status", "chunk", "part", "done", "error", "stage", "tool_call", "document"
+    ] = Field(
         description=(
-            "事件类型：状态提示 status / 增量文本 chunk / 阶段进度 stage / 结束 done / 错误 error，"
-            "tool_call 与 document 为后续扩展预留。"
+            "事件类型：状态提示 status / 增量文本 chunk / 定稿正文 part / 阶段进度 stage / "
+            "结束 done / 错误 error，tool_call 与 document 为后续扩展预留。"
             "`stage` 用于分章节生成：`data.stage` 取 writing / reviewing / rewriting / done，"
-            "`data.section_id` 标识当前章节（前端据此丢弃被改写章节已接收的文本）。"
+            "`data.section_id` 标识当前章节（前端据此重置本章的实时缓冲）。"
+            "`part` 也用于分章节生成：每段正文（文档头、每一章）一被定稿就整段下发，"
+            "`data.text` 可直接追加到文档末尾，前端据此拼出与最终 `done.reply` 逐字一致的预览。"
         )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
