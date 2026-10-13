@@ -1,271 +1,176 @@
-# HarnessPRD 架构演进与重构路线图
+# HarnessPRD 架构演进与重构路线图（2026-10-13 重订版）
 
-> 状态：**部分已实施**（P0 大部分完成、登录系统已上线；P1 方案持久化待开工）
-> 依据：2026-10-12 代码库快照（后端 2227 行 Python / 前端 2780 行 TS+Vue）
-> 2026-10-13 修订：登录提前于持久化实施，新增 3 条 ADR。进度见文末「八、实施进度」。
-> 前提约束：
-> 1. 项目当前处于**功能开发期**，架构目标优先服务「加功能的速度」，而非「多人部署的完备性」。
-> 2. 终局形态是**少量人使用 + 简单登录**。~~登录系统在功能开发完成后才实施~~
->    → **已调整**：登录**提前到持久化之前**实施（理由见第四节）。
-> 3. 因此本路线图把登录需要的 `user_id` 提前埋进 schema。~~让 P4 变成「填坑」而不是「重构」~~
->    → **插槽已提前兑现**：持久化落地时 `user_id` 直接是 `NOT NULL` 外键，不再需要 NULL 回填阶段
->    （见 ADR-005 修订）。埋插槽的价值在于让两者的顺序可以自由调换而不返工。
-
-配套文档：`ADR.md`（9 条架构决策记录及其权衡）。
+> 状态：**原 P0–P4 大半已落地，本版只规划「剩余工作」**。
+> 依据：2026-10-13 代码库实测（后端 5676 行 / 26 模块；前端 14652 行 / 46 文件；后端 78 用例、前端 209 用例）。
+> 配套文档：`ADR.md`（10 条已决记录 + 新增 ADR-011 双闸门）。
+> 前提交代：终局是**少量人 + 简单登录**，该目标已通过 owner 过滤 + 登录系统提前兑现；本版聚焦「把剩下的可靠性与部署补齐」。
 
 ---
 
-## 一、现状评估
+## 一、现状盘点（实测，非旧文档推断）
 
-### 1.1 规模与形态
+### 1.1 已落地（对照旧路线图逐条核查）
 
-| 维度 | 现状 |
-| --- | --- |
-| 后端 | 2227 行 / 11 个模块。FastAPI + LangChain，src layout，`uv` 管理依赖 |
-| 前端 | 2780 行 / 10 个文件。Vue 3 + Vite 8 + Tailwind v4，**无 router、无 store**（`pinia` 已装未用） |
-| 存储 | **SQLite**（2026-10-13 引入）：`users` / `auth_sessions` / `invite_codes` 已建表；会话仍为内存 dict，方案持久化待做 |
-| 测试 | 后端 **58** 用例（pytest，含认证与「默认拒绝」门禁不变量）；前端 **145** 用例（vitest / 10 文件） |
-| 工程化 | 无 CI、无 Docker、无结构化日志；部署靠本机 `uvicorn` + `vite dev` |
-| 交付 | V1 已收尾：问卷 → 需求澄清对话 → PRD → 接口文档 → 提示词套件 |
-
-这是一个**刚跑通主干、尚未沉淀结构的原型**。它的价值在于链路完整，风险在于每加一个功能都要在同一堆耦合里再凿一次。
-
-### 1.2 已经做对的（明确不要动）
-
-重构最容易犯的错是把好的一起推翻。以下几处是全项目最干净的部分，路线图只做「复用」不做「替换」：
-
-- **`services/llm_factory.py` 的供应商抽象**：ark / anthropic / openai 三选一，统一暴露 `astream`，业务层完全无感。这是后续做 failover 的天然接入点。
-- **路由层与 service 层分离**：`api/` 只做参数解析与响应封装，`schemas.py` 集中声明数据契约。
-- **SSE 事件协议**：`status / chunk / done / error` + 末尾 `[DONE]`，前后端一致，且异常在流内转事件、两层兜底（`_make_sse_generator` 与服务层各一层）。
-- **技能包驱动的 PRD 生成**：`skills/prd-generator` 提供字段契约、模板、写作规范，缺失时自动降级到内置提示词，服务不中断。
-- **默认拒绝的认证中间件**（2026-10-13 新增）：白名单放行、其余一律校验登录态，新增接口自动受保护；由一条遍历 `app.openapi()["paths"]` 的不变量测试守护（见 ADR-008）。
-
-### 1.3 债务清单（按处理优先级排序）
-
-| 编号 | 问题 | 位置 | 代价 | 处理阶段 |
-| --- | --- | --- | --- | --- |
-| D1 | **状态双真相**：后端内存 dict（重启即丢）+ 浏览器本地快照，靠回传 history 缝合 | `conversation_service._conversations`；`App.vue` 的 SESSION_KEY | 无法重启保活、无法跨设备、无法回溯历史会话；改一次后端代码就要重填问卷才能调试 | P1 |
-| D2 | **流式编排被抄两遍**：`_stream_reply` 与 `_extract_text` 各两份，逻辑几乎逐行相同 | `conversation_service.py:347` vs `document_service.py:281`；`:102` vs `:325` | 改一处漏一处，且两处行为会静默漂移 | P0 |
-| ~~D3~~ | ~~**死接口在线**：3 条 REST 路由调用后抛 `NotImplementedError`~~ | `api/conversation.py` / `schemas.py` / `document_service.py` | 接口契约自相矛盾，`DocumentResponse` 是为不存在的 DB 设计的 | **✅ 已解决**（2026-10-13 删除；OpenAPI 路径 18 → 15）→ P1 用 ADR-009 的快照范式重新定义 |
-| D4 | **错误契约靠中文字符串匹配** | `App.vue:374` `message.includes('会话不存在')` | 后端改一个字，前端降级逻辑静默失效 | P0 |
-| D5 | **App.vue 巨石**：1305 行混着编排、9 态状态机、持久化、文档生成、下载 | `frontend/src/App.vue` | 加一种文档类型要同时改状态、视图、进度条、下载四处 | P2 |
-| ~~D6~~ | ~~**零测试护栏**~~ | 后端无 pytest；前端 0 用例 | 任何重构都是裸奔，回归靠手动点全流程 | **✅ 已解决**（2026-10-13：后端 58 / 前端 145）→ 持续按阶段增长 |
-| D7 | **长文生成不可续传**：单次 `astream` 出整篇 PRD，`ark_max_tokens` 默认 4096 | `core/config.py:73-77`（注释已自认会截断）；`document_service.generate_prd_stream` | 中断即全废；PRD 越长越危险 | P3 |
-| D8 | **提示词资产定位脆弱**：靠「向上找 6 层目录」找 `skills/`，部署时目录不在同一棵树就失效 | `document_service._resolve_skill_dir` | 换部署方式就可能静默降级到内置提示词，输出质量悄悄下降 | P3 |
-| D9 | **无可观测性与成本计量**：只有 `/health`，无 request_id，无 token 打点 | 全局 | 出问题时无法归因；成本不可见 | P3 |
-| D10 | **技能资源常驻缓存**：`lru_cache` 缓存到进程结束，改模板必须重启 | `document_service._load_skill_artifact` | 调提示词时改一次重启一次，迭代极慢 | P3 |
-
----
-
-## 二、目标架构
-
-**一句话**：后端数据库成为会话与文档的唯一真相，前端只负责展示与离线缓存；流式编排全局只有一份实现；登录系统通过预留的 `user_id` 插槽后接，不改 schema。
-
-### 2.1 分层与依赖方向
-
-```
-前端：阶段视图组件 → 状态机 + 会话 store → api 层（SSE 封装 + 错误码）
-后端：api/ 路由（conversation + documents） → services（共用流式编排） → repositories → SQLite
-```
-
-**依赖规则（写进 code review 清单）**：
-
-1. `api → services → repositories → db`，**禁止反向 import**。
-2. `services` 之间**互不 import**；需要复用就下沉到新的公共模块（如 `services/streaming.py`）。
-3. 前端视图组件**不得直接调 `api.ts`**，必须经过 store / composable。
-4. `schemas.py` 是后端唯一的数据契约出处；前端 `types/index.ts` 是前端唯一出处。两者不一致时**改后端迁就前端**（既有约定，继续沿用）。
-
-### 2.2 与现状的关键差异
-
-| 关注点 | 现状 | 目标 |
+| 旧阶段 | 实际状态 | 证据 |
 | --- | --- | --- |
-| 会话状态 | 内存 dict + 浏览器快照，双真相 | SQLite 唯一真相；浏览器快照降级为离线草稿 |
-| 流式编排 | 两份重复实现 | `services/streaming.py` 一份，两个 service 共用 |
-| 文档 | 生成后只存在前端内存 | 随方案快照落 `solutions.data_json`，不单独建 `documents` 表（ADR-009） |
-| 错误 | 中文字符串 | `error_code` 枚举 + 人类可读 message |
-| 阶段流转 | 散在 `goTo` / 多个 computed 里 | ✅ 已抽为 `workflow.ts` 纯函数（P2-T1 完成） |
-| 登录 | 无 | ✅ **已实施**（自建账号密码 + HttpOnly Cookie + 邀请码，ADR-007）；`user_id` 为 NOT NULL 外键 |
-| 接口鉴权 | 无，全部裸奔 | ✅ **已实施**：默认拒绝中间件 + 白名单，新增接口自动受保护（ADR-008） |
+| P0-T1 后端测试 | ✅ 78 用例 | `backend/tests/` 7 文件，含认证门禁不变量 |
+| P0-T2 前端测试 | ✅ 209 用例 | `frontend/src/__tests__/` 15 文件，`--run` 全绿 |
+| P0-T4 删死接口 | ✅ | OpenAPI 路径已收敛，无 `NotImplementedError` 路由 |
+| P1 方案持久化 | ✅ | `repositories/solution_repo.py` + `services/solution_service.py` + `api/solutions.py` + 前端 `stores/solutions.ts` + 左侧栏 + `vue-router` 两条页面级路由 |
+| P2 前端解耦 | ✅ | `App.vue` 已物理删除；`AppV2.vue` 只做分派；`stages/` `form/` `ui/` 组件库；`stores/workflow.ts` 状态机纯函数；`composables/` |
+| P3-T1 分章节生成 | ✅ | `services/prd_section_writer.py`：`PRD_SECTIONS` + 逐节流式 + 前向上下文 `prior_sections` |
+| P3-T3 max_tokens 分档 | ✅ | `services/llm_factory.py` 按文档类型配置 |
+| P4 登录 | ✅ | `api/auth.py` + `auth_service` + `auth_repo` + 纯 ASGI 默认拒绝中间件 + 前端 `AuthDialog`/`UserMenu` + `scripts/auth_cli.py` |
+| ADR-007/008/009/010 | ✅ 已决已落地 | 见 `ADR.md` |
+
+### 1.2 路线图外、期间新增的能力（非债务，但影响部署与文档）
+
+- **双闸门工作流**（5766e7d）：闸门 1「摘要 Diff」（`sync-summary-from-conversation` → `SummaryDiffPanel` 确认才回写）；闸门 2「RAG 接口规范检索」（`retrieve-api-docs-rag`，本地词法检索 `core/api_doc_knowledge.json` → `RagResultPanel` 勾选）。
+- **三入口模式**（1636eaf）：完整流程 / 快捷入口 / 调试入口。
+- **MVP 留空推断**（babc4a6）：`requirements` 为空时按 `ui_pages` 推断候选功能清单并标「（建议）」。
+- **主题系统**（1625e3c）：亮/暗/跟随系统三态，三层语义令牌。
+- **RAG 知识库资产**：`core/api_doc_knowledge.json` 是**新增的部署资产**，Docker 化时必须随镜像打包（见 R3）。
+
+### 1.3 仍存在的债务清单（按新优先级）
+
+| 编号 | 问题 | 位置 | 状态 | 归属阶段 |
+| --- | --- | --- | --- | --- |
+| D2 | **流式编排只去重了一半**：`ensure_not_truncated` 已抽进 `stream_guard.py`，但 `_stream_reply` 仍两份（`conversation_service.py:365` / `document_service.py:625`），SSE 帧封装与文本拼接逻辑各自维护 | 两 service | ⚠️ 部分 | R0-T3 |
+| D4 | **错误契约仍靠中文串**：前端 `useClarificationChat.ts:128` 仍 `message.includes('会话不存在')` 判定降级 | 前端 composable | ❌ 仍开 | R0-T5 |
+| D7 | **长文生成不可续传**：`prd_section_writer` 逐节生成但是**单次运行内**的内存态，网络中断仍整体丢失；无中间产物落库 | `document_service` / `prd_section_writer` | ❌ 仍开 | R1-T2 |
+| D8 | **技能目录仍脆弱**：`HARNESSPRD_SKILLS_DIR` 已支持，但缺失时仍「向上找目录」并**静默降级**到内置提示词（D8 未真正解决） | `prd_skill.resolve_skill_dir` | ⚠️ 部分 | R2-T6 |
+| D9 | **无可观测性与成本计量**：仅 `/health` 返回 `{"status":"ok"}`；无任何 token 打点、request_id、结构化日志 | 全局 | ❌ 仍开 | R1-T5 / R2-T7 |
+| D10 | **技能资源常驻缓存**：`prd_skill.py:64 @lru_cache` 缓存到进程结束，改模板必须重启 | `prd_skill` | ❌ 仍开 | R2-T6 |
+| D11 | **零部署/零 CI**：全仓库无 `Dockerfile`、无 `docker-compose`、无 `.github`、无 `Makefile`；287 个测试靠人手跑 | 仓库根 | ❌ 仍开 | R0-T1 / R3 |
+| D12 | **无供应商 failover**：`llm_factory.get_llm` 只按 `default_llm_provider` 构造单个模型，无主备切换/超时重试 | `llm_factory.py:31` | ❌ 仍开 | R1-T4 |
+
+> 已彻底解决的旧债务（不再追踪）：D1 状态双真相（P1）、D3 死接口、D5 App.vue 巨石（P2）、D6 零测试。
 
 ---
 
-## 三、演进路线图
+## 二、已经做对、明确不要动的设计
 
-排序原则：**先降「改代码的成本」，再降「跑起来的成本」，最后才是「多人用的成本」**。
+重构最容易犯的错是把好的一起推翻。以下仍是全项目最干净的部分，**任何阶段都只复用不替换**：
+
+- **`llm_factory` 的三供应商抽象**：ark / anthropic / openai 统一 `astream`，业务层无感——这是 R1-T4 failover 的天然接入点。
+- **路由层 / service 层 / repository 层分离**：`api` 只解析封装，`schemas.py` 集中契约，`repositories/` 是全项目唯一写 SQL 的地方（review 红线）。
+- **SSE 事件协议**：`status / chunk / part / stage / done / error` + 末尾 `[DONE]`，两层异常兜底；PRD 正文以 `part` 事件为准（预览与最终同源，见 8ea4896）。
+- **技能包驱动 + 自动降级**：`skills/prd-generator` 缺失时退回内置提示词，服务不中断（R2 只把「静默降级」改成「显式告警 + 可选 fail-fast」）。
+- **默认拒绝中间件**（纯 ASGI，避开 `BaseHTTPMiddleware` 对 SSE 的响应体重包）+ 遍历 OpenAPI 路径的不变量测试。
+- **快照范式 + owner 强制过滤**（ADR-009）：单表全量 JSON、`Repository` 不接受 `owner_id=None`。
 
 ---
 
-### P0 · 护栏：让重构不再裸奔
+## 三、重订路线图（剩余工作 R0 → R3）
 
-**周期**：1 周内　**功能变化**：零　**风险**：低
+排序原则升级为：**先给手上 287 个测试装上自动执行的网（R0），再补核心交付物的可靠性（R1），再工程化资产与可观测性（R2），最后把「能跑」变成「能部署」（R3）。**
 
-**目标**：在动任何结构之前先装安全网。本阶段不修任何 bug，只让后续每个阶段敢动手。
+> 命名 `R0–R3`（Revised）是为了和已完成的 `P0–P4` 区分——它们不是推翻重来，而是收尾。
 
-| 任务 | 具体动作 |
-| --- | --- |
-| T1 补后端测试（pytest） ✅ 已完成 | 新增 `pytest` 依赖。首批锁住：`format_form_data`（空值/多选/配置外字段）、`_build_lc_messages`（角色归一化、user/assistant 严格交替）、`_format_sse_block`（帧格式、`[DONE]`）、技能资源加载的降级路径 |
-| T2 补前端测试（vitest） ✅ 已完成 | 首批锁住：`parseSseBlock`（**重点覆盖中文多字节被切断**与坏帧容错）、`STEP_OF_STATE` 映射完整性、会话快照的校验与 `generating-*` 降级 |
-| T3 合并流式编排 | 新建 `services/streaming.py`，把两份 `_stream_reply` 与 `_extract_text` 收敛为一份；两个 service 改为调用它。行为必须逐字保持一致 |
-| T4 删死接口 ✅ 已完成 | 移除 `api/conversation.py` 的 3 条 `NotImplementedError` 路由与 `DocumentResponse`（P1 会用 ADR-009 的快照范式重新定义） |
-| T5 错误契约码化 | `StreamEvent.data` 增加 `error_code`：`conversation_not_found` / `output_truncated` / `llm_error` / `invalid_input`。前端改判 code，删掉 `includes('会话不存在')` |
+---
+
+### R0 · 安全网收尾：CI + 两个未结的护栏项
+
+**周期**：3–5 天　**功能变化**：零　**风险**：低（除 T3 需对照测试）
+
+**目标**：在动任何有风险的结构之前，先把「287 个测试靠人手跑」和「两个半吊子护栏」解决掉。
+
+| 任务 | 具体动作 | 关联债务 |
+| --- | --- | --- |
+| T1 建 CI | GitHub Actions：单 job 跑 `uv run pytest` + `npm run test:unit -- --run` + `vue-tsc` 类型检查；PR 必过。本地 `Makefile` 镜像同三条命令 | D11 |
+| T2 错误码化 | SSE `error` 事件与 REST 错误响应加 `error_code` 枚举（`conversation_not_found` / `output_truncated` / `llm_error` / `invalid_input` / `auth_required`）。前端删掉 `includes('会话不存在')`，改判 `code === 'conversation_not_found'` | D4 |
+| T3 收尾流式去重 | 把两份 `_stream_reply`（SSE 帧封装 + 文本拼接 + 异常转事件）彻底收敛到 `services/streaming.py`，`conversation_service` 与 `document_service` 改为调用它；`ensure_not_truncated` 已就位，纳入同模块。**先写对照测试固定两边当前行为，再统一** | D2 |
 
 **验收**：
-- `uv run pytest` 与 `npm run test:unit` 全绿，且都有 CI-ready 的单条命令入口。
-- 手动跑通一次完整流程（问卷 → 对话 → 三份文档），输出与重构前逐字一致。
-- 故意改坏 `prd-template.md`，测试能红灯。
+- 推一个空 PR，CI 能红灯拦下「漏跑测试 / 类型错误」。
+- `grep -rn "includes('会话不存在')\|includes(\"会话不存在\")" frontend/src` 返回空。
+- 全项目 `grep -rn "_stream_reply" backend/src/backend/services` 只命中 `streaming.py` 一处定义；手动跑通完整流程，输出与合并前逐字一致。
 
 **不做**：不碰持久化、不改 UI、不动提示词内容。
 
-**风险**：T3 合并时两份实现的边角行为可能不一致（例如 `document_service` 的 `last_chunk` 在异常时保留、`conversation_service` 在 `_astream_text` 内持有）。合并前先写对照测试固定两边当前行为，再统一。
+**风险**：T3 合并时两份实现的边角行为可能不一致（如异常时 `last_chunk` 的保留时机）。这是旧路线图 P0-T3 遗留的坑，**必须先用对照测试钉死**再动。
 
 ---
 
-### P1 · 方案持久化：可列表、可回溯、可继续
+### R1 · 生成可靠性：核心交付物「放心用」
 
-**周期**：2-3 周　**风险**：中（改动面最大）　**依赖**：登录已实施（建表即可写 `user_id`）
+**周期**：2–3 周　**风险**：中（R1-T2 改动生成主链路）
 
-**目标**：方案（会话 + 文档 + 阶段）成为可持久化、可列表、可回溯的实体。这是开发期摩擦最大的一环——现在每改一次后端代码（`--reload`）会话就丢，得重填问卷才能测 PRD 生成。
+**目标**：把「能生成 PRD」升级成「中断可续、供应商挂了能切、花了多少 token 看得见」。
 
-采用 **ADR-009 的快照范式**：单表存全量 `SessionDataV2` JSON，不拆 `messages` / `documents`。
-
-| 任务 | 具体动作 |
-| --- | --- |
-| T1 Repository 层 | `repositories/` 已随登录建立（认证用，全项目唯一写 SQL 的地方）。本阶段新增 `SolutionRepository`，沿用同一约定：服务层只依赖接口 |
-| T2 建 `solutions` 表 | `solutions(id, user_id NOT NULL 外键, title, summary_json, data_json, created_at, updated_at)`。**不拆** `conversations` / `messages` / `documents` 三表（ADR-009） |
-| T3 方案服务 | 新增 `services/solution_service.py`：保存 = 一次 UPSERT 全量快照；读取 = 一次 SELECT + 反序列化；列表 = 只读冗余摘要列，**不反序列化 `data_json`** |
-| T4 五个接口 | `GET /api/solutions`（列表，只读摘要列）、`POST /api/solutions`（创建）、`GET /api/solutions/{id}`（读全量）、`PUT /api/solutions/{id}`（整份覆盖）、`DELETE /api/solutions/{id}`。Repository **强制 `owner_id` 过滤**，越权返回 **404 而非 403** |
-| T5 前端页面级路由 | 启用 `vue-router`，路由表只有**两条**：`/v2`（新建，尚无 id）、`/v2/:id`（打开某方案）。**阶段流转仍走状态机，不进 URL**（ADR-006 修订） |
-| T6 左侧方案侧边栏 | **不做独立列表页**，改为常驻左侧栏：顶部「新建任务」+ 下方方案列表（标题 / 阶段 / 更新时间，可删除）。窄屏折叠为顶栏抽屉 |
-| T7 自动保存 | 方案**「有内容了才建」**：首次出现非空内容时 `POST` 创建，随后 `router.replace` 到 `/v2/{id}`；此后一律 `PUT`。状态变更后**防抖**落库（约 1.5s）；进入下一阶段时即时保存并加锁；离开页面前 `flushPendingSave()` |
-| T8 开启 WAL | SQLite 开 `journal_mode=WAL`，为少量并发写预留 |
-
-> 接口前缀用 `/api/solutions/*` 而非 `/api/session/*`：引入登录后「session」会与「登录会话」语义撞车。
-> 前端 service 文件同步命名 `solutionService.ts`。
-
-**创建门槛**：快照的内容字段（`summary` / `messages` / `quickInput` / `debugPrdText` /
-`prdContent` / `apiDocsContent` / `promptsContent`）**任一非空**即创建，防抖后判定。
-不含 `viewState` / `entryMode` / `conversationId`——它们不是「内容」。
-代价是用户敲一个字就走会留下一项，靠侧边栏的删除解决，好过「填了半天刷新全丢」。
-
-**标题**：自动取 `product_name`（完整流程取 `summary.product_name`，快捷入口取 `quickInput.productName`，
-调试入口取所贴 PRD 的首个 H1 标题），都取不到则为「未命名方案」。每次保存重算——用户往往是后填的产品名。
+| 任务 | 具体动作 | 关联债务 |
+| --- | --- | --- |
+| T2 断点续传 | 在 ADR-009 快照内新增 `prdSections` 中间态字段（已完成节的标题→正文）。生成请求带 `resume_from` 时，只补生成缺失节，已完成的节不重复消耗 token。单节失败只重试该节 | D7 |
+| T4 供应商 failover | `llm_factory` 接受**有序供应商列表**（`default_llm_provider` + `fallback_llm_providers`）；调用抛异常或超时，按序切下一个；业务层无感。`get_llm()` 返回封装了重试/切换的客户端 | D12 |
+| T5 成本计量 | 每次生成从 `response_metadata` 取 `prompt_tokens` / `completion_tokens`，随方案快照落库（或在 `solutions` 冗余列记总数）；方案详情可看「本次生成 token 与所用供应商/模型」 | D9（成本部分） |
 
 **验收**：
-- `kill` 后端再启动，从侧边栏点进上次方案，阶段、消息、四份文档全部与离开时一致。
-- 刷新页面后状态与后端一致；侧边栏渲染无需反序列化大 JSON。
-- 账号 A 创建的方案，账号 B 直接访问其 id 返回 404，侧边栏里也看不到。
-- 方案可删除；删掉后侧边栏立即少一项。
-- 首次产生内容后地址栏变成 `/v2/{id}`，此后刷新都回到同一份方案。
+- 生成中途 kill 后端网络/进程，恢复后能从断点续，已完成节不重复计费。
+- 把主供应商 key 置空，自动切备用供应商，业务代码零改动。
+- 方案详情页能查到最近一次生成的 token 总量与模型名。
 
-**不做**：不迁移历史数据（当前无持久数据）；不做消息级检索（ADR-009 已权衡）；**不改动 `conversation_service` 的内存 dict**——对话进行中的临时态仍在内存，只在保存 / 进入下一阶段时落库，避免把流式生成的热路径绑上 DB 写。
-**顺带删干净**：`stores/workflow.ts` 的 localStorage 快照（`persist` / `restore` / `SESSION_STORAGE_KEY`）
-整体移除，后端是唯一权威，不再保留离线副本。其快照校验与降级逻辑（`parseSessionSnapshot` /
-`STATE_DOWNGRADE`）保留并改用于后端恢复。
+**不做**：不做异步任务队列（当前同步流式体感更好）；不做多轮自评/批判式生成（先把单次可靠性做扎实）。
 
-**风险**：T7 自动保存若与流式生成并发，可能写入半成品快照。**缓解**：`generating-*` 态不触发保存，生成结束进入 review 态后再存；保存期间加锁，避免并发覆盖。
-次要风险：前端曾靠「回传 history」做无状态恢复，持久化上线后两者会冲突。决策见 ADR-001：**后端快照为唯一权威，前端传入的 history 仅在方案不存在时作为恢复来源**。
+**风险**：T2 续传会改变 PRD「一气呵成」的连贯性——保留「整篇模式」开关（ADR-004 已定），两种模式由配置切换，续传仅作用于分章节模式。
 
 ---
 
-### P2 · 前端解耦：加一种文档类型只动一处
+### R2 · 资产工程化与可观测性
 
-**周期**：2 周　**风险**：中
+**周期**：1–2 周　**风险**：低
 
-**目标**：把 `App.vue` 从「什么都做」削到「只做分派」。
+**目标**：让提示词/技能资产可调试、可审计、可部署；补上出问题时能归因的最低限度观测。
 
-| 任务 | 具体动作 |
-| --- | --- |
-| T1 状态机外置 | 把 `goTo` / `canClickStep` / `reachedStepIndex` / `STEP_OF_STATE` / `GENERATING_TO_REVIEW` 抽成 `workflow.ts` 的**纯函数**（`next()` / `canGoTo()` / `reachedIndex()` / `degradeGenerating()`），配单测 |
-| T2 阶段视图拆分 | `views/FormView.vue` / `ChatView.vue` / `ReviewView.vue` / `DoneView.vue`。`App.vue` 只保留 header、进度条、按 `viewState` 分派 |
-| T3 状态收进 store | 三份文档、消息、会话 ID 收进 Pinia store（依赖已装未用），或 `useSession()` composable。二选一，见 ADR-003 |
-| T4 api 层统一 | `api.ts` 里 SSE（fetch）与 axios 两套收口到一个客户端；错误统一转 `AppError { code, message }`，视图层不再做字符串判断 |
-| T5 文档类型参数化 | 三份文档的生成/审阅/下载目前是三套近似代码，改为按 `docType` 参数驱动。新增第四种文档只加配置 |
+| 任务 | 具体动作 | 关联债务 |
+| --- | --- | --- |
+| T6 技能资产加固 | 开发态：弃用 `lru_cache` 常驻缓存，改为「按文件 mtime 的轻量缓存 / 显式重载开关」，改模板即时生效（D10）。生产态：`HARNESSPRD_SKILLS_DIR` 从「可选兜底」提升为「缺失即启动失败」（fail-fast），消除静默降级（D8）。每次生成记录所用技能资源版本/指纹 | D8 / D10 |
+| T7 可观测性基线 | 结构化日志（JSON 行）+ 每请求 `request_id`（中间件注入 `scope`）；`/health` 扩展返回 DB 连通性 + 主/备供应商可用性 + 技能目录是否就位 | D9（观测部分） |
+| T8 RAG 资产登记 | `core/api_doc_knowledge.json` 纳入「部署资产清单」，与 `skills/` 一起作为 Docker 打包项；记录其版本/更新时间，避免部署后检索静默失效 | 新能力收口 |
 
 **验收**：
-- `App.vue` < 250 行（现 1305 行）。
-- `workflow.ts` 测试覆盖所有 9 个状态与降级路径。
-- 新增一种文档类型只改 `workflow.ts` 配置 + 加一个视图，不碰编排逻辑。
+- 改 `prd-template.md` 无需重启即生效（开发态）；故意把 `HARNESSPRD_SKILLS_DIR` 指错目录，后端启动即报错而非降级。
+- 任意一次请求日志含 `request_id`；`/health` 能反映 DB 与供应商健康。
+- Docker 镜像内 `skills/` 与 `api_doc_knowledge.json` 路径在生产配置下可被加载（R3 验证）。
 
-**不做**：不引入 `vue-router`（理由见 ADR-006）；不做组件库抽象，Tailwind class 继续内联。
-
-**风险**：T2 拆分时，`App.vue` 里散落的 `activeDocKey` / `activeDocTitle` / `activeDocContent` 是隐式耦合点，拆之前先用测试固定它们的行为。
+**不做**：不引入 Prometheus/Grafana（少量人场景，结构化日志 + `/health` 足够）；不做分布式追踪。
 
 ---
 
-### P3 · 生成链路工业化：长文不再一断全废
+### R3 · 部署与多人加固
 
-**周期**：3-4 周　**风险**：中高（依赖 P1 的文档落库）
+**周期**：1 周　**风险**：低（不动业务逻辑）
 
-**目标**：把「能生成」升级成「可靠地生成」。
+**目标**：把「本地能跑」变成「一条命令起全栈、CI 拦破坏性改动、两账号互不可见」。
 
-| 任务 | 具体动作 |
-| --- | --- |
-| T1 分章节生成 | 依据 `field-schema.json` 的章节拆成 N 次调用，逐节流式 + 组装；单节失败只重试该节 |
-| T2 断点续传 | 中间产物落 `documents.sections`，中断后可续；已完成的章节不重复消耗 token |
-| T3 max_tokens 分档 | 按文档类型配置（PRD 用大值，澄清对话用小值），把默认 4096 改成不截断的值 |
-| T4 供应商 failover | `llm_factory` 增加主备切换、超时与有限重试。业务层依然无感 |
-| T5 成本计量 | 每次生成记录 token 用量与供应商模型名，落库并可查询 |
-| T6 提示词资产工程化 | 技能资源加版本号；开发态热重载（替换现有常驻缓存），生产态打包进镜像；每次生成记录所用版本 |
-| T7 定位方式加固 | `HARNESSPRD_SKILLS_DIR` 从「可选兜底」提升为「生产必填」，启动时校验，避免静默降级 |
+| 任务 | 具体动作 | 关联债务 |
+| --- | --- | --- |
+| T3 Docker 化 | `Dockerfile`（后端 uv 多阶段 + 前端 `npm run build` 静态产物）+ `docker-compose.yml`（backend + nginx 反代前端，SSE 的 `credentials: same-origin` 与 nginx 同源部署天然兼容）。`skills/` 与 `core/api_doc_knowledge.json` 随镜像打包（承接 R2-T8） | D11 |
+| T4 生产加固 | `AUTH_COOKIE_SECURE=true` 写入部署配置；轮换默认邀请码 `123456`；配置全部走环境变量，`.env` 不入库 | 旧 P4-T6 |
+| T5 部署态隔离验证 | 容器里建两个账号，互访问对方方案 id 返回 404；侧边栏互不可见（owner 过滤在 Repository 层强制，已在 P1 落地，这里只做部署态复验） | 旧 P4-T2 |
 
 **验收**：
-- 在生成中途断开网络，恢复后能从断点续，已完成章节不重复计费。
-- 一次 PRD 生成的 token 成本与所用提示词版本可查。
-- 把主供应商的 key 置空，自动切到备用供应商，业务代码零改动。
+- `docker compose up` 一条命令起全栈，浏览器同源访问可用，SSE 流式正常。
+- 默认邀请码不再是 `123456`；Cookie 在 HTTPS 下带 `Secure`。
+- 两账号互不可见，CI 红灯能拦住破坏性改动。
 
-**不做**：不做多轮自评/批判式生成（先把单次可靠性做扎实）；不做异步任务队列（当前同步流式的体感更好，除非并发上来）。
-
-**风险**：T1 分章节会改变 PRD「一气呵成」的连贯性，可能出现章节间口径不一致。**必须保留「整篇生成」作为可切换的 fallback**，两种模式由配置开关控制，对比后再决定默认用哪个。
+**不做**：不做多实例会话共享（当前单实例足够；真要扩再换 `TokenIssuer` 实现，ADR-007 已留接口）；不做计费、角色权限、租户隔离。
 
 ---
 
-### P4 · 登录与少量人使用（**登录部分已实施**）
-
-**周期**：功能开发完成后 → **已提前到 P1 之前**（2026-10-13 拍板，见第四节）
-
-**目标**：几个人能各自用自己的方案，互不干扰。
-
-**已完成（2026-10-13）**：
-
-| 任务 | 具体动作 |
-| --- | --- |
-| T1 自建账号密码 ✅ | 账号密码 + 服务端不透明 token + HttpOnly Cookie，**不上 JWT**（ADR-007）。密码 `hashlib.scrypt` 零新增依赖；开放注册但需邀请码（`invite_codes` 表，原子核销） |
-| T1a 接口可见性 ✅ | 默认拒绝中间件 + 白名单，新增接口自动受保护；一条不变量测试遍历 OpenAPI 全部路径守护（ADR-008） |
-| T1b 前端接入 ✅ | 顶栏右侧「登录 / 昵称」容器 + 登录注册弹窗（**不新增登录页**）；未登录禁止创建任务，登录后只关弹窗、由用户重新选入口（不做自动进入） |
-| T1c 运维入口 ✅ | `scripts/auth_cli.py`：列用户/邀请码、直接建号、改密、删号、发码 |
-
-**待做（随 P1 持久化落地）**：
-
-| 任务 | 具体动作 |
-| --- | --- |
-| T2 数据隔离 | `solutions.user_id` NOT NULL 外键；Repository **强制 owner 过滤**，越权返回 404（已并入 P1-T4） |
-| T3 部署打包 | Docker Compose 起全栈；`skills/` 目录随镜像打包，消除「向上找 6 层目录」的脆弱定位 |
-| T4 CI | GitHub Actions 跑 `pytest` + `vitest` + `vue-tsc` 类型检查 |
-| T5 健康检查加料 | `/health` 返回 DB 连通性与当前供应商可用性 |
-| T6 生产加固 | `AUTH_ENABLED=true` 与 `AUTH_COOKIE_SECURE=true` 写入部署配置；轮换默认邀请码 `123456` |
-
-**验收**：两个账号互不可见对方方案；一条命令起全栈；CI 红灯能拦住破坏性改动。
-
-**不做**：不做计费、不做角色权限体系、不做租户隔离（少量人场景，owner 过滤足够）。
-
----
-
-## 四、为什么是这个顺序
+## 四、为什么是这个顺序（含被否决的替代方案）
 
 | 决策 | 理由 |
 | --- | --- |
-| **P0 最先** | 它是后面所有重构的保险，且**零功能变化、当天可见效**。没有护栏就动 P1/P2，等于在没有网的情况下走钢丝 |
-| **P1 先于 P2** | 持久化会**改变后端接口形态**（新增 `/api/solutions/*` 列表 / 读取 / 保存 / 删除）。先定后端契约再拆前端，否则前端刚拆完就要因为接口变动再改一遍 |
-| **P2 紧随** | 你正处于功能开发期，会不断加文档类型、改流程。巨石组件此时的改动成本最高，越早拆越省 |
-| **P3 在 P1 之后** | 断点续传依赖「文档中间产物落库」，而落库是 P1 的产出。顺序不可颠倒 |
-| **登录提前到 P1 之前**（2026-10-13 修订） | 原计划「功能开发完再做登录」，现改为**先登录、后持久化**。理由：① 持久化要建的 `solutions` 表必须有 owner，**先有 `users` 表，外键才能一次建对**，否则要先建可空列、日后回填；② 登录是「一次性、边界清晰、与业务流程无耦合」的横切关注点，先做完能让后续每批代码**天生带上 `owner`**；③ 「每次调试都要登录」的摩擦由 `AUTH_ENABLED=false` 的 dev 兜底用户消解，而不是靠推迟登录来躲。代价是 P1 的验收多一层「两个账号互不可见」——但这本来就是要做的，只是提前 |
-| **P4 的部署部分仍在最后** | Docker / CI / 健康检查不阻塞任何开发，等全栈形态稳定后一次性做 |
+| **CI 提到 R0 而非留在 R3** | 旧路线图把 CI 放在部署阶段，但现在已有 **287 个测试**且 R0-T3 要动有风险的流式去重代码。先装自动执行的网，才能让后续每个改动「敢动手」——这是旧 P0 护栏思想的延续，只是落地时机随测试规模而前移 |
+| **R0 先于 R1** | T3 流式去重是已知风险点，必须先有 CI 兜底 + 对照测试钉死行为；T5 错误码是仍活着的 bug（前端字符串匹配），顺手收掉 |
+| **R1 紧随 R0** | PRD 是核心交付物，中断即全废（D7）、供应商单点（D12）、成本不可见（D9）直接决定「用户敢不敢用」。它们改的都是生成主链路，应在结构稳定后集中处理 |
+| **R2 在 R1 之后** | 资产工程化（热重载/fail-fast）与可观测性不阻塞任何功能，但 R2-T8 的 RAG 资产登记是 R3 Docker 打包的前置，故排在 R3 之前 |
+| **R3 最后** | Docker/CI/加固不阻塞开发，等全栈形态（含 R2 的资产清单）稳定后一次性做，且 R2-T8 明确要打包的资产后，R3 才不会漏项 |
 
-**替代方案及其被否理由**：
-
-- **先拆前端再搞持久化**：接口未定就拆组件，前端会返工两次。否决。
-- **直接上 Postgres + Docker**：当前单用户本地开发，SQLite 单文件的运维成本近乎为零，且通过 Repository 隔离后切换成本很低（见 ADR-002）。否决。
-- ~~**现在就做登录**：功能开发期每次调试都要登录，拖慢迭代~~ → **已改为采纳**（2026-10-13）：调试摩擦由开关与 dev 兜底用户消解，不值得为它推迟一个能简化后续所有批次的前置工作。
+**被否决的替代方案**：
+- **直接上 Postgres + K8s**：当前少量人 + 单实例，SQLite + Docker Compose 的运维成本近乎为零；切 Postgres 的代价被 Repository 隔离在一个文件内（ADR-002）。否决。
+- **续传另建 `documents.sections` 表**：与 ADR-009「单表全量快照」冲突，会 reintroduce 差集同步复杂度。否决——续传中间态复用同一份快照 JSON 内的字段。
+- **现在就做多轮自评/批判式生成**：先把单次可靠性（续传/failover）做扎实，再谈质量增强，避免把两个不确定因素叠在一起。
 
 ---
 
@@ -273,15 +178,12 @@
 
 每个阶段结束前自查：
 
-1. **行为未变**：P0/P2 结束后，完整跑一遍 V1 流程，输出与重构前逐字比对。
-2. **测试增长**：每个阶段结束时用例数只增不减。
-3. **依赖方向**：`api → services → repositories`，无反向 import；services 之间无横向 import。
-4. **契约一致**：后端 `schemas.py` 与前端 `types/index.ts` 字段名一致。
-5. **错误码化**：新增错误必须带 `error_code`，前端不得新增字符串匹配。
-6. **鉴权默认关闭**（2026-10-13 新增）：新增接口若在白名单内，必须说明为什么它可以公开。
-   不在白名单的接口**自动受保护**，由遍历 OpenAPI 路径的不变量测试守卫（ADR-008）。
-7. **owner 强制过滤**（P1 起生效）：任何查方案 / 文档的 Repository 方法都必须带 `owner_id` 参数，
-   且不允许「传 None 表示不过滤」的逃生口。
+1. **测试只增不减**：R0 起 CI 强制；每个阶段结束 `pytest` 与 `vitest` 用例数只增不减。
+2. **依赖方向**：`api → services → repositories → db`，无反向 import；services 之间无横向 import（D2 收尾后 `_stream_reply` 只在 `streaming.py`）。
+3. **契约一致**：后端 `schemas.py` 与前端 `types/index.ts` 字段名一致；新增错误必须带 `error_code`（R0-T5 后不得新增字符串匹配）。
+4. **鉴权默认关闭风险**：新增接口若在白名单内必须说明原因；非白名单自动受保护，由 OpenAPI 路径不变量测试守卫（ADR-008）。
+5. **owner 强制过滤**：任何查方案/文档的 Repository 方法都带 `owner_id`，不接受 `None`（ADR-009）。
+6. **技能资产不静默降级**：R2-T6 后，资源缺失在启动或生成时显式报错/告警，不再悄悄退回内置提示词。
 
 ---
 
@@ -289,41 +191,40 @@
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| P1 改造后无状态模式与后端历史冲突 | 上下文错乱、重复回复 | ADR-001 明确权威来源；响应里回传所用历史来源 |
-| P3 分章节导致章节间口径不一致 | PRD 质量下降 | 保留整篇模式开关，A/B 对比后再定默认值 |
-| SQLite 在 P4 少量并发写时锁竞争 | 写入卡顿 | 开 WAL；真不够用时经 Repository 切 Postgres |
-| 重构期长，功能开发被阻塞 | 拖慢交付 | P0/P1/P2 每条都可独立合入，不与功能开发互斥 |
-| 提示词模板改动无法热生效 | 调提示词极慢 | P3-T6 解决；过渡期可在 `.env` 加开关关掉资源缓存 |
+| R0-T3 合并两份 `_stream_reply` 边角行为漂移 | 生成输出突变 | 先写对照测试钉死两边行为再统一 |
+| R1-T2 续传导致章节间口径不一致 | PRD 质量下降 | 保留整篇模式开关；续传仅作用于分章节模式；前向上下文已传 `prior_sections` |
+| R1-T4 failover 触发双倍调用成本 | 费用上升 | 仅主供应商异常/超时切备；正常路径零开销 |
+| R2-T6 热重载引入竞态 | 读到半截模板 | 文件级原子替换 + mtime 比对，不做内容 diff |
+| SQLite 部署态并发写 | 写入卡顿 | 开 WAL（P1 已做）；真不够经 Repository 切 Postgres |
 
 ---
 
 ## 七、明确不做
 
-防止过度设计，以下**不在本路线图范围内**：
-
-- 微服务拆分。单体足够，拆了只会增加部署负担。
-- CQRS / 事件溯源。读写负载都很轻，引入是纯负担。
-- GraphQL。当前 9 条 REST + SSE 接口完全够用。
-- ~~前端引入 `vue-router`~~ → **已改为引入**（2026-10-13）：但**只用于页面级导航**（`/v2` / `/v2/list` / `/v2/:id`），9 个阶段的流转仍由 `workflow.ts` 状态机驱动、**不进 URL**。即 ADR-006 的决策主体未变，只是行动项作废。
-- 自研 Agent 编排框架。LangChain 的抽象当前够用，不要为了「可控」提前造轮子。
-- 多租户、计费、角色权限。少量人场景，owner 过滤足够。
+- 微服务 / CQRS / 事件溯源 / GraphQL：单体 + 9 条 REST+SSE 完全够用。
+- 异步任务队列：同步流式体感更好，除非并发上来。
+- 多租户 / 计费 / 角色权限：少量人场景，owner 过滤足够（ADR-009）。
+- 自研 Agent 编排框架：LangChain 抽象当前够用。
+- 多实例会话共享：当前单实例足够，真要扩再换 `TokenIssuer` 实现（ADR-007 已留接口）。
 
 ---
 
-## 八、实施进度（截至 2026-10-13）
+## 八、实施进度（截至 2026-10-13 重订）
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| P0-T1 后端测试 | ✅ | 58 用例（pytest）：认证服务、认证接口、**门禁不变量**（遍历 OpenAPI 路径） |
-| P0-T2 前端测试 | ✅ | 145 用例 / 10 文件（vitest）：api 凭据、auth store、登录弹窗、AppV2 门禁 |
-| P0-T3 合并流式编排 | ⬜ | 待做 |
-| P0-T4 删死接口 | ✅ | 3 条 document 路由 + 4 个 schema + 3 个 service 占位已删；OpenAPI 路径 18 → 15 |
-| P0-T5 错误契约码化 | ⬜ | 待做 |
-| P2-T1 状态机外置 | ✅ | `workflow.ts` 纯函数 + `STATE_DOWNGRADE` 降级表，已配单测 |
-| P4 登录系统 | ✅ | 后端认证 + 默认拒绝中间件 + 前端接入 + 运维 CLI，见 ADR-007 / 008 |
-| ADR 增补 | ✅ | 新增 007 / 008 / 009；修订 005（`user_id` 插槽）、006（vue-router） |
-| P1 方案持久化 | ⬜ | **下一批**，设计见 ADR-009 与本文 P1 节 |
-
-**当前入口形态**：`/v2` 可匿名浏览三个入口，但选择任一入口都会提示先登录；登录成功后**只关弹窗**
-并提示「已登录，请选择入口开始」，**不自动进入刚才选的入口**——刻意如此，避免用户登录完忘了自己选过什么
-（这条行为已有前端测试锁定）。
+| 原 P0 护栏（除 T3/T5） | ✅ | 78 后端 + 209 前端用例；死接口已删 |
+| 原 P1 方案持久化 | ✅ | 快照范式 + owner 过滤 + 侧边栏 + router |
+| 原 P2 前端解耦 | ✅ | App.vue 已删；组件库 + 状态机 + composables |
+| 原 P3-T1/T3（分章节 + max_tokens 分档） | ✅ | `prd_section_writer` + `llm_factory` 分档 |
+| 原 P4 登录 | ✅ | 认证 + 中间件 + 前端 + CLI |
+| **R0-T1 CI** | ⬜ | 新建，保护现有 287 测试 |
+| **R0-T3 流式去重收尾** | ⬜ | D2 半吊子，需彻底收敛 |
+| **R0-T5 错误码化** | ⬜ | D4 仍活（前端字符串匹配） |
+| **R1-T2 断点续传** | ⬜ | D7 |
+| **R1-T4 供应商 failover** | ⬜ | D12 |
+| **R1-T5 成本计量** | ⬜ | D9 成本部分 |
+| **R2-T6 技能资产加固** | ⬜ | D8/D10 |
+| **R2-T7 可观测性** | ⬜ | D9 观测部分 |
+| **R2-T8 RAG 资产登记** | ⬜ | 新能力收口 |
+| **R3 Docker / 加固 / 隔离验证** | ⬜ | D11 + 旧 P4-T6 |
