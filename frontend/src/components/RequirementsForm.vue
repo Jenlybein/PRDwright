@@ -42,7 +42,7 @@ const emit = defineEmits<{
   /** 校验通过并生成结构化摘要后触发，载荷为提交给后端 Skill 的标准 JSON */
   submit: [summary: RequirementsSummary]
   /** 编辑器内容变化时触发，供父组件实时保存草稿 */
-  'update:summary': [summary: RequirementsSummary]
+ 'update:summary': [summary: RequirementsSummary]
   /** 点击返回按钮；具体落到哪一页由父组件决定 */
   back: []
 }>()
@@ -62,26 +62,26 @@ const STORAGE_OPTIONS = ['无需存储', '浏览器本地存储', '服务端数�
 
 /** 前端技术常见组合（输入建议，仍可自由填写） */
 const FRONTEND_SUGGESTIONS = [
-  'Vue 3 + Vite + TypeScript',
-  'React + Next.js',
-  '微信小程序原生',
-  'Flutter',
+ 'Vue 3 + Vite + TypeScript',
+ 'React + Next.js',
+ '微信小程序原生',
+ 'Flutter',
 ]
 
 /** 后端技术常见组合（输入建议，仍可自由填写） */
 const BACKEND_SUGGESTIONS = [
-  'Python + FastAPI',
-  'Node.js + Express',
-  'Go + Gin',
-  'Supabase / Firebase（免自建后端）',
+ 'Python + FastAPI',
+ 'Node.js + Express',
+ 'Go + Gin',
+ 'Supabase / Firebase（免自建后端）',
 ]
 
 /** 部署方式常见组合（输入建议，仍可自由填写） */
 const DEPLOYMENT_SUGGESTIONS = [
-  'Docker 部署到云服务器',
-  'Vercel / Netlify 静态托管',
-  '本地运行',
-  '微信小程序云开发',
+ 'Docker 部署到云服务器',
+ 'Vercel / Netlify 静态托管',
+ '本地运行',
+ '微信小程序云开发',
 ]
 
 /** 四个区块的字段配置 */
@@ -113,7 +113,7 @@ const SECTIONS: SectionConfig[] = [
         label: '核心目标',
         type: 'textarea',
         placeholder:
-          '要说清「解决谁的问题」与「解决成什么样」，例如：帮独立开发者在 30 分钟内把模糊想法整理成可开工的 PRD，替代口头对齐与反复返工。',
+ '要说清「解决谁的问题」与「解决成什么样」，例如：帮独立开发者在 30 分钟内把模糊想法整理成可开工的 PRD，替代口头对齐与反复返工。',
         required: true,
         rows: 3,
       },
@@ -301,10 +301,10 @@ const form = reactive<FormState>(emptyForm())
 
 /** 各折叠区块的展开状态；含必填字段的前两个区块默认展开 */
 const expanded = reactive<Record<string, boolean>>({
-  'product-users': true,
-  'features-pages': true,
+ 'product-users': true,
+ 'features-pages': true,
   technical: false,
-  'non-functional': false,
+ 'non-functional': false,
 })
 
 /** 校验错误提示；普通字段与列表字段用字段 key，结构化行用 `字段.{行号}.{子字段}` */
@@ -597,13 +597,13 @@ function validate(): boolean {
     if (!item.name.trim()) {
       setError(
         rowErrorKey('mvp_features', index, 'name'),
-        `第 ${index + 1} 个功能：功能名称为必填项`,
+ `第 ${index + 1} 个功能：功能名称为必填项`,
       )
     }
     if (!item.description.trim()) {
       setError(
         rowErrorKey('mvp_features', index, 'description'),
-        `第 ${index + 1} 个功能：功能描述为必填项`,
+ `第 ${index + 1} 个功能：功能描述为必填项`,
       )
     }
   })
@@ -616,7 +616,7 @@ function validate(): boolean {
     if (normalizeList(page.modules).length === 0) {
       setError(
         rowErrorKey('ui_pages', index, 'modules'),
-        `第 ${index + 1} 个页面：请至少添加一个模块`,
+ `第 ${index + 1} 个页面：请至少添加一个模块`,
       )
     }
   })
@@ -679,7 +679,7 @@ function fillExample(): void {
     product_name: 'HarnessPRD',
     platform: '网页应用',
     product_goal:
-      '帮独立开发者与小团队在 30 分钟内把模糊的产品想法整理成可开工的 PRD，替代口头对齐与反复返工。',
+ '帮独立开发者与小团队在 30 分钟内把模糊的产品想法整理成可开工的 PRD，替代口头对齐与反复返工。',
     target_users: ['独立开发者', '3-10 人小团队的产品经理'],
     mvp_features: [
       { name: '问卷填写', description: '分基础与进阶两组收集产品信息', user_value: '降低填写门槛' },
@@ -765,12 +765,12 @@ defineExpose({ getSummary: () => currentSummary.value })
   <div>
     <!-- 页面标题与说明 -->
     <div class="mb-6">
-      <h1 class="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100 sm:text-3xl">
+      <h1 class="text-2xl font-bold tracking-tight text-fg  sm:text-3xl">
         告诉我们你的产品想法
       </h1>
-      <p class="mt-2 max-w-xl text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+      <p class="mt-2 max-w-xl text-sm leading-relaxed text-muted">
         按字段逐项填写下面的表单，列表类内容逐条添加即可，<span
-          class="font-medium text-slate-700 dark:text-slate-300"
+          class="font-medium text-muted "
           >不需要自己拼格式或写分隔符</span
         >，前端会实时转换成后端 Skill 可直接使用的结构化 JSON。带
         <span class="text-red-500">*</span> 的字段为必填。
@@ -819,12 +819,12 @@ defineExpose({ getSummary: () => currentSummary.value })
     <!-- JSON 预览面板：实时反映表单内容，等宽字体便于阅读与排查 -->
     <section
       v-if="showJsonPreview"
-      class="mb-6 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900"
+      class="mb-6 overflow-hidden rounded-2xl border border-line bg-surface shadow-sm  "
     >
-      <div class="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3 dark:border-slate-800">
+      <div class="flex items-center justify-between gap-3 border-b border-line px-5 py-3 ">
         <div class="min-w-0">
-          <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">结构化 JSON 预览</h2>
-          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+          <h2 class="text-sm font-semibold text-fg ">结构化 JSON 预览</h2>
+          <p class="mt-0.5 text-xs text-subtle">
             实时反映表单内容 · 与后端 Skill 字段结构一致 · {{ jsonSize }}
           </p>
         </div>
@@ -841,7 +841,7 @@ defineExpose({ getSummary: () => currentSummary.value })
         </AppButton>
       </div>
       <pre
-        class="max-h-96 overflow-auto bg-slate-50 px-5 py-4 font-mono text-xs leading-relaxed text-slate-700 dark:bg-slate-800/60 dark:text-slate-300"
+        class="max-h-96 overflow-auto bg-surface-2 px-5 py-4 font-mono text-xs leading-relaxed text-muted  "
         >{{ jsonPreview }}</pre
       >
     </section>
@@ -852,12 +852,12 @@ defineExpose({ getSummary: () => currentSummary.value })
       <section
         v-for="section in SECTIONS"
         :key="section.key"
-        class="rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-200/50 dark:border-slate-700/80 dark:bg-slate-900 dark:shadow-none"
+        class="rounded-2xl border border-line bg-surface shadow-sm shadow-slate-200/50   dark:shadow-none"
       >
         <!-- 区块标题：点击折叠 / 展开 -->
         <button
           type="button"
-          class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-slate-50 dark:hover:bg-slate-800/60 sm:px-6"
+          class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-surface-2 sm:px-6"
           :aria-expanded="expanded[section.key]"
           @click="expanded[section.key] = !expanded[section.key]"
         >
@@ -868,7 +868,7 @@ defineExpose({ getSummary: () => currentSummary.value })
               {{ section.no }}
             </span>
             <span class="min-w-0">
-              <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-slate-900 dark:text-slate-100">
+              <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-fg ">
                 {{ section.title }}
                 <span
                   v-if="section.required"
@@ -881,7 +881,7 @@ defineExpose({ getSummary: () => currentSummary.value })
                   >有错误</span
                 >
               </span>
-              <span class="block text-xs text-slate-500 dark:text-slate-400">
+              <span class="block text-xs text-subtle">
                 {{ section.hint }}
                 <template v-if="!expanded[section.key]">
                   · 已填 {{ filledCount(section) }}/{{ section.fields.length }}
@@ -890,7 +890,7 @@ defineExpose({ getSummary: () => currentSummary.value })
             </span>
           </span>
           <svg
-            class="h-4 w-4 shrink-0 text-slate-400 transition-transform dark:text-slate-500"
+            class="h-4 w-4 shrink-0 text-subtle transition-transform"
             :class="expanded[section.key] ? 'rotate-180' : ''"
             viewBox="0 0 20 20"
             fill="currentColor"
@@ -907,14 +907,14 @@ defineExpose({ getSummary: () => currentSummary.value })
         <!-- 区块字段 -->
         <div
           v-show="expanded[section.key]"
-          class="space-y-5 border-t border-slate-100 px-5 pb-6 pt-5 dark:border-slate-800 sm:px-6"
+          class="space-y-5 border-t border-line px-5 pb-6 pt-5  sm:px-6"
         >
           <div v-for="field in section.fields" :key="field.key">
             <!-- 普通控件：label 关联到控件 -->
             <label
               v-if="isPlainField(field)"
               :for="`field-${field.key}`"
-              class="mb-2 block text-sm font-medium text-slate-800 dark:text-slate-200"
+              class="mb-2 block text-sm font-medium text-fg "
             >
               {{ field.label }}
               <span v-if="field.required" class="ml-0.5 text-red-500" aria-hidden="true">*</span>
@@ -922,11 +922,11 @@ defineExpose({ getSummary: () => currentSummary.value })
 
             <!-- 结构化编辑器：整体作为一组，label 不加 for -->
             <div v-else class="mb-2 flex flex-wrap items-baseline gap-x-2">
-              <span class="text-sm font-medium text-slate-800 dark:text-slate-200">
+              <span class="text-sm font-medium text-fg ">
                 {{ field.label }}
                 <span v-if="field.required" class="ml-0.5 text-red-500" aria-hidden="true">*</span>
               </span>
-              <span v-if="field.hint" class="text-xs text-slate-400 dark:text-slate-500">{{ field.hint }}</span>
+              <span v-if="field.hint" class="text-xs text-subtle">{{ field.hint }}</span>
             </div>
 
             <!-- 通用字段（input / textarea / select / list）交给 FormFieldRenderer -->
@@ -985,7 +985,7 @@ defineExpose({ getSummary: () => currentSummary.value })
         <AppButton variant="primary" block size="md" @click="handleSubmit">
           提交需求，开始 AI 澄清
         </AppButton>
-        <p class="mt-3 text-center text-xs text-slate-400 dark:text-slate-500">
+        <p class="mt-3 text-center text-xs text-subtle">
           提交前自动校验必填项、字段完整性与范围冲突 · 可随时打开 JSON 预览核对
         </p>
         <!--

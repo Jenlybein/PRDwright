@@ -352,7 +352,7 @@ function handleStepClick(stepId: StepId): void {
 </script>
 
 <template>
-  <div class="flex min-h-screen bg-gradient-to-b from-primary-50 via-slate-50 to-slate-100 text-slate-900 dark:from-slate-900 dark:via-slate-950 dark:to-slate-950 dark:text-slate-100">
+  <div class="flex min-h-screen bg-gradient-to-b from-accent-soft via-bg to-bg text-body">
     <!-- 左侧：方案侧边栏（窄屏为抽屉；lg 以上常驻，含品牌 / 主题 / 列表 / 登录） -->
     <SolutionSidebar />
 
@@ -363,8 +363,8 @@ function handleStepClick(stepId: StepId): void {
         v-if="solutions.saving || solutions.saveError || savedTip"
         class="mb-4 flex items-center justify-end gap-3 text-xs"
       >
-        <span v-if="solutions.saving" class="text-slate-400">保存中…</span>
-        <span v-else-if="solutions.saveError" class="text-red-500">{{ solutions.saveError }}</span>
+        <span v-if="solutions.saving" class="text-subtle">保存中…</span>
+        <span v-else-if="solutions.saveError" class="text-danger">{{ solutions.saveError }}</span>
         <Transition
           enter-active-class="transition duration-200"
           enter-from-class="opacity-0 translate-y-1"
@@ -396,7 +396,7 @@ function handleStepClick(stepId: StepId): void {
       <!-- 刷新时落在无法恢复的状态：说明为什么不是原来的阶段 -->
       <p
         v-if="downgradeNotice"
-        class="mb-4 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+        class="mb-4 rounded-xl border border-line bg-surface px-4 py-2 text-xs text-subtle"
       >
         {{ downgradeNotice }}
       </p>
@@ -516,7 +516,7 @@ function handleStepClick(stepId: StepId): void {
       />
     </main>
 
-    <footer class="pb-10 text-center text-xs text-slate-400 dark:text-slate-500">
+    <footer class="pb-10 text-center text-xs text-subtle">
       HarnessPRD · 由 AI 驱动的产品文档生成器
     </footer>
     </div>

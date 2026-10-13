@@ -95,7 +95,7 @@ const emit = defineEmits<{
           v-if="viewState === 'review-prd'"
           variant="secondary"
           size="sm"
-          class="!border-primary-300 !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
+          class="!border-accent !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
           @click="emit('generateApiDocs')"
         >
           生成接口文档
@@ -105,7 +105,7 @@ const emit = defineEmits<{
           v-else-if="viewState === 'review-api-docs'"
           variant="secondary"
           size="sm"
-          class="!border-primary-300 !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
+          class="!border-accent !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
           @click="emit('generatePrompts')"
         >
           生成提示词套件

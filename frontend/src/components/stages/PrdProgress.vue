@@ -59,7 +59,7 @@ const progressPercent = computed(() => {
 /** 步骤胶囊的样式：已完成 / 当前 / 未到达 */
 function chipClass(stepIndex: number): string {
   if (stepIndex > currentIndex.value)
-    return 'bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500'
+    return 'bg-surface-2 text-subtle'
   if (stepIndex === currentIndex.value)
     return 'bg-primary-500 text-white ring-4 ring-primary-100 dark:ring-primary-900/50'
   return 'bg-primary-100 text-primary-700 dark:bg-primary-900/60 dark:text-primary-300'
@@ -67,7 +67,7 @@ function chipClass(stepIndex: number): string {
 </script>
 
 <template>
-  <div class="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
+  <div class="rounded-2xl border border-line bg-surface p-4 shadow-sm  ">
     <div class="flex items-center justify-between gap-3">
       <div class="flex min-w-0 items-center gap-2">
         <!-- 生成中转圈；完成后换成对勾，避免「已完成」还转着 -->
@@ -94,10 +94,10 @@ function chipClass(stepIndex: number): string {
             clip-rule="evenodd"
           />
         </svg>
-        <span class="truncate text-sm font-medium text-slate-900 dark:text-slate-100">{{ headline }}</span>
+        <span class="truncate text-sm font-medium text-fg ">{{ headline }}</span>
       </div>
 
-      <span v-if="progress.total" class="shrink-0 text-xs text-slate-500 dark:text-slate-400">
+      <span v-if="progress.total" class="shrink-0 text-xs text-subtle">
         第 {{ Math.min(progress.index + 1, progress.total) }} / {{ progress.total }} 章
       </span>
     </div>
@@ -113,12 +113,12 @@ function chipClass(stepIndex: number): string {
         <span
           v-if="index < STEPS.length - 1"
           class="h-px flex-1"
-          :class="index < currentIndex ? 'bg-primary-300' : 'bg-slate-200 dark:bg-slate-700'"
+          :class="index < currentIndex ? 'bg-primary-300' : 'bg-line '"
         ></span>
       </li>
     </ol>
 
-    <div v-if="progress.total" class="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+    <div v-if="progress.total" class="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-surface-2 ">
       <div
         class="h-full rounded-full bg-gradient-to-r from-primary-400 to-primary-600 transition-all duration-300"
         :style="{ width: `${progressPercent}%` }"

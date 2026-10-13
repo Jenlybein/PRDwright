@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
 import { useSolutionsStore } from '@/stores/solutions'
 import type { SolutionSummary } from '@/types'
 import AppButton from '@/components/ui/AppButton.vue'
+import ThemeMenu from '@/components/ui/ThemeMenu.vue'
 import UserMenu from '@/components/UserMenu.vue'
 
 /**
@@ -17,6 +18,12 @@ import UserMenu from '@/components/UserMenu.vue'
  *
  * lg 以上常驻左侧且 `sticky`，不随右侧内容滚动；窄屏（< lg）下默认收起为抽屉，
  * 用悬浮按钮唤出。本组件只负责展示与派发事件，数据与动作都在 `stores/solutions.ts`。
+ *
+ * 颜色全部走语义令牌（bg-surface / text-fg / text-subtle / bg-accent-soft …）。
+ * 这里曾是暗色可读性最差的一屏：方案标题写的是 `text-slate-800` 却没有暗色变体，
+ * 在深底上对比度只有 1.22:1（等于看不见）；选中态用的 primary-950/40 与底色
+ * 也只差 1.14:1。现在标题走 --ui-fg、次要信息走 --ui-subtle、选中态由
+ * 「浅色底 + 描边 + 左侧色条」三重提示共同表达。
  */
 
 const solutions = useSolutionsStore()
@@ -86,45 +93,13 @@ function open(item: SolutionSummary): void {
   // 结果就是在列表里多出一份重复方案。改地址后由 AppV2 的 watch 负责加载。
   void router.push(`/v2/${item.id}`)
 }
-
-// ---------------------------------------------------------------------------
-// 主题（明 / 暗）：手动开关，持久化到 localStorage，缺省跟随系统偏好
-// ---------------------------------------------------------------------------
-const isDark = ref(false)
-
-function applyTheme(dark: boolean): void {
-  isDark.value = dark
-  document.documentElement.classList.toggle('dark', dark)
-  try {
-    localStorage.setItem('theme', dark ? 'dark' : 'light')
-  } catch {
-    // localStorage 不可用时忽略，不影响本次切换
-  }
-}
-
-function toggleTheme(): void {
-  applyTheme(!isDark.value)
-}
-
-// 初始化：优先读取用户上次的选择，否则跟随系统偏好
-const storedTheme = (() => {
-  try {
-    return localStorage.getItem('theme')
-  } catch {
-    return null
-  }
-})()
-const prefersDark =
-  typeof window.matchMedia === 'function' &&
-  window.matchMedia('(prefers-color-scheme: dark)').matches
-applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
 </script>
 
 <template>
   <!-- 窄屏唤出按钮：lg 以上不需要 -->
   <button
     type="button"
-    class="fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-white shadow-lg shadow-primary-500/30 lg:hidden"
+    class="fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-on-accent shadow-lg shadow-primary-500/30 lg:hidden"
     aria-label="打开方案列表"
     @click="drawerOpen = true"
   >
@@ -140,59 +115,34 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
   <!-- 窄屏抽屉遮罩 -->
   <div
     v-if="drawerOpen"
-    class="fixed inset-0 z-30 bg-slate-900/30 lg:hidden"
+    class="fixed inset-0 z-30 bg-slate-950/40 lg:hidden"
     @click="drawerOpen = false"
   />
 
   <aside
     :class="[
-      'flex flex-col border-slate-200/70 bg-white/70 backdrop-blur dark:border-slate-800/70 dark:bg-slate-900/80',
+      'flex flex-col border-line bg-surface/80 backdrop-blur',
       // 窄屏：抽屉；lg 以上：常驻左侧且 sticky，不随右侧内容滚动
       'fixed inset-y-0 left-0 z-40 w-64 border-r transition-transform lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0',
       drawerOpen ? 'translate-x-0' : '-translate-x-full',
     ]"
     aria-label="方案列表"
   >
-    <!-- 顶端：品牌 + 主题切换 -->
-    <div class="flex items-center justify-between gap-2 border-b border-slate-200/70 px-4 py-3 dark:border-slate-800/70">
-      <div class="flex items-center gap-2.5">
+    <!-- 顶端：品牌 + 主题切换（亮 / 暗 / 跟随系统） -->
+    <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+      <div class="flex min-w-0 items-center gap-2.5">
         <div
           class="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 text-sm font-bold text-white shadow-md shadow-primary-500/30"
         >
           H
         </div>
-        <div class="leading-tight">
-          <div class="text-sm font-bold text-slate-900 dark:text-slate-100">HarnessPRD</div>
-          <div class="text-[11px] text-slate-500 dark:text-slate-400">需求 → PRD / 接口 / 提示词</div>
+        <div class="min-w-0 leading-tight">
+          <div class="truncate text-sm font-bold text-fg">HarnessPRD</div>
+          <div class="truncate text-[11px] text-subtle">需求 → PRD / 接口 / 提示词</div>
         </div>
       </div>
 
-      <AppButton
-        variant="ghost"
-        size="sm"
-        class="!px-2"
-        :aria-label="isDark ? '切换到亮色模式' : '切换到暗色模式'"
-        :title="isDark ? '切换到亮色模式' : '切换到暗色模式'"
-        @click="toggleTheme"
-      >
-        <svg v-if="isDark" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-          <path
-            d="M10 2a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 2ZM10 15a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 15Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.06 1.06a.75.75 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-11.314 0a.75.75 0 0 1 1.06 0l1.06 1.06a.75.75 0 0 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.06Zm9.9 4.243a.75.75 0 0 1 1.06 0 .75.75 0 0 1 0 1.061l-1.061 1.06a.75.75 0 1 1-1.06-1.06l1.06-1.06Zm-9.9-4.243a.75.75 0 0 1 0 1.06L5.66 9.22a.75.75 0 1 1-1.06-1.06l1.06-1.06Zm-1.06 7.07a.75.75 0 0 1 1.06 0 .75.75 0 0 1 0 1.06l-1.06 1.06a.75.75 0 1 1-1.06-1.06l1.06-1.06Zm1.06-7.07a.75.75 0 0 1-1.06 0 .75.75 0 0 1 0-1.06l1.06-1.06a.75.75 0 1 1 1.06 1.06l-1.06 1.06Z"
-          />
-          <path
-            fill-rule="evenodd"
-            d="M10 1.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Zm0 2.5a6 6 0 1 0 0 12 6 6 0 0 0 0-12Z"
-            clip-rule="evenodd"
-          />
-        </svg>
-        <svg v-else class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-          <path
-            fill-rule="evenodd"
-            d="M7.455 2.004a.75.75 0 0 1 .26.77 7 7 0 0 0 9.958 7.967.75.75 0 0 1 1.067.853A8.5 8.5 0 1 1 6.647 1.921a.75.75 0 0 1 .808 1.083Z"
-            clip-rule="evenodd"
-          />
-        </svg>
-      </AppButton>
+      <ThemeMenu />
     </div>
 
     <!-- 新建任务（仅登录后） -->
@@ -210,11 +160,11 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
     <!-- 方案列表（仅登录后；列表区独立滚动，不影响侧栏固定） -->
     <div v-if="auth.isLoggedIn" class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
       <div class="mb-2 flex items-center justify-between px-2">
-        <span class="text-xs font-medium text-slate-400 dark:text-slate-500">我的方案</span>
+        <span class="text-xs font-medium text-muted">我的方案</span>
         <!-- 窄屏抽屉的收起按钮；lg 以上侧栏常驻，不需要 -->
         <button
           type="button"
-          class="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 lg:hidden"
+          class="rounded-md p-1 text-subtle transition hover:bg-surface-2 hover:text-fg lg:hidden"
           aria-label="收起方案列表"
           @click="drawerOpen = false"
         >
@@ -227,14 +177,17 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
       </div>
 
       <!-- 加载中 -->
-      <p v-if="solutions.loading && solutions.items.length === 0" class="px-2 py-6 text-center text-xs text-slate-400 dark:text-slate-500">
+      <p
+        v-if="solutions.loading && solutions.items.length === 0"
+        class="px-2 py-6 text-center text-xs text-subtle"
+      >
         加载中…
       </p>
 
       <!-- 空态 -->
       <p
         v-else-if="solutions.items.length === 0"
-        class="px-2 py-6 text-center text-xs leading-relaxed text-slate-400 dark:text-slate-500"
+        class="px-2 py-6 text-center text-xs leading-relaxed text-subtle"
       >
         还没有方案<br />写下第一句话就会自动创建
       </p>
@@ -243,10 +196,10 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
         <li v-for="item in solutions.items" :key="item.id">
           <div
             :class="[
-              'group relative rounded-lg px-2.5 py-2 transition',
+              'group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition',
               item.id === activeId
-                ? 'bg-primary-50 ring-1 ring-primary-200 dark:bg-primary-950/40 dark:ring-primary-800'
-                : 'hover:bg-slate-100/80 dark:hover:bg-slate-800/80',
+                ? 'border-primary-500 bg-accent-soft ring-1 ring-accent-soft-line'
+                : 'border-transparent hover:bg-surface-2',
             ]"
           >
             <button
@@ -255,8 +208,8 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
               :aria-current="item.id === activeId ? 'true' : undefined"
               @click="open(item)"
             >
-              <span class="block truncate text-sm text-slate-800">{{ item.title }}</span>
-              <span class="mt-0.5 flex items-center gap-1.5 text-xs text-slate-400">
+              <span class="block truncate text-sm font-medium text-fg">{{ item.title }}</span>
+              <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
                 <span>{{ solutions.stageLabel(item.stage) }}</span>
                 <span aria-hidden="true">·</span>
                 <span>{{ relativeTime(item.updated_at) }}</span>
@@ -267,7 +220,7 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
             <button
               v-if="pendingDeleteId !== item.id"
               type="button"
-              class="absolute right-1.5 top-1.5 rounded-md p-1 text-slate-300 opacity-0 transition hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 group-hover:opacity-100"
+              class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
               :aria-label="`删除方案 ${item.title}`"
               @click.stop="confirmDelete(item)"
             >
@@ -283,20 +236,20 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
             <!-- 行内二次确认：删除是不可逆动作，不该点一下就没了 -->
             <div
               v-else
-              class="absolute inset-0 flex items-center justify-between gap-2 rounded-lg bg-red-50 px-2.5 py-2 ring-1 ring-red-100"
+              class="absolute inset-0 flex items-center justify-between gap-2 rounded-lg bg-danger-surface px-2.5 py-2 ring-1 ring-danger-line"
             >
-              <span class="truncate text-xs text-red-700">删除「{{ item.title }}」？</span>
+              <span class="truncate text-xs text-danger-fg">删除「{{ item.title }}」？</span>
               <span class="flex shrink-0 gap-1">
                 <button
                   type="button"
-                  class="rounded-md bg-red-500 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-600"
+                  class="rounded-md bg-danger px-2 py-0.5 text-xs font-medium text-on-accent transition hover:bg-danger/90"
                   @click.stop="doDelete"
                 >
                   删除
                 </button>
                 <button
                   type="button"
-                  class="rounded-md px-2 py-0.5 text-xs text-slate-500 hover:bg-white"
+                  class="rounded-md px-2 py-0.5 text-xs text-body transition hover:bg-surface"
                   @click.stop="cancelDelete"
                 >
                   取消
@@ -310,13 +263,13 @@ applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark)
 
     <!-- 未登录占位：登录后才看得到方案列表 -->
     <div v-else class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
-      <p class="px-2 py-6 text-center text-xs leading-relaxed text-slate-400 dark:text-slate-500">
+      <p class="px-2 py-6 text-center text-xs leading-relaxed text-subtle">
         登录后查看<br />你的方案列表
       </p>
     </div>
 
     <!-- 底端：登录入口；未登录显示「登录」，已登录显示昵称并可退出 -->
-    <div class="border-t border-slate-200/70 px-3 py-3 dark:border-slate-800/70">
+    <div class="border-t border-line px-3 py-3">
       <UserMenu />
     </div>
   </aside>

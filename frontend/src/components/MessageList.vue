@@ -31,10 +31,10 @@ const visibleMessages = computed(() =>
 
 /** 思考中的轮换提示语：长时间等待首字时给用户可感知的进度反馈，避免干等静止文案 */
 const THINKING_PHRASES = [
-  '正在理解你的需求要点…',
-  '正在梳理产品结构与边界…',
-  '正在组织文档内容…',
-  '正在撰写详细回复…',
+ '正在理解你的需求要点…',
+ '正在梳理产品结构与边界…',
+ '正在组织文档内容…',
+ '正在撰写详细回复…',
 ]
 
 /** 当前展示的思考提示语 */
@@ -127,7 +127,7 @@ defineExpose({ scrollToBottom })
     <!-- 空状态 -->
     <div
       v-if="!visibleMessages.length"
-      class="flex h-full items-center justify-center text-sm text-slate-400"
+      class="flex h-full items-center justify-center text-sm text-subtle"
     >
       暂无消息，输入内容开始对话
     </div>
@@ -146,7 +146,7 @@ defineExpose({ scrollToBottom })
             message.role === 'user'
               ? 'bg-gradient-to-br from-primary-400 to-primary-600'
               : 'bg-gradient-to-br from-slate-600 to-slate-800'
-          "
+ "
         >
           {{ message.role === 'user' ? '我' : 'AI' }}
         </div>
@@ -166,26 +166,26 @@ defineExpose({ scrollToBottom })
             <!-- 思考中：跳动圆点 + 轮换提示语，缓解首字等待期的空洞感 -->
             <div
               v-if="message.streaming && !message.content.trim()"
-              class="flex items-center gap-3 rounded-2xl rounded-tl-sm bg-white px-4 py-3.5 shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-800 dark:ring-slate-700"
+              class="flex items-center gap-3 rounded-2xl rounded-tl-sm bg-surface px-4 py-3.5 shadow-sm ring-1 ring-line"
             >
               <span class="flex items-end gap-1" aria-hidden="true">
                 <span
-                  class="h-2 w-2 animate-bounce rounded-full bg-slate-400"
+                  class="h-2 w-2 animate-bounce rounded-full bg-subtle"
                   style="animation-delay: -0.32s"
                 ></span>
                 <span
-                  class="h-2 w-2 animate-bounce rounded-full bg-slate-400"
+                  class="h-2 w-2 animate-bounce rounded-full bg-subtle"
                   style="animation-delay: -0.16s"
                 ></span>
-                <span class="h-2 w-2 animate-bounce rounded-full bg-slate-400"></span>
+                <span class="h-2 w-2 animate-bounce rounded-full bg-subtle"></span>
               </span>
-              <span class="text-sm text-slate-500 dark:text-slate-400">{{ thinkingPhrase }}</span>
+              <span class="text-sm text-subtle">{{ thinkingPhrase }}</span>
             </div>
 
             <!-- 已有内容：Markdown 渲染 + 流式光标 -->
             <div
               v-else
-              class="prose prose-sm prose-slate max-w-none rounded-2xl rounded-tl-sm bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70 dark:prose-invert dark:bg-slate-800 dark:ring-slate-700"
+              class="prose prose-sm prose-slate max-w-none rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm ring-1 ring-line dark:prose-invert  "
             >
               <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
               <div v-html="renderMarkdown(message.content)" />

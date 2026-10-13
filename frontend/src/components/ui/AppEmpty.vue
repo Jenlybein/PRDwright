@@ -22,11 +22,11 @@ withDefaults(
 
 <template>
   <div class="flex flex-col items-center justify-center gap-2 px-4 py-12 text-center">
-    <span class="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
+    <span class="flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2 text-subtle">
       <AppIcon :path="iconPath" size="lg" />
     </span>
-    <p class="text-sm font-medium text-slate-600">{{ title }}</p>
-    <p v-if="description" class="max-w-xs text-xs text-slate-400">{{ description }}</p>
+    <p class="text-sm font-medium text-body">{{ title }}</p>
+    <p v-if="description" class="max-w-xs text-xs text-subtle">{{ description }}</p>
     <slot />
   </div>
 </template>

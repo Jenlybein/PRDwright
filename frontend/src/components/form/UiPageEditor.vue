@@ -40,7 +40,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   /** 页面卡片数组变化，载荷为新数组 */
-  'update:modelValue': [value: UiPageItem[]]
+ 'update:modelValue': [value: UiPageItem[]]
 }>()
 
 /** 批量粘贴导入面板是否展开 */
@@ -59,7 +59,7 @@ function updateCell(index: number, sub: 'name' | 'notes' | 'moduleDraft', value:
   // 这里只清 name / notes 两个真正的错误键。
   if (sub === 'name' || sub === 'notes') props.clearError(errorKey(index, sub))
   emit(
-    'update:modelValue',
+ 'update:modelValue',
     props.modelValue.map((page, i) => (i === index ? { ...page, [sub]: value } : page)),
   )
 }
@@ -78,7 +78,7 @@ async function add(): Promise<void> {
 /** 删除指定下标的页面卡片 */
 function remove(index: number): void {
   emit(
-    'update:modelValue',
+ 'update:modelValue',
     props.modelValue.filter((_, i) => i !== index),
   )
   props.clearError(PREFIX)
@@ -97,7 +97,7 @@ function runImport(): void {
     <!-- 空状态引导 -->
     <div
       v-if="modelValue.length === 0"
-      class="rounded-xl border border-dashed border-slate-300 bg-slate-50/50 px-4 py-6 text-center text-xs text-slate-400 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-500"
+      class="rounded-xl border border-dashed border-line-strong bg-surface-2 px-4 py-6 text-center text-xs text-subtle  /40"
     >
       还没有页面，点击下方「添加页面」逐张填写
     </div>
@@ -106,14 +106,14 @@ function runImport(): void {
     <div
       v-for="(page, index) in modelValue"
       :key="index"
-      class="rounded-xl border border-slate-200 bg-slate-50/40 p-3.5 dark:border-slate-700/70 dark:bg-slate-800/40"
+      class="rounded-xl border border-line bg-surface-2/40 p-3.5 /70 /40"
     >
       <div class="mb-2.5 flex items-center justify-between">
-        <span class="text-xs font-semibold text-slate-500 dark:text-slate-400">页面 {{ index + 1 }}</span>
+        <span class="text-xs font-semibold text-subtle">页面 {{ index + 1 }}</span>
         <button
           type="button"
           title="删除该页面"
-          class="rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+          class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
           @click="remove(index)"
         >
           删除
@@ -123,7 +123,7 @@ function runImport(): void {
       <div class="space-y-2.5">
         <!-- 页面名称 -->
         <div>
-          <label :for="`field-${errorKey(index, 'name')}`" class="mb-1.5 block text-xs font-medium text-slate-700 dark:text-slate-300">
+          <label :for="`field-${errorKey(index, 'name')}`" class="mb-1.5 block text-xs font-medium text-muted ">
             页面名称
             <span class="text-red-500" aria-hidden="true">*</span>
           </label>
@@ -152,10 +152,10 @@ function runImport(): void {
 
         <!-- 模块标签 -->
         <div>
-          <label :for="`field-${errorKey(index, 'modules')}`" class="mb-1.5 block text-xs font-medium text-slate-700 dark:text-slate-300">
+          <label :for="`field-${errorKey(index, 'modules')}`" class="mb-1.5 block text-xs font-medium text-muted ">
             模块 / 区块
             <span class="text-red-500" aria-hidden="true">*</span>
-            <span class="ml-1 font-normal text-slate-400 dark:text-slate-500">回车或逗号确认一个模块</span>
+            <span class="ml-1 font-normal text-subtle">回车或逗号确认一个模块</span>
           </label>
 
           <!-- 已确认的模块标签 -->
@@ -190,7 +190,7 @@ function runImport(): void {
             />
             <button
               type="button"
-              class="shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-600 transition hover:border-primary-400 hover:text-primary-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-primary-400 dark:hover:text-primary-300"
+              class="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-2 text-xs font-medium text-muted transition hover:border-primary-400 hover:text-accent     "
               @click="addModule(index)"
             >
               添加模块
@@ -213,7 +213,7 @@ function runImport(): void {
 
         <!-- 备注 -->
         <div>
-          <label :for="`field-${errorKey(index, 'notes')}`" class="mb-1.5 block text-xs font-medium text-slate-700 dark:text-slate-300">
+          <label :for="`field-${errorKey(index, 'notes')}`" class="mb-1.5 block text-xs font-medium text-muted ">
             备注（选填）
           </label>
           <input
@@ -231,7 +231,7 @@ function runImport(): void {
     <!-- 添加页面卡片 -->
     <button
       type="button"
-      class="w-full rounded-xl border border-dashed border-slate-300 px-4 py-2.5 text-xs font-medium text-slate-500 transition hover:border-primary-400 hover:text-primary-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-primary-500 dark:hover:text-primary-400"
+      class="w-full rounded-xl border border-dashed border-line-strong px-4 py-2.5 text-xs font-medium text-subtle transition hover:border-primary-400 hover:text-primary-600   dark:hover:border-primary-500 dark:hover:text-primary-400"
       @click="add"
     >
       ＋ 添加页面
@@ -241,7 +241,7 @@ function runImport(): void {
     <div class="pt-0.5">
       <button
         type="button"
-        class="text-xs text-slate-400 underline-offset-2 transition hover:text-primary-600 hover:underline dark:text-slate-500 dark:hover:text-primary-400"
+        class="text-xs text-subtle underline-offset-2 transition hover:text-accent hover:underline"
         @click="showPaste = !showPaste"
       >
         {{ showPaste ? '收起批量粘贴' : '批量粘贴导入（可选）' }}
@@ -250,12 +250,12 @@ function runImport(): void {
         <textarea
           v-model="pasteText"
           rows="3"
-          class="w-full resize-y rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-primary-500 focus:bg-white focus:ring-4 focus:ring-primary-100 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-100 dark:placeholder:text-slate-500 dark:hover:border-slate-600 dark:focus:bg-slate-800 dark:focus:ring-primary-900/50"
+          class="w-full resize-y rounded-xl border border-line bg-surface-2 px-3.5 py-2.5 text-sm leading-relaxed text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:border-accent focus:bg-surface focus:ring-4 focus:ring-accent-soft-line      "
           placeholder="每行一个页面：页面名｜模块1,模块2｜备注，例如：&#10;首页｜产品介绍,快速开始｜面向新用户"
         ></textarea>
         <button
           type="button"
-          class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-primary-400 hover:text-primary-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-primary-400 dark:hover:text-primary-300"
+          class="rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-muted shadow-sm transition hover:border-primary-400 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50     "
           :disabled="!pasteText.trim()"
           @click="runImport"
         >

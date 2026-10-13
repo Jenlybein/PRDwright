@@ -34,7 +34,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   /** 提交 AI 优化指令时触发，载荷为当前可编辑原文与用户输入的指令 */
-  'ai-optimize': [payload: { content: string; instruction: string }]
+ 'ai-optimize': [payload: { content: string; instruction: string }]
   /** 点击底部「保存」按钮时触发，载荷为当前可编辑原文 */
   save: [content: string]
   /** 底部自定义按钮被点击时触发，载荷为按钮标识 */
@@ -158,11 +158,11 @@ function runAction(action: string): void {
 </script>
 
 <template>
-  <div class="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
+  <div class="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm  ">
     <!-- 头部：标题 + 状态徽章 + 视图切换 -->
-    <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-6 dark:border-slate-800">
+    <div class="flex items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-6 ">
       <div class="flex min-w-0 items-center gap-2">
-        <h2 class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ title || '文档' }}</h2>
+        <h2 class="truncate text-sm font-semibold text-fg ">{{ title || '文档' }}</h2>
         <span
           v-if="generating"
           class="inline-flex items-center gap-1 rounded-full bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-700 ring-1 ring-primary-200 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800"
@@ -173,11 +173,11 @@ function runAction(action: string): void {
       </div>
 
       <!-- 视图切换：仅在非生成态可用 -->
-      <div v-if="!generating" class="flex shrink-0 items-center gap-1 rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800">
+      <div v-if="!generating" class="flex shrink-0 items-center gap-1 rounded-lg bg-surface-2 p-0.5 ">
         <button
           type="button"
           class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'preview' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'"
+          :class="viewMode === 'preview' ? 'bg-surface text-fg shadow-sm  ' : 'text-subtle hover:text-muted  '"
           @click="viewMode = 'preview'"
         >
           预览
@@ -185,7 +185,7 @@ function runAction(action: string): void {
         <button
           type="button"
           class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'edit' ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'"
+          :class="viewMode === 'edit' ? 'bg-surface text-fg shadow-sm  ' : 'text-subtle hover:text-muted  '"
           @click="viewMode = 'edit'"
         >
           编辑
@@ -194,11 +194,11 @@ function runAction(action: string): void {
     </div>
 
     <!-- 正文区域 -->
-    <div class="flex-1 overflow-y-auto bg-slate-50/40 p-4 dark:bg-slate-950/40 sm:p-6">
+    <div class="flex-1 overflow-y-auto bg-surface-2/40 p-4 dark:bg-bg/40 sm:p-6">
       <!-- 空状态 -->
       <div
         v-if="!hasContent"
-        class="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-400 dark:text-slate-500"
+        class="flex h-full min-h-[200px] items-center justify-center text-sm text-subtle"
       >
         {{ generating ? '正在准备文档…' : '暂无内容' }}
       </div>
@@ -206,7 +206,7 @@ function runAction(action: string): void {
       <!-- 生成中：只读展示流式内容（Markdown 实时渲染） -->
       <div
         v-else-if="generating"
-        class="prose prose-sm prose-slate max-w-none rounded-xl bg-white px-5 py-4 shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-800 dark:prose-invert dark:ring-slate-700"
+        class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line  dark:prose-invert "
       >
         <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
         <div v-html="renderMarkdown(streamingContent)" />
@@ -218,7 +218,7 @@ function runAction(action: string): void {
         <!-- 预览视图：渲染缓存后的 HTML -->
         <div
           v-if="viewMode === 'preview'"
-          class="prose prose-sm prose-slate max-w-none rounded-xl bg-white px-5 py-4 shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-800 dark:prose-invert dark:ring-slate-700"
+          class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line  dark:prose-invert "
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
           <div v-html="renderedHtml" />
@@ -229,14 +229,14 @@ function runAction(action: string): void {
           v-else
           v-model="draft"
           rows="20"
-          class="min-h-[320px] w-full resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 font-mono text-sm leading-relaxed text-slate-800 shadow-sm outline-none transition-colors focus:border-primary-400 focus:ring-2 focus:ring-primary-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-primary-900/50"
+          class="min-h-[320px] w-full resize-y rounded-xl border border-line bg-surface px-4 py-3 font-mono text-sm leading-relaxed text-fg shadow-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent-soft-line    "
           placeholder="在此编辑文档的 Markdown 原文"
         ></textarea>
       </template>
     </div>
 
     <!-- AI 优化指令输入区：点击「AI 优化」后展开 -->
-    <div v-if="showOptimize" class="border-t border-primary-200 bg-primary-50/70 px-4 py-3 dark:border-primary-800 dark:bg-primary-950/40 sm:px-6">
+    <div v-if="showOptimize" class="border-t border-accent-soft-line bg-primary-50/70 px-4 py-3 dark:border-primary-800 dark:bg-primary-950/40 sm:px-6">
       <label
         for="document-optimize-instruction"
         class="mb-1.5 block text-xs font-medium text-primary-900 dark:text-primary-300"
@@ -248,7 +248,7 @@ function runAction(action: string): void {
         v-model="optimizeInstruction"
         rows="2"
         :disabled="generating"
-        class="w-full resize-y rounded-lg border border-primary-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-800 shadow-sm outline-none transition-colors focus:border-primary-400 focus:ring-2 focus:ring-primary-100 disabled:bg-slate-50 disabled:text-slate-400 dark:border-primary-800 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-primary-900/50 dark:disabled:bg-slate-900 dark:disabled:text-slate-500"
+        class="w-full resize-y rounded-lg border border-accent-soft-line bg-surface px-3 py-2 text-sm leading-relaxed text-fg shadow-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent-soft-line disabled:bg-surface-2 disabled:text-subtle dark:border-primary-800     "
         placeholder="输入优化指令，Ctrl / ⌘ + Enter 直接提交"
         @keydown.ctrl.enter.prevent="submitOptimize"
         @keydown.meta.enter.prevent="submitOptimize"
@@ -274,7 +274,7 @@ function runAction(action: string): void {
     </div>
 
     <!-- 底部操作栏 -->
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900 sm:px-6">
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-surface px-4 py-3   sm:px-6">
       <!-- 左侧：AI 优化 + 复制 -->
       <div class="flex items-center gap-2">
         <AppButton

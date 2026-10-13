@@ -77,10 +77,10 @@ defineExpose({ focus })
 </script>
 
 <template>
-  <div class="border-t border-slate-200 bg-white/80 px-4 py-3 backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/80 sm:px-6">
+  <div class="border-t border-line bg-surface/80 px-4 py-3 backdrop-blur-sm   sm:px-6">
     <div
-      class="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border bg-white p-2 shadow-sm transition-colors dark:bg-slate-800"
-      :class="props.loading ? 'border-slate-200 dark:border-slate-700' : 'border-slate-300 focus-within:border-primary-400 dark:border-slate-700'"
+      class="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border bg-surface p-2 shadow-sm transition-colors "
+      :class="props.loading ? 'border-line ' : 'border-line-strong focus-within:border-primary-400 '"
     >
       <textarea
         ref="textareaRef"
@@ -88,7 +88,7 @@ defineExpose({ focus })
         rows="1"
         :placeholder="props.placeholder"
         :disabled="props.loading"
-        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:opacity-60 dark:text-slate-100"
+        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-fg outline-none placeholder:text-subtle disabled:cursor-not-allowed disabled:opacity-60 "
         @keydown="handleKeydown"
       />
 
@@ -104,7 +104,7 @@ defineExpose({ focus })
       </AppButton>
     </div>
 
-    <p class="mx-auto mt-1.5 max-w-3xl px-1 text-xs text-slate-400 dark:text-slate-500">
+    <p class="mx-auto mt-1.5 max-w-3xl px-1 text-xs text-subtle">
       回车发送，Shift+Enter 换行
     </p>
   </div>

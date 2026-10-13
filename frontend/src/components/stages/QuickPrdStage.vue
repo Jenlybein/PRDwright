@@ -25,9 +25,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   /** 产品名称变化 */
-  'update:productName': [value: string]
+ 'update:productName': [value: string]
   /** 需求文本变化 */
-  'update:requirements': [value: string]
+ 'update:requirements': [value: string]
   /** 直接生成 PRD */
   generate: []
   /** 返回入口选择页 */
@@ -49,7 +49,7 @@ const canGenerate = computed(() => !requirementMissing.value)
 const SAMPLE = {
   productName: '小账本',
   requirements:
-    '做一个给家庭用的记账 App，主要解决两口子各花各的、月底算不清的问题。\n'
+ '做一个给家庭用的记账 App，主要解决两口子各花各的、月底算不清的问题。\n'
     + '希望支持：快速记一笔（金额、分类、备注）、按月和按分类看统计图、两个人共享同一个账本。\n'
     + '平台先做 iOS 和 Android，数据要能云端同步。',
 }
@@ -70,24 +70,24 @@ function clearAll(): void {
 <template>
   <section class="space-y-4">
     <header>
-      <h1 class="text-lg font-bold text-slate-900 dark:text-slate-100">直接生成 PRD</h1>
-      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+      <h1 class="text-lg font-bold text-fg ">直接生成 PRD</h1>
+      <p class="mt-1 text-sm text-subtle">
         用一段话把想法说清楚就行，不需要按字段填。生成时会逐章撰写并逐章审核，
         没提到的信息会标注「待确认」而不是替你编。
       </p>
     </header>
 
-    <div class="space-y-3 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
+    <div class="space-y-3 rounded-2xl border border-line bg-surface p-5 shadow-sm  ">
       <!-- 产品名称（可选） -->
       <div>
-        <label for="field-quick-product-name" class="mb-1.5 block text-xs font-medium text-slate-700 dark:text-slate-300">
+        <label for="field-quick-product-name" class="mb-1.5 block text-xs font-medium text-muted ">
           产品名称
-          <span class="ml-1 font-normal text-slate-400 dark:text-slate-500">可选，会用于文档标题与下载文件名</span>
+          <span class="ml-1 font-normal text-subtle">可选，会用于文档标题与下载文件名</span>
         </label>
         <input
           id="field-quick-product-name"
           type="text"
-          class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-primary-400 focus:ring-2 focus:ring-primary-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:ring-primary-900/50"
+          class="w-full rounded-lg border border-line-strong px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line    "
           placeholder="例如：小账本"
           :value="productName"
           @input="emit('update:productName', ($event.target as HTMLInputElement).value)"
@@ -96,7 +96,7 @@ function clearAll(): void {
 
       <!-- 需求描述（必填） -->
       <div>
-        <label for="field-quick-requirements" class="mb-1.5 block text-xs font-medium text-slate-700 dark:text-slate-300">
+        <label for="field-quick-requirements" class="mb-1.5 block text-xs font-medium text-muted ">
           需求描述
           <span class="ml-1 text-rose-500">*</span>
         </label>
@@ -104,12 +104,12 @@ function clearAll(): void {
           id="field-quick-requirements"
           ref="textareaRef"
           rows="8"
-          class="w-full resize-y rounded-lg border px-3 py-2 text-sm leading-relaxed text-slate-900 outline-none transition placeholder:text-slate-400 focus:ring-2 dark:text-slate-100 dark:bg-slate-800"
+          class="w-full resize-y rounded-lg border px-3 py-2 text-sm leading-relaxed text-fg outline-none transition placeholder:text-subtle focus:ring-2  "
           :class="
             requirementMissing
-              ? 'border-slate-300 focus:border-primary-400 focus:ring-primary-100 dark:border-slate-600 dark:focus:ring-primary-900/50'
-              : 'border-primary-300 focus:border-primary-400 focus:ring-primary-100 dark:border-primary-700 dark:focus:ring-primary-900/50'
-          "
+              ? 'border-line-strong focus:border-accent focus:ring-accent-soft-line  '
+              : 'border-accent focus:border-accent focus:ring-accent-soft-line  '
+ "
           placeholder="干什么用的、给谁用、要有哪些功能、有什么技术或范围的约束……没提到的会被标成「待确认」。"
           :value="requirements"
           @input="emit('update:requirements', ($event.target as HTMLTextAreaElement).value)"
@@ -118,15 +118,15 @@ function clearAll(): void {
           <p v-if="requirementMissing" class="text-xs text-amber-600 dark:text-amber-400" role="status">
             请至少写一句需求描述，否则没有可依据的内容。
           </p>
-          <p v-else class="text-xs text-slate-400 dark:text-slate-500">
+          <p v-else class="text-xs text-subtle">
             纯文本即可，换行、列表、甚至粘一整段会议记录都可以。
           </p>
-          <span class="shrink-0 text-xs text-slate-400 dark:text-slate-500">{{ requirements.length }} 字</span>
+          <span class="shrink-0 text-xs text-subtle">{{ requirements.length }} 字</span>
         </div>
       </div>
 
       <!-- 快捷操作 -->
-      <div class="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+      <div class="flex flex-wrap items-center gap-2 border-t border-line pt-3 ">
         <AppButton variant="secondary" size="sm" @click="fillSample">
           填充示例
         </AppButton>

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /**
  * 统一轻提示（Toast）：固定底部居中，自动淡出由消费方控制显隐，组件只负责样式。
- * 计划替代 AppV2 里手写的 flashSavedTip 内联徽章（见 P2-2）。
  */
 import AppIcon from './AppIcon.vue'
 
@@ -18,10 +17,11 @@ withDefaults(
   },
 )
 
+// 三种变体都只引语义令牌；暗色下这些 surface 是半透明色，配 backdrop-blur 保证浮在正文上仍可读
 const ringClass = {
-  success: 'bg-success-50 text-success-700 ring-success-200',
-  error: 'bg-danger-50 text-danger-700 ring-danger-200',
-  info: 'bg-primary-50 text-primary-700 ring-primary-200',
+  success: 'bg-success-surface text-success-fg ring-success-line',
+  error: 'bg-danger-surface text-danger-fg ring-danger-line',
+  info: 'bg-accent-soft text-accent ring-accent-soft-line',
 } as const
 </script>
 
@@ -38,7 +38,7 @@ const ringClass = {
       aria-live="polite"
     >
       <div
-        class="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium shadow-pop ring-1"
+        class="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium shadow-pop ring-1 backdrop-blur"
         :class="ringClass[variant]"
       >
         <AppIcon :path="iconPath" size="sm" />

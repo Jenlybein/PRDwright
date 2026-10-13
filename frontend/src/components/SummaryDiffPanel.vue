@@ -55,7 +55,7 @@ const CHANGE_META: Record<
   modified: {
     text: '修改',
     badge: 'bg-primary-50 text-primary-700 ring-primary-200 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800',
-    card: 'border-primary-200 bg-primary-50/50 dark:border-primary-800 dark:bg-primary-950/30',
+    card: 'border-accent-soft-line bg-primary-50/50 dark:border-primary-800 dark:bg-primary-950/30',
     label: 'text-primary-700 dark:text-primary-300',
   },
   removed: {
@@ -91,11 +91,11 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
 
 <template>
   <section
-    class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900"
+    class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm  "
     aria-label="摘要更新确认"
   >
     <!-- 头部 -->
-    <div class="border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-6">
+    <div class="border-b border-line px-4 py-3  sm:px-6">
       <div class="flex items-start gap-3">
         <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-50 dark:bg-primary-950/40">
           <svg class="h-5 w-5 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -107,8 +107,8 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
           </svg>
         </div>
         <div class="min-w-0 flex-1">
-          <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">需求摘要更新确认</h2>
-          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+          <h2 class="text-sm font-semibold text-fg ">需求摘要更新确认</h2>
+          <p class="mt-0.5 text-xs text-subtle">
             AI 只把你在对话里「明确补充或修正」的内容回填到摘要；确认后才会据此生成 PRD。
           </p>
         </div>
@@ -116,7 +116,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
 
       <!-- 变更统计 -->
       <div v-if="hasChanges && !loading" class="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        <span class="font-medium text-slate-600 dark:text-slate-300">共 {{ changes.length }} 处变更</span>
+        <span class="font-medium text-muted ">共 {{ changes.length }} 处变更</span>
         <span
           v-if="counts.added"
           class="rounded-full bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700 ring-1 ring-emerald-200"
@@ -139,13 +139,13 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     </div>
 
     <!-- 回填中 -->
-    <div v-if="loading" class="flex items-center justify-center gap-2 bg-slate-50/60 px-4 py-12 text-sm text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+    <div v-if="loading" class="flex items-center justify-center gap-2 bg-surface-2 px-4 py-12 text-sm text-subtle  ">
       <AppSpinner />
       正在从对话中整理需求摘要…
     </div>
 
     <!-- 回填失败 -->
-    <div v-else-if="error" class="bg-slate-50/60 px-4 py-6 dark:bg-slate-800/60 sm:px-6">
+    <div v-else-if="error" class="bg-surface-2 px-4 py-6  sm:px-6">
       <p
         class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
         role="alert"
@@ -162,16 +162,16 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     </div>
 
     <!-- 无变更 -->
-    <div v-else-if="!hasChanges" class="bg-slate-50/60 px-4 py-10 text-center dark:bg-slate-800/60 sm:px-6">
-      <p class="text-sm text-slate-500 dark:text-slate-400">对话里没有检测到需要回填的补充信息，摘要保持不变。</p>
+    <div v-else-if="!hasChanges" class="bg-surface-2 px-4 py-10 text-center  sm:px-6">
+      <p class="text-sm text-subtle">对话里没有检测到需要回填的补充信息，摘要保持不变。</p>
     </div>
 
     <!-- 变更列表 -->
-    <ul v-else class="max-h-[min(52vh,480px)] space-y-2 overflow-y-auto bg-slate-50/60 p-4 dark:bg-slate-800/60 sm:p-6">
+    <ul v-else class="max-h-[min(52vh,480px)] space-y-2 overflow-y-auto bg-surface-2 p-4  sm:p-6">
       <li
         v-for="change in changes"
         :key="change.path"
-        class="rounded-xl border bg-white px-3 py-2.5 dark:bg-slate-800"
+        class="rounded-xl border bg-surface px-3 py-2.5 "
         :class="metaOf(change.changeType).card"
       >
         <div class="flex flex-wrap items-center gap-2">
@@ -184,19 +184,19 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
           <span class="text-sm font-medium" :class="metaOf(change.changeType).label">
             {{ change.label || change.path }}
           </span>
-          <code class="truncate font-mono text-[11px] text-slate-400 dark:text-slate-500">{{ change.path }}</code>
+          <code class="truncate font-mono text-[11px] text-subtle">{{ change.path }}</code>
         </div>
 
         <div class="mt-2 space-y-1 text-xs leading-relaxed">
           <p v-if="change.changeType !== 'added'" class="flex gap-1.5">
-            <span class="shrink-0 text-slate-400 dark:text-slate-500">变更前</span>
-            <span class="min-w-0 whitespace-pre-wrap break-words text-slate-500 line-through decoration-slate-400 dark:text-slate-400">
+            <span class="shrink-0 text-subtle">变更前</span>
+            <span class="min-w-0 whitespace-pre-wrap break-words text-subtle line-through decoration-slate-400 ">
               {{ formatSummaryValue(change.before) }}
             </span>
           </p>
           <p v-if="change.changeType !== 'removed'" class="flex gap-1.5">
-            <span class="shrink-0 text-slate-400 dark:text-slate-500">变更后</span>
-            <span class="min-w-0 whitespace-pre-wrap break-words font-medium text-slate-800 dark:text-slate-100">
+            <span class="shrink-0 text-subtle">变更后</span>
+            <span class="min-w-0 whitespace-pre-wrap break-words font-medium text-fg ">
               {{ formatSummaryValue(change.after) }}
             </span>
           </p>
@@ -205,8 +205,8 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     </ul>
 
     <!-- 底部操作 -->
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900 sm:px-6">
-      <p class="text-xs text-slate-500 dark:text-slate-400">
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-surface px-4 py-3   sm:px-6">
+      <p class="text-xs text-subtle">
         拒绝后不会修改摘要，也不会进入生成流程，你可以回到对话继续补充。
       </p>
       <div class="flex items-center gap-2">

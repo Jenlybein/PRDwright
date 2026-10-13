@@ -9,6 +9,9 @@ import type { Step, StepId } from '@/types'
  *
  * 可点击范围由「已到达的最远步骤」决定：走过的步骤可以点回去回看，
  * 当前步骤与尚未到达的步骤不可点。
+ *
+ * 颜色走语义令牌。此前这一条整个没有暗色适配（未到达的步骤是 `bg-surface-2`
+ * 的亮色块、文字是 `text-subtle`，在深色底上刺眼且看不清）。
  */
 const props = withDefaults(
   defineProps<{
@@ -50,12 +53,12 @@ function canClick(index: number): boolean {
             :class="[
               index === currentIndex
                 ? generating
-                  ? 'bg-primary-100 text-primary-700 ring-2 ring-primary-500 animate-pulse'
-                  : 'bg-primary-500 text-white ring-4 ring-primary-100'
+                  ? 'bg-accent-soft text-accent ring-2 ring-accent animate-pulse'
+                  : 'bg-primary-500 text-on-accent ring-4 ring-accent-soft'
                 : index <= reachedIndex
-                  ? 'bg-primary-500 text-white'
-                  : 'bg-slate-100 text-slate-400',
-              canClick(index) ? 'group-hover:ring-4 group-hover:ring-primary-200' : '',
+                  ? 'bg-primary-500 text-on-accent'
+                  : 'bg-surface-2 text-subtle',
+              canClick(index) ? 'group-hover:ring-4 group-hover:ring-accent-soft-line' : '',
             ]"
           >
             <svg
@@ -76,8 +79,8 @@ function canClick(index: number): boolean {
           <span
             class="whitespace-nowrap text-[11px] font-medium transition"
             :class="[
-              index <= reachedIndex ? 'text-primary-700' : 'text-slate-400',
-              canClick(index) ? 'group-hover:text-primary-600' : '',
+              index <= reachedIndex ? 'text-accent' : 'text-subtle',
+              canClick(index) ? 'group-hover:text-accent' : '',
             ]"
           >
             {{ step.label }}
@@ -87,7 +90,7 @@ function canClick(index: number): boolean {
         <div
           v-if="index < steps.length - 1"
           class="mx-1 mb-5 h-0.5 flex-1 rounded-full transition"
-          :class="index < reachedIndex ? 'bg-primary-400' : 'bg-slate-200'"
+          :class="index < reachedIndex ? 'bg-primary-500' : 'bg-line-strong'"
         ></div>
       </li>
     </ol>

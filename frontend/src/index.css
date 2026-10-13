@@ -6,22 +6,29 @@
 
 /*
  * ============================================================================
- * 设计令牌（Design Tokens）
+ * 三层设计令牌（Design Tokens）
  * ----------------------------------------------------------------------------
- * 全部视觉决策收敛到 @theme 内，业务组件只引用令牌，禁止再写 sky-*/硬编码色值。
- * 改品牌色时只需改 --color-primary-*，全站随之统一变化。
+ * L1 原始色阶：品牌 primary + 语义色阶。与主题无关，任何主题下取值相同。
+ * L2 语义令牌：本次新增。按「用途」命名（surface / line / fg / muted / accent …），
+ *              取值随主题交换（见文件的 :root 与 .dark 两段）。组件只引用 L2。
+ * L3 组件：只写 L2 令牌，不再逐处手写 dark: 变体。
  *
- * ⚠️ 重要：本版本 Tailwind v4 的 @theme 解析器对内部注释敏感（会报
- * "Invalid declaration: name"）。因此 @theme 块内部保持零注释，所有说明写在
- * 本段块注释中。命名约定：
- *   --color-primary[-N]  品牌主色（原 sky 色阶），生成 bg-/text-/border-/ring-/from-/to-primary*
- *   --color-success/-warning/-danger  语义色（替代散落的 emerald/amber/red）
- *   --color-surface/-surface-muted/-border  表面与描边基调
- *   --radius-card/--radius-control  圆角语义别名
- *   --shadow-card/--shadow-pop      层级阴影
- *   --ease-smooth                   统一动效曲线
+ * 为什么要有 L2：此前全站靠手写 `bg-white dark:bg-slate-900` 这类成对变体表达暗色，
+ * 共 400 余处，漏一处就在暗色下文字与底色同色（例如侧栏方案标题 1.2:1 等于不可见）。
+ * 收敛到语义令牌后，「暗色下可读」由令牌文件一处保证。
+ *
+ * 对比度基线（WCAG AA，已用脚本实测）：
+ *   正文 / 次要 / 提示文字 >= 4.5:1
+ *   交互控件描边、图形 >= 3:1（装饰性分隔线不在此列）
+ *   禁止再用 slate-400 表达亮色正文（实测 2.56:1），暗色下也不再使用 slate-500 作提示
+ *   （实测 3.75:1）。文字层级统一走 --ui-muted / --ui-subtle。
+ *
+ * ⚠️ Tailwind v4 的 @theme 解析器对块内注释敏感（会报 "Invalid declaration: name"），
+ * 因此下面两个 @theme 块内部保持零注释；命名与取值说明全部写在本段块注释里。
  * ============================================================================
  */
+
+/* L1：原始色阶与视觉常量（与主题无关） */
 @theme {
   --color-primary: #0ea5e9;
   --color-primary-50: #f0f9ff;
@@ -35,21 +42,6 @@
   --color-primary-800: #075985;
   --color-primary-900: #0c4a6e;
   --color-primary-950: #082f49;
-  --color-success: #10b981;
-  --color-success-50: #ecfdf5;
-  --color-success-700: #047857;
-  --color-warning: #f59e0b;
-  --color-warning-50: #fffbeb;
-  --color-warning-700: #b45309;
-  --color-danger: #ef4444;
-  --color-danger-50: #fef2f2;
-  --color-danger-700: #b91c1c;
-  --color-surface: #ffffff;
-  --color-surface-muted: #f8fafc;
-  --color-border: #e2e8f0;
-  --color-surface-dark: #0f172a;
-  --color-surface-muted-dark: #1e293b;
-  --color-border-dark: #334155;
   --radius-card: 1rem;
   --radius-control: 0.75rem;
   --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 4px 12px -2px rgb(15 23 42 / 0.06);
@@ -57,7 +49,95 @@
   --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* 暗色变体：由 <html class="dark"> 切换（用户手动开关，覆盖系统偏好） */
+/* L2：语义令牌对外暴露为工具类（bg-surface / text-muted / border-line …）
+ * `inline` 让工具类直接引用变量本身，从而能随主题实时交换，而不是把值烤死在编译期。 */
+@theme inline {
+  --color-bg: var(--ui-bg);
+  --color-surface: var(--ui-surface);
+  --color-surface-2: var(--ui-surface-2);
+  --color-field: var(--ui-field);
+  --color-line: var(--ui-line);
+  --color-line-strong: var(--ui-line-strong);
+  --color-fg: var(--ui-fg);
+  --color-body: var(--ui-body);
+  --color-muted: var(--ui-muted);
+  --color-subtle: var(--ui-subtle);
+  --color-on-accent: var(--ui-on-accent);
+  --color-accent: var(--ui-accent);
+  --color-accent-soft: var(--ui-accent-soft);
+  --color-accent-soft-line: var(--ui-accent-soft-line);
+  --color-danger: var(--ui-danger);
+  --color-danger-surface: var(--ui-danger-surface);
+  --color-danger-line: var(--ui-danger-line);
+  --color-danger-fg: var(--ui-danger-fg);
+  --color-warning-surface: var(--ui-warning-surface);
+  --color-warning-line: var(--ui-warning-line);
+  --color-warning-fg: var(--ui-warning-fg);
+  --color-success-surface: var(--ui-success-surface);
+  --color-success-line: var(--ui-success-line);
+  --color-success-fg: var(--ui-success-fg);
+}
+
+/* 亮色主题取值（默认）。同一组变量在 .dark 下被整体覆盖，故 .dark 段必须写在后面
+ * —— 两者选择器权重相同（:root 与 .dark 同为 0,1,0），靠书写顺序决定胜负。 */
+:root {
+  --ui-bg: #f8fafc;
+  --ui-surface: #ffffff;
+  --ui-surface-2: #f1f5f9;
+  --ui-field: #ffffff;
+  --ui-line: #e2e8f0;
+  --ui-line-strong: #94a3b8;
+  --ui-fg: #0f172a;
+  --ui-body: #334155;
+  --ui-muted: #475569;
+  --ui-subtle: #64748b;
+  --ui-on-accent: #ffffff;
+  --ui-accent: #0369a1;
+  --ui-accent-soft: #e0f2fe;
+  --ui-accent-soft-line: #7dd3fc;
+  --ui-danger: #dc2626;
+  --ui-danger-surface: #fef2f2;
+  --ui-danger-line: #fecaca;
+  --ui-danger-fg: #b91c1c;
+  --ui-warning-surface: #fffbeb;
+  --ui-warning-line: #fde68a;
+  --ui-warning-fg: #92400e;
+  --ui-success-surface: #ecfdf5;
+  --ui-success-line: #a7f3d0;
+  --ui-success-fg: #047857;
+  color-scheme: light;
+}
+
+/* 暗色主题取值。由 <html class="dark"> 触发（用户显式选择，或跟随系统偏好）。 */
+.dark {
+  --ui-bg: #020617;
+  --ui-surface: #0f172a;
+  --ui-surface-2: #1e293b;
+  --ui-field: #1e293b;
+  --ui-line: #1e293b;
+  --ui-line-strong: #475569;
+  --ui-fg: #f8fafc;
+  --ui-body: #e2e8f0;
+  --ui-muted: #cbd5e1;
+  --ui-subtle: #94a3b8;
+  --ui-on-accent: #ffffff;
+  --ui-accent: #7dd3fc;
+  --ui-accent-soft: rgb(56 189 248 / 0.16);
+  --ui-accent-soft-line: #0284c7;
+  --ui-danger: #dc2626;
+  --ui-danger-surface: rgb(127 29 29 / 0.3);
+  --ui-danger-line: #7f1d1d;
+  --ui-danger-fg: #fca5a5;
+  --ui-warning-surface: rgb(120 53 15 / 0.3);
+  --ui-warning-line: #92400e;
+  --ui-warning-fg: #fcd34d;
+  --ui-success-surface: rgb(6 78 59 / 0.3);
+  --ui-success-line: #065f46;
+  --ui-success-fg: #6ee7b7;
+  color-scheme: dark;
+}
+
+/* 暗色变体：仅当确需按主题给「同一个元素」写两套样式时才用；能用 L2 令牌表达的不要走这里 */
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* 全局基础排版：统一字体、背景、文字色，作为视觉基底（含暗色） */
@@ -67,12 +147,11 @@
     text-rendering: optimizeLegibility;
   }
   body {
-    @apply bg-slate-50 text-slate-700;
-    @apply dark:bg-slate-950 dark:text-slate-200;
+    @apply bg-bg text-body;
   }
   /* 统一键盘焦点环：所有可聚焦元素都有清晰的可见焦点（无障碍） */
   :focus-visible {
-    @apply outline-none ring-2 ring-slate-400 ring-offset-2 ring-offset-white dark:ring-offset-slate-950;
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-bg;
   }
 
   /* 尊重「减少动态效果」偏好：关闭非必要的过渡与动画，避免眩晕 */

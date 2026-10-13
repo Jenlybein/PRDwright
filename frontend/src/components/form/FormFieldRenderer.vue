@@ -24,7 +24,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   /** 值变化（任意子控件输入、列表增删等），载荷为新值 */
-  'update:modelValue': [value: string | string[]]
+ 'update:modelValue': [value: string | string[]]
 }>()
 
 /** 列表类字段的数组视图（便于模板遍历与类型收窄） */
@@ -45,7 +45,7 @@ async function addItem(): Promise<void> {
 /** 列表：删除指定下标 */
 function removeItem(index: number): void {
   emit(
-    'update:modelValue',
+ 'update:modelValue',
     items.value.filter((_, i) => i !== index),
   )
 }
@@ -53,7 +53,7 @@ function removeItem(index: number): void {
 /** 列表：回写指定下标的内容 */
 function setItem(index: number, value: string): void {
   emit(
-    'update:modelValue',
+ 'update:modelValue',
     items.value.map((item, i) => (i === index ? value : item)),
   )
 }
@@ -118,7 +118,7 @@ function handlePaste(event: ClipboardEvent): void {
         </option>
       </select>
       <svg
-        class="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500"
+        class="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-subtle"
         viewBox="0 0 20 20"
         fill="currentColor"
         aria-hidden="true"
@@ -144,13 +144,13 @@ function handlePaste(event: ClipboardEvent): void {
     >
       <p
         v-if="items.length === 0"
-        class="rounded-xl border border-dashed border-slate-300 bg-slate-50/50 px-4 py-5 text-center text-xs text-slate-400 dark:border-slate-700 dark:bg-slate-800/40 dark:text-slate-500"
+        class="rounded-xl border border-dashed border-line-strong bg-surface-2 px-4 py-5 text-center text-xs text-subtle  /40"
       >
         {{ field.emptyText }}
       </p>
 
       <div v-for="(item, index) in items" :key="index" class="flex items-center gap-2">
-        <span class="w-5 shrink-0 text-center text-xs font-medium text-slate-400 dark:text-slate-500">
+        <span class="w-5 shrink-0 text-center text-xs font-medium text-subtle">
           {{ index + 1 }}
         </span>
         <input
@@ -165,7 +165,7 @@ function handlePaste(event: ClipboardEvent): void {
         <button
           type="button"
           title="删除该条"
-          class="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+          class="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
           @click="removeItem(index)"
         >
           删除
@@ -174,7 +174,7 @@ function handlePaste(event: ClipboardEvent): void {
 
       <button
         type="button"
-        class="w-full rounded-xl border border-dashed border-slate-300 px-4 py-2.5 text-xs font-medium text-slate-500 transition hover:border-primary-400 hover:text-primary-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-primary-500 dark:hover:text-primary-400"
+        class="w-full rounded-xl border border-dashed border-line-strong px-4 py-2.5 text-xs font-medium text-subtle transition hover:border-primary-400 hover:text-primary-600   dark:hover:border-primary-500 dark:hover:text-primary-400"
         @click="addItem"
       >
         ＋ {{ field.addLabel }}

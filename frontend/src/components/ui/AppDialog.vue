@@ -2,6 +2,9 @@
 /**
  * 统一弹窗底座：Teleport 到 body，支持背景点击关闭、Esc 关闭、标题栏关闭按钮。
  * 业务弹窗（如登录）改成基于它实现，消除各处的 Modal 样板与不一致。
+ *
+ * 弹窗被 Teleport 到 body，仍在 <html class="dark"> 之内，因此语义令牌照样生效
+ * —— 这也是必须走令牌而不是「在弹窗里各写一遍 dark:」的原因。
  */
 import { watch, onBeforeUnmount } from 'vue'
 
@@ -40,24 +43,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <Transition name="dialog">
       <div v-if="modelValue" class="fixed inset-0 z-50 flex items-center justify-center p-4">
         <div
-          class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+          class="absolute inset-0 bg-slate-950/50 backdrop-blur-sm"
           @click="closeOnBackdrop && close()"
         />
         <div
-          class="relative z-10 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-pop dark:border-slate-700 dark:bg-slate-900"
+          class="relative z-10 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-line bg-surface shadow-pop"
           role="dialog"
           aria-modal="true"
         >
           <header
             v-if="title || $slots.header"
-            class="flex items-center justify-between border-b border-slate-100 px-5 py-3.5 dark:border-slate-800"
+            class="flex items-center justify-between border-b border-line px-5 py-3.5"
           >
             <slot name="header">
-              <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ title }}</h2>
+              <h2 class="text-sm font-semibold text-fg">{{ title }}</h2>
             </slot>
             <button
               type="button"
-              class="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+              class="rounded-lg p-1 text-subtle transition hover:bg-surface-2 hover:text-fg"
               aria-label="关闭"
               @click="close()"
             >
@@ -71,7 +74,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             </button>
           </header>
           <div class="px-5 py-4"><slot /></div>
-          <footer v-if="$slots.footer" class="border-t border-slate-100 px-5 py-3.5">
+          <footer v-if="$slots.footer" class="border-t border-line px-5 py-3.5">
             <slot name="footer" />
           </footer>
         </div>

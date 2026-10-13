@@ -1,10 +1,31 @@
 <!DOCTYPE html>
-<html lang="">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8">
     <link rel="icon" href="/favicon.ico">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vite App</title>
+    <!-- 声明两种配色方案：原生滚动条、表单控件、日期选择器会跟随当前主题 -->
+    <meta name="color-scheme" content="light dark">
+    <title>HarnessPRD · 需求 → PRD / 接口文档 / 提示词</title>
+    <script>
+      /*
+       * 首帧前定主题，避免暗色用户刷新时先闪一屏白（FOUC）。
+       * 解析规则与 src/composables/useTheme.ts 的 readStoredMode 保持一致，共用 'theme' 键：
+       * 存了 'light' / 'dark' 就听用户的，其余（含 'system' 或没存过）跟随系统偏好。
+       * 必须内联在这里：打包产物是异步加载的，等 Vue 起来再切已经晚了一帧。
+       */
+      (function () {
+        try {
+          var saved = localStorage.getItem('theme')
+          var dark =
+            saved === 'dark' ||
+            (saved !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) {
+          /* localStorage 不可用（隐私模式等）时留空，后续由 useTheme 兜底 */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

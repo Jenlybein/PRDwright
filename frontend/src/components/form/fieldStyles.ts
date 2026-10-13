@@ -4,6 +4,9 @@
  * 此前 controlClass / rowControlClass 散落在 RequirementsForm 内部，拆分出多个字段
  * 编辑组件后统一收敛到此，保证 input / textarea / select / list / 结构化行编辑器
  * 的视觉与配色完全一致（含暗色模式）。
+ *
+ * 配色一律走语义令牌（bg-surface-2 / text-fg / border-line / focus:ring-accent-soft-line …），
+ * 与 ui/AppInput 同一套口径；错误态用 danger 令牌，不再手写 dark: 变体。
  */
 
 /**
@@ -12,10 +15,10 @@
  */
 export function controlClass(hasError: boolean): string {
   const base =
-    'w-full rounded-xl border bg-slate-50/50 px-3.5 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:bg-white focus:ring-4 dark:bg-slate-800/50 dark:text-slate-100 dark:placeholder:text-slate-500 dark:hover:border-slate-600 dark:focus:bg-slate-800 dark:focus:ring-primary-900/50'
+    'w-full rounded-xl border bg-surface-2 px-3.5 py-2.5 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4'
   const state = hasError
-    ? 'border-red-400 focus:border-red-500 focus:ring-red-100 dark:border-red-500 dark:focus:border-red-500 dark:focus:ring-red-900/40'
-    : 'border-slate-200 focus:border-primary-500 focus:ring-primary-100 dark:border-slate-600 dark:focus:border-primary-500 dark:focus:ring-primary-900/50'
+    ? 'border-danger focus:border-danger focus:ring-danger-line'
+    : 'border-line focus:border-accent focus:ring-accent-soft-line'
   return `${base} ${state}`
 }
 

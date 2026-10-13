@@ -124,20 +124,20 @@ watch(
     >
       <div
         v-if="auth.dialogOpen"
-        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 pt-24 backdrop-blur-sm"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-4 pt-24 backdrop-blur-sm"
         role="dialog"
         aria-modal="true"
         aria-label="登录或注册"
         @click.self="close"
       >
-        <div class="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+        <div class="w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-pop">
           <!-- 顶部：标题 + 关闭 -->
           <div class="flex items-start justify-between">
             <div>
-              <h2 class="text-base font-bold text-slate-900">
+              <h2 class="text-base font-bold text-fg">
                 {{ isRegister ? '注册账号' : '登录' }}
               </h2>
-              <p class="mt-1 text-xs text-slate-500">
+              <p class="mt-1 text-xs text-subtle">
                 {{
                   isRegister
                     ? '注册需要邀请码，成功后会自动登录'
@@ -157,20 +157,20 @@ watch(
           <!-- 为什么弹出来：例如「创建任务需要先登录」，被动弹出时才显示 -->
           <p
             v-if="auth.promptReason"
-            class="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700"
+            class="mt-4 rounded-xl border border-warning-line bg-warning-surface px-3 py-2 text-xs text-warning-fg"
           >
             {{ auth.promptReason }}
           </p>
 
           <!-- 页签 -->
-          <div class="mt-4 flex gap-1 rounded-xl bg-slate-100 p-1 text-sm">
+          <div class="mt-4 flex gap-1 rounded-xl bg-surface-2 p-1 text-sm">
             <button
               type="button"
               class="flex-1 rounded-lg py-1.5 font-medium transition"
               :class="
                 isRegister
-                  ? 'text-slate-500 hover:text-slate-700'
-                  : 'bg-white text-slate-900 shadow-sm'
+                  ? 'text-muted hover:text-fg'
+                  : 'bg-surface text-fg shadow-sm ring-1 ring-line-strong'
               "
               @click="switchMode('login')"
             >
@@ -181,8 +181,8 @@ watch(
               class="flex-1 rounded-lg py-1.5 font-medium transition"
               :class="
                 isRegister
-                  ? 'bg-white text-slate-900 shadow-sm'
-                  : 'text-slate-500 hover:text-slate-700'
+                  ? 'bg-surface text-fg shadow-sm ring-1 ring-line-strong'
+                  : 'text-muted hover:text-fg'
               "
               @click="switchMode('register')"
             >
@@ -192,52 +192,52 @@ watch(
 
           <form class="mt-4 space-y-3" @submit.prevent="handleSubmit">
             <label class="block">
-              <span class="text-xs font-medium text-slate-600">用户名</span>
+              <span class="text-xs font-medium text-muted">用户名</span>
               <input
                 ref="usernameInput"
                 v-model="username"
                 type="text"
                 autocomplete="username"
-                class="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-primary-400 focus:ring-2 focus:ring-primary-100"
+                class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
                 placeholder="3-32 个字符"
               />
             </label>
 
             <label class="block">
-              <span class="text-xs font-medium text-slate-600">密码</span>
+              <span class="text-xs font-medium text-muted">密码</span>
               <input
                 v-model="password"
                 type="password"
                 :autocomplete="isRegister ? 'new-password' : 'current-password'"
-                class="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-primary-400 focus:ring-2 focus:ring-primary-100"
+                class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
                 :placeholder="isRegister ? '至少 8 位' : '请输入密码'"
               />
             </label>
 
             <template v-if="isRegister">
               <label class="block">
-                <span class="text-xs font-medium text-slate-600">确认密码</span>
+                <span class="text-xs font-medium text-muted">确认密码</span>
                 <input
                   v-model="confirmPassword"
                   type="password"
                   autocomplete="new-password"
-                  class="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-primary-400 focus:ring-2 focus:ring-primary-100"
+                  class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
                   placeholder="再输入一次"
                 />
               </label>
 
               <label class="block">
-                <span class="text-xs font-medium text-slate-600">邀请码</span>
+                <span class="text-xs font-medium text-muted">邀请码</span>
                 <input
                   v-model="inviteCode"
                   type="text"
-                  class="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-primary-400 focus:ring-2 focus:ring-primary-100"
+                  class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
                   placeholder="注册需要邀请码"
                 />
               </label>
             </template>
 
-            <p v-if="errorText" class="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">
+            <p v-if="errorText" class="rounded-xl bg-danger-surface px-3 py-2 text-xs text-danger-fg">
               {{ errorText }}
             </p>
 

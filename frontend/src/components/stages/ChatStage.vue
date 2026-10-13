@@ -49,17 +49,17 @@ watch(
 </script>
 
 <template>
-  <section class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-900">
-    <div class="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-6">
+  <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm  ">
+    <div class="flex items-start justify-between gap-3 border-b border-line px-4 py-3  sm:px-6">
       <div class="min-w-0">
-        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">需求澄清对话</h2>
-        <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">AI 会追问关键细节，信息补齐后再生成文档</p>
+        <h2 class="text-sm font-semibold text-fg ">需求澄清对话</h2>
+        <p class="mt-0.5 text-xs text-subtle">AI 会追问关键细节，信息补齐后再生成文档</p>
       </div>
       <div class="flex shrink-0 gap-2">
         <AppButton variant="secondary" size="sm" @click="emit('editRequirements')">改需求</AppButton>
         <button
           type="button"
-          class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-red-300 hover:text-red-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-red-500 dark:hover:text-red-400"
+          class="rounded-lg border border-line-strong px-3 py-1.5 text-xs font-medium text-muted transition hover:border-red-300 hover:text-red-600   dark:hover:border-red-500 dark:hover:text-red-400"
           @click="emit('restart')"
         >
           重新开始
@@ -77,7 +77,7 @@ watch(
     </p>
 
     <!-- 固定高度的会话区：消息列表内部滚动，输入框常驻底部 -->
-    <div class="flex h-[min(68vh,620px)] flex-col bg-slate-50/60 dark:bg-slate-800/60">
+    <div class="flex h-[min(68vh,620px)] flex-col bg-surface-2 ">
       <MessageList :messages="messages" />
       <ChatInput ref="inputRef" :loading="loading" @send="emit('send', $event)" />
     </div>
@@ -85,9 +85,9 @@ watch(
     <!-- 满足条件后显示「生成 PRD」入口 -->
     <div
       v-if="canGeneratePrd"
-      class="flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900 sm:px-6"
+      class="flex items-center justify-between gap-3 border-t border-line bg-surface px-4 py-3   sm:px-6"
     >
-      <p class="text-xs text-slate-500 dark:text-slate-400">
+      <p class="text-xs text-subtle">
         需求已澄清。生成前会先让你确认「补充信息回填到需求摘要」的变更。
       </p>
       <AppButton variant="primary" shrink-0 @click="emit('generatePrd')">
