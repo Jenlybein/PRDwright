@@ -70,9 +70,8 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import StreamEvent
 from backend.core.config import get_settings
-from backend.core.errors import ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
-from backend.services.llm_utils import extract_json_object, extract_text
+from backend.services.llm_utils import extract_json_object
 from backend.services.prd_skill import (
     build_prd_system_prompt,
     format_conversation,
@@ -86,7 +85,7 @@ from backend.services.prompts import (
     PRD_SECTION_REVIEW_SYSTEM_PROMPT,
     PRD_SECTION_REWRITE_APPENDIX,
 )
-from backend.services.stream_guard import ensure_not_truncated
+from backend.services.stream_reply import astream_text, collect_reply, error_event
 
 logger = logging.getLogger(__name__)
 
@@ -437,7 +436,7 @@ class PrdSectionWriter:
                     buffer.append(delta)
                     yield StreamEvent(type="chunk", content=delta)
             except Exception as exc:  # noqa: BLE001 - 流式接口需把异常转成事件
-                yield _error_event(exc)
+                yield error_event(exc)
                 return
             section_text = "".join(buffer).strip()
 
@@ -489,7 +488,7 @@ class PrdSectionWriter:
                             buffer.append(delta)
                             yield StreamEvent(type="chunk", content=delta)
                     except Exception as exc:  # noqa: BLE001
-                        yield _error_event(exc)
+                        yield error_event(exc)
                         return
                     section_text = "".join(buffer).strip()
 
@@ -574,29 +573,16 @@ class PrdSectionWriter:
     # 模型调用
     # ------------------------------------------------------------------
 
-    async def _stream_text(self, messages: list[BaseMessage]) -> AsyncIterator[str]:
-        """流式产出一次调用的纯文本增量，结束时检查是否被截断。"""
-        last_chunk = None
-        async for chunk in self.llm.astream(messages):
-            text = extract_text(chunk.content)
-            last_chunk = chunk
-            if text:
-                yield text
-        if last_chunk is not None:
-            ensure_not_truncated(last_chunk)
+    def _stream_text(self, messages: list[BaseMessage]) -> AsyncIterator[str]:
+        """流式产出一次调用的纯文本增量，结束时检查是否被截断。
+
+        复用 `stream_reply.astream_text`：截断检测与文本归一化只有一份实现。
+        """
+        return astream_text(self.llm, messages)
 
     async def _collect(self, messages: list[BaseMessage]) -> str:
         """把流式回复收拢成完整文本（审核需要整体 JSON 才能解析）。"""
-        chunks: list[str] = []
-        last_chunk = None
-        async for chunk in self.llm.astream(messages):
-            text = extract_text(chunk.content)
-            last_chunk = chunk
-            if text:
-                chunks.append(text)
-        if last_chunk is not None:
-            ensure_not_truncated(last_chunk)
-        return "".join(chunks).strip()
+        return await collect_reply(self.llm, messages)
 
     async def _safe_review(
         self,
@@ -772,15 +758,3 @@ def _section_stage_event(
     )
 
 
-def _error_event(exc: Exception) -> StreamEvent:
-    """把异常转成 `error` 事件（与 `document_service._stream_reply` 的口径一致）。
-
-    错误码同样是 `LLM_UPSTREAM_ERROR`：分章节生成与整篇生成是同一条能力的两条
-    实现路径，对前端来说不该有两种错误分类。
-    """
-    return StreamEvent(
-        type="error",
-        content=f"生成失败：{exc}",
-        data={"error_type": type(exc).__name__},
-        code=ErrorCode.LLM_UPSTREAM_ERROR.value,
-    )

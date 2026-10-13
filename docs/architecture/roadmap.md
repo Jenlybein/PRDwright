@@ -1,9 +1,13 @@
-# PRDwright 架构演进与重构路线图（2026-10-13 重订版）
+# PRDwright 架构演进与重构路线图（2026-10-13 重订 / 2026-10-14 进度同步）
 
-> 状态：**原 P0–P4 大半已落地，本版只规划「剩余工作」**。
+> 状态：**原 P0–P4 已全部落地，本版只规划「剩余工作」**。
 > 依据：2026-10-13 代码库实测（后端 5676 行 / 26 模块；前端 14652 行 / 46 文件；后端 78 用例、前端 209 用例）。
-> 配套文档：`ADR.md`（10 条已决记录 + 新增 ADR-011 双闸门）。
+> 配套文档：`ADR.md`（13 条已决记录，含 ADR-011 双闸门、ADR-012 错误契约、ADR-013 统一流式编排）。
 > 前提交代：终局是**少量人 + 简单登录**，该目标已通过 owner 过滤 + 登录系统提前兑现；本版聚焦「把剩下的可靠性与部署补齐」。
+>
+> **2026-10-14 进度更新**：R0-T1 CI ✅（`.github/workflows/ci.yml`，云端双 job 已跑绿）、
+> R0-T5 错误码化 ✅（`7be5989`）、R0-T3 流式去重 ✅（四份重复 → `services/stream_reply.py`）。
+> **R0 安全网全部完成**；用例数为**后端 117 / 前端 222**。下一阶段 R1 生成可靠性。
 
 ---
 
@@ -21,6 +25,8 @@
 | P3-T1 分章节生成 | ✅ | `services/prd_section_writer.py`：`PRD_SECTIONS` + 逐节流式 + 前向上下文 `prior_sections` |
 | P3-T3 max_tokens 分档 | ✅ | `services/llm_factory.py` 按文档类型配置 |
 | P4 登录 | ✅ | `api/auth.py` + `auth_service` + `auth_repo` + 纯 ASGI 默认拒绝中间件 + 前端 `AuthDialog`/`UserMenu` + `scripts/auth_cli.py` |
+| **R0-T1 CI** | ✅ 2026-10-14 | `.github/workflows/ci.yml`：backend（uv + pytest）/ frontend（npm ci + vitest `--run` + build）双 job 并行，云端已跑绿 |
+| **R0-T5 错误码化** | ✅ `7be5989` | `core/errors.py`（`ErrorCode` 8 码）+ `main.py::register_error_handlers` + 前端 `services/errors.ts`；前后端码值一致由不变量测试守卫 |
 | ADR-007/008/009/010 | ✅ 已决已落地 | 见 `ADR.md` |
 
 ### 1.2 路线图外、期间新增的能力（非债务，但影响部署与文档）
@@ -35,16 +41,17 @@
 
 | 编号 | 问题 | 位置 | 状态 | 归属阶段 |
 | --- | --- | --- | --- | --- |
-| D2 | **流式编排只去重了一半**：`ensure_not_truncated` 已抽进 `stream_guard.py`，但 `_stream_reply` 仍两份（`conversation_service.py:365` / `document_service.py:625`），SSE 帧封装与文本拼接逻辑各自维护 | 两 service | ⚠️ 部分 | R0-T3 |
-| D4 | **错误契约仍靠中文串**：前端 `useClarificationChat.ts:128` 仍 `message.includes('会话不存在')` 判定降级 | 前端 composable | ❌ 仍开 | R0-T5 |
+| ~~D2~~ | ~~流式编排四份重复~~ → **已解决**（2026-10-14，R0-T3）：全部收敛到 `services/stream_reply.py`（`astream_text` / `iter_reply_events` / `collect_reply` / `error_event`），三个 service 改为调用；`_extract_text` 副本与 `_error_event` 包装已删除 | 三 service | ✅ 已解决 | — |
+| ~~D4~~ | ~~错误契约靠中文串~~ → **已解决**（2026-10-14，`7be5989`）：判据改为 `isApiError(error, 'SESSION_NOT_FOUND')`，并由 4 条不变量测试防回退 | 前端 composable | ✅ 已解决 | — |
 | D7 | **长文生成不可续传**：`prd_section_writer` 逐节生成但是**单次运行内**的内存态，网络中断仍整体丢失；无中间产物落库 | `document_service` / `prd_section_writer` | ❌ 仍开 | R1-T2 |
 | D8 | **技能目录仍脆弱**：`PRDWRIGHT_SKILLS_DIR` 已支持，但缺失时仍「向上找目录」并**静默降级**到内置提示词（D8 未真正解决） | `prd_skill.resolve_skill_dir` | ⚠️ 部分 | R2-T6 |
 | D9 | **无可观测性与成本计量**：仅 `/health` 返回 `{"status":"ok"}`；无任何 token 打点、request_id、结构化日志 | 全局 | ❌ 仍开 | R1-T5 / R2-T7 |
 | D10 | **技能资源常驻缓存**：`prd_skill.py:64 @lru_cache` 缓存到进程结束，改模板必须重启 | `prd_skill` | ❌ 仍开 | R2-T6 |
-| D11 | **零部署/零 CI**：全仓库无 `Dockerfile`、无 `docker-compose`、无 `.github`、无 `Makefile`；287 个测试靠人手跑 | 仓库根 | ❌ 仍开 | R0-T1 / R3 |
+| D11 | **零部署**（CI 已解决）：`.github/workflows/ci.yml` 已就位并跑绿，测试不再靠人手跑；仍无 `Dockerfile` / `docker-compose` / `Makefile` | 仓库根 | ⚠️ 部分（部署待 R3） | R3 |
 | D12 | **无供应商 failover**：`llm_factory.get_llm` 只按 `default_llm_provider` 构造单个模型，无主备切换/超时重试 | `llm_factory.py:31` | ❌ 仍开 | R1-T4 |
 
-> 已彻底解决的旧债务（不再追踪）：D1 状态双真相（P1）、D3 死接口、D5 App.vue 巨石（P2）、D6 零测试。
+> 已彻底解决的旧债务（不再追踪）：D1 状态双真相（P1）、D3 死接口、D5 App.vue 巨石（P2）、
+> D6 零测试、**D4 错误契约靠中文串（R0-T5，2026-10-14）**。
 
 ---
 
@@ -63,7 +70,7 @@
 
 ## 三、重订路线图（剩余工作 R0 → R3）
 
-排序原则升级为：**先给手上 287 个测试装上自动执行的网（R0），再补核心交付物的可靠性（R1），再工程化资产与可观测性（R2），最后把「能跑」变成「能部署」（R3）。**
+排序原则升级为：**先给手上的测试装上自动执行的网（R0，现 329 个），再补核心交付物的可靠性（R1），再工程化资产与可观测性（R2），最后把「能跑」变成「能部署」（R3）。**
 
 > 命名 `R0–R3`（Revised）是为了和已完成的 `P0–P4` 区分——它们不是推翻重来，而是收尾。
 
@@ -71,24 +78,29 @@
 
 ### R0 · 安全网收尾：CI + 两个未结的护栏项
 
-**周期**：3–5 天　**功能变化**：零　**风险**：低（除 T3 需对照测试）
+**周期**：3–5 天（T1/T5 已完成，仅剩 T3）　**功能变化**：零　**风险**：低（T3 需对照测试）
 
-**目标**：在动任何有风险的结构之前，先把「287 个测试靠人手跑」和「两个半吊子护栏」解决掉。
+**目标**：在动任何有风险的结构之前，先把「测试靠人手跑」和「两个半吊子护栏」解决掉。
 
-| 任务 | 具体动作 | 关联债务 |
+| 任务 | 具体动作 | 状态 |
 | --- | --- | --- |
-| T1 建 CI | GitHub Actions：单 job 跑 `uv run pytest` + `npm run test:unit -- --run` + `vue-tsc` 类型检查；PR 必过。本地 `Makefile` 镜像同三条命令 | D11 |
-| T2 错误码化 | SSE `error` 事件与 REST 错误响应加 `error_code` 枚举（`conversation_not_found` / `output_truncated` / `llm_error` / `invalid_input` / `auth_required`）。前端删掉 `includes('会话不存在')`，改判 `code === 'conversation_not_found'` | D4 |
-| T3 收尾流式去重 | 把两份 `_stream_reply`（SSE 帧封装 + 文本拼接 + 异常转事件）彻底收敛到 `services/streaming.py`，`conversation_service` 与 `document_service` 改为调用它；`ensure_not_truncated` 已就位，纳入同模块。**先写对照测试固定两边当前行为，再统一** | D2 |
+| T1 建 CI | GitHub Actions 双 job：backend `uv sync` + `uv run pytest`；frontend `npm ci` + `npm run test:unit -- --run` + `npm run build`（含 `vue-tsc`）。push/PR 触发，红灯拦合并 | ✅ 已落地并跑绿 |
+| T5 错误码化 | `code` 与 `detail` 并列（`detail` 一字不改），8 个机器码；**SSE `error` 事件也带顶层 `code`**（原判据来自流内而非 HTTP 响应，见 ADR-012）；前端改判 `isApiError(error, 'SESSION_NOT_FOUND')` | ✅ `7be5989` |
+| T3 收尾流式去重 | 把四份重复（两份 `_stream_reply` + `_error_event` + `_extract_text` 副本）收敛到 `services/stream_reply.py` 一处，三个 service 改为调用它；`stream_guard.py` 保持只管截断检测。**先写对照测试固定当前行为，再统一**（详见 ADR-013） | ✅ 已落地 |
 
 **验收**：
-- 推一个空 PR，CI 能红灯拦下「漏跑测试 / 类型错误」。
-- `grep -rn "includes('会话不存在')\|includes(\"会话不存在\")" frontend/src` 返回空。
-- 全项目 `grep -rn "_stream_reply" backend/src/backend/services` 只命中 `streaming.py` 一处定义；手动跑通完整流程，输出与合并前逐字一致。
+- ✅ 推一个空 PR，CI 能红灯拦下「漏跑测试 / 类型错误」。
+- ✅ 前端源码零中文错误串判据（由 `tests/test_error_contract.py` 的扫描不变量永久守护）。
+- ✅ 合并后：`grep -rn "async def _stream_reply\|def _extract_text" backend/src/backend/services` 归零（由 `tests/test_stream_reply.py::test_services_hold_no_duplicate_stream_implementation` 永久守护）；
+  合并前用**差分比对**跑了 12 组场景（正常多块 / 单块 / 截断 / 空输出 / 中途异常 / 结构化分块 / 无 status_text），新旧实现**逐事件完全一致**。
 
 **不做**：不碰持久化、不改 UI、不动提示词内容。
 
-**风险**：T3 合并时两份实现的边角行为可能不一致（如异常时 `last_chunk` 的保留时机）。这是旧路线图 P0-T3 遗留的坑，**必须先用对照测试钉死**再动。
+**风险**：T3 合并时两份实现的边角行为可能不一致（`on_finish` 的调用时机、异常后是否还发 `done`）。这是旧路线图 P0-T3 遗留的坑，**必须先用对照测试钉死**再动。
+
+> ⚠️ **规模更正（2026-10-14 实测）**：此前把「`conversation_service.py:366` / `document_service.py:626`」的**行号**误读成了行数，
+> 一度把 T3 描述为「365 / 625 行的大手术」。实测两个函数本体分别只有 **44 行**与 **48 行**，
+> 且签名只差一个 `on_finish` 参数。T3 的真实风险不在体量，而在**两处调用点各自依赖的边角行为**。
 
 ---
 
@@ -161,8 +173,8 @@
 
 | 决策 | 理由 |
 | --- | --- |
-| **CI 提到 R0 而非留在 R3** | 旧路线图把 CI 放在部署阶段，但现在已有 **287 个测试**且 R0-T3 要动有风险的流式去重代码。先装自动执行的网，才能让后续每个改动「敢动手」——这是旧 P0 护栏思想的延续，只是落地时机随测试规模而前移 |
-| **R0 先于 R1** | T3 流式去重是已知风险点，必须先有 CI 兜底 + 对照测试钉死行为；T5 错误码是仍活着的 bug（前端字符串匹配），顺手收掉 |
+| **CI 提到 R0 而非留在 R3** | 旧路线图把 CI 放在部署阶段，但当时已有 287 个测试且 R0-T3 要动有风险的流式去重代码。先装自动执行的网，才能让后续每个改动「敢动手」——这是旧 P0 护栏思想的延续，只是落地时机随测试规模而前移（现 329 个测试，CI 已跑绿） |
+| **R0 先于 R1** | T3 流式去重是已知风险点，必须先有 CI 兜底 + 对照测试钉死行为；T5 错误码是仍活着的 bug（前端字符串匹配），已于 2026-10-14 收掉 |
 | **R1 紧随 R0** | PRD 是核心交付物，中断即全废（D7）、供应商单点（D12）、成本不可见（D9）直接决定「用户敢不敢用」。它们改的都是生成主链路，应在结构稳定后集中处理 |
 | **R2 在 R1 之后** | 资产工程化（热重载/fail-fast）与可观测性不阻塞任何功能，但 R2-T8 的 RAG 资产登记是 R3 Docker 打包的前置，故排在 R3 之前 |
 | **R3 最后** | Docker/CI/加固不阻塞开发，等全栈形态（含 R2 的资产清单）稳定后一次性做，且 R2-T8 明确要打包的资产后，R3 才不会漏项 |
@@ -179,8 +191,8 @@
 每个阶段结束前自查：
 
 1. **测试只增不减**：R0 起 CI 强制；每个阶段结束 `pytest` 与 `vitest` 用例数只增不减。
-2. **依赖方向**：`api → services → repositories → db`，无反向 import；services 之间无横向 import（D2 收尾后 `_stream_reply` 只在 `streaming.py`）。
-3. **契约一致**：后端 `schemas.py` 与前端 `types/index.ts` 字段名一致；新增错误必须带 `error_code`（R0-T5 后不得新增字符串匹配）。
+2. **依赖方向**：`api → services → repositories → db`，无反向 import；services 之间无横向 import（D2 收尾后流式编排只在 `stream_reply.py`）。
+3. **契约一致**：后端 `schemas.py` 与前端 `types/index.ts` 字段名一致；**新增错误必须带 `code`**（R0-T5 后不得新增中文串匹配，由不变量测试守卫，见 ADR-012）。
 4. **鉴权默认关闭风险**：新增接口若在白名单内必须说明原因；非白名单自动受保护，由 OpenAPI 路径不变量测试守卫（ADR-008）。
 5. **owner 强制过滤**：任何查方案/文档的 Repository 方法都带 `owner_id`，不接受 `None`（ADR-009）。
 6. **技能资产不静默降级**：R2-T6 后，资源缺失在启动或生成时显式报错/告警，不再悄悄退回内置提示词。
@@ -191,7 +203,7 @@
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| R0-T3 合并两份 `_stream_reply` 边角行为漂移 | 生成输出突变 | 先写对照测试钉死两边行为再统一 |
+| R0-T3 合并四份流式重复时边角行为漂移 | 生成输出突变（`on_finish` 不写历史 / 异常后多发了 `done`） | 先写对照测试钉死 `status→chunk→done` 序列、异常转 `error` 后不发 `done`、`on_finish` 仅成功时调用，再统一 |
 | R1-T2 续传导致章节间口径不一致 | PRD 质量下降 | 保留整篇模式开关；续传仅作用于分章节模式；前向上下文已传 `prior_sections` |
 | R1-T4 failover 触发双倍调用成本 | 费用上升 | 仅主供应商异常/超时切备；正常路径零开销 |
 | R2-T6 热重载引入竞态 | 读到半截模板 | 文件级原子替换 + mtime 比对，不做内容 diff |
@@ -209,18 +221,18 @@
 
 ---
 
-## 八、实施进度（截至 2026-10-13 重订）
+## 八、实施进度（截至 2026-10-14）
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 原 P0 护栏（除 T3/T5） | ✅ | 78 后端 + 209 前端用例；死接口已删 |
+| 原 P0 护栏（除 T3/T5） | ✅ | 用例数已增长为 **117 后端 / 222 前端**；死接口已删 |
 | 原 P1 方案持久化 | ✅ | 快照范式 + owner 过滤 + 侧边栏 + router |
 | 原 P2 前端解耦 | ✅ | App.vue 已删；组件库 + 状态机 + composables |
 | 原 P3-T1/T3（分章节 + max_tokens 分档） | ✅ | `prd_section_writer` + `llm_factory` 分档 |
 | 原 P4 登录 | ✅ | 认证 + 中间件 + 前端 + CLI |
-| **R0-T1 CI** | ⬜ | 新建，保护现有 287 测试 |
-| **R0-T3 流式去重收尾** | ⬜ | D2 半吊子，需彻底收敛 |
-| **R0-T5 错误码化** | ⬜ | D4 仍活（前端字符串匹配） |
+| **R0-T1 CI** | ✅ | `.github/workflows/ci.yml`，双 job 云端已跑绿（107 + 222） |
+| **R0-T5 错误码化** | ✅ | `7be5989`；ADR-012；4 条不变量测试防回退 |
+| **R0-T3 流式去重收尾** | ✅ | D2 四份重复 → `services/stream_reply.py`；差分比对 12 组一致 + 10 例契约测试 |
 | **R1-T2 断点续传** | ⬜ | D7 |
 | **R1-T4 供应商 failover** | ⬜ | D12 |
 | **R1-T5 成本计量** | ⬜ | D9 成本部分 |

@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import QuestionsConfig, StreamEvent
 from backend.core.errors import ErrorCode
@@ -29,7 +29,7 @@ from backend.services.prompts import (
     ConversationProfile,
     resolve_profile,
 )
-from backend.services.stream_guard import ensure_not_truncated
+from backend.services.stream_reply import iter_reply_events
 
 # 问卷配置文件：backend/src/backend/core/question_config.json
 QUESTION_CONFIG_PATH = Path(__file__).resolve().parents[1] / "core" / "question_config.json"
@@ -96,26 +96,6 @@ def _normalize_value(value: Any) -> str:
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False)
     return str(value).strip()
-
-
-def _extract_text(content: Any) -> str:
-    """从消息内容里取出纯文本。
-
-    部分供应商的分块内容不是字符串，而是 `[{"type": "text", "text": "..."}]`
-    这样的结构化列表，这里统一摊平成字符串。
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            # 形如 {"type": "text", "text": "..."}
-            if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(str(item.get("text", "")))
-            elif isinstance(item, str):
-                parts.append(item)
-        return "".join(parts)
-    return "" if content is None else str(content)
 
 
 def load_questions_config(path: Path | None = None) -> QuestionsConfig | None:
@@ -348,65 +328,6 @@ class ConversationService:
     # 流式对话
     # ------------------------------------------------------------------
 
-    async def _astream_text(self, messages: list[BaseMessage]) -> AsyncIterator[str]:
-        """调用模型流式生成，逐段产出纯文本。
-
-        遍历结束时检查最后一个分块的结束原因，若因达到 max_tokens 被截断
-        则抛出 `OutputTruncatedError`，由上游 `_stream_reply` 转成 error 事件。
-        """
-        last_chunk: AIMessageChunk | None = None
-        async for chunk in self.llm.astream(messages):
-            text = _extract_text(chunk.content)
-            last_chunk = chunk
-            if text:
-                yield text
-        if last_chunk is not None:
-            ensure_not_truncated(last_chunk)
-
-    async def _stream_reply(
-        self,
-        messages: list[BaseMessage],
-        status_text: str | None = None,
-        on_finish: Any = None,
-        extra_data: dict[str, Any] | None = None,
-    ) -> AsyncIterator[StreamEvent]:
-        """通用的流式回复流程：状态提示 → 逐字增量 → 收尾事件。
-
-        Args:
-            messages: 已组装好的 LangChain 消息。
-            status_text: 首个状态事件的提示语；为 `None` 时不发状态事件
-                （调用方已经发过时用）。
-            on_finish: 生成结束后的回调，接收完整回复文本，用于回写历史。
-            extra_data: 附加到 `done` 事件的数据，如会话 ID。
-
-        Yields:
-            `StreamEvent`，依次为 `status` / 若干 `chunk` / `done`，出错时为 `error`。
-        """
-        if status_text:
-            yield StreamEvent(type="status", content=status_text)
-
-        chunks: list[str] = []
-        try:
-            async for text in self._astream_text(messages):
-                chunks.append(text)
-                yield StreamEvent(type="chunk", content=text)
-        except Exception as exc:  # noqa: BLE001 - 流式接口需要把异常转成事件而不是抛出
-            yield StreamEvent(
-                type="error",
-                content=f"生成失败：{exc}",
-                data={"error_type": type(exc).__name__},
-                code=ErrorCode.LLM_UPSTREAM_ERROR.value,
-            )
-            return
-
-        reply = "".join(chunks).strip()
-        if on_finish is not None:
-            on_finish(reply)
-
-        # done 事件带上完整回复，便于前端在断流或丢包时做一次对齐
-        data: dict[str, Any] = {**(extra_data or {}), "reply": reply}
-        yield StreamEvent(type="done", content="", data=data)
-
     async def start_conversation_stream(
         self,
         form_data: dict[str, Any],
@@ -449,7 +370,8 @@ class ConversationService:
             record.messages.append({"role": "assistant", "content": reply})
             record.updated_at = datetime.now()
 
-        async for event in self._stream_reply(
+        async for event in iter_reply_events(
+            self.llm,
             messages,
             on_finish=_persist,
             extra_data={"conversation_id": record.id},
@@ -518,7 +440,8 @@ class ConversationService:
                 base_history.append({"role": "user", "content": user_message})
                 base_history.append({"role": "assistant", "content": reply})
 
-        async for event in self._stream_reply(
+        async for event in iter_reply_events(
+            self.llm,
             messages,
             status_text="正在思考…",
             on_finish=_persist,

@@ -46,9 +46,8 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import StreamEvent
-from backend.core.errors import ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
-from backend.services.llm_utils import extract_json_object, extract_text
+from backend.services.llm_utils import extract_json_object
 from backend.services.prd_section_writer import PrdSectionWriter, is_available as prd_sections_available
 from backend.services.prd_skill import (
     build_prd_system_prompt,
@@ -68,7 +67,7 @@ from backend.services.prompts import (
     SUMMARY_SYNC_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
 )
-from backend.services.stream_guard import ensure_not_truncated
+from backend.services.stream_reply import collect_reply, iter_reply_events
 
 logger = logging.getLogger(__name__)
 
@@ -612,60 +611,7 @@ class DocumentService:
         供应商抽象只提供 `astream`，需要完整结果时（如摘要回填要解析 JSON）就在
         内部把增量拼起来。同样做截断检查，避免拿到一段被切断的 JSON 后误判。
         """
-        chunks: list[str] = []
-        last_chunk = None
-        async for chunk in self.llm.astream(messages):
-            text = extract_text(chunk.content)
-            last_chunk = chunk
-            if text:
-                chunks.append(text)
-        if last_chunk is not None:
-            ensure_not_truncated(last_chunk)
-        return "".join(chunks).strip()
-
-    async def _stream_reply(
-        self,
-        messages: list[BaseMessage],
-        status_text: str | None = None,
-        extra_data: dict[str, Any] | None = None,
-    ) -> AsyncIterator[StreamEvent]:
-        """通用流式生成流程：状态提示 → 逐字增量 → 收尾事件。
-
-        Args:
-            messages: 已组装好的 LangChain 消息。
-            status_text: 首个状态事件的提示语；为 `None` 时不发状态事件。
-            extra_data: 附加到 `done` 事件的数据（如文档类型）。
-
-        Yields:
-            `StreamEvent`，依次为 `status` / 若干 `chunk` / `done`，出错时为 `error`。
-        """
-        if status_text:
-            yield StreamEvent(type="status", content=status_text)
-
-        chunks: list[str] = []
-        try:
-            last_chunk = None
-            async for chunk in self.llm.astream(messages):
-                text = extract_text(chunk.content)
-                last_chunk = chunk
-                if text:
-                    chunks.append(text)
-                    yield StreamEvent(type="chunk", content=text)
-            # 流结束后检查是否因 max_tokens 被截断，是则抛出转 error 事件
-            if last_chunk is not None:
-                ensure_not_truncated(last_chunk)
-        except Exception as exc:  # noqa: BLE001 - 流式接口需把异常转成事件而非抛出
-            yield StreamEvent(
-                type="error",
-                content=f"生成失败：{exc}",
-                data={"error_type": type(exc).__name__},
-                code=ErrorCode.LLM_UPSTREAM_ERROR.value,
-            )
-            return
-
-        reply = "".join(chunks).strip()
-        data: dict[str, Any] = {**(extra_data or {}), "reply": reply}
-        yield StreamEvent(type="done", content="", data=data)
+        return await collect_reply(self.llm, messages)
 
     # ------------------------------------------------------------------
     # PRD 生成（整篇 / 分章节）
@@ -690,7 +636,8 @@ class DocumentService:
             conversation=format_conversation(history or []),
         )
         messages = self._build_messages(system_prompt, user_content)
-        async for event in self._stream_reply(
+        async for event in iter_reply_events(
+            self.llm,
             messages,
             status_text="正在生成 PRD…",
             extra_data={"doc_type": "prd"},
@@ -777,7 +724,8 @@ class DocumentService:
         if rag_context:
             user_content += API_DOCS_RAG_REFERENCE_TEMPLATE.format(rag_context=rag_context)
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
-        async for event in self._stream_reply(
+        async for event in iter_reply_events(
+            self.llm,
             messages,
             status_text="正在生成接口文档…",
             extra_data={"doc_type": "api_doc"},
@@ -798,7 +746,8 @@ class DocumentService:
         """
         user_content = self._load_template("prompts").format(prd_content=prd_content)
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
-        async for event in self._stream_reply(
+        async for event in iter_reply_events(
+            self.llm,
             messages,
             status_text="正在生成提示词套件…",
             extra_data={"doc_type": "prompts"},
@@ -824,7 +773,8 @@ class DocumentService:
             document=document,
         )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
-        async for event in self._stream_reply(
+        async for event in iter_reply_events(
+            self.llm,
             messages,
             status_text="正在优化文档…",
             extra_data={"doc_type": "optimize"},
