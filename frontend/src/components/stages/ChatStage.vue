@@ -58,7 +58,9 @@ watch(
     <div class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
       <div class="border-b border-line px-4 py-3 sm:px-6">
         <h2 class="text-sm font-semibold text-fg">需求澄清对话</h2>
-        <p class="mt-0.5 text-xs text-subtle">AI 会追问关键细节，信息补齐后再生成文档</p>
+        <p class="mt-0.5 text-xs text-subtle">
+          每轮只问 1-2 个关键细节，逐步澄清后再生成文档
+        </p>
       </div>
 
       <!-- 出错时把原因贴在会话区顶部，不打断已有消息 -->

@@ -361,11 +361,10 @@ async function readStream(
  * `answers` 的值允许是字符串数组：后端拿到的是 `dict[str, Any]`，
  * 服务层 `_normalize_value` 会把数组拼成「、」连接的文本。
  *
- * `systemPrompt` 用于给本次会话换一套人设（如澄清对话专用提示词），后端会把它
- * 存在会话记录里，后续接续对话自动沿用。
+ * 提示词（系统人设与首轮开场白）由后端的对话档案决定，请求里不携带任何提示词字段。
  */
 export async function startConversationStream(
-  payload: { answers: RequirementAnswers; title?: string; systemPrompt?: string },
+  payload: { answers: RequirementAnswers; title?: string },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
   return readStream(
@@ -373,7 +372,6 @@ export async function startConversationStream(
     {
       title: payload.title ?? '',
       answers: payload.answers,
-      system_prompt_override: payload.systemPrompt ?? '',
     },
     handlers,
   )
@@ -384,11 +382,11 @@ export async function startConversationStream(
  * 对应后端 `POST /api/conversation/continue-stream`。
  *
  * 不传 `conversationId` 时后端走无状态模式，需要由 `history` 回传完整历史；
- * 两者都传时以后端收到的 `history` 为准。无状态模式下后端拿不到会话记录，
- * 因此系统提示词人设要靠 `systemPrompt` 重新下发。
+ * 两者都传时以后端收到的 `history` 为准。人设由后端按档案标识解析，无状态模式下
+ * 回退到默认档案，因此前端不需要补发提示词。
  */
 export async function continueConversationStream(
-  payload: { content: string; conversationId?: string; history?: ChatMessage[]; systemPrompt?: string },
+  payload: { content: string; conversationId?: string; history?: ChatMessage[] },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
   return readStream(
@@ -398,7 +396,6 @@ export async function continueConversationStream(
       content: payload.content,
       // 只保留后端认识的 role / content 两个字段
       history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
-      system_prompt_override: payload.systemPrompt ?? '',
     },
     handlers,
   )

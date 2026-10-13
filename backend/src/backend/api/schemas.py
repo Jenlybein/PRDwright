@@ -40,19 +40,16 @@ class QuestionsConfig(BaseModel):
 
 
 class ConversationCreateRequest(BaseModel):
-    """创建会话请求。"""
+    """创建会话请求。
+
+    不接受任何提示词参数：人设与首轮开场白由后端的对话档案决定
+    （见 `services/prompts.py`），前端只能选场景，不能自带提示词。
+    """
 
     title: str = Field(default="", description="会话标题，留空则由服务层自动生成")
     answers: dict[str, Any] = Field(
         default_factory=dict,
         description="问卷答案，key 为 QuestionConfig.name",
-    )
-    system_prompt_override: str = Field(
-        default="",
-        description=(
-            "本轮会话专用的系统提示词覆盖。传入时用它替代服务层的默认系统提示词，"
-            "例如前端为「需求澄清对话」下发的专用人设；留空则沿用默认。"
-        ),
     )
 
 
@@ -64,7 +61,11 @@ class MessageItem(BaseModel):
 
 
 class ConversationContinueRequest(BaseModel):
-    """接续对话请求。会话 ID 与历史至少提供一种。"""
+    """接续对话请求。会话 ID 与历史至少提供一种。
+
+    同样不接受提示词参数：人设由会话记录里的档案标识实时解析，无状态模式下
+    回退到默认档案，前端不需要（也无法）重新下发。
+    """
 
     conversation_id: str = Field(
         default="",
@@ -74,13 +75,6 @@ class ConversationContinueRequest(BaseModel):
     history: list[MessageItem] = Field(
         default_factory=list,
         description="前端回传的历史消息；传入时优先于服务端保存的历史",
-    )
-    system_prompt_override: str = Field(
-        default="",
-        description=(
-            "系统提示词覆盖。有状态模式下会沿用创建会话时保存的人设，"
-            "无状态模式（只传 history）下需由前端重新下发。"
-        ),
     )
 
 

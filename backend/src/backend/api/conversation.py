@@ -180,13 +180,12 @@ async def start_conversation_stream(
     事件序列：`status`（`data` 里带本次的 `conversation_id`，前端需立即记录）
     → 若干 `chunk`（增量文本）→ `done`（带完整 `reply`）；出错时为 `error`。
 
-    `system_prompt_override` 用于给本次会话换一套人设（如前端下发的「需求澄清对话」
-    专用提示词），会在会话记录里保存下来供后续接续对话沿用。
+    请求里没有提示词参数：本轮用哪套人设与开场白，由后端按默认对话档案决定
+    （`services/prompts.py` 的 `ConversationProfile`）。
     """
     events = conversation_service.start_stream(
         form_data=payload.answers,
         title=payload.title,
-        system_prompt=payload.system_prompt_override or None,
     )
     return StreamingResponse(
         _make_sse_generator(events),
@@ -204,8 +203,8 @@ async def continue_conversation_stream(
     `conversation_id` 与 `history` 至少提供一种：给出 ID 时用服务端保存的
     历史；不给出则由前端回传完整历史走无状态模式。两者都给时以 `history` 为准。
 
-    系统提示词默认沿用创建会话时保存的人设；无状态模式（服务端会话已丢失）下
-    需要前端在 `system_prompt_override` 里重新下发。
+    人设由会话记录里的档案标识实时解析；无状态模式（服务端会话已丢失）下回退到
+    默认档案，前端不需要也没有通道重新下发提示词。
     """
     # 空列表视为「未传」，交给服务层回退到服务端历史
     history = [{"role": m.role, "content": m.content} for m in payload.history] or None
@@ -213,7 +212,6 @@ async def continue_conversation_stream(
         user_message=payload.content,
         conversation_id=payload.conversation_id or None,
         history=history,
-        system_prompt=payload.system_prompt_override or None,
     )
     return StreamingResponse(
         _make_sse_generator(events),

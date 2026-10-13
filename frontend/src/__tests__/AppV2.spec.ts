@@ -326,7 +326,7 @@ describe('AppV2 完整流程编排', () => {
     expect(api.startConversationStream).not.toHaveBeenCalled()
   })
 
-  it('提交需求后进入对话阶段，映射后端题目字段并下发澄清专用系统提示词', async () => {
+  it('提交需求后进入对话阶段，映射后端题目字段且载荷不携带任何提示词', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
       handlers?.onChunk?.('我先复述一下理解：这是一个给独立开发者用的 PRD 生成器。')
       return { conversationId: 'conv-1', reply: '我先复述一下理解：这是一个给独立开发者用的 PRD 生成器。' }
@@ -346,10 +346,10 @@ describe('AppV2 完整流程编排', () => {
     expect(payload?.answers.platform_type).toBe('网页应用')
     expect(payload?.answers.core_features).toEqual(['问卷填写 —— 收集产品信息'])
 
-    // 澄清对话专用人设：资深产品经理 / 只做澄清 / 信息足够时提示生成 PRD
-    expect(payload?.systemPrompt).toContain('资深产品经理')
-    expect(payload?.systemPrompt).toContain('绝不生成 PRD')
-    expect(payload?.systemPrompt).toContain('可以点击生成 PRD')
+    // 提示词归后端独占（后端按对话档案解析人设与开场白），前端只提交问卷内容
+    expect(payload).not.toHaveProperty('systemPrompt')
+    expect(payload).not.toHaveProperty('system_prompt_override')
+    expect(JSON.stringify(payload)).not.toContain('资深产品经理')
   })
 
   it('对话完成后可生成 PRD，并在生成完成时进入待确认阶段', async () => {

@@ -5,6 +5,9 @@
 
 对前端暴露的消息格式统一为 `FrontendMessage`（`{"role": ..., "content": ...}`），
 `_build_lc_messages()` 负责把历史与本轮输入组装成 LangChain 消息列表。
+
+系统人设与首轮开场白来自 `services/prompts.py` 的**对话档案**，本模块不持有任何
+提示词文本，调用方也无从传入——提示词是后端的领域资产，前端只能点名场景。
 """
 
 from __future__ import annotations
@@ -20,7 +23,11 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 
 from backend.api.schemas import QuestionsConfig, StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
-from backend.services.prompts import SYSTEM_PROMPT
+from backend.services.prompts import (
+    DEFAULT_CONVERSATION_PROFILE,
+    ConversationProfile,
+    resolve_profile,
+)
 from backend.services.stream_guard import ensure_not_truncated
 
 # 问卷配置文件：backend/src/backend/core/question_config.json
@@ -58,17 +65,8 @@ _ROLE_ALIASES: dict[str, MessageRole] = {
     "bot": "assistant",
 }
 
-# 首轮开场白：把问卷答案交给模型，让它先做理解确认与追问，而不是直接写 PRD
-REQUIREMENTS_WRAPPER = """我填写了一份需求问卷，内容如下：
-
-{requirements}
-
-请你先做两件事：
-1. 用 3-5 条要点简要复述你对这个产品的理解，确认我们对齐了。
-2. 针对仍然模糊、会明显影响后续 PRD 质量的关键点向我提问，一次问 3-5 个，不要贪多。
-
-这一轮不要输出 PRD 正文，只做理解确认与追问。"""
-
+# 首轮开场白与系统人设已上收到 `services/prompts.py` 的「对话档案」，
+# 由 `resolve_profile()` 按 key 取用——两者必须同口径，不能再分居两处。
 
 # ----------------------------------------------------------------------------
 # 工具函数
@@ -189,7 +187,7 @@ def format_form_data(
 
 
 def _build_lc_messages(
-    system_prompt: str = SYSTEM_PROMPT,
+    system_prompt: str,
     history: Iterable[FrontendMessage | dict[str, Any]] | None = None,
     user_message: str | None = None,
 ) -> list[BaseMessage]:
@@ -200,7 +198,8 @@ def _build_lc_messages(
     严格交替——Anthropic 对消息顺序有硬性要求。
 
     Args:
-        system_prompt: 系统提示词，默认取 `prompts.SYSTEM_PROMPT`。
+        system_prompt: 系统提示词，由调用方从对话档案里取出（没有默认值，
+            避免「忘记传」时静默用上另一个人设）。
         history: 历史消息，元素为 `FrontendMessage` 或等价字典。
         user_message: 本轮用户输入；为空则不追加。
 
@@ -245,7 +244,9 @@ class _ConversationRecord:
     form_data: dict[str, Any] = field(default_factory=dict)
     requirements: str = ""
     messages: list[FrontendMessage] = field(default_factory=list)
-    system_prompt: str = ""
+    # 只存档案标识，不存解析后的提示词文本：这样以后改提示词，
+    # 进行中的会话下一轮就生效，库里也不会留下「冻结的旧人设」。
+    profile_key: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -256,22 +257,30 @@ class ConversationService:
     职责：管理会话上下文、把问卷答案整理成模型上下文、调用 LLM 并以
     `StreamEvent` 事件流的形式逐字返回回复。
 
+    提示词不由调用方传入：本服务按 `profile_key` 从 `services/prompts.py` 的
+    对话档案注册表里取人设与开场白。路由层不暴露该参数，前端也无从指定。
+
     Attributes:
-        system_prompt: 系统提示词，默认取 `prompts.SYSTEM_PROMPT`。
+        profile_key: 本服务默认使用的对话档案标识。
     """
 
     def __init__(
         self,
         llm: StreamingChatModel | None = None,
-        system_prompt: str = SYSTEM_PROMPT,
+        profile_key: str = DEFAULT_CONVERSATION_PROFILE,
     ) -> None:
         """初始化服务。
 
         Args:
             llm: 自定义 LLM 实例；不传则在首次使用时通过 `get_llm()` 惰性创建。
-            system_prompt: 系统提示词。
+            profile_key: 默认对话档案标识。
+
+        Raises:
+            KeyError: `profile_key` 未在注册表中登记——在启动阶段就暴露写错的档案名，
+                好过某次对话中途静默退回默认人设。
         """
-        self.system_prompt = system_prompt
+        resolve_profile(profile_key)
+        self.profile_key = profile_key
         self._llm = llm
         self._conversations: dict[str, _ConversationRecord] = {}
 
@@ -312,15 +321,14 @@ class ConversationService:
         self,
         form_data: dict[str, Any],
         title: str = "",
-        system_prompt: str = "",
+        profile_key: str = "",
     ) -> _ConversationRecord:
         """创建并登记一条会话记录。
 
         Args:
             form_data: 问卷答案。
             title: 会话标题，留空则自动推断。
-            system_prompt: 本会话生效的系统提示词（已含默认值回退），
-                存下来供后续接续对话沿用，避免每轮都要前端重新下发。
+            profile_key: 本会话使用的对话档案标识；留空取服务默认。
         """
         now = datetime.now()
         record = _ConversationRecord(
@@ -328,7 +336,7 @@ class ConversationService:
             title=self._guess_title(form_data, title),
             form_data=dict(form_data),
             requirements=format_form_data(form_data),
-            system_prompt=system_prompt or self.system_prompt,
+            profile_key=profile_key or self.profile_key,
             created_at=now,
             updated_at=now,
         )
@@ -401,27 +409,25 @@ class ConversationService:
         self,
         form_data: dict[str, Any],
         title: str = "",
-        opening_prompt: str | None = None,
-        system_prompt: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """提交问卷后开启会话，流式返回模型的第一轮回复。
 
         流程：登记会话 → 把问卷答案整理成需求文本 → 让模型先做理解确认与
         追问 → 逐字推送 → 把这一轮写进会话历史。
 
+        人设与首轮开场白都取自对话档案（默认 `clarification`），调用方无法指定，
+        因此不可能出现「人设与开场白口径不一致」的情况。
+
         Args:
             form_data: 问卷答案。
             title: 会话标题，留空则自动推断。
-            opening_prompt: 自定义开场提示词；不传则用 `REQUIREMENTS_WRAPPER`。
-            system_prompt: 本轮会话专用的系统提示词覆盖（如「需求澄清对话」人设）；
-                留空则沿用服务默认。传入时会存进会话记录，后续接续对话自动沿用。
 
         Yields:
             `StreamEvent`。首个 `status` 事件的 `data` 里带 `conversation_id`，
             前端需要立刻记下来，后续接续对话要靠它。
         """
-        override = (system_prompt or "").strip()
-        record = self._create_record(form_data, title, system_prompt=override or self.system_prompt)
+        record = self._create_record(form_data, title)
+        profile: ConversationProfile = resolve_profile(record.profile_key)
         yield StreamEvent(
             type="status",
             content="已收到你的需求，正在整理分析…",
@@ -429,11 +435,9 @@ class ConversationService:
         )
 
         # 首轮的用户消息：需求文本 + 让模型先确认理解再追问
-        first_message = (opening_prompt or REQUIREMENTS_WRAPPER).format(
-            requirements=record.requirements
-        )
+        first_message = profile.opening.format(requirements=record.requirements)
         messages = _build_lc_messages(
-            system_prompt=record.system_prompt,
+            system_prompt=profile.system_prompt,
             user_message=first_message,
         )
 
@@ -455,7 +459,6 @@ class ConversationService:
         user_message: str,
         conversation_id: str | None = None,
         history: list[FrontendMessage] | None = None,
-        system_prompt: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """接续对话，流式返回模型对本轮输入的回复。
 
@@ -464,15 +467,15 @@ class ConversationService:
         - **无状态**：不传 `conversation_id` 而传 `history`，由前端携带完整历史，
           适合服务重启或多实例部署的场景。
 
-        系统提示词的取值优先级：本轮的 `system_prompt` 覆盖 > 创建会话时保存的人设
-        > 服务默认。无状态模式（会话已丢失）下必须由前端重新下发覆盖，否则会退回默认人设。
+        人设按会话记录里的档案标识**实时解析**：无状态模式下记录已丢失，则回退到
+        服务默认档案——由于默认档案就是澄清人设，前端无需（也无从）重新下发提示词，
+        不会像以前那样「忘了重发就悄悄退回另一个人设」。
 
         Args:
             user_message: 本轮用户输入。
             conversation_id: 会话 ID；给出时优先使用服务内的历史，并在生成
                 结束后把本轮问答写回该会话。
             history: 前端传入的历史消息；传入时优先于服务端历史。
-            system_prompt: 系统提示词覆盖；留空则沿用会话记录里的人设。
 
         Yields:
             `StreamEvent`。`done` 事件的 `data` 带 `conversation_id` 与完整
@@ -492,13 +495,9 @@ class ConversationService:
         base_history: list[FrontendMessage] = list(history) if history else list(
             record.messages if record else []
         )
-        effective_prompt = (
-            (system_prompt or "").strip()
-            or (record.system_prompt if record else "")
-            or self.system_prompt
-        )
+        profile: ConversationProfile = resolve_profile(record.profile_key if record else "")
         messages = _build_lc_messages(
-            system_prompt=effective_prompt,
+            system_prompt=profile.system_prompt,
             history=base_history,
             user_message=user_message,
         )
@@ -540,14 +539,12 @@ def get_service() -> ConversationService:
 async def start_stream(
     form_data: dict[str, Any],
     title: str = "",
-    system_prompt: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """提交问卷答案、创建会话，并以事件流形式产出模型的第一轮回复。
 
     Args:
         form_data: 问卷答案。
         title: 会话标题，留空则自动推断。
-        system_prompt: 本轮会话专用的系统提示词覆盖（如「需求澄清对话」人设）。
 
     Yields:
         `StreamEvent`，首个 `status` 事件的 `data` 里带 `conversation_id`。
@@ -555,7 +552,6 @@ async def start_stream(
     async for event in get_service().start_conversation_stream(
         form_data=form_data,
         title=title,
-        system_prompt=system_prompt,
     ):
         yield event
 
@@ -564,7 +560,6 @@ async def continue_stream(
     user_message: str,
     conversation_id: str | None = None,
     history: list[FrontendMessage] | None = None,
-    system_prompt: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """接续对话，以事件流形式产出模型对本轮输入的回复。
 
@@ -572,7 +567,6 @@ async def continue_stream(
         user_message: 本轮用户输入。
         conversation_id: 会话 ID；为 `None` 时走无状态模式。
         history: 前端回传的历史消息；传入时优先于服务端保存的历史。
-        system_prompt: 系统提示词覆盖；留空则沿用会话记录里的人设。
 
     Yields:
         `StreamEvent`，`done` 事件的 `data` 带 `conversation_id` 与完整 `reply`。
@@ -581,6 +575,5 @@ async def continue_stream(
         user_message=user_message,
         conversation_id=conversation_id,
         history=history,
-        system_prompt=system_prompt,
     ):
         yield event
