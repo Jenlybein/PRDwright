@@ -12,7 +12,7 @@
 但要发给不同人、限量、限时，就得有个发码入口；同理，运维初始化账号也不该
 去走「注册接口 + 邀请码」这条路。
 
-它读写的是服务运行时那个 SQLite 库（`DB_PATH`，缺省 `backend/harnessprd.db`），
+它读写的是服务运行时那个 SQLite 库（`DB_PATH`，缺省 `backend/prdwright.db`），
 因此**后端不需要重启**，改动即时生效。
 
 本脚本只做参数解析与结果打印，全部业务规则都在 `services/auth_service` 里，
@@ -135,7 +135,7 @@ def _cmd_invite(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行参数解析器。"""
-    parser = argparse.ArgumentParser(description="HarnessPRD 认证运维工具")
+    parser = argparse.ArgumentParser(description="PRDwright 认证运维工具")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="列出用户与邀请码").set_defaults(func=_cmd_list)

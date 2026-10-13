@@ -530,7 +530,7 @@ function handleStepClick(stepId: StepId): void {
     </main>
 
     <!--
-      原先这里有一行品牌落款（「HarnessPRD · 由 AI 驱动的产品文档生成器」）。
+      原先这里有一行品牌落款（「PRDwright · 由 AI 驱动的产品文档生成器」）。
       改成吸底操作栏后它与操作栏直接重叠，而品牌在侧栏顶端已有，故移除。
     -->
     </div>

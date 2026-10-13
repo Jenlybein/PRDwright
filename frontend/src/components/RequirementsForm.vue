@@ -98,7 +98,7 @@ const SECTIONS: SectionConfig[] = [
         key: 'product_name',
         label: '产品名称',
         type: 'input',
-        placeholder: '例如：HarnessPRD、团队周报助手',
+        placeholder: '例如：PRDwright、团队周报助手',
         required: true,
       },
       {
@@ -682,7 +682,7 @@ function handleSubmit(): void {
 /** 填充示例数据：与各字段提示中的示例一致，便于快速体验与排查 */
 function fillExample(): void {
   applySummary({
-    product_name: 'HarnessPRD',
+    product_name: 'PRDwright',
     platform: '网页应用',
     product_goal:
  '帮独立开发者与小团队在 30 分钟内把模糊的产品想法整理成可开工的 PRD，替代口头对齐与反复返工。',

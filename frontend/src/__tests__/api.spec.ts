@@ -34,7 +34,7 @@ function sseFrame(type: string, payload: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`
 }
 
-const SUMMARY = { product_name: 'HarnessPRD' } as RequirementsSummary
+const SUMMARY = { product_name: 'PRDwright' } as RequirementsSummary
 
 afterEach(() => {
   vi.unstubAllGlobals()

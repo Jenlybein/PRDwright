@@ -312,7 +312,7 @@ def login(username: str, password: str) -> tuple[User, str, datetime]:
 
     if row is None:
         # 用固定 salt 做一次等价运算，抹平与「用户存在」时的耗时差异
-        _derive(password, b"harnessprd-dummy-salt")
+        _derive(password, b"prdwright-dummy-salt")
         raise AuthError("用户名或密码错误")
 
     if not verify_password(password, str(row["password_hash"]), bytes(row["salt"])):

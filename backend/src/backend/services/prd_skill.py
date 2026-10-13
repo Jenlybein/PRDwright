@@ -38,7 +38,7 @@ def resolve_skill_dir(skill_name: str) -> Path:
     """定位技能包根目录。
 
     查找顺序：
-    1. 环境变量 `HARNESSPRD_SKILLS_DIR` 指向的目录下查找（部署时后端与 skills
+    1. 环境变量 `PRDWRIGHT_SKILLS_DIR` 指向的目录下查找（部署时后端与 skills
        目录可能不在同一棵目录树里，用它显式指定 skills 根目录）。
     2. 从当前文件向上逐级查找 `<祖先目录>/skills/<skill_name>`。
 
@@ -48,7 +48,7 @@ def resolve_skill_dir(skill_name: str) -> Path:
     Returns:
         技能包根目录路径。找不到时返回按目录层级推算的默认路径，读取时会报错。
     """
-    env_dir = os.environ.get("HARNESSPRD_SKILLS_DIR")
+    env_dir = os.environ.get("PRDWRIGHT_SKILLS_DIR")
     if env_dir:
         return Path(env_dir) / skill_name
 
@@ -84,7 +84,7 @@ def load_skill_artifact(skill_name: str, relative_path: str) -> str:
     except FileNotFoundError as exc:
         raise FileNotFoundError(
             f"技能资源缺失：{path}"
-            "（可设置环境变量 HARNESSPRD_SKILLS_DIR 指定 skills 根目录）"
+            "（可设置环境变量 PRDWRIGHT_SKILLS_DIR 指定 skills 根目录）"
         ) from exc
 
 

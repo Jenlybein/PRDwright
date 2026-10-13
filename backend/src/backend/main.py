@@ -37,8 +37,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="HarnessPRD API",
-    description="HarnessPRD 后端服务",
+    title="PRDwright API",
+    description="PRDwright 后端服务",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -66,7 +66,7 @@ app.include_router(solutions_router)
 async def root() -> dict:
     """返回服务基本信息，用于快速确认后端已启动。"""
     return {
-        "name": "HarnessPRD API",
+        "name": "PRDwright API",
         "status": "running",
         "docs": "/docs",
     }

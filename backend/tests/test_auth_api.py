@@ -116,12 +116,12 @@ def test_logout_revokes_session_on_server_side(client):
     register(client)
     assert client.get("/api/auth/me").status_code == 200
 
-    stolen_token = client.cookies.get("harnessprd_session")
+    stolen_token = client.cookies.get("prdwright_session")
     client.post("/api/auth/logout")
     assert client.get("/api/auth/me").status_code == 401
 
     # 手动把旧 token 塞回 Cookie，服务端仍应拒绝
-    client.cookies.set("harnessprd_session", stolen_token)
+    client.cookies.set("prdwright_session", stolen_token)
     assert client.get("/api/auth/me").status_code == 401
 
 
@@ -134,14 +134,14 @@ def test_each_login_creates_an_independent_session(client):
     """多次登录会签发多个会话，登出其中一个不影响其它。"""
     register(client, username="alice", password="password123")
 
-    first_token = client.cookies.get("harnessprd_session")
+    first_token = client.cookies.get("prdwright_session")
     login(client, username="alice", password="password123")
-    second_token = client.cookies.get("harnessprd_session")
+    second_token = client.cookies.get("prdwright_session")
     assert first_token != second_token, "每次登录都应签发新的会话凭据"
 
     # 用第二个会话登出，再手动换回第一个，应当仍然有效
     client.post("/api/auth/logout")
-    client.cookies.set("harnessprd_session", first_token)
+    client.cookies.set("prdwright_session", first_token)
     assert client.get("/api/auth/me").status_code == 200
 
 

@@ -570,7 +570,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // -------------------------------------------------------------------------
 
   /**
-   * 下载文件名统一为「产品名称-文档类型」（如 `HarnessPRD-PRD.md`）。
+   * 下载文件名统一为「产品名称-文档类型」（如 `PRDwright-PRD.md`）。
    * 产品名优先取结构化摘要；快捷入口没有摘要，退回用户在录入页填的名称；
    * 都为空或含非法字符时由 `buildDocFilename` 兜底。
    */

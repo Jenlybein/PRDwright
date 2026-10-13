@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "harnessprd/skills/prd-generator/references/field-schema.json",
+  "$id": "prdwright/skills/prd-generator/references/field-schema.json",
   "title": "PRD 需求输入字段结构",
   "description": "PRD 生成流程的输入契约。校验输入与归一化需求时以本文件为准：required 列出的字段缺失必须走「缺失信息处理」流程；type 为数组的字段允许传入字符串或对象，由归一化步骤统一成规范形态。",
   "type": "object",
@@ -16,7 +16,7 @@
       "type": "string",
       "minLength": 1,
       "description": "产品名称。必填。用于 PRD 标题与全文统一指代，全文必须使用同一个名称，不得自行改名或另起别名。",
-      "examples": ["HarnessPRD", "团队周报助手"]
+      "examples": ["PRDwright", "团队周报助手"]
     },
     "product_goal": {
       "type": "string",

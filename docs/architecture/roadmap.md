@@ -1,4 +1,4 @@
-# HarnessPRD 架构演进与重构路线图（2026-10-13 重订版）
+# PRDwright 架构演进与重构路线图（2026-10-13 重订版）
 
 > 状态：**原 P0–P4 大半已落地，本版只规划「剩余工作」**。
 > 依据：2026-10-13 代码库实测（后端 5676 行 / 26 模块；前端 14652 行 / 46 文件；后端 78 用例、前端 209 用例）。
@@ -38,7 +38,7 @@
 | D2 | **流式编排只去重了一半**：`ensure_not_truncated` 已抽进 `stream_guard.py`，但 `_stream_reply` 仍两份（`conversation_service.py:365` / `document_service.py:625`），SSE 帧封装与文本拼接逻辑各自维护 | 两 service | ⚠️ 部分 | R0-T3 |
 | D4 | **错误契约仍靠中文串**：前端 `useClarificationChat.ts:128` 仍 `message.includes('会话不存在')` 判定降级 | 前端 composable | ❌ 仍开 | R0-T5 |
 | D7 | **长文生成不可续传**：`prd_section_writer` 逐节生成但是**单次运行内**的内存态，网络中断仍整体丢失；无中间产物落库 | `document_service` / `prd_section_writer` | ❌ 仍开 | R1-T2 |
-| D8 | **技能目录仍脆弱**：`HARNESSPRD_SKILLS_DIR` 已支持，但缺失时仍「向上找目录」并**静默降级**到内置提示词（D8 未真正解决） | `prd_skill.resolve_skill_dir` | ⚠️ 部分 | R2-T6 |
+| D8 | **技能目录仍脆弱**：`PRDWRIGHT_SKILLS_DIR` 已支持，但缺失时仍「向上找目录」并**静默降级**到内置提示词（D8 未真正解决） | `prd_skill.resolve_skill_dir` | ⚠️ 部分 | R2-T6 |
 | D9 | **无可观测性与成本计量**：仅 `/health` 返回 `{"status":"ok"}`；无任何 token 打点、request_id、结构化日志 | 全局 | ❌ 仍开 | R1-T5 / R2-T7 |
 | D10 | **技能资源常驻缓存**：`prd_skill.py:64 @lru_cache` 缓存到进程结束，改模板必须重启 | `prd_skill` | ❌ 仍开 | R2-T6 |
 | D11 | **零部署/零 CI**：全仓库无 `Dockerfile`、无 `docker-compose`、无 `.github`、无 `Makefile`；287 个测试靠人手跑 | 仓库根 | ❌ 仍开 | R0-T1 / R3 |
@@ -123,12 +123,12 @@
 
 | 任务 | 具体动作 | 关联债务 |
 | --- | --- | --- |
-| T6 技能资产加固 | 开发态：弃用 `lru_cache` 常驻缓存，改为「按文件 mtime 的轻量缓存 / 显式重载开关」，改模板即时生效（D10）。生产态：`HARNESSPRD_SKILLS_DIR` 从「可选兜底」提升为「缺失即启动失败」（fail-fast），消除静默降级（D8）。每次生成记录所用技能资源版本/指纹 | D8 / D10 |
+| T6 技能资产加固 | 开发态：弃用 `lru_cache` 常驻缓存，改为「按文件 mtime 的轻量缓存 / 显式重载开关」，改模板即时生效（D10）。生产态：`PRDWRIGHT_SKILLS_DIR` 从「可选兜底」提升为「缺失即启动失败」（fail-fast），消除静默降级（D8）。每次生成记录所用技能资源版本/指纹 | D8 / D10 |
 | T7 可观测性基线 | 结构化日志（JSON 行）+ 每请求 `request_id`（中间件注入 `scope`）；`/health` 扩展返回 DB 连通性 + 主/备供应商可用性 + 技能目录是否就位 | D9（观测部分） |
 | T8 RAG 资产登记 | `core/api_doc_knowledge.json` 纳入「部署资产清单」，与 `skills/` 一起作为 Docker 打包项；记录其版本/更新时间，避免部署后检索静默失效 | 新能力收口 |
 
 **验收**：
-- 改 `prd-template.md` 无需重启即生效（开发态）；故意把 `HARNESSPRD_SKILLS_DIR` 指错目录，后端启动即报错而非降级。
+- 改 `prd-template.md` 无需重启即生效（开发态）；故意把 `PRDWRIGHT_SKILLS_DIR` 指错目录，后端启动即报错而非降级。
 - 任意一次请求日志含 `request_id`；`/health` 能反映 DB 与供应商健康。
 - Docker 镜像内 `skills/` 与 `api_doc_knowledge.json` 路径在生产配置下可被加载（R3 验证）。
 

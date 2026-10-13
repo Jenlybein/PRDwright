@@ -142,7 +142,7 @@ function open(item: SolutionSummary): void {
           H
         </div>
         <div class="min-w-0 leading-tight">
-          <div class="truncate text-sm font-bold text-fg">HarnessPRD</div>
+          <div class="truncate text-sm font-bold text-fg">PRDwright</div>
           <div class="truncate text-[11px] text-subtle">需求 → PRD / 接口 / 提示词</div>
         </div>
       </div>

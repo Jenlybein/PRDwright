@@ -102,7 +102,7 @@ async function clickStep(wrapper: VueWrapper, label: string): Promise<void> {
 
 /** 构造一份可用于提交的完整摘要 */
 const SAMPLE_SUMMARY: RequirementsSummary = {
-  product_name: 'HarnessPRD',
+  product_name: 'PRDwright',
   product_goal: '把模糊想法整理成可开工的 PRD',
   target_users: ['独立开发者'],
   platform: '网页应用',
@@ -341,7 +341,7 @@ describe('AppV2 完整流程编排', () => {
 
     // 载荷：结构化字段映射到后端已有题目的字段名
     const payload = vi.mocked(api.startConversationStream).mock.calls[0]?.[0]
-    expect(payload?.answers.product_name).toBe('HarnessPRD')
+    expect(payload?.answers.product_name).toBe('PRDwright')
     expect(payload?.answers.problem_to_solve).toBe('把模糊想法整理成可开工的 PRD')
     expect(payload?.answers.platform_type).toBe('网页应用')
     expect(payload?.answers.core_features).toEqual(['问卷填写 —— 收集产品信息'])
@@ -367,7 +367,7 @@ describe('AppV2 完整流程编排', () => {
     // PRD 生成拿到的是与 field-schema 对齐的结构化 JSON
     const payload = vi.mocked(api.generatePrdFromSummaryStream).mock.calls[0]?.[0]
     // 直接下发结构化摘要字典，需求文本由后端统一格式化
-    expect(payload?.summary?.product_name).toBe('HarnessPRD')
+    expect(payload?.summary?.product_name).toBe('PRDwright')
     expect(payload?.summary?.mvp_features?.[0]?.name).toBe('问卷填写')
     // 对话历史一并带上：首轮只有 AI 那条回复（需求本身走 summary 传入）
     expect(payload?.history?.length).toBe(1)
@@ -408,7 +408,7 @@ describe('AppV2 完整流程编排', () => {
 
     // 回填请求带上了当前摘要与完整对话历史
     const syncPayload = vi.mocked(api.syncSummaryFromConversation).mock.calls[0]?.[0]
-    expect(syncPayload?.summary.product_name).toBe('HarnessPRD')
+    expect(syncPayload?.summary.product_name).toBe('PRDwright')
     expect(syncPayload?.history?.[0]?.role).toBe('assistant')
 
     await clickButton(wrapper, '确认更新')
@@ -542,7 +542,7 @@ describe('AppV2 完整流程编排', () => {
 
     expect(wrapper.text()).toContain('告诉我们你的产品想法')
     // 表单是常驻组件，切换阶段不会丢内容
-    expect((byId(wrapper, 'field-product_name').element as HTMLInputElement).value).toBe('HarnessPRD')
+    expect((byId(wrapper, 'field-product_name').element as HTMLInputElement).value).toBe('PRDwright')
 
     // 从进度条点回「AI 对话」：上一轮对话记录仍在，不需要重新提交需求
     await clickStep(wrapper, 'AI 对话')
@@ -570,7 +570,7 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('历史内容')
     expect((byId(wrapper, 'field-product_name').element as HTMLInputElement).value).toBe(
-      'HarnessPRD',
+      'PRDwright',
     )
     // 恢复的是快照，不该顺手重跑一遍对话
     expect(api.startConversationStream).not.toHaveBeenCalled()

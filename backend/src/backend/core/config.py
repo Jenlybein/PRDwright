@@ -125,7 +125,7 @@ class Settings(BaseSettings):
         description="登录会话的有效时长（小时），默认 7 天。过期后需要重新登录。",
     )
     auth_cookie_name: str = Field(
-        default="harnessprd_session",
+        default="prdwright_session",
         description="存放会话 token 的 Cookie 名称。",
     )
     auth_cookie_secure: bool = Field(
@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     # --- 数据库 --------------------------------------------------------------
     db_path: str = Field(
         default="",
-        description="SQLite 数据库文件路径；留空则使用后端项目根目录下的 harnessprd.db。",
+        description="SQLite 数据库文件路径；留空则使用后端项目根目录下的 prdwright.db。",
     )
 
     # --- 服务配置 ------------------------------------------------------------
@@ -185,11 +185,11 @@ class Settings(BaseSettings):
     def db_file(self) -> Path:
         """SQLite 数据库文件的绝对路径。
 
-        未显式配置 `db_path` 时，放在后端项目根目录下的 `harnessprd.db`。
+        未显式配置 `db_path` 时，放在后端项目根目录下的 `prdwright.db`。
         """
         if self.db_path:
             return Path(self.db_path).expanduser().resolve()
-        return BACKEND_ROOT / "harnessprd.db"
+        return BACKEND_ROOT / "prdwright.db"
 
     def require_api_key(self) -> str:
         """返回当前所选供应商对应的 API 密钥。

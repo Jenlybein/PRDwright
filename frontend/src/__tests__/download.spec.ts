@@ -10,9 +10,9 @@ import { buildDocFilename, DOC_TYPE_LABELS } from '@/utils/download'
  */
 describe('buildDocFilename', () => {
   it('按「产品名称-文档类型」命名', () => {
-    expect(buildDocFilename('prd', 'HarnessPRD')).toBe('HarnessPRD-PRD.md')
-    expect(buildDocFilename('api-docs', 'HarnessPRD')).toBe('HarnessPRD-接口文档.md')
-    expect(buildDocFilename('prompts', 'HarnessPRD')).toBe('HarnessPRD-提示词套件.md')
+    expect(buildDocFilename('prd', 'PRDwright')).toBe('PRDwright-PRD.md')
+    expect(buildDocFilename('api-docs', 'PRDwright')).toBe('PRDwright-接口文档.md')
+    expect(buildDocFilename('prompts', 'PRDwright')).toBe('PRDwright-提示词套件.md')
   })
 
   it('过滤产品名里的路径与保留字符', () => {

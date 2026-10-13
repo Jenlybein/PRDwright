@@ -297,7 +297,7 @@ describe('RequirementsForm 结构化录入表单', () => {
       'non_functional',
       'scope',
     ])
-    expect(preview.product_name).toBe('HarnessPRD')
+    expect(preview.product_name).toBe('PRDwright')
     expect(preview.platform).toBe('网页应用')
     expect(preview.target_users).toEqual(['独立开发者', '3-10 人小团队的产品经理'])
     expect(preview.mvp_features).toEqual([
@@ -413,7 +413,7 @@ describe('RequirementsForm 结构化录入表单', () => {
     // submit 事件带回完整摘要，供上层直接使用
     const emitted = wrapper.emitted('submit')
     expect(emitted).toHaveLength(1)
-    expect((emitted?.[0]?.[0] as RequirementsSummary).product_name).toBe('HarnessPRD')
+    expect((emitted?.[0]?.[0] as RequirementsSummary).product_name).toBe('PRDwright')
   })
 
   it('JSON 预览为格式化后的等宽文本', async () => {
@@ -431,7 +431,7 @@ describe('RequirementsForm 结构化录入表单', () => {
     const wrapper = mountForm()
     await clickButton(wrapper, '提交')
     expect(wrapper.text()).toContain('产品名称为必填项')
-    await fill(wrapper, 'product_name', 'HarnessPRD')
+    await fill(wrapper, 'product_name', 'PRDwright')
     expect(wrapper.text()).not.toContain('产品名称为必填项')
   })
 

@@ -10,7 +10,7 @@ import {
 
 /** 一份用于比对的基础摘要 */
 const BASE: RequirementsSummary = {
-  product_name: 'HarnessPRD',
+  product_name: 'PRDwright',
   product_goal: '把模糊想法整理成可开工的 PRD',
   target_users: ['独立开发者'],
   platform: '网页应用',
@@ -161,7 +161,7 @@ describe('buildAnswers（既有契约回归）', () => {
       scope: { in_scope: ['表单'], out_of_scope: ['登录'] },
     })
 
-    expect(answers.product_name).toBe('HarnessPRD')
+    expect(answers.product_name).toBe('PRDwright')
     expect(answers.problem_to_solve).toBe('把模糊想法整理成可开工的 PRD')
     expect(answers.target_users).toEqual(['独立开发者'])
     expect(answers.core_features).toEqual(['问卷填写 —— 收集产品信息'])
