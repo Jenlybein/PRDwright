@@ -70,6 +70,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import StreamEvent
 from backend.core.config import get_settings
+from backend.core.errors import ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object, extract_text
 from backend.services.prd_skill import (
@@ -772,9 +773,14 @@ def _section_stage_event(
 
 
 def _error_event(exc: Exception) -> StreamEvent:
-    """把异常转成 `error` 事件（与 `document_service._stream_reply` 的口径一致）。"""
+    """把异常转成 `error` 事件（与 `document_service._stream_reply` 的口径一致）。
+
+    错误码同样是 `LLM_UPSTREAM_ERROR`：分章节生成与整篇生成是同一条能力的两条
+    实现路径，对前端来说不该有两种错误分类。
+    """
     return StreamEvent(
         type="error",
         content=f"生成失败：{exc}",
         data={"error_type": type(exc).__name__},
+        code=ErrorCode.LLM_UPSTREAM_ERROR.value,
     )

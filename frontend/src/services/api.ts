@@ -1,5 +1,7 @@
 import axios from 'axios'
 
+import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
+import type { BackendErrorCode } from '@/services/errors'
 import type {
   ChatMessage,
   QuestionsConfig,
@@ -125,6 +127,13 @@ export interface StreamEventPayload {
   content: string
   /** 事件附加数据，如 conversation_id 与完整 reply */
   data: Record<string, unknown>
+  /**
+   * 机器可读的错误码，取值见 `services/errors.ts` 的 `BACKEND_ERROR_CODES`。
+   *
+   * 只有 `error` 事件会带。它在 SSE 帧里是**顶层**字段（不是 `data` 里的），
+   * 因为这条通道上 HTTP 状态码恒为 200，判断「该不该降级重试」只能靠它。
+   */
+  code?: BackendErrorCode
 }
 
 /** 流式回复过程中可注册的回调 */
@@ -250,6 +259,9 @@ function parseSseBlock(block: string): StreamEventPayload | null {
       type: type as StreamEventPayload['type'],
       content: parsed.content ?? '',
       data: parsed.data ?? {},
+      // 只有真的带了这个字段才赋值：`code` 缺失与「码未知」是两回事，
+      // 都由消费方统一降级成 INTERNAL_ERROR，这里不替它编一个值出来。
+      ...(typeof parsed.code === 'string' ? { code: toErrorCode(parsed.code) } : {}),
     }
   } catch {
     return null
@@ -266,7 +278,8 @@ function parseSseBlock(block: string): StreamEventPayload | null {
  * @param body 请求体
  * @param handlers 状态提示与增量文本的回调
  * @returns 完整回复文本与事件附加数据里出现过的字段（如 conversation_id）
- * @throws 网络异常、HTTP 非 2xx，以及后端下发的 `error` 事件
+ * @throws 网络异常、HTTP 非 2xx，以及后端下发的 `error` 事件——后者抛 `ApiError`，
+ *   调用方按 `code` 分支（见 `services/errors.ts`），不要匹配 message 里的中文文案
  */
 async function readStream(
   path: string,
@@ -302,7 +315,8 @@ async function readStream(
   let buffer = ''
   let conversationId = ''
   let reply = ''
-  let failure = ''
+  // 后端下发的 error 事件：HTTP 状态码是 200，分类信息全在事件的 code 里
+  let failure: ApiError | null = null
 
   function handleBlock(block: string): void {
     const event = parseSseBlock(block)
@@ -327,7 +341,12 @@ async function readStream(
         reply = readString(event.data, 'reply') || reply
         break
       case 'error':
-        failure = event.content || '生成失败'
+        // 文案（message）照旧给人和日志看，分支判断走 code：
+        // 缺失或取值未知时降级为 INTERNAL_ERROR，绝不因为不认识的码而漏判
+        failure = new ApiError(
+          event.content || '生成失败',
+          event.code ?? BACKEND_ERROR_CODES.INTERNAL_ERROR,
+        )
         break
       default:
         break
@@ -349,7 +368,9 @@ async function readStream(
   // 收尾：处理最后一段没有以空行结尾的内容
   handleBlock(buffer)
 
-  if (failure) throw new Error(failure)
+  // 直接抛 ApiError 而不是重新包一层 Error：调用方要按 code 分支，
+  // 包一层就把错误码弄丢了
+  if (failure) throw failure
 
   return { conversationId, reply }
 }

@@ -8,10 +8,11 @@ Cookie**，不依赖中间件注入的用户——否则未登录时连「查询
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Request, Response, status
 
 from backend.api import schemas
 from backend.core.config import get_settings
+from backend.core.errors import AppError, ErrorCode
 from backend.services import auth_service
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -50,7 +51,8 @@ async def register(
     try:
         user = auth_service.register(payload.username, payload.password, payload.invite_code)
     except auth_service.AuthError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
+        # 错误码由服务层给定，这里原样透传；状态码才是本层该决定的事
+        raise AppError(exc.code, exc.message, status.HTTP_400_BAD_REQUEST) from exc
 
     credential, _ = auth_service.get_token_issuer().issue(user.id)
     _set_session_cookie(response, credential)
@@ -67,9 +69,7 @@ async def login(
         user, credential, _ = auth_service.login(payload.username, payload.password)
     except auth_service.AuthError as exc:
         # 统一返回 401：不区分「用户不存在」与「密码错误」，防止账号枚举
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.message
-        ) from exc
+        raise AppError(exc.code, exc.message, status.HTTP_401_UNAUTHORIZED) from exc
 
     _set_session_cookie(response, credential)
     return schemas.AuthUserResponse(id=user.id, username=user.username)
@@ -96,8 +96,5 @@ async def me(request: Request) -> schemas.AuthUserResponse:
     credential = request.cookies.get(get_settings().auth_cookie_name, "")
     user = auth_service.current_user(credential)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="当前未登录",
-        )
+        raise AppError(ErrorCode.UNAUTHORIZED, "当前未登录")
     return schemas.AuthUserResponse(id=user.id, username=user.username)

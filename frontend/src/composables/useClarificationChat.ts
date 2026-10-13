@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
 import { continueConversationStream, startConversationStream } from '@/services/api'
+import { isApiError } from '@/services/errors'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { ChatMessage, RequirementsSummary } from '@/types'
 import { buildAnswers } from '@/utils/requirements'
@@ -97,9 +98,13 @@ export function useClarificationChat(hooks: ChatHooks) {
   /**
    * 发送一条消息并接续对话。
    *
-   * 后端会话存在内存里，服务重启后 ID 会失效；收到「会话不存在」时清掉 ID，
+   * 后端会话存在内存里，服务重启后 ID 会失效；收到 `SESSION_NOT_FOUND` 时清掉 ID，
    * 改用前端回传的完整历史重试一次（无状态模式）。人设由后端按默认档案解析，
    * 无状态模式下同样生效，前端不需要补发任何提示词。
+   *
+   * 判据是**错误码**而不是文案：这个错误发生在 SSE 流内（HTTP 状态码仍是 200），
+   * 只能靠事件里的 `code` 识别；早先这里匹配的是「会话不存在」这句中文，
+   * 后端改一个字降级逻辑就静默失效——那正是本次改造要消灭的耦合。
    */
   async function sendMessage(content: string): Promise<void> {
     const text = content.trim()
@@ -124,8 +129,7 @@ export function useClarificationChat(hooks: ChatHooks) {
           { onChunk: handleChunk },
         )
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        if (!conversationId.value || !message.includes('会话不存在')) throw error
+        if (!conversationId.value || !isApiError(error, 'SESSION_NOT_FOUND')) throw error
         // 会话已失效：丢掉旧 ID 与半截输出，退回无状态模式重试
         conversationId.value = ''
         streamingContent.value = ''

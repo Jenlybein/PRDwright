@@ -7,6 +7,7 @@ import http, {
   retrieveApiDocsRag,
   UnauthorizedError,
 } from '../services/api'
+import { ApiError } from '../services/errors'
 import type { StreamDocumentPart, StreamStageEvent, RequirementsSummary } from '../types'
 
 /**
@@ -201,6 +202,60 @@ describe('SSE 事件解析', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(generatePrdFromSummaryStream({ summary: SUMMARY })).rejects.toThrow('生成失败：被截断')
+  })
+})
+
+// ============================================================================
+// error 事件的错误码
+//
+// 这条通道上 HTTP 状态码恒为 200，调用方只能靠 `code` 分支。因此除了「码要传过来」，
+// 更要保证「码传不过来时不会崩、也不会漏判」——未知与缺失都降级为 INTERNAL_ERROR。
+// ============================================================================
+
+describe('SSE error 事件的错误码', () => {
+  /** 跑一次流式请求并把抛出的异常交回来（而不是让断言卡在 rejects 的匹配上） */
+  async function catchStreamError(blocks: string[]): Promise<unknown> {
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse(blocks)))
+    return generatePrdFromSummaryStream({ summary: SUMMARY }).catch((error: unknown) => error)
+  }
+
+  it('error 事件带 code 时抛 ApiError，错误码原样保留', async () => {
+    const error = await catchStreamError([
+      sseFrame('error', {
+        type: 'error',
+        content: '会话不存在或已过期：conv-1',
+        code: 'SESSION_NOT_FOUND',
+        data: {},
+      }),
+    ])
+
+    expect(error).toBeInstanceOf(ApiError)
+    // 分支判断只看 code；message 只是给人看的
+    expect((error as ApiError).code).toBe('SESSION_NOT_FOUND')
+  })
+
+  it('error 事件缺失 code 时降级为 INTERNAL_ERROR', async () => {
+    const error = await catchStreamError([
+      sseFrame('error', { type: 'error', content: '生成失败：未知原因', data: {} }),
+    ])
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).code).toBe('INTERNAL_ERROR')
+  })
+
+  it('error 事件的 code 取值未知时降级为 INTERNAL_ERROR', async () => {
+    const error = await catchStreamError([
+      sseFrame('error', {
+        type: 'error',
+        content: '生成失败：未知原因',
+        // 模拟后端先上线了新码、前端还没同步
+        code: 'SOMETHING_NEW',
+        data: {},
+      }),
+    ])
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).code).toBe('INTERNAL_ERROR')
   })
 })
 

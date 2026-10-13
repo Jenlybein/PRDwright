@@ -18,6 +18,7 @@ from typing import Protocol
 
 from backend.core.config import get_settings
 from backend.core.db import utc_now
+from backend.core.errors import ErrorCode
 from backend.repositories.auth_repo import (
     AuthSessionRepository,
     InviteCodeRepository,
@@ -61,13 +62,19 @@ class User:
 class AuthError(Exception):
     """认证或注册失败。
 
+    错误码**由抛出点直接给定**（默认 `AUTH_FAILED`），路由层原样透传即可。
+    刻意不在 `api/` 层做「中文文案 → 错误码」的映射表：文案一改映射就静默失效，
+    那正是本次改造要消灭的耦合。
+
     Attributes:
         message: 可以直接展示给用户看的中文说明。
+        code: 机器可读的错误码（`core/errors.py` 的 `ErrorCode`）。
     """
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, code: ErrorCode = ErrorCode.AUTH_FAILED) -> None:
         super().__init__(message)
         self.message = message
+        self.code = code
 
 
 # ---------------------------------------------------------------------------

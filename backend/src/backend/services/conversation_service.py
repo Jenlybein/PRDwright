@@ -22,6 +22,7 @@ from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import QuestionsConfig, StreamEvent
+from backend.core.errors import ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import (
     DEFAULT_CONVERSATION_PROFILE,
@@ -394,6 +395,7 @@ class ConversationService:
                 type="error",
                 content=f"生成失败：{exc}",
                 data={"error_type": type(exc).__name__},
+                code=ErrorCode.LLM_UPSTREAM_ERROR.value,
             )
             return
 
@@ -484,10 +486,14 @@ class ConversationService:
         record = self._conversations.get(conversation_id) if conversation_id else None
 
         if conversation_id and record is None:
+            # ★ 本次改造的核心：这条错误发生在 HTTP 200 的 SSE 流内，前端拿不到
+            # 状态码，只能靠 `code` 判断「该不该清掉会话 ID 走无状态重试」。
+            # 前端据此分支，而不是匹配 `content` 里的中文文案——文案一改就失效。
             yield StreamEvent(
                 type="error",
                 content=f"会话不存在或已过期：{conversation_id}",
                 data={"conversation_id": conversation_id},
+                code=ErrorCode.SESSION_NOT_FOUND.value,
             )
             return
 

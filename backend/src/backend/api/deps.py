@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 from http.cookies import SimpleCookie
 
-from fastapi import HTTPException, Request, status
+from fastapi import Request, status
 
 from backend.core.config import get_settings
+from backend.core.errors import AppError, ErrorCode, error_payload
 from backend.services.auth_service import User, current_user, ensure_dev_user
 
 # 精确匹配的公开路径
@@ -109,8 +110,20 @@ class AuthMiddleware:
 
     @staticmethod
     async def _send_unauthorized(send) -> None:  # noqa: ANN001
-        """直接回一个 401 JSON。走 ASGI 原生消息，不构造 Response 对象。"""
-        body = json.dumps({"detail": _UNAUTHORIZED_DETAIL}, ensure_ascii=False).encode("utf-8")
+        """直接回一个 401 JSON，带 `UNAUTHORIZED` 错误码。
+
+        走 ASGI 原生消息而不构造 Response 对象：中间件这一层还没进路由，
+        构造 Response 要额外承担序列化与生命周期管理，这里只需要「写两帧」。
+
+        响应体由 `error_payload` 构造，与路由层的 `AppError` 保持同一形态——
+        中间件拦下的 401 和路由抛出的 401 对前端来说必须是同一种东西。
+        """
+        # separators 与 JSONResponse 的取值一致，让中间件与路由层产出的错误体逐字节相同
+        body = json.dumps(
+            error_payload(_UNAUTHORIZED_DETAIL, ErrorCode.UNAUTHORIZED),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
         await send(
             {
                 "type": "http.response.start",
@@ -137,13 +150,10 @@ def get_current_user_optional(request: Request) -> User | None:
 
 
 def get_current_user(request: Request) -> User:
-    """取当前用户；未登录抛 401。"""
+    """取当前用户；未登录抛 401（带 `UNAUTHORIZED` 错误码）。"""
     user = get_current_user_optional(request)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=_UNAUTHORIZED_DETAIL,
-        )
+        raise AppError(ErrorCode.UNAUTHORIZED, _UNAUTHORIZED_DETAIL)
     return user
 
 
@@ -164,7 +174,4 @@ def acting_user(request: Request) -> User:
     if not get_settings().auth_enabled:
         return ensure_dev_user()
 
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=_UNAUTHORIZED_DETAIL,
-    )
+    raise AppError(ErrorCode.UNAUTHORIZED, _UNAUTHORIZED_DETAIL)

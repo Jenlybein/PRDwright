@@ -13,10 +13,11 @@ Repository 已经保证「不属于你的」在 SQL 层面就查不到，这里�
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 
 from backend.api import schemas
 from backend.api.deps import acting_user
+from backend.core.errors import AppError, ErrorCode
 from backend.services import solution_service
 from backend.services.auth_service import User
 
@@ -67,7 +68,7 @@ async def get_solution(
     """读取方案详情（含全量快照文本）；不存在或非本人返回 404。"""
     row = solution_service.get_solution(user.id, solution_id)
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
     return schemas.SolutionDetail(**row)
 
 
@@ -91,7 +92,7 @@ async def update_solution(
         data=payload.data,
     )
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
     return schemas.SolutionDetail(**row)
 
 
@@ -110,5 +111,5 @@ async def delete_solution(
     调用方无法察觉自己的归属判断写错了。
     """
     if not solution_service.delete_solution(user.id, solution_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_DETAIL)
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
     return schemas.SolutionDeleteResponse(ok=True)

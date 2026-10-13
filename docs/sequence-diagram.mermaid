@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    participant UI as useClarificationChat
+    participant API as services/api.ts (readStream)
+    participant MW as api/deps.py AuthMiddleware
+    participant Route as api/conversation.py
+    participant Svc as services/conversation_service.py
+    participant FE as frontend (chat / solutions)
+
+    Note over UI,Svc: 场景 A：会话失效降级（本次核心，走 SSE，HTTP 状态码仍为 200）
+    UI->>API: continueConversationStream({conversationId, content, history})
+    API->>MW: POST /api/conversation/continue-stream
+    MW-->>Route: 已登录，放行
+    Route->>Svc: continue_stream(conversation_id=...)
+    Svc-->>Route: StreamEvent(type="error", content="会话不存在或已过期：xxx", code="SESSION_NOT_FOUND")
+    Route-->>API: event: error / data: {...,"code":"SESSION_NOT_FOUND"}
+    API->>API: parseSseBlock() 读出 code
+    API-->>UI: throw new ApiError("会话不存在或已过期：xxx", "SESSION_NOT_FOUND")
+    UI->>UI: isApiError(error, "SESSION_NOT_FOUND") → true
+    UI->>API: 清空 conversationId，重试 continueConversationStream({history}) 无状态模式
+    API-->>UI: { conversationId: "", reply }
+    Note over UI: 后端文案改成任意变体都不影响此分支
+
+    Note over MW,FE: 场景 B：HTTP 错误响应带 code
+    FE->>MW: GET /api/solutions/42（越权或未登录）
+    alt 未登录
+        MW-->>FE: 401 {"detail":"请先登录后再使用该功能","code":"UNAUTHORIZED"}
+        FE->>FE: axios 拦截器 → UnauthorizedError → 弹登录窗（既有逻辑不动）
+    else 方案不存在 / 越权
+        MW-->>Route: 放行
+        Route->>Route: raise AppError(SOLUTION_NOT_FOUND)
+        Route-->>FE: 404 {"detail":"方案不存在","code":"SOLUTION_NOT_FOUND"}
+        FE->>FE: solutionService 按 404 → SolutionNotFoundError（既有逻辑不动）
+    end
+
+    Note over Route,FE: 场景 C：参数校验失败（detail 仍为列表）
+    FE->>Route: POST /api/solutions {data: ""}
+    Route-->>FE: 422 {"detail":[{...}],"code":"VALIDATION_ERROR"}

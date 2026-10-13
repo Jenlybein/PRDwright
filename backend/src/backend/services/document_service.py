@@ -46,6 +46,7 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.api.schemas import StreamEvent
+from backend.core.errors import ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object, extract_text
 from backend.services.prd_section_writer import PrdSectionWriter, is_available as prd_sections_available
@@ -658,6 +659,7 @@ class DocumentService:
                 type="error",
                 content=f"生成失败：{exc}",
                 data={"error_type": type(exc).__name__},
+                code=ErrorCode.LLM_UPSTREAM_ERROR.value,
             )
             return
 

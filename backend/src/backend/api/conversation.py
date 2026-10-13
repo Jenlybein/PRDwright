@@ -10,10 +10,11 @@ import json
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from backend.api import schemas
+from backend.core.errors import AppError, ErrorCode
 from backend.services import conversation_service, document_service
 
 router = APIRouter(prefix="/api/conversation", tags=["conversation"])
@@ -73,6 +74,7 @@ def _make_sse_generator(events: AsyncIterator[schemas.StreamEvent]) -> AsyncIter
                     type="error",
                     content=f"生成失败：{exc}",
                     data={"error_type": type(exc).__name__},
+                    code=ErrorCode.INTERNAL_ERROR.value,
                 )
             )
         yield f"data: {SSE_DONE}\n\n"
@@ -86,17 +88,17 @@ async def get_questions() -> schemas.QuestionsConfig:
     try:
         raw = QUESTIONS_CONFIG_PATH.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"问卷配置文件不存在：{QUESTIONS_CONFIG_PATH}",
+        raise AppError(
+            ErrorCode.INTERNAL_ERROR,
+            f"问卷配置文件不存在：{QUESTIONS_CONFIG_PATH}",
         ) from exc
 
     try:
         config: dict[str, Any] = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"问卷配置文件不是合法 JSON：{exc}",
+        raise AppError(
+            ErrorCode.INTERNAL_ERROR,
+            f"问卷配置文件不是合法 JSON：{exc}",
         ) from exc
 
     return schemas.QuestionsConfig.model_validate(config)
@@ -132,9 +134,9 @@ async def sync_summary_from_conversation(
             history=history,
         )
     except Exception as exc:  # noqa: BLE001 - 模型调用失败统一转成 502
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"需求摘要回填失败：{exc}",
+        raise AppError(
+            ErrorCode.LLM_UPSTREAM_ERROR,
+            f"需求摘要回填失败：{exc}",
         ) from exc
 
     return schemas.SummarySyncResponse(summary=updated, changed=updated != payload.summary)
@@ -161,9 +163,9 @@ async def retrieve_api_docs_rag(
             limit=payload.limit,
         )
     except Exception as exc:  # noqa: BLE001 - 检索异常统一转成 500
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"接口规范检索失败：{exc}",
+        raise AppError(
+            ErrorCode.INTERNAL_ERROR,
+            f"接口规范检索失败：{exc}",
         ) from exc
 
     return schemas.ApiDocsRagResponse(
@@ -265,9 +267,9 @@ async def generate_prd_from_summary_stream(
     `stage: done` → `done`（`data` 带完整 `reply` 与 `doc_type=prd`）；出错时为 `error`。
     """
     if not payload.summary and not payload.requirements.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="summary 与 requirements 至少需要提供一个",
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "summary 与 requirements 至少需要提供一个",
         )
 
     # 空列表视为「无补充对话」

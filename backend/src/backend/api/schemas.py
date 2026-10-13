@@ -104,6 +104,16 @@ class StreamEvent(BaseModel):
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
     data: dict[str, Any] = Field(default_factory=dict, description="事件附加数据")
+    code: str | None = Field(
+        default=None,
+        description=(
+            "机器可读的错误码（`backend/core/errors.py` 的 `ErrorCode` 成员），"
+            "供前端做分支判断。只有 `error` 事件会带，其余事件恒为 `None`。"
+            "刻意放在**顶层**而不是塞进 `data`：SSE 流是 HTTP 200，前端拿不到状态码，"
+            "判断「该不该降级重试」只能靠这个字段，放在顶层才不会被 `data` 的"
+            "其它附加字段淹没。缺失或取值未知时前端一律按 `INTERNAL_ERROR` 处理。"
+        ),
+    )
 
 
 # ============================================================================

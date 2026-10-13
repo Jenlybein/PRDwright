@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from backend.api.deps import acting_user
 from backend.core.config import get_settings
 from backend.core.db import init_schema
+from backend.main import register_error_handlers
 from backend.repositories.auth_repo import (
     AuthSessionRepository,
     InviteCodeRepository,
@@ -331,8 +332,12 @@ def test_acting_user_raises_when_auth_enabled_and_anonymous():
     """鉴权开启且没有登录态时，取归属直接 401——不能悄悄放行到 dev 用户。
 
     这条是 `acting_user` 与「关闭鉴权」之间的边界：dev 兜底只在开关关掉时生效。
+
+    探针应用要装上生产用的错误处理器（`register_error_handlers`）：`acting_user` 抛的
+    是 `AppError`，裸 `FastAPI()` 不认识它，不装的话请求会 500 而不是 401。
     """
     probe = FastAPI()
+    register_error_handlers(probe)
 
     @probe.get("/who")
     def who(request: Request) -> dict:

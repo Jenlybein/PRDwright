@@ -1,0 +1,93 @@
+classDiagram
+    direction LR
+
+    class ErrorCode {
+        <<enumeration str>>
+        SESSION_NOT_FOUND
+        UNAUTHORIZED
+        AUTH_FAILED
+        SOLUTION_NOT_FOUND
+        INVALID_REQUEST
+        VALIDATION_ERROR
+        LLM_UPSTREAM_ERROR
+        INTERNAL_ERROR
+    }
+
+    class DEFAULT_STATUS {
+        <<mapping>>
+        ErrorCode 到 int
+    }
+
+    class AppError {
+        +ErrorCode code
+        +str message
+        +int status_code
+        +__init__(code, message, status_code=None)
+    }
+
+    class error_payload {
+        <<function>>
+        +dict error_payload(detail, code)
+    }
+
+    class AuthError {
+        +str message
+        +ErrorCode code
+    }
+
+    class StreamEvent {
+        +Literal type
+        +str content
+        +dict data
+        +str_OR_None code
+    }
+
+    class StreamEventPayload {
+        <<TS interface>>
+        +string type
+        +string content
+        +Record data
+        +string? code
+    }
+
+    class BACKEND_ERROR_CODES {
+        <<TS const>>
+        SESSION_NOT_FOUND
+        UNAUTHORIZED
+        AUTH_FAILED
+        SOLUTION_NOT_FOUND
+        INVALID_REQUEST
+        VALIDATION_ERROR
+        LLM_UPSTREAM_ERROR
+        INTERNAL_ERROR
+    }
+
+    class ApiError {
+        <<TS class extends Error>>
+        +BackendErrorCode code
+        +number status
+        +__init__(message, code, status=0)
+    }
+
+    class isApiError {
+        <<TS type guard>>
+        +bool isApiError(e, code)
+    }
+
+    class UnauthorizedError {
+        <<TS class extends Error>>
+    }
+
+    class SolutionNotFoundError {
+        <<TS class extends Error>>
+    }
+
+    AppError --> ErrorCode : 持有
+    AppError ..> DEFAULT_STATUS : 查默认状态码
+    AppError ..> error_payload : 由异常处理器调用
+    AuthError --> ErrorCode : 携带（api 层透传）
+    StreamEvent ..> ErrorCode : error 事件的 code 取值
+    StreamEvent <.. StreamEventPayload : 前后端字段一一对应
+    ApiError --> BACKEND_ERROR_CODES : 持有
+    isApiError ..> ApiError : 类型守卫
+    BACKEND_ERROR_CODES <.. ErrorCode : 取值集合必须相等（后端测试守卫）
