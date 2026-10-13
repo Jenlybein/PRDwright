@@ -6,12 +6,12 @@ import { renderMarkdown } from '@/utils/markdown'
 /**
  * 文档审阅组件。
  *
- * 生成中只读展示流式内容；生成完成后切换为可编辑模式，支持「预览 / 编辑」两种视图一键切换。
+ * 生成中只读展示流式内容；生成完成后切换为可编辑模式，支持「预览 / 编辑」两种视图切换。
  *
- * **不再自带底部操作栏**：AI 优化 / 复制 / 保存这三个工具，与「这份文档该往哪走」的流程操作
- * 一起收在页面级底栏（`AppActionBar`）里——此前卡片自带一条底栏、页面又垫一条，两条叠在一起
- * 中间还断开，用户得上下两处找按钮。工具按钮改由上层渲染，所以这里用 `defineExpose` 把
- * 「状态 + 动作」交出去，本组件只负责卡片本身（含 AI 优化的指令输入，见 `ReviewStage`）。
+ * **卡片不再自带任何操作控件**：AI 优化 / 复制 / 保存这三个工具，以及「预览 / 编辑」视图切换，
+ * 全部收在页面级底栏（`AppActionBar`）里——此前卡片头部塞着视图切换、卡片底部又垫一条工具栏，
+ * 用户得上下两处找按钮。控件改由上层渲染，所以这里用 `defineExpose` 把「状态 + 动作」交出去
+ * （含 `viewMode` 与 `setViewMode`），本组件只负责卡片本身（含 AI 优化的指令输入，见 `ReviewStage`）。
  *
  * Markdown 渲染做了缓存：只有当原文（可编辑的 draft）真正发生变化时才重新
  * 调用 `renderMarkdown`，流式滚动刷新或反复切换视图不会触发重复解析。
@@ -95,9 +95,6 @@ const hasContent = computed(() => {
   return draft.value.trim().length > 0
 })
 
-/** 原文是否被改过（相对上一次落地的 `content`）；没改过时底栏的「保存」保持禁用 */
-const dirty = computed(() => draft.value !== props.content)
-
 // ---------------------------------------------------------------------------
 // 操作
 // ---------------------------------------------------------------------------
@@ -124,18 +121,26 @@ function save(): void {
 }
 
 /**
- * 工具行的按钮渲染在上层底栏里，因此这里把「状态 + 动作」暴露给 `ReviewStage`：
- * `busy` / `dirty` 决定按钮禁用态，`copyTip` 决定按钮文案，`draftContent` 是 AI 优化要取的载荷。
+ * 工具行与视图切换的按钮渲染在上层底栏里，因此这里把「状态 + 动作」暴露给 `ReviewStage`：
+ * `busy` 决定按钮禁用态，`hasContent` 决定「保存」是否可点（有正文就能存，不看是否改过），
+ * `copyTip` 决定按钮文案，`draftContent` 是 AI 优化 / 保存要取的载荷；
+ * `viewMode` 供底栏渲染「预览 / 编辑」分段控件的高亮态，`setViewMode` 供它切换。
  */
 defineExpose({
   /** 生成中文档工具应处于禁用态 */
   busy: computed(() => props.generating),
-  /** 原文是否被改过（决定「保存」是否可点） */
-  dirty,
+  /** 是否已有正文（决定「保存」是否可点） */
+  hasContent,
   /** 复制反馈文案（空串表示无提示） */
   copyTip,
   /** 当前可编辑原文 */
   draftContent: computed(() => draft.value),
+  /** 当前视图模式，供底栏的分段控件读取高亮态 */
+  viewMode: computed(() => viewMode.value),
+  /** 切换视图模式（由底栏的分段控件调用） */
+  setViewMode: (mode: 'preview' | 'edit') => {
+    viewMode.value = mode
+  },
   /** 一键复制 */
   copy,
   /** 保存当前原文 */
@@ -145,8 +150,8 @@ defineExpose({
 
 <template>
   <div class="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
-    <!-- 头部：标题 + 状态徽章 + 视图切换 -->
-    <div class="flex items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-6">
+    <!-- 头部：只有标题与状态徽章；视图切换已下沉到页面级底栏（见 ReviewStage） -->
+    <div class="flex items-center gap-3 border-b border-line px-4 py-3 sm:px-6">
       <div class="flex min-w-0 items-center gap-2">
         <h2 class="truncate text-sm font-semibold text-fg">{{ title || '文档' }}</h2>
         <span
@@ -156,26 +161,6 @@ defineExpose({
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
           生成中
         </span>
-      </div>
-
-      <!-- 视图切换：仅在非生成态可用 -->
-      <div v-if="!generating" class="flex shrink-0 items-center gap-1 rounded-lg bg-surface-2 p-0.5">
-        <button
-          type="button"
-          class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'preview' ? 'bg-surface text-fg shadow-sm' : 'text-subtle hover:text-muted'"
-          @click="viewMode = 'preview'"
-        >
-          预览
-        </button>
-        <button
-          type="button"
-          class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'edit' ? 'bg-surface text-fg shadow-sm' : 'text-subtle hover:text-muted'"
-          @click="viewMode = 'edit'"
-        >
-          编辑
-        </button>
       </div>
     </div>
 

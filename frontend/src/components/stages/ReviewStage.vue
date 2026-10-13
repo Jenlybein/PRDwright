@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import DocumentReview from '@/components/DocumentReview.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
@@ -15,12 +15,16 @@ import type { ViewState } from '@/types'
  *
  * ## 底栏两行，各自职责单一
  *
- * - **内容行**：这份文档自己的工具——AI 优化 / 复制 / 保存。点「AI 优化」后原地换成指令输入，
- *   文档全程可见（改成弹窗就看不到了，而写优化指令时恰恰要对着文档）。
+ * - **内容行**：这份文档自己的工具——AI 优化 / 复制 / 保存，以及「预览 / 编辑」视图切换。
+ *   点「AI 优化」后原地换成指令输入，文档全程可见（改成弹窗就看不到了，而写优化指令时恰恰要
+ *   对着文档）。
  * - **流程行**：这份文档之后往哪走——返回、生成下一份、完成。
  *
- * 工具行的按钮是「对内容做的事」，但草稿、复制反馈这些状态天然属于 `DocumentReview`，
+ * 工具行的按钮是「对内容做的事」，但草稿、复制反馈、视图模式这些状态天然属于 `DocumentReview`，
  * 所以用 `ref` 取它的句柄来渲染；指令输入本身是底栏的 UI 状态，留在本组件里。
+ *
+ * 「预览 / 编辑」最初挂在文档卡片头部，与卡片底部的工具条隔着整篇正文——同一份文档的控件
+ * 散在上下两处。现在收进底栏内容行，与文档工具排在一行，符合「文档相关的控件都在底栏」的约定。
  */
 const emit = defineEmits<{
   /** 保存编辑后的正文 */
@@ -64,8 +68,16 @@ defineProps<{
   backLabel?: string
 }>()
 
-/** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈，并调它的复制、保存 */
+/** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制、保存、切换视图 */
 const doc = ref<InstanceType<typeof DocumentReview> | null>(null)
+
+/**
+ * 当前文档视图模式（`preview` / `edit`）。
+ *
+ * 状态由 `DocumentReview` 持有（草稿也在那里），这里只读它来渲染底栏分段控件的高亮态；
+ * 组件尚未挂载时按 `preview` 兜底，避免两个分段按钮同时不亮。
+ */
+const viewMode = computed(() => doc.value?.viewMode ?? 'preview')
 
 /** 是否把底栏内容行切成「优化指令输入」形态 */
 const optimizing = ref(false)
@@ -168,15 +180,49 @@ function submitOptimize(): void {
             </AppButton>
           </div>
 
-          <!-- 保存：没改过就禁用，避免「点了没反应」的假按钮 -->
-          <AppButton
-            variant="secondary"
-            size="sm"
-            :disabled="doc?.busy || !doc?.dirty"
-            @click="doc?.save()"
-          >
-            保存
-          </AppButton>
+          <!-- 右端：视图切换 + 保存。两者都作用于「这份文档」，排在一起 -->
+          <div class="flex items-center gap-2">
+            <!-- 预览 / 编辑：从文档卡片头部下沉过来，与文档工具同处底栏 -->
+            <div
+              class="flex shrink-0 items-center gap-1 rounded-lg bg-surface-2 p-0.5 ring-1 ring-line"
+              role="group"
+              aria-label="文档视图"
+            >
+              <button
+                type="button"
+                class="rounded-md px-2.5 py-1 text-xs font-medium transition"
+                :class="
+                  viewMode === 'preview' ? 'bg-surface text-fg shadow-sm' : 'text-subtle hover:text-muted'
+                "
+                @click="doc?.setViewMode('preview')"
+              >
+                预览
+              </button>
+              <button
+                type="button"
+                class="rounded-md px-2.5 py-1 text-xs font-medium transition"
+                :class="
+                  viewMode === 'edit' ? 'bg-surface text-fg shadow-sm' : 'text-subtle hover:text-muted'
+                "
+                @click="doc?.setViewMode('edit')"
+              >
+                编辑
+              </button>
+            </div>
+
+            <!-- 保存：只要文档有正文、且没有生成在跑，就可点。
+                 曾按「原文被改过」（dirty）来决定禁用态，结果是**刚生成完的那一刻按钮是灰的**——
+                 用户把文档生成出来了却存不下去，观感上像功能坏了（自动落库是后台行为，用户看不到）。
+                 现在改为「有内容即可保存」，点一下至少能拿到明确的「已保存」回执。 -->
+            <AppButton
+              variant="secondary"
+              size="sm"
+              :disabled="doc?.busy || !doc?.hasContent"
+              @click="doc?.save()"
+            >
+              保存
+            </AppButton>
+          </div>
         </div>
       </template>
 
