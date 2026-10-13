@@ -7,6 +7,11 @@
  *
  * 阶段判断全部委托给 `utils/workflow.ts` 的纯函数——store 只负责持有状态，
  * 让这些规则可以被独立单测，也能被后续新增的入口模式复用。
+ *
+ * **持久化不在这里**：会话状态的权威来源是后端 `solutions` 表，
+ * 由 `stores/solutions.ts` 负责加载与保存。本 store 只提供 `snapshot()` / `applySnapshot()`
+ * 两个出入口，外加一个 `changeTick` 供上层 watch 到「有东西变了」。
+ * 这样存储策略（防抖、创建还是更新、失败怎么办）与状态本身互不纠缠。
  */
 
 import { defineStore } from 'pinia'
@@ -17,6 +22,7 @@ import type {
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
+  SessionDataV2,
   Step,
   ViewState,
 } from '@/types'
@@ -26,15 +32,11 @@ import {
   hasRequiredDocuments,
   isDocReviewPhase,
   isGeneratingPhase,
-  parseSessionSnapshot,
   reachedStepIndex as computeReachedStepIndex,
   stepIndexOf,
   stepsForMode,
   type DowngradeKind,
 } from '@/utils/workflow'
-
-/** 本地会话快照的存储键 */
-export const SESSION_STORAGE_KEY = 'harnessprd:v2:session'
 
 /** 各入口模式的落点：选中某个入口后直接进入该入口的第一个界面 */
 const MODE_LANDING: Record<EntryMode, ViewState> = {
@@ -94,47 +96,53 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 刷新时发生降级的类型；供界面解释为什么不是原状态 */
   const downgrade = ref<DowngradeKind | null>(null)
 
+  /**
+   * 状态变更计数。
+   *
+   * `stores/solutions.ts` 靠 watch 它来决定何时保存——这样保存方不必逐个订阅本 store 的
+   * 十个字段（漏订阅一个就是「这个字段改了但没存」这种极难发现的 bug）。
+   * 计数不参与快照，也不参与「有没有内容」的判断。
+   */
+  const changeTick = ref(0)
+
+  /**
+   * 「整份快照被换上」的计数。
+   *
+   * 与 `changeTick` 的区别在于**谁引起的**：`changeTick` 是用户/流程让状态变了
+   * （该去保存），而本计数是**外部内容盖了上来**（该去重建那些只在 setup 读一次
+   * 初始值的子组件）。两者不能混用——若用它触发保存，打开一份旧方案就会立刻
+   * 原样存回去，白跑一趟请求。
+   */
+  const restoreTick = ref(0)
+
   // ------------------------------------------------------------------
-  // 持久化
+  // 快照出入口：存储策略由 stores/solutions.ts 负责
   // ------------------------------------------------------------------
 
-  /** 把当前会话数据落盘；写入失败（隐私模式 / 存储超限）时静默跳过 */
-  function persist(): void {
-    try {
-      localStorage.setItem(
-        SESSION_STORAGE_KEY,
-        JSON.stringify({
-          viewState: viewState.value,
-          entryMode: entryMode.value,
-          summary: summary.value,
-          messages: messages.value,
-          conversationId: conversationId.value,
-          quickInput: quickInput.value,
-          debugPrdText: debugPrdText.value,
-          prdContent: prdContent.value,
-          apiDocsContent: apiDocsContent.value,
-          promptsContent: promptsContent.value,
-        }),
-      )
-    } catch {
-      // 隐私模式或存储超限时静默跳过，不影响使用
+  /** 导出当前会话的可持久化部分 */
+  function snapshot(): SessionDataV2 {
+    return {
+      viewState: viewState.value,
+      entryMode: entryMode.value,
+      summary: summary.value,
+      messages: messages.value,
+      conversationId: conversationId.value,
+      quickInput: quickInput.value,
+      debugPrdText: debugPrdText.value,
+      prdContent: prdContent.value,
+      apiDocsContent: apiDocsContent.value,
+      promptsContent: promptsContent.value,
     }
   }
 
-  /** 读取本地快照并回填 */
-  function restore(): void {
-    let raw: string | null = null
-    try {
-      raw = localStorage.getItem(SESSION_STORAGE_KEY)
-    } catch {
-      // 隐私模式下 localStorage 不可用，静默跳过
-      return
-    }
-
-    const parsed = parseSessionSnapshot(raw)
-    if (!parsed) return
-
-    const { session } = parsed
+  /**
+   * 用一份快照覆盖当前状态。
+   *
+   * 调用方（`stores/solutions.ts`）负责先做校验与降级——快照可能来自旧版本的前端，
+   * 或落在 `generating-*` 这种「刷新后无法继续」的中间态，那些判断在
+   * `utils/workflow.ts` 里已有现成实现，不必在这里重做。
+   */
+  function applySnapshot(session: SessionDataV2, downgradeKind: DowngradeKind | null = null): void {
     viewState.value = session.viewState
     entryMode.value = session.entryMode
     summary.value = session.summary
@@ -145,14 +153,20 @@ export const useWorkflowStore = defineStore('workflow', () => {
     prdContent.value = session.prdContent
     apiDocsContent.value = session.apiDocsContent
     promptsContent.value = session.promptsContent
-    downgrade.value = parsed.downgrade
+    downgrade.value = downgradeKind
+    // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
+    // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
+    // 否则异步恢复回来的摘要会填不进表单（打开旧方案时肉眼可见）。
+    restoreTick.value += 1
   }
 
-  // 先恢复再挂 watch，避免恢复动作本身触发一次多余落盘。
-  // 恢复必须在 setup 阶段同步完成，否则首帧会闪一下空状态。
-  restore()
-
-  // 状态变化时整体落盘。流式过程中的临时文本不在此列，因此不会高频写存储。
+  /**
+   * 状态变化时自增 `changeTick`。
+   *
+   * 注意这里 watch 的是「快照里包含的字段」，而**不是**那三个运行态 ref
+   * （`chatStreaming` / `docGenerating` / `downgrade`）——它们不该触发保存。
+   * 流式过程中的临时文本留在组件里，因此也不会形成高频保存。
+   */
   watch(
     [
       viewState,
@@ -166,7 +180,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       apiDocsContent,
       promptsContent,
     ],
-    persist,
+    () => {
+      changeTick.value += 1
+    },
     { deep: true },
   )
 
@@ -255,7 +271,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
     return goTo('entry')
   }
 
-  /** 清空会话数据并回到入口页，同时删除本地快照 */
+  /**
+   * 清空会话数据并回到入口页。
+   *
+   * 只清内存——后端那份方案由 `stores/solutions.ts` 决定删不删。
+   * 「重新开始」的语义是「开一份新的」，因此那边是**清掉当前 id 而不是删库**，
+   * 旧方案仍留在侧边栏里可随时回来。
+   */
   function reset(): void {
     messages.value = []
     conversationId.value = ''
@@ -264,17 +286,33 @@ export const useWorkflowStore = defineStore('workflow', () => {
     debugPrdText.value = ''
     prdContent.value = ''
     apiDocsContent.value = ''
-    promptsContent.value = ''
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
-
-    try {
-      localStorage.removeItem(SESSION_STORAGE_KEY)
-    } catch {
-      // 隐私模式等场景下静默忽略
-    }
+    // 与 `applySnapshot` 同理：这也是一次「整份换掉」，
+    // 视图（尤其是只在 setup 读一次 `initial` 的表单）要据此重建，
+    // 否则「重新开始」后表单里还留着上一轮的内容。
+    restoreTick.value += 1
   }
+
+  /**
+   * 快照里是否存在「值得保存」的内容。
+   *
+   * 只看内容字段，**不看 `viewState` / `entryMode` / `conversationId`**——
+   * 它们描述的是「走到哪一步」而不是「有什么」；用户只是点进入口看一眼就又退回，
+   * 不该因此留下一份空方案。
+   */
+  const hasContent = computed(
+    () =>
+      messages.value.length > 0 ||
+      summary.value !== null ||
+      quickInput.value.productName.trim() !== '' ||
+      quickInput.value.requirements.trim() !== '' ||
+      debugPrdText.value.trim() !== '' ||
+      prdContent.value.trim() !== '' ||
+      apiDocsContent.value.trim() !== '' ||
+      promptsContent.value.trim() !== '',
+  )
 
   return {
     // 会话数据
@@ -293,6 +331,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     docGenerating,
     busy,
     downgrade,
+    changeTick,
+    restoreTick,
     // 派生状态
     downgradeNotice,
     steps,
@@ -303,10 +343,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
     requiredDocsReady,
     canFinish,
     canGeneratePrd,
+    hasContent,
     // 动作
     goTo,
     chooseEntry,
     backToEntry,
     reset,
+    snapshot,
+    applySnapshot,
   }
 })

@@ -14,6 +14,7 @@ from backend.api.auth import router as auth_router
 from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
 from backend.api.deps import AuthMiddleware
+from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
 from backend.core.db import init_schema
 from backend.services import auth_service
@@ -58,6 +59,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(config_router)
+app.include_router(solutions_router)
 
 
 @app.get("/", summary="服务根路径")

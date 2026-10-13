@@ -2,17 +2,19 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { SESSION_STORAGE_KEY, useWorkflowStore } from '@/stores/workflow'
+import { useWorkflowStore } from '@/stores/workflow'
 
 /**
  * 会话流程 store 测试。
  *
- * 重点验证三件事：导航守卫是否真的拦得住、会话数据是否自动落盘与恢复、
- * 以及「重新开始」是否连本地快照一起清掉（否则刷新会把旧会话又拉回来）。
+ * 重点验证三件事：导航守卫是否真的拦得住、快照出入口是否完整、
+ * 以及「重新开始」是否把数据清干净。
+ *
+ * 持久化不再由本 store 负责（权威来源是后端，见 `stores/solutions.ts`），
+ * 因此这里不再涉及 localStorage。
  */
 describe('useWorkflowStore', () => {
   beforeEach(() => {
-    localStorage.clear()
     setActivePinia(createPinia())
   })
 
@@ -32,16 +34,117 @@ describe('useWorkflowStore', () => {
     expect(store.goTo('form')).toBe(false)
   })
 
-  it('会话数据变化时写入本地快照', async () => {
+  it('快照变化时自增 changeTick，供上层决定何时保存', async () => {
     const store = useWorkflowStore()
+    const before = store.changeTick
+
     store.prdContent = '# 新 PRD'
     await nextTick()
 
-    const raw = localStorage.getItem(SESSION_STORAGE_KEY)
-    expect(raw).toContain('# 新 PRD')
+    expect(store.changeTick).toBeGreaterThan(before)
   })
 
-  it('reset 清空数据、回到入口页并删除本地快照', async () => {
+  it('运行态变化不触发 changeTick（不该被保存的状态）', () => {
+    const store = useWorkflowStore()
+    const before = store.changeTick
+
+    store.chatStreaming = true
+    store.docGenerating = true
+    store.downgrade = 'generating'
+
+    expect(store.changeTick).toBe(before)
+  })
+
+  it('applySnapshot 自增 restoreTick，供视图重建那些只读一次初始值的组件', () => {
+    const store = useWorkflowStore()
+    const before = store.restoreTick
+
+    store.applySnapshot({
+      viewState: 'form',
+      entryMode: 'structured',
+      summary: null,
+      messages: [],
+      conversationId: '',
+      quickInput: { productName: '', requirements: '' },
+      debugPrdText: '',
+      prdContent: '',
+      apiDocsContent: '',
+      promptsContent: '',
+    })
+
+    expect(store.restoreTick).toBe(before + 1)
+  })
+
+  it('restoreTick 与 changeTick 是两条独立的信号：加载也会让 changeTick 变，但语义不同', async () => {
+    const store = useWorkflowStore()
+    const changeBefore = store.changeTick
+    const restoreBefore = store.restoreTick
+
+    store.applySnapshot({
+      viewState: 'review-prd',
+      entryMode: 'structured',
+      summary: null,
+      messages: [],
+      conversationId: '',
+      quickInput: { productName: '', requirements: '' },
+      debugPrdText: '',
+      prdContent: '# 恢复的 PRD',
+      apiDocsContent: '',
+      promptsContent: '',
+    })
+    await nextTick()
+
+    // 两者都动：changeTick 用于「有东西变了」，restoreTick 用于「这是整份换上来的」
+    expect(store.restoreTick).toBe(restoreBefore + 1)
+    expect(store.changeTick).toBeGreaterThan(changeBefore)
+  })
+
+  it('reset 也重置 restoreTick 之外的状态，避免旧方案内容回流', () => {
+    const store = useWorkflowStore()
+    store.prdContent = '# 旧 PRD'
+
+    store.reset()
+
+    expect(store.prdContent).toBe('')
+  })
+
+  it('snapshot 只导出可持久化字段，applySnapshot 能原样还原', () => {
+    const store = useWorkflowStore()
+    store.viewState = 'review-prd'
+    store.entryMode = 'structured'
+    store.messages.push({ role: 'user', content: 'hi' })
+    store.quickInput = { productName: '小账本', requirements: '记账' }
+    store.debugPrdText = '# 贴进来的 PRD'
+    store.prdContent = '# PRD'
+    store.apiDocsContent = '# API'
+    store.promptsContent = '# Prompts'
+    store.conversationId = 'conv-1'
+
+    const snapshot = store.snapshot()
+    expect(snapshot).toEqual({
+      viewState: 'review-prd',
+      entryMode: 'structured',
+      summary: null,
+      messages: [{ role: 'user', content: 'hi' }],
+      conversationId: 'conv-1',
+      quickInput: { productName: '小账本', requirements: '记账' },
+      debugPrdText: '# 贴进来的 PRD',
+      prdContent: '# PRD',
+      apiDocsContent: '# API',
+      promptsContent: '# Prompts',
+    })
+    // 运行态不在快照里
+    expect('chatStreaming' in snapshot).toBe(false)
+    expect('downgrade' in snapshot).toBe(false)
+
+    const fresh = useWorkflowStore()
+    fresh.reset()
+    fresh.applySnapshot(snapshot, null)
+    expect(fresh.snapshot()).toEqual(snapshot)
+    expect(fresh.downgrade).toBeNull()
+  })
+
+  it('reset 清空数据并回到入口页', async () => {
     const store = useWorkflowStore()
     store.prdContent = '# PRD'
     store.messages.push({ role: 'user', content: 'hi' })
@@ -51,7 +154,6 @@ describe('useWorkflowStore', () => {
     store.debugPrdText = '# 别人的 PRD'
     store.viewState = 'review-prd'
     await nextTick()
-    expect(localStorage.getItem(SESSION_STORAGE_KEY)).not.toBeNull()
 
     store.reset()
 
@@ -63,32 +165,41 @@ describe('useWorkflowStore', () => {
     expect(store.quickInput).toEqual({ productName: '', requirements: '' })
     expect(store.debugPrdText).toBe('')
     expect(store.viewState).toBe('entry')
-    // 立刻删除本地快照：这里断言的是 reset 中的删除动作本身。
-    // （持久化 watch 会在下一次 flush 时把「空态」再写回去，那是无害的，
-    // 因为空态恢复出来就是入口页——见 AppV2 里对重新开始的断言。）
-    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull()
   })
 
-  it('挂载时从已有快照恢复，并对生成中断做降级', () => {
-    localStorage.setItem(
-      SESSION_STORAGE_KEY,
-      JSON.stringify({
-        viewState: 'generating-prd',
-        summary: null,
-        messages: [],
-        conversationId: '',
-        prdContent: '# 半截 PRD',
-        apiDocsContent: '',
-        promptsContent: '',
-      }),
-    )
-
+  it('hasContent 只认内容字段，光选入口不算有内容', () => {
     const store = useWorkflowStore()
+    expect(store.hasContent).toBe(false)
 
-    expect(store.viewState).toBe('review-prd')
-    expect(store.prdContent).toBe('# 半截 PRD')
-    expect(store.downgrade).toBe('generating')
-    expect(store.downgradeNotice).toContain('上次的生成未完成')
+    // 走到表单页但什么都没填：不该被当成「有内容」
+    store.chooseEntry('structured')
+    expect(store.viewState).toBe('form')
+    expect(store.hasContent).toBe(false)
+
+    // 对话有了一条消息，就算有内容了
+    store.messages.push({ role: 'user', content: 'hi' })
+    expect(store.hasContent).toBe(true)
+  })
+
+  it('hasContent 覆盖三处录入与三份文档', () => {
+    type Store = ReturnType<typeof useWorkflowStore>
+    const cases: Array<[string, (s: Store) => void]> = [
+      ['快捷入口产品名', (s) => (s.quickInput.productName = '小账本')],
+      ['快捷入口需求描述', (s) => (s.quickInput.requirements = '记账')],
+      ['调试入口贴入的 PRD', (s) => (s.debugPrdText = '# PRD')],
+      ['PRD 正文', (s) => (s.prdContent = '# PRD')],
+      ['接口文档正文', (s) => (s.apiDocsContent = '# API')],
+      ['提示词正文', (s) => (s.promptsContent = '# Prompts')],
+      ['结构化摘要', (s) => (s.summary = { product_name: 'X' } as never)],
+    ]
+
+    for (const [label, apply] of cases) {
+      setActivePinia(createPinia())
+      const store = useWorkflowStore()
+      expect(store.hasContent, label).toBe(false)
+      apply(store)
+      expect(store.hasContent, label).toBe(true)
+    }
   })
 
   it('派生状态跟随数据变化', async () => {
@@ -160,41 +271,5 @@ describe('useWorkflowStore', () => {
     store.promptsContent = '# Prompts'
     await nextTick()
     expect(store.canFinish).toBe(true)
-  })
-
-  it('入口模式与两处录入内容随快照持久化', async () => {
-    const store = useWorkflowStore()
-    store.chooseEntry('prompt-debug')
-    store.debugPrdText = '# 别人的 PRD'
-    await nextTick()
-
-    const raw = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) ?? '{}')
-    expect(raw.entryMode).toBe('prompt-debug')
-    expect(raw.debugPrdText).toBe('# 别人的 PRD')
-    expect(raw.viewState).toBe('prompt-debug')
-  })
-
-  it('刷新后仍停在录入页（录入内容在快照里，无需降级）', () => {
-    localStorage.setItem(
-      SESSION_STORAGE_KEY,
-      JSON.stringify({
-        viewState: 'prd-quick',
-        entryMode: 'prd-quick',
-        summary: null,
-        messages: [],
-        conversationId: '',
-        quickInput: { productName: '小账本', requirements: '做一个记账 App' },
-        debugPrdText: '',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
-      }),
-    )
-
-    const store = useWorkflowStore()
-
-    expect(store.viewState).toBe('prd-quick')
-    expect(store.downgrade).toBeNull()
-    expect(store.quickInput).toEqual({ productName: '小账本', requirements: '做一个记账 App' })
   })
 })

@@ -285,3 +285,66 @@ class LogoutResponse(BaseModel):
 
     ok: bool = Field(default=True, description="是否成功登出")
 
+
+# ============================================================================
+# 方案（solutions）：整份会话快照的持久化
+# ============================================================================
+
+
+class SolutionSaveRequest(BaseModel):
+    """新建 / 更新方案的请求体。
+
+    `data` 是 `SessionDataV2` 的 JSON 文本，前端序列化后直接提交，**后端不解析其内容**——
+    快照结构属于前端契约（`types/index.ts`），后端把它当不透明字符串存取，
+    这样前端调整快照字段时后端不必跟着改。
+
+    `title` / `mode` / `stage` 是随快照一起提交的**冗余摘要**：列表接口只读这三列，
+    不必把大 JSON 取出来反序列化。冗余值由前端计算——「产品名该从 summary 还是
+    quickInput 取」只有前端清楚。
+
+    这三个字段的长度上限刻意放宽，**不在校验层拒绝超长值**：它们只是展示用的冗余，
+    真正的正文在 `data` 里完好无损，为此把整次保存判为 422 是本末倒置——
+    用户会看到「保存失败」，而数据其实一点问题都没有。超长值由服务层截断
+    （见 `solution_service._clean`）。
+    """
+
+    title: str = Field(default="", max_length=2000, description="方案标题，列表展示用")
+    mode: str = Field(default="", max_length=200, description="入口模式，列表展示用")
+    stage: str = Field(default="", max_length=200, description="当前阶段，列表展示进度用")
+    data: str = Field(min_length=1, description="完整会话快照的 JSON 文本")
+
+
+class SolutionSummary(BaseModel):
+    """方案摘要，用于左侧列表。刻意**不含** `data`。"""
+
+    id: int = Field(description="方案 ID")
+    title: str = Field(description="方案标题；未取到产品名时由前端给出默认标题")
+    mode: str = Field(default="", description="入口模式")
+    stage: str = Field(default="", description="当前阶段")
+    created_at: str = Field(description="创建时间（UTC ISO 8601）")
+    updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
+
+
+class SolutionDetail(SolutionSummary):
+    """方案详情：摘要 + 全量快照文本。"""
+
+    data: str = Field(description="完整会话快照的 JSON 文本，由前端自行反序列化")
+
+
+class SolutionListResponse(BaseModel):
+    """方案列表响应。
+
+    包一层对象而不是直接返回数组：将来要加分页或总数时不必改响应结构，
+    前端也不会因为「根是数组」而在扩展时被迫重写解析。
+    """
+
+    solutions: list[SolutionSummary] = Field(
+        default_factory=list, description="当前用户的方案摘要列表"
+    )
+
+
+class SolutionDeleteResponse(BaseModel):
+    """删除方案响应。"""
+
+    ok: bool = Field(default=True, description="是否成功删除")
+

@@ -200,9 +200,11 @@ PRD 生成目前是一次 `astream` 出整篇。默认 `ark_max_tokens=4096`（`
 
 原决策里的**行动项作废**（`vue-router` 保留并启用），但决策主体**依然成立**：
 
-- 新增「方案列表」这一真实页面后，Wizard 之外出现了**第二个页面级入口**。
+- 需要「打开某个已有方案」这一能力后，Wizard 之外出现了**第二个页面级入口**。
   若继续用 `viewState` 之外的布尔开关切换页面，`AppV2.vue` 会重新长成巨石。
-- 因此引入 `vue-router`，路由表只有三条：`/v2`（新建）、`/v2/list`（列表）、`/v2/:id`（编辑）。
+- 因此引入 `vue-router`，但路由表只有**两条**：`/v2`（新建，尚无 id）、`/v2/:id`（打开某方案）。
+  方案列表**不做独立页面**，而是常驻左侧边栏（顶部「新建任务」+ 下方列表）——
+  列表是「工作台的一部分」而不是「另一个页面」，用户不该为了看一眼列表而离开正在做的事。
 - **不变的是**：9 个 `ViewState` 的阶段流转**仍完全由 `workflow.ts` 状态机驱动，不映射到 URL**。
   用户不会看到 `/v2/xxx/chat` 这样的地址；刷新后一律按 `conversation_id` 从后端恢复数据，
   再由状态机决定展示哪个阶段，而不是试图从 URL 恢复到某个中间阶段。
@@ -328,15 +330,29 @@ ADR-006 原有风险（直接访问中间步骤但数据不存在）因此**没�
 
 ### Decision
 
-**选 A。** `solutions(id, user_id NOT NULL 外键, title, summary_json, data_json, created_at, updated_at)`。
-`title` 与摘要冗余成独立列，是为了列表页**不反序列化大 JSON** 就能渲染。
+**选 A。** `solutions(id, user_id NOT NULL 外键, title, mode, stage, data, created_at, updated_at)`，
+其中 `data` 是整份 `SessionDataV2` 的 JSON 文本。
+
+`title` / `mode` / `stage` 冗余成独立列，是为了**侧边栏列表不反序列化大 JSON** 就能渲染——
+一份快照含三份文档正文，几十 KB 起步，列 20 条时差别很明显。这三个冗余列由前端随快照一起
+提交（前端才理解 `product_name` 该从 `summary` 还是 `quickInput` 取），后端只做 trim 与长度校验；
+后端**不解析 `data` 的内容**，保持「不透明快照」这个好处。
 
 配套：
 - 越权访问返回 **404 而非 403**——403 会泄露「这个资源确实存在」这一信息。
 - 数据隔离**在 Repository 层强制 `owner_id` 过滤**，而不是靠每个路由记得检查：漏一次就是越权，
-  不能把安全边界寄托在「每个写接口的人都记得」。
+  不能把安全边界寄托在「每个写接口的人都记得」。Repository 方法**不接受 `owner_id=None`**，
+  不给「不过滤」留逃生口。
+- **方案「有内容了才建」**：快照的内容字段（`summary` / `messages` / `quickInput` /
+  `debugPrdText` / 三份文档）任一非空时才 `POST` 创建，随后 `router.replace` 到 `/v2/{id}`；
+  此后一律 `PUT`。因此保存天然分**创建 / 更新两条路径**（5 个接口而非 4 个）。
+  代价是用户敲一个字就走会留下一项，靠侧边栏删除解决；收益是「填了半天刷新全丢」不会发生。
 - **不改动 `conversation_service` 的内存 dict**：对话进行中的临时态仍在内存，只在用户保存 /
   进入下一阶段时落库，避免把流式生成的热路径绑上 DB 写。
+- **列表不做独立页面**，改常驻左侧边栏（顶部「新建任务」+ 下方列表）。列表是工作台的一部分，
+  不是另一个目的地。
+- **顺带删掉** `stores/workflow.ts` 的 localStorage 快照：后端是唯一权威，留离线副本只会带来
+  「恢复时该听谁的」的歧义。但它的快照校验与降级逻辑保留，改用于后端恢复。
 - 接口前缀用 **`/api/solutions/*` 而非 `/api/session/*`**：引入登录后，「session」会和
   「登录会话（auth session）」语义撞车，两者是完全不同的东西。前端 service 文件同步命名
   `solutionService.ts`。

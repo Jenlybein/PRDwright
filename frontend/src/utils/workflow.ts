@@ -233,23 +233,14 @@ export interface ParsedSessionSnapshot {
 }
 
 /**
- * 解析 localStorage 里的会话快照。
+ * 校验并规范化一份会话快照。
  *
- * 缺失、非法 JSON、结构不符时返回 `null`；每个字段单独做类型校验，
- * 脏数据只会丢弃对应字段，不会让整份快照失效。
+ * 每个字段单独做类型校验，脏数据只会丢弃对应字段，不会让整份快照失效——
+ * 快照是跨版本存下来的，用「一个字段不对就整份作废」的严格模式会让用户平白丢掉整份工作。
  *
- * `entryMode` 缺失时按 `null` 处理（即完整流程）——这是升级前的快照，
- * 当时只有完整流程一条链路。
+ * 阶段若落在无法恢复的中间态（如 `generating-prd`），这里会一并给出降级结果。
  */
-export function parseSessionSnapshot(raw: string | null): ParsedSessionSnapshot | null {
-  if (!raw) return null
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return null
-  }
+export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot | null {
   if (typeof parsed !== 'object' || parsed === null) return null
 
   const record = parsed as Partial<SessionDataV2>
@@ -273,4 +264,23 @@ export function parseSessionSnapshot(raw: string | null): ParsedSessionSnapshot 
       promptsContent: typeof record.promptsContent === 'string' ? record.promptsContent : '',
     },
   }
+}
+
+/**
+ * 解析后端返回的快照 JSON 文本（`solutions.data`）。
+ *
+ * 保留这一层而不是让调用方自己 `JSON.parse`：后端把 `data` 当作不透明字符串存取，
+ * 它里面究竟是不是合法 JSON、字段是否齐全，只有前端知道，也就只能在这里校验。
+ * 非法 JSON、结构不符时返回 `null`，由调用方决定是新建还是报错。
+ */
+export function parseSessionSnapshot(raw: string | null): ParsedSessionSnapshot | null {
+  if (!raw) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  return normalizeSessionSnapshot(parsed)
 }

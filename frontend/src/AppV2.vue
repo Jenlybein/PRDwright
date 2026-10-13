@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import { useRoute, useRouter } from 'vue-router'
 
 import AuthDialog from '@/components/AuthDialog.vue'
 import RagResultPanel from '@/components/RagResultPanel.vue'
 import RequirementsForm from '@/components/RequirementsForm.vue'
+import SolutionSidebar from '@/components/SolutionSidebar.vue'
 import SummaryDiffPanel from '@/components/SummaryDiffPanel.vue'
 import UserMenu from '@/components/UserMenu.vue'
 import ChatStage from '@/components/stages/ChatStage.vue'
@@ -19,6 +21,7 @@ import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
 import { onUnauthorized } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
+import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { EntryMode, RequirementsSummary, StepId } from '@/types'
 
@@ -41,11 +44,29 @@ import type { EntryMode, RequirementsSummary, StepId } from '@/types'
  * 登录成功后只给一句提示，不自动进入——用户可能已经忘了刚才想选哪个入口。
  * 接口（含 SSE）返回 401 时同样弹登录窗，注册回调见 `services/api.ts` 的 `onUnauthorized`。
  *
- * 本文件做四件事：路由（阶段 → 视图）、跨流程的提示语、登录态的接线，以及把两个流程
- * （对话 / 文档）拼装起来。会话数据与阶段在 `stores/workflow.ts`，登录态在 `stores/auth.ts`，
+ * **持久化**：会话状态的权威来源是后端 `solutions` 表。地址是 `/v2`（新建）或 `/v2/{id}`
+ * （打开某份方案）；首次产生内容时方案才被创建，随后地址 `replace` 成带 id 的形式。
+ * 具体策略（防抖、创建还是更新）在 `stores/solutions.ts`，本文件只做接线：
+ * 挂载时按路由参数加载、创建成功后换地址、离开前把待保存的变更冲掉。
+ *
+ * 本文件做五件事：路由（阶段 → 视图）、跨流程的提示语、登录态的接线、持久化接线，
+ * 以及把两个流程（对话 / 文档）拼装起来。会话数据与阶段在 `stores/workflow.ts`，
+ * 方案持久化在 `stores/solutions.ts`，登录态在 `stores/auth.ts`，
  * 对话编排在 `composables/useClarificationChat.ts`，文档编排在 `composables/useDocumentPipeline.ts`，
  * 各阶段视图在 `components/stages/`。
  */
+
+const route = useRoute()
+const router = useRouter()
+
+/** 路由参数里的方案 id；`/v2`（新建）时为 null */
+const routeSolutionId = computed<number | null>(() => {
+  const raw = route.params.id
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (!value) return null
+  const parsed = Number.parseInt(value, 10)
+  return Number.isFinite(parsed) ? parsed : null
+})
 
 const store = useWorkflowStore()
 const {
@@ -68,6 +89,20 @@ const {
  * 「重新开始」时自增，强制重建表单组件，确保里面的编辑器回到空状态。
  */
 const formKey = ref(0)
+
+/**
+ * 打开一份已存方案时也重建表单。
+ *
+ * 快照是**异步**到达的（要先请求后端），而表单只在 setup 阶段读一次 `:initial`；
+ * 若只靠 prop 传递，恢复出来的摘要会填不进表单——界面上表现为「PRD 回来了，
+ * 但需求表单是空的」，用户再点提交就会用一份空需求覆盖掉已有内容。
+ */
+watch(
+  () => store.restoreTick,
+  () => {
+    formKey.value += 1
+  },
+)
 
 /** 短暂展示的提示语（草稿保存 / 提交 / 闸门确认等） */
 const savedTip = ref('')
@@ -111,6 +146,88 @@ watch(
     if (now && !before) flashSavedTip('已登录，请选择入口开始')
   },
 )
+
+// ---------------------------------------------------------------------------
+// 方案持久化接线
+// ---------------------------------------------------------------------------
+
+const solutions = useSolutionsStore()
+
+/** 尚未登录时不该去拉方案列表——那只会得到 401 与一次无意义的弹窗 */
+watch(
+  () => auth.isLoggedIn,
+  (now) => {
+    if (!now) return
+    void solutions.loadList()
+    if (routeSolutionId.value !== null) {
+      void solutions.openSolution(routeSolutionId.value)
+    }
+  },
+  { immediate: true },
+)
+
+/**
+ * 方案被创建后，把地址从 `/v2` 换成 `/v2/{id}`。
+ *
+ * 用 `replace` 而不是 `push`：用户如果按返回键，期望是「回到上一份方案」或「离开」，
+ * 而不是回到「那份刚刚还不存在的新建页」——那一步在历史里没有意义。
+ */
+solutions.setCreatedHandler((id) => {
+  if (routeSolutionId.value !== id) void router.replace(`/v2/${id}`)
+})
+
+// 打开方案后若地址与当前 id 不一致（例如方案已被删除而地址还留着旧 id），把地址归位
+solutions.setOpenedHandler((id) => {
+  if (id === null && routeSolutionId.value !== null) void router.replace('/v2')
+})
+
+/**
+ * 加载完后若地址带了 id 但方案打不开（被删 / 越权），退回新建页并说明原因，
+ * 否则用户会停在一片空白里，不知道发生了什么。
+ */
+watch(
+  () => solutions.saveError,
+  (message) => {
+    if (message && routeSolutionId.value !== null && solutions.currentId === null) {
+      flashSavedTip(message)
+    }
+  },
+)
+
+/**
+ * 地址里的 id 变化时切换方案（含浏览器前进后退）。
+ *
+ * 注意判断 `currentId`：创建后我们自己也 `replace` 了一次地址，那一次不需要重新加载——
+ * 内容就在内存里，重新拉一遍纯属浪费，还会把刚填的东西冲掉。
+ */
+watch(routeSolutionId, (id) => {
+  if (id === null) {
+    // 回到新建页：若当前有打开的方案（浏览器后退），开一份干净的
+    if (solutions.currentId !== null) void solutions.startNew()
+    return
+  }
+  if (id === solutions.currentId) return
+  void solutions.openSolution(id)
+})
+
+/**
+ * 离开页面前把防抖窗口里压着的那次保存冲掉。
+ *
+ * 只在 `beforeunload` 里做：它无法等待 async 完成，能起作用是「请求已经发出」这件事本身。
+ * 真正可靠的落库时机是「进入下一阶段」与「路由切换」，`beforeunload` 只是兜底。
+ */
+function handleBeforeUnload(): void {
+  void solutions.flushPendingSave()
+}
+
+onMounted(() => {
+  window.addEventListener('beforeunload', handleBeforeUnload)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  void solutions.flushPendingSave()
+})
 
 // ---------------------------------------------------------------------------
 // 文档流水线：生成 / 审阅 / 两道确认闸门 / 下载
@@ -202,16 +319,23 @@ function handleSelectEntry(mode: EntryMode): void {
   store.chooseEntry(mode)
 }
 
-/** 清空全部数据并回到入口选择页（含清除本地持久化的会话快照） */
+/**
+ * 「重新开始」：开一份新方案。
+ *
+ * 走 `solutions.startNew()` 而不是 `store.reset()`——它会先把待保存的变更冲掉，
+ * 再把 id 与地址归零；**不会删除**刚写完的那份，它仍在侧边栏里等着被找回来。
+ */
 function handleRestart(): void {
-  // 会话数据与本地快照交由 store 统一重置（入口模式与两处录入内容也一并清掉）
-  store.reset()
+  // `startNew()` 自己会先 flush，这里不必再调一次
+  void solutions.startNew()
+  void router.replace('/v2')
+
   // 两条流程各自的临时状态分别归零
   resetPipeline()
   resetChat()
 
-  // 表单是 v-show 常驻组件，自增 key 强制重建，保证编辑器回到空状态
-  formKey.value += 1
+  // 表单不必在这里手动重建：`workflow.reset()` 会自增 `restoreTick`，
+  // 上面那个 watch 会据此把 `formKey` 顶掉，保证编辑器回到空状态。
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -225,7 +349,11 @@ function handleStepClick(stepId: StepId): void {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gradient-to-b from-sky-50 via-slate-50 to-slate-100 text-slate-900">
+  <div class="flex min-h-screen bg-gradient-to-b from-sky-50 via-slate-50 to-slate-100 text-slate-900">
+    <!-- 左侧：方案侧边栏（顶部「新建任务」+ 方案列表；窄屏为抽屉） -->
+    <SolutionSidebar v-if="auth.isLoggedIn" />
+
+    <div class="flex min-w-0 flex-1 flex-col">
     <!-- 顶部导航栏 -->
     <header class="sticky top-0 z-10 border-b border-slate-200/70 bg-white/80 backdrop-blur">
       <div class="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
@@ -244,6 +372,16 @@ function handleStepClick(stepId: StepId): void {
         </div>
 
         <div class="flex items-center gap-2">
+          <!-- 保存状态：只在「保存中 / 保存失败」时出现，正常时不该占注意力 -->
+          <span
+            v-if="solutions.saving"
+            class="hidden text-xs text-slate-400 sm:inline"
+          >保存中…</span>
+          <span
+            v-else-if="solutions.saveError"
+            class="hidden text-xs text-red-500 sm:inline"
+          >{{ solutions.saveError }}</span>
+
           <!-- 状态提示徽章，自动淡出 -->
           <Transition
             enter-active-class="transition duration-200"
@@ -409,6 +547,7 @@ function handleStepClick(stepId: StepId): void {
     <footer class="pb-10 text-center text-xs text-slate-400">
       HarnessPRD · 由 AI 驱动的产品文档生成器
     </footer>
+    </div>
 
     <!-- 登录 / 注册弹窗。挂在根部，顶栏点击与接口 401 都通过 store 打开它 -->
     <AuthDialog />

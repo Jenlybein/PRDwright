@@ -1,11 +1,14 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { nextTick } from 'vue'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppV2 from '../AppV2.vue'
 import * as api from '../services/api'
+import * as solutionApi from '../services/solutionService'
 import { useAuthStore } from '../stores/auth'
+import { useWorkflowStore } from '../stores/workflow'
 import type { RagHit, RequirementsSummary, StreamStageEvent } from '../types'
 
 /**
@@ -38,8 +41,34 @@ vi.mock('../services/authService', () => ({
   logout: vi.fn(async () => undefined),
 }))
 
-/** 快照存储键（与 AppV2 内部保持一致，便于构造/断言） */
-const SESSION_KEY = 'harnessprd:v2:session'
+/**
+ * 方案持久化 mock。
+ *
+ * 编排测试关心的是**流程流转**，不是「什么时候把快照存到后端」——那有专门的
+ * `solutions` 测试。这里给一组无害实现，避免每挂载一次就真的发请求。
+ */
+vi.mock('../services/solutionService', () => ({
+  SolutionNotFoundError: class SolutionNotFoundError extends Error {
+    constructor() {
+      super('方案不存在或已被删除')
+      this.name = 'SolutionNotFoundError'
+    }
+  },
+  fetchSolutions: vi.fn(async () => []),
+  fetchSolution: vi.fn(async () => {
+    throw new Error('本测试不加载已有方案')
+  }),
+  createSolution: vi.fn(async () => ({
+    id: 1,
+    title: '测试方案',
+    mode: 'structured',
+    stage: 'form',
+    created_at: '',
+    updated_at: '',
+  })),
+  updateSolution: vi.fn(async () => null),
+  deleteSolution: vi.fn(async () => undefined),
+}))
 
 /** 按 id 查找元素（结构化行级 id 含点号，须用属性选择器） */
 function byId(wrapper: VueWrapper | DOMWrapper<Element>, id: string): DOMWrapper<Element> {
@@ -133,9 +162,8 @@ async function reachPrdReview(wrapper: VueWrapper): Promise<void> {
   await confirmSummaryPanel(wrapper)
 }
 
-/** 每个用例前清掉本地快照，并给出各接口的安全默认实现 */
+/** 每个用例前重置 mock，并给出各接口的安全默认实现 */
 beforeEach(() => {
-  localStorage.clear()
   vi.clearAllMocks()
 
   // 默认：回填结果与当前摘要一致（无变更）
@@ -155,6 +183,31 @@ beforeEach(() => {
     handlers?.onChunk?.('# 提示词套件\n')
     return { conversationId: '', reply: '# 提示词套件\n\n## 一、角色设定\n内容' }
   })
+
+  // 方案持久化：默认给一组无害实现，避免每挂载一次就真的发请求。
+  // 需要「打开已有方案」的用例会各自覆盖 `fetchSolution`。
+  vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([])
+  vi.mocked(solutionApi.fetchSolution).mockRejectedValue(
+    new solutionApi.SolutionNotFoundError(),
+  )
+  vi.mocked(solutionApi.createSolution).mockResolvedValue({
+    id: 1,
+    title: '测试方案',
+    mode: 'structured',
+    stage: 'form',
+    created_at: '2026-10-13T00:00:00',
+    updated_at: '2026-10-13T00:00:00',
+  })
+  vi.mocked(solutionApi.updateSolution).mockImplementation(async (id, payload) => ({
+    id,
+    title: payload.title,
+    mode: payload.mode,
+    stage: payload.stage,
+    created_at: '2026-10-13T00:00:00',
+    updated_at: '2026-10-13T00:00:00',
+    data: payload.data,
+  }))
+  vi.mocked(solutionApi.deleteSolution).mockResolvedValue(undefined)
 })
 
 /**
@@ -173,9 +226,34 @@ function loggedInPinia(): Pinia {
   return pinia
 }
 
+/**
+ * 造一个真实的 router（内存 history）。
+ *
+ * AppV2 现在从路由参数里读方案 id，因此挂载时必须提供 router——
+ * 用 mock 一个假的 `useRoute` 会让「地址真的变了」这件事测不到，
+ * 而地址变化正是「首次保存后拿到 id」的表现。
+ */
+function makeRouter(): Router {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/v2', component: AppV2, props: { solutionId: null } },
+      { path: '/v2/:id', component: AppV2, props: true },
+    ],
+  })
+}
+
 /** 挂载应用，停在入口选择页 */
-function mountEntry(): VueWrapper {
-  return mount(AppV2, { global: { plugins: [loggedInPinia()] } })
+async function mountEntry(initialPath = '/v2'): Promise<VueWrapper> {
+  const router = makeRouter()
+  // 必须在挂载**之前**把导航落地：AppV2 在 setup 阶段（`immediate` watch）就会读
+  // `route.params.id` 去拉方案，若导航还在 pending，读到的永远是 undefined，
+  // 看起来就像「没走恢复逻辑」——而「走没走恢复逻辑」正是这批用例要验证的。
+  await router.push(initialPath)
+  const wrapper = mount(AppV2, { global: { plugins: [loggedInPinia(), router] } })
+  await router.isReady()
+  await flushPromises()
+  return wrapper
 }
 
 /**
@@ -183,14 +261,50 @@ function mountEntry(): VueWrapper {
  * 绝大多数用例验证的是完整流程内部的行为，入口选择对它只是前置动作。
  */
 async function mountApp(): Promise<VueWrapper> {
-  const wrapper = mountEntry()
+  const wrapper = await mountEntry()
   await clickButton(wrapper, '完整流程')
   return wrapper
 }
 
+/**
+ * 造一份后端方案详情的 mock 返回值。
+ *
+ * 快照现在是**后端**存的（`solutions.data`），因此「刷新后恢复」这类用例的造数方式
+ * 从「往 localStorage 写一份」改成了「让 `fetchSolution` 返回一份」——恢复路径本身
+ * 也从同步读改成了异步请求，用例必须 `await` 挂载后的那次请求。
+ */
+function makeSolutionDetail(
+  id: number,
+  snapshot: Record<string, unknown>,
+  overrides: Partial<{ title: string; mode: string; stage: string }> = {},
+) {
+  return {
+    id,
+    title: overrides.title ?? '测试方案',
+    mode: overrides.mode ?? 'structured',
+    stage: overrides.stage ?? 'form',
+    created_at: '2026-10-13T00:00:00',
+    updated_at: '2026-10-13T00:00:00',
+    data: JSON.stringify(snapshot),
+  }
+}
+
+/**
+ * 挂载一份「已存在」的方案：让 `fetchSolution` 返回指定快照，并从 `/v2/{id}` 进入。
+ * AppV2 在登录后按地址拉详情，所以恢复动作发生在挂载后的异步阶段，这里等它就绪。
+ */
+async function mountExistingSolution(
+  snapshot: Record<string, unknown>,
+  id = 1,
+): Promise<VueWrapper> {
+  const detail = makeSolutionDetail(id, snapshot)
+  vi.mocked(solutionApi.fetchSolution).mockResolvedValue(detail)
+  return mountEntry(`/v2/${id}`)
+}
+
 describe('AppV2 完整流程编排', () => {
-  it('默认停在入口选择页：三条入口可选，且尚未发起任何请求', () => {
-    const wrapper = mountEntry()
+  it('默认停在入口选择页：三条入口可选，且尚未发起任何请求', async () => {
+    const wrapper = await mountEntry()
 
     expect(wrapper.text()).toContain('选择一种开始方式')
     expect(wrapper.text()).toContain('完整流程')
@@ -436,71 +550,67 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('已理解需求。')
   })
 
-  it('刷新后按本地快照恢复：回到原阶段并回填表单', async () => {
-    localStorage.setItem(
-      SESSION_KEY,
-      JSON.stringify({
-        viewState: 'review-prd',
-        summary: SAMPLE_SUMMARY,
-        messages: [
-          { role: 'user', content: '需求如下' },
-          { role: 'assistant', content: '已理解需求。' },
-        ],
-        conversationId: 'conv-1',
-        prdContent: '# 产品需求文档\n历史内容',
-        apiDocsContent: '',
-        promptsContent: '',
-      }),
-    )
+  it('重新打开已有方案：按后端快照恢复，回到原阶段并回填表单', async () => {
+    const wrapper = await mountExistingSolution({
+      viewState: 'review-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [
+        { role: 'user', content: '需求如下' },
+        { role: 'assistant', content: '已理解需求。' },
+      ],
+      conversationId: 'conv-1',
+      prdContent: '# 产品需求文档\n历史内容',
+      apiDocsContent: '',
+      promptsContent: '',
+    })
 
-    // 快照已经把阶段定在 review-prd，直接挂载即可（不需要经过入口页）
-    const wrapper = mountEntry()
+    // 地址带了 id，AppV2 会去拉详情；快照把阶段定在 review-prd，直接落在那一步
+    expect(solutionApi.fetchSolution).toHaveBeenCalledWith(1)
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('历史内容')
-    expect((byId(wrapper, 'field-product_name').element as HTMLInputElement).value).toBe('HarnessPRD')
+    expect((byId(wrapper, 'field-product_name').element as HTMLInputElement).value).toBe(
+      'HarnessPRD',
+    )
+    // 恢复的是快照，不该顺手重跑一遍对话
     expect(api.startConversationStream).not.toHaveBeenCalled()
   })
 
-  it('刷新时若正处于生成中，降级为待确认并给出说明', async () => {
-    localStorage.setItem(
-      SESSION_KEY,
-      JSON.stringify({
-        viewState: 'generating-prd',
-        summary: SAMPLE_SUMMARY,
-        messages: [],
-        conversationId: '',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
-      }),
-    )
+  it('恢复时若快照正处于生成中，降级为待确认并给出说明', async () => {
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      prdContent: '',
+      apiDocsContent: '',
+      promptsContent: '',
+    })
 
-    const wrapper = mountEntry()
     expect(wrapper.text()).toContain('上次的生成未完成')
     expect(wrapper.text()).toContain('PRD 文档')
   })
 
-  it('刷新时若停在确认闸门，回到发起该步骤的阶段并给出说明', async () => {
-    localStorage.setItem(
-      SESSION_KEY,
-      JSON.stringify({
-        viewState: 'summary-diff',
-        summary: SAMPLE_SUMMARY,
-        messages: [{ role: 'assistant', content: '已理解需求。' }],
-        conversationId: 'conv-1',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
-      }),
-    )
+  it('恢复时若快照停在确认闸门，回到发起该步骤的阶段并给出说明', async () => {
+    const wrapper = await mountExistingSolution({
+      viewState: 'summary-diff',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [{ role: 'assistant', content: '已理解需求。' }],
+      conversationId: 'conv-1',
+      prdContent: '',
+      apiDocsContent: '',
+      promptsContent: '',
+    })
 
-    const wrapper = mountEntry()
     expect(wrapper.text()).toContain('上次的确认步骤未完成')
     expect(wrapper.text()).toContain('需求澄清对话')
+    // 闸门依赖内存里的一次性 Diff，刷新后无从恢复，因此不该再把面板弹出来
     expect(wrapper.text()).not.toContain('需求摘要更新确认')
   })
 
-  it('重新开始：回到入口页并清空表单、入口模式与本地快照', async () => {
+  it('重新开始：回到入口页并清空表单、入口模式与会话内容', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
       reply: '已理解需求。',
@@ -509,19 +619,23 @@ describe('AppV2 完整流程编排', () => {
     const wrapper = await mountApp()
     await submitSampleForm(wrapper)
     await clickButton(wrapper, '重新开始')
+    // 「重新开始」会先 flush 一次待保存的改动，再清空——因此要多等几拍
+    await flushPromises()
     await nextTick()
 
     // 重新开始回到入口页，而不是直接落回表单
     expect(wrapper.text()).toContain('选择一种开始方式')
 
-    // 快照被持久化 watch 重新写成了「空态」——所以断言内容而不是「键不存在」：
-    // 重开一次页面必须回到入口页，而不是把上一轮的产物又拉回来
-    const snapshot = JSON.parse(localStorage.getItem(SESSION_KEY) ?? '{}')
-    expect(snapshot.viewState).toBe('entry')
-    expect(snapshot.entryMode).toBeNull()
-    expect(snapshot.quickInput).toEqual({ productName: '', requirements: '' })
-    expect(snapshot.debugPrdText).toBe('')
-    expect(snapshot.prdContent).toBe('')
+    // 会话内容确实被清空了——断言 store 里的空态，而不是磁盘上某个键的内容：
+    // 持久化的权威来源已从 localStorage 换成后端，重开一次页面必须回到入口页，
+    // 而不是把上一轮的产物又拉回来。
+    const workflow = useWorkflowStore()
+    expect(workflow.viewState).toBe('entry')
+    expect(workflow.entryMode).toBeNull()
+    expect(workflow.quickInput).toEqual({ productName: '', requirements: '' })
+    expect(workflow.debugPrdText).toBe('')
+    expect(workflow.prdContent).toBe('')
+    expect(workflow.hasContent).toBe(false)
 
     // 再进完整流程时，表单是重建后的空表单（依赖 formKey 自增强制重建）
     await clickButton(wrapper, '完整流程')
@@ -558,7 +672,7 @@ describe('AppV2 入口模式', () => {
   }
 
   it('PRD 快捷：一段话直接生成 PRD，不经过摘要确认闸门', async () => {
-    const wrapper = mountEntry()
+    const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
 
     // 跳过了表单与对话：进度条只剩 PRD / 接口文档 / 提示词三步
@@ -588,7 +702,7 @@ describe('AppV2 入口模式', () => {
   })
 
   it('PRD 快捷：未填需求时不能提交', async () => {
-    const wrapper = mountEntry()
+    const wrapper = await mountEntry()
     await clickButton(wrapper, 'PRD 快捷')
 
     const generate = wrapper.findAll('button').find((item) => item.text().trim() === '生成 PRD')
@@ -600,7 +714,7 @@ describe('AppV2 入口模式', () => {
   })
 
   it('PRD 快捷：「返回描述」回到录入页且内容还在，返回按钮文案随模式变化', async () => {
-    const wrapper = mountEntry()
+    const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
     await clickButton(wrapper, '生成 PRD', true)
     await flushPromises()
@@ -618,7 +732,7 @@ describe('AppV2 入口模式', () => {
   })
 
   it('PRD 快捷：只要 PRD 就能完成，完成页不留空文档卡片', async () => {
-    const wrapper = mountEntry()
+    const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
     await clickButton(wrapper, '生成 PRD', true)
     await flushPromises()
@@ -641,7 +755,7 @@ describe('AppV2 入口模式', () => {
   })
 
   it('提示词调试：贴入 PRD 直接生成提示词套件，且不出现「查看 PRD」', async () => {
-    const wrapper = mountEntry()
+    const wrapper = await mountEntry()
     await clickButton(wrapper, '提示词调试')
 
     expect(wrapper.text()).toContain('从现有 PRD 生成提示词套件')
@@ -674,7 +788,7 @@ describe('AppV2 入口模式', () => {
   })
 
   it('提示词调试：未贴入 PRD 时不能提交', async () => {
-    const wrapper = mountEntry()
+    const wrapper = await mountEntry()
     await clickButton(wrapper, '提示词调试')
 
     const generate = wrapper.findAll('button').find((item) => item.text().trim() === '生成提示词套件')
@@ -685,7 +799,7 @@ describe('AppV2 入口模式', () => {
   })
 
   it('两个录入页都能「返回入口」，重新选另一条入口', async () => {
-    const wrapper = mountEntry()
+    const wrapper = await mountEntry()
     await clickButton(wrapper, 'PRD 快捷')
     expect(wrapper.text()).toContain('直接生成 PRD')
 

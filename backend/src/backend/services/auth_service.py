@@ -17,11 +17,11 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from backend.core.config import get_settings
+from backend.core.db import utc_now
 from backend.repositories.auth_repo import (
     AuthSessionRepository,
     InviteCodeRepository,
     UserRepository,
-    utc_now,
 )
 
 # scrypt 参数：n=2**14（16384）是交互式登录场景的常用下限，单次约 16MB 内存，

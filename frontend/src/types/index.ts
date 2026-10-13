@@ -334,6 +334,51 @@ export interface RegisterPayload {
   inviteCode: string
 }
 
+// ============================================================================
+// 方案持久化（solutions）
+// ============================================================================
+
+/**
+ * 方案摘要，用于左侧边栏列表。
+ *
+ * 刻意**不含快照正文**：一份快照含三份文档，几十 KB 起步，列表页要的只是标题与进度。
+ * 后端也是按这个思路设计的——列表查询根本不读 `data` 列。
+ */
+export interface SolutionSummary {
+  /** 方案 ID，也是路由参数 `/v2/:id` */
+  id: number
+  /** 方案标题；未取到产品名时自动生成的默认标题 */
+  title: string
+  /** 入口模式；空串表示未选（兼容旧数据） */
+  mode: string
+  /** 当前阶段（`ViewState` 的字面值），用于显示进度 */
+  stage: string
+  /** 创建时间（UTC ISO 8601 字符串） */
+  created_at: string
+  /** 最近更新时间（UTC ISO 8601 字符串），列表按它倒序 */
+  updated_at: string
+}
+
+/** 方案详情：摘要 + 快照正文 */
+export interface SolutionDetail extends SolutionSummary {
+  /** `SessionDataV2` 的 JSON 文本，由前端自行反序列化 */
+  data: string
+}
+
+/**
+ * 保存方案的请求体。
+ *
+ * `title` / `mode` / `stage` 是**冗余摘要**，由前端随快照一起算好提交——
+ * 「产品名该从 `summary` 还是 `quickInput` 取」只有前端清楚，后端不解析快照内容。
+ */
+export interface SolutionSavePayload {
+  title: string
+  mode: string
+  stage: string
+  /** `SessionDataV2` 序列化后的 JSON 文本 */
+  data: string
+}
+
 /**
  * V2 完整流程的本地快照。
  * 与 V1 的 `SessionData` 分开存储，避免两套流程共用同一份缓存互相覆盖。

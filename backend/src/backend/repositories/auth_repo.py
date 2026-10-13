@@ -6,20 +6,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
-from backend.core.db import connect
-
-
-def utc_now() -> datetime:
-    """当前 UTC 时间（naive，不带时区；库里一律按 UTC 存）。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def utc_now_text() -> str:
-    """当前 UTC 时间的 ISO 8601 字符串，用于写入库里的日期字段。"""
-    return utc_now().isoformat()
+from backend.core.db import connect, utc_now_text
 
 
 class UserRepository:

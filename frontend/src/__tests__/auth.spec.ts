@@ -1,5 +1,6 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppV2 from '../AppV2.vue'
@@ -35,6 +36,46 @@ vi.mock('../services/authService', () => ({
   register: vi.fn(),
   logout: vi.fn(),
 }))
+
+/**
+ * 方案持久化 mock。
+ *
+ * 本文件测的是登录门禁；挂载 AppV2 会顺带触发方案列表请求，给一组无害实现即可，
+ * 免得每个用例都真的发一次 HTTP。
+ */
+vi.mock('../services/solutionService', () => ({
+  SolutionNotFoundError: class SolutionNotFoundError extends Error {},
+  fetchSolutions: vi.fn(async () => []),
+  fetchSolution: vi.fn(async () => {
+    throw new Error('本测试不加载已有方案')
+  }),
+  createSolution: vi.fn(async () => ({
+    id: 1,
+    title: '测试方案',
+    mode: 'structured',
+    stage: 'form',
+    created_at: '',
+    updated_at: '',
+  })),
+  updateSolution: vi.fn(async () => null),
+  deleteSolution: vi.fn(async () => undefined),
+}))
+
+/**
+ * 造一个真实的 router（内存 history）。
+ *
+ * AppV2 从路由参数读方案 id，缺了 router 会在 setup 阶段就抛
+ * 「Cannot read properties of undefined (reading 'params')」。
+ */
+function makeRouter(): Router {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/v2', component: { template: '<div />' } },
+      { path: '/v2/:id', component: { template: '<div />' } },
+    ],
+  })
+}
 
 /** 造一个空的 Pinia 实例并激活它 */
 function freshPinia(): Pinia {
@@ -336,7 +377,9 @@ describe('AppV2 的登录门禁', () => {
   /** 挂载一个未登录的应用 */
   async function mountAnonymous(): Promise<VueWrapper> {
     vi.mocked(authService.fetchCurrentUser).mockResolvedValue(null)
-    const wrapper = mount(AppV2, { global: { plugins: [freshPinia()] } })
+    const router = makeRouter()
+    await router.push('/v2')
+    const wrapper = mount(AppV2, { global: { plugins: [freshPinia(), router] } })
     await flushPromises()
     return wrapper
   }

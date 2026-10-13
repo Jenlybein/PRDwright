@@ -27,6 +27,9 @@ PROTECTED_POST_ENDPOINTS = [
     "/api/conversation/generate-api-docs-stream",
     "/api/conversation/generate-prompts-stream",
     "/api/conversation/optimize-document-stream",
+    # 方案接口：新增时**没有**做任何鉴权相关的工作，它们是被中间件默认拦下的。
+    # 这条清单只用于逐个断言，真正兜底的是下面的不变量测试。
+    "/api/solutions",
 ]
 
 _PATH_PARAM = re.compile(r"\{[^}]+\}")

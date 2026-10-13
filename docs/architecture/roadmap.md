@@ -133,22 +133,34 @@
 | T1 Repository 层 | `repositories/` 已随登录建立（认证用，全项目唯一写 SQL 的地方）。本阶段新增 `SolutionRepository`，沿用同一约定：服务层只依赖接口 |
 | T2 建 `solutions` 表 | `solutions(id, user_id NOT NULL 外键, title, summary_json, data_json, created_at, updated_at)`。**不拆** `conversations` / `messages` / `documents` 三表（ADR-009） |
 | T3 方案服务 | 新增 `services/solution_service.py`：保存 = 一次 UPSERT 全量快照；读取 = 一次 SELECT + 反序列化；列表 = 只读冗余摘要列，**不反序列化 `data_json`** |
-| T4 四个接口 | `GET /api/solutions`、`GET /api/solutions/{id}`、`PUT /api/solutions/{id}`、`DELETE /api/solutions/{id}`。Repository **强制 `owner_id` 过滤**，越权返回 **404 而非 403** |
-| T5 前端页面级路由 | 启用 `vue-router`：`/v2`（新建）、`/v2/list`（列表）、`/v2/:id`（编辑）。**阶段流转仍走状态机，不进 URL**（ADR-006 修订） |
-| T6 方案列表页 | 展示标题 / 更新时间 / 阶段摘要；支持新建、进入、删除 |
-| T7 自动保存 | `AppV2` 状态变更后**防抖**落库（约 1.5s）；进入下一阶段时即时保存并加锁；离开页面前 `flushPendingSave()` |
+| T4 五个接口 | `GET /api/solutions`（列表，只读摘要列）、`POST /api/solutions`（创建）、`GET /api/solutions/{id}`（读全量）、`PUT /api/solutions/{id}`（整份覆盖）、`DELETE /api/solutions/{id}`。Repository **强制 `owner_id` 过滤**，越权返回 **404 而非 403** |
+| T5 前端页面级路由 | 启用 `vue-router`，路由表只有**两条**：`/v2`（新建，尚无 id）、`/v2/:id`（打开某方案）。**阶段流转仍走状态机，不进 URL**（ADR-006 修订） |
+| T6 左侧方案侧边栏 | **不做独立列表页**，改为常驻左侧栏：顶部「新建任务」+ 下方方案列表（标题 / 阶段 / 更新时间，可删除）。窄屏折叠为顶栏抽屉 |
+| T7 自动保存 | 方案**「有内容了才建」**：首次出现非空内容时 `POST` 创建，随后 `router.replace` 到 `/v2/{id}`；此后一律 `PUT`。状态变更后**防抖**落库（约 1.5s）；进入下一阶段时即时保存并加锁；离开页面前 `flushPendingSave()` |
 | T8 开启 WAL | SQLite 开 `journal_mode=WAL`，为少量并发写预留 |
 
 > 接口前缀用 `/api/solutions/*` 而非 `/api/session/*`：引入登录后「session」会与「登录会话」语义撞车。
 > 前端 service 文件同步命名 `solutionService.ts`。
 
+**创建门槛**：快照的内容字段（`summary` / `messages` / `quickInput` / `debugPrdText` /
+`prdContent` / `apiDocsContent` / `promptsContent`）**任一非空**即创建，防抖后判定。
+不含 `viewState` / `entryMode` / `conversationId`——它们不是「内容」。
+代价是用户敲一个字就走会留下一项，靠侧边栏的删除解决，好过「填了半天刷新全丢」。
+
+**标题**：自动取 `product_name`（完整流程取 `summary.product_name`，快捷入口取 `quickInput.productName`，
+调试入口取所贴 PRD 的首个 H1 标题），都取不到则为「未命名方案」。每次保存重算——用户往往是后填的产品名。
+
 **验收**：
-- `kill` 后端再启动，从列表页点进上次方案，阶段、消息、四份文档全部与离开时一致。
-- 刷新页面后状态与后端一致；列表页渲染无需反序列化大 JSON。
-- 账号 A 创建的方案，账号 B 直接访问其 id 返回 404，列表里也看不到。
-- 方案可删除。
+- `kill` 后端再启动，从侧边栏点进上次方案，阶段、消息、四份文档全部与离开时一致。
+- 刷新页面后状态与后端一致；侧边栏渲染无需反序列化大 JSON。
+- 账号 A 创建的方案，账号 B 直接访问其 id 返回 404，侧边栏里也看不到。
+- 方案可删除；删掉后侧边栏立即少一项。
+- 首次产生内容后地址栏变成 `/v2/{id}`，此后刷新都回到同一份方案。
 
 **不做**：不迁移历史数据（当前无持久数据）；不做消息级检索（ADR-009 已权衡）；**不改动 `conversation_service` 的内存 dict**——对话进行中的临时态仍在内存，只在保存 / 进入下一阶段时落库，避免把流式生成的热路径绑上 DB 写。
+**顺带删干净**：`stores/workflow.ts` 的 localStorage 快照（`persist` / `restore` / `SESSION_STORAGE_KEY`）
+整体移除，后端是唯一权威，不再保留离线副本。其快照校验与降级逻辑（`parseSessionSnapshot` /
+`STATE_DOWNGRADE`）保留并改用于后端恢复。
 
 **风险**：T7 自动保存若与流式生成并发，可能写入半成品快照。**缓解**：`generating-*` 态不触发保存，生成结束进入 review 态后再存；保存期间加锁，避免并发覆盖。
 次要风险：前端曾靠「回传 history」做无状态恢复，持久化上线后两者会冲突。决策见 ADR-001：**后端快照为唯一权威，前端传入的 history 仅在方案不存在时作为恢复来源**。

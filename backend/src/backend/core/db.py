@@ -1,7 +1,8 @@
 """SQLite 数据库连接与建表。
 
-登录（用户 / 会话 / 邀请码）落在本文件管理的 SQLite 库里。这里**只负责连接与表结构**，
-不含任何业务读写——业务读写一律走 `repositories/`，从而满足「业务代码不出现 SQL」的约束。
+登录（用户 / 会话 / 邀请码）与方案（solutions）都落在本文件管理的 SQLite 库里。
+这里**只负责连接与表结构**，不含任何业务读写——业务读写一律走 `repositories/`，
+从而满足「业务代码不出现 SQL」的约束。
 
 连接策略：
 - 每次操作新建连接、用完即关。SQLite 建连成本极低（微秒级），换来的是天然线程安全，
@@ -15,6 +16,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.core.config import get_settings
@@ -49,12 +51,44 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     note       TEXT
 );
 
+-- 方案：一份完整会话的全量快照。
+-- data 是 SessionDataV2 的 JSON 文本，后端**不解析其内容**，保持「不透明快照」；
+-- title / mode / stage 是前端随快照提交的冗余摘要，让方案列表不必反序列化大 JSON。
+-- user_id 非空并级联删除：删号时其方案一并清掉，不留孤儿数据。
+CREATE TABLE IF NOT EXISTS solutions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title      TEXT    NOT NULL DEFAULT '',
+    mode       TEXT    NOT NULL DEFAULT '',
+    stage      TEXT    NOT NULL DEFAULT '',
+    data       TEXT    NOT NULL,
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user    ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+
+-- 方案列表按「owner + 最近更新」查询，复合索引同时覆盖过滤与排序
+CREATE INDEX IF NOT EXISTS idx_solutions_owner ON solutions(user_id, updated_at DESC);
 """
 
 # 时间戳统一用 UTC 的 ISO 8601，避免本地时区带来的歧义
 DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
+
+
+def utc_now() -> datetime:
+    """当前 UTC 时间（naive，不带时区）——库里一律按 UTC 存，读取时也按 UTC 解释。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_now_text() -> str:
+    """当前 UTC 时间的 ISO 8601 字符串，用于写入库里的日期字段。
+
+    这个格式的好处是**字典序与时间序一致**，可以直接在 SQL 里比较大小
+    （例如 `WHERE expires_at > ?`），不必把时间取回 Python 再判断。
+    """
+    return utc_now().isoformat()
 
 
 def db_file_path() -> Path:
