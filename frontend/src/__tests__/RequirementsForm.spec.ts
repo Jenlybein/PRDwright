@@ -322,7 +322,7 @@ describe('RequirementsForm 结构化录入表单', () => {
     })
   })
 
-  it('必填校验：空表单提交时五个必填项全部报红且不打开预览', async () => {
+  it('必填校验：空表单提交时四个必填项全部报红且不打开预览', async () => {
     const wrapper = mountForm()
     await clickButton(wrapper, '提交')
     const text = wrapper.text()
@@ -330,19 +330,49 @@ describe('RequirementsForm 结构化录入表单', () => {
     expect(text).toContain('请选择运行平台')
     expect(text).toContain('核心目标为必填项')
     expect(text).toContain('目标用户为必填项，至少添加一个用户角色')
-    expect(text).toContain('至少添加一个 MVP 功能')
     expect(wrapper.find('pre').exists()).toBe(false)
   })
 
-  it('MVP 校验：功能行缺少名称或描述时逐行报红', async () => {
+  it('默认展开状态：只有「产品与用户」展开，其余三个选填区块收起', () => {
+    const wrapper = mountForm()
+    const toggles = wrapper.findAll('button[aria-expanded]')
+    expect(toggles.map((item) => item.attributes('aria-expanded'))).toEqual([
+      'true',
+      'false',
+      'false',
+      'false',
+    ])
+  })
+
+  it('MVP 功能为选填：完全不填功能也能通过校验并提交，摘要里是空数组', async () => {
+    const wrapper = mountForm()
+    await fill(wrapper, 'product_name', '测试产品')
+    await fill(wrapper, 'platform', 'App')
+    await fill(wrapper, 'product_goal', '解决一个问题')
+    await clickButton(wrapper, '添加用户角色')
+    await byId(wrapper, 'field-target_users.0').setValue('开发者')
+    await clickButton(wrapper, '提交')
+    expect(wrapper.find('pre').exists()).toBe(true)
+    const preview = JSON.parse(wrapper.find('pre').text()) as Record<string, unknown>
+    expect(preview.mvp_features).toEqual([])
+    expect(wrapper.emitted('submit')).toHaveLength(1)
+  })
+
+  it('MVP 校验：已填内容的行缺名称或描述时逐行报红，整行留空的行被忽略', async () => {
     const wrapper = mountForm()
     await addFeatureRow(wrapper, '问卷填写', '收集产品信息')
-    await clickButton(byId(wrapper, 'field-mvp_features'), '添加功能') // 第二行整体留空
+    // 第二行只填名称，缺描述
+    await clickButton(byId(wrapper, 'field-mvp_features'), '添加功能')
+    const nameInputs = wrapper.findAll('input[id^="field-mvp_features."][id$=".name"]')
+    const partialIndex = nameInputs.length - 1
+    await byId(wrapper, `field-mvp_features.${partialIndex}.name`).setValue('只有名称')
+    // 第三行整体留空：选填字段下不参与校验
+    await clickButton(byId(wrapper, 'field-mvp_features'), '添加功能')
     await clickButton(wrapper, '提交')
     const text = wrapper.text()
-    expect(text).toContain('第 2 个功能：功能名称为必填项')
     expect(text).toContain('第 2 个功能：功能描述为必填项')
-    // 第一行已填写完整，不应出现针对它的错误
+    expect(text).not.toContain('第 2 个功能：功能名称为必填项')
+    expect(text).not.toContain('第 3 个功能')
     expect(text).not.toContain('第 1 个功能')
     expect(wrapper.find('pre').exists()).toBe(false)
   })

@@ -22,8 +22,8 @@ inputs:
     - product_goal
     - target_users
     - platform
-    - mvp_features
   optional:
+    - mvp_features
     - v2_features
     - ui_pages
     - technical_constraints

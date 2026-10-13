@@ -97,7 +97,7 @@ function runImport(): void {
     <!-- 空状态引导 -->
     <div
       v-if="modelValue.length === 0"
-      class="rounded-xl border border-dashed border-line-strong bg-surface-2 px-4 py-6 text-center text-xs text-subtle  /40"
+      class="rounded-xl border border-dashed border-line-strong bg-surface-2 px-4 py-6 text-center text-xs text-subtle"
     >
       还没有页面，点击下方「添加页面」逐张填写
     </div>
@@ -106,7 +106,7 @@ function runImport(): void {
     <div
       v-for="(page, index) in modelValue"
       :key="index"
-      class="rounded-xl border border-line bg-surface-2/40 p-3.5 /70 /40"
+      class="rounded-xl border border-line bg-surface-2/40 p-3.5"
     >
       <div class="mb-2.5 flex items-center justify-between">
         <span class="text-xs font-semibold text-subtle">页面 {{ index + 1 }}</span>

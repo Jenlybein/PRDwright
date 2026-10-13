@@ -134,14 +134,13 @@ const SECTIONS: SectionConfig[] = [
     key: 'features-pages',
     no: 2,
     title: '功能与页面',
-    hint: '逐项录入即可，前端自动组装成结构化数据，不需要手写任何分隔符',
+    hint: '选填；逐项录入即可，前端自动组装成结构化数据，不需要手写任何分隔符',
     fields: [
       {
         key: 'mvp_features',
         label: 'MVP 功能',
         type: 'mvp',
-        required: true,
-        hint: '按字段填写，无需拼格式',
+        hint: '选填；按字段填写，无需拼格式。留空则由 AI 依据「页面结构」推断候选功能并标注（建议）',
       },
       {
         key: 'v2_features',
@@ -300,12 +299,18 @@ function emptyForm(): FormState {
 /** 表单原始输入；key 与 FieldConfig.key 一致 */
 const form = reactive<FormState>(emptyForm())
 
-/** 各折叠区块的展开状态；含必填字段的前两个区块默认展开 */
+/**
+ * 各折叠区块的展开状态。
+ *
+ * 四个区块里只有「产品与用户」含必填字段，默认展开；「功能与页面」「技术约束」
+ * 「非功能与范围」都是选填，默认收起，让首屏聚焦在必须填写的内容上。区块内容用
+ * `v-show` 保留在 DOM 中，展开只是去掉 `display:none`，不涉及重新解析。
+ */
 const expanded = reactive<Record<string, boolean>>({
- 'product-users': true,
- 'features-pages': true,
+  'product-users': true,
+  'features-pages': false,
   technical: false,
- 'non-functional': false,
+  'non-functional': false,
 })
 
 /** 校验错误提示；普通字段与列表字段用字段 key，结构化行用 `字段.{行号}.{子字段}` */
@@ -354,8 +359,10 @@ function toSummaryPage(item: UiPageItem): UiPage {
 
 /**
  * 主函数：整合全部解析逻辑，输出与后端 Schema 对齐的结构化需求摘要。
- * 五个 required 字段恒定出现；可选字段仅在用户填写了对应内容时才进入摘要，
- * 避免给后端塞入大量空值。字段顺序与 schema properties 声明顺序一致。
+ * 四个 required 字段恒定出现；`mvp_features` 也恒定输出（用户没填时是空数组，
+ * 前端类型把它声明为必填数组，后端据空数组走「未提供」的缺失处理）；
+ * 其余可选字段仅在用户填写了对应内容时才进入摘要，避免给后端塞入大量空值。
+ * 字段顺序与 schema properties 声明顺序一致。
  */
 function buildRequirementsSummary(): RequirementsSummary {
   const summary: RequirementsSummary = {
@@ -584,32 +591,30 @@ function validate(): boolean {
   // 未回车的模块草稿先入库，再参与校验
   commitModuleDrafts()
 
-  // 1) 必填校验：产品名称、平台、核心目标、目标用户、MVP 功能
+  // 1) 必填校验：产品名称、平台、核心目标、目标用户（MVP 功能为选填，不在此列）
   if (!form.product_name.trim()) setError('product_name', '产品名称为必填项')
   if (!form.platform) setError('platform', '请选择运行平台')
   if (!form.product_goal.trim()) setError('product_goal', '核心目标为必填项')
   if (normalizeList(form.target_users).length === 0) {
     setError('target_users', '目标用户为必填项，至少添加一个用户角色')
   }
-  if (form.mvp_features.filter(rowHasContent).length === 0) {
-    setError('mvp_features', '至少添加一个 MVP 功能')
-  }
+
+  // 2) MVP 功能为选填：整行留空的行提交时会被过滤掉，所以也跳过校验；
+  //    只有「已经填了东西」的行才要求补全（否则会留下没有名称/描述的功能项）。
   form.mvp_features.forEach((item, index) => {
+    if (!rowHasContent(item)) return
     if (!item.name.trim()) {
-      setError(
-        rowErrorKey('mvp_features', index, 'name'),
- `第 ${index + 1} 个功能：功能名称为必填项`,
-      )
+      setError(rowErrorKey('mvp_features', index, 'name'), `第 ${index + 1} 个功能：功能名称为必填项`)
     }
     if (!item.description.trim()) {
       setError(
         rowErrorKey('mvp_features', index, 'description'),
- `第 ${index + 1} 个功能：功能描述为必填项`,
+        `第 ${index + 1} 个功能：功能描述为必填项`,
       )
     }
   })
 
-  // 2) 完整性校验：每张页面卡片都要有页面名称与至少一个模块
+  // 3) 完整性校验：每张页面卡片都要有页面名称与至少一个模块
   form.ui_pages.forEach((page, index) => {
     if (!page.name.trim()) {
       setError(rowErrorKey('ui_pages', index, 'name'), `第 ${index + 1} 个页面：页面名称为必填项`)
@@ -617,12 +622,12 @@ function validate(): boolean {
     if (normalizeList(page.modules).length === 0) {
       setError(
         rowErrorKey('ui_pages', index, 'modules'),
- `第 ${index + 1} 个页面：请至少添加一个模块`,
+        `第 ${index + 1} 个页面：请至少添加一个模块`,
       )
     }
   })
 
-  // 3) 范围校验：在范围内 / 不在范围内不能出现相同内容
+  // 4) 范围校验：在范围内 / 不在范围内不能出现相同内容
   const inScope = normalizeList(form.scope_in)
   const outScope = normalizeList(form.scope_out)
   const overlap = inScope.filter((item) => outScope.includes(item))

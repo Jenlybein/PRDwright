@@ -144,7 +144,7 @@ function handlePaste(event: ClipboardEvent): void {
     >
       <p
         v-if="items.length === 0"
-        class="rounded-xl border border-dashed border-line-strong bg-surface-2 px-4 py-5 text-center text-xs text-subtle  /40"
+        class="rounded-xl border border-dashed border-line-strong bg-surface-2 px-4 py-5 text-center text-xs text-subtle"
       >
         {{ field.emptyText }}
       </p>
