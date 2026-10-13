@@ -58,8 +58,10 @@ watch(
     <div class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
       <div class="border-b border-line px-4 py-3 sm:px-6">
         <h2 class="text-sm font-semibold text-fg">需求澄清对话</h2>
+        <!-- 刻意不写具体数字：提问上限是后端提示词的口径（见 ADR-010），
+             文案里再落一份数字就等于又多出一个需要手工同步的副本 -->
         <p class="mt-0.5 text-xs text-subtle">
-          每轮只问 1-2 个关键细节，逐步澄清后再生成文档
+          AI 会追问关键细节，逐步澄清后再生成文档
         </p>
       </div>
 
