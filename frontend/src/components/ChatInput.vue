@@ -8,6 +8,11 @@ import AppButton from '@/components/ui/AppButton.vue'
  *
  * 回车发送、Shift+Enter 换行；高度随内容自适应，超过上限后内部滚动。
  * 只负责收集输入并把内容抛给父组件，不关心消息如何发送。
+ *
+ * 默认是「卡片内底栏」形态（自带分隔线 / 底色 / 内边距）；`embedded` 为 true 时供页面级
+ * 底栏的内容行（`AppActionBar` 的 `#tools`）使用——那里的分隔线、底色与最大宽度由底栏统一
+ * 提供，输入框再自带一套就会叠出双重边框。此形态下也不重复渲染「回车发送」那行提示：
+ * 占位文案里已经写了一遍，底栏的空间要留给按钮。
  */
 const props = withDefaults(
   defineProps<{
@@ -15,10 +20,13 @@ const props = withDefaults(
     loading?: boolean
     /** 占位提示文案 */
     placeholder?: string
+    /** 是否嵌进页面级底栏的内容行（去掉自带的外层与提示行） */
+    embedded?: boolean
   }>(),
   {
     loading: false,
     placeholder: '输入你的想法，回车发送，Shift+Enter 换行',
+    embedded: false,
   },
 )
 
@@ -77,10 +85,13 @@ defineExpose({ focus })
 </script>
 
 <template>
-  <div class="border-t border-line bg-surface/80 px-4 py-3 backdrop-blur-sm   sm:px-6">
+  <div :class="props.embedded ? '' : 'border-t border-line bg-surface/80 px-4 py-3 backdrop-blur-sm sm:px-6'">
     <div
-      class="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border bg-surface p-2 shadow-sm transition-colors "
-      :class="props.loading ? 'border-line ' : 'border-line-strong focus-within:border-primary-400 '"
+      class="flex items-end gap-2 rounded-2xl border bg-surface p-2 shadow-sm transition-colors"
+      :class="[
+        props.embedded ? '' : 'mx-auto max-w-3xl',
+        props.loading ? 'border-line' : 'border-line-strong focus-within:border-primary-400',
+      ]"
     >
       <textarea
         ref="textareaRef"
@@ -88,7 +99,7 @@ defineExpose({ focus })
         rows="1"
         :placeholder="props.placeholder"
         :disabled="props.loading"
-        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-fg outline-none placeholder:text-subtle disabled:cursor-not-allowed disabled:opacity-60 "
+        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-fg outline-none placeholder:text-subtle disabled:cursor-not-allowed disabled:opacity-60"
         @keydown="handleKeydown"
       />
 
@@ -104,7 +115,7 @@ defineExpose({ focus })
       </AppButton>
     </div>
 
-    <p class="mx-auto mt-1.5 max-w-3xl px-1 text-xs text-subtle">
+    <p v-if="!props.embedded" class="mx-auto mt-1.5 max-w-3xl px-1 text-xs text-subtle">
       回车发送，Shift+Enter 换行
     </p>
   </div>

@@ -2,6 +2,7 @@
 /**
  * 统一按钮：吞掉此前散落在各页面的主/次按钮样式，消除 12+ 处重复与 padding 不一致。
  * - variant：primary（品牌主操作）/ secondary（描边次操作）/ ghost（轻量）
+ *            / danger（重置类操作：清空、重新开始——静息保持克制，悬浮才显红）
  * - 原生 click 通过属性透传落到根 <button>，消费方直接 @click 即可。
  *
  * 颜色只用语义令牌（bg-surface / text-body / border-line-strong …），
@@ -11,7 +12,7 @@ import AppSpinner from './AppSpinner.vue'
 
 withDefaults(
   defineProps<{
-    variant?: 'primary' | 'secondary' | 'ghost'
+    variant?: 'primary' | 'secondary' | 'ghost' | 'danger'
     size?: 'sm' | 'md' | 'lg'
     type?: 'button' | 'submit' | 'reset'
     block?: boolean
@@ -37,6 +38,9 @@ withDefaults(
         : '',
       variant === 'ghost'
         ? 'text-body hover:bg-surface-2 hover:text-accent disabled:opacity-40'
+        : '',
+      variant === 'danger'
+        ? 'text-danger-fg hover:bg-danger-surface disabled:opacity-50'
         : '',
       size === 'sm' ? 'px-3 py-1.5 text-xs' : '',
       size === 'md' ? 'px-4 py-2 text-sm' : '',

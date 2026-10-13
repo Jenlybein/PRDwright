@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 
 /**
@@ -125,35 +126,34 @@ function clearAll(): void {
         </div>
       </div>
 
-      <!-- 快捷操作 -->
+      <!-- 快捷操作（工具类，留在卡片内；「清空」属重置类，下沉到页面级操作栏） -->
       <div class="flex flex-wrap items-center gap-2 border-t border-line pt-3 ">
         <AppButton variant="secondary" size="sm" @click="fillSample">
           填充示例
         </AppButton>
+      </div>
+    </div>
+
+    <!-- 页面级操作栏：左「清空」│「返回入口」，右主操作 -->
+    <AppActionBar>
+      <template #danger>
         <AppButton
-          variant="ghost"
-          size="sm"
+          variant="danger"
+          size="md"
           :disabled="!productName && !requirements"
           @click="clearAll"
         >
           清空
         </AppButton>
-      </div>
-    </div>
+      </template>
+      <template #secondary>
+        <AppButton variant="secondary" size="md" @click="emit('back')">返回入口</AppButton>
+      </template>
 
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <AppButton variant="secondary" size="md" @click="emit('back')">
-        返回入口
-      </AppButton>
-      <AppButton
-        variant="primary"
-        size="md"
-        :disabled="!canGenerate"
-        @click="emit('generate')"
-      >
+      <AppButton variant="primary" size="md" :disabled="!canGenerate" @click="emit('generate')">
         生成 PRD
       </AppButton>
-    </div>
+    </AppActionBar>
   </section>
 </template>
 

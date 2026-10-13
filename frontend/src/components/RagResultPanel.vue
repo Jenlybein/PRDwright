@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 import type { RagHit } from '@/types'
+import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppSpinner from '@/components/ui/AppSpinner.vue'
 import AppBadge from '@/components/ui/AppBadge.vue'
@@ -216,17 +217,29 @@ const confirmLabel = computed(() => {
       </div>
     </div>
 
-    <!-- 底部操作 -->
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-surface px-4 py-3   sm:px-6">
-      <p class="text-xs text-subtle">取消则不会调用生成接口，接口文档保持原样。</p>
-      <div class="flex items-center gap-2">
-        <AppButton variant="secondary" :disabled="loading" @click="emit('cancel')">
+    <!--
+      面板底栏，与页面级操作栏同一套三段式（说明文字在左、主操作在最右）。
+      `sticky=false`：本面板自身是 `overflow-hidden` 的卡片，吸底只会粘在卡片内部而不是视口上；
+      而命中列表已限高内滚，底栏本来就常驻可见，不需要吸底。
+    -->
+    <AppActionBar :sticky="false">
+      <template #secondary>
+        <AppButton variant="secondary" size="md" :disabled="loading" @click="emit('cancel')">
           取消
         </AppButton>
-        <AppButton variant="primary" :disabled="loading" @click="emit('confirm', selectedHits)">
-          {{ confirmLabel }}
-        </AppButton>
-      </div>
-    </div>
+      </template>
+      <template #hint>
+        <p class="text-xs text-subtle">取消则不会调用生成接口，接口文档保持原样。</p>
+      </template>
+
+      <AppButton
+        variant="primary"
+        size="md"
+        :disabled="loading"
+        @click="emit('confirm', selectedHits)"
+      >
+        {{ confirmLabel }}
+      </AppButton>
+    </AppActionBar>
   </section>
 </template>

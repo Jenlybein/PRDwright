@@ -96,10 +96,14 @@ function open(item: SolutionSummary): void {
 </script>
 
 <template>
-  <!-- 窄屏唤出按钮：lg 以上不需要 -->
+  <!--
+    窄屏唤出按钮：lg 以上不需要。
+    `shell-fab` 供 index.css 里的 :has() 规则识别——当前这屏存在吸底操作栏时按钮上移，
+    否则会被固定在底部的操作栏盖住（见 index.css 尾部的规则）。
+  -->
   <button
     type="button"
-    class="fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-on-accent shadow-lg shadow-primary-500/30 lg:hidden"
+    class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-on-accent shadow-lg shadow-primary-500/30 lg:hidden"
     aria-label="打开方案列表"
     @click="drawerOpen = true"
   >
@@ -122,8 +126,9 @@ function open(item: SolutionSummary): void {
   <aside
     :class="[
       'flex flex-col border-line bg-surface/80 backdrop-blur',
-      // 窄屏：抽屉；lg 以上：常驻左侧且 sticky，不随右侧内容滚动
-      'fixed inset-y-0 left-0 z-40 w-64 border-r transition-transform lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0',
+      // 窄屏：抽屉；lg 以上：常驻左侧且 sticky，不随右侧内容滚动。
+      // 宽度走 --shell-sidebar-w（index.css）：底部操作栏吸底时的左偏移引用同一个值。
+      'fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0',
       drawerOpen ? 'translate-x-0' : '-translate-x-full',
     ]"
     aria-label="方案列表"

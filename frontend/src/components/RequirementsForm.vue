@@ -5,6 +5,7 @@ import type { MvpFeature, RequirementsSummary, UiPage } from '@/types'
 import type { FormState, ListKey, SectionConfig, FieldConfig, MvpFeatureItem, UiPageItem } from './form/types'
 import { normalizeList, parseMvpFeatures, parseModules, parsePages } from './form/parsers'
 import { rowErrorKey } from './form/fieldStyles'
+import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import FormFieldRenderer from './form/FormFieldRenderer.vue'
 import MvpFeatureEditor from './form/MvpFeatureEditor.vue'
@@ -778,7 +779,7 @@ defineExpose({ getSummary: () => currentSummary.value })
       </p>
     </div>
 
-    <!-- 操作栏：JSON 预览开关 / 示例 / 清空 -->
+    <!-- 工具条：JSON 预览开关 / 填充示例（流程操作已下沉到底部吸底操作栏） -->
     <div class="mb-6 flex flex-wrap items-center gap-2">
       <AppButton variant="secondary" size="sm" @click="showJsonPreview = !showJsonPreview">
         <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -791,7 +792,6 @@ defineExpose({ getSummary: () => currentSummary.value })
         {{ showJsonPreview ? '关闭 JSON 预览' : '查看 JSON 预览' }}
       </AppButton>
       <AppButton variant="secondary" size="sm" @click="fillExample">填充示例</AppButton>
-      <AppButton variant="ghost" size="sm" @click="resetForm">清空</AppButton>
 
       <!-- 操作成功的短暂提示，自动淡出 -->
       <Transition
@@ -980,24 +980,29 @@ defineExpose({ getSummary: () => currentSummary.value })
         </div>
       </section>
 
-      <!-- 提交区 -->
-      <div class="pt-2">
-        <AppButton variant="primary" block size="md" @click="handleSubmit">
-          提交需求，开始 AI 澄清
-        </AppButton>
-        <p class="mt-3 text-center text-xs text-subtle">
-          提交前自动校验必填项、字段完整性与范围冲突 · 可随时打开 JSON 预览核对
-        </p>
-        <!--
-          返回入口。放在主操作下方而不是并排：主操作是「提交」，返回只是退路，
-          并排会把它抬到和提交同等的视觉权重上。
-        -->
-        <div class="mt-4 flex justify-center">
+      <p class="text-xs text-subtle">
+        提交前自动校验必填项、字段完整性与范围冲突 · 可随时打开 JSON 预览核对
+      </p>
+
+      <!--
+        页面级操作栏（全站唯一的流程操作落点）：
+        左「清空（重置类，最左）」│「返回入口」，右「提交」——主操作永远最右且唯一。
+        吸底常驻，长表单不必先滚到底才能提交。
+      -->
+      <AppActionBar>
+        <template #danger>
+          <AppButton variant="danger" size="md" @click="resetForm">清空</AppButton>
+        </template>
+        <template #secondary>
           <AppButton variant="secondary" size="md" @click="emit('back')">
             {{ backLabel }}
           </AppButton>
-        </div>
-      </div>
+        </template>
+
+        <AppButton variant="primary" size="md" @click="handleSubmit">
+          提交需求，开始 AI 澄清
+        </AppButton>
+      </AppActionBar>
     </form>
   </div>
 </template>

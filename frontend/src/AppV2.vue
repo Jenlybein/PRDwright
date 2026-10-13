@@ -357,7 +357,18 @@ function handleStepClick(stepId: StepId): void {
     <SolutionSidebar />
 
     <div class="flex min-w-0 flex-1 flex-col">
-    <main class="mx-auto max-w-3xl px-4 py-10">
+    <!--
+      `w-full` 不能省：父级是 `flex-col`，而 `mx-auto` 的横向 auto 外边距会让 `stretch`
+      失效，`main` 于是退化成「收缩到内容宽度」。结果各页宽度不一（需求表单只有 ~608px，
+      对话/审阅却是满额 768px），同一套表单在两种宽度间跳。显式 `w-full` + `max-w-3xl`
+      把宽度钉死为 `min(容器宽, 768px)`，居中仍由 `mx-auto` 负责。
+
+      `pb-[calc(var(--shell-action-bar-h)+2.5rem)]` 对应吸底的 `AppActionBar`：它用 `fixed`
+      脱离文档流，不再自己占位，内容末端必须靠这里留白。底栏现在最多两行（内容工具 + 流程操作），
+      高度不固定，因此不能写死 padding——`AppActionBar` 会把实时高度写进
+      `--shell-action-bar-h`，这里跟着算，长文档的最后一行才不会被压住。
+    -->
+    <main class="mx-auto w-full max-w-3xl px-4 pt-10 pb-[calc(var(--shell-action-bar-h)+2.5rem)]">
       <!-- 保存状态 / 提示：原顶栏的信息下沉到内容区右上角，无状态时不占空间 -->
       <div
         v-if="solutions.saving || solutions.saveError || savedTip"
@@ -516,9 +527,10 @@ function handleStepClick(stepId: StepId): void {
       />
     </main>
 
-    <footer class="pb-10 text-center text-xs text-subtle">
-      HarnessPRD · 由 AI 驱动的产品文档生成器
-    </footer>
+    <!--
+      原先这里有一行品牌落款（「HarnessPRD · 由 AI 驱动的产品文档生成器」）。
+      改成吸底操作栏后它与操作栏直接重叠，而品牌在侧栏顶端已有，故移除。
+    -->
     </div>
 
     <!-- 登录 / 注册弹窗。挂在根部，顶栏点击与接口 401 都通过 store 打开它 -->

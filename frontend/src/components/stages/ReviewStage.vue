@@ -1,15 +1,44 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
 import DocumentReview from '@/components/DocumentReview.vue'
+import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import type { ViewState } from '@/types'
 
 /**
  * 文档「待确认」阶段视图（PRD / 接口文档 / 提示词共用）。
  *
- * 三份文档的审阅区完全一致，差异只在底部后续操作：按顺序推进（PRD → 接口文档 →
+ * 三份文档的审阅区完全一致，差异只在底栏右端的后续操作：按顺序推进（PRD → 接口文档 →
  * 提示词）、回看已生成的其它文档、三份齐备后进入完成页。这些差异由 `viewState`
  * 与三个布尔量驱动，组件自身不持有流程状态。
+ *
+ * ## 底栏两行，各自职责单一
+ *
+ * - **内容行**：这份文档自己的工具——AI 优化 / 复制 / 保存。点「AI 优化」后原地换成指令输入，
+ *   文档全程可见（改成弹窗就看不到了，而写优化指令时恰恰要对着文档）。
+ * - **流程行**：这份文档之后往哪走——返回、生成下一份、完成。
+ *
+ * 工具行的按钮是「对内容做的事」，但草稿、复制反馈这些状态天然属于 `DocumentReview`，
+ * 所以用 `ref` 取它的句柄来渲染；指令输入本身是底栏的 UI 状态，留在本组件里。
  */
+const emit = defineEmits<{
+  /** 保存编辑后的正文 */
+  save: [content: string]
+  /** 提交 AI 优化指令 */
+  optimize: [payload: { content: string; instruction: string }]
+  /** 返回对话 */
+  back: []
+  /** 进入接口文档生成（先检索团队规范） */
+  generateApiDocs: []
+  /** 进入提示词套件生成 */
+  generatePrompts: []
+  /** 跳到某个文档的审阅阶段 */
+  navigate: [state: ViewState]
+  /** 进入完成页 */
+  finish: []
+}>()
+
 defineProps<{
   /** 文档标题 */
   title: string
@@ -35,22 +64,33 @@ defineProps<{
   backLabel?: string
 }>()
 
-const emit = defineEmits<{
-  /** 保存编辑后的正文 */
-  save: [content: string]
-  /** 提交 AI 优化指令 */
-  optimize: [payload: { content: string; instruction: string }]
-  /** 返回对话 */
-  back: []
-  /** 进入接口文档生成（先检索团队规范） */
-  generateApiDocs: []
-  /** 进入提示词套件生成 */
-  generatePrompts: []
-  /** 跳到某个文档的审阅阶段 */
-  navigate: [state: ViewState]
-  /** 进入完成页 */
-  finish: []
-}>()
+/** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈，并调它的复制、保存 */
+const doc = ref<InstanceType<typeof DocumentReview> | null>(null)
+
+/** 是否把底栏内容行切成「优化指令输入」形态 */
+const optimizing = ref(false)
+
+/** 用户输入的优化指令 */
+const instruction = ref('')
+
+/** 展开指令输入；没有正文时不展开（没有可优化的内容） */
+function openOptimize(): void {
+  if (!doc.value?.draftContent.trim()) return
+  optimizing.value = true
+}
+
+/** 收起指令输入并清空指令 */
+function cancelOptimize(): void {
+  optimizing.value = false
+  instruction.value = ''
+}
+
+/** 提交优化指令：原文与指令一起交给上层 */
+function submitOptimize(): void {
+  const text = instruction.value.trim()
+  if (!text || !doc.value) return
+  emit('optimize', { content: doc.value.draftContent, instruction: text })
+}
 </script>
 
 <template>
@@ -71,78 +111,134 @@ const emit = defineEmits<{
       <span>{{ error }}</span>
     </p>
 
+    <!-- 文档卡片：只有头部与正文，工具全部下沉到下面的底栏 -->
     <DocumentReview
+      ref="doc"
       :title="title"
       :content="content"
       @save="emit('save', $event)"
-      @ai-optimize="emit('optimize', $event)"
-    >
-      <template #actions="{ save }">
-        <!-- 保存 -->
-        <AppButton variant="primary" size="sm" @click="save">保存</AppButton>
-      </template>
-    </DocumentReview>
+    />
 
-    <!-- 各文档对应的后续操作 -->
-    <div class="flex flex-wrap items-center justify-between gap-2">
-      <AppButton variant="secondary" size="sm" @click="emit('back')">
-        {{ backLabel ?? '返回对话' }}
+    <AppActionBar>
+      <!-- 内容行：常态是文档工具；点「AI 优化」原地变成指令输入，文档始终可见 -->
+      <template #tools>
+        <div v-if="optimizing" class="flex flex-wrap items-center gap-2">
+          <input
+            id="document-optimize-instruction"
+            v-model="instruction"
+            type="text"
+            class="min-w-0 flex-1 rounded-control border border-line-strong bg-field px-3 py-1.5 text-xs text-fg outline-none transition-colors placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+            placeholder="告诉 AI 要怎么改，例如：语气更正式 / 压缩到 500 字以内 / 把未确认的技术选型改为待确认"
+            @keydown.enter.prevent="submitOptimize"
+            @keydown.esc.prevent="cancelOptimize"
+          />
+          <AppButton
+            variant="primary"
+            size="sm"
+            :disabled="!instruction.trim()"
+            @click="submitOptimize"
+          >
+            开始优化
+          </AppButton>
+          <AppButton variant="ghost" size="sm" @click="cancelOptimize">取消</AppButton>
+        </div>
+
+        <div v-else class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <AppButton
+              variant="secondary"
+              size="sm"
+              :disabled="doc?.busy"
+              @click="openOptimize"
+            >
+              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z"
+                />
+              </svg>
+              AI 优化
+            </AppButton>
+
+            <AppButton variant="secondary" size="sm" :disabled="doc?.busy" @click="doc?.copy()">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path d="M7 9a2 2 0 012-2h6a2 2 0 012 2v6a2 2 0 01-2 2H9a2 2 0 01-2-2V9z" />
+                <path d="M5 3a2 2 0 00-2 2v6a2 2 0 002 2h1V7a2 2 0 012-2h6V5a2 2 0 00-2-2H5z" />
+              </svg>
+              {{ doc?.copyTip || '复制' }}
+            </AppButton>
+          </div>
+
+          <!-- 保存：没改过就禁用，避免「点了没反应」的假按钮 -->
+          <AppButton
+            variant="secondary"
+            size="sm"
+            :disabled="doc?.busy || !doc?.dirty"
+            @click="doc?.save()"
+          >
+            保存
+          </AppButton>
+        </div>
+      </template>
+
+      <!-- 流程行：左「返回」，右按顺序推进 / 查看其它文档 / 完成 -->
+      <template #secondary>
+        <AppButton variant="secondary" size="md" @click="emit('back')">
+          {{ backLabel ?? '返回对话' }}
+        </AppButton>
+      </template>
+
+      <!-- 各阶段按顺序推进：PRD 完成 → 生成接口文档；接口文档完成 → 生成提示词套件 -->
+      <AppButton
+        v-if="viewState === 'review-prd'"
+        variant="secondary"
+        size="md"
+        class="!border-accent !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
+        @click="emit('generateApiDocs')"
+      >
+        生成接口文档
       </AppButton>
 
-      <div class="flex flex-wrap items-center gap-2">
-        <!-- 各阶段按顺序推进：PRD 完成 → 生成接口文档；接口文档完成 → 生成提示词套件 -->
-        <AppButton
-          v-if="viewState === 'review-prd'"
-          variant="secondary"
-          size="sm"
-          class="!border-accent !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
-          @click="emit('generateApiDocs')"
-        >
-          生成接口文档
-        </AppButton>
+      <AppButton
+        v-else-if="viewState === 'review-api-docs'"
+        variant="secondary"
+        size="md"
+        class="!border-accent !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
+        @click="emit('generatePrompts')"
+      >
+        生成提示词套件
+      </AppButton>
 
-        <AppButton
-          v-else-if="viewState === 'review-api-docs'"
-          variant="secondary"
-          size="sm"
-          class="!border-accent !text-primary-700 hover:!bg-primary-50 dark:!border-primary-700 dark:!text-primary-300 dark:hover:!bg-primary-950/40"
-          @click="emit('generatePrompts')"
-        >
-          生成提示词套件
-        </AppButton>
+      <!-- 其它已生成的文档的查看入口（当前阶段除外）。
+           没有正文的文档不出现入口：点进去只会看到一片空白 -->
+      <AppButton
+        v-if="viewState !== 'review-prd' && hasPrd"
+        variant="secondary"
+        size="md"
+        @click="emit('navigate', 'review-prd')"
+      >
+        查看 PRD
+      </AppButton>
+      <AppButton
+        v-if="viewState !== 'review-api-docs' && hasApiDocs"
+        variant="secondary"
+        size="md"
+        @click="emit('navigate', 'review-api-docs')"
+      >
+        查看接口文档
+      </AppButton>
+      <AppButton
+        v-if="viewState !== 'review-prompts' && hasPrompts"
+        variant="secondary"
+        size="md"
+        @click="emit('navigate', 'review-prompts')"
+      >
+        查看提示词
+      </AppButton>
 
-        <!-- 其它已生成的文档的查看入口（当前阶段除外）。
-             没有正文的文档不出现入口：点进去只会看到一片空白 -->
-        <AppButton
-          v-if="viewState !== 'review-prd' && hasPrd"
-          variant="secondary"
-          size="sm"
-          @click="emit('navigate', 'review-prd')"
-        >
-          查看 PRD
-        </AppButton>
-        <AppButton
-          v-if="viewState !== 'review-api-docs' && hasApiDocs"
-          variant="secondary"
-          size="sm"
-          @click="emit('navigate', 'review-api-docs')"
-        >
-          查看接口文档
-        </AppButton>
-        <AppButton
-          v-if="viewState !== 'review-prompts' && hasPrompts"
-          variant="secondary"
-          size="sm"
-          @click="emit('navigate', 'review-prompts')"
-        >
-          查看提示词
-        </AppButton>
-
-        <!-- 完成入口：三份文档齐备才可用 -->
-        <AppButton variant="primary" size="sm" :disabled="!canFinish" @click="emit('finish')">
-          完成
-        </AppButton>
-      </div>
-    </div>
+      <!-- 完成入口：三份文档齐备才可用 -->
+      <AppButton variant="primary" size="md" :disabled="!canFinish" @click="emit('finish')">
+        完成
+      </AppButton>
+    </AppActionBar>
   </section>
 </template>

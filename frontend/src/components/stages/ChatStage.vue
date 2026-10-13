@@ -3,6 +3,7 @@ import { nextTick, ref, watch } from 'vue'
 
 import ChatInput from '@/components/ChatInput.vue'
 import MessageList from '@/components/MessageList.vue'
+import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import type { ChatMessage } from '@/types'
 
@@ -49,48 +50,53 @@ watch(
 </script>
 
 <template>
-  <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm  ">
-    <div class="flex items-start justify-between gap-3 border-b border-line px-4 py-3  sm:px-6">
-      <div class="min-w-0">
-        <h2 class="text-sm font-semibold text-fg ">需求澄清对话</h2>
+  <section class="space-y-3">
+    <!--
+      对话卡片只负责消息区。输入框已下沉到页面级底栏的内容行里——
+      与「重新开始 / 改需求 / 生成 PRD」同处一条栏，用户不必在卡片底部与页面底部之间来回找。
+    -->
+    <div class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+      <div class="border-b border-line px-4 py-3 sm:px-6">
+        <h2 class="text-sm font-semibold text-fg">需求澄清对话</h2>
         <p class="mt-0.5 text-xs text-subtle">AI 会追问关键细节，信息补齐后再生成文档</p>
       </div>
-      <div class="flex shrink-0 gap-2">
-        <AppButton variant="secondary" size="sm" @click="emit('editRequirements')">改需求</AppButton>
-        <button
-          type="button"
-          class="rounded-lg border border-line-strong px-3 py-1.5 text-xs font-medium text-muted transition hover:border-red-300 hover:text-red-600   dark:hover:border-red-500 dark:hover:text-red-400"
-          @click="emit('restart')"
-        >
-          重新开始
-        </button>
+
+      <!-- 出错时把原因贴在会话区顶部，不打断已有消息 -->
+      <p
+        v-if="error"
+        class="border-b border-red-200 bg-red-50 px-4 py-2 text-xs leading-relaxed text-red-600 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300 sm:px-6"
+        role="alert"
+      >
+        {{ error }}
+      </p>
+
+      <!-- 消息区：内部滚动。输入框移出后，这里就是一个纯粹的滚动容器 -->
+      <div class="flex h-[min(60vh,560px)] flex-col bg-surface-2">
+        <MessageList :messages="messages" />
       </div>
     </div>
 
-    <!-- 出错时把原因贴在会话区顶部，不打断已有消息 -->
-    <p
-      v-if="error"
-      class="border-b border-red-200 bg-red-50 px-4 py-2 text-xs leading-relaxed text-red-600 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300 sm:px-6"
-      role="alert"
-    >
-      {{ error }}
-    </p>
+    <!-- 页面级操作栏：内容行是输入框，流程行左「重新开始 │ 改需求」、右「生成 PRD」 -->
+    <AppActionBar>
+      <template #tools>
+        <ChatInput ref="inputRef" embedded :loading="loading" @send="emit('send', $event)" />
+      </template>
 
-    <!-- 固定高度的会话区：消息列表内部滚动，输入框常驻底部 -->
-    <div class="flex h-[min(68vh,620px)] flex-col bg-surface-2 ">
-      <MessageList :messages="messages" />
-      <ChatInput ref="inputRef" :loading="loading" @send="emit('send', $event)" />
-    </div>
+      <template #danger>
+        <AppButton variant="danger" size="md" @click="emit('restart')">重新开始</AppButton>
+      </template>
+      <template #secondary>
+        <AppButton variant="secondary" size="md" @click="emit('editRequirements')">
+          改需求
+        </AppButton>
+      </template>
+      <template #hint>
+        <p v-if="canGeneratePrd" class="text-xs text-subtle">
+          需求已澄清。生成前会先让你确认「补充信息回填到需求摘要」的变更。
+        </p>
+      </template>
 
-    <!-- 满足条件后显示「生成 PRD」入口 -->
-    <div
-      v-if="canGeneratePrd"
-      class="flex items-center justify-between gap-3 border-t border-line bg-surface px-4 py-3   sm:px-6"
-    >
-      <p class="text-xs text-subtle">
-        需求已澄清。生成前会先让你确认「补充信息回填到需求摘要」的变更。
-      </p>
-      <AppButton variant="primary" shrink-0 @click="emit('generatePrd')">
+      <AppButton v-if="canGeneratePrd" variant="primary" size="md" @click="emit('generatePrd')">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             fill-rule="evenodd"
@@ -100,6 +106,6 @@ watch(
         </svg>
         生成 PRD
       </AppButton>
-    </div>
+    </AppActionBar>
   </section>
 </template>

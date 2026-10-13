@@ -78,6 +78,16 @@
   --color-success-fg: var(--ui-success-fg);
 }
 
+/* 外壳几何：与主题无关的尺寸常量。
+ * --shell-sidebar-w 同时被侧栏（SolutionSidebar 的宽度）与底部操作栏（吸底时的左偏移）引用，
+ * 两处若各写一遍，改动时必然漏掉一处、底栏就会与侧栏错开。
+ * --shell-action-bar-h 是底栏的实时高度（AppActionBar 用 ResizeObserver 写入）：底栏最多两行，
+ * 高度不固定，`<main>` 的底部留白与窄屏浮动按钮的避让都按它算；没有底栏时回落为 0。 */
+:root {
+  --shell-sidebar-w: 16rem;
+  --shell-action-bar-h: 0px;
+}
+
 /* 亮色主题取值（默认）。同一组变量在 .dark 下被整体覆盖，故 .dark 段必须写在后面
  * —— 两者选择器权重相同（:root 与 .dark 同为 0,1,0），靠书写顺序决定胜负。 */
 :root {
@@ -164,5 +174,17 @@
       transition-duration: 0.001ms !important;
       scroll-behavior: auto !important;
     }
+  }
+}
+
+/*
+ * 窄屏（< lg，侧栏收起为抽屉）下，浮动的「唤出侧栏」按钮要避开底部操作栏：
+ * 操作栏是 fixed 贴底的，默认会把这个按钮盖住（两者都在底部右侧）。
+ * 用 :has() 精确判断「当前这屏确实有操作栏」，无操作栏的页面按钮位置不变。
+ * 写在所有 @layer 之外：未分层样式的优先级高于分层样式，无需 !important 即可覆盖工具类。
+ */
+@media (max-width: 63.99rem) {
+  html:has(.shell-action-bar) .shell-fab {
+    bottom: calc(var(--shell-action-bar-h) + 1rem);
   }
 }

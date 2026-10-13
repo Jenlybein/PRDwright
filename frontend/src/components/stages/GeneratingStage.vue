@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import DocumentReview from '@/components/DocumentReview.vue'
 import PrdProgress from '@/components/stages/PrdProgress.vue'
+import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import type { PrdStageProgress } from '@/types'
 
@@ -62,8 +63,13 @@ const emit = defineEmits<{
       :streaming-content="streamingContent"
       :generating="true"
     />
-    <AppButton variant="secondary" @click="emit('back')">
-      {{ backLabel ?? '返回对话' }}
-    </AppButton>
+    <!-- 页面级操作栏：生成中 / 失败时只有「返回」这一条退路，主操作区留空 -->
+    <AppActionBar>
+      <template #secondary>
+        <AppButton variant="secondary" size="md" @click="emit('back')">
+          {{ backLabel ?? '返回对话' }}
+        </AppButton>
+      </template>
+    </AppActionBar>
   </section>
 </template>

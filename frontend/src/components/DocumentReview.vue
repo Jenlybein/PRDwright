@@ -2,13 +2,16 @@
 import { computed, ref, watch } from 'vue'
 
 import { renderMarkdown } from '@/utils/markdown'
-import AppButton from '@/components/ui/AppButton.vue'
 
 /**
  * 文档审阅组件。
  *
- * 生成中只读展示流式内容；生成完成后切换为可编辑模式，支持「预览 / 编辑」
- * 两种视图一键切换、AI 优化、一键复制，底部提供自定义操作按钮。
+ * 生成中只读展示流式内容；生成完成后切换为可编辑模式，支持「预览 / 编辑」两种视图一键切换。
+ *
+ * **不再自带底部操作栏**：AI 优化 / 复制 / 保存这三个工具，与「这份文档该往哪走」的流程操作
+ * 一起收在页面级底栏（`AppActionBar`）里——此前卡片自带一条底栏、页面又垫一条，两条叠在一起
+ * 中间还断开，用户得上下两处找按钮。工具按钮改由上层渲染，所以这里用 `defineExpose` 把
+ * 「状态 + 动作」交出去，本组件只负责卡片本身（含 AI 优化的指令输入，见 `ReviewStage`）。
  *
  * Markdown 渲染做了缓存：只有当原文（可编辑的 draft）真正发生变化时才重新
  * 调用 `renderMarkdown`，流式滚动刷新或反复切换视图不会触发重复解析。
@@ -33,12 +36,8 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  /** 提交 AI 优化指令时触发，载荷为当前可编辑原文与用户输入的指令 */
- 'ai-optimize': [payload: { content: string; instruction: string }]
-  /** 点击底部「保存」按钮时触发，载荷为当前可编辑原文 */
+  /** 点击底栏「保存」时触发，载荷为当前可编辑原文 */
   save: [content: string]
-  /** 底部自定义按钮被点击时触发，载荷为按钮标识 */
-  action: [action: string]
 }>()
 
 // ---------------------------------------------------------------------------
@@ -88,12 +87,15 @@ const hasContent = computed(() => {
   return draft.value.trim().length > 0
 })
 
+/** 原文是否被改过（相对上一次落地的 `content`）；没改过时底栏的「保存」保持禁用 */
+const dirty = computed(() => draft.value !== props.content)
+
 // ---------------------------------------------------------------------------
 // 操作
 // ---------------------------------------------------------------------------
 
 /** 一键复制当前原文到剪贴板 */
-async function copyContent(): Promise<void> {
+async function copy(): Promise<void> {
   const text = props.generating ? props.streamingContent : draft.value
   if (!text) return
   try {
@@ -108,64 +110,40 @@ async function copyContent(): Promise<void> {
   }, 2000)
 }
 
-/** 是否展开优化指令输入区 */
-const showOptimize = ref(false)
-
-/** 用户输入的优化指令 */
-const optimizeInstruction = ref('')
-
-/**
- * 展开优化指令输入区。
- *
- * 此前用浏览器原生 `prompt()` 收集指令，样式脱离页面、移动端体验差，
- * 且在 jsdom 里无法直接测试；改为页内输入区。
- */
-function requestOptimize(): void {
-  if (!draft.value.trim()) return
-  showOptimize.value = true
-}
-
-/** 提交优化指令：把原文与指令一起交给父组件 */
-function submitOptimize(): void {
-  const instruction = optimizeInstruction.value.trim()
-  if (!instruction || props.generating) return
-  emit('ai-optimize', { content: draft.value, instruction })
-}
-
-/** 收起优化输入区并清空指令 */
-function cancelOptimize(): void {
-  showOptimize.value = false
-  optimizeInstruction.value = ''
-}
-
-// 优化结束后（无论成功或失败）自动收起输入区，避免指令残留导致误触重复提交
-watch(
-  () => props.generating,
-  (now, before) => {
-    if (before && !now) cancelOptimize()
-  },
-)
-
 /** 保存：把当前原文回传给父组件 */
 function save(): void {
   emit('save', draft.value)
 }
 
-/** 底部自定义按钮：把按钮标识抛给父组件 */
-function runAction(action: string): void {
-  emit('action', action)
-}
+/**
+ * 工具行的按钮渲染在上层底栏里，因此这里把「状态 + 动作」暴露给 `ReviewStage`：
+ * `busy` / `dirty` 决定按钮禁用态，`copyTip` 决定按钮文案，`draftContent` 是 AI 优化要取的载荷。
+ */
+defineExpose({
+  /** 生成中文档工具应处于禁用态 */
+  busy: computed(() => props.generating),
+  /** 原文是否被改过（决定「保存」是否可点） */
+  dirty,
+  /** 复制反馈文案（空串表示无提示） */
+  copyTip,
+  /** 当前可编辑原文 */
+  draftContent: computed(() => draft.value),
+  /** 一键复制 */
+  copy,
+  /** 保存当前原文 */
+  save,
+})
 </script>
 
 <template>
-  <div class="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm  ">
+  <div class="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
     <!-- 头部：标题 + 状态徽章 + 视图切换 -->
-    <div class="flex items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-6 ">
+    <div class="flex items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-6">
       <div class="flex min-w-0 items-center gap-2">
-        <h2 class="truncate text-sm font-semibold text-fg ">{{ title || '文档' }}</h2>
+        <h2 class="truncate text-sm font-semibold text-fg">{{ title || '文档' }}</h2>
         <span
           v-if="generating"
-          class="inline-flex items-center gap-1 rounded-full bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-700 ring-1 ring-primary-200 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800"
+          class="inline-flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent ring-1 ring-accent-soft-line"
         >
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
           生成中
@@ -173,11 +151,11 @@ function runAction(action: string): void {
       </div>
 
       <!-- 视图切换：仅在非生成态可用 -->
-      <div v-if="!generating" class="flex shrink-0 items-center gap-1 rounded-lg bg-surface-2 p-0.5 ">
+      <div v-if="!generating" class="flex shrink-0 items-center gap-1 rounded-lg bg-surface-2 p-0.5">
         <button
           type="button"
           class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'preview' ? 'bg-surface text-fg shadow-sm  ' : 'text-subtle hover:text-muted  '"
+          :class="viewMode === 'preview' ? 'bg-surface text-fg shadow-sm' : 'text-subtle hover:text-muted'"
           @click="viewMode = 'preview'"
         >
           预览
@@ -185,7 +163,7 @@ function runAction(action: string): void {
         <button
           type="button"
           class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-          :class="viewMode === 'edit' ? 'bg-surface text-fg shadow-sm  ' : 'text-subtle hover:text-muted  '"
+          :class="viewMode === 'edit' ? 'bg-surface text-fg shadow-sm' : 'text-subtle hover:text-muted'"
           @click="viewMode = 'edit'"
         >
           编辑
@@ -206,7 +184,7 @@ function runAction(action: string): void {
       <!-- 生成中：只读展示流式内容（Markdown 实时渲染） -->
       <div
         v-else-if="generating"
-        class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line  dark:prose-invert "
+        class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
       >
         <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
         <div v-html="renderMarkdown(streamingContent)" />
@@ -218,7 +196,7 @@ function runAction(action: string): void {
         <!-- 预览视图：渲染缓存后的 HTML -->
         <div
           v-if="viewMode === 'preview'"
-          class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line  dark:prose-invert "
+          class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
           <div v-html="renderedHtml" />
@@ -229,95 +207,10 @@ function runAction(action: string): void {
           v-else
           v-model="draft"
           rows="20"
-          class="min-h-[320px] w-full resize-y rounded-xl border border-line bg-surface px-4 py-3 font-mono text-sm leading-relaxed text-fg shadow-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent-soft-line    "
+          class="min-h-[320px] w-full resize-y rounded-xl border border-line bg-surface px-4 py-3 font-mono text-sm leading-relaxed text-fg shadow-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
           placeholder="在此编辑文档的 Markdown 原文"
         ></textarea>
       </template>
-    </div>
-
-    <!-- AI 优化指令输入区：点击「AI 优化」后展开 -->
-    <div v-if="showOptimize" class="border-t border-accent-soft-line bg-primary-50/70 px-4 py-3 dark:border-primary-800 dark:bg-primary-950/40 sm:px-6">
-      <label
-        for="document-optimize-instruction"
-        class="mb-1.5 block text-xs font-medium text-primary-900 dark:text-primary-300"
-      >
-        告诉 AI 要怎么改，例如：语气更正式 / 压缩到 500 字以内 / 把未确认的技术选型改为待确认
-      </label>
-      <textarea
-        id="document-optimize-instruction"
-        v-model="optimizeInstruction"
-        rows="2"
-        :disabled="generating"
-        class="w-full resize-y rounded-lg border border-accent-soft-line bg-surface px-3 py-2 text-sm leading-relaxed text-fg shadow-sm outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent-soft-line disabled:bg-surface-2 disabled:text-subtle dark:border-primary-800     "
-        placeholder="输入优化指令，Ctrl / ⌘ + Enter 直接提交"
-        @keydown.ctrl.enter.prevent="submitOptimize"
-        @keydown.meta.enter.prevent="submitOptimize"
-      ></textarea>
-      <div class="mt-2 flex flex-wrap items-center gap-2">
-        <AppButton
-          variant="primary"
-          size="sm"
-          :disabled="generating || !optimizeInstruction.trim()"
-          @click="submitOptimize"
-        >
-          {{ generating ? '正在优化…' : '开始优化' }}
-        </AppButton>
-        <AppButton
-          variant="ghost"
-          size="sm"
-          :disabled="generating"
-          @click="cancelOptimize"
-        >
-          取消
-        </AppButton>
-      </div>
-    </div>
-
-    <!-- 底部操作栏 -->
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-surface px-4 py-3   sm:px-6">
-      <!-- 左侧：AI 优化 + 复制 -->
-      <div class="flex items-center gap-2">
-        <AppButton
-          variant="secondary"
-          size="sm"
-          :disabled="generating"
-          @click="requestOptimize"
-        >
-          <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path
-              d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z"
-            />
-          </svg>
-          AI 优化
-        </AppButton>
-        <AppButton
-          variant="secondary"
-          size="sm"
-          @click="copyContent"
-        >
-          <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path
-              d="M7 9a2 2 0 012-2h6a2 2 0 012 2v6a2 2 0 01-2 2H9a2 2 0 01-2-2V9z"
-            />
-            <path d="M5 3a2 2 0 00-2 2v6a2 2 0 002 2h1V7a2 2 0 012-2h6V5a2 2 0 00-2-2H5z" />
-          </svg>
-          {{ copyTip || '复制' }}
-        </AppButton>
-      </div>
-
-      <!-- 右侧：自定义操作按钮（父组件通过默认插槽注入） -->
-      <div class="flex items-center gap-2">
-        <slot name="actions" :run-action="runAction" :save="save" :content="draft">
-          <AppButton
-            variant="primary"
-            size="sm"
-            :disabled="generating"
-            @click="save"
-          >
-            保存
-          </AppButton>
-        </slot>
-      </div>
     </div>
   </div>
 </template>

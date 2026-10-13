@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import type { ViewState } from '@/types'
 import type { DocType } from '@/utils/download'
+import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 
 /**
@@ -149,14 +150,19 @@ const DOWNLOAD_ICON =
       </article>
     </div>
 
-    <!-- 底部操作 -->
-    <div class="flex flex-wrap items-center justify-center gap-3 pt-1">
-      <AppButton variant="secondary" @click="emit('back')">
-        {{ backLabel ?? '返回对话' }}
-      </AppButton>
-      <AppButton variant="primary" @click="emit('restart')">
-        重新开始
-      </AppButton>
-    </div>
+    <!--
+      页面级操作栏：左「重新开始」│「返回」，右侧留空——本页已交付，没有「下一步」。
+      下载入口留在各自的文档卡片上（「下载这份文档」属于文档本身的操作）。
+    -->
+    <AppActionBar>
+      <template #danger>
+        <AppButton variant="danger" size="md" @click="emit('restart')">重新开始</AppButton>
+      </template>
+      <template #secondary>
+        <AppButton variant="secondary" size="md" @click="emit('back')">
+          {{ backLabel ?? '返回对话' }}
+        </AppButton>
+      </template>
+    </AppActionBar>
   </section>
 </template>
