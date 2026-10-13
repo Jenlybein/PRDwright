@@ -1,5 +1,10 @@
 # R0-T5 错误契约机器码化 · 增量设计与任务分解
 
+> **归档留档（已完工，不代表当前状态）**
+> 本文是 2026-10-14 施工时的增量设计与任务分解，是一次性施工单据，不是常青文档。
+> 结论已压缩为 [`../ADR.md` 的 ADR-012](../ADR.md)；**当前实现以 `../ARCHITECTURE.md` 为准**。
+> 保留它是为了回溯「当时为什么这么拆任务」，不用于了解现状。
+>
 > 适用范围：既有项目上的**增量改造**（不是从零开始）。品牌 PRDwright，根目录仍为 `HarnessPRD`。
 > 目标：把「错误判据靠中文串匹配」这个活 bug，换成机器可读的 `code`，并配不变量测试防回退。
 
@@ -58,7 +63,7 @@
 | `frontend/src/composables/useClarificationChat.ts` | 改 | 判据由 `message.includes('会话不存在')` 换成 `isApiError(error, 'SESSION_NOT_FOUND')` |
 | `frontend/src/__tests__/api.spec.ts` | 改 | 追加 SSE error → `ApiError.code` 的用例 |
 | `frontend/src/__tests__/useClarificationChat.spec.ts` | **新建** | 降级重试用例（直接用**任意文案**构造错误，证明与文案解耦） |
-| `docs/architecture/ADR.md` | 改（T05 收尾） | 记一条 ADR：错误契约以 `code` 为唯一判据 |
+| `docs/architecture/v2/ADR.md` | 改（T05 收尾） | 记一条 ADR：错误契约以 `code` 为唯一判据 |
 
 ### 3. 数据结构与接口（Data Structures and Interfaces）
 
@@ -298,7 +303,7 @@ sequenceDiagram
 
 | 项 | 内容 |
 |---|---|
-| 文件 | `docs/architecture/ADR.md`（追加一条 ADR）；不改业务代码（手工验收的临时改动必须还原） |
+| 文件 | `docs/architecture/v2/ADR.md`（追加一条 ADR）；不改业务代码（手工验收的临时改动必须还原） |
 | 改什么 | ① 全量跑：`cd backend && uv run pytest`；`cd frontend && npm run test:unit -- --run && npm run build`<br>② 手工验收四项：a) 前端源码 grep 不到 `includes('中文')` 这类判据；b) 任一 4xx/5xx 响应体含 `code`；c) 310 用例全绿；d) **临时**把后端「会话不存在或已过期」改成任意变体（如「该会话已失效：」），跑前端用例 + 手点一次续接对话，确认降级仍生效，**然后改回**<br>③ ADR 记录：错误契约以 `code` 为唯一机器判据，`detail` 仅供展示且可随时改写 |
 | 验收 | 四项全过；`git status` 干净（除本次设计改动外无残留） |
 | 依赖 | T04 |
