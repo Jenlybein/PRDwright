@@ -393,8 +393,15 @@ export interface JobSnapshot {
 export interface StepUsage {
   /** 步骤名，形如 `prd:writing` */
   step: string
-  /** 该步骤内的模型调用次数 */
+  /** 该步骤内**拿到结果**的模型调用次数 */
   calls: number
+  /**
+   * 该步骤内失败的调用次数（超时、断连、5xx，含自愈重试前的废弃尝试）。
+   *
+   * 与 `calls` 分开是为了不被互相掩盖：两者都真实发生过，混在一起会让
+   * 「总共发了几次请求」读不出来。它们耗掉的时间都计在 `durationMs` 里。
+   */
+  failedCalls: number
   /** 输入 token 累计 */
   promptTokens: number
   /** 输出 token 累计 */
@@ -416,8 +423,15 @@ export interface RunSummary {
   status: string
   /** 本次生成总耗时（毫秒） */
   durationMs: number
-  /** 模型调用总次数 */
+  /** 模型调用总次数（只统计拿到结果的调用） */
   totalCalls: number
+  /**
+   * 失败的调用次数。
+   *
+   * 与 `totalCalls` 分开：两者都是真实发生的请求，但含义不同。看到它不为 0 说明
+   * 生成过程中有过抖动并被自愈回来了（或重试也没成功），这是排查「为什么偏慢」的线索。
+   */
+  failedCalls: number
   /** 输入 token 总量 */
   promptTokens: number
   /** 输出 token 总量 */

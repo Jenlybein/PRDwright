@@ -98,6 +98,7 @@ class VolcanoArkChatModel:
         max_tokens: int | None = None,
         *,
         thinking_enabled: bool = False,
+        timeout: float | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -105,6 +106,7 @@ class VolcanoArkChatModel:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.thinking_enabled = thinking_enabled
+        self.timeout = timeout
 
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
         """异步流式产出模型回复，每块为 `AIMessageChunk`。
@@ -112,11 +114,13 @@ class VolcanoArkChatModel:
         官方 SDK 的 `create` 返回的是异步可迭代对象。这里每次调用新建一个
         客户端并在结束后关闭，避免长生命周期连接池在请求间泄漏。
         """
-        client = (
-            AsyncArk(api_key=self.api_key, base_url=self.base_url)
-            if self.base_url
-            else AsyncArk(api_key=self.api_key)
-        )
+        client_kwargs: dict[str, Any] = {"api_key": self.api_key}
+        if self.base_url:
+            client_kwargs["base_url"] = self.base_url
+        # 不配超时时不传这个参数，沿用 SDK 自己的默认值
+        if self.timeout is not None:
+            client_kwargs["timeout"] = self.timeout
+        client = AsyncArk(**client_kwargs)
         try:
             ark_messages = [
                 {"role": _role_of(message), "content": _content_of(message)}

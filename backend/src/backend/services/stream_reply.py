@@ -21,7 +21,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
 from langchain_core.messages import AIMessageChunk, BaseMessage
@@ -32,12 +34,93 @@ from backend.core.errors import AppError, ErrorCode
 from backend.services.llm_factory import StreamingChatModel
 from backend.services.llm_meter import current_meter
 from backend.services.llm_utils import extract_text
-from backend.services.stream_guard import ensure_not_truncated
+from backend.services.stream_guard import OutputTruncatedError, ensure_not_truncated
 from backend.services.token_budget import enforce
 
 # 流式生成失败时使用的错误码：分章节与整篇是同一条能力的两条实现路径，
 # 对前端来说不该有两种错误分类。
 _DEFAULT_ERROR_CODE = ErrorCode.LLM_UPSTREAM_ERROR
+
+# 判定「值不值得整次重来」的字样白名单。这里刻意**不 import httpx**（业务层不碰传输层
+# 的库），改按异常类名匹配：httpx 的传输类异常名字本身很稳定——
+# ConnectTimeout / ReadTimeout / PoolTimeout、ConnectError / ReadError / WriteError、
+# LocalProtocolError / RemoteProtocolError，各家 SDK 的 APITimeoutError /
+# APIConnectionError 也都被这些字样覆盖住。
+_RETRYABLE_NAME_PARTS = (
+    "Timeout",
+    "Connection",
+    "ConnectError",
+    "ReadError",
+    "WriteError",
+    "ProtocolError",
+    "NetworkError",
+)
+
+
+class CallTimeoutError(AppError):
+    """单次模型调用超过了墙钟硬顶，本次调用被取消。
+
+    继承 `AppError` 是为了两件事：错误码复归 `LLM_UPSTREAM_ERROR`（8 码体系不膨胀），
+    以及让 `_is_retryable` 据此**不再重试**——慢到触发总上限的调用，重来一次只会同样慢，
+    让用户多等一遍没有意义。
+    """
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(
+            ErrorCode.LLM_UPSTREAM_ERROR,
+            f"模型响应超过 {seconds:g} 秒仍未完成，已取消本次调用。"
+            "请稍后重试；若频繁出现，可调大 LLM_TOTAL_TIMEOUT 或精简输入。",
+        )
+
+
+def _elapsed_ms(started_at: float) -> int:
+    """把一次调用的墙钟消耗算成毫秒；时钟回拨得到的负数按 0 处理。"""
+    return int(max(0.0, time.monotonic() - started_at) * 1000)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """这次失败是不是「大概率重来一次就好」的传输层抖动。
+
+    **宁可不重试，也不误重试**：漏掉一次本可自愈的调用，代价是用户手动点一次重生成；
+    误判的代价则是重复扣费与重复内容（后者由 `astream_text` 里的 `text_emitted` 兜底）。
+    所以这里是白名单，并先排除两类「重试一万次结果也一样」的失败：
+
+    - `AppError`：我们自己判定的失败（预算超顶、调用超过墙钟硬顶 …）；
+    - `OutputTruncatedError`：内容性质的失败，重来只会拿到同样的内容。
+
+    Returns:
+        是否可以整次重来。
+    """
+    if isinstance(exc, (AppError, OutputTruncatedError)):
+        return False
+
+    if any(part in type(exc).__name__ for part in _RETRYABLE_NAME_PARTS):
+        return True
+
+    # 上游明确的服务端故障与请求/锁超时；4xx 一律不重试（参数不合法、认证、限流）
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and (500 <= status < 600 or status in (408, 409)):
+        return True
+    return False
+
+
+@asynccontextmanager
+async def _total_deadline(seconds: float) -> AsyncIterator[None]:
+    """给一次调用套墙钟上限；`seconds <= 0` 表示不设限。
+
+    为什么要多这一层：底层 httpx 的 read timeout 是 **inter-byte** 语义，只约束
+    「相邻两次数据之间」的等待。一个每 59 秒吐一个字的模型能把单次调用无限拖下去
+    而永不超时，所以总时长必须在这里自己包一层。
+    """
+    if seconds <= 0:
+        yield
+        return
+    try:
+        async with asyncio.timeout(seconds):
+            yield
+    except TimeoutError as exc:
+        # 换成业务异常，前端拿到的是可展示的中文说明而不是一个空字符串的 TimeoutError
+        raise CallTimeoutError(seconds) from exc
 
 
 def _chunk_usage(chunk: AIMessageChunk | None) -> tuple[int, int]:
@@ -84,13 +167,18 @@ async def astream_text(
     llm: StreamingChatModel,
     messages: list[BaseMessage],
 ) -> AsyncIterator[str]:
-    """流式产出一次调用的纯文本增量，流开始时查预算、流结束时检查截断**并计量**。
+    """流式产出一次调用的纯文本增量，并检查预算、超时与截断，**并在此计量**。
 
     各供应商的分块 `content` 有可能是结构化列表，`extract_text` 统一摊平成字符串。
 
     **这里是全项目唯一的用量累加点**：`iter_reply_events` 与 `collect_reply` 都经由本函数，
     分章节流水线的两个包装（`_stream_text` / `_collect`）也一样——一处覆盖全部调用点，
     新增生成入口只要走这条路就自动被计量，不会漏。事前预算同理。
+
+    **自愈也发生在这里**（ADR-016）：失败时若**还没有向调用方交付过任何增量**，就把整次调用
+    重来一遍。重来对消费者是透明的——一帧都还没出去，重开 `astream` 即可。
+    一旦交付过增量就绝不再来：那些字符已经流到了浏览器里撤不回来，重来会让前端收到
+    「半截 + 一份完整」的重复内容（T0 时代并发订阅踩过同款的坑）。
 
     计量所需的「这是哪一次生成、第几步」来自环境值（见 `llm_meter`），因此**没有新增
     任何函数参数**，业务层的调用方式一字未改。
@@ -104,31 +192,53 @@ async def astream_text(
 
     Raises:
         BudgetExceededError: 估算的输入超过预算，本次调用未发出。
+        CallTimeoutError: 单次调用超过墙钟硬顶被取消。
         OutputTruncatedError: 模型输出因达到 token 上限被截断。由调用方决定
             转成 `error` 事件还是直接上抛。
     """
     _check_budget(messages)
     meter = current_meter()
-    started_at = time.monotonic()
-    last_chunk: AIMessageChunk | None = None
-    async for chunk in llm.astream(messages):
-        text = extract_text(chunk.content)
-        last_chunk = chunk
-        if text:
-            yield text
+    settings = get_settings()
 
-    if meter is not None:
-        # 先计量再查截断：被截断的这次调用**照样烧了 token**，不该因为它抛错就漏记。
-        # （截断检查在下面，抛异常时本函数的 yield 已结束，但上面的累加已经完成。）
-        input_tokens, output_tokens = _chunk_usage(last_chunk)
-        meter.record(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            duration_ms=int(max(0.0, time.monotonic() - started_at) * 1000),
-        )
+    for attempt in range(settings.llm_max_retries + 1):
+        started_at = time.monotonic()
+        last_chunk: AIMessageChunk | None = None
+        text_emitted = False
+        try:
+            async with _total_deadline(settings.llm_total_timeout):
+                async for chunk in llm.astream(messages):
+                    last_chunk = chunk
+                    text = extract_text(chunk.content)
+                    if text:
+                        text_emitted = True
+                        yield text
+        except Exception as exc:  # noqa: BLE001 - 要不要重来由 `_is_retryable` 判，不在这里过滤
+            # 失败同样占用墙钟与一次请求，先记下来再决定要不要重来。
+            # （`CancelledError` 是 BaseException，不会被这里捕获，取消任务不会误记成失败。）
+            if meter is not None:
+                meter.record_failed(duration_ms=_elapsed_ms(started_at))
+            if (
+                text_emitted  # 内容已经交付，撤不回来
+                or not _is_retryable(exc)
+                or attempt >= settings.llm_max_retries
+            ):
+                raise
+            if settings.llm_retry_delay > 0:
+                await asyncio.sleep(settings.llm_retry_delay)
+            continue
 
-    if last_chunk is not None:
-        ensure_not_truncated(last_chunk)
+        # 成功路径（含「成功但被截断」）：先计量再查截断——
+        # 被截断的这次调用照样烧了 token，不该因为它随后抛错就漏记。
+        if meter is not None:
+            input_tokens, output_tokens = _chunk_usage(last_chunk)
+            meter.record(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=_elapsed_ms(started_at),
+            )
+        if last_chunk is not None:
+            ensure_not_truncated(last_chunk)
+        return
 
 
 def error_event(

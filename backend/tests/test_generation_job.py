@@ -147,6 +147,7 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(alice, monk
         assert set(step) == {
             "step",
             "calls",
+            "failed_calls",
             "prompt_tokens",
             "completion_tokens",
             "duration_ms",

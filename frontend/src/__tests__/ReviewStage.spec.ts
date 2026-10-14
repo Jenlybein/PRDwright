@@ -45,6 +45,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     status: 'completed',
     durationMs: 12_300,
     totalCalls: 8,
+    failedCalls: 0,
     promptTokens: 900,
     completionTokens: 300,
     steps: [],
@@ -206,6 +207,17 @@ describe('ReviewStage 的生成用量回执', () => {
     const code = wrapper.find('code')
     expect(code.exists()).toBe(true)
     expect(code.classes()).toContain('select-all')
+  })
+
+  it('没有失败调用时不提这一茬（正常情况下回执不该多一行）', () => {
+    const wrapper = mountWithSummary(runSummary())
+    expect(wrapper.text()).toContain('8 次调用')
+    expect(wrapper.text()).not.toContain('次调用失败后重试')
+  })
+
+  it('失败过的调用会说出来——它占用了时间却不在 token 数里', () => {
+    const wrapper = mountWithSummary(runSummary({ failedCalls: 2 }))
+    expect(wrapper.text()).toContain('其中 2 次调用失败后重试')
   })
 
   it('token 为 0 时不展示 token 段（取不到用量时不留一个「0 tokens」）', () => {

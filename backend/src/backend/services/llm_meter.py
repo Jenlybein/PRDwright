@@ -58,6 +58,8 @@ class RunMeter:
         self._total_calls = 0
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        # 失败调用单独计数：重试机制的废弃尝试也得看得见（见 `record_failed`）
+        self._failed_calls = 0
 
     # ------------------------------------------------------------------
     # 供流水线侧写入
@@ -90,26 +92,68 @@ class RunMeter:
         if previous is None or ratio > previous[0]:
             self._warnings[step] = (ratio, message)
 
-    def record(self, *, input_tokens: int = 0, output_tokens: int = 0, duration_ms: int = 0) -> None:
-        """记一次模型调用。
+    def _accumulate(
+        self,
+        step: str,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        duration_ms: int,
+        failed: bool,
+    ) -> None:
+        """成功与失败共用的累加入口，区别只在「记到哪一列」。
 
-        上游没给用量（部分供应商的流式集成默认不回吐）时传 0 即可：这一次调用
-        仍然计入 `calls` 与 `duration_ms`，「调了几次、花了多久」不会因此丢失。
+        失败的那次拿不到用量（多半连第一个字节都还没回来），但它**占用了时间与一次调用**，
+        两者都要记：否则「回执说 12 秒 3 次调用，实际花了 25 秒」这种偏差无从解释。
         """
-        step = self.current_step()
         usage = self._steps.get(step)
         if usage is None:
             usage = StepUsage(step=step)
             self._steps[step] = usage
 
+        usage.duration_ms += max(0, duration_ms)
+        if failed:
+            usage.failed_calls += 1
+            self._failed_calls += 1
+            return
+
         usage.calls += 1
         usage.prompt_tokens += input_tokens
         usage.completion_tokens += output_tokens
-        usage.duration_ms += duration_ms
-
         self._total_calls += 1
         self._prompt_tokens += input_tokens
         self._completion_tokens += output_tokens
+
+    def record(self, *, input_tokens: int = 0, output_tokens: int = 0, duration_ms: int = 0) -> None:
+        """记一次**拿到结果**的模型调用（含「结果被截断」——那也照烧 token）。
+
+        上游没给用量（部分供应商的流式集成默认不回吐）时传 0 即可：这一次调用
+        仍然计入 `calls` 与 `duration_ms`，「调了几次、花了多久」不会因此丢失。
+        """
+        self._accumulate(
+            self.current_step(),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            duration_ms=duration_ms,
+            failed=False,
+        )
+
+    def record_failed(self, *, duration_ms: int = 0) -> None:
+        """记一次**失败**的模型调用（网络断开、超时、5xx，以及重试前的废弃尝试）。
+
+        `calls` 保持只统计成功的调用，失败进 `failed_calls`：两个数字分开，
+        「总共发了几次请求」与「真正跑完了几次」才对得上。
+
+        Args:
+            duration_ms: 这次失败耗掉的时间；失败同样占用墙钟，必须计入。
+        """
+        self._accumulate(
+            self.current_step(),
+            input_tokens=0,
+            output_tokens=0,
+            duration_ms=duration_ms,
+            failed=True,
+        )
 
     # ------------------------------------------------------------------
     # 供出口侧读取
@@ -124,6 +168,8 @@ class RunMeter:
         """
         return {
             "total_calls": self._total_calls,
+            # 失败调用单独给一个数字：它与成功调用都是真金白银的等待，不该混在 total_calls 里
+            "failed_calls": self._failed_calls,
             "prompt_tokens": self._prompt_tokens,
             "completion_tokens": self._completion_tokens,
             "steps": [step.model_dump() for step in self._steps.values()],

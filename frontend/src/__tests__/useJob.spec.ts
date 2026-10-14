@@ -81,6 +81,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     status: 'completed',
     durationMs: 250,
     totalCalls: 3,
+    failedCalls: 0,
     promptTokens: 100,
     completionTokens: 50,
     steps: [],

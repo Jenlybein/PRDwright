@@ -60,6 +60,15 @@ def get_llm(
     # 自定义地址只在配置了时才注入，留空则交给 SDK 使用官方默认地址
     extra: dict[str, object] = dict(kwargs)
 
+    # 超时与重试的统一口径（ADR-016）：
+    # - `llm_timeout` 为 0 时表示沿用各家 SDK 自己的默认值，此时不传该参数。
+    # - SDK 自带的重试一律显式关掉，交由 `stream_reply` 统一接管。不是因为它不安全
+    #   （它的判定发生在「拿到响应」层，边界等同于「只在首字之前」），而是因为它在
+    #   本层不可见——废弃掉的尝试无法计量，回执上的 token 会系统性偏乐观。
+    #   不关掉还会与本层的重试叠成 `2 × N` 次。
+    # 业务层若通过 kwargs 显式指定了同名参数，以它的为准（走 `setdefault`）。
+    timeout = settings.llm_timeout or None
+
     if provider == "ark":
         # 火山方舟走官方 SDK，而不是 OpenAI 兼容伪装
         from backend.services.ark_llm import VolcanoArkChatModel
@@ -71,6 +80,7 @@ def get_llm(
             temperature=temperature,
             max_tokens=settings.ark_max_tokens,
             thinking_enabled=settings.ark_thinking_enabled,
+            timeout=timeout,
         )
 
     if provider == "anthropic":
@@ -81,6 +91,10 @@ def get_llm(
             extra.setdefault("base_url", settings.anthropic_api_url)
         # Anthropic 用 max_tokens 控制单次回复上限，避免长文档被截断
         extra.setdefault("max_tokens", settings.anthropic_max_tokens)
+        if timeout is not None:
+            extra.setdefault("default_request_timeout", timeout)
+        # 关掉 SDK 自带重试，让重试只在 stream_reply 这一处发生（见上面的说明）
+        extra.setdefault("max_retries", 0)
 
         return ChatAnthropic(
             model=model,
@@ -96,6 +110,10 @@ def get_llm(
             extra.setdefault("base_url", settings.openai_api_url)
         # OpenAI 用 max_tokens 控制单次回复上限（新版本也支持 max_completion_tokens）
         extra.setdefault("max_tokens", settings.openai_max_tokens)
+        if timeout is not None:
+            extra.setdefault("request_timeout", timeout)
+        # 同上：关掉 SDK 自带重试，重试由 stream_reply 统一管
+        extra.setdefault("max_retries", 0)
 
         return ChatOpenAI(
             model=model,

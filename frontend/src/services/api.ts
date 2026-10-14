@@ -296,6 +296,7 @@ function parseSteps(data: Record<string, unknown>): StepUsage[] {
   return readObjectArray(data, 'steps').map((item) => ({
     step: readString(item, 'step'),
     calls: readNumber(item, 'calls'),
+    failedCalls: readNumber(item, 'failed_calls'),
     promptTokens: readNumber(item, 'prompt_tokens'),
     completionTokens: readNumber(item, 'completion_tokens'),
     durationMs: readNumber(item, 'duration_ms'),
@@ -315,6 +316,7 @@ function parseRunSummary(data: Record<string, unknown>): RunSummary {
     status: readString(data, 'status'),
     durationMs: readNumber(data, 'duration_ms'),
     totalCalls: readNumber(data, 'total_calls'),
+    failedCalls: readNumber(data, 'failed_calls'),
     promptTokens: readNumber(data, 'prompt_tokens'),
     completionTokens: readNumber(data, 'completion_tokens'),
     steps: parseSteps(data),

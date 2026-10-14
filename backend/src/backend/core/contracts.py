@@ -104,7 +104,11 @@ class StepUsage(BaseModel):
     """
 
     step: str = Field(description="步骤名，形如 `prd:writing`")
-    calls: int = Field(default=0, description="该步骤内的模型调用次数")
+    calls: int = Field(default=0, description="该步骤内**拿到结果**的模型调用次数")
+    failed_calls: int = Field(
+        default=0,
+        description="该步骤内失败的调用次数（超时、断连、5xx，含重试前的废弃尝试）",
+    )
     prompt_tokens: int = Field(default=0, description="输入 token 累计")
     completion_tokens: int = Field(default=0, description="输出 token 累计")
     duration_ms: int = Field(default=0, description="该步骤累计耗时（毫秒）")
@@ -120,7 +124,14 @@ class RunSummary(BaseModel):
     kind: str = Field(default="", description="任务类型：prd / api_docs / prompts / optimize")
     status: str = Field(default="", description="终态：completed / failed")
     duration_ms: int = Field(default=0, description="任务总耗时（毫秒）")
-    total_calls: int = Field(default=0, description="模型调用总次数")
+    total_calls: int = Field(default=0, description="模型调用总次数（只统计拿到结果的调用）")
+    failed_calls: int = Field(
+        default=0,
+        description=(
+            "失败的调用次数。与 `total_calls` 分开是为了不互相污染：两者都是真实发生的请求，"
+            "混在一起会让「总共发了几次」失真。它的耗时也已计入各 step 的 `duration_ms`。"
+        ),
+    )
     prompt_tokens: int = Field(default=0, description="输入 token 总量")
     completion_tokens: int = Field(default=0, description="输出 token 总量")
     steps: list[StepUsage] = Field(default_factory=list, description="按步骤拆分的用量")

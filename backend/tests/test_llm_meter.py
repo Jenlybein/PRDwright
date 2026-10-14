@@ -101,6 +101,7 @@ def test_record_accumulates_per_step_and_total() -> None:
     assert usage["steps"][0] == {
         "step": "prd:writing",
         "calls": 2,
+        "failed_calls": 0,
         "prompt_tokens": 110,
         "completion_tokens": 55,
         "duration_ms": 1500,
@@ -128,6 +129,7 @@ def test_usage_shape_matches_run_summary_fields() -> None:
     meter = RunMeter(kind="prompts")
     assert set(meter.usage()) == {
         "total_calls",
+        "failed_calls",
         "prompt_tokens",
         "completion_tokens",
         "steps",

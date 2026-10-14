@@ -413,12 +413,15 @@ describe('生成任务接口（jobs）', () => {
             status: 'completed',
             duration_ms: 1234,
             total_calls: 3,
+            // 中途有过一次失败并被自愈回来
+            failed_calls: 1,
             prompt_tokens: 900,
             completion_tokens: 300,
             steps: [
               {
                 step: 'prd:writing',
                 calls: 2,
+                failed_calls: 1,
                 prompt_tokens: 800,
                 completion_tokens: 250,
                 duration_ms: 900,
@@ -426,6 +429,7 @@ describe('生成任务接口（jobs）', () => {
               {
                 step: 'prd:reviewing',
                 calls: 1,
+                failed_calls: 0,
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 duration_ms: 300,
@@ -486,12 +490,14 @@ describe('生成任务接口（jobs）', () => {
         status: 'completed',
         durationMs: 1234,
         totalCalls: 3,
+        failedCalls: 1,
         promptTokens: 900,
         completionTokens: 300,
         steps: [
           {
             step: 'prd:writing',
             calls: 2,
+            failedCalls: 1,
             promptTokens: 800,
             completionTokens: 250,
             durationMs: 900,
@@ -499,6 +505,7 @@ describe('生成任务接口（jobs）', () => {
           {
             step: 'prd:reviewing',
             calls: 1,
+            failedCalls: 0,
             promptTokens: 100,
             completionTokens: 50,
             durationMs: 300,
@@ -553,6 +560,7 @@ describe('生成任务接口（jobs）', () => {
       {
         step: 'api_docs',
         calls: 1,
+        failedCalls: 0,
         promptTokens: 0,
         completionTokens: 0,
         durationMs: 0,

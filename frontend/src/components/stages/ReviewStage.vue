@@ -149,6 +149,17 @@ function submitOptimize(): void {
         <span aria-hidden="true">·</span>
         <span>约 {{ formatTokens(totalTokens) }} tokens</span>
       </template>
+      <template v-if="runSummary.totalCalls > 0">
+        <span aria-hidden="true">·</span>
+        <span>{{ runSummary.totalCalls }} 次调用</span>
+      </template>
+      <!-- 失败过的调用：生成这次成功了（否则不会走到审核页），但过程中有抖动。
+           说出来是为了回答「为什么这次比平时慢」——它占用了真实的时间，
+           却又不在上面的 token 数里。同样不加按钮，只陈述。 -->
+      <template v-if="runSummary.failedCalls > 0">
+        <span aria-hidden="true">·</span>
+        <span>其中 {{ runSummary.failedCalls }} 次调用失败后重试</span>
+      </template>
       <template v-if="runSummary.requestId">
         <span aria-hidden="true">·</span>
         <span>
