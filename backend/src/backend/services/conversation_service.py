@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from backend.api.schemas import QuestionsConfig, StreamEvent
+from backend.core.contracts import QuestionsConfig, StreamEvent
 from backend.core.errors import ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import (

@@ -3,7 +3,10 @@ import { describe, expect, it } from 'vitest'
 import type { ChatMessage, RequirementsSummary, SessionDataV2 } from '@/types'
 import {
   canGeneratePrdFrom,
+  docKindOfState,
+  generatingStateFor,
   hasRequiredDocuments,
+  isDocKind,
   isEntryMode,
   isViewState,
   parseSessionSnapshot,
@@ -204,6 +207,8 @@ describe('会话快照解析', () => {
     prdContent: '# PRD',
     apiDocsContent: '',
     promptsContent: '',
+    activeJobId: null,
+    activeJobKind: null,
   }
 
   it('空值与非法 JSON 一律返回 null', () => {
@@ -293,5 +298,86 @@ describe('会话快照解析', () => {
       JSON.stringify({ ...full, quickInput: { productName: '小账本' } }),
     )
     expect(parsed?.session.quickInput).toEqual({ productName: '小账本', requirements: '' })
+  })
+})
+
+// ============================================================================
+// 带任务指针的快照恢复（刷新静默重连的判定依据）
+//
+// 生成与浏览器连接解耦后，`generating-*` 是否降级取决于快照里有没有一个还在跑的
+// 任务：有 -> 重连（不降级）；没有 -> 按原规则降级并给说明。这里是那条分叉的落点。
+// ============================================================================
+
+describe('带任务指针的快照恢复', () => {
+  const withJob = {
+    viewState: 'generating-prd',
+    entryMode: 'structured',
+    summary: null,
+    messages: [],
+    conversationId: '',
+    quickInput: { productName: '', requirements: '' },
+    debugPrdText: '',
+    prdContent: '',
+    apiDocsContent: '',
+    promptsContent: '',
+    activeJobId: 7,
+    activeJobKind: 'prd',
+  }
+
+  it('有进行中的任务时 generating-* 不降级：任务在后端继续跑，重连即可续上', () => {
+    expect(resolveRestoredPhase('generating-prd', true)).toEqual({
+      viewState: 'generating-prd',
+      downgrade: null,
+    })
+    // 没有任务时才回到原规则
+    expect(resolveRestoredPhase('generating-prd', false)).toEqual({
+      viewState: 'review-prd',
+      downgrade: 'generating',
+    })
+  })
+
+  it('快照带 activeJobId 时保留生成态与任务种类', () => {
+    const parsed = parseSessionSnapshot(JSON.stringify(withJob))
+    expect(parsed?.session.viewState).toBe('generating-prd')
+    expect(parsed?.downgrade).toBeNull()
+    expect(parsed?.session.activeJobId).toBe(7)
+    expect(parsed?.session.activeJobKind).toBe('prd')
+  })
+
+  it('任务指针非法 / 缺失时退化为 null，且仍然降级', () => {
+    const parsed = parseSessionSnapshot(
+      JSON.stringify({ ...withJob, activeJobId: 'abc', activeJobKind: 'prd' }),
+    )
+    expect(parsed?.session.activeJobId).toBeNull()
+    expect(parsed?.session.viewState).toBe('review-prd')
+    expect(parsed?.downgrade).toBe('generating')
+    // 指针没了，种类也不该留着——两者成对出现
+    expect(parsed?.session.activeJobKind).toBeNull()
+  })
+
+  it('任务种类非法时退化为 null，但任务指针仍保留', () => {
+    const parsed = parseSessionSnapshot(JSON.stringify({ ...withJob, activeJobKind: 'bogus' }))
+    expect(parsed?.session.activeJobId).toBe(7)
+    expect(parsed?.session.activeJobKind).toBeNull()
+  })
+
+  it('isDocKind 只承认四种文档种类', () => {
+    expect(isDocKind('prd')).toBe(true)
+    expect(isDocKind('api-docs')).toBe(true)
+    expect(isDocKind('prompts')).toBe(true)
+    expect(isDocKind('optimize')).toBe(true)
+    expect(isDocKind('bogus')).toBe(false)
+    expect(isDocKind(null)).toBe(false)
+  })
+
+  it('generatingStateFor / docKindOfState 互为逆映射（optimize 不占阶段）', () => {
+    expect(generatingStateFor('prd')).toBe('generating-prd')
+    expect(generatingStateFor('api-docs')).toBe('generating-api-docs')
+    expect(generatingStateFor('prompts')).toBe('generating-prompts')
+    expect(generatingStateFor('optimize')).toBeNull()
+    expect(docKindOfState('review-prd')).toBe('prd')
+    expect(docKindOfState('review-api-docs')).toBe('api-docs')
+    expect(docKindOfState('review-prompts')).toBe('prompts')
+    expect(docKindOfState('entry')).toBeNull()
   })
 })

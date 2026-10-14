@@ -2,13 +2,22 @@ import axios, { type AxiosResponse, type InternalAxiosRequestConfig } from 'axio
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import http, {
+  createJob,
+  fetchActiveJobs,
   generatePrdFromSummaryStream,
   onUnauthorized,
+  readJobStream,
   retrieveApiDocsRag,
   UnauthorizedError,
 } from '../services/api'
 import { ApiError } from '../services/errors'
-import type { StreamDocumentPart, StreamStageEvent, RequirementsSummary } from '../types'
+import type {
+  JobSnapshot,
+  RunSummary,
+  StreamDocumentPart,
+  StreamStageEvent,
+  RequirementsSummary,
+} from '../types'
 
 /**
  * SSE 解析测试。
@@ -335,5 +344,180 @@ describe('登录凭据与未登录处理', () => {
 
     await expect(http.post('/api/auth/login', {})).rejects.toThrow()
     expect(messages).toEqual([])
+  })
+})
+
+// ============================================================================
+// 生成任务（jobs）
+//
+// 有了任务，生成与浏览器连接解耦：刷新 / 断线只断订阅；重连时先收 `snapshot`
+// 再收 live。这里钉住三件事——请求方法 / 凭据、`snapshot` 的字段映射、以及
+// `run_summary` 的最小版契约。任何一处映射错位都不会报错，只会静默丢进度。
+// ============================================================================
+
+describe('生成任务接口（jobs）', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('createJob 以 POST /api/jobs 下发，kind 转成后端下划线口径', async () => {
+    const post = vi
+      .spyOn(http, 'post')
+      .mockResolvedValue({ data: { job_id: 11, status: 'running' } } as never)
+
+    const created = await createJob({
+      kind: 'api-docs',
+      solutionId: 3,
+      prdContent: '# PRD',
+      ragHits: [],
+    })
+
+    expect(post).toHaveBeenCalledTimes(1)
+    const [url, body] = post.mock.calls[0] ?? []
+    expect(url).toBe('/api/jobs')
+    const payload = body as Record<string, unknown>
+    // 前端用连字符、后端用下划线：转换只在 api.ts 一处发生
+    expect(payload.kind).toBe('api_docs')
+    expect(payload.solution_id).toBe(3)
+    expect(payload.prd_content).toBe('# PRD')
+    expect(created).toEqual({ jobId: 11, status: 'running' })
+  })
+
+  it('readJobStream 以 GET 订阅任务流，带凭据、带中止信号且不带 Content-Type', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      streamResponse([
+        sseFrame('snapshot', {
+          type: 'snapshot',
+          content: '',
+          data: {
+            job_id: 5,
+            kind: 'prd',
+            status: 'running',
+            phase: 'writing',
+            finalized_text: '# 产品需求文档\n\n',
+            live_buffer: '半句',
+            completed_sections: [
+              { section_id: 'overview', heading: '## 1. 产品概述', text: '## 1. 产品概述\n\n正文\n\n' },
+            ],
+            solution_id: 3,
+            error_code: '',
+            error_message: '',
+          },
+        }),
+        sseFrame('run_summary', {
+          type: 'run_summary',
+          content: '',
+          data: { kind: 'prd', status: 'completed', duration_ms: 1234 },
+        }),
+        sseFrame('done', { type: 'done', content: '', data: { reply: '# 产品需求文档\n\n半句' } }),
+        'data: [DONE]\n\n',
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const controller = new AbortController()
+    const snapshots: JobSnapshot[] = []
+    const summaries: RunSummary[] = []
+    const result = await readJobStream(
+      5,
+      { onSnapshot: (snap) => snapshots.push(snap), onRunSummary: (item) => summaries.push(item) },
+      controller.signal,
+    )
+
+    const [path, init] = fetchMock.mock.calls[0] ?? []
+    expect(path).toBe('/api/jobs/5/stream')
+    expect(init).toMatchObject({ method: 'GET', credentials: 'same-origin' })
+    // 订阅是 GET，不带 body，因此也不该带 Content-Type
+    expect(init?.headers).not.toHaveProperty('Content-Type')
+    // 退订靠这个信号：abort 只断本地读取，服务端任务照跑
+    expect(init?.signal).toBe(controller.signal)
+
+    expect(snapshots).toEqual([
+      {
+        jobId: 5,
+        kind: 'prd',
+        status: 'running',
+        phase: 'writing',
+        finalizedText: '# 产品需求文档\n\n',
+        liveBuffer: '半句',
+        completedSections: [
+          { sectionId: 'overview', heading: '## 1. 产品概述', text: '## 1. 产品概述\n\n正文\n\n' },
+        ],
+        solutionId: 3,
+        errorCode: '',
+        errorMessage: '',
+      },
+    ])
+    // run_summary 是最小版：只有 kind / status / duration_ms
+    expect(summaries).toEqual([{ kind: 'prd', status: 'completed', durationMs: 1234 }])
+    expect(result.reply).toBe('# 产品需求文档\n\n半句')
+  })
+
+  it('snapshot 的 completed_sections 逐项校验，坏项被丢弃而不打断整条流', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          sseFrame('snapshot', {
+            type: 'snapshot',
+            content: '',
+            data: {
+              job_id: 6,
+              // 第一项不是对象：应被丢弃，而不是让整段快照失效
+              completed_sections: ['坏项', { section_id: 'overview', heading: '## 1', text: '正文' }],
+            },
+          }),
+          sseFrame('done', { type: 'done', content: '', data: { reply: '正文' } }),
+        ]),
+      ),
+    )
+
+    const snapshots: JobSnapshot[] = []
+    await readJobStream(6, { onSnapshot: (snap) => snapshots.push(snap) })
+
+    expect(snapshots[0]?.completedSections).toEqual([
+      { sectionId: 'overview', heading: '## 1', text: '正文' },
+    ])
+    // 缺字段各退化为自己的默认值
+    expect(snapshots[0]?.status).toBe('')
+    expect(snapshots[0]?.solutionId).toBeNull()
+  })
+
+  it('只有 snapshot 没有 done 时，用快照的定稿正文 + 实时缓冲兜底作为 reply', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          sseFrame('snapshot', {
+            type: 'snapshot',
+            content: '',
+            data: { job_id: 8, status: 'completed', finalized_text: '# PRD\n\n', live_buffer: '半句' },
+          }),
+        ]),
+      ),
+    )
+
+    const result = await readJobStream(8)
+
+    // 任务在断线期间跑完了：没有 done 也要能拿到完整正文
+    expect(result.reply).toBe('# PRD\n\n半句')
+  })
+
+  it('fetchActiveJobs 按过滤条件拼查询参数，kind 用下划线口径', async () => {
+    const get = vi
+      .spyOn(http, 'get')
+      .mockResolvedValue({ data: { jobs: [{ id: 7, kind: 'api_docs', status: 'running' }] } } as never)
+
+    const jobs = await fetchActiveJobs({ solutionId: 3, kind: 'api-docs', status: 'running' })
+
+    expect(get).toHaveBeenCalledTimes(1)
+    const [url, config] = get.mock.calls[0] ?? []
+    expect(url).toBe('/api/jobs')
+    expect((config as { params: Record<string, unknown> }).params).toEqual({
+      solution_id: 3,
+      kind: 'api_docs',
+      status: 'running',
+    })
+    expect(jobs[0]).toMatchObject({ id: 7, kind: 'api_docs', status: 'running' })
   })
 })

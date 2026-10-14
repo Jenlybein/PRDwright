@@ -9,10 +9,14 @@
  *
  * ## 防抖与并发
  *
- * 状态变化 → 防抖 1.5s → 保存。生成期间（`generating-*`）不保存：那时快照是半成品，
- * 而且会高频变化；一次生成结束进入 `review-*` 时才落库。保存期间若有新的变化进来，
- * 只记一个「还得再存一次」的标记，等在途请求回来后再补一次，
- * 避免同一份方案被两个请求交错写入。
+ * 状态变化 → 防抖 1.5s → 保存。生成期间**也**保存：快照里只有任务指针
+ * （`activeJobId` / `activeJobKind`），半截正文不进快照（见 `shouldPersistStage`）。
+ *
+ * 落库是**单飞**的：所有保存都经 `scheduleSave` 发起，保证任一时刻至多一个请求在途。
+ * 这在创建路径上是硬要求——`createSolution` 返回之前 `currentId` 仍是 `null`，
+ * 两个并发请求会各自 `POST` 一次，库里就多出一份一模一样的方案（列表里两条同名记录）。
+ * 保存期间若有新的变化进来，只记「还得再存一次」，等当前这次回来后自动补存，
+ * 避免同一份方案被交错写入。
  *
  * ## 标题
  *
@@ -100,16 +104,26 @@ export const useSolutionsStore = defineStore('solutions', () => {
    * 不能只看 `timer`：`watch` 的回调是**异步**刷新的，改完状态到定时器被排上之间
    * 有一个微任务窗口；而 `flushPendingSave` 恰恰常在这个窗口里被调用
    * （「点了跳转 → 同步 flush」）。只看定时器会让那次 flush 静默丢掉。
+   *
+   * 另：它只在**保存成功**（或方案已被删除）时才被清掉，失败时保持置位，
+   * 这样 `flushPendingSave` 还知道该再试一次。
    */
   let dirty = false
 
-  /** 在途的保存请求 */
+  /**
+   * 改动版本号：每标记一次「有改动待落库」自增。
+   *
+   * 用来回答一个问题——**在途的那次保存，是否覆盖了它启动之后才发生的改动**。
+   * `scheduleSave` 启动时记下版本，收尾时版本变了就补存一次；版本没变就不再发请求。
+   * 用版本号而不是「在途期间又置过位」的布尔标记，是为了让**保存失败**（版本没变）
+   * 不会立刻触发重试：失败后 `dirty` 仍为真，重试交给下一次变更或 `flushPendingSave`。
+   */
+  let changeEpoch = 0
+
+  /** 在途的保存请求；`flushPendingSave` 靠它等到保存链排空 */
   let inFlight: Promise<void> | null = null
 
-  /** 在途期间又有新变化，返回后需要补存一次 */
-  let dirtyWhileSaving = false
-
-  /** 当前保存任务的 promise，供 `flushPendingSave` 等待 */
+  /** 取消尚未触发的防抖定时器 */
   function clearTimer(): void {
     if (timer !== undefined) {
       window.clearTimeout(timer)
@@ -118,13 +132,43 @@ export const useSolutionsStore = defineStore('solutions', () => {
   }
 
   /**
-   * 生成期间不保存。
+   * 发起一次保存——**所有落库动作的唯一入口**，保证任一时刻至多一个请求在途。
    *
-   * 这些状态下快照是半成品：文档正文只到一半，且每来一个 chunk 都会变。
-   * 真正值得落库的时刻是生成结束进入 `review-*`，那时会自然触发一次保存。
+   * 为什么必须单飞：创建路径上 `createSolution` 返回之前 `currentId` 一直是 `null`，
+   * 若防抖定时器与 `flushPendingSave` 各自并发跑一次 `saveNow`，两边都会走 `POST`，
+   * 数据库里就留下两份一模一样的方案。
+   *
+   * 在途时直接返回，不再做别的：期间发生的改动会体现在 `changeEpoch` 上，
+   * 由收尾逻辑统一决定要不要补存一次。
+   *
+   * 一开始就 `clearTimer()`：既然现在就存，那个防抖定时器已无意义，
+   * 留着它只会在补存之后再多发一个请求。
    */
-  function isStableStage(): boolean {
-    return !workflow.viewState.startsWith('generating-')
+  function scheduleSave(): void {
+    if (inFlight) return
+    clearTimer()
+    const epochAtStart = changeEpoch
+    saving.value = true
+    inFlight = saveNow()
+      .then(() => undefined)
+      .finally(() => {
+        saving.value = false
+        inFlight = null
+        // 保存期间又有改动：补存一次（此时通常已经拿到 id，走 PUT）
+        if (changeEpoch !== epochAtStart) scheduleSave()
+      })
+  }
+
+  /**
+   * 生成期间也保存——**去掉了旧的「`generating-*` 不保存」短路**。
+   *
+   * 任务与浏览器连接解耦后，快照里只保留「任务指针」（`activeJobId` / `activeJobKind`），
+   * 半截正文天然在 `useDocumentPipeline` 的临时 ref、不进快照，因此生成态保存是安全的；
+   * 而且**正因为要保存这个指针，刷新后才有东西可用来静默重连**。
+   * （旧的「等生成结束再落库」反而是这个特性缺失的根因。）
+   */
+  function shouldPersistStage(): boolean {
+    return true
   }
 
   /** 快照里有没有值得保存的内容（判定在 workflow store 里，避免两处口径不一致） */
@@ -330,20 +374,27 @@ export const useSolutionsStore = defineStore('solutions', () => {
   }
 
   /**
-   * 立即保存（若有待保存的变更），并等待在途请求结束。
+   * 立即保存（若有待保存的变更），并等待保存链彻底排空。
    *
    * 用在「即将离开当前方案 / 页面」这类时机：防抖窗口里可能还压着一次未发出的保存，
    * 不等它就跳转，最后一次改动就丢了。
+   *
+   * 注意这里是**发起保存，而不是直接调 `saveNow`**：若已有请求在途（例如防抖定时器
+   * 刚把创建请求发出去），再直接跑一次 `saveNow` 就是并发创建，库里会出现两份方案。
+   * 交给 `scheduleSave` 就只会在收尾时按需补存。
    */
   async function flushPendingSave(): Promise<void> {
     // 先等一次微任务，让 watch 的回调有机会跑完并排上定时器：
     // 调用方常常是「同步改完状态紧接着 flush」，那时 watch 还没执行。
     await nextTick()
 
-    const hadPending = dirty || timer !== undefined
+    // 既然现在就存，防抖定时器已无意义
     clearTimer()
-    if (hadPending) await saveNow()
-    if (inFlight) await inFlight
+    if (dirty) scheduleSave()
+
+    // 等到保存链排空——包括在途任务结束时自动补存的那一次，
+    // 否则调用方可能在最后一次改动还没写库时就跳转。
+    while (inFlight) await inFlight
   }
 
   /** 供测试与调试：是否有尚未落库的变更 */
@@ -371,32 +422,21 @@ export const useSolutionsStore = defineStore('solutions', () => {
         return
       }
 
-      // 生成中的半成品不存，等进入 review 态后会再来一次变更事件
-      if (!isStableStage()) return
+      // 生成态也保存（见 `shouldPersistStage` 的说明）：保存的是任务指针，
+      // 半截正文不进快照，因此这里不再按阶段短路。
+      if (!shouldPersistStage()) return
       if (!hasContent.value && currentId.value === null) return
 
-      // 记下「有未落库的改动」：即使后面因为页面跳转没能走到定时器回调，
-      // `flushPendingSave` 也还知道该补一次
+      // 记下「有未落库的改动」，并把改动版本推一格：
+      // 即使后面因为页面跳转没能走到定时器回调，`flushPendingSave` 也还知道该补一次；
+      // 而在途保存正是靠这个版本号判断「启动之后是否又有改动」。
       dirty = true
+      changeEpoch += 1
       clearTimer()
       timer = window.setTimeout(() => {
         timer = undefined
-        if (inFlight) {
-          // 上一次还没回来：记个标记，回来后再补一次，避免交错写入同一份方案
-          dirtyWhileSaving = true
-          return
-        }
-        saving.value = true
-        inFlight = saveNow()
-          .then(() => undefined)
-          .finally(() => {
-            saving.value = false
-            inFlight = null
-            if (dirtyWhileSaving) {
-              dirtyWhileSaving = false
-              void saveNow()
-            }
-          })
+        // 单飞入口：在途时它自己会记账，不会并发再发一个请求
+        scheduleSave()
       }, SAVE_DEBOUNCE_MS)
     },
   )

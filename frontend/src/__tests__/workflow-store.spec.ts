@@ -70,6 +70,8 @@ describe('useWorkflowStore', () => {
       prdContent: '',
       apiDocsContent: '',
       promptsContent: '',
+      activeJobId: null,
+      activeJobKind: null,
     })
 
     expect(store.restoreTick).toBe(before + 1)
@@ -91,6 +93,8 @@ describe('useWorkflowStore', () => {
       prdContent: '# 恢复的 PRD',
       apiDocsContent: '',
       promptsContent: '',
+      activeJobId: null,
+      activeJobKind: null,
     })
     await nextTick()
 
@@ -132,6 +136,8 @@ describe('useWorkflowStore', () => {
       prdContent: '# PRD',
       apiDocsContent: '# API',
       promptsContent: '# Prompts',
+      activeJobId: null,
+      activeJobKind: null,
     })
     // 运行态不在快照里
     expect('chatStreaming' in snapshot).toBe(false)
@@ -271,5 +277,38 @@ describe('useWorkflowStore', () => {
     store.promptsContent = '# Prompts'
     await nextTick()
     expect(store.canFinish).toBe(true)
+  })
+
+  it('任务指针是可持久化字段：变化触发保存信号，并随快照原样往返', async () => {
+    const store = useWorkflowStore()
+    const before = store.changeTick
+
+    store.activeJobId = 7
+    store.activeJobKind = 'prd'
+    await nextTick()
+
+    // 变化必须触发保存信号，否则「刷新后重连」所需的指针不会落库
+    expect(store.changeTick).toBeGreaterThan(before)
+
+    const snapshot = store.snapshot()
+    expect(snapshot.activeJobId).toBe(7)
+    expect(snapshot.activeJobKind).toBe('prd')
+
+    const fresh = useWorkflowStore()
+    fresh.reset()
+    fresh.applySnapshot(snapshot)
+    expect(fresh.activeJobId).toBe(7)
+    expect(fresh.activeJobKind).toBe('prd')
+  })
+
+  it('reset 清掉任务指针，避免刷新后重连一个已结束的任务', () => {
+    const store = useWorkflowStore()
+    store.activeJobId = 9
+    store.activeJobKind = 'prd'
+
+    store.reset()
+
+    expect(store.activeJobId).toBeNull()
+    expect(store.activeJobKind).toBeNull()
   })
 })

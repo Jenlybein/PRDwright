@@ -17,11 +17,12 @@ from backend.api.auth import router as auth_router
 from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
 from backend.api.deps import AuthMiddleware
+from backend.api.jobs import router as jobs_router
 from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
 from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
-from backend.services import auth_service
+from backend.services import auth_service, job_service
 
 settings = get_settings()
 
@@ -37,6 +38,8 @@ async def lifespan(_: FastAPI):
     # 开发模式下预先备好内置用户，业务数据落归属时才有恒非空的 user_id
     if not settings.auth_enabled:
         auth_service.ensure_dev_user()
+    # 收上次进程残留的 running 生成任务：内存运行时已随进程消失，DB 里不可能还有真在跑的
+    job_service.reap_orphans()
     yield
 
 
@@ -110,6 +113,7 @@ app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(config_router)
 app.include_router(solutions_router)
+app.include_router(jobs_router)
 
 
 @app.get("/", summary="服务根路径")

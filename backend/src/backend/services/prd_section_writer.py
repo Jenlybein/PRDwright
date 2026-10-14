@@ -68,8 +68,8 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from backend.api.schemas import StreamEvent
 from backend.core.config import get_settings
+from backend.core.contracts import StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object
 from backend.services.prd_skill import (

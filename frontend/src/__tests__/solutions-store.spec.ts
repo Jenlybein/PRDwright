@@ -12,7 +12,8 @@ import type { SolutionSummary } from '../types'
  * 这一层是持久化的**策略中心**，几处约定一旦写错都是「不报错但数据不对」：
  * 1. 「有内容了才建」——只点进入口看一眼不能落库；
  * 2. 首次 `POST` 拿到 id 后走 `PUT`（否则每次都新建，列表里堆一串同名方案）；
- * 3. 生成期间不保存（半成品 + 高频），进入 `review-*` 才落；
+ * 3. 生成期间**也保存**——快照里只留任务指针（`activeJobId` / `activeJobKind`），
+ *    半截正文不进快照；正因如此，刷新后才有东西可用来静默重连；
  * 4. 保存失败不阻断使用，且要把错误呈现给用户；
  * 5. 标题取产品名，取不到才退默认值。
  */
@@ -174,11 +175,11 @@ describe('创建与更新两条路径', () => {
 })
 
 // ============================================================================
-// 生成期间不保存
+// 生成期间也保存（持久化的核心目的：留住任务指针）
 // ============================================================================
 
-describe('生成期间不保存', () => {
-  it('generating-* 阶段的变化不落库', async () => {
+describe('生成期间也保存', () => {
+  it('generating-* 阶段的变化照样落库，且把任务指针写进快照', async () => {
     workflow.chooseEntry('structured')
     workflow.summary = {
       product_name: '订单系统',
@@ -190,11 +191,42 @@ describe('生成期间不保存', () => {
     await advanceDebounce()
     vi.mocked(solutionApi.updateSolution).mockClear()
 
+    // 进入生成态并记下任务指针：这一步必须落库，否则刷新后无从重连
     workflow.viewState = 'generating-prd'
+    workflow.activeJobId = 7
+    workflow.activeJobKind = 'prd'
     workflow.prdContent = '# 半成品'
     await advanceDebounce()
 
-    expect(solutionApi.updateSolution).not.toHaveBeenCalled()
+    expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
+    expect(payload?.stage).toBe('generating-prd')
+    // 任务指针随快照一起持久化——这正是「刷新后能静默重连」的落点
+    expect(payload?.data).toContain('"activeJobId":7')
+    expect(payload?.data).toContain('"activeJobKind":"prd"')
+  })
+
+  it('生成态 flushPendingSave 立即把任务指针落库而不等防抖窗口', async () => {
+    workflow.chooseEntry('structured')
+    workflow.summary = {
+      product_name: '订单系统',
+      product_goal: '收单',
+      target_users: [],
+      platform: '网页应用',
+      mvp_features: [],
+    }
+    await advanceDebounce()
+    vi.mocked(solutionApi.updateSolution).mockClear()
+
+    // 创建任务后紧接着 flush，把 activeJobId 落库（`useJob.start` 的第二次 flush）
+    workflow.viewState = 'generating-prd'
+    workflow.activeJobId = 9
+    workflow.activeJobKind = 'prd'
+    await solutions.flushPendingSave()
+
+    expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
+    expect(payload?.data).toContain('"activeJobId":9')
   })
 
   it('生成结束进入 review 态时补上这次保存', async () => {
@@ -213,6 +245,9 @@ describe('生成期间不保存', () => {
     await advanceDebounce()
     vi.mocked(solutionApi.updateSolution).mockClear()
 
+    // 生成结束：清掉任务指针并切到 review 态
+    workflow.activeJobId = null
+    workflow.activeJobKind = null
     workflow.viewState = 'review-prd'
     workflow.prdContent = '# 完整 PRD'
     await advanceDebounce()
@@ -221,6 +256,8 @@ describe('生成期间不保存', () => {
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
     expect(payload?.stage).toBe('review-prd')
     expect(payload?.data).toContain('完整 PRD')
+    // 任务已终态，指针不再留在快照里
+    expect(payload?.data).toContain('"activeJobId":null')
   })
 })
 
@@ -343,6 +380,45 @@ describe('保存失败与并发', () => {
 
     // 第一次回来后补存了一次（此时已有 id，走 PUT）
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
+  })
+
+  it('防抖保存还在途时又 flush：不会并发创建出第二份方案', async () => {
+    // 让首次创建「卡住」——这正是 `POST` 返回前 `currentId` 仍为 null 的窗口
+    let release: (() => void) | undefined
+    vi.mocked(solutionApi.createSolution).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(summary(1))
+        }),
+    )
+
+    workflow.chooseEntry('structured')
+    workflow.summary = {
+      product_name: '订单系统',
+      product_goal: '收单',
+      target_users: [],
+      platform: '网页应用',
+      mvp_features: [],
+    }
+
+    // 防抖到点：创建请求已经发出，但还没回来
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS)
+    expect(solutionApi.createSolution).toHaveBeenCalledTimes(1)
+
+    // 此刻调用方（点跳转 / 开新方案）要求立即落库，flush 撞上在途请求
+    const flushed = solutions.flushPendingSave()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // 关键：在途期间绝不能并发再发一个 POST，否则库里会出现两份同样的方案
+    expect(solutionApi.createSolution).toHaveBeenCalledTimes(1)
+
+    release?.()
+    await flushed
+
+    expect(solutionApi.createSolution).toHaveBeenCalledTimes(1)
+    expect(solutions.currentId).toBe(1)
+    expect(solutions.isPersisted).toBe(true)
+    expect(solutions.items).toHaveLength(1)
   })
 })
 

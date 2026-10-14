@@ -11,6 +11,7 @@
 import { STEP_OF_STATE, STEPS } from '@/types'
 import type {
   ChatMessage,
+  DocKind,
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
@@ -47,6 +48,13 @@ export function isViewState(value: unknown): value is ViewState {
 /** 判断任意值是否为合法入口模式 */
 export function isEntryMode(value: unknown): value is EntryMode {
   return value === 'structured' || value === 'prd-quick' || value === 'prompt-debug'
+}
+
+/** 判断任意值是否为合法文档种类（生成任务的 kind） */
+export function isDocKind(value: unknown): value is DocKind {
+  return (
+    value === 'prd' || value === 'api-docs' || value === 'prompts' || value === 'optimize'
+  )
 }
 
 /** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`） */
@@ -113,9 +121,18 @@ export interface RestoredPhase {
   downgrade: DowngradeKind | null
 }
 
-/** 依据快照里记录的阶段算出恢复后的阶段；非法值一律回到入口页 */
-export function resolveRestoredPhase(last: unknown): RestoredPhase {
+/**
+ * 依据快照里记录的阶段算出恢复后的阶段；非法值一律回到入口页。
+ *
+ * `hasActiveJob` 为真表示快照里记着一个**还在跑**的生成任务——此时 `generating-*`
+ * 不再降级：任务在后端继续跑，前端重连后由 `snapshot` 决定落点（续流 / 落稿）。
+ * 无任务时才按原规则降级并给出说明。
+ */
+export function resolveRestoredPhase(last: unknown, hasActiveJob = false): RestoredPhase {
   if (!isViewState(last)) return { viewState: 'entry', downgrade: null }
+  if (hasActiveJob && isGeneratingPhase(last)) {
+    return { viewState: last, downgrade: null }
+  }
   const fallback = STATE_DOWNGRADE[last]
   if (fallback) return { viewState: fallback.state, downgrade: fallback.kind }
   return { viewState: last, downgrade: null }
@@ -124,6 +141,43 @@ export function resolveRestoredPhase(last: unknown): RestoredPhase {
 /** 是否处于「文档生成中」阶段（进度条呼吸高亮用） */
 export function isGeneratingPhase(state: ViewState): boolean {
   return state.startsWith('generating-')
+}
+
+/**
+ * 文档种类 → 对应的「生成中」阶段；`optimize` 就地流式、不改变阶段，故返回 `null`。
+ *
+ * 供「刷新后兜底找回任务」把种类还原成阶段（重连时要切回生成态视图）。
+ */
+export function generatingStateFor(kind: DocKind): ViewState | null {
+  switch (kind) {
+    case 'prd':
+      return 'generating-prd'
+    case 'api-docs':
+      return 'generating-api-docs'
+    case 'prompts':
+      return 'generating-prompts'
+    default:
+      return null
+  }
+}
+
+/**
+ * 「待确认」阶段 → 文档种类。
+ *
+ * 用于「刷新后无 activeJobId、但快照落在 generating-*」的兜底：降级后落到 review-*，
+ * 由它反推原本在生成哪份文档，再去查活跃任务。
+ */
+export function docKindOfState(state: ViewState): DocKind | null {
+  switch (state) {
+    case 'review-prd':
+      return 'prd'
+    case 'review-api-docs':
+      return 'api-docs'
+    case 'review-prompts':
+      return 'prompts'
+    default:
+      return null
+  }
 }
 
 /** 是否处于「文档待确认」阶段 */
@@ -225,6 +279,11 @@ function parseQuickInput(value: unknown): QuickPrdInput {
   }
 }
 
+/** 解析快照里的进行中任务 id；缺失 / 非法 / 非正数一律退化为 null */
+function parseActiveJobId(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+}
+
 /** 快照解析结果 */
 export interface ParsedSessionSnapshot {
   session: SessionDataV2
@@ -238,13 +297,17 @@ export interface ParsedSessionSnapshot {
  * 每个字段单独做类型校验，脏数据只会丢弃对应字段，不会让整份快照失效——
  * 快照是跨版本存下来的，用「一个字段不对就整份作废」的严格模式会让用户平白丢掉整份工作。
  *
- * 阶段若落在无法恢复的中间态（如 `generating-prd`），这里会一并给出降级结果。
+ * 阶段若落在无法恢复的中间态（如 `generating-prd`），这里会一并给出降级结果；
+ * 但若快照里记着一个进行中的任务（`activeJobId`），则 `generating-*` **不降级**——
+ * 任务在后端继续跑，重连即可续上。
  */
 export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot | null {
   if (typeof parsed !== 'object' || parsed === null) return null
 
   const record = parsed as Partial<SessionDataV2>
-  const { viewState, downgrade } = resolveRestoredPhase(record.viewState)
+  const activeJobId = parseActiveJobId(record.activeJobId)
+  const hasActiveJob = activeJobId !== null
+  const { viewState, downgrade } = resolveRestoredPhase(record.viewState, hasActiveJob)
 
   return {
     downgrade,
@@ -262,6 +325,8 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
       prdContent: typeof record.prdContent === 'string' ? record.prdContent : '',
       apiDocsContent: typeof record.apiDocsContent === 'string' ? record.apiDocsContent : '',
       promptsContent: typeof record.promptsContent === 'string' ? record.promptsContent : '',
+      activeJobId,
+      activeJobKind: hasActiveJob && isDocKind(record.activeJobKind) ? record.activeJobKind : null,
     },
   }
 }

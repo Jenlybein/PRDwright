@@ -4,10 +4,14 @@ import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
 import type { BackendErrorCode } from '@/services/errors'
 import type {
   ChatMessage,
+  CompletedSection,
+  DocKind,
+  JobSnapshot,
   QuestionsConfig,
   RagHit,
   RequirementAnswers,
   RequirementsSummary,
+  RunSummary,
   StreamDocumentPart,
   StreamStageEvent,
 } from '@/types'
@@ -123,6 +127,8 @@ export interface StreamEventPayload {
     | 'error'
     | 'tool_call'
     | 'document'
+    | 'snapshot'
+    | 'run_summary'
   /** 文本内容（增量文本或提示语） */
   content: string
   /** 事件附加数据，如 conversation_id 与完整 reply */
@@ -153,6 +159,17 @@ export interface StreamHandlers {
    * 改写时重置本章的实时缓冲。
    */
   onStage?: (event: StreamStageEvent) => void
+  /**
+   * 收到任务流首发的 `snapshot` 事件时触发。
+   * 目前只有生成任务（`/api/jobs/{id}/stream`）会下发：刷新重连时先用它补全
+   * 断线前已产出的正文，再接 live 流。
+   */
+  onSnapshot?: (snapshot: JobSnapshot) => void
+  /**
+   * 收到任务收尾的 `run_summary` 事件时触发。最小版 `{kind, status, durationMs}`，
+   * 前端只做记录，不做 UI。
+   */
+  onRunSummary?: (summary: RunSummary) => void
 }
 
 /** 一次流式对话的结果 */
@@ -226,6 +243,48 @@ function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
 }
 
 /**
+ * 把任务流 `snapshot` 事件的 `data` 归一成 `JobSnapshot`。
+ *
+ * 与其它解析函数同一口径：字段缺失或类型不对只退化那一个字段，不打断整条流。
+ * `completedSections` 会逐项校验，坏项被丢弃而不是让整段快照失效。
+ */
+function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
+  const rawSections = data.completed_sections
+  const completedSections: CompletedSection[] = Array.isArray(rawSections)
+    ? rawSections
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => ({
+          sectionId: readString(item, 'section_id'),
+          heading: readString(item, 'heading'),
+          text: readString(item, 'text'),
+        }))
+    : []
+
+  const rawSolutionId = data.solution_id
+  return {
+    jobId: readNumber(data, 'job_id'),
+    kind: readString(data, 'kind'),
+    status: readString(data, 'status'),
+    phase: readString(data, 'phase'),
+    finalizedText: readString(data, 'finalized_text'),
+    liveBuffer: readString(data, 'live_buffer'),
+    completedSections,
+    solutionId: typeof rawSolutionId === 'number' ? rawSolutionId : null,
+    errorCode: readString(data, 'error_code'),
+    errorMessage: readString(data, 'error_message'),
+  }
+}
+
+/** 把任务流 `run_summary` 事件的 `data` 归一成 `RunSummary`。 */
+function parseRunSummary(data: Record<string, unknown>): RunSummary {
+  return {
+    kind: readString(data, 'kind'),
+    status: readString(data, 'status'),
+    durationMs: readNumber(data, 'duration_ms'),
+  }
+}
+
+/**
  * 解析单个 SSE 事件块。
  *
  * 后端每个事件都同时输出 `event:` 与 `data:` 两行，二者重复，这里以 `event:`
@@ -268,34 +327,46 @@ function parseSseBlock(block: string): StreamEventPayload | null {
   }
 }
 
+/** 一次流式请求的描述：POST 带 body，GET 不带 */
+interface StreamRequest {
+  method: 'POST' | 'GET'
+  path: string
+  body?: unknown
+  /** 可选的中止信号：`detach()` 用它退订（不取消服务端任务） */
+  signal?: AbortSignal
+}
+
 /**
- * 执行一次 SSE 流式请求，读取并消费事件流。
+ * 执行一次 SSE 流式请求，读取并消费事件流（**POST 与 GET 共用同一套解析**）。
  *
  * axios 不支持读取流式响应体，所以这里直接用 `fetch` + `ReadableStream` 消费
- * SSE：按空行切分事件块，逐块解析后把状态提示与增量文本回调给调用方。
+ * SSE：按空行切分事件块，逐块解析后把各类事件回调给调用方。
  *
- * @param path 接口路径，如 `/api/conversation/start-stream`
- * @param body 请求体
- * @param handlers 状态提示与增量文本的回调
+ * POST（文档生成）与 GET（生成任务订阅 `/api/jobs/{id}/stream`）只是请求方法不同，
+ * 分帧 / `[DONE]` / 错误处理完全相同，因此收口在这一个函数里，绝不复制解析逻辑。
+ *
+ * @param request 请求描述（方法 / 路径 / 可选 body）
+ * @param handlers 各类事件的回调
  * @returns 完整回复文本与事件附加数据里出现过的字段（如 conversation_id）
  * @throws 网络异常、HTTP 非 2xx，以及后端下发的 `error` 事件——后者抛 `ApiError`，
  *   调用方按 `code` 分支（见 `services/errors.ts`），不要匹配 message 里的中文文案
  */
-async function readStream(
-  path: string,
-  body: unknown,
+async function readStreamRequest(
+  request: StreamRequest,
   handlers: StreamHandlers = {},
 ): Promise<StreamResult> {
-  const response = await fetch(path, {
-    method: 'POST',
+  const hasBody = request.body !== undefined
+  const response = await fetch(request.path, {
+    method: request.method,
     // 这里不能省：fetch 默认不发送 Cookie，而登录态就在 Cookie 里。
     // 少了它，流式接口会稳定地 401，且因为「普通接口没事」而极难定位。
     credentials: 'same-origin',
     headers: {
-      'Content-Type': 'application/json',
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
       Accept: 'text/event-stream',
     },
-    body: JSON.stringify(body),
+    ...(hasBody ? { body: JSON.stringify(request.body) } : {}),
+    ...(request.signal ? { signal: request.signal } : {}),
   })
 
   if (response.status === 401) {
@@ -339,6 +410,17 @@ async function readStream(
       case 'done':
         conversationId = readString(event.data, 'conversation_id') || conversationId
         reply = readString(event.data, 'reply') || reply
+        break
+      case 'snapshot': {
+        const snapshot = parseSnapshotEvent(event.data)
+        // 尚未收到 done 前，用快照的定稿正文 + 实时缓冲先兜一份 reply：
+        // 这样「任务已完成、只有快照没有 done」时也能拿到完整正文。
+        if (!reply) reply = snapshot.finalizedText + snapshot.liveBuffer
+        handlers.onSnapshot?.(snapshot)
+        break
+      }
+      case 'run_summary':
+        handlers.onRunSummary?.(parseRunSummary(event.data))
         break
       case 'error':
         // 文案（message）照旧给人和日志看，分支判断走 code：
@@ -602,6 +684,156 @@ export function optimizeDocumentStream(
       document: payload.document,
       instruction: payload.instruction,
     },
+    handlers,
+  )
+}
+
+/**
+ * 兼容旧调用点：以 `POST` 发起一次流式请求。
+ *
+ * 保留这个名字是因为对话 / 文档生成的调用点都按「POST + body」使用它，
+ * 内部转交给 `readStreamRequest`，解析逻辑只有一份。
+ */
+async function readStream(
+  path: string,
+  body: unknown,
+  handlers: StreamHandlers = {},
+): Promise<StreamResult> {
+  return readStreamRequest({ method: 'POST', path, body }, handlers)
+}
+
+// ============================================================================
+// 生成任务（jobs）：创建 / 查询 / 订阅
+//
+// 有了任务，生成与浏览器连接解耦：刷新 / 断线只断订阅，不中断任务；重连时先收
+// `snapshot`（补全已产出正文）再接 live，实现页面恢复后的自动静默重连。
+// ============================================================================
+
+/** 后端 `kind` 用下划线，前端 `DocKind` 用连字符——这里是唯一的转换点 */
+function toBackendKind(kind: DocKind): string {
+  return kind === 'api-docs' ? 'api_docs' : kind
+}
+
+/** 创建任务响应 */
+export interface JobCreated {
+  /** 任务 id */
+  jobId: number
+  /** 初始状态，创建时恒为 running */
+  status: string
+}
+
+/** 任务状态摘要（列表 / 查询共用；**不含正文**） */
+export interface JobStatusSummary {
+  id: number
+  /** 后端原始 kind（下划线口径） */
+  kind: string
+  status: string
+  phase: string
+  solutionId: number | null
+  errorCode: string
+  errorMessage: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** 把后端任务状态响应归一成前端结构（字段缺失给安全默认值） */
+function toJobStatus(data: unknown): JobStatusSummary {
+  const raw = (data ?? {}) as Record<string, unknown>
+  return {
+    id: typeof raw.id === 'number' ? raw.id : 0,
+    kind: typeof raw.kind === 'string' ? raw.kind : '',
+    status: typeof raw.status === 'string' ? raw.status : '',
+    phase: typeof raw.phase === 'string' ? raw.phase : '',
+    solutionId: typeof raw.solution_id === 'number' ? raw.solution_id : null,
+    errorCode: typeof raw.error_code === 'string' ? raw.error_code : '',
+    errorMessage: typeof raw.error_message === 'string' ? raw.error_message : '',
+    createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
+    updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
+  }
+}
+
+/** `createJob` 入参：`kind` + 各类型各自的字段（无关字段留空即可） */
+export interface CreateJobPayload {
+  kind: DocKind
+  solutionId?: number | null
+  summary?: RequirementsSummary | null
+  requirements?: string
+  productName?: string
+  history?: ChatMessage[]
+  prdContent?: string
+  ragHits?: RagHit[]
+  document?: string
+  instruction?: string
+}
+
+/**
+ * 创建一次生成任务并启动后台生成。
+ * 对应后端 `POST /api/jobs`。
+ */
+export async function createJob(payload: CreateJobPayload): Promise<JobCreated> {
+  const { data } = await http.post<{ job_id: number; status: string }>('/api/jobs', {
+    kind: toBackendKind(payload.kind),
+    solution_id: payload.solutionId ?? null,
+    summary: payload.summary ?? null,
+    requirements: payload.requirements ?? '',
+    product_name: payload.productName ?? '',
+    // 只保留后端认识的 role / content 两个字段
+    history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+    prd_content: payload.prdContent ?? '',
+    rag_hits: payload.ragHits ?? [],
+    document: payload.document ?? '',
+    instruction: payload.instruction ?? '',
+  })
+  return {
+    jobId: typeof data?.job_id === 'number' ? data.job_id : 0,
+    status: typeof data?.status === 'string' ? data.status : 'running',
+  }
+}
+
+/**
+ * 读取单个任务的状态摘要。
+ * 对应后端 `GET /api/jobs/{id}`。
+ */
+export async function fetchJob(jobId: number): Promise<JobStatusSummary> {
+  const { data } = await http.get(`/api/jobs/${jobId}`)
+  return toJobStatus(data)
+}
+
+/**
+ * 按 owner + 过滤条件查询任务（兜底找回）。
+ * 对应后端 `GET /api/jobs`。
+ *
+ * 典型用途：刷新后快照里没有 `activeJobId`，用
+ * `{solutionId, kind, status:'running'}` 仍能找到那个还在跑的任务并重连。
+ */
+export async function fetchActiveJobs(filters: {
+  solutionId?: number | null
+  kind?: DocKind
+  status?: string
+}): Promise<JobStatusSummary[]> {
+  const params: Record<string, string | number> = {}
+  if (filters.solutionId != null) params.solution_id = filters.solutionId
+  if (filters.kind) params.kind = toBackendKind(filters.kind)
+  if (filters.status) params.status = filters.status
+  const { data } = await http.get<{ jobs?: unknown[] }>('/api/jobs', { params })
+  const jobs = Array.isArray(data?.jobs) ? data.jobs : []
+  return jobs.map(toJobStatus)
+}
+
+/**
+ * 订阅一个生成任务的事件流（SSE，GET）。
+ * 对应后端 `GET /api/jobs/{id}/stream`。
+ *
+ * 订阅开始时后端会**先发一份 `snapshot`**（补全断线前已产出的正文），再接 live 事件；
+ * 因此刷新后重连只需调用它，即可「静默」把进度接上。
+ */
+export function readJobStream(
+  jobId: number,
+  handlers?: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<StreamResult> {
+  return readStreamRequest(
+    { method: 'GET', path: `/api/jobs/${jobId}/stream`, signal },
     handlers,
   )
 }

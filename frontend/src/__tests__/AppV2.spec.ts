@@ -6,10 +6,43 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppV2 from '../AppV2.vue'
 import * as api from '../services/api'
+import * as authService from '../services/authService'
 import * as solutionApi from '../services/solutionService'
 import { useAuthStore } from '../stores/auth'
 import { useWorkflowStore } from '../stores/workflow'
-import type { RagHit, RequirementsSummary, StreamDocumentPart, StreamStageEvent } from '../types'
+import type {
+  JobSnapshot,
+  RagHit,
+  RequirementsSummary,
+  StreamDocumentPart,
+  StreamStageEvent,
+} from '../types'
+
+/**
+ * 生成任务撮合器。
+ *
+ * 流水线已从「一次请求」升级为「一个后端任务」：`useJob` 先 `createJob`、再
+ * `readJobStream`。测试要按 **kind** 决定这次任务该产出哪一类事件，而
+ * `readJobStream` 只拿得到 `jobId`——因此这里用一张 `jobId → kind` 的表把两者接上，
+ * 让每个用例只需配置「prd 这条流怎么跑」，不必关心它拿到的是哪个 id。
+ */
+const jobHarness = vi.hoisted(() => {
+  const kinds = new Map<number, string>()
+  let nextId = 1
+  return {
+    kinds,
+    register(kind: string): number {
+      const id = nextId
+      nextId += 1
+      kinds.set(id, kind)
+      return id
+    },
+    reset(): void {
+      kinds.clear()
+      nextId = 1
+    },
+  }
+})
 
 /**
  * 编排层测试：把流式接口整体 mock 掉，专注验证「第一步换成结构化表单」后
@@ -19,10 +52,13 @@ import type { RagHit, RequirementsSummary, StreamDocumentPart, StreamStageEvent 
 vi.mock('../services/api', () => ({
   startConversationStream: vi.fn(),
   continueConversationStream: vi.fn(),
-  generatePrdFromSummaryStream: vi.fn(),
-  generateApiDocsStream: vi.fn(),
-  generatePromptsStream: vi.fn(),
-  optimizeDocumentStream: vi.fn(),
+  createJob: vi.fn(async (payload: { kind: string }) => ({
+    jobId: jobHarness.register(payload.kind),
+    status: 'running',
+  })),
+  readJobStream: vi.fn(),
+  fetchActiveJobs: vi.fn(async () => []),
+  fetchJob: vi.fn(),
   syncSummaryFromConversation: vi.fn(),
   retrieveApiDocsRag: vi.fn(),
   onUnauthorized: vi.fn(),
@@ -69,6 +105,76 @@ vi.mock('../services/solutionService', () => ({
   updateSolution: vi.fn(async () => null),
   deleteSolution: vi.fn(async () => undefined),
 }))
+
+/**
+ * 默认任务流：按 kind 产出一段可断言的最小正文。
+ *
+ * 三类文档各自有可辨识的标题，断言「PRD 文档 / 提示词套件」时就不必再各自配置流；
+ * 需要观察中间态的用例再用 `mockJobStream` 覆盖对应的那条。
+ */
+async function defaultJobStream(
+  kind: string,
+  handlers: api.StreamHandlers,
+): Promise<api.StreamResult> {
+  if (kind === 'prompts') {
+    handlers.onChunk?.('# 提示词套件\n')
+    return { conversationId: '', reply: '# 提示词套件\n\n## 一、角色设定\n内容' }
+  }
+  if (kind === 'api-docs') {
+    handlers.onChunk?.('# 接口文档\n')
+    return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构' }
+  }
+  if (kind === 'optimize') {
+    return { conversationId: '', reply: '优化后的内容' }
+  }
+  handlers.onChunk?.('# 产品需求文档\n')
+  return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
+}
+
+/**
+ * 覆盖某些 kind 的任务流；未覆盖的 kind 沿用 `defaultJobStream`。
+ *
+ * 单参数设计让用例只需声明「prd 这条流怎么跑」，其余文档仍按默认走完，
+ * 不会因为覆盖了一个 kind 而把别的链路一并打断。
+ */
+function mockJobStream(
+  overrides: Partial<Record<string, (handlers: api.StreamHandlers) => Promise<api.StreamResult>>> = {},
+): void {
+  vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
+    const kind = jobHarness.kinds.get(jobId) ?? 'prd'
+    const override = overrides[kind]
+    if (override) return override(handlers ?? {})
+    return defaultJobStream(kind, handlers ?? {})
+  })
+}
+
+/** 某一类文档被创建了几次 */
+function jobCount(kind: string): number {
+  return vi.mocked(api.createJob).mock.calls.filter((call) => call[0]?.kind === kind).length
+}
+
+/** 取某一类文档最近一次的任务创建载荷（同种文档可能被重跑，取最后一次） */
+function jobPayload(kind: string): api.CreateJobPayload | undefined {
+  const calls = vi.mocked(api.createJob).mock.calls.filter((call) => call[0]?.kind === kind)
+  return calls[calls.length - 1]?.[0]
+}
+
+/** 造一份任务快照（刷新重连时后端首发的事件） */
+function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
+  return {
+    jobId: 1,
+    kind: 'prd',
+    status: 'running',
+    phase: '',
+    finalizedText: '',
+    liveBuffer: '',
+    completedSections: [],
+    solutionId: 1,
+    errorCode: '',
+    errorMessage: '',
+    ...overrides,
+  }
+}
 
 /** 按 id 查找元素（结构化行级 id 含点号，须用属性选择器） */
 function byId(wrapper: VueWrapper | DOMWrapper<Element>, id: string): DOMWrapper<Element> {
@@ -164,6 +270,8 @@ async function reachPrdReview(wrapper: VueWrapper): Promise<void> {
 
 /** 每个用例前重置 mock，并给出各接口的安全默认实现 */
 beforeEach(() => {
+  // 任务 id 从头开始，避免跨用例串号（登记表只在 `createJob` 成功时增长）
+  jobHarness.reset()
   vi.clearAllMocks()
 
   // 默认：回填结果与当前摘要一致（无变更）
@@ -173,16 +281,10 @@ beforeEach(() => {
   }))
   // 默认：没有检索到规范
   vi.mocked(api.retrieveApiDocsRag).mockResolvedValue({ hits: [] })
-  // 默认：PRD 生成成功
-  vi.mocked(api.generatePrdFromSummaryStream).mockImplementation(async (_payload, handlers) => {
-    handlers?.onChunk?.('# 产品需求文档\n')
-    return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
-  })
-  // 默认：提示词生成成功（提示词调试入口直接从这一步开始）
-  vi.mocked(api.generatePromptsStream).mockImplementation(async (_payload, handlers) => {
-    handlers?.onChunk?.('# 提示词套件\n')
-    return { conversationId: '', reply: '# 提示词套件\n\n## 一、角色设定\n内容' }
-  })
+  // 默认：三类文档各自生成成功（按任务 kind 派发，见 `defaultJobStream`）
+  mockJobStream()
+  // 默认：没有还在跑的活跃任务（兜底查询落空，保持降级提示）
+  vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
 
   // 方案持久化：默认给一组无害实现，避免每挂载一次就真的发请求。
   // 需要「打开已有方案」的用例会各自覆盖 `fetchSolution`。
@@ -223,6 +325,19 @@ function loggedInPinia(): Pinia {
   const auth = useAuthStore(pinia)
   auth.user = { id: 1, username: 'tester' }
   auth.ready = true
+  return pinia
+}
+
+/**
+ * 造一个「尚未探测登录态」的 Pinia（用户为空、探测未完成）。
+ *
+ * 登录态探测是首屏触发「恢复方案」的**第二条路径**：`auth.load()` 由 AppV2 在 setup
+ * 阶段发起，探测完成后 `isLoggedIn` 才由 false 翻成 true。`loggedInPinia()` 预置了
+ * 登录态，这条路径不会发生；要复现「首屏同时被两个入口触发」就必须用它。
+ */
+function pendingLoginPinia(): Pinia {
+  const pinia = createPinia()
+  setActivePinia(pinia)
   return pinia
 }
 
@@ -364,8 +479,9 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('项目背景')
 
-    // PRD 生成拿到的是与 field-schema 对齐的结构化 JSON
-    const payload = vi.mocked(api.generatePrdFromSummaryStream).mock.calls[0]?.[0]
+    // PRD 生成拿到的是与 field-schema 对齐的结构化 JSON（走 createJob 下发）
+    const payload = jobPayload('prd')
+    expect(payload?.kind).toBe('prd')
     // 直接下发结构化摘要字典，需求文本由后端统一格式化
     expect(payload?.summary?.product_name).toBe('PRDwright')
     expect(payload?.summary?.mvp_features?.[0]?.name).toBe('问卷填写')
@@ -404,7 +520,7 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('小团队产品经理')
     expect(wrapper.text()).toContain('省时间')
     expect(wrapper.text()).toContain('共 2 处变更')
-    expect(api.generatePrdFromSummaryStream).not.toHaveBeenCalled()
+    expect(jobCount('prd')).toBe(0)
 
     // 回填请求带上了当前摘要与完整对话历史
     const syncPayload = vi.mocked(api.syncSummaryFromConversation).mock.calls[0]?.[0]
@@ -416,8 +532,8 @@ describe('AppV2 完整流程编排', () => {
 
     // 确认后摘要被写回，PRD 需求文本里带上了新增的目标用户
     expect(wrapper.text()).toContain('PRD 文档')
-    expect(api.generatePrdFromSummaryStream).toHaveBeenCalledTimes(1)
-    const prdPayload = vi.mocked(api.generatePrdFromSummaryStream).mock.calls[0]?.[0]
+    expect(jobCount('prd')).toBe(1)
+    const prdPayload = jobPayload('prd')
     // 回填结果已写回摘要，并作为生成输入下发
     expect(prdPayload?.summary?.target_users).toContain('小团队产品经理')
     expect(prdPayload?.summary?.mvp_features?.[0]?.user_value).toBe('省时间')
@@ -444,7 +560,7 @@ describe('AppV2 完整流程编排', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('需求澄清对话')
-    expect(api.generatePrdFromSummaryStream).not.toHaveBeenCalled()
+    expect(jobCount('prd')).toBe(0)
     // 摘要未被改动：回到第一步看到的仍是原平台
     expect((byId(wrapper, 'field-platform').element as HTMLInputElement).value).toBe('网页应用')
   })
@@ -455,9 +571,11 @@ describe('AppV2 完整流程编排', () => {
       reply: '已理解需求。',
     }))
     vi.mocked(api.retrieveApiDocsRag).mockResolvedValue({ hits: [SAMPLE_HIT] })
-    vi.mocked(api.generateApiDocsStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('# 接口文档\n')
-      return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构' }
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.('# 接口文档\n')
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构' }
+      },
     })
 
     const wrapper = await mountApp()
@@ -469,7 +587,7 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('接口规范检索结果')
     expect(wrapper.text()).toContain('列表与分页规范')
     expect(wrapper.text()).toContain('相关度 0.31')
-    expect(api.generateApiDocsStream).not.toHaveBeenCalled()
+    expect(jobCount('api-docs')).toBe(0)
 
     // 检索请求带上了 PRD 正文
     const ragPayload = vi.mocked(api.retrieveApiDocsRag).mock.calls[0]?.[0]
@@ -479,9 +597,9 @@ describe('AppV2 完整流程编排', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('接口文档')
-    expect(api.generateApiDocsStream).toHaveBeenCalledTimes(1)
+    expect(jobCount('api-docs')).toBe(1)
     // 勾选的命中随生成请求下发
-    const docsPayload = vi.mocked(api.generateApiDocsStream).mock.calls[0]?.[0]
+    const docsPayload = jobPayload('api-docs')
     expect(docsPayload?.ragHits?.[0]?.title).toBe('列表与分页规范')
   })
 
@@ -500,7 +618,7 @@ describe('AppV2 完整流程编排', () => {
     await clickButton(wrapper, '取消')
     await flushPromises()
 
-    expect(api.generateApiDocsStream).not.toHaveBeenCalled()
+    expect(jobCount('api-docs')).toBe(0)
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).not.toContain('接口规范检索结果')
   })
@@ -511,10 +629,9 @@ describe('AppV2 完整流程编排', () => {
       reply: '已理解需求。',
     }))
     vi.mocked(api.retrieveApiDocsRag).mockRejectedValue(new Error('接口规范检索失败：文件缺失'))
-    vi.mocked(api.generateApiDocsStream).mockImplementation(async () => ({
-      conversationId: '',
-      reply: '# 接口文档\n内容',
-    }))
+    mockJobStream({
+      'api-docs': async () => ({ conversationId: '', reply: '# 接口文档\n内容' }),
+    })
 
     const wrapper = await mountApp()
     await reachPrdReview(wrapper)
@@ -526,8 +643,8 @@ describe('AppV2 完整流程编排', () => {
     await clickButton(wrapper, '直接生成接口文档')
     await flushPromises()
 
-    expect(api.generateApiDocsStream).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(api.generateApiDocsStream).mock.calls[0]?.[0]?.ragHits).toEqual([])
+    expect(jobCount('api-docs')).toBe(1)
+    expect(jobPayload('api-docs')?.ragHits).toEqual([])
   })
 
   it('「改需求」回到第一步，表单内容与对话记录都不丢', async () => {
@@ -610,6 +727,159 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).not.toContain('需求摘要更新确认')
   })
 
+  it('恢复路径 1：快照带 activeJobId 时静默重连该任务，先收快照补全正文再接 live', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
+      expect(jobId).toBe(42)
+      // 后端订阅时首发 snapshot：用它把断线前已产出的正文补齐
+      handlers?.onSnapshot?.(
+        makeJobSnapshot({
+          jobId: 42,
+          kind: 'prd',
+          status: 'running',
+          phase: 'writing',
+          finalizedText: '# 产品需求文档\n\n## 1. 项目背景\n',
+          liveBuffer: '断线前的半句',
+        }),
+      )
+      handlers?.onChunk?.('续写')
+      return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n断线前的半句续写' }
+    })
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      prdContent: '',
+      apiDocsContent: '',
+      promptsContent: '',
+      activeJobId: 42,
+      activeJobKind: 'prd',
+    })
+
+    // 有任务指针时 generating-* 不降级：任务在后端继续跑，重连即可
+    expect(wrapper.text()).not.toContain('上次的生成未完成')
+    expect(api.readJobStream).toHaveBeenCalledWith(42, expect.anything(), expect.anything())
+    // 不新建任务，只是订阅既有任务
+    expect(jobCount('prd')).toBe(0)
+    // 快照补全的正文 + live 续写一起落稿
+    expect(wrapper.text()).toContain('PRD 文档')
+    expect(wrapper.text()).toContain('断线前的半句续写')
+  })
+
+  it('恢复路径 2：无指针但快照落在生成中时兜底查到活跃任务，撤销降级并重连', async () => {
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([
+      {
+        id: 7,
+        kind: 'prd',
+        status: 'running',
+        phase: 'writing',
+        solutionId: 1,
+        errorCode: '',
+        errorMessage: '',
+        createdAt: '2026-10-13T00:00:00',
+        updatedAt: '2026-10-13T00:00:00',
+      },
+    ])
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      prdContent: '',
+      apiDocsContent: '',
+      promptsContent: '',
+    })
+
+    // 兜底查询带上了当前方案与文档种类
+    expect(api.fetchActiveJobs).toHaveBeenCalledWith({ solutionId: 1, kind: 'prd', status: 'running' })
+    // 命中活跃任务：撤销降级提示，切回生成态并重连
+    expect(wrapper.text()).not.toContain('上次的生成未完成')
+    expect(api.readJobStream).toHaveBeenCalledWith(7, expect.anything(), expect.anything())
+    expect(wrapper.text()).toContain('PRD 文档')
+  })
+
+  it('恢复路径 3：兜底查询落空时保持降级提示，不发起任何订阅', async () => {
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      prdContent: '',
+      apiDocsContent: '',
+      promptsContent: '',
+    })
+
+    expect(api.fetchActiveJobs).toHaveBeenCalledTimes(1)
+    expect(api.readJobStream).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('上次的生成未完成')
+  })
+
+  it('首屏「路由落位」与「登录态探测」同时触发恢复时只订阅一次', async () => {
+    // 快照里带着任务指针：两条触发路径都会走到「静默重连该任务」
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue(
+      makeSolutionDetail(1, {
+        viewState: 'generating-prd',
+        entryMode: 'structured',
+        summary: SAMPLE_SUMMARY,
+        messages: [],
+        conversationId: '',
+        quickInput: { productName: '', requirements: '' },
+        debugPrdText: '',
+        prdContent: '',
+        apiDocsContent: '',
+        promptsContent: '',
+        activeJobId: 42,
+        activeJobKind: 'prd',
+      }),
+    )
+    // 任务流**不结束**：真实生成会跑几分钟，守卫必须覆盖整个生成窗口
+    mockJobStream({
+      prd: (handlers) => {
+        handlers.onSnapshot?.(
+          makeJobSnapshot({
+            jobId: 42,
+            kind: 'prd',
+            status: 'running',
+            phase: 'writing',
+            finalizedText: '# 产品需求文档\n',
+          }),
+        )
+        return new Promise<api.StreamResult>(() => {})
+      },
+    })
+
+    // 登录态探测「卡住」：等路由先落位，再放行，制造两条路径先后触发
+    let releaseAuth: () => void = () => {}
+    vi.mocked(authService.fetchCurrentUser).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseAuth = () => resolve({ id: 1, username: 'tester' })
+        }),
+    )
+
+    const router = makeRouter()
+    // 刻意「先挂载、后落位路由」：生产环境 `main.ts` 未等待 `router.isReady()` 就挂载，
+    // 于是 `routeSolutionId` 会由 null 变为 id，与登录态探测一起触发两次加载
+    mount(AppV2, { global: { plugins: [pendingLoginPinia(), router] } })
+    await router.push('/v2/1')
+    await flushPromises()
+
+    releaseAuth()
+    await flushPromises()
+
+    // 同一份方案只加载一次、同一个任务只订阅一次——两路 SSE 事件不会交错写进同一份预览
+    expect(solutionApi.fetchSolution).toHaveBeenCalledTimes(1)
+    expect(api.readJobStream).toHaveBeenCalledTimes(1)
+    expect(api.readJobStream).toHaveBeenCalledWith(42, expect.anything(), expect.anything())
+  })
+
   it('重新开始：回到入口页并清空表单、入口模式与会话内容', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
@@ -687,9 +957,9 @@ describe('AppV2 入口模式', () => {
     // 关键：一次摘要回填都没发生，也就没有弹过确认面板
     expect(api.syncSummaryFromConversation).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('需求摘要更新确认')
-    expect(api.generatePrdFromSummaryStream).toHaveBeenCalledTimes(1)
+    expect(jobCount('prd')).toBe(1)
 
-    const payload = vi.mocked(api.generatePrdFromSummaryStream).mock.calls[0]?.[0]
+    const payload = jobPayload('prd')
     expect(payload?.requirements).toBe('做一个记账 App，支持多人共享账本。')
     expect(payload?.productName).toBe('小账本')
     // 没有结构化摘要，也没有对话历史
@@ -768,7 +1038,7 @@ describe('AppV2 入口模式', () => {
     await clickButton(wrapper, '生成提示词套件', true)
     await flushPromises()
 
-    const payload = vi.mocked(api.generatePromptsStream).mock.calls[0]?.[0]
+    const payload = jobPayload('prompts')
     expect(payload?.prdContent).toContain('家庭记账工具')
     expect(wrapper.text()).toContain('提示词套件')
     expect(wrapper.text()).toContain('角色设定')
@@ -794,7 +1064,7 @@ describe('AppV2 入口模式', () => {
     const generate = wrapper.findAll('button').find((item) => item.text().trim() === '生成提示词套件')
     expect((generate?.element as HTMLButtonElement).disabled).toBe(true)
 
-    expect(api.generatePromptsStream).not.toHaveBeenCalled()
+    expect(jobCount('prompts')).toBe(0)
     expect(wrapper.text()).toContain('请先贴入 PRD 正文')
   })
 
@@ -868,14 +1138,17 @@ describe('AppV2 分章节生成的阶段展示', () => {
       conversationId: 'conv-1',
       reply: '已理解需求。',
     })
-    vi.mocked(api.generatePrdFromSummaryStream).mockImplementation((_payload, handlers) => {
-      state.handlers = handlers
-      return new Promise((resolve) => {
-        state.finish = async (reply: string) => {
-          resolve({ conversationId: '', reply })
-          await flushPromises()
-        }
-      })
+    // 用「手动放行」的 PRD 任务流替换默认实现，才能观察到生成过程中的中间态
+    mockJobStream({
+      prd: (handlers) => {
+        state.handlers = handlers
+        return new Promise<api.StreamResult>((resolve) => {
+          state.finish = async (reply: string) => {
+            resolve({ conversationId: '', reply })
+            await flushPromises()
+          }
+        })
+      },
     })
 
     await submitSampleForm(wrapper)
@@ -978,6 +1251,33 @@ describe('AppV2 分章节生成的阶段展示', () => {
     expect(wrapper.text()).toContain('PRD 文档')
   })
 
+  it('同一段定稿正文被重复投递时预览不重复（重复订阅也污染不了预览）', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledPrdGeneration(wrapper)
+
+    // 文档头与第一章各投递两遍——等价于「同一个任务被订阅了两次」时客户端的所见
+    await pushPart(stream, '# 产品需求文档\n\n')
+    await pushPart(stream, '# 产品需求文档\n\n')
+
+    await pushStage(stream, 'writing')
+    stream.handlers?.onChunk?.('## 1. 产品概述\n\n正文内容\n')
+    await nextTick()
+
+    const overview: Partial<StreamDocumentPart> = {
+      sectionId: 'overview',
+      sectionTitle: '产品概述',
+      sectionHeading: '## 1. 产品概述',
+      total: 7,
+    }
+    await pushPart(stream, '## 1. 产品概述\n\n正文内容\n\n', overview)
+    await pushPart(stream, '## 1. 产品概述\n\n正文内容\n\n', overview)
+
+    const text = wrapper.text()
+    // 重复的 part 被守卫丢弃：文档头与本章正文都只出现一次
+    expect(text.split('产品需求文档').length - 1).toBe(1)
+    expect(text.split('正文内容').length - 1).toBe(1)
+  })
+
   it('改写时保留上一版草稿（不出现空白期），新内容流出后原地替换', async () => {
     const wrapper = await mountApp()
     const stream = await startControlledPrdGeneration(wrapper)
@@ -1014,9 +1314,11 @@ describe('AppV2 分章节生成的阶段展示', () => {
       conversationId: 'conv-1',
       reply: '已理解需求。',
     })
-    vi.mocked(api.generatePrdFromSummaryStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('# 产品需求文档\n\n## 1. 项目背景\n内容')
-      return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
+    mockJobStream({
+      prd: async (handlers) => {
+        handlers.onChunk?.('# 产品需求文档\n\n## 1. 项目背景\n内容')
+        return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
+      },
     })
 
     const wrapper = await mountApp()

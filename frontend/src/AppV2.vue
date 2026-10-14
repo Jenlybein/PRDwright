@@ -19,10 +19,11 @@ import QuickPrdStage from '@/components/stages/QuickPrdStage.vue'
 import ReviewStage from '@/components/stages/ReviewStage.vue'
 import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
-import { onUnauthorized } from '@/services/api'
+import { fetchActiveJobs, onUnauthorized } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
+import { docKindOfState, generatingStateFor } from '@/utils/workflow'
 import type { EntryMode, RequirementsSummary, StepId } from '@/types'
 
 /**
@@ -110,6 +111,14 @@ watch(
 /** 短暂展示的提示语（草稿保存 / 提交 / 闸门确认等） */
 const savedTip = ref('')
 
+/**
+ * 正在「打开并恢复」的方案 id 集合（单飞守卫，见 `loadAndResume` 的说明）。
+ *
+ * 必须声明在**注册 watch 之前**：登录态 watch 是 `immediate` 的，会在 setup 阶段
+ * 就调用 `loadAndResume`，晚于它声明就会撞上暂时性死区。
+ */
+const resumingSolutionIds = new Set<number>()
+
 /** 提示语的定时器 */
 let savedTipTimer: number | undefined
 
@@ -163,7 +172,7 @@ watch(
     if (!now) return
     void solutions.loadList()
     if (routeSolutionId.value !== null) {
-      void solutions.openSolution(routeSolutionId.value)
+      void loadAndResume(routeSolutionId.value)
     }
   },
   { immediate: true },
@@ -183,6 +192,84 @@ solutions.setCreatedHandler((id) => {
 solutions.setOpenedHandler((id) => {
   if (id === null && routeSolutionId.value !== null) void router.replace('/v2')
 })
+
+/**
+ * 恢复快照后自动「静默重连」进行中的生成任务。
+ *
+ * 三条路径：
+ * 1. 快照里记着 `activeJobId`：直接重连该任务（后端先发 `snapshot` 补全正文，再接 live）；
+ * 2. 无指针但快照原本落在 `generating-*`（已被降级为 `review-*`）：兜底查一次活跃任务，
+ *    命中则把指针写回 store、撤销降级并重连；
+ * 3. 都未命中：什么都不做，保持既有「上次生成未完成」的降级提示。
+ *
+ * 全程无需用户点击——这正是「生成与连接解耦」带来的体验。
+ */
+async function resumeAfterRestore(): Promise<void> {
+  if (store.activeJobId !== null) {
+    await reconnectJob(store.activeJobId)
+    return
+  }
+
+  if (store.downgrade !== 'generating') return
+  const kind = docKindOfState(store.viewState)
+  if (!kind) return
+
+  try {
+    const jobs = await fetchActiveJobs({
+      solutionId: solutions.currentId,
+      kind,
+      status: 'running',
+    })
+    const match = jobs[0]
+    if (!match) return
+    store.activeJobId = match.id
+    store.activeJobKind = kind
+    // 命中活跃任务：撤销降级、切回生成态，再重连
+    store.downgrade = null
+    const target = generatingStateFor(kind)
+    if (target) store.viewState = target
+    await reconnectJob(match.id)
+  } catch {
+    // 兜底查询失败不改变降级结果：保持既有提示即可
+  }
+}
+
+/**
+ * 打开一份方案并在成功后尝试重连进行中的任务。
+ *
+ * 一次硬刷新会**从两个入口同时**触发「打开并恢复同一份方案」：
+ * 1. 路由从初始空路由解析到 `/v2/{id}`（`routeSolutionId` 由 `null` 变为 id）；
+ * 2. 登录态探测完成（`isLoggedIn` 由 `false` 变为 `true`）。
+ *
+ * 两个入口都是异步的，各自 `await` 一串网络请求。不折叠的话就会并发跑两遍
+ * `openSolution`，进而跑两遍静默重连——**同一个任务被订阅两次**，两路 SSE 事件
+ * 交错写进同一份预览缓冲（表现为整段章节重复、表格单元格成对出现：
+ * `| 编号 | 编号 | 功能模块 | 功能模块 |`）。而最终落稿取的是 `done.reply`，
+ * 所以「预览全乱、存下来的正文却是好的」正是这个路径的特征。
+ *
+ * 单测里 `await router.push()` 先于挂载，路由在挂载时已经就位、不会再变化，
+ * 因此这条路径在单测中走不到；生产环境 `main.ts` 未等待 `router.isReady()` 就挂载，
+ * 才会命中——这也是它一直没被测出来的原因。
+ *
+ * 守卫按方案 id 单飞，两道叠加：
+ * - 正在打开/恢复该方案时直接返回（覆盖并发窗口——重连会 `await` 到任务流结束）；
+ * - 该方案已经是「当前打开的」时直接返回（覆盖两次触发**先后**发生的情形，
+ *   后一次的前一次已经落地）。
+ *
+ * 这与路由 watcher 里的 `id === solutions.currentId` 是同一口径，只是登录态那条
+ * 触发路径没有这个短路，需要在入口处补齐。
+ */
+async function loadAndResume(id: number): Promise<void> {
+  if (resumingSolutionIds.has(id)) return
+  if (solutions.currentId === id) return
+  resumingSolutionIds.add(id)
+  try {
+    const ok = await solutions.openSolution(id)
+    if (ok) await resumeAfterRestore()
+  } finally {
+    resumingSolutionIds.delete(id)
+  }
+}
 
 /**
  * 加载完后若地址带了 id 但方案打不开（被删 / 越权），退回新建页并说明原因，
@@ -210,7 +297,7 @@ watch(routeSolutionId, (id) => {
     return
   }
   if (id === solutions.currentId) return
-  void solutions.openSolution(id)
+  void loadAndResume(id)
 })
 
 /**
@@ -271,6 +358,7 @@ const {
   rejectSummaryDiff,
   confirmRag,
   cancelRag,
+  reconnectJob,
   reset: resetPipeline,
 } = useDocumentPipeline({ onNotice: flashSavedTip })
 

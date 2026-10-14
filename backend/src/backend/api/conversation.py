@@ -14,6 +14,12 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from backend.api import schemas
+from backend.api.sse import (  # noqa: F401 - SSE_DONE/SSE_HEADERS/make_sse_generator 仅作再导出
+    SSE_DONE,
+    SSE_HEADERS,
+    make_sse_generator,
+    sse_response,
+)
 from backend.core.errors import AppError, ErrorCode
 from backend.services import conversation_service, document_service
 
@@ -22,64 +28,8 @@ router = APIRouter(prefix="/api/conversation", tags=["conversation"])
 # 问卷配置文件：backend/src/backend/core/question_config.json
 QUESTIONS_CONFIG_PATH = Path(__file__).resolve().parents[1] / "core" / "question_config.json"
 
-# SSE 结束标记，前端收到后主动关闭连接
-SSE_DONE = "[DONE]"
-
-# SSE 响应头：禁用缓存与 Nginx 缓冲，保证流式实时输出
-SSE_HEADERS = {
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
-
-
-def _format_sse_block(event: schemas.StreamEvent) -> str:
-    """把单个事件格式化成标准 SSE 块。
-
-    同时输出 `event:` 与 `data:` 两行：前端既可以用
-    `addEventListener(event.type, ...)` 分类型监听，也可以只监听默认消息、
-    再解析 `data` 里的 `type` 字段。事件体统一为 JSON，`content` 里的换行
-    会被 JSON 转义，因此 `data:` 始终保持单行，不会破坏 SSE 帧边界。
-
-    Args:
-        event: 待发送的事件。
-
-    Returns:
-        形如 `event: chunk\\ndata: {...}\\n\\n` 的字符串。
-    """
-    return f"event: {event.type}\ndata: {event.model_dump_json()}\n\n"
-
-
-def _make_sse_generator(events: AsyncIterator[schemas.StreamEvent]) -> AsyncIterator[str]:
-    """把服务层产出的事件流包装成 SSE（text/event-stream）文本。
-
-    服务层自身已把异常转成 `error` 事件，这里再兜一层：万一生成器抛出未捕获
-    异常，也补发一个 `error` 块，避免连接直接断开而前端收不到任何提示。
-    无论正常结束还是出错，最后都会补发 `[DONE]` 标记。
-
-    Args:
-        events: 服务层返回的 `StreamEvent` 异步迭代器。
-
-    Yields:
-        符合 SSE 规范的字符串片段，每个事件为 `event:` + `data:` 组成的块。
-    """
-    # 事件流的转码在生成器内部完成，避免路由层掺入序列化逻辑
-    async def generator() -> AsyncIterator[str]:
-        try:
-            async for event in events:
-                yield _format_sse_block(event)
-        except Exception as exc:  # noqa: BLE001 - SSE 流里必须把异常转成事件
-            yield _format_sse_block(
-                schemas.StreamEvent(
-                    type="error",
-                    content=f"生成失败：{exc}",
-                    data={"error_type": type(exc).__name__},
-                    code=ErrorCode.INTERNAL_ERROR.value,
-                )
-            )
-        yield f"data: {SSE_DONE}\n\n"
-
-    return generator()
+# SSE 的分帧与响应头已抽到 `backend/api/sse.py`（`/api/jobs/{id}/stream` 也用它），
+# 路由统一改用 `sse_response(events)`，分帧行为逐字节不变。
 
 
 @router.get("/questions", response_model=schemas.QuestionsConfig, summary="获取需求澄清问卷")
@@ -189,11 +139,7 @@ async def start_conversation_stream(
         form_data=payload.answers,
         title=payload.title,
     )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return sse_response(events)
 
 
 @router.post("/continue-stream", summary="接续对话（SSE 流式返回）")
@@ -215,11 +161,7 @@ async def continue_conversation_stream(
         conversation_id=payload.conversation_id or None,
         history=history,
     )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return sse_response(events)
 
 
 # ============================================================================
@@ -242,11 +184,7 @@ async def generate_prd_stream(
         requirements=payload.requirements,
         history=history,
     )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return sse_response(events)
 
 
 @router.post(
@@ -280,11 +218,7 @@ async def generate_prd_from_summary_stream(
         product_name=payload.product_name,
         history=history,
     )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return sse_response(events)
 
 
 @router.post("/generate-api-docs-stream", summary="根据 PRD 生成接口文档（SSE 流式返回）")
@@ -300,11 +234,7 @@ async def generate_api_docs_stream(
         prd_content=payload.prd_content,
         rag_hits=[hit.model_dump() for hit in payload.rag_hits] or None,
     )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return sse_response(events)
 
 
 @router.post("/generate-prompts-stream", summary="根据 PRD 生成提示词套件（SSE 流式返回）")
@@ -315,11 +245,7 @@ async def generate_prompts_stream(
     events = document_service.generate_prompts_stream(
         prd_content=payload.prd_content,
     )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return sse_response(events)
 
 
 @router.post("/optimize-document-stream", summary="优化文档（SSE 流式返回）")
@@ -331,9 +257,5 @@ async def optimize_document_stream(
         document=payload.document,
         instruction=payload.instruction,
     )
-    return StreamingResponse(
-        _make_sse_generator(events),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return sse_response(events)
 

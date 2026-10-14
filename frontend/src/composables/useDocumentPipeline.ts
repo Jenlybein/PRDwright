@@ -2,17 +2,17 @@ import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
 import {
-  generateApiDocsStream,
-  generatePrdFromSummaryStream,
-  generatePromptsStream,
-  optimizeDocumentStream,
   retrieveApiDocsRag,
   syncSummaryFromConversation,
   type GeneratePrdFromSummaryPayload,
+  type StreamHandlers,
 } from '@/services/api'
+import { useJob, type JobStartInput } from '@/composables/useJob'
 import { useWorkflowStore } from '@/stores/workflow'
 import type {
   ChatMessage,
+  DocKind,
+  JobSnapshot,
   PrdGenerationStage,
   PrdStageProgress,
   RagHit,
@@ -112,6 +112,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    */
   const prdRewriteGhost = ref('')
 
+  /**
+   * 已并入预览的章节 id 集合（文档头单独用一个标记）。
+   *
+   * 预览是**累积**出来的（`prdFinalizedText += part.text`），所以必须能识别重复投递：
+   * 同一章（或文档头）的 `part` 只认第一次，重复到达直接丢弃。
+   *
+   * 没有这道防线时，任何让「同一个任务被订阅两次」的路径都会把两路事件交错写进
+   * 同一份缓冲——表现为文档里出现两遍「1. 产品概述」，表格单元格成对重复
+   * （`| 编号 | 编号 | 功能模块 | 功能模块 |`）。这两个标记只做守卫、不参与渲染，
+   * 因此用普通变量而不是 `ref`，避免给每次增量都挂上无谓的响应式开销。
+   */
+  let deliveredSectionIds = new Set<string>()
+  let headerDelivered = false
+
   /** 分章节生成是否处于「写入中」等阶段（非 PRD 文档恒为 false） */
   const prdStatus = computed<PrdStageProgress | null>(() =>
     activeDocKey.value === 'prd' ? prdProgress.value : null,
@@ -134,11 +148,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       prdFinalizedText.value + (prdLiveBuffer.value || prdRewriteGhost.value)
   }
 
-  /** 清空分章节预览的三段缓冲 */
+  /** 清空分章节预览的三段缓冲，并复位「已定稿」守卫 */
   function clearPrdPreview(): void {
     prdFinalizedText.value = ''
     prdLiveBuffer.value = ''
     prdRewriteGhost.value = ''
+    deliveredSectionIds = new Set<string>()
+    headerDelivered = false
   }
 
   /** 进入 PRD 生成前的复位：先按「撰写中」占位，等后端 stage 事件再细化 */
@@ -161,9 +177,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 同时丢掉实时缓冲——它装的是这一段的原始 `chunk`，此刻已被加工后的版本取代。
    * 这样预览与最终 `reply` 逐字一致，「标题凭空消失」「与上一段粘连」这类偏差
    * 从结构上不可能再出现，而不是靠两边各自拼得一样。
+   *
+   * **幂等**：章节按 `sectionId`、文档头按「是否已收到」去重。重复投递的 `part`
+   * 被直接丢弃——这是「同一任务被订阅两次」也污染不了预览的结构性保证。
    */
   function handlePrdPart(part: StreamDocumentPart): void {
     if (!part.text) return
+    if (part.sectionId) {
+      if (deliveredSectionIds.has(part.sectionId)) return
+      deliveredSectionIds.add(part.sectionId)
+    } else {
+      // 没有 sectionId 的 `part` 只可能是文档头（后端在正文最前一次性下发）
+      if (headerDelivered) return
+      headerDelivered = true
+    }
     prdFinalizedText.value += part.text
     prdLiveBuffer.value = ''
     prdRewriteGhost.value = ''
@@ -278,46 +305,163 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // 文档生成与优化
   // -------------------------------------------------------------------------
 
-  /**
-   * 执行一次文档流式生成，并把增量实时写入 `docStreamingContent`。
-   *
-   * @param docKey 目标文档 key，用于在出错时定位提示
-   * @param request 实际发起请求的闭包
-   * @param options.sectioned 本次是否走「分章节 PRD」链路；只有它才需要保留
-   *   阶段进度条。其它情况（含对 **PRD 正文本身**的 AI 优化）都要把上一轮残留的
-   *   进度清掉，否则会显示一个语义无关的「全部章节已完成」。
-   * @returns `{ reply, ok }`：`ok` 为 false 表示生成失败（如被截断），
-   *   此时 `reply` 为已流出的半截内容，调用方不应把它当作完整文档推进流程。
-   */
-  async function runDocumentStream(
-    docKey: DocKey,
-    request: () => Promise<{ reply: string }>,
-    options: { sectioned?: boolean } = {},
-  ): Promise<{ reply: string; ok: boolean }> {
-    activeDocKey.value = docKey
-    isGenerating.value = true
-    docStreamingContent.value = ''
-    docError.value = ''
-    if (!options.sectioned) prdProgress.value = null
+  // -------------------------------------------------------------------------
+  // 生成任务接线（任务生命周期交给 useJob；预览仍由本文件负责，单一出口不变）
+  // -------------------------------------------------------------------------
 
-    let reply = ''
-    let ok = true
-    try {
-      const result = await request()
-      reply = result.reply
-    } catch (error) {
-      ok = false
-      docError.value = error instanceof Error ? error.message : String(error)
-      // 报错时保留已经流出的半截内容，供用户查看已生成到哪一步
-      reply = docStreamingContent.value
-    } finally {
-      isGenerating.value = false
-      if (ok) {
-        // 成功才清空流式缓冲；失败时保留，让失败分支里仍能看到半截内容
-        docStreamingContent.value = ''
+  /** 任务生命周期：创建 / 重连 / 退订 */
+  const job = useJob()
+
+  /**
+   * 按文档种类给出事件 handlers，把任务事件映射到本文件的预览状态。
+   *
+   * PRD 走三段预览（已定稿 + 当前缓冲 + 上一版草稿）；其余文档只有一段流式缓冲。
+   * 快照回调对两者都接——刷新重连时用它补全断线前已产出的正文。
+   */
+  function handlersForKind(kind: DocKind): StreamHandlers {
+    if (kind === 'prd') {
+      return {
+        onChunk: appendPrdChunk,
+        onPart: handlePrdPart,
+        onStage: handlePrdStage,
+        onSnapshot: applyJobSnapshot,
       }
     }
-    return { reply, ok }
+    return {
+      onChunk: (chunk) => {
+        docStreamingContent.value += chunk
+      },
+      onSnapshot: applyJobSnapshot,
+    }
+  }
+
+  /**
+   * 应用任务快照：把「断线前已产出的正文」补齐到预览（刷新重连的落点）。
+   *
+   * PRD 还原三段状态与阶段进度；其余文档直接用快照的实时缓冲。
+   *
+   * **只在预览还空着时用它初始化**：快照是「订阅开始时的一次补全」，理应发生在任何
+   * live 事件之前；若同一任务被订阅两次，第二份快照会在正文已经流出一段之后到达，
+   * 此时无条件覆盖会把已产出的内容**倒退**回去。守卫住这一点，重复快照就退化成
+   * 一次无害的 no-op，最多让阶段指示器刷新一下。
+   */
+  function applyJobSnapshot(snap: JobSnapshot): void {
+    if (snap.kind === 'prd') {
+      const untouched =
+        !prdFinalizedText.value && !prdLiveBuffer.value && deliveredSectionIds.size === 0 && !headerDelivered
+      if (untouched) {
+        prdFinalizedText.value = snap.finalizedText
+        prdLiveBuffer.value = snap.liveBuffer
+        prdRewriteGhost.value = ''
+        // 重建「已定稿」守卫：快照里的章节不该被随后的 live `part` 再拼一遍
+        headerDelivered = snap.finalizedText.length > 0
+        deliveredSectionIds = new Set(
+          snap.completedSections.map((section) => section.sectionId).filter((id) => id !== ''),
+        )
+      }
+      if (snap.phase) {
+        const last = snap.completedSections[snap.completedSections.length - 1]
+        prdProgress.value = {
+          stage: toPrdStage(snap.phase),
+          sectionId: last?.sectionId ?? '',
+          sectionTitle: '',
+          sectionHeading: last?.heading ?? '',
+          index: snap.completedSections.length,
+          total: 0,
+          note: '',
+        }
+      }
+      syncPrdPreview()
+      return
+    }
+    // 其余文档只有一段流式缓冲：同样只在空着时用快照初始化，避免重复快照覆盖已流出的内容
+    if (!docStreamingContent.value) docStreamingContent.value = snap.liveBuffer
+  }
+
+  /** 把某份文档的生成结果落稿并按类型推进阶段 */
+  function finishDoc(kind: DocKind, reply: string): void {
+    const content = reply.trim()
+    if (!content) return
+    if (kind === 'optimize') {
+      // 优化是就地替换：写回当前正在看的那份文档，不跳转
+      if (activeDocKey.value === 'prd') prdContent.value = content
+      else if (activeDocKey.value === 'api-docs') apiDocsContent.value = content
+      else promptsContent.value = content
+      return
+    }
+    if (kind === 'prd') {
+      prdContent.value = content
+      goTo('review-prd')
+    } else if (kind === 'api-docs') {
+      apiDocsContent.value = content
+      goTo('review-api-docs')
+    } else {
+      promptsContent.value = content
+      goTo('review-prompts')
+    }
+  }
+
+  /** 生成结束后清掉任务指针：任务已终态，刷新无需再重连 */
+  function clearActiveJob(): void {
+    store.activeJobId = null
+    store.activeJobKind = null
+  }
+
+  /** 把 PRD 的请求参数折成任务输入 */
+  function prdJobInput(payload: GeneratePrdFromSummaryPayload): JobStartInput {
+    return {
+      summary: payload.summary ?? null,
+      requirements: payload.requirements ?? '',
+      productName: payload.productName ?? '',
+      history: payload.history ?? [],
+    }
+  }
+
+  /**
+   * 刷新后静默重连一个进行中的任务：先收快照补全正文，再接 live。
+   *
+   * 由 AppV2 在恢复快照后调用——**无需用户点击**。按快照 status 分流：
+   * running 续流 / completed 落稿 / failed 保 partial + 展示错误。
+   *
+   * **对同一任务幂等**：一进入就要把预览复位，若同一个任务被并发重连两次，
+   * 后一次会在前一路已经流出正文之后把预览清空，两路事件随即交错写入同一份缓冲。
+   * 因此「已经开始重连该任务」时直接返回，绝不重复订阅。
+   */
+  let reconnectingJobId: number | null = null
+  async function reconnectJob(jobId: number): Promise<void> {
+    if (reconnectingJobId === jobId) return
+    reconnectingJobId = jobId
+    try {
+      await reconnectAndSettle(jobId)
+    } finally {
+      if (reconnectingJobId === jobId) reconnectingJobId = null
+    }
+  }
+
+  /** `reconnectJob` 的实际动作（与幂等守卫分离，便于阅读与测试） */
+  async function reconnectAndSettle(jobId: number): Promise<void> {
+    const kind = store.activeJobKind ?? 'prd'
+    activeDocKey.value = kind === 'api-docs' ? 'api-docs' : kind === 'prompts' ? 'prompts' : 'prd'
+    docStreamingContent.value = ''
+    docError.value = ''
+    if (kind === 'prd') {
+      beginPrdStages()
+    } else {
+      prdProgress.value = null
+    }
+
+    const result = await job.reconnect(jobId, handlersForKind(kind))
+    const snap = job.snapshot.value
+    if (!result.ok) {
+      docError.value = job.error.value || '生成失败'
+      prdProgress.value = null
+    } else if (snap?.status === 'failed') {
+      docError.value = snap.errorMessage || '生成失败'
+      prdProgress.value = null
+    } else {
+      finishDoc(kind, result.reply)
+    }
+    clearActiveJob()
   }
 
   /**
@@ -352,45 +496,42 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 重新生成 PRD 会让基于它的后续文档失效，进度回退到 PRD
     apiDocsContent.value = ''
     promptsContent.value = ''
+    activeDocKey.value = 'prd'
+    docStreamingContent.value = ''
+    docError.value = ''
     beginPrdStages()
-    const { reply, ok } = await runDocumentStream(
-      'prd',
-      () =>
-        generatePrdFromSummaryStream(payload, {
-          onChunk: appendPrdChunk,
-          onPart: handlePrdPart,
-          onStage: handlePrdStage,
-        }),
-      { sectioned: true },
-    )
+    const { reply, ok } = await job.start('prd', prdJobInput(payload), handlersForKind('prd'))
     if (!ok) {
+      docError.value = job.error.value || 'PRD 生成失败'
       // 失败时收掉阶段条：原因由错误提示说明，留着一个「进行中」的指示反而误导
       prdProgress.value = null
+      clearActiveJob()
       return
     }
-    const content = reply.trim()
-    if (content) {
-      prdContent.value = content
-      goTo('review-prd')
-    }
+    finishDoc('prd', reply)
+    clearActiveJob()
   }
 
   /** 生成接口文档：以 PRD 正文为输入，可带上用户确认过的检索命中作为参考规范 */
   async function generateApiDocs(hits: RagHit[] = []): Promise<void> {
     // 重新生成接口文档会让基于它的提示词失效，进度回退到接口文档
     promptsContent.value = ''
-    const { reply, ok } = await runDocumentStream('api-docs', () =>
-      generateApiDocsStream(
-        { prdContent: prdContent.value, ragHits: hits },
-        { onChunk: (chunk) => (docStreamingContent.value += chunk) },
-      ),
+    activeDocKey.value = 'api-docs'
+    docStreamingContent.value = ''
+    docError.value = ''
+    prdProgress.value = null
+    const { reply, ok } = await job.start(
+      'api-docs',
+      { prdContent: prdContent.value, ragHits: hits },
+      handlersForKind('api-docs'),
     )
-    if (!ok) return
-    const content = reply.trim()
-    if (content) {
-      apiDocsContent.value = content
-      goTo('review-api-docs')
+    if (!ok) {
+      docError.value = job.error.value || '接口文档生成失败'
+      clearActiveJob()
+      return
     }
+    finishDoc('api-docs', reply)
+    clearActiveJob()
   }
 
   /**
@@ -400,18 +541,22 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 因此由调用方把正文传进来，而不是在这里猜该读哪份状态。
    */
   async function generatePrompts(prdText: string): Promise<void> {
-    const { reply, ok } = await runDocumentStream('prompts', () =>
-      generatePromptsStream(
-        { prdContent: prdText },
-        { onChunk: (chunk) => (docStreamingContent.value += chunk) },
-      ),
+    activeDocKey.value = 'prompts'
+    docStreamingContent.value = ''
+    docError.value = ''
+    prdProgress.value = null
+    const { reply, ok } = await job.start(
+      'prompts',
+      { prdContent: prdText },
+      handlersForKind('prompts'),
     )
-    if (!ok) return
-    const content = reply.trim()
-    if (content) {
-      promptsContent.value = content
-      goTo('review-prompts')
+    if (!ok) {
+      docError.value = job.error.value || '提示词生成失败'
+      clearActiveJob()
+      return
     }
+    finishDoc('prompts', reply)
+    clearActiveJob()
   }
 
   /**
@@ -421,21 +566,23 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 否则优化结果会把用户刚改的内容覆盖掉。
    */
   async function optimizeCurrentDocument(content: string, instruction: string): Promise<void> {
-    const docKey = activeDocKey.value
     if (!content.trim() || !instruction.trim()) return
 
-    const { reply, ok } = await runDocumentStream(docKey, () =>
-      optimizeDocumentStream(
-        { document: content, instruction },
-        { onChunk: (chunk) => (docStreamingContent.value += chunk) },
-      ),
+    docStreamingContent.value = ''
+    docError.value = ''
+    const { reply, ok } = await job.start(
+      'optimize',
+      { document: content, instruction },
+      handlersForKind('optimize'),
     )
-    if (!ok) return // 优化失败：保留原文档，错误已写入 docError
-    const optimized = reply.trim()
-    if (!optimized) return
-    if (docKey === 'prd') prdContent.value = optimized
-    else if (docKey === 'api-docs') apiDocsContent.value = optimized
-    else promptsContent.value = optimized
+    if (!ok) {
+      // 优化失败：保留原文档，错误已写入 docError
+      docError.value = job.error.value || '优化失败'
+      clearActiveJob()
+      return
+    }
+    finishDoc('optimize', reply)
+    clearActiveJob()
   }
 
   /** 审阅页「保存」：把编辑后的原文写回对应的文档状态 */
@@ -732,6 +879,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     goTo,
     // 生成与优化
     generatePrd,
+    reconnectJob,
     onSaveDocument,
     onAiOptimize,
     handleGenerateApiDocs,

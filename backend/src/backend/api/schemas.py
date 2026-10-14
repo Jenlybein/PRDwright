@@ -10,29 +10,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+# 这三个契约（StreamEvent / QuestionConfig / QuestionsConfig）已下沉到
+# `core/contracts.py`，此处 re-export 以保持 API 层引用不变：
+# `from backend.api.schemas import StreamEvent / QuestionsConfig` 继续可用。
+from backend.core.contracts import QuestionConfig, QuestionsConfig, StreamEvent
+
 # ============================================================================
 # 问题配置（对应 core/question_config.json）
 # ============================================================================
 
-
-class QuestionConfig(BaseModel):
-    """问卷中的单个问题，字段与前端 `types/index.ts` 的 `QuestionConfig` 保持一致。"""
-
-    name: str = Field(description="字段名称，作为提交答案时字典的 key")
-    label: str = Field(description="展示给用户的题目文案")
-    type: Literal["text", "textarea", "select", "radio"] = Field(
-        description="题型：单行文本 / 多行文本 / 下拉选择 / 单选"
-    )
-    required: bool = Field(default=False, description="是否必填")
-    options: list[str] = Field(default_factory=list, description="选择类题型的选项文案列表")
-
-
-class QuestionsConfig(BaseModel):
-    """问卷配置整体结构，按基础题 / 进阶题分组。"""
-
-    base_questions: list[QuestionConfig] = Field(description="基础问题，创建会话时必答")
-    advanced_questions: list[QuestionConfig] = Field(description="进阶问题，可按需补充")
-
+# QuestionConfig / QuestionsConfig 已移至 core/contracts.py（见上方 re-export）。
 
 # ============================================================================
 # 会话（conversation）
@@ -82,39 +69,7 @@ class ConversationContinueRequest(BaseModel):
 # SSE 流式响应
 # ============================================================================
 
-
-class StreamEvent(BaseModel):
-    """SSE 推送的单个事件。
-
-    事件类型与 SSE 的 `event:` 行一一对应，前端既可以用
-    `addEventListener('<type>')` 监听，也可以只解析 `data` 里的 `type` 字段。
-    """
-
-    type: Literal[
-        "status", "chunk", "part", "done", "error", "stage", "tool_call", "document"
-    ] = Field(
-        description=(
-            "事件类型：状态提示 status / 增量文本 chunk / 定稿正文 part / 阶段进度 stage / "
-            "结束 done / 错误 error，tool_call 与 document 为后续扩展预留。"
-            "`stage` 用于分章节生成：`data.stage` 取 writing / reviewing / rewriting / done，"
-            "`data.section_id` 标识当前章节（前端据此重置本章的实时缓冲）。"
-            "`part` 也用于分章节生成：每段正文（文档头、每一章）一被定稿就整段下发，"
-            "`data.text` 可直接追加到文档末尾，前端据此拼出与最终 `done.reply` 逐字一致的预览。"
-        )
-    )
-    content: str = Field(default="", description="文本内容（增量或提示语）")
-    data: dict[str, Any] = Field(default_factory=dict, description="事件附加数据")
-    code: str | None = Field(
-        default=None,
-        description=(
-            "机器可读的错误码（`backend/core/errors.py` 的 `ErrorCode` 成员），"
-            "供前端做分支判断。只有 `error` 事件会带，其余事件恒为 `None`。"
-            "刻意放在**顶层**而不是塞进 `data`：SSE 流是 HTTP 200，前端拿不到状态码，"
-            "判断「该不该降级重试」只能靠这个字段，放在顶层才不会被 `data` 的"
-            "其它附加字段淹没。缺失或取值未知时前端一律按 `INTERNAL_ERROR` 处理。"
-        ),
-    )
-
+# StreamEvent 已移至 core/contracts.py（见上方 re-export）。
 
 # ============================================================================
 # 接口文档检索增强（RAG）
@@ -355,4 +310,80 @@ class SolutionDeleteResponse(BaseModel):
     """删除方案响应。"""
 
     ok: bool = Field(default=True, description="是否成功删除")
+
+
+# ============================================================================
+# 生成任务（generation_jobs）：把一次生成持久化并支持刷新重连
+# ============================================================================
+
+# 任务类型：与前端 `DocKind` 一一对应
+JobKind = Literal["prd", "api_docs", "prompts", "optimize"]
+
+
+class JobCreateRequest(BaseModel):
+    """创建一次生成任务的请求体。
+
+    一个模型承载四种生成：必填字段按 `kind` 区分（路由层校验），
+    因此不同 `kind` 只用到各自相关的字段，其余留默认值即可。
+    """
+
+    kind: JobKind = Field(description="任务类型：prd / api_docs / prompts / optimize")
+    solution_id: int | None = Field(
+        default=None,
+        description="关联方案 id；快捷入口等场景可为空（逃生口）",
+    )
+    # --- prd ---
+    summary: dict[str, Any] | None = Field(
+        default=None,
+        description="结构化需求摘要（完整流程）；与 requirements 二选一",
+    )
+    requirements: str = Field(default="", description="自由文本需求（PRD 快捷入口）")
+    product_name: str = Field(default="", description="产品名称，仅用于 PRD 文档头")
+    history: list[MessageItem] = Field(
+        default_factory=list,
+        description="补充对话记录；为空则按无对话处理",
+    )
+    # --- api_docs / prompts ---
+    prd_content: str = Field(default="", description="PRD 正文（接口文档 / 提示词生成输入）")
+    rag_hits: list[RagHit] = Field(
+        default_factory=list,
+        description="用户确认后的检索命中（生成接口文档时的对齐依据）",
+    )
+    # --- optimize ---
+    document: str = Field(default="", description="待优化的原文档正文")
+    instruction: str = Field(default="", description="用户的优化要求")
+
+
+class JobCreated(BaseModel):
+    """创建任务响应：返回任务 id 与初始状态。"""
+
+    job_id: int = Field(description="任务 id")
+    status: str = Field(default="running", description="任务状态，创建时恒为 running")
+
+
+class JobStatus(BaseModel):
+    """任务状态摘要。**刻意不含 `draft_content`**：正文只走 stream 的 snapshot。
+
+    `id` 用 `job_id` 作为对外字段名，与创建响应保持一致；内部主键列名是 `id`。
+    """
+
+    id: int = Field(description="任务 id")
+    kind: str = Field(description="任务类型")
+    status: str = Field(description="任务状态：running / completed / failed")
+    phase: str = Field(default="", description="当前阶段（如 writing / reviewing）")
+    solution_id: int | None = Field(default=None, description="关联方案 id，可空")
+    error_code: str = Field(default="", description="失败时的错误码")
+    error_message: str = Field(default="", description="失败时的中文说明")
+    created_at: str = Field(description="创建时间（UTC ISO 8601）")
+    updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
+
+
+class JobListResponse(BaseModel):
+    """任务列表响应。
+
+    包一层对象而不是直接返回数组：将来要加分页或总数时不必改响应结构，
+    与 `SolutionListResponse` 保持同一约定。
+    """
+
+    jobs: list[JobStatus] = Field(default_factory=list, description="当前用户的任务列表")
 

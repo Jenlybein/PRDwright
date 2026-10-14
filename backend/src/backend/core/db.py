@@ -71,6 +71,39 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at
 
 -- 方案列表按「owner + 最近更新」查询，复合索引同时覆盖过滤与排序
 CREATE INDEX IF NOT EXISTS idx_solutions_owner ON solutions(user_id, updated_at DESC);
+
+-- 生成任务：一次「生成」的过程记录，把生成与浏览器连接解耦。
+-- 刷新 / 断线只断订阅，不中断任务；重连时先读快照补全已产出正文，再接 live 流。
+--
+-- 设计要点：
+-- - `solution_id` 可空（快捷入口等逃生口可能还没有方案），**刻意不加外键**：
+--   任务记录不应因为方案被删而级联消失，否则「任务跑完却没地方落」。
+-- - `draft_content` 由 `job_service` 合并写（内存权威，DB 每 ≤300ms 或增量 >4KB flush）：
+--   快照读内存运行时而非本列，本列只用于进程重启后的兜底恢复。
+-- - `usage` / `input_fingerprint` / `max_provider_switches` 为后续阶段预留，
+--   本期可为空 / 默认值，不在逻辑中使用。
+CREATE TABLE IF NOT EXISTS generation_jobs (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id              INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    solution_id           INTEGER,                      -- 可空（快捷入口逃生口）；刻意不加外键
+    kind                  TEXT    NOT NULL,             -- prd | api_docs | prompts | optimize
+    status                TEXT    NOT NULL DEFAULT 'running',
+    phase                 TEXT    NOT NULL DEFAULT '',
+    draft_content         TEXT    NOT NULL DEFAULT '',
+    completed_sections    TEXT    NOT NULL DEFAULT '[]',
+    input_fingerprint     TEXT,
+    usage                 TEXT,
+    max_provider_switches INTEGER NOT NULL DEFAULT 2,
+    error_code            TEXT    NOT NULL DEFAULT '',
+    error_message         TEXT    NOT NULL DEFAULT '',
+    created_at            TEXT    NOT NULL,
+    updated_at            TEXT    NOT NULL
+);
+
+-- 任务列表按「owner + 最近创建」查询
+CREATE INDEX IF NOT EXISTS idx_generation_jobs_owner   ON generation_jobs(owner_id, created_at DESC);
+-- 兜底找回：按「运行态 + owner + 种类」定位可恢复的任务
+CREATE INDEX IF NOT EXISTS idx_generation_jobs_recover ON generation_jobs(status, owner_id, kind);
 """
 
 # 时间戳统一用 UTC 的 ISO 8601，避免本地时区带来的歧义

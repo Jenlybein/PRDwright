@@ -67,6 +67,17 @@ export type ViewState =
  */
 export type EntryMode = 'structured' | 'prd-quick' | 'prompt-debug'
 
+/**
+ * 生成任务的文档种类（与后端 `generation_jobs.kind` 一一对应）。
+ *
+ * - `prd` / `api-docs` / `prompts`：三份文档的生成；
+ * - `optimize`：对某一份已有文档的 AI 优化（就地流式，不改变所处阶段）。
+ *
+ * 注意命名口径：后端用下划线（`api_docs`），前端用连字符（`api-docs`），
+ * 转换收口在 `services/api.ts`。
+ */
+export type DocKind = 'prd' | 'api-docs' | 'prompts' | 'optimize'
+
 /** PRD 快捷入口的录入内容 */
 export interface QuickPrdInput {
   /** 产品名称；为空时文档头退化为「未命名产品」 */
@@ -325,6 +336,64 @@ export interface StreamStageEvent {
 }
 
 // ============================================================================
+// 生成任务（generation_jobs）：刷新重连的状态载体
+// ============================================================================
+
+/** 已定稿章节的结构化记录（后端 `snapshot` 的 `completed_sections` 项） */
+export interface CompletedSection {
+  /** 章节 id，如 `overview` */
+  sectionId: string
+  /** 章节标题行，如 `## 1. 产品概述` */
+  heading: string
+  /** 该章的定稿正文（可直接追加） */
+  text: string
+}
+
+/**
+ * 一次生成任务在订阅开始时的**快照**（后端 `snapshot` 事件的 `data`）。
+ *
+ * 刷新 / 断线重连时，前端先用它把「断线前已产出的正文」补齐，再接 live 流，
+ * 从而在页面恢复后**自动静默重连**、不丢进度。
+ */
+export interface JobSnapshot {
+  /** 任务 id */
+  jobId: number
+  /** 文档种类（后端原始取值，如 `api_docs`） */
+  kind: string
+  /** 任务状态：running / completed / failed */
+  status: string
+  /** 当前阶段（如 writing / reviewing / rewriting） */
+  phase: string
+  /** 已定稿正文（文档头 + 各章，可直接作为预览前缀） */
+  finalizedText: string
+  /** 当前段落实时缓冲（尚未定稿的 chunk 增量） */
+  liveBuffer: string
+  /** 已定稿章节列表 */
+  completedSections: CompletedSection[]
+  /** 关联方案 id；可空 */
+  solutionId: number | null
+  /** 失败时的错误码；正常为空串 */
+  errorCode: string
+  /** 失败时的中文说明；正常为空串 */
+  errorMessage: string
+}
+
+/**
+ * 任务收尾的最小摘要（后端 `run_summary` 事件的 `data`）。
+ *
+ * 本期只含 `{kind, status, duration_ms}`；token 计量字段留待后续阶段。
+ * 前端**只把它存进 ref，不做任何 UI**（见 `composables/useJob.ts`）。
+ */
+export interface RunSummary {
+  /** 文档种类（后端原始取值） */
+  kind: string
+  /** 终态：completed / failed */
+  status: string
+  /** 本次生成耗时（毫秒） */
+  durationMs: number
+}
+
+// ============================================================================
 // 认证（登录 / 注册）
 // ============================================================================
 
@@ -430,5 +499,14 @@ export interface SessionDataV2 {
   apiDocsContent: string
   /** 提示词套件正文 */
   promptsContent: string
+  /**
+   * 当前进行中的生成任务 id；`null` 表示没有任务。
+   *
+   * 有了它，刷新后即使正文只到一半，前端也能凭这个指针**静默重连**到同一任务，
+   * 先收 `snapshot` 补全正文再接 live。
+   */
+  activeJobId: number | null
+  /** 当前进行中任务的文档种类；与 `activeJobId` 成对出现，无任务时为 null */
+  activeJobKind: DocKind | null
 }
 

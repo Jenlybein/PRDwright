@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator, Callable
 
 from langchain_core.messages import BaseMessage
 
-from backend.api.schemas import StreamEvent
+from backend.core.contracts import StreamEvent
 from backend.core.errors import ErrorCode
 from backend.services.llm_factory import StreamingChatModel
 from backend.services.llm_utils import extract_text

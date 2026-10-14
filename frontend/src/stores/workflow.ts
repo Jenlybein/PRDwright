@@ -19,6 +19,7 @@ import { computed, ref, watch } from 'vue'
 
 import type {
   ChatMessage,
+  DocKind,
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
@@ -80,6 +81,18 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 已生成的提示词套件正文（Markdown 源码） */
   const promptsContent = ref('')
 
+  /**
+   * 当前进行中的生成任务 id；`null` 表示没有任务。
+   *
+   * 生成与浏览器连接解耦后，刷新 / 断线只断订阅；凭这个指针即可在页面恢复后
+   * **静默重连**到同一任务，先收 `snapshot` 补全正文再接 live。
+   * 它是**持久化字段**（随快照存后端）：正是跨刷新才需要它。
+   */
+  const activeJobId = ref<number | null>(null)
+
+  /** 当前进行中任务的文档种类；与 `activeJobId` 成对写入 / 清空 */
+  const activeJobKind = ref<DocKind | null>(null)
+
   // ------------------------------------------------------------------
   // 运行态（不写入快照）
   // ------------------------------------------------------------------
@@ -132,6 +145,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       prdContent: prdContent.value,
       apiDocsContent: apiDocsContent.value,
       promptsContent: promptsContent.value,
+      activeJobId: activeJobId.value,
+      activeJobKind: activeJobKind.value,
     }
   }
 
@@ -153,6 +168,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     prdContent.value = session.prdContent
     apiDocsContent.value = session.apiDocsContent
     promptsContent.value = session.promptsContent
+    activeJobId.value = session.activeJobId ?? null
+    activeJobKind.value = session.activeJobKind ?? null
     downgrade.value = downgradeKind
     // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
     // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
@@ -179,6 +196,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       prdContent,
       apiDocsContent,
       promptsContent,
+      activeJobId,
+      activeJobKind,
     ],
     () => {
       changeTick.value += 1
@@ -286,6 +305,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     debugPrdText.value = ''
     prdContent.value = ''
     apiDocsContent.value = ''
+    activeJobId.value = null
+    activeJobKind.value = null
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
@@ -326,6 +347,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     prdContent,
     apiDocsContent,
     promptsContent,
+    activeJobId,
+    activeJobKind,
     // 运行态
     chatStreaming,
     docGenerating,
