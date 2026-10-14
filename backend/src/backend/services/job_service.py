@@ -12,6 +12,11 @@
 `flush` 一次（`persist_progress`）；任务收尾时再落一次终态。快照读的是内存运行时，
 DB 只在「运行时未命中」时兜底。
 
+**用量计量**：每个任务自带一个 `RunMeter`（`llm_meter`），`run_job` 用 `use_meter`
+把它挂到当前上下文，流水线深处的 `stream_reply.astream_text` 因此能在一处完成累加；
+本模块只做三件事——喂阶段（`_apply_event`）、收尾汇总（`_summary_data`）、
+落库与广播。事件与落库共用同一份 JSON，前端「流里看到的」与「重连后读到的」不会两样。
+
 **不改动现有 LLM 生成链路**：`_build_event_stream` 直接复用 `document_service` 的
 模块级流式入口，本模块只负责编排 + 记录。
 """
@@ -22,13 +27,17 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
+from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
-from backend.core.errors import ErrorCode
-from backend.repositories.generation_job_repo import GenerationJobRepository
+from backend.core.db import utc_now
+from backend.core.errors import AppError, ErrorCode
+from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.services import document_service
 from backend.services.job_bus import job_bus
+from backend.services.llm_meter import RunMeter, use_meter
 
 # 合并写的节奏：距上次 flush 超过该秒数，或 live_buffer 增量超过该字节数，就写一次
 _FLUSH_INTERVAL_SECONDS = 0.3
@@ -69,6 +78,8 @@ class JobRuntime:
     started_at: float = 0.0
     # done 事件带来的权威完整正文
     final_reply: str = ""
+    # 本次任务的用量计量器（在 `dispatch` 里按任务类型与当前供应商构造）
+    meter: RunMeter = field(default_factory=RunMeter)
 
 
 # ----------------------------------------------------------------------------
@@ -104,7 +115,14 @@ def dispatch(
 
     路由是 async，调用方已在事件循环内，因此这里可以 `asyncio.create_task`。
     任务会被 `_TASKS` 持有强引用，跑完后由 done 回调移除。
+
+    计量器随任务一起建，并记下**当前**供应商与模型：任务的执行环境在这一刻就定下来了，
+    事后回看「这次生成花了多少、用的哪个模型」才不会因为中途改配置而对不上账。
+
+    另：`create_task` 会**复制当前上下文**，因此请求中间件写入的 `request_id`
+    自动随任务带走，`run_summary` 里能直接读到，无需任何显式传参。
     """
+    settings = get_settings()
     runtime = JobRuntime(
         job_id=job_id,
         owner_id=owner_id,
@@ -113,6 +131,11 @@ def dispatch(
         request=request or {},
         started_at=time.monotonic(),
         last_flush_at=time.monotonic(),
+        meter=RunMeter(
+            kind=kind,
+            provider=settings.default_llm_provider,
+            model=settings.default_llm_model,
+        ),
     )
     task = asyncio.create_task(run_job(runtime))
     runtime.task = task
@@ -124,17 +147,28 @@ def dispatch(
 
 
 async def run_job(runtime: JobRuntime) -> None:
-    """后台任务主体：驱动事件流、更新内存、广播、按节奏落库、收尾。"""
+    """后台任务主体：驱动事件流、更新内存、广播、按节奏落库、收尾。
+
+    `use_meter` 包住整条事件流的消费过程：计量器是环境值，流水线深处的
+    `stream_reply.astream_text` 靠它把自己记到这次任务上（见 `llm_meter`）。
+    """
     try:
-        async for event in _build_event_stream(runtime.kind, runtime.request):
-            _apply_event(runtime, event)
-            job_bus.publish(runtime.job_id, event)
-            _maybe_flush(runtime)
+        with use_meter(runtime.meter):
+            async for event in _build_event_stream(runtime.kind, runtime.request):
+                _apply_event(runtime, event)
+                job_bus.publish(runtime.job_id, event)
+                _maybe_flush(runtime)
         _finalize(runtime, "failed" if runtime.failed else "completed")
     except Exception as exc:  # noqa: BLE001 - 后台任务必须自兜异常，不能静默消失
         runtime.failed = True
-        runtime.error_code = ErrorCode.LLM_UPSTREAM_ERROR.value
-        runtime.error_message = f"生成失败：{exc}"
+        if isinstance(exc, AppError):
+            # 异常自带的码更准：预算超顶是 INVALID_REQUEST（重试也没用），
+            # 不该被笼统记成「上游故障」，否则前端会去做无意义的重试。
+            runtime.error_code = exc.code.value
+            runtime.error_message = exc.message
+        else:
+            runtime.error_code = ErrorCode.LLM_UPSTREAM_ERROR.value
+            runtime.error_message = f"生成失败：{exc}"
         _finalize(runtime, "failed")
     finally:
         # 先关总线（给订阅者放哨兵）再摘运行时：已订阅者仍能读到 run_summary 与结束标记；
@@ -150,11 +184,18 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
     """订阅一个任务的事件流：先 `snapshot`，再 live。
 
     - 内存运行时命中且 owner 相符：在**无 await 的临界区**内取快照并订阅队列，
-      先 `yield` 快照；若任务已非 running 则立即返回，否则循环消费队列直到哨兵 `None`。
-    - 未命中或 owner 不符：读 DB 发一份快照后返回（进程重启 / 已完成过久 / 越权）。
+      先 `yield` 快照；若任务已非 running 则补发一份 `run_summary` 后立即返回，
+      否则循环消费队列直到哨兵 `None`。
+    - 未命中或 owner 不符：读 DB 发一份快照后返回（进程重启 / 已完成过久 / 越权）；
+      终态任务若已落用量，同样补发 `run_summary`。
 
     「无 await 临界区」是正确性的关键：取快照与订阅之间一旦让出事件循环，
     任务就可能在这段窗口里产事件并被丢弃，导致「快照与 live 之间缺一段」。
+
+    **为什么要补发 `run_summary`**：收尾事件是在任务结束那一刻广播的，只在当刻连着的人
+    收得到。刷新页面、或任务结束得早于订阅，都会漏掉它——那样「花了多少 token」就只在
+    没人看的时候存在。终态任务的用量已经落库，重连时补一份即可，前端因此无需再单独
+    发一次 `GET /api/jobs/{id}` 就能显示用量。
     """
     runtime = _RUNTIMES.get(job_id)
     if runtime is None or runtime.owner_id != owner_id:
@@ -162,6 +203,9 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
         if row is None:
             return
         yield _db_snapshot_event(row)
+        usage = parse_usage(row.get("usage"))
+        if usage is not None and row.get("status") != STATUS_RUNNING:
+            yield _run_summary_event(usage)
         return
 
     # —— 无 await 临界区 ——
@@ -171,6 +215,7 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
     try:
         yield snapshot
         if runtime.status != "running":
+            yield _run_summary_event(_summary_data(runtime, runtime.status))
             return
         while True:
             event = await queue.get()
@@ -218,7 +263,7 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
     对照 `document_service` / `prd_section_writer` 的事件契约：
     - `chunk` → 追加到当前段缓冲；
     - `part` → 定稿一段：并入已定稿、清空缓冲；带 `section_id` 时登记章节；
-    - `stage` → 更新 phase；
+    - `stage` → 更新 phase（**同时同步给计量器**，计量器据此把调用归到 `类型:阶段` 这一步）；
     - `error` → 标记失败并记下错误码 / 文案；
     - `done` → 记下权威完整正文。
     """
@@ -240,6 +285,7 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
             )
     elif event_type == "stage":
         runtime.phase = str(event.data.get("stage", ""))
+        runtime.meter.set_phase(runtime.phase)
     elif event_type == "error":
         runtime.failed = True
         runtime.error_code = event.code or ErrorCode.INTERNAL_ERROR.value
@@ -269,20 +315,45 @@ def _maybe_flush(runtime: JobRuntime) -> None:
         runtime.flushed_len = len(runtime.live_buffer)
 
 
+def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
+    """组装完整的 `run_summary`。
+
+    这一份同时是**落进 `generation_jobs.usage` 的那份 JSON**：事件与落库共用同一结构，
+    前端从流里拿到的和刷新后从 `GET /api/jobs/{id}` 拿到的必然一致，不会出现两套口径。
+
+    总耗时用 `job_service` 自己的时钟（含章节之间的空档），而 `steps[]` 里是每一步的
+    模型调用耗时——两者不相等是正常的：差额就是「组织提示词、落库、广播」这些开销。
+    """
+    duration_ms = int(max(0.0, time.monotonic() - runtime.started_at) * 1000)
+    return {
+        "kind": runtime.kind,
+        "status": status,
+        "duration_ms": duration_ms,
+        **runtime.meter.usage(),
+    }
+
+
+def _run_summary_event(data: dict[str, Any]) -> StreamEvent:
+    """由汇总数据构造 `run_summary` 事件。"""
+    return StreamEvent(type="run_summary", content="", data=data)
+
+
 def _finalize(runtime: JobRuntime, status: str) -> None:
-    """收尾：置终态、落库、广播最小版 `run_summary`。
+    """收尾：置终态、落库（含用量）、广播 `run_summary`。
 
     保留运行时（直到 `run_job` 的 finally）让已订阅者把这一条读完。
     """
     runtime.status = status
     draft = _draft(runtime)
+    summary = _summary_data(runtime, status)
+    usage = json.dumps(summary, ensure_ascii=False)
     if status == "completed":
         GenerationJobRepository.finish(
             runtime.owner_id,
             runtime.job_id,
             draft_content=draft,
             completed_sections=runtime.completed_sections,
-            usage=None,
+            usage=usage,
         )
     else:
         GenerationJobRepository.fail(
@@ -292,18 +363,49 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             error_message=runtime.error_message or "生成失败",
             draft_content=draft,
             completed_sections=runtime.completed_sections,
+            # 失败的任务同样烧了 token，用量一并落库——不然「这次为什么这么贵」无从追溯
+            usage=usage,
         )
 
-    duration_ms = int(max(0.0, time.monotonic() - runtime.started_at) * 1000)
-    # 最小版：token 计量留待后续阶段
-    job_bus.publish(
-        runtime.job_id,
-        StreamEvent(
-            type="run_summary",
-            content="",
-            data={"kind": runtime.kind, "status": status, "duration_ms": duration_ms},
-        ),
-    )
+    job_bus.publish(runtime.job_id, _run_summary_event(summary))
+
+
+def parse_usage(raw: Any) -> dict[str, Any] | None:
+    """解析 `generation_jobs.usage` 里存的 JSON；缺失或非法时返回 `None`。
+
+    **容错是刻意的**：这一列在早年版本里恒为 `NULL`，将来也可能被改过结构；
+    读不出来的正确反应是「这条任务没有用量可展示」，而不是让整个列表接口 500。
+    只接受对象（字典），数组 / 字符串一律当作无效。
+    """
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _elapsed_ms_from_row(row: dict[str, Any]) -> int:
+    """由 DB 行的创建 / 更新时间推算耗时（毫秒）；时间格式异常时返回 0。
+
+    终态任务用 `updated_at - created_at`（≈ 整个过程），仍在跑的任务用「到现在」。
+    这只是给前端的「已用时」一个起点，精度到秒即可，因此不做时区之外的额外校正。
+    """
+    try:
+        created = datetime.fromisoformat(str(row.get("created_at") or ""))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        end = utc_now() if row.get("status") == STATUS_RUNNING else datetime.fromisoformat(
+            str(row.get("updated_at") or "")
+        )
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        return int(max(0.0, (end - created).total_seconds()) * 1000)
+    except (ValueError, TypeError):
+        return 0
 
 
 def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
@@ -322,6 +424,8 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "solution_id": runtime.solution_id,
             "error_code": runtime.error_code,
             "error_message": runtime.error_message,
+            # 服务端算的已用时：刷新重连后前端接着它继续走，客户端计时器归零也不影响
+            "elapsed_ms": int(max(0.0, time.monotonic() - runtime.started_at) * 1000),
         },
     )
 
@@ -348,6 +452,7 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "solution_id": row.get("solution_id"),
             "error_code": row.get("error_code", "") or "",
             "error_message": row.get("error_message", "") or "",
+            "elapsed_ms": _elapsed_ms_from_row(row),
         },
     )
 

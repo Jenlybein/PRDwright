@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 import DocumentReview from '@/components/DocumentReview.vue'
 import PrdProgress from '@/components/stages/PrdProgress.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import type { PrdStageProgress } from '@/types'
+import { formatDuration } from '@/utils/metering'
 
 /**
  * 文档「生成中 / 生成失败」阶段视图。
@@ -14,7 +17,7 @@ import type { PrdStageProgress } from '@/types'
  * PRD 走的是分章节链路（撰写 → 审核 → 改写），额外用 `prd` 传入阶段进度；
  * 其它文档与降级路径不传，行为与拆分前完全一致。
  */
-defineProps<{
+const props = defineProps<{
   /** 文档标题 */
   title: string
   /** 流式生成中的增量文本 */
@@ -27,6 +30,13 @@ defineProps<{
   prd?: PrdStageProgress | null
   /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
   draftOnly?: boolean
+  /**
+   * 本次生成已用时（毫秒），由任务运行态统一维护（见 `composables/useJob.ts`）。
+   *
+   * 组件自己**不计时**：重连时要用服务端的已用时打底，收尾后要停在权威总耗时上，
+   * 这两件事只有任务运行态做得到。
+   */
+  elapsedMs?: number
   /** 「返回」按钮的文案（返回目标随入口模式而变，由上层决定） */
   backLabel?: string
 }>()
@@ -35,12 +45,24 @@ const emit = defineEmits<{
   /** 返回对话 */
   back: []
 }>()
+
+/** 已用时的可读文案；为 0（尚未开始计时）时不展示 */
+const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
 </script>
 
 <template>
   <section class="space-y-3">
     <!-- 分章节生成时先给出阶段条：让用户知道卡在哪一章、是否在改写 -->
     <PrdProgress v-if="prd" :progress="prd" />
+
+    <!-- 已用时：长生成时给一个「还在推进」的可感知信号，比转圈动画更有信息量。
+         只在确实计过时（>0）时出现，避免刚进入生成态就闪一个「已用时 0 秒」 -->
+    <p
+      v-if="generating && (elapsedMs ?? 0) > 0"
+      class="text-xs tabular-nums text-subtle"
+    >
+      已用时 {{ elapsedText }}
+    </p>
 
     <!-- 生成 / 优化出错提示：非正常结尾（如被截断）时展示原因 -->
     <p

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from conftest import login, register
@@ -124,21 +125,45 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(alice, monk
     # 契约：part 拼接 == 最终正文
     assert "".join(part.data["text"] for part in parts).strip() == done.data["reply"]
 
-    # 收尾：run_summary 最小版
+    # 收尾：run_summary 的完整契约（用量汇总与任务状态并作一份）
     summary = events[-1]
     assert summary.type == "run_summary"
-    assert summary.data == {
-        "kind": "prd",
-        "status": "completed",
-        "duration_ms": summary.data["duration_ms"],
-    }
-    assert isinstance(summary.data["duration_ms"], int)
+    data = summary.data
+    assert data["kind"] == "prd"
+    assert data["status"] == "completed"
+    assert isinstance(data["duration_ms"], int)
+    # 假 LLM 不带 usage_metadata，token 按零计；但调用次数与耗时照记（不是「没计量」）
+    assert data["total_calls"] >= 1
+    assert data["prompt_tokens"] == 0
+    assert data["completion_tokens"] == 0
+    assert data["injected_skills"] == []
+    assert isinstance(data["provider"], str) and data["provider"]
+    assert isinstance(data["model"], str) and data["model"]
+    # 直连服务、没有 HTTP 请求上下文，request_id 为空（不抛异常）
+    assert data["request_id"] == ""
+    # steps 覆盖流水线的多个阶段，字段与 StepUsage 一致；步骤名由 kind + 阶段推出
+    assert data["steps"]
+    for step in data["steps"]:
+        assert set(step) == {
+            "step",
+            "calls",
+            "prompt_tokens",
+            "completion_tokens",
+            "duration_ms",
+        }
+        assert step["calls"] >= 1
+        assert step["step"].startswith("prd")
+    # 分步调用次数之和 == 总调用次数
+    assert sum(step["calls"] for step in data["steps"]) == data["total_calls"]
 
     # 落库：完成态 + 正文与 part 拼接一致
     row = GenerationJobRepository.get(alice, job_id)
     assert row is not None
     assert row["status"] == "completed"
     assert row["draft_content"] == "".join(part.data["text"] for part in parts)
+    # 用量与事件同源：落库的 usage 就是流里那份 run_summary，前端「看到的」与「重连读到的」一致
+    assert row["usage"] is not None
+    assert json.loads(row["usage"]) == data
 
 
 def test_reconnect_after_unsubscribe_completes_remaining(alice, monkeypatch):
@@ -178,8 +203,13 @@ def test_reconnect_after_unsubscribe_completes_remaining(alice, monkeypatch):
     assert done.data["reply"].startswith("# 演示产品 产品需求文档")
 
 
-def test_resubscribe_after_completion_sends_only_snapshot(alice, monkeypatch):
-    """任务已完成后再订阅：只发一份 snapshot，立即结束、不挂起。"""
+def test_resubscribe_after_completion_sends_snapshot_then_summary(alice, monkeypatch):
+    """任务已完成后再订阅：发 snapshot 补全正文，**再补一份 run_summary**，随即结束。
+
+    补发是必须的：收尾的 `run_summary` 在任务结束当刻广播，只在当刻连着的人收得到；
+    刷新页面或订阅晚于收尾，就会漏掉它——那样「这次花了多少 token」只在没人看的时候存在。
+    终态任务的用量已落库，重连时按库补齐即可。
+    """
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
 
     async def scenario() -> list:
@@ -194,15 +224,18 @@ def test_resubscribe_after_completion_sends_only_snapshot(alice, monkeypatch):
         # 第一次订阅跑到任务结束
         async for _ in job_service.open_stream(alice, job_id):
             pass
-        # 第二次订阅：应只发 snapshot 后返回
+        # 第二次订阅：snapshot + run_summary 后返回，不挂起
         return [event async for event in job_service.open_stream(alice, job_id)]
 
     events = _run(scenario())
 
-    assert len(events) == 1
-    assert events[0].type == "snapshot"
+    assert [event.type for event in events] == ["snapshot", "run_summary"]
     assert events[0].data["status"] == "completed"
     assert events[0].data["finalized_text"].startswith("# 演示产品")
+    # 重连补发的汇总与落库同源
+    assert events[1].data["status"] == "completed"
+    assert events[1].data["kind"] == "prd"
+    assert events[1].data["total_calls"] >= 1
 
 
 def test_failure_event_marks_job_failed_and_keeps_partial(alice, monkeypatch):

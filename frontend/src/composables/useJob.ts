@@ -9,10 +9,17 @@
  * 状态记录，不直接写预览。它把 `onChunk` / `onPart` / `onStage` / `onSnapshot` 回调
  * 原样透传给调用方提供的 handlers，由流水线决定这些事件怎么落到预览上。
  *
- * `runSummary` 只存进 ref、**不做任何 UI**（token 计量留待后续阶段）。
+ * ## 已用时（`elapsedMs`）
+ *
+ * 「这次生成跑了多久」由本 composable 统一维护，而不是让展示组件各起一个计时器：
+ * 生成中要一秒一跳，收尾后要停在权威总耗时上，重连后还要把客户端归零的部分补回来。
+ * 三种情形共用一处状态，展示组件只管读。
+ *
+ * 计时不依赖任何一次请求：**每次 `snapshot` 都用服务端算好的 `elapsedMs` 重新锚定**，
+ * 因此刷新页面、换设备重连，显示的仍是任务的真实已用时，而不是「本地计时器启动后过了多久」。
  */
 
-import { ref } from 'vue'
+import { getCurrentScope, onScopeDispose, ref } from 'vue'
 
 import {
   createJob,
@@ -62,24 +69,74 @@ export function useJob() {
   const error = ref('')
   /** 最近的阶段（来自 stage 事件或 snapshot） */
   const phase = ref('')
-  /** 任务收尾摘要（**只记录，不做 UI**） */
+  /** 任务收尾摘要（完整的用量汇总；展示由上层决定） */
   const runSummary = ref<RunSummary | null>(null)
   /** 最近一次收到的快照（供上层判断任务是否已终态） */
   const snapshot = ref<JobSnapshot | null>(null)
+  /** 任务已用时（毫秒）：生成中每秒自增，重连时按服务端值锚定，收尾后停在总耗时 */
+  const elapsedMs = ref(0)
+
   /** `detach()` 用的控制器：退订而不取消服务端任务 */
   let controller: AbortController | null = null
 
-  /** 包装 handlers：在透传的同时记录 phase / runSummary / snapshot */
+  // ---- 已用时计时器 ----------------------------------------------------------
+  // `anchorMs` 是本地锚点时刻，`baseMs` 是锚定时任务已经跑过的毫秒数（来自服务端）。
+  // 显示值 = baseMs + (now - anchorMs)，因此「重新锚定」是幂等的：给同一次任务锚两次，
+  // 只是把基准换成服务端那个更准的值，不会出现跳变或翻倍。
+  let elapsedTimer: ReturnType<typeof setInterval> | null = null
+  let elapsedBaseMs = 0
+  let elapsedAnchorMs = 0
+
+  /** 清掉计时器但**保留当前显示值**（收尾 / 退订后停表用） */
+  function stopElapsedTimer(): void {
+    if (elapsedTimer !== null) {
+      clearInterval(elapsedTimer)
+      elapsedTimer = null
+    }
+  }
+
+  /** 开始计时（`baseMs` 为服务端已用时打底） */
+  function startElapsedTimer(baseMs = 0): void {
+    stopElapsedTimer()
+    elapsedBaseMs = Math.max(0, baseMs)
+    elapsedAnchorMs = Date.now()
+    elapsedMs.value = elapsedBaseMs
+    elapsedTimer = setInterval(() => {
+      elapsedMs.value = elapsedBaseMs + (Date.now() - elapsedAnchorMs)
+    }, 1000)
+  }
+
+  /** 用服务端权威耗时重新锚定（每次 `snapshot` 都做，幂等） */
+  function anchorElapsed(serverMs: number): void {
+    elapsedBaseMs = Math.max(0, serverMs)
+    elapsedAnchorMs = Date.now()
+    elapsedMs.value = elapsedBaseMs
+  }
+
+  /** 收尾：停表并停在权威总耗时上（没有总耗时就停在当前值） */
+  function settleElapsed(totalMs?: number): void {
+    stopElapsedTimer()
+    if (typeof totalMs === 'number') elapsedMs.value = Math.max(0, totalMs)
+  }
+
+  // 组件卸载时停表。非组件环境（纯逻辑测试）下不注册，避免无谓告警。
+  if (getCurrentScope()) onScopeDispose(stopElapsedTimer)
+
+  /** 包装 handlers：在透传的同时记录 phase / runSummary / snapshot / 已用时 */
   function wrapHandlers(handlers: StreamHandlers): StreamHandlers {
     return {
       ...handlers,
       onSnapshot: (snap) => {
         snapshot.value = snap
         phase.value = snap.phase
+        // 快照是订阅开始时的权威进度：用它锚定已用时，客户端从零开始也不影响连续性
+        anchorElapsed(snap.elapsedMs)
         handlers.onSnapshot?.(snap)
       },
       onRunSummary: (summary) => {
         runSummary.value = summary
+        // 收尾摘要里的总耗时是权威值，停表并停在它上面
+        settleElapsed(summary.durationMs)
         handlers.onRunSummary?.(summary)
       },
     }
@@ -102,6 +159,7 @@ export function useJob() {
     phase.value = ''
     runSummary.value = null
     snapshot.value = null
+    startElapsedTimer()
     controller = new AbortController()
 
     try {
@@ -130,6 +188,8 @@ export function useJob() {
       running.value = false
       workflow.docGenerating = false
       controller = null
+      // 正常收尾时运行摘要已把耗时定死；中止 / 失败则停在当前值，不让计时器空转
+      settleElapsed()
     }
   }
 
@@ -137,11 +197,14 @@ export function useJob() {
    * 静默重连一个已有任务：先收 `snapshot` 补全正文，再接 live。
    *
    * 与 `start` 的区别是不创建任务、不改阶段（阶段已由快照恢复保留为 `generating-*`）。
+   * 已用时同样从零起算、随即被快照里的服务端值锚定，所以显示的仍是任务的真实已用时。
    */
   async function reconnect(jobId: number, handlers: StreamHandlers): Promise<JobResult> {
     running.value = true
     error.value = ''
+    runSummary.value = null
     snapshot.value = null
+    startElapsedTimer()
     controller = new AbortController()
 
     try {
@@ -154,6 +217,7 @@ export function useJob() {
       running.value = false
       workflow.docGenerating = false
       controller = null
+      settleElapsed()
     }
   }
 
@@ -168,6 +232,8 @@ export function useJob() {
     controller = null
     running.value = false
     workflow.docGenerating = false
+    // 只断订阅不停表会让「已用时」在离开页面后继续涨，但那已经不是本次会话看到的状态了
+    settleElapsed()
   }
 
   /** 统一处理订阅失败：中止不算错误，其余记入 `error` 并取回错误码 */
@@ -187,6 +253,7 @@ export function useJob() {
     phase,
     runSummary,
     snapshot,
+    elapsedMs,
     // 动作
     start,
     reconnect,

@@ -12,7 +12,18 @@
 >
 > **2026-10-14 进度更新**：R0-T1 CI ✅（`.github/workflows/ci.yml`，云端双 job 已跑绿）、
 > R0-T5 错误码化 ✅（`7be5989`）、R0-T3 流式去重 ✅（四份重复 → `services/stream_reply.py`）。
-> **R0 安全网全部完成**；用例数为**后端 117 / 前端 222**。下一阶段 R1 生成可靠性。
+> **R0 安全网全部完成**；自 R1 起进入生成可靠性。
+> **R1 已落地两项**：
+> T0 生成 Job 骨架 ✅（`1f2ad08`，33 文件）：`generation_jobs` 表 + 同进程后台任务 +
+> 内存广播 + `GET /api/jobs/{id}/stream`（订阅 / 刷新重连），生成与浏览器连接就此解耦；
+> T5 成本计量 ✅：累加点唯一化到 `services/stream_reply.py::astream_text`，用量挂在环境计量器
+> `services/llm_meter.py` 上按「任务类型 + 阶段」自动分步；方舟流式的 `include_usage` 用量帧已接入。
+> 用量与 `run_summary` 事件**同源**写进 `generation_jobs.usage`，终态任务重连会补发该事件。
+> **事前预算同批交付**：有效预算 = min(物理顶[`core/model_registry`], 业务顶[`.env` 按 step])，
+> 发送前按字符启发式估算，超顶即在调用**发出之前**拒掉（复用 `INVALID_REQUEST`，不新增错误码），
+> 逼近上限只记告警、随 `run_summary.warnings` 回传。
+> R1 余下两项（T4 供应商 failover → T2 断点续传）继续建立在这套骨架与仪表上。
+> 现用例数：**后端 194 / 前端 268**。
 
 ---
 
@@ -48,9 +59,9 @@
 | --- | --- | --- | --- | --- |
 | ~~D2~~ | ~~流式编排四份重复~~ → **已解决**（2026-10-14，R0-T3）：全部收敛到 `services/stream_reply.py`（`astream_text` / `iter_reply_events` / `collect_reply` / `error_event`），三个 service 改为调用；`_extract_text` 副本与 `_error_event` 包装已删除 | 三 service | ✅ 已解决 | — |
 | ~~D4~~ | ~~错误契约靠中文串~~ → **已解决**（2026-10-14，`7be5989`）：判据改为 `isApiError(error, 'SESSION_NOT_FOUND')`，并由 4 条不变量测试防回退 | 前端 composable | ✅ 已解决 | — |
-| D7 | **长文生成不可续传**：`prd_section_writer` 逐节生成但是**单次运行内**的内存态，网络中断仍整体丢失；无中间产物落库 | `document_service` / `prd_section_writer` | ❌ 仍开 | R1-T2 |
+| D7 | **长文生成不可续传**：逐节生成，但缺「已有章节不重跑」的入口。R1-T0 已把中间态搬进后端 `generation_jobs`——`completed_sections` 逐节落库、`input_fingerprint` 已算已存、`draft_content` 合并写，刷新 / 断网后正文可原样恢复展示；**尚不能跳过已完成节**（指纹门禁未接） | `job_service` / `prd_section_writer` | ⚠️ 部分（中间态已持久化，续跑待 R1-T2） | R1-T2 |
 | D8 | **技能目录仍脆弱**：`PRDWRIGHT_SKILLS_DIR` 已支持，但缺失时仍「向上找目录」并**静默降级**到内置提示词（D8 未真正解决） | `prd_skill.resolve_skill_dir` | ⚠️ 部分 | R2-T6 |
-| D9 | **无可观测性与成本计量**：仅 `/health` 返回 `{"status":"ok"}`；无任何 token 打点、request_id、结构化日志 | 全局 | ❌ 仍开 | R1-T5 / R2-T7 |
+| D9 | **无可观测性与成本计量**：仅 `/health` 返回 `{"status":"ok"}`；无任何 token 打点、request_id、结构化日志 | 全局 | ⚠️ 部分（成本侧已收：token/耗时/调用次数随 `run_summary` 落库，`request_id` 已贯通，事前预算在调用发出前拦截；结构化日志与 `/health` 扩展待 R2-T7） | R1-T5 ✅ / R2-T7 |
 | D10 | **技能资源常驻缓存**：`prd_skill.py:64 @lru_cache` 缓存到进程结束，改模板必须重启 | `prd_skill` | ❌ 仍开 | R2-T6 |
 | D11 | **零部署**（CI 已解决）：`.github/workflows/ci.yml` 已就位并跑绿，测试不再靠人手跑；仍无 `Dockerfile` / `docker-compose` / `Makefile` | 仓库根 | ⚠️ 部分（部署待 R3） | R3 |
 | D12 | **无供应商 failover**：`llm_factory.get_llm` 只按 `default_llm_provider` 构造单个模型，无主备切换/超时重试 | `llm_factory.py:31` | ❌ 仍开 | R1-T4 |
@@ -75,7 +86,7 @@
 
 ## 三、重订路线图（剩余工作 R0 → R3）
 
-排序原则升级为：**先给手上的测试装上自动执行的网（R0，现 329 个），再补核心交付物的可靠性（R1），再工程化资产与可观测性（R2），最后把「能跑」变成「能部署」（R3）。**
+排序原则升级为：**先给手上的测试装上自动执行的网（R0，现 462 个 = 194 + 268），再补核心交付物的可靠性（R1），再工程化资产与可观测性（R2），最后把「能跑」变成「能部署」（R3）。**
 
 > 命名 `R0–R3`（Revised）是为了和已完成的 `P0–P4` 区分——它们不是推翻重来，而是收尾。
 
@@ -83,7 +94,7 @@
 
 ### R0 · 安全网收尾：CI + 两个未结的护栏项
 
-**周期**：3–5 天（T1/T5 已完成，仅剩 T3）　**功能变化**：零　**风险**：低（T3 需对照测试）
+**周期**：3–5 天（T1 / T3 / T5 已全部完成）　**功能变化**：零　**风险**：低（T3 需对照测试）
 
 **目标**：在动任何有风险的结构之前，先把「测试靠人手跑」和「两个半吊子护栏」解决掉。
 
@@ -117,9 +128,11 @@
 
 | 任务 | 具体动作 | 关联债务 |
 | --- | --- | --- |
+| **T0 生成 Job 骨架** ✅ `1f2ad08` | 新增 `generation_jobs` 表 + 同进程后台任务 + 内存广播 `job_bus` + `GET /api/jobs/{id}/stream`（订阅 / 重连）；生成与浏览器连接解耦，刷新只凭快照里的任务指针重连。表内 `input_fingerprint` / `usage` / `max_provider_switches` 三列随骨架落地 | 新增能力（v3.0 地基） |
 | T2 断点续传 | 续传依据是 `generation_jobs.completed_sections`（已完成节的标题→正文，落在**后端自有 Job 表**，不塞进 `solutions.data` 快照——塞快照会与 ADR-009「后端不解析 `data`」冲突）。生成请求带 `resume_from` 时，只补生成缺失节，已完成的节不重复消耗 token。单节失败只重试该节。展开方案见 `./ARCHITECTURE.md` 第 4.1 / 4.6 节 | D7 |
 | T4 供应商 failover | `llm_factory` 接受**有序供应商列表**（`default_llm_provider` + `fallback_llm_providers`）；调用抛异常或超时，按序切下一个；业务层无感。`get_llm()` 返回封装了重试/切换的客户端 | D12 |
-| T5 成本计量 | 每次生成从 `response_metadata` 取 `prompt_tokens` / `completion_tokens`，经统一 LLM 包装层累加进 `generation_jobs.usage`，Job 完成发 `run_summary`（含总 tokens / 耗时 / 调用次数 / 注入技能）；方案详情可看「本次生成 token 与所用供应商/模型」 | D9（成本部分） |
+| **T5 成本计量** ✅ | 每次生成从分块的 `usage_metadata` 取 `input_tokens` / `output_tokens`（LangChain 三个供应商的统一字段；方舟封装需先开 `stream_options.include_usage` 再映射，见第 4.6 节实测结论），经统一 LLM 包装层累加进 `generation_jobs.usage`，Job 完成发 `run_summary`（含总 tokens / 耗时 / 调用次数 / 注入技能）；方案详情可看「本次生成 token 与所用供应商/模型」。**落地细化**：累加点唯一化到 `stream_reply.astream_text`（一次覆盖全部约 10 个流式调用点）；计量器是 `ContextVar` 承载的 `RunMeter`，调用方式不变、`step` 由 `{kind}:{phase}` 自动派生；方舟用量在 `choices` 为空的独立帧上，取用必须在「有无 choices」判断**之前**（原循环在此静默吞帧）；`run_summary` 事件与 `generation_jobs.usage` 同源（同一份 JSON），终态任务重连补发该事件；计量**先于**截断检查，被截断的调用照样计费。
+**事前预算同批落地**：有效预算 = min(物理顶 `core/model_registry` 按 provider+model 登记，业务顶 `.env` 按 step 覆盖)，发送前按字符启发式估算（不引 tiktoken，偏高估），超顶即在调用**发出之前**拒掉（复用 `INVALID_REQUEST`，8 码体系不膨胀），逼近上限记一条告警随 `run_summary.warnings` 回传；检查点与计量同在 `astream_text` | D9（成本部分） |
 
 **验收**：
 - 生成中途 kill 后端网络/进程，恢复后能从断点续，已完成节不重复计费。
@@ -178,7 +191,7 @@
 
 | 决策 | 理由 |
 | --- | --- |
-| **CI 提到 R0 而非留在 R3** | 旧路线图把 CI 放在部署阶段，但当时已有 287 个测试且 R0-T3 要动有风险的流式去重代码。先装自动执行的网，才能让后续每个改动「敢动手」——这是旧 P0 护栏思想的延续，只是落地时机随测试规模而前移（现 329 个测试，CI 已跑绿） |
+| **CI 提到 R0 而非留在 R3** | 旧路线图把 CI 放在部署阶段，但当时已有 287 个测试且 R0-T3 要动有风险的流式去重代码。先装自动执行的网，才能让后续每个改动「敢动手」——这是旧 P0 护栏思想的延续，只是落地时机随测试规模而前移（现 462 个测试，CI 已跑绿） |
 | **R0 先于 R1** | T3 流式去重是已知风险点，必须先有 CI 兜底 + 对照测试钉死行为；T5 错误码是仍活着的 bug（前端字符串匹配），已于 2026-10-14 收掉 |
 | **R1 紧随 R0** | PRD 是核心交付物，中断即全废（D7）、供应商单点（D12）、成本不可见（D9）直接决定「用户敢不敢用」。它们改的都是生成主链路，应在结构稳定后集中处理 |
 | **R2 在 R1 之后** | 资产工程化（热重载/fail-fast）与可观测性不阻塞任何功能，但 R2-T8 的 RAG 资产登记是 R3 Docker 打包的前置，故排在 R3 之前 |
@@ -230,17 +243,18 @@
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 原 P0 护栏（除 T3/T5） | ✅ | 用例数已增长为 **117 后端 / 222 前端**；死接口已删 |
+| 原 P0 护栏（除 T3/T5） | ✅ | 用例数已增长为 **194 后端 / 268 前端**；死接口已删 |
 | 原 P1 方案持久化 | ✅ | 快照范式 + owner 过滤 + 侧边栏 + router |
 | 原 P2 前端解耦 | ✅ | App.vue 已删；组件库 + 状态机 + composables |
 | 原 P3-T1/T3（分章节 + max_tokens 分档） | ✅ | `prd_section_writer` + `llm_factory` 分档 |
 | 原 P4 登录 | ✅ | 认证 + 中间件 + 前端 + CLI |
-| **R0-T1 CI** | ✅ | `.github/workflows/ci.yml`，双 job 云端已跑绿（107 + 222） |
+| **R0-T1 CI** | ✅ | `.github/workflows/ci.yml`，双 job 云端已跑绿（194 + 268） |
 | **R0-T5 错误码化** | ✅ | `7be5989`；ADR-012；4 条不变量测试防回退 |
 | **R0-T3 流式去重收尾** | ✅ | D2 四份重复 → `services/stream_reply.py`；差分比对 12 组一致 + 10 例契约测试 |
-| **R1-T2 断点续传** | ⬜ | D7 |
-| **R1-T4 供应商 failover** | ⬜ | D12 |
-| **R1-T5 成本计量** | ⬜ | D9 成本部分 |
+| **R1-T0 生成 Job 骨架** | ✅ | `1f2ad08`；`generation_jobs` 表 + 后台任务 + `job_bus` 广播 + `GET /api/jobs/{id}/stream` 订阅重连；用例 107→141 后端 / 222→248 前端 |
+| **R1-T5 成本计量** | ✅ | D9 成本部分：事后计量（`llm_meter` 环境计量器 + `request_id` 贯通 + 方舟 `include_usage` + `run_summary` 与 `generation_jobs.usage` 同源）与**事前预算**（`core/model_registry` 物理顶 + `.env` 业务顶取小值、字符启发式估算、超顶在调用前拒掉且复用 `INVALID_REQUEST`、逼近上限告警随 `run_summary.warnings` 回传）；两个检查点都唯一化到 `stream_reply.astream_text`；用例 141→**194** 后端 / 248→**268** 前端 |
+| **R1-T4 供应商 failover** | ⬜ | D12 ← 下一步 |
+| **R1-T2 断点续传** | ⬜ | D7（中间态已随 T0 持久化） |
 | **R2-T6 技能资产加固** | ⬜ | D8/D10 |
 | **R2-T7 可观测性** | ⬜ | D9 观测部分 |
 | **R2-T8 RAG 资产登记** | ⬜ | 新能力收口 |
@@ -264,7 +278,7 @@
 | 持久化 | 方案单表全量快照 + owner 强制过滤 + 左侧栏 + 防抖保存 |
 | 账号 | 注册（需邀请码）/ 登录 / HttpOnly Cookie / 默认拒绝中间件 / 未登录禁止建任务 |
 | 前端 | `App.vue` 巨石已拆（`AppV2` + `stages/` + `ui/` + `composables/`）、亮暗主题三层令牌、底栏为唯一操作落点 |
-| 可靠性护栏 | CI 双 job（后端 117 例 / 前端 222 例，全程离线零 token）、错误契约机器码化（ADR-012）、流式编排单一实现（ADR-013） |
+| 可靠性护栏 | CI 双 job（收口时后端 107 例 / 前端 222 例，全程离线零 token）、错误契约机器码化（ADR-012）、流式编排单一实现（ADR-013） |
 | 品牌 | HarnessPRD → PRDwright 全量更名（仓库根目录名保留 `HarnessPRD`） |
 
 **v2 的边界**：以上能力都成立，但一次「长文生成」仍是**乐观流程**——中断即全丢、供应商单点、成本不可见。
@@ -276,7 +290,7 @@
 
 | 版本阶段 | 对应本文件章节 | 目标 |
 | --- | --- | --- |
-| v3.0 生成可靠性 | R1（T5 成本计量 → T4 供应商 failover → T2 断点续传，统一建立在**生成 Job 骨架**上） | 引入「生成 Job + run 中间态」，生成与浏览器连接解耦，三项共享同一份记录 |
+| v3.0 生成可靠性 | R1（**骨架 ✅ T0** → **成本计量 ✅ T5** → T4 供应商 failover → T2 断点续传） | 引入「生成 Job + run 中间态」，生成与浏览器连接解耦，三项共享同一份记录 |
 | v3.1 资产与观测 | R2（T6 技能加固 / T7 可观测性 / T8 RAG 资产登记）+ C 文档生命周期 / D Skill 注册表 / E 交付质量 | 技能热重载 + fail-fast、文档版本链、结构化日志与 `/health` |
 | v3.2 部署 | R3（Docker / 生产加固 / 隔离验证） | `docker compose up` 起全栈 |
 

@@ -87,6 +87,7 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
 
 def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
     """把 DB 行（含未对外暴露的列）收敛成 `JobStatus`（不含 draft_content）。"""
+    usage = job_service.parse_usage(row.get("usage"))
     return schemas.JobStatus(
         id=int(row.get("id", 0)),
         kind=str(row.get("kind", "")),
@@ -97,6 +98,7 @@ def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
         error_message=str(row.get("error_message", "") or ""),
         created_at=str(row.get("created_at", "")),
         updated_at=str(row.get("updated_at", "")),
+        usage=usage,
     )
 
 

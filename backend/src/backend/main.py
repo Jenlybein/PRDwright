@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from backend.api.auth import router as auth_router
 from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
-from backend.api.deps import AuthMiddleware
+from backend.api.deps import AuthMiddleware, RequestIdMiddleware
 from backend.api.jobs import router as jobs_router
 from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
@@ -51,8 +51,10 @@ app = FastAPI(
 )
 
 # 中间件注册顺序：Starlette 的 add_middleware 是「后加的在外层」。
-# 因此先注册认证（内层），后注册 CORS（外层）——跨域预检请求由 CORS 直接应答，
-# 不会误闯认证层；同时 CORS 会给认证拒绝的 401 也补上跨域头，前端才读得到错误详情。
+# 因此先注册认证（内层），再注册 CORS，最后注册 request_id（最外层）——跨域预检请求
+# 由 CORS 直接应答，不会误闯认证层；同时 CORS 会给认证拒绝的 401 也补上跨域头，
+# 前端才读得到错误详情。request_id 放最外层，是为了让**认证拦下的 401 也带得上
+# `X-Request-ID`**：报障时用户手上那个号必须存在于每一次响应里。
 app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +63,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIdMiddleware)
 
 
 async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:

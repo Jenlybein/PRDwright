@@ -90,7 +90,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | 落库 | 新增 `generation_jobs` 表：`id / owner_id / solution_id / kind / status / phase / draft_content / completed_sections / usage / error_code / created_at / updated_at` |
 | 执行 | 同进程 `asyncio.create_task`，复用现有 `document_service` 的 generator，**不改 LLM pipeline** |
 | 广播 | 内存事件总线 `job_bus`：chunk / phase 推给当前订阅者；连接断开只 unsubscribe，**不 cancel 任务** |
-| 订阅 | `GET /api/jobs/{id}/stream`；事件沿用现有 SSE 词汇（`status` / `chunk` / `part` / `stage` / `done` / `error`），对新订阅者先发一条 `snapshot` 补全已有内容 |
+| 订阅 | `GET /api/jobs/{id}/stream`；事件沿用现有 SSE 词汇（`status` / `chunk` / `part` / `stage` / `done` / `error`），对新订阅者先发一条 `snapshot` 补全已有内容。SSE 帧的拼装统一在 `api/sse.py`（`event:` + `data:` 两行同写，与旧通道同一口径） |
 | 重连 | 前端重连带同一 `jobId`；`running` → 整段显示已有内容 + 新字打字机；`completed` → 静态全文；`failed` → 保留 partial + 错误码 |
 | 归属 | 强制 `owner_id`，越权返回 404（与 `solutions` 一致） |
 
@@ -113,6 +113,21 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 
 **物理顶必须按 provider 建模**：当前默认供应商是 ark、默认模型 `doubao-seed-2-1-turbo-260628`。
 注册表按「provider + model」查上限，避免把某个厂商的窗口写死进代码。
+
+**落地状态（2026-10-14）**：上表**观测侧与预算侧都已随 R1-T5 落地**（仅「打一行 JSON 日志」除外，随 R2-T7）。
+
+- **观测侧**：`request_id` 由纯 ASGI 中间件（`api/deps.py::RequestIdMiddleware`）
+  经 `core/request_context.py` 的 `ContextVar` 贯通到业务层；`step` 标签由「任务类型 + 阶段」派生
+  （`{kind}:{phase}`，`phase` 来自既有 `stage` 事件），无需在各个调用点手写；token / duration_ms
+  的累加**只写在 `stream_reply.astream_text` 一处**；`run_summary` 由 `core/contracts.py::RunSummary`
+  定形，**事件与 `generation_jobs.usage` 同源**（同一份 JSON），终态任务重连会补发该事件。
+  方舟侧已开 `stream_options.include_usage` 并映射到统一 `usage_metadata`（实现细节见 4.6）。
+- **预算侧**：物理顶来自 `core/model_registry`（按 provider + model 两级登记，未登记的型号退到
+  provider 默认值，并可用 `LLM_CONTEXT_WINDOW` 覆盖），业务顶来自 `.env`（`LLM_BUDGET_DEFAULT_CAP`
+  与按 step 覆盖的 `LLM_BUDGET_CAPS`），**取两者较小值**为有效预算；发送前用字符启发式估算
+  （不引 tiktoken，误差方向刻意偏高估），超顶即抛 `BudgetExceededError`——**这次调用根本不发出**，
+  错误码复用 `INVALID_REQUEST` 而不新增码；逼近上限只记一条告警，随 `run_summary.warnings` 回传。
+  检查点同样唯一（`astream_text` 开头），与事后计量互为表里。
 
 ### 4.3 文档生命周期
 
@@ -163,25 +178,42 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 
 以下四条是生成可靠性的关键实现约定（原 `r1-generation-reliability.md` 折入，该文件已删）：
 
-**输入指纹（安全续传的闸门）**：`hash(需求文本 + 技能资源指纹 + 模板 + PRD_SECTIONS 定义)`，随 Job 一起落库。
+**输入指纹（安全续传的闸门）**：`hash(需求文本 + 技能资源指纹 + 模板 + PRD_SECTIONS 定义)`，随 Job 一起落库
+（`services/job_fingerprint.py::compute_input_fingerprint`，T0 落地时已接入 `POST /api/jobs`）。
 指纹对不上说明用户改了需求或换了模板，旧中间态一律作废重来——绝不把改需求前的章节拼进新文档。
 
 **failover 的切换边界**：只在「一次完整调用」的边界切换，切后**整节重跑**；绝不在流中途接着上一个供应商的半个输出继续（那样会产出半截章节）。
 前端已有的「丢弃实时缓冲、等权威 `part` 覆盖」语义（`stage: rewriting` 就是这么干的）直接复用，不引入新机制。
 触发条件是连接异常 / 超时 / 5xx，**不因内容质量切换**；同一 Job 内切换次数设上限，避免费用翻倍。最终供应商与切换次数写进 Job，成本计量才有归因。
 
-**计量落点的实测风险**：`ark_llm.py` 现在只往 chunk 里塞 `response_metadata`（finish_reason），**没取 token 用量**——
-第一步是改 ark 封装把 usage 带上；火山流式是否返回 usage 需实测确认（可能要开 `stream_options.include_usage`），
-openai / anthropic 的 LangChain 集成在最后一帧自带 `usage_metadata`。累加只写在 `stream_reply` 这一处（见 4.2）。
+**计量落点的实测风险（已核实，非推断）**：`ark_llm.py` 只往 chunk 里塞 `response_metadata`（finish_reason），
+**没取 token 用量**。读仓库已装的 `arkruntime` 类型定义确认：方舟的 `stream_options` 支持 `include_usage`
+（定义原话「include token usage info in the final stream chunk」）与 `chunk_include_usage`，
+用量挂在**流式响应顶层**的 `usage`（`prompt_tokens` / `completion_tokens` / `total_tokens`）。
+**这里有一个必踩的坑**：开启 `include_usage` 后，携带用量的那一帧 `choices` 为空，
+而现有循环开头就是 `if not chunk.choices: continue`——不先读 `usage` 就会把整帧吞掉，
+表现为「usage 永远拿不到」。openai / anthropic 的 LangChain 集成在最后一帧自带 `usage_metadata`
+（`input_tokens` / `output_tokens` / `total_tokens`），方舟侧映射到同一字段即可，三个供应商归一。
+累加只写在 `stream_reply` 这一处（见 4.2）。
 
-**测试策略（全部离线，CI 会拦）**：给 FakeLLM 加三种能力——抛连接异常（验 failover 切换与整节重跑）、返回 usage（验累加）、中途断流（验续传）；
-再加不变量测试：业务层禁止直接 import 具体供应商 SDK。**不得破坏 FakeLLM 离线测试（CI 全程零 token）**。
+**测试策略（全部离线，CI 会拦）**：假模型 `tests/fakes.py::ScriptedLLM` 已备好三种能力——`raise_at` 抛连接异常
+（验 failover 切换与整节重跑）、末块 `usage_metadata` 返回用量（验累加）、先吐若干块再抛（验续传）；
+再加不变量测试：业务层禁止直接 import 具体供应商 SDK。**不得破坏离线测试（CI 全程零 token）**。
+
+**落地状态**：输入指纹的计算与落库、假模型三种能力、**计量累加与 `run_summary` 汇总**均已落地
+（计量随 R1-T5，累加点唯一在 `stream_reply.astream_text`，业务层禁止直连供应商 SDK 由 `tests/test_layering.py` 的不变量测试守卫）；
+供应商切换（failover）是 R1-T4 的范围，按 `./roadmap.md` 第八节的顺序推进（当前进度也在那一节）。
 
 ### 4.7 沿用不变的部分
 
 v3 建立在这些已有决策之上，不推翻它们：ADR-007/008（Cookie 与默认拒绝中间件）、ADR-009（快照不透明 + owner 强制）、
 ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（流式编排单一出口）、ADR-014/015（主题令牌与底栏唯一落点）。
 新增的 Job API 同样受默认拒绝中间件保护，错误统一带 `code`。
+
+分层方向（`api → services → repositories → core`）在 R1-T0 里补了两处具体落点：跨层契约
+（`StreamEvent` / `QuestionConfig` / `QuestionsConfig`）从 `api/schemas.py` 移入 `core/contracts.py`，
+`api/schemas.py` 保留同名 re-export，对外引用对象不变；并新增 `tests/test_layering.py`
+（源码扫描禁止 `services/` / `repositories/` 反向 import `api/`，带检测器非空转自检）。
 
 ## 5. 前端设计
 
@@ -265,4 +297,5 @@ Job + 内存广播 + SSE 订阅保留真流式，所以应修订的是那条「�
 顺序理由：**A 是地基**（其余三项都要读 Job 记录）；**B 是仪表**（动主链路前先能看见代价）；
 C / D / E 都建立在「Job 完成」这个事件上；v3.2 与业务正交。
 
-开工前仍需拍板的两件事见 `./README.md`（中间态落点、R1 内部顺序）。
+开工前需拍板的两件事（中间态落点、R1 内部顺序）**已拍板并随 R1-T0 落地**；
+R1-T5 的计量落地点另见 `./README.md`「R1-T5 成本计量落地点」一节，实施状态以 `./roadmap.md` 第八节为准。

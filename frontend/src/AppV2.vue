@@ -336,6 +336,8 @@ const {
   docError,
   prdStatus,
   prdShowingDraft,
+  runSummary,
+  elapsedMs,
   summaryChanges,
   summarySyncing,
   summarySyncError,
@@ -563,6 +565,7 @@ function handleStepClick(stepId: StepId): void {
         :generating="isGenerating"
         :prd="prdStatus"
         :draft-only="prdShowingDraft"
+        :elapsed-ms="elapsedMs"
         :back-label="backLabel"
         @back="backToInput"
       />
@@ -578,6 +581,7 @@ function handleStepClick(stepId: StepId): void {
         :has-prd="hasPrd"
         :has-api-docs="hasApiDocs"
         :has-prompts="hasPrompts"
+        :run-summary="runSummary"
         :back-label="backLabel"
         @save="onSaveDocument"
         @optimize="onAiOptimize"

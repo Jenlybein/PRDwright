@@ -95,6 +95,41 @@ class Settings(BaseSettings):
         description="所选供应商下的默认模型名称。",
     )
 
+    # --- Token 预算（事前） --------------------------------------------------
+    # 事后计量（llm_meter）只能告诉你「刚才花了多少」；这几个开关负责在调用
+    # **发出之前**拦住明显失控的请求（如章节上下文滚雪球）。详见 services/token_budget.py。
+    llm_budget_enabled: bool = Field(
+        default=True,
+        description="是否在调用模型前做 token 预算检查。关闭后只做事后计量，"
+        "不做任何拦截——仅在排查「是不是误拦了正常请求」时临时关闭。",
+    )
+    llm_budget_default_cap: int = Field(
+        default=120_000,
+        ge=1,
+        description="业务顶的默认值（token）。故意小于模型的物理窗口：让用户在逼近"
+        "模型极限之前就先收束，而不是等到上游返回一句厂商自己的报错。",
+    )
+    llm_budget_caps: str = Field(
+        default="",
+        description="按 step 覆盖业务顶，形如 `prd:writing=60000,api_docs=40000`。"
+        "step 是「任务类型:阶段」（如 prd:writing / prd:reviewing）；只写任务类型"
+        "（如 `prd=60000`）则对该类型下所有阶段生效。未列出的 step 用 "
+        "llm_budget_default_cap；格式写错的项会被忽略而不是让服务起不来。",
+    )
+    llm_budget_warn_ratio: float = Field(
+        default=0.8,
+        gt=0,
+        le=1,
+        description="估算值达到有效预算的这个比例时记一条告警（随 run_summary 回传）。"
+        "只提示、不拦截。",
+    )
+    llm_context_window: int = Field(
+        default=0,
+        ge=0,
+        description="覆盖模型注册表里的上下文窗口（token）；0 表示用注册表的值。"
+        "换了表里没有的型号、或厂商调整了窗口时用这一个变量，不必改代码。",
+    )
+
     # --- PRD 分章节生成 ------------------------------------------------------
     # 模板本身就是「6 章 + 待确认附录」，逐章撰写可以让每章都带上已定稿的前序章节，
     # 从而保证 6.1 引用的功能编号、附录汇总的「待确认」与前文一致；
@@ -175,6 +210,27 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return value.strip().lower()
         return value
+
+    @property
+    def budget_step_caps(self) -> dict[str, int]:
+        """把 `llm_budget_caps` 解析成 `{step: cap}`。
+
+        解析不了的项**静默丢弃**：这是配置项，写错一个不该让整个服务起不来；
+        未配置任何项时返回空字典，由调用方回落到 `llm_budget_default_cap`。
+        """
+        caps: dict[str, int] = {}
+        for item in self.llm_budget_caps.split(","):
+            name, sep, raw = item.partition("=")
+            name = name.strip()
+            if not sep or not name:
+                continue
+            try:
+                value = int(raw.strip())
+            except ValueError:
+                continue
+            if value > 0:
+                caps[name] = value
+        return caps
 
     @property
     def cors_origins_list(self) -> list[str]:

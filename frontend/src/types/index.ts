@@ -376,21 +376,69 @@ export interface JobSnapshot {
   errorCode: string
   /** 失败时的中文说明；正常为空串 */
   errorMessage: string
+  /**
+   * 服务端算的任务已用时（毫秒）。
+   *
+   * 重连时用它给本地计时器打底：客户端计时器归零也不影响「已用时」的连续性。
+   */
+  elapsedMs: number
 }
 
 /**
- * 任务收尾的最小摘要（后端 `run_summary` 事件的 `data`）。
+ * 一个生成步骤的用量（后端 `StepUsage`）。
  *
- * 本期只含 `{kind, status, duration_ms}`；token 计量字段留待后续阶段。
- * 前端**只把它存进 ref，不做任何 UI**（见 `composables/useJob.ts`）。
+ * 步骤名由后端按「任务类型 + 阶段」推出（`prd:writing` / `prd:reviewing` / `api_docs` …），
+ * 前端只是展示，不参与命名。
+ */
+export interface StepUsage {
+  /** 步骤名，形如 `prd:writing` */
+  step: string
+  /** 该步骤内的模型调用次数 */
+  calls: number
+  /** 输入 token 累计 */
+  promptTokens: number
+  /** 输出 token 累计 */
+  completionTokens: number
+  /** 该步骤累计耗时（毫秒） */
+  durationMs: number
+}
+
+/**
+ * 一次生成任务的用量汇总（后端 `run_summary` 事件的 `data`，也是 `generation_jobs.usage` 的结构）。
+ *
+ * 事件与落库共用同一份结构，因此「流里看到的」与「重连后读到的」必然一致。
+ * 终态任务重连时后端会补发一份，前端无需额外查询即可显示用量。
  */
 export interface RunSummary {
-  /** 文档种类（后端原始取值） */
+  /** 文档种类（后端原始取值：prd / api_docs / prompts / optimize） */
   kind: string
   /** 终态：completed / failed */
   status: string
-  /** 本次生成耗时（毫秒） */
+  /** 本次生成总耗时（毫秒） */
   durationMs: number
+  /** 模型调用总次数 */
+  totalCalls: number
+  /** 输入 token 总量 */
+  promptTokens: number
+  /** 输出 token 总量 */
+  completionTokens: number
+  /** 按步骤拆分的用量 */
+  steps: StepUsage[]
+  /** 本次注入的技能规范文件；技能注册表统一后填充，当前恒为空 */
+  injectedSkills: string[]
+  /**
+   * 事前预算的告警（如「某步的输入已达预算上限的 92%」），每个 step 至多一条。
+   *
+   * 文案由后端生成、**仅供展示**：展示即可，不要拿它做分支判断或重试决策——
+   * 真正的拦截发生在超顶时，那时请求根本没发出，会直接转成 `error` 事件。
+   */
+  warnings: string[]
+  /** 实际使用的供应商 */
+  provider: string
+  /** 实际使用的模型名 */
+  model: string
+  /** 该次生成所属请求的追踪号；可念给维护者定位问题 */
+  requestId: string
 }
 
 // ============================================================================

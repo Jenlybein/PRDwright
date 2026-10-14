@@ -2,7 +2,7 @@
 
 这里存放 services 与 api 共享的数据契约，放在 core 是为了避免 services
 反向依赖 api：`services/` 只应依赖 `core/`，不应回头 import `api/`。
-`api/schemas.py` 从这里 re-export 这三个模型，因此 API 层对外的引用
+`api/schemas.py` 从这里 re-export 这些模型，因此 API 层对外的引用
 （`from backend.api.schemas import StreamEvent / QuestionsConfig`）保持不变。
 
 本模块只允许依赖 `pydantic` / `typing`，**不得 import `backend.api.*`**——
@@ -72,8 +72,8 @@ class StreamEvent(BaseModel):
             "`data.text` 可直接追加到文档末尾，前端据此拼出与最终 `done.reply` 逐字一致的预览。"
             "`snapshot` 与 `run_summary` 用于生成任务（generation_jobs）：前者在每次订阅开始时 "
             "**首发给**，`data` 含 job_id/kind/status/phase/finalized_text/live_buffer/"
-            "completed_sections/solution_id/error_code/error_message，供前端补全已产出正文；"
-            "后者在任务收尾时下发最小摘要 `data={kind, status, duration_ms}`。"
+            "completed_sections/solution_id/error_code/error_message/elapsed_ms，供前端补全已产出正文；"
+            "后者在任务收尾时下发本次生成的用量汇总（结构见 `RunSummary`）。"
         )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
@@ -88,3 +88,54 @@ class StreamEvent(BaseModel):
             "其它附加字段淹没。缺失或取值未知时前端一律按 `INTERNAL_ERROR` 处理。"
         ),
     )
+
+
+# ============================================================================
+# 本次生成的用量汇总
+# ============================================================================
+
+
+class StepUsage(BaseModel):
+    """一个生成步骤的用量累计（如 PRD 的撰写 / 审核 / 改写各算一步）。
+
+    步骤名由「任务类型 + 阶段」推出（`prd:writing` / `api_docs` …），见
+    `services/llm_meter.py`：模型调用发生在流水线内部，那里拿不到调用方的语义名，
+    却能从 job 的 kind 与已在流转的 `stage` 事件里唯一确定自己在哪一步。
+    """
+
+    step: str = Field(description="步骤名，形如 `prd:writing`")
+    calls: int = Field(default=0, description="该步骤内的模型调用次数")
+    prompt_tokens: int = Field(default=0, description="输入 token 累计")
+    completion_tokens: int = Field(default=0, description="输出 token 累计")
+    duration_ms: int = Field(default=0, description="该步骤累计耗时（毫秒）")
+
+
+class RunSummary(BaseModel):
+    """一次生成任务的用量汇总：`run_summary` 事件与 `generation_jobs.usage` 共用同一结构。
+
+    字段名与前端 `types/index.ts::RunSummary` **逐字一致**（前端用 camelCase 归一化），
+    契约准绳在前端，改任何一侧都要同步另一侧。
+    """
+
+    kind: str = Field(default="", description="任务类型：prd / api_docs / prompts / optimize")
+    status: str = Field(default="", description="终态：completed / failed")
+    duration_ms: int = Field(default=0, description="任务总耗时（毫秒）")
+    total_calls: int = Field(default=0, description="模型调用总次数")
+    prompt_tokens: int = Field(default=0, description="输入 token 总量")
+    completion_tokens: int = Field(default=0, description="输出 token 总量")
+    steps: list[StepUsage] = Field(default_factory=list, description="按步骤拆分的用量")
+    injected_skills: list[str] = Field(
+        default_factory=list,
+        description="本次注入的技能规范文件；技能注册表在 v3.1 统一后填充，当前恒为空",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "事前预算的告警（如「某步的输入已达预算上限的 92%」），每个 step 至多一条、"
+            "保留最严重的那条。文案由后端生成、仅供展示：前端**不做**分支判断，"
+            "也更不该拿它做重试决策——真正的拦截在超顶时已经转成 `error` 事件了。"
+        ),
+    )
+    provider: str = Field(default="", description="最终使用的供应商")
+    model: str = Field(default="", description="最终使用的模型名")
+    request_id: str = Field(default="", description="该次生成所属请求的追踪 id")

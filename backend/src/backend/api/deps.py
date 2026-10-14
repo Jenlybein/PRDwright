@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import json
 from http.cookies import SimpleCookie
+from uuid import uuid4
 
 from fastapi import Request, status
+from starlette.datastructures import MutableHeaders
 
 from backend.core.config import get_settings
 from backend.core.errors import AppError, ErrorCode, error_payload
+from backend.core.request_context import reset_request_id, set_request_id
 from backend.services.auth_service import User, current_user, ensure_dev_user
 
 # 精确匹配的公开路径
@@ -135,6 +138,71 @@ class AuthMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+
+_REQUEST_ID_HEADER = b"x-request-id"
+
+# 入站 request_id 的最大长度。回写响应头之前必须设上限，避免外部塞进超长头。
+_MAX_REQUEST_ID_LENGTH = 64
+
+
+def _incoming_request_id(scope: dict) -> str:
+    """取入站 `X-Request-ID`；没有或不可用时返回空串（由调用方另生成）。
+
+    **必须过滤**：这个值会被原样写进响应头，直接采信外部输入等于把响应头的控制权
+    交给调用方（换行注入、超长头）。因此只接受「长度合规 + 仅字母数字与 `-` `_`」，
+    不合规就当没带，而不是原样透传。
+    """
+    for key, value in scope.get("headers", []):
+        if key.lower() != _REQUEST_ID_HEADER:
+            continue
+        raw = value.decode("latin-1").strip()
+        if 0 < len(raw) <= _MAX_REQUEST_ID_LENGTH and all(
+            char.isalnum() or char in "-_" for char in raw
+        ):
+            return raw
+        return ""
+    return ""
+
+
+class RequestIdMiddleware:
+    """给每个请求分配 `request_id`，并回写 `X-Request-ID` 响应头。
+
+    **为什么是纯 ASGI**：与 `AuthMiddleware` 同理——`BaseHTTPMiddleware` 会把下游响应体
+    重新包一层，对本项目的 SSE 接口是额外的不确定因素。这里只在 `http.response.start`
+    那一帧往响应头里**追加一个字段**，完全不触碰响应体，流式数据原样透传；
+    也正因为只在首帧动手，长连接（SSE）不会因此被缓冲。
+
+    **为什么要回写响应头**：`request_id` 的价值在于「用户能把它念给维护者」。
+    只写日志、不回给前端，用户报障时给不出这个值，追踪链就断在浏览器这一端。
+
+    **为什么还要写上下文变量**：`run_summary` 由服务层组装，那里没有任何 HTTP 对象；
+    上下文变量是中间件与服务层之间唯一的通道（见 `core/request_context.py`）。
+    后台任务会复制当前上下文，因此生成任务的 `request_id` 与发起它的那次请求一致。
+    """
+
+    def __init__(self, app) -> None:  # noqa: ANN001 - ASGIApp 类型随 starlette 版本而异
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = _incoming_request_id(scope) or uuid4().hex
+        scope.setdefault("state", {})
+        scope["state"]["request_id"] = request_id
+        token = set_request_id(request_id)
+
+        async def send_with_request_id(message) -> None:  # noqa: ANN001
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["X-Request-ID"] = request_id
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        finally:
+            reset_request_id(token)
 
 
 def get_current_user_optional(request: Request) -> User | None:

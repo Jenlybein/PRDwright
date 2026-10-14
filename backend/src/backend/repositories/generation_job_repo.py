@@ -190,19 +190,25 @@ class GenerationJobRepository:
         error_message: str,
         draft_content: str,
         completed_sections: list[dict[str, Any]],
+        usage: str | None = None,
     ) -> None:
-        """标记任务失败，保留已产出的半截正文与章节（供用户查看生成到哪一步）。"""
+        """标记任务失败，保留已产出的半截正文、章节与已发生的用量。
+
+        `usage` 在失败路径同样要落：失败的生成**照样消耗了 token**，
+        只记成功那次等于把最贵的失败藏起来。
+        """
         with connect() as conn:
             conn.execute(
                 "UPDATE generation_jobs "
                 "SET status = 'failed', error_code = ?, error_message = ?, "
-                "    draft_content = ?, completed_sections = ?, updated_at = ? "
+                "    draft_content = ?, completed_sections = ?, usage = ?, updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     error_code,
                     error_message,
                     draft_content,
                     _dump_sections(completed_sections),
+                    usage,
                     utc_now_text(),
                     job_id,
                     owner_id,

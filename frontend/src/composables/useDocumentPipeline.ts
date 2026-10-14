@@ -864,11 +864,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     activeDocContent,
     backLabel,
     formBackLabel,
-    // 临时状态
-    docStreamingContent,
-    docError,
-    prdStatus,
-    prdShowingDraft,
+  // 临时状态
+  docStreamingContent,
+  docError,
+  prdStatus,
+  prdShowingDraft,
+  // 用量观测：运行摘要（生成后展示）+ 已用时（生成中展示），均来自任务运行态
+  runSummary: job.runSummary,
+  elapsedMs: job.elapsedMs,
     summaryChanges,
     summarySyncing,
     summarySyncError,

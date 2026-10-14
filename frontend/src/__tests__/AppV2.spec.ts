@@ -172,6 +172,7 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     solutionId: 1,
     errorCode: '',
     errorMessage: '',
+    elapsedMs: 0,
     ...overrides,
   }
 }
@@ -780,6 +781,7 @@ describe('AppV2 完整流程编排', () => {
         errorMessage: '',
         createdAt: '2026-10-13T00:00:00',
         updatedAt: '2026-10-13T00:00:00',
+        usage: null,
       },
     ])
 
@@ -887,6 +889,11 @@ describe('AppV2 完整流程编排', () => {
     }))
 
     const wrapper = await mountApp()
+    // 断言必须落在**挂载时那个 pinia** 的 store 上。`useWorkflowStore()` 取的是模块级的
+    // 「当前活跃 pinia」，而同一文件里每次挂载都会把它换成新实例；等到断言时再取，
+    // 拿到的就未必是这个应用的 store（会读到别的用例遗留的状态），断言随之随执行顺序漂移。
+    // 挂载后立刻取到手里，断言才只反映「这一次点击」的结果。
+    const workflow = useWorkflowStore()
     await submitSampleForm(wrapper)
     await clickButton(wrapper, '重新开始')
     // 「重新开始」会先 flush 一次待保存的改动，再清空——因此要多等几拍
@@ -899,7 +906,6 @@ describe('AppV2 完整流程编排', () => {
     // 会话内容确实被清空了——断言 store 里的空态，而不是磁盘上某个键的内容：
     // 持久化的权威来源已从 localStorage 换成后端，重开一次页面必须回到入口页，
     // 而不是把上一轮的产物又拉回来。
-    const workflow = useWorkflowStore()
     expect(workflow.viewState).toBe('entry')
     expect(workflow.entryMode).toBeNull()
     expect(workflow.quickInput).toEqual({ productName: '', requirements: '' })

@@ -4,7 +4,8 @@ import { computed, ref } from 'vue'
 import DocumentReview from '@/components/DocumentReview.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
-import type { ViewState } from '@/types'
+import type { RunSummary, ViewState } from '@/types'
+import { formatDuration, formatTokens } from '@/utils/metering'
 
 /**
  * 文档「待确认」阶段视图（PRD / 接口文档 / 提示词共用）。
@@ -43,7 +44,7 @@ const emit = defineEmits<{
   finish: []
 }>()
 
-defineProps<{
+const props = defineProps<{
   /** 文档标题 */
   title: string
   /** 文档正文（Markdown 源码） */
@@ -66,7 +67,20 @@ defineProps<{
    * 因此文案由上层给，组件不猜。
    */
   backLabel?: string
+  /**
+   * 最近一次生成的用量汇总；没有（如直接打开一份已完成方案、未发生本次生成）时为 null。
+   *
+   * **只展示，不产生任何操作**：这一行是给用户看的回执（花了多久、用了多少、出问题时报哪个号），
+   * 不是「对文档做的事」，因此不放进底栏，也不加按钮。
+   */
+  runSummary?: RunSummary | null
 }>()
+
+/** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
+const totalTokens = computed(() => {
+  const summary = props.runSummary
+  return summary ? summary.promptTokens + summary.completionTokens : 0
+})
 
 /** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制、保存、切换视图 */
 const doc = ref<InstanceType<typeof DocumentReview> | null>(null)
@@ -122,6 +136,40 @@ function submitOptimize(): void {
       </svg>
       <span>{{ error }}</span>
     </p>
+
+    <!-- 最近一次生成的只读用量回执：耗时 / token / 请求号。
+         请求号是报障时「念给维护者」的那串字，用 select-all 让它可选中复制——刻意不加按钮，
+         这一行不该和底栏那些「对文档做的事」抢注意力。 -->
+    <div
+      v-if="runSummary"
+      class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-subtle"
+    >
+      <span>本次生成耗时 {{ formatDuration(runSummary.durationMs) }}</span>
+      <template v-if="totalTokens > 0">
+        <span aria-hidden="true">·</span>
+        <span>约 {{ formatTokens(totalTokens) }} tokens</span>
+      </template>
+      <template v-if="runSummary.requestId">
+        <span aria-hidden="true">·</span>
+        <span>
+          请求号
+          <code
+            class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px] text-muted"
+            title="选中即可复制；报障时提供它可快速定位这次生成"
+            >{{ runSummary.requestId }}</code
+          >
+        </span>
+      </template>
+    </div>
+
+    <!-- 事前预算的告警：某一步的输入逼近了预算上限（未超顶，所以生成照常完成了）。
+         只提示、不拦截、不给按钮——用户据此知道「下次该精简点」，不需要现在做什么。 -->
+    <ul
+      v-if="runSummary?.warnings.length"
+      class="space-y-1 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+    >
+      <li v-for="warning in runSummary.warnings" :key="warning">{{ warning }}</li>
+    </ul>
 
     <!-- 文档卡片：只有头部与正文，工具全部下沉到下面的底栏 -->
     <DocumentReview

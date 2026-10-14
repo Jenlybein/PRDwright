@@ -33,6 +33,16 @@ _FORBIDDEN_IMPORT_RE = re.compile(
     re.MULTILINE,
 )
 
+# 具体供应商 SDK。业务代码只认 `llm_factory.get_llm()` 与统一的 `StreamingChatModel`
+# 协议，绝不直接 import 任何一家的 SDK。
+_VENDOR_SDK_RE = re.compile(
+    r"^\s*(?:from|import)\s+(arkruntime|langchain_openai|langchain_anthropic)\b",
+    re.MULTILINE,
+)
+
+# 唯一允许直连供应商 SDK 的两处：工厂（按配置选供应商）与方舟适配器（含用量映射）。
+_VENDOR_SDK_ALLOWED = frozenset({"llm_factory.py", "ark_llm.py"})
+
 
 def _scan_for_backward_imports(directory: Path) -> list[str]:
     """扫描目录下所有 .py 文件，返回「反向 import api」的违规行。
@@ -81,4 +91,37 @@ def test_layer_does_not_import_api(layer):
     assert not offenders, (
         f"`{layer}/` 出现对 `api/` 的反向依赖（契约应放在 core/contracts.py）："
         + "；".join(offenders)
+    )
+
+
+def test_vendor_sdk_detector_is_not_vacuous():
+    """自检：供应商 SDK 扫描规则必须真能命中直连写法。"""
+    assert _VENDOR_SDK_RE.search("from arkruntime import AsyncArk")
+    assert _VENDOR_SDK_RE.search("import langchain_openai")
+    assert _VENDOR_SDK_RE.search("from langchain_anthropic import ChatAnthropic")
+    # 抽象层与自家的适配器不该被误报
+    assert not _VENDOR_SDK_RE.search("from langchain_core.messages import AIMessageChunk")
+    assert not _VENDOR_SDK_RE.search(
+        "from backend.services.ark_llm import VolcanoArkChatModel"
+    )
+
+
+def test_only_adapters_import_vendor_sdk():
+    """业务层不得直接 import 供应商 SDK（方舟 / OpenAI / Anthropic）。
+
+    换供应商时要改的只有工厂（`llm_factory`）与各自的适配器（如 `ark_llm`）。
+    若某个 service 直接 import `arkruntime` / `langchain_openai`，换供应商就成了
+    全仓大改；用量映射这类适配逻辑也会被复制到各处，迟早走形。
+    """
+    offenders: list[str] = []
+    for path in sorted((_BACKEND_SRC / "services").glob("*.py")):
+        if path.name in _VENDOR_SDK_ALLOWED:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in _VENDOR_SDK_RE.finditer(text):
+            line_no = text.count("\n", 0, match.start()) + 1
+            offenders.append(f"{path.name}:{line_no}")
+
+    assert offenders == [], (
+        "业务层出现供应商 SDK 直连（应经 `llm_factory.get_llm()`）：" + "；".join(offenders)
     )

@@ -352,7 +352,7 @@ describe('登录凭据与未登录处理', () => {
 //
 // 有了任务，生成与浏览器连接解耦：刷新 / 断线只断订阅；重连时先收 `snapshot`
 // 再收 live。这里钉住三件事——请求方法 / 凭据、`snapshot` 的字段映射、以及
-// `run_summary` 的最小版契约。任何一处映射错位都不会报错，只会静默丢进度。
+// `run_summary` 的完整契约。任何一处映射错位都不会报错，只会静默丢进度或丢用量。
 // ============================================================================
 
 describe('生成任务接口（jobs）', () => {
@@ -402,12 +402,41 @@ describe('生成任务接口（jobs）', () => {
             solution_id: 3,
             error_code: '',
             error_message: '',
+            elapsed_ms: 4500,
           },
         }),
         sseFrame('run_summary', {
           type: 'run_summary',
           content: '',
-          data: { kind: 'prd', status: 'completed', duration_ms: 1234 },
+          data: {
+            kind: 'prd',
+            status: 'completed',
+            duration_ms: 1234,
+            total_calls: 3,
+            prompt_tokens: 900,
+            completion_tokens: 300,
+            steps: [
+              {
+                step: 'prd:writing',
+                calls: 2,
+                prompt_tokens: 800,
+                completion_tokens: 250,
+                duration_ms: 900,
+              },
+              {
+                step: 'prd:reviewing',
+                calls: 1,
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                duration_ms: 300,
+              },
+            ],
+            injected_skills: [],
+            warnings: ['prd:writing 的输入约 96,000 tokens，已达预算上限 120,000 的 80%'],
+            provider: 'ark',
+            model: 'doubao-seed-2-1-turbo-260628',
+            request_id: 'req-abc',
+          },
         }),
         sseFrame('done', { type: 'done', content: '', data: { reply: '# 产品需求文档\n\n半句' } }),
         'data: [DONE]\n\n',
@@ -446,11 +475,93 @@ describe('生成任务接口（jobs）', () => {
         solutionId: 3,
         errorCode: '',
         errorMessage: '',
+        // 服务端算的已用时：刷新重连后用它给本地计时器打底，显示的仍是任务真实耗时
+        elapsedMs: 4500,
       },
     ])
-    // run_summary 是最小版：只有 kind / status / duration_ms
-    expect(summaries).toEqual([{ kind: 'prd', status: 'completed', durationMs: 1234 }])
+    // run_summary 的完整契约：任务状态 + 用量汇总（含按步骤拆分）
+    expect(summaries).toEqual([
+      {
+        kind: 'prd',
+        status: 'completed',
+        durationMs: 1234,
+        totalCalls: 3,
+        promptTokens: 900,
+        completionTokens: 300,
+        steps: [
+          {
+            step: 'prd:writing',
+            calls: 2,
+            promptTokens: 800,
+            completionTokens: 250,
+            durationMs: 900,
+          },
+          {
+            step: 'prd:reviewing',
+            calls: 1,
+            promptTokens: 100,
+            completionTokens: 50,
+            durationMs: 300,
+          },
+        ],
+        injectedSkills: [],
+        warnings: ['prd:writing 的输入约 96,000 tokens，已达预算上限 120,000 的 80%'],
+        provider: 'ark',
+        model: 'doubao-seed-2-1-turbo-260628',
+        requestId: 'req-abc',
+      },
+    ])
     expect(result.reply).toBe('# 产品需求文档\n\n半句')
+  })
+
+  it('run_summary 的 steps、注入技能与预算告警逐项校验，坏项被丢弃而不让整份摘要失效', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          sseFrame('run_summary', {
+            type: 'run_summary',
+            content: '',
+            data: {
+              kind: 'api_docs',
+              status: 'completed',
+              duration_ms: 800,
+              // 第一项不是对象、末一项字段类型不对：都不该让整份摘要失败
+              steps: ['坏项', { step: 'api_docs', calls: 1 }, 42],
+              injected_skills: ['prd-generator', 7],
+              // 告警同理：非字符串项丢弃，合法项保留
+              warnings: ['api_docs 的输入已达预算上限的 88%', 7],
+              provider: 'ark',
+              model: 'm',
+              request_id: '',
+            },
+          }),
+          'data: [DONE]\n\n',
+        ]),
+      ),
+    )
+
+    const summaries: RunSummary[] = []
+    await readJobStream(7, { onRunSummary: (item) => summaries.push(item) })
+
+    expect(summaries).toHaveLength(1)
+    const summary = summaries[0]!
+    expect(summary.kind).toBe('api_docs')
+    expect(summary.totalCalls).toBe(0)
+    // 非对象项被丢弃，字段缺失的项按零补
+    expect(summary.steps).toEqual([
+      {
+        step: 'api_docs',
+        calls: 1,
+        promptTokens: 0,
+        completionTokens: 0,
+        durationMs: 0,
+      },
+    ])
+    // 非字符串项被丢弃，但这一项本身仍保留
+    expect(summary.injectedSkills).toEqual(['prd-generator'])
+    expect(summary.warnings).toEqual(['api_docs 的输入已达预算上限的 88%'])
+    expect(summary.requestId).toBe('')
   })
 
   it('snapshot 的 completed_sections 逐项校验，坏项被丢弃而不打断整条流', async () => {

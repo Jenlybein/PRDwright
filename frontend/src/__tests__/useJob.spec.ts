@@ -8,16 +8,18 @@ import type { StreamHandlers } from '@/services/api'
 import { ApiError } from '@/services/errors'
 import * as solutionApi from '@/services/solutionService'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { JobSnapshot } from '@/types'
+import type { JobSnapshot, RunSummary } from '@/types'
 
 /**
  * 生成任务生命周期编排测试。
  *
- * 这一层把「一次生成」从「一次浏览器请求」升级为「一个后端任务」，三件事必须钉死：
+ * 这一层把「一次生成」从「一次浏览器请求」升级为「一个后端任务」，四件事必须钉死：
  * 1. `start` **创建任务前后各 flush 一次**——前一次让任务带上 `solution_id`，
  *    后一次把任务指针写进后端快照（刷新后能重连，全押在这一步）；
  * 2. 事件回调（含 `snapshot` / `run_summary`）要原样透传给调用方，并顺手记录运行态；
- * 3. `detach` **只退订、不取消服务端任务**——这正是「生成与连接解耦」的落点。
+ * 3. `detach` **只退订、不取消服务端任务**——这正是「生成与连接解耦」的落点；
+ * 4. 已用时由运行态统一维护：**每次快照都用服务端的值重新锚定**（刷新重连后不归零），
+ *    收尾时停在权威总耗时上。
  */
 
 vi.mock('@/services/api', () => ({
@@ -67,6 +69,26 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     solutionId: 1,
     errorCode: '',
     errorMessage: '',
+    elapsedMs: 0,
+    ...overrides,
+  }
+}
+
+/** 造一份用量汇总（`run_summary` 事件的 data） */
+function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    kind: 'prd',
+    status: 'completed',
+    durationMs: 250,
+    totalCalls: 3,
+    promptTokens: 100,
+    completionTokens: 50,
+    steps: [],
+    injectedSkills: [],
+    warnings: [],
+    provider: 'ark',
+    model: 'doubao-seed',
+    requestId: 'req-1',
     ...overrides,
   }
 }
@@ -135,7 +157,7 @@ describe('useJob.start', () => {
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       handlers?.onSnapshot?.(snap)
       handlers?.onChunk?.('增量')
-      handlers?.onRunSummary?.({ kind: 'prd', status: 'completed', durationMs: 250 })
+      handlers?.onRunSummary?.(runSummary())
       return { conversationId: '', reply: '# 正文\n增量' }
     })
 
@@ -153,8 +175,73 @@ describe('useJob.start', () => {
     // 记录：快照、阶段、收尾摘要
     expect(job.snapshot.value).toEqual(snap)
     expect(job.phase.value).toBe('reviewing')
-    expect(job.runSummary.value).toEqual({ kind: 'prd', status: 'completed', durationMs: 250 })
+    expect(job.runSummary.value).toEqual(runSummary())
     expect(result).toEqual({ reply: '# 正文\n增量', ok: true })
+  })
+
+  it('已用时：快照用服务端的值锚定，收尾停在权威总耗时上', async () => {
+    const job = useJob()
+    const seen: number[] = []
+    vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
+      // 订阅一开始后端就发快照：此时本地计时器才刚起（0），必须被服务端值锚定
+      handlers?.onSnapshot?.(snapshot({ elapsedMs: 30_000 }))
+      seen.push(job.elapsedMs.value)
+      handlers?.onRunSummary?.(runSummary({ durationMs: 45_000 }))
+      seen.push(job.elapsedMs.value)
+      return { conversationId: '', reply: '' }
+    })
+
+    await job.start('prd', { requirements: 'x' }, {})
+
+    // 快照把已用时从 0 锚到 30 秒，收尾摘要把总耗时定在 45 秒
+    expect(seen).toEqual([30_000, 45_000])
+    expect(job.elapsedMs.value).toBe(45_000)
+  })
+
+  it('重新开始一轮生成时，已用时归零重算（不延续上一轮）', async () => {
+    const job = useJob()
+    vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
+      handlers?.onRunSummary?.(runSummary({ durationMs: 9_000 }))
+      return { conversationId: '', reply: '' }
+    })
+
+    await job.start('prd', { requirements: 'x' }, {})
+    expect(job.elapsedMs.value).toBe(9_000)
+
+    const duringSecond: number[] = []
+    vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
+      duringSecond.push(job.elapsedMs.value)
+      handlers?.onSnapshot?.(snapshot({ elapsedMs: 1_000 }))
+      return { conversationId: '', reply: '' }
+    })
+
+    await job.start('prd', { requirements: 'x' }, {})
+
+    // 第二轮起步时是 0（不是上一轮的 9 秒），随后被这一轮的快照锚定
+    expect(duringSecond).toEqual([0])
+    expect(job.elapsedMs.value).toBe(1_000)
+  })
+
+  it('重连会清掉上一轮的运行摘要（避免把旧用量当成本次生成）', async () => {
+    const job = useJob()
+    vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
+      handlers?.onRunSummary?.(runSummary({ durationMs: 1_000 }))
+      return { conversationId: '', reply: '' }
+    })
+    await job.start('prd', { requirements: 'x' }, {})
+    expect(job.runSummary.value).not.toBeNull()
+
+    const duringReconnect: unknown[] = []
+    vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
+      duringReconnect.push(job.runSummary.value)
+      handlers?.onRunSummary?.(runSummary({ durationMs: 30_000, requestId: 'req-second' }))
+      return { conversationId: '', reply: '' }
+    })
+
+    await job.reconnect(12, {})
+
+    expect(duringReconnect).toEqual([null])
+    expect(job.runSummary.value?.requestId).toBe('req-second')
   })
 
   it('optimize 就地流式：不改变当前阶段', async () => {

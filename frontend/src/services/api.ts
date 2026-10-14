@@ -12,6 +12,7 @@ import type {
   RequirementAnswers,
   RequirementsSummary,
   RunSummary,
+  StepUsage,
   StreamDocumentPart,
   StreamStageEvent,
 } from '@/types'
@@ -166,8 +167,9 @@ export interface StreamHandlers {
    */
   onSnapshot?: (snapshot: JobSnapshot) => void
   /**
-   * 收到任务收尾的 `run_summary` 事件时触发。最小版 `{kind, status, durationMs}`，
-   * 前端只做记录，不做 UI。
+   * 收到任务收尾的 `run_summary` 事件时触发，携带本次生成的完整用量汇总。
+   *
+   * 终态任务重连时后端会**补发**一份，因此刷新页面后也拿得到，无需再查一次接口。
    */
   onRunSummary?: (summary: RunSummary) => void
 }
@@ -193,6 +195,22 @@ function readString(data: Record<string, unknown>, key: string): string {
 function readNumber(data: Record<string, unknown>, key: string): number {
   const value = data[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/** 从事件附加数据里安全地取字符串数组（缺失或类型不对时返回空数组，非字符串项被丢弃） */
+function readStringArray(data: Record<string, unknown>, key: string): string[] {
+  const value = data[key]
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string')
+}
+
+/** 逐项校验对象数组，只保留对象项（`null` 与原始值一律丢弃） */
+function readObjectArray(data: Record<string, unknown>, key: string): Record<string, unknown>[] {
+  const value = data[key]
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (item): item is Record<string, unknown> => typeof item === 'object' && item !== null,
+  )
 }
 
 /**
@@ -249,16 +267,13 @@ function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
  * `completedSections` 会逐项校验，坏项被丢弃而不是让整段快照失效。
  */
 function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
-  const rawSections = data.completed_sections
-  const completedSections: CompletedSection[] = Array.isArray(rawSections)
-    ? rawSections
-        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
-        .map((item) => ({
-          sectionId: readString(item, 'section_id'),
-          heading: readString(item, 'heading'),
-          text: readString(item, 'text'),
-        }))
-    : []
+  const completedSections: CompletedSection[] = readObjectArray(data, 'completed_sections').map(
+    (item) => ({
+      sectionId: readString(item, 'section_id'),
+      heading: readString(item, 'heading'),
+      text: readString(item, 'text'),
+    }),
+  )
 
   const rawSolutionId = data.solution_id
   return {
@@ -272,15 +287,42 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     solutionId: typeof rawSolutionId === 'number' ? rawSolutionId : null,
     errorCode: readString(data, 'error_code'),
     errorMessage: readString(data, 'error_message'),
+    elapsedMs: readNumber(data, 'elapsed_ms'),
   }
 }
 
-/** 把任务流 `run_summary` 事件的 `data` 归一成 `RunSummary`。 */
+/** 把 `run_summary` 里的 `steps` 数组归一成 `StepUsage[]`（坏项丢弃，不打断整条流）。 */
+function parseSteps(data: Record<string, unknown>): StepUsage[] {
+  return readObjectArray(data, 'steps').map((item) => ({
+    step: readString(item, 'step'),
+    calls: readNumber(item, 'calls'),
+    promptTokens: readNumber(item, 'prompt_tokens'),
+    completionTokens: readNumber(item, 'completion_tokens'),
+    durationMs: readNumber(item, 'duration_ms'),
+  }))
+}
+
+/**
+ * 把任务流 `run_summary` 事件的 `data` 归一成 `RunSummary`。
+ *
+ * 与其它解析函数同一口径：字段缺失或类型不对只退化那一个字段。`steps`、
+ * `injected_skills`、`warnings` 逐项校验，坏项被丢弃而不是让整份摘要失效——用量是
+ * **锦上添花**的信息，绝不能因为它取不到就把整条流打断。
+ */
 function parseRunSummary(data: Record<string, unknown>): RunSummary {
   return {
     kind: readString(data, 'kind'),
     status: readString(data, 'status'),
     durationMs: readNumber(data, 'duration_ms'),
+    totalCalls: readNumber(data, 'total_calls'),
+    promptTokens: readNumber(data, 'prompt_tokens'),
+    completionTokens: readNumber(data, 'completion_tokens'),
+    steps: parseSteps(data),
+    injectedSkills: readStringArray(data, 'injected_skills'),
+    warnings: readStringArray(data, 'warnings'),
+    provider: readString(data, 'provider'),
+    model: readString(data, 'model'),
+    requestId: readString(data, 'request_id'),
   }
 }
 
@@ -734,11 +776,18 @@ export interface JobStatusSummary {
   errorMessage: string
   createdAt: string
   updatedAt: string
+  /**
+   * 该次生成的用量汇总；任务未收尾时后端为 `null`。
+   *
+   * 与 `run_summary` 事件同构，因此复用同一个解析函数，两处口径不会分叉。
+   */
+  usage: RunSummary | null
 }
 
 /** 把后端任务状态响应归一成前端结构（字段缺失给安全默认值） */
 function toJobStatus(data: unknown): JobStatusSummary {
   const raw = (data ?? {}) as Record<string, unknown>
+  const rawUsage = raw.usage
   return {
     id: typeof raw.id === 'number' ? raw.id : 0,
     kind: typeof raw.kind === 'string' ? raw.kind : '',
@@ -749,6 +798,10 @@ function toJobStatus(data: unknown): JobStatusSummary {
     errorMessage: typeof raw.error_message === 'string' ? raw.error_message : '',
     createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
+    usage:
+      typeof rawUsage === 'object' && rawUsage !== null
+        ? parseRunSummary(rawUsage as Record<string, unknown>)
+        : null,
   }
 }
 

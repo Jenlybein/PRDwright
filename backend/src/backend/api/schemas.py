@@ -10,10 +10,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-# 这三个契约（StreamEvent / QuestionConfig / QuestionsConfig）已下沉到
-# `core/contracts.py`，此处 re-export 以保持 API 层引用不变：
+# 这些契约（StreamEvent / QuestionConfig / QuestionsConfig / StepUsage / RunSummary）
+# 已下沉到 `core/contracts.py`，此处 re-export 以保持 API 层引用不变：
 # `from backend.api.schemas import StreamEvent / QuestionsConfig` 继续可用。
-from backend.core.contracts import QuestionConfig, QuestionsConfig, StreamEvent
+# `RunSummary` 同时是 `run_summary` 事件与 `generation_jobs.usage` 的**同一份结构**。
+from backend.core.contracts import (
+    QuestionConfig,
+    QuestionsConfig,
+    RunSummary,
+    StepUsage,
+    StreamEvent,
+)
 
 # ============================================================================
 # 问题配置（对应 core/question_config.json）
@@ -376,6 +383,13 @@ class JobStatus(BaseModel):
     error_message: str = Field(default="", description="失败时的中文说明")
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
+    usage: RunSummary | None = Field(
+        default=None,
+        description=(
+            "本次生成的用量汇总（token / 耗时 / 步骤 / 模型）。"
+            "与 SSE 的 `run_summary` 事件**同结构、同来源**；任务尚未收尾或记录损坏时为 null。"
+        ),
+    )
 
 
 class JobListResponse(BaseModel):
