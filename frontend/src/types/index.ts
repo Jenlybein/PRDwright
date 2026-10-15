@@ -411,6 +411,21 @@ export interface StepUsage {
 }
 
 /**
+ * 一次生成里实际注入的技能包身份。
+ *
+ * 回答的是「这份 PRD 是按哪一套模板写的」：改了 template 之后指纹就会变，
+ * 两份文档的生成条件对不对得上，回执上直接看得到。
+ */
+export interface SkillRef {
+  /** 技能包目录名，如 prd-generator */
+  name: string
+  /** skill.yaml 声明的版本号；读不到时为 unknown */
+  version: string
+  /** 三份资源内容合成的整体指纹（前 12 位） */
+  fingerprint: string
+}
+
+/**
  * 一次生成任务的用量汇总（后端 `run_summary` 事件的 `data`，也是 `generation_jobs.usage` 的结构）。
  *
  * 事件与落库共用同一份结构，因此「流里看到的」与「重连后读到的」必然一致。
@@ -438,8 +453,8 @@ export interface RunSummary {
   completionTokens: number
   /** 按步骤拆分的用量 */
   steps: StepUsage[]
-  /** 本次注入的技能规范文件；技能注册表统一后填充，当前恒为空 */
-  injectedSkills: string[]
+  /** 本次注入的技能包身份；只有 PRD 生成不为空，其他类型恒为空数组（不代表降级） */
+  injectedSkills: SkillRef[]
   /**
    * 事前预算的告警（如「某步的输入已达预算上限的 92%」），每个 step 至多一条。
    *

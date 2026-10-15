@@ -49,7 +49,8 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     promptTokens: 900,
     completionTokens: 300,
     steps: [],
-    injectedSkills: [],
+    // PRD 生成本就带技能包身份，放在默认里才贴近真实回执
+    injectedSkills: [{ name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' }],
     warnings: [],
     provider: 'ark',
     model: 'doubao-seed',
@@ -227,9 +228,30 @@ describe('ReviewStage 的生成用量回执', () => {
   })
 
   it('没有请求号时不展示请求号段', () => {
-    const wrapper = mountWithSummary(runSummary({ requestId: '' }))
+    const wrapper = mountWithSummary(runSummary({ requestId: '', injectedSkills: [] }))
     expect(wrapper.text()).not.toContain('请求号')
     expect(wrapper.find('code').exists()).toBe(false)
+  })
+
+  it('展示技能包版本与指纹（这次是按哪一套模板写的，回执上讲得清）', () => {
+    const wrapper = mountWithSummary(runSummary())
+
+    expect(wrapper.text()).toContain('技能包 prd-generator v0.1.0')
+    expect(wrapper.text()).toContain('e4f928df7be9')
+  })
+
+  it('PRD 没用上技能包时显式告警——不再静默退回内置提示词', () => {
+    const wrapper = mountWithSummary(runSummary({ injectedSkills: [] }))
+
+    expect(wrapper.text()).toContain('未加载技能包')
+    // 只是一句提示：不进底栏，页面上也不因此多出按钮
+    expect(wrapper.find('.shell-action-bar').text()).not.toContain('未加载技能包')
+  })
+
+  it('接口文档没有技能包不算异常（只有 PRD 依赖它，不该挂莫须有的告警）', () => {
+    const wrapper = mountWithSummary(runSummary({ kind: 'api_docs', injectedSkills: [] }))
+
+    expect(wrapper.text()).not.toContain('未加载技能包')
   })
 
   it('回执自身不带任何按钮，且不进入底栏', () => {

@@ -82,6 +82,16 @@ const totalTokens = computed(() => {
   return summary ? summary.promptTokens + summary.completionTokens : 0
 })
 
+/**
+ * 这次生成是否**没能用上技能包**（退回了内置兜底提示词）。
+ *
+ * 只有 PRD 生成依赖技能包，接口文档与提示词本来就不注入，所以必须先判 `kind`——
+ * 否则每份接口文档的回执上都会挂一条莫须有的告警。
+ */
+const skillFallback = computed(
+  () => props.runSummary?.kind === 'prd' && (props.runSummary.injectedSkills ?? []).length === 0,
+)
+
 /** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制、保存、切换视图 */
 const doc = ref<InstanceType<typeof DocumentReview> | null>(null)
 
@@ -171,7 +181,29 @@ function submitOptimize(): void {
           >
         </span>
       </template>
+      <!-- 技能包身份：回答「这份文档是按哪一套模板写的」。指纹随模板内容变化，
+           所以两份回执的指纹不同，就说明它们不是同一套模板写的。 -->
+      <template v-for="skill in runSummary.injectedSkills ?? []" :key="skill.name">
+        <span aria-hidden="true">·</span>
+        <span>
+          技能包 {{ skill.name }} v{{ skill.version }}
+          <code
+            class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px] text-muted"
+            title="三份技能资源合成的内容指纹；改了模板它就会变"
+            >{{ skill.fingerprint }}</code
+          >
+        </span>
+      </template>
     </div>
+
+    <!-- 技能包没加载上：生成退回了内置兜底提示词，PRD 的风格可能与你有模板时不同。
+         这条必须显式——以往它只是在后端留一行没人看的日志（债务 D8）。 -->
+    <p
+      v-if="skillFallback"
+      class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+    >
+      未加载技能包，本次使用的是内置兜底提示词（章节结构与写作规范可能与技能包版本不同）。
+    </p>
 
     <!-- 事前预算的告警：某一步的输入逼近了预算上限（未超顶，所以生成照常完成了）。
          只提示、不拦截、不给按钮——用户据此知道「下次该精简点」，不需要现在做什么。 -->

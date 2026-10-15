@@ -39,6 +39,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | 项 | 推迟理由 |
 | --- | --- |
 | 运行时自动供应商 failover | 三家密钥齐备，仍裁决为**不自动切换**、保留手动冷切换（ADR-016）；单次调用的可靠性改由「显式超时 + 自管有限重试」承接 |
+| **R1-T2 章节续传（跳过已完成节）** | 2026-10-15 按实测推迟：用户实测「生成中刷新不丢章节」是 T0 的效果，T2 针对的「任务本身中断」日常尚未发生。中间态仍逐节落库（`generation_jobs.completed_sections`），届时它只差「跳过已完成节」这一段接线，不涉及结构调整 |
 | 多实例 / 分布式 Worker（Celery + Redis） | 单进程 `asyncio` 任务已够；Job 表与 API 形状按「将来可换执行层」设计 |
 | 真向量 RAG 与知识库入库 | 现有词法检索服务于「检索团队规范」这一固定场景，换成向量的收益不抵成本 |
 | 两版文档 diff 对比 | 依赖版本链先落地；本版只做「回看与恢复」，不做差异渲染 |
@@ -107,7 +108,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | 关注点 | 设计 |
 | --- | --- |
 | 观测（事后） | 每次 HTTP 请求一个 `request_id`（ASGI 中间件注入）；每次 LLM 调用打 `step` 标签（`prd_writer` / `prd_review` / `chat_continue` …）；记录 input / output tokens、duration_ms |
-| 汇总 | 生成结束发 `run_summary`，含总 tokens、总耗时、调用次数、`injected_skills`；同时打一行 JSON 日志 |
+| 汇总 | 生成结束发 `run_summary`，含总 tokens、总耗时、调用次数、`failed_calls`、技能身份 `injected_skills`（R2-T6 起为 `SkillRef{name, version, fingerprint}`，PRD 任务才会填）；JSON 日志随 R2-T7 落地 |
 | 预算（事前） | **两层上限**：物理顶来自模型注册表（按 provider 建模，不绑具体厂商），业务顶来自 `.env`（各 step 独立 cap，故意小于物理顶，让用户早点收束）；取两者较小值为有效预算 |
 | 估算 | 发送前按字符启发式估算 messages 大小（不引入 tiktoken 依赖）；接近阈值 warn 并回传 `context_usage`，超阈值 reject 并给出中文说明，**不消耗这次调用** |
 | 落点 | 计量累加只写在 `stream_reply` 这一处（v2 已把流式收敛到单一出口，这里正是回报） |
@@ -154,7 +155,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | 注册表 | `config/skills.yaml`：声明 prd / api_docs / prompts 各绑哪些 skill 包、加载哪些 references |
 | 包 | 保留 `prd-generator`；新建 `api-docs-generator`（迁入 `core/api_doc_knowledge.json` 的接口规范）、`prompts-generator`（从 `prompts.py` 迁出提示词套件的生成规范） |
 | 加载 | `skill_loader` 作为**唯一读 skill 的入口**；三条产线都走它拼 prompt |
-| 可追溯 | `run_summary.injected_skills` 记录本次注入了哪些规范文件 |
+| 可追溯 | `run_summary.injected_skills` 记录本次注入了哪些规范文件（R2-T6 起该字段不再是占位：填满 `SkillRef{name, version, fingerprint}`，指纹随模板内容变化，ADR-017） |
 
 **关于 RAG 闸门（与源文档分歧最大的一处）**：源文档要求「删除 RAG、删掉前端确认页」。
 本项目不这么做——闸门 2 是 ADR-011 明确的设计决策，它的价值是**让用户知道模型参考了什么**（可审计），
@@ -254,7 +255,9 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 **版本 API**：`GET /api/documents/{kind}/versions`、`GET /api/document-versions/{id}`（只读预览）、
 `POST /api/documents/{kind}/checkpoint`（保存为新版本）、`POST /api/document-versions/{id}/restore`（恢复为新的一版）。
 
-**run_summary**：`{ total_calls, prompt_tokens, completion_tokens, duration_ms, steps[], injected_skills[], provider, model }`。
+**run_summary**：`{ total_calls, failed_calls, prompt_tokens, completion_tokens, duration_ms, steps[], injected_skills[], warnings[], provider, model, request_id }`。
+`injected_skills` 的元素是 `SkillRef{ name, version, fingerprint }`（ADR-017）；只有 PRD 生成不为空，
+为空数组意味着这次走的是内置兜底提示词——前端会把这件事说给用户听，而不是静默过去。
 
 **quality_gate**：`{ passed, issues[], checked_at, rules_version }`，随版本 metadata 落盘。
 
@@ -305,12 +308,17 @@ Job + 内存广播 + SSE 订阅保留真流式，所以应修订的是那条「�
 
 | 版本 | 内容 | 依据 |
 | --- | --- | --- |
-| **v3.0** | A 生成运行时（Job + 重连 + 章节续传）+ B 观测与预算 + **C 单次调用自愈（超时 + 有限重试）** | 先立骨架与仪表，再动其余；三者共用 `stream_reply` 同一个出口 |
-| **v3.1** | C 文档生命周期 + D Skill 注册表 + E 交付质量 + 技能资产加固（热重载 / fail-fast） | 依赖 v3.0 的 Job 完成事件与 run_summary |
+| **v3.0** | A 生成运行时（Job + 重连 + **已随 T0 落地的刷新恢复**）+ B 观测与预算 + **C 单次调用自愈（超时 + 有限重试）**。~~章节续传~~ 按实测推迟，见下表下说明 | 先立骨架与仪表，再动其余；三者共用 `stream_reply` 同一个出口 |
+| **v3.1** | C 文档生命周期 + D Skill 注册表 + E 交付质量 + **技能资产加固（热重载 / fail-fast / 回执可追溯，ADR-017，已完成）** | 依赖 v3.0 的 Job 完成事件与 run_summary |
 | **v3.2** | Docker 化、生产加固（Cookie Secure / 邀请码轮换）、部署态隔离验证 | 与 A–E 正交，可随时做 |
 
 顺序理由：**A 是地基**（其余三项都要读 Job 记录）；**B 是仪表**（动主链路前先能看见代价）；
 C / D / E 都建立在「Job 完成」这个事件上；v3.2 与业务正交。
+
+> **「章节续传」为何从 v3.0 移出**：它不是做不了，而是做完暂时也用不上。用户实测「生成中途
+> 刷新、章节一份不少」——那由 T0 承担（任务活在服务端，刷新只断 SSE 连线）；而续传真正针对的
+> **任务本身被杀死**（进程重启、调用彻底失败）在日常使用中尚未出现，仅开发期会因改代码重启而
+> 触发。中间态早已随 T0 逐节落库，届时把「跳过已完成节」接上即可，不必重做地基。
 
 开工前需拍板的两件事（中间态落点、R1 内部顺序）**已拍板并随 R1-T0 落地**；
 R1-T5 的计量落地点另见 `./README.md`「R1-T5 成本计量落地点」一节，实施状态以 `./roadmap.md` 第八节为准。

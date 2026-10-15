@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
-from functools import lru_cache
+import re
 from pathlib import Path
 from typing import Any
 
@@ -61,12 +62,26 @@ def resolve_skill_dir(skill_name: str) -> Path:
     return here.parents[4] / "skills" / skill_name
 
 
-@lru_cache(maxsize=None)
+# 读盘缓存：`资源绝对路径 -> (文件戳, 内容)`。
+# 文件戳取 `(st_mtime_ns, st_size)`：内容一改必然变其一，所以既不用每轮生成都读盘，
+# 也不会像原先的 `lru_cache` 那样把旧内容锁到进程结束（债务 D10）。
+# **只有读成功之后才写缓存**：资源原本缺失时会直接抛异常而非留一条空缓存，
+# 文件补齐后下一次调用立刻就能读到。
+_ARTIFACT_CACHE: dict[str, tuple[tuple[int, int], str]] = {}
+
+
+def _artifact_stamp(path: Path) -> tuple[int, int]:
+    """资源的当前文件戳：纳秒级修改时间 + 字节数。"""
+    stat = path.stat()
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 def load_skill_artifact(skill_name: str, relative_path: str) -> str:
     """读取技能包内的资源文件（模板、规范、字段契约等）。
 
-    结果按 `(skill_name, relative_path)` 缓存，避免每轮生成都重复读盘。
-    注意：异常不会被缓存，文件补齐后下一次调用会重新读取。
+    缓存判定用「修改时间 + 大小」双条件而不是只有秒级 mtime：同一秒内连续改写模板时，
+    大小多半也会变；两者都没变就当作没改，一次生成读一次盘的开销可以忽略。
+    （注：编辑器保存的瞬间存在极小概率读到半截文件，重发一次即可，不做额外加锁。）
 
     Args:
         skill_name: 技能包目录名，如 `prd-generator`。
@@ -79,13 +94,121 @@ def load_skill_artifact(skill_name: str, relative_path: str) -> str:
         FileNotFoundError: 技能包目录或资源文件不存在。
     """
     path = resolve_skill_dir(skill_name) / relative_path
+    cache_key = str(path)
     try:
-        return path.read_text(encoding="utf-8")
+        stamp = _artifact_stamp(path)
     except FileNotFoundError as exc:
+        # 资源被删掉时一并清掉旧缓存，避免「文件已经没了还在拿旧内容生成」
+        _ARTIFACT_CACHE.pop(cache_key, None)
         raise FileNotFoundError(
             f"技能资源缺失：{path}"
             "（可设置环境变量 PRDWRIGHT_SKILLS_DIR 指定 skills 根目录）"
         ) from exc
+
+    cached = _ARTIFACT_CACHE.get(cache_key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    text = path.read_text(encoding="utf-8")
+    _ARTIFACT_CACHE[cache_key] = (stamp, text)
+    return text
+
+
+def clear_artifact_cache() -> None:
+    """清空资源读盘缓存。
+
+    正常路径不需要调用它（改文件会让文件戳失效）；测试里用来保证下一次读取真的走盘，
+    避免同一份 fixture 在用例之间互相污染。
+    """
+    _ARTIFACT_CACHE.clear()
+
+
+def missing_skill_assets(skill_name: str = PRD_SKILL_NAME) -> list[str]:
+    """返回当前读不到的必需资源的相对路径（齐全时为空列表）。
+
+    自检只看「文件在不在」，不读内容：读内容是加载阶段的事，混在一起会让
+    启动自检变得很重，也让「缺失」和「损坏」两种问题分不清。
+    """
+    root = resolve_skill_dir(skill_name)
+    return [
+        relative_path
+        for relative_path in PRD_SKILL_ARTIFACTS.values()
+        if not (root / relative_path).is_file()
+    ]
+
+
+def skill_version(skill_name: str = PRD_SKILL_NAME) -> str:
+    """读技能包 `skill.yaml` 声明的版本号；读不到时返回 `"unknown"`。
+
+    刻意用正则而不是引入 PyYAML：这里只需要一个标量，为它加一层依赖不划算。
+    """
+    try:
+        raw = load_skill_artifact(skill_name, "skill.yaml")
+    except FileNotFoundError:
+        return "unknown"
+    match = re.search(r"^version:\s*([^\s#]+)", raw, re.MULTILINE)
+    return match.group(1) if match else "unknown"
+
+
+def skill_fingerprint(skill_name: str = PRD_SKILL_NAME) -> str:
+    """三份资源合成的整体指纹：`sha256(版本 + 各资源的路径与内容)[:12]`。
+
+    给回执用：两份 PRD 的生成指纹不同，就一定不是同一套模板写的，不用去猜。
+    它同时也是 `job_fingerprint.PRD_TEMPLATE_VERSION` 的自动化版本——那个常量要求
+    人工 +1，容易忘；这里的指纹不会因为忘了改版本号而失效。
+
+    Raises:
+        FileNotFoundError: 任一资源缺失时抛出（调用方请先做 `missing_skill_assets`）。
+    """
+    digest = hashlib.sha256()
+    digest.update(skill_version(skill_name).encode("utf-8"))
+    for key in sorted(PRD_SKILL_ARTIFACTS):
+        relative_path = PRD_SKILL_ARTIFACTS[key]
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(load_skill_artifact(skill_name, relative_path).encode("utf-8"))
+    return digest.hexdigest()[:12]
+
+
+def describe_skill(skill_name: str = PRD_SKILL_NAME) -> dict[str, str] | None:
+    """把技能包的身份信息打包成 `run_summary.injected_skills` 的一个条目。
+
+    资源不齐全时返回 `None`：此时生成会降级到内置提示词，而「这次到底有没有用上
+    技能包」必须能在回执上看得见（债务 D8），因此不返回残缺条目也不返回占位值。
+    """
+    if missing_skill_assets(skill_name):
+        return None
+    return {
+        "name": skill_name,
+        "version": skill_version(skill_name),
+        "fingerprint": skill_fingerprint(skill_name),
+    }
+
+
+def ensure_skill_assets(skill_name: str = PRD_SKILL_NAME, *, strict: bool = False) -> list[str]:
+    """启动自检：缺了哪些必需资源。`strict` 为真时缺失直接 fail-fast。
+
+    放在应用 `lifespan` 里跑一遍，部署漏打包 `skills/` 目录就能在**起服务的时候**
+    炸出来，而不是等某次生成悄悄退回内置提示词、PRD 风格变了都没人知道（债务 D8）。
+
+    Args:
+        skill_name: 技能包目录名。
+        strict: 为真时任一资源缺失都抛错中止启动。
+
+    Returns:
+        缺失资源的相对路径列表（齐全时为空列表）。
+
+    Raises:
+        RuntimeError: `strict` 为真且存在缺失资源。
+    """
+    missing = missing_skill_assets(skill_name)
+    if missing and strict:
+        raise RuntimeError(
+            f"技能包 {skill_name} 资源缺失：{missing}。"
+            f"已解析的技能包目录为 {resolve_skill_dir(skill_name)}；"
+            "可用环境变量 PRDWRIGHT_SKILLS_DIR 指定 skills 根目录，"
+            "或在部署产物中打包该目录。不想让启动失败请把 PRDWRIGHT_SKILLS_STRICT 设为 false。"
+        )
+    return missing
 
 
 def load_prd_skill_artifacts() -> dict[str, str] | None:
@@ -95,14 +218,18 @@ def load_prd_skill_artifacts() -> dict[str, str] | None:
         键为 `field_schema` / `prd_template` / `writing_rules` 的资源字典；
         任一资源缺失时返回 `None`，由调用方降级到内置提示词。
     """
-    try:
-        return {
-            key: load_skill_artifact(PRD_SKILL_NAME, relative_path)
-            for key, relative_path in PRD_SKILL_ARTIFACTS.items()
-        }
-    except FileNotFoundError:
-        logger.warning("PRD 技能资源加载失败，本次改用内置提示词生成", exc_info=True)
+    missing = missing_skill_assets(PRD_SKILL_NAME)
+    if missing:
+        logger.warning(
+            "PRD 技能资源缺失（%s），本次改用内置提示词生成。"
+            "生产环境应把 PRDWRIGHT_SKILLS_STRICT 设为 true，让缺失在启动时暴露",
+            "、".join(missing),
+        )
         return None
+    return {
+        key: load_skill_artifact(PRD_SKILL_NAME, relative_path)
+        for key, relative_path in PRD_SKILL_ARTIFACTS.items()
+    }
 
 
 def format_summary_as_requirements(summary: dict[str, Any]) -> str:

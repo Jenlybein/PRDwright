@@ -6,6 +6,7 @@
 """
 
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -23,6 +24,9 @@ from backend.core.config import get_settings
 from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
 from backend.services import auth_service, job_service
+from backend.services.prd_skill import ensure_skill_assets
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -40,6 +44,15 @@ async def lifespan(_: FastAPI):
         auth_service.ensure_dev_user()
     # 收上次进程残留的 running 生成任务：内存运行时已随进程消失，DB 里不可能还有真在跑的
     job_service.reap_orphans()
+    # 技能资源自检：默认只告警（本地调试缺 skills 也能起），
+    # 设 PRDWRIGHT_SKILLS_STRICT=true 后缺失即中止启动——给部署态用的 fail-fast。
+    missing_skills = ensure_skill_assets(strict=settings.skills_strict)
+    if missing_skills:
+        logger.warning(
+            "PRD 技能资源缺失：%s，生成时将退回内置提示词（回执会标出）。"
+            "请用环境变量 PRDWRIGHT_SKILLS_DIR 指定 skills 根目录",
+            "、".join(missing_skills),
+        )
     yield
 
 

@@ -114,6 +114,21 @@ class StepUsage(BaseModel):
     duration_ms: int = Field(default=0, description="该步骤累计耗时（毫秒）")
 
 
+class SkillRef(BaseModel):
+    """一次生成里实际注入的技能包身份。
+
+    用来回答「这份 PRD 是按哪一套模板写的」：改了 `references/prd-template.md` 之后指纹
+    就会变，两份文档的生成条件能不能对得上，回执上直接看得到，不必去翻当时的文件。
+
+    列表为空（且这次是 PRD 任务）意味着技能包没加载上、走的是内置兜底提示词——
+    这不是一个应当静默发生的情况（债务 D8），前端会把它显示成一条告警。
+    """
+
+    name: str = Field(default="", description="技能包目录名，如 prd-generator")
+    version: str = Field(default="", description="skill.yaml 声明的版本号；读不到时为 unknown")
+    fingerprint: str = Field(default="", description="三份资源内容合成的整体指纹（前 12 位）")
+
+
 class RunSummary(BaseModel):
     """一次生成任务的用量汇总：`run_summary` 事件与 `generation_jobs.usage` 共用同一结构。
 
@@ -135,9 +150,10 @@ class RunSummary(BaseModel):
     prompt_tokens: int = Field(default=0, description="输入 token 总量")
     completion_tokens: int = Field(default=0, description="输出 token 总量")
     steps: list[StepUsage] = Field(default_factory=list, description="按步骤拆分的用量")
-    injected_skills: list[str] = Field(
+    injected_skills: list[SkillRef] = Field(
         default_factory=list,
-        description="本次注入的技能规范文件；技能注册表在 v3.1 统一后填充，当前恒为空",
+        description="本次注入的技能规范文件。只有 PRD 生成会这项不为空；"
+        "其他任务类型恒为空列表，不代表降级。",
     )
     warnings: list[str] = Field(
         default_factory=list,

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,6 +39,9 @@ from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJ
 from backend.services import document_service
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import RunMeter, use_meter
+from backend.services.prd_skill import describe_skill
+
+logger = logging.getLogger(__name__)
 
 # 合并写的节奏：距上次 flush 超过该秒数，或 live_buffer 增量超过该字节数，就写一次
 _FLUSH_INTERVAL_SECONDS = 0.3
@@ -80,6 +84,9 @@ class JobRuntime:
     final_reply: str = ""
     # 本次任务的用量计量器（在 `dispatch` 里按任务类型与当前供应商构造）
     meter: RunMeter = field(default_factory=RunMeter)
+    # 注入的技能包身份（PRD 任务才有），进 `run_summary.injected_skills`。
+    # 在 dispatch 那一刻定格：万一生成中途改了模板，回执仍能说明「这次用的是哪一套」。
+    skill_refs: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------------
@@ -101,6 +108,26 @@ def create_job(
     """
     GenerationJobRepository.supersede_active(owner_id, solution_id=solution_id, kind=kind)
     return GenerationJobRepository.create(owner_id, kind, solution_id, input_fingerprint)
+
+
+def _resolve_skill_refs(kind: str) -> list[dict[str, Any]]:
+    """本次任务注入的技能包身份；只有 PRD 生成依赖技能包。
+
+    技能包不在位时返回空列表——生成会降级到内置提示词，这件事必须能在回执上看得见，
+    所以这里既不填占位值也不抛异常让任务起不来（能否 fail-fast 由启动自检管，
+    见 `settings.skills_strict`）。
+
+    读盘本身出意外（权限、编码）也按「没加载上」处理并留一条日志：它属于
+    「该起的自检没拦住」，不让一次具体的生成请求无缘无故失败。
+    """
+    if kind != "prd":
+        return []
+    try:
+        described = describe_skill()
+    except Exception:  # noqa: BLE001 - 自检类问题不该让生成任务起不来
+        logger.warning("读取 PRD 技能包身份信息失败，本次回执不记录技能版本", exc_info=True)
+        return []
+    return [described] if described else []
 
 
 def dispatch(
@@ -137,6 +164,8 @@ def dispatch(
             model=settings.default_llm_model,
         ),
     )
+    runtime.skill_refs = _resolve_skill_refs(kind)
+
     task = asyncio.create_task(run_job(runtime))
     runtime.task = task
     # 先登记运行时再登记任务：两者都在 create_task 之后、任何 await 之前完成，
@@ -330,6 +359,9 @@ def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
         "status": status,
         "duration_ms": duration_ms,
         **runtime.meter.usage(),
+        # 放在展开之后覆盖：`usage()` 里的 `injected_skills` 恒为空（计量器不知道技能包的事），
+        # 技能身份由编排层在任务开始时定格，生成中途改模板也不会让回执前后不一致。
+        "injected_skills": runtime.skill_refs,
     }
 
 

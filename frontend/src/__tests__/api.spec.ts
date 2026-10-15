@@ -435,7 +435,9 @@ describe('生成任务接口（jobs）', () => {
                 duration_ms: 300,
               },
             ],
-            injected_skills: [],
+            injected_skills: [
+              { name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' },
+            ],
             warnings: ['prd:writing 的输入约 96,000 tokens，已达预算上限 120,000 的 80%'],
             provider: 'ark',
             model: 'doubao-seed-2-1-turbo-260628',
@@ -511,7 +513,7 @@ describe('生成任务接口（jobs）', () => {
             durationMs: 300,
           },
         ],
-        injectedSkills: [],
+        injectedSkills: [{ name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' }],
         warnings: ['prd:writing 的输入约 96,000 tokens，已达预算上限 120,000 的 80%'],
         provider: 'ark',
         model: 'doubao-seed-2-1-turbo-260628',
@@ -535,7 +537,11 @@ describe('生成任务接口（jobs）', () => {
               duration_ms: 800,
               // 第一项不是对象、末一项字段类型不对：都不该让整份摘要失败
               steps: ['坏项', { step: 'api_docs', calls: 1 }, 42],
-              injected_skills: ['prd-generator', 7],
+              injected_skills: [
+                '坏项',
+                { name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' },
+                42,
+              ],
               // 告警同理：非字符串项丢弃，合法项保留
               warnings: ['api_docs 的输入已达预算上限的 88%', 7],
               provider: 'ark',
@@ -566,8 +572,10 @@ describe('生成任务接口（jobs）', () => {
         durationMs: 0,
       },
     ])
-    // 非字符串项被丢弃，但这一项本身仍保留
-    expect(summary.injectedSkills).toEqual(['prd-generator'])
+    // 非对象项被丢弃，合法项保留且缺失字段按空串补
+    expect(summary.injectedSkills).toEqual([
+      { name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' },
+    ])
     expect(summary.warnings).toEqual(['api_docs 的输入已达预算上限的 88%'])
     expect(summary.requestId).toBe('')
   })

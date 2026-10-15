@@ -12,6 +12,7 @@ import type {
   RequirementAnswers,
   RequirementsSummary,
   RunSummary,
+  SkillRef,
   StepUsage,
   StreamDocumentPart,
   StreamStageEvent,
@@ -303,6 +304,15 @@ function parseSteps(data: Record<string, unknown>): StepUsage[] {
   }))
 }
 
+/** 把 `run_summary` 里的 `injected_skills` 归一成 `SkillRef[]`（坏项丢弃）。 */
+function parseSkills(data: Record<string, unknown>): SkillRef[] {
+  return readObjectArray(data, 'injected_skills').map((item) => ({
+    name: readString(item, 'name'),
+    version: readString(item, 'version'),
+    fingerprint: readString(item, 'fingerprint'),
+  }))
+}
+
 /**
  * 把任务流 `run_summary` 事件的 `data` 归一成 `RunSummary`。
  *
@@ -320,7 +330,7 @@ function parseRunSummary(data: Record<string, unknown>): RunSummary {
     promptTokens: readNumber(data, 'prompt_tokens'),
     completionTokens: readNumber(data, 'completion_tokens'),
     steps: parseSteps(data),
-    injectedSkills: readStringArray(data, 'injected_skills'),
+    injectedSkills: parseSkills(data),
     warnings: readStringArray(data, 'warnings'),
     provider: readString(data, 'provider'),
     model: readString(data, 'model'),

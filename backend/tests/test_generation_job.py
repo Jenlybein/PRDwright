@@ -136,7 +136,14 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(alice, monk
     assert data["total_calls"] >= 1
     assert data["prompt_tokens"] == 0
     assert data["completion_tokens"] == 0
-    assert data["injected_skills"] == []
+    # PRD 生成必须在回执上留下技能身份：这次用的是技能包还是内置兜底提示词，
+    # 这个差别以往是静默的（债务 D8），现在随 run_summary 事件与 usage 列一起可见。
+    skills = data["injected_skills"]
+    assert len(skills) == 1
+    assert skills[0]["name"] == "prd-generator"
+    assert skills[0]["version"]
+    # 指纹由三份资源内容算出，长度固定；改了模板它就变（不必依赖人工改版本号）
+    assert len(skills[0]["fingerprint"]) == 12
     assert isinstance(data["provider"], str) and data["provider"]
     assert isinstance(data["model"], str) and data["model"]
     # 直连服务、没有 HTTP 请求上下文，request_id 为空（不抛异常）
