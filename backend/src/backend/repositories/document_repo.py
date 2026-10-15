@@ -87,15 +87,31 @@ class DocumentRepository:
         content_sha: str,
         pending_items: str,
         last_run_summary: str | None,
+        invalidate: tuple[str, ...] = (),
     ) -> bool:
         """一次生成（或改写）收尾时落稿，成功返回 True。
 
         与 `save_content` 的关键差别：正文、待确认清单、用量回执**同批替换**。
         这三者产自同一次模型调用栈，分开写就会各自漂移——那正是「清单与正文对不上」
         这类问题的来源。
+
+        `invalidate` 列出「被本次生成取代、应当删除」的产物种类（下游产物从上游正文
+        推导而来，上游重写后它们就失效了）。删除与写入**在同一个事务里**完成：
+        若分成两次提交，中间那一瞬就是「新正文已写、旧下游还在」，刷新页面会看到
+        一份自相矛盾的方案。删不掉（归属不符）不影响本次写入，`rowcount` 仍按
+        写入结果返回。
         """
         now = utc_now_text()
         with connect() as conn:
+            for stale_kind in invalidate:
+                conn.execute(
+                    "DELETE FROM documents WHERE id IN ("
+                    "  SELECT d.id FROM documents d "
+                    "  JOIN solutions s ON s.id = d.solution_id "
+                    "  WHERE s.user_id = ? AND d.solution_id = ? AND d.kind = ?"
+                    ")",
+                    (owner_id, solution_id, stale_kind),
+                )
             cur = conn.execute(
                 "INSERT INTO documents "
                 "(solution_id, kind, content, content_sha, pending_items, "

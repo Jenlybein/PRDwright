@@ -81,6 +81,8 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
         "prd_content": payload.prd_content,
         "document": payload.document,
         "instruction": payload.instruction,
+        # 落库用：`optimize` 靠它知道把结果写进哪一份产物
+        "doc_kind": payload.doc_kind,
     }
 
 

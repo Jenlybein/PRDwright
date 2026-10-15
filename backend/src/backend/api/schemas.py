@@ -351,6 +351,14 @@ class JobCreateRequest(BaseModel):
         default=None,
         description="关联方案 id；快捷入口等场景可为空（逃生口）",
     )
+    doc_kind: DocumentKind | None = Field(
+        default=None,
+        description=(
+            "本次任务**作用在**哪一份产物上。仅 `optimize` 需要：它的 `kind` 表达的是"
+            "「做了一件什么事」，而落库要知道「东西写进哪一份文档」。缺省时不落库"
+            "（宁可本次改动只留在会话里，也不猜一个默认值写错位置）。"
+        ),
+    )
     # --- prd ---
     summary: dict[str, Any] | None = Field(
         default=None,

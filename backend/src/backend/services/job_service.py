@@ -17,6 +17,11 @@ DB 只在「运行时未命中」时兜底。
 本模块只做三件事——喂阶段（`_apply_event`）、收尾汇总（`_summary_data`）、
 落库与广播。事件与落库共用同一份 JSON，前端「流里看到的」与「重连后读到的」不会两样。
 
+**文档落库**：任务成功收尾时，`_write_document` 把权威正文写进 `documents` 表
+（见 `document_store.commit_generated`）。这是「文档所有权在后端」的落点：一份产物
+什么时候产生、产生成什么样，只在这里决定；前端只读、只提交用户的手改。
+失败的任务**不写**——半截输出不该顶掉一份完整文档。
+
 **不改动现有 LLM 生成链路**：`_build_event_stream` 直接复用 `document_service` 的
 模块级流式入口，本模块只负责编排 + 记录。
 """
@@ -32,11 +37,11 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from backend.core.config import get_settings
-from backend.core.contracts import StreamEvent
+from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
 from backend.core.db import utc_now
 from backend.core.errors import AppError, ErrorCode
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
-from backend.services import document_service
+from backend.services import document_service, document_store
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import RunMeter, use_meter
 from backend.services.skill_registry import describe_kind
@@ -376,9 +381,13 @@ def _run_summary_event(data: dict[str, Any]) -> StreamEvent:
 
 
 def _finalize(runtime: JobRuntime, status: str) -> None:
-    """收尾：置终态、落库（含用量）、广播 `run_summary`。
+    """收尾：置终态、落库（含用量）、**成功时把正文写进 `documents`**、广播 `run_summary`。
 
     保留运行时（直到 `run_job` 的 finally）让已订阅者把这一条读完。
+
+    **只有成功才写文档**：失败的任务保留上一次可用的正文（半截输出不该顶掉一份
+    完整文档）。这正是「文档所有权在后端」的关键收益——「谁写、什么时候写、
+    写完之后长什么样」只在这一处决定，前端只负责读与提交用户变更。
     """
     runtime.status = status
     draft = _draft(runtime)
@@ -392,6 +401,7 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             completed_sections=runtime.completed_sections,
             usage=usage,
         )
+        _write_document(runtime, summary)
     else:
         GenerationJobRepository.fail(
             runtime.owner_id,
@@ -405,6 +415,76 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
         )
 
     job_bus.publish(runtime.job_id, _run_summary_event(summary))
+
+
+def _document_kind(runtime: JobRuntime) -> str | None:
+    """任务种类 → 产物类型；无法确定时返回 `None`（宁可不写，也不写错位置）。
+
+    `prd` / `api_docs` / `prompts` 三种生成任务的种类就是产物类型，一目了然。
+    只有 `optimize` 需要额外信息——它优化的是「某一份」文档，而种类本身不带这个信息；
+    调用方必须通过 `doc_kind` 说明改的是哪一份。
+
+    ⚠️ `optimize` 缺 `doc_kind` 时**刻意返回 None**：猜一个默认值（比如 prd）会让
+    「优化接口文档」的结果覆盖掉 PRD 正文，那是**静默的数据损坏**。宁可这次不落库
+    （改动只留在当次会话里，与旧行为一致），也不要写错位置。
+    """
+    if runtime.kind in DOCUMENT_KINDS:
+        return runtime.kind
+    if runtime.kind == "optimize":
+        doc_kind = runtime.request.get("doc_kind")
+        return doc_kind if doc_kind in DOCUMENT_KINDS else None
+    return None
+
+
+def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
+    """把本次任务的权威正文写进 `documents`（成功收尾的唯一落点）。
+
+    用 `done.reply` 而不是 `_draft()`：前者是流水线**定稿**的完整正文，后者是
+    「已定稿段落 + 实时缓冲」的尽力还原，两者在正常情况下一致，但定稿值才是权威。
+
+    无方案可挂（`solution_id` 为空，如快捷入口的逃生口）或归属不符时静默跳过——
+    这属于「这次生成没地方落」，不该让一个已经成功的任务变成失败。
+
+    写库本身出意外也只记日志：正文已经在 `generation_jobs.draft_content` 里存了一份，
+    丢的只是「升格成文档」这一步，不该把整个任务判失败。
+    """
+    kind = _document_kind(runtime)
+    if kind is None or runtime.solution_id is None:
+        return
+    content = runtime.final_reply
+    if not content.strip():
+        return
+    try:
+        written = document_store.commit_generated(
+            runtime.owner_id,
+            runtime.solution_id,
+            kind,
+            content,
+            run_summary=summary,
+            # 整篇重生成会让下游产物失效；`optimize` 不在这一步（`kind` 不是产物类型）
+            invalidate_downstream=True,
+        )
+    except Exception:  # noqa: BLE001 - 落文档不该把已成功的任务判失败
+        logger.warning(
+            "生成任务收尾写入文档失败，正文仍保留在任务记录里",
+            extra={
+                "event": "job.document_write_failed",
+                "job_id": runtime.job_id,
+                "kind": kind,
+            },
+            exc_info=True,
+        )
+        return
+    if written is None:
+        logger.warning(
+            "生成任务收尾未能写入文档（方案不存在或归属不符）",
+            extra={
+                "event": "job.document_write_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
 
 
 def parse_usage(raw: Any) -> dict[str, Any] | None:

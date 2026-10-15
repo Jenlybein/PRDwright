@@ -23,6 +23,17 @@ from backend.repositories.document_repo import DocumentRepository
 
 logger = logging.getLogger(__name__)
 
+# 产物依赖链：下游由上游正文推导而来，上游**重新生成**后下游即失效。
+# 只对「整篇重生成」生效（首次生成 / 重新生成）；`optimize`（就地优化）与
+# `clarify`（按澄清改写）都是对**同一份**文档的局部重写，不牵动下游。
+# 「提示词由接口文档推出？还是由 PRD 推出？」——现有链路是 PRD → 接口文档 → 提示词，
+# 因此重生成 PRD 会让两份下游都失效，重生成接口文档只会让提示词失效。
+DOWNSTREAM_KINDS: dict[str, tuple[str, ...]] = {
+    "prd": ("api_docs", "prompts"),
+    "api_docs": ("prompts",),
+    "prompts": (),
+}
+
 
 def list_documents(owner_id: int, solution_id: int) -> list[dict[str, Any]]:
     """列出某方案下的全部文档；方案不存在或不属于该用户时返回空列表。"""
@@ -62,6 +73,7 @@ def commit_generated(
     *,
     pending_items: list[dict[str, Any]] | None = None,
     run_summary: dict[str, Any] | None = None,
+    invalidate_downstream: bool = False,
 ) -> dict[str, Any] | None:
     """生成（或改写）收尾落稿：正文 + 待确认清单 + 用量回执一同写入。
 
@@ -72,6 +84,7 @@ def commit_generated(
         content: 已剥离标记块的正文。
         pending_items: 本次产出的待确认清单；`None` 视为空清单。
         run_summary: 本次生成的用量回执；`None` 表示不写（保持原值）。
+        invalidate_downstream: 是否让下游产物失效（见 `DOWNSTREAM_KINDS`）。
 
     Returns:
         更新后的文档；方案不可见时返回 None。
@@ -86,6 +99,7 @@ def commit_generated(
         last_run_summary=(
             json.dumps(run_summary, ensure_ascii=False) if run_summary is not None else None
         ),
+        invalidate=DOWNSTREAM_KINDS.get(kind, ()) if invalidate_downstream else (),
     )
     if not ok:
         return None

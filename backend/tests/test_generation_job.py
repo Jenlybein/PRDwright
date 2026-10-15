@@ -21,7 +21,7 @@ import pytest
 from conftest import login, register
 
 from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services import document_service, job_service, llm_factory, prd_section_writer
+from backend.services import document_service, document_store, job_service, llm_factory, prd_section_writer
 from backend.services.job_bus import job_bus
 from backend.services.prd_section_writer import PRD_SECTIONS
 from fakes import ScriptedLLM
@@ -89,6 +89,34 @@ def _run(coro):
 
 def _parts(events):
     return [event for event in events if event.type == "part"]
+
+
+def _create_solution(client) -> int:
+    """建一份真实方案并返回 id。
+
+    落文档要求 `documents.solution_id` 指向一个**真实且属于本人**的方案
+    （仓储靠 `JOIN solutions` 判归属），所以涉及落库的用例不能像早期那样随手
+    写一个不存在的 `solution_id=5`。
+    """
+    response = client.post(
+        "/api/solutions",
+        json={"title": "演示方案", "mode": "structured", "stage": "review-prd", "data": "{}"},
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
+
+
+def _run_job(owner_id: int, solution_id: int | None, kind: str, request: dict) -> tuple[int, list]:
+    """建任务 → 派发 → 一路订阅到结束，返回 (job_id, 全部事件)。"""
+
+    async def scenario() -> tuple[int, list]:
+        job_id = job_service.create_job(owner_id=owner_id, solution_id=solution_id, kind=kind)
+        job_service.dispatch(
+            job_id, owner_id=owner_id, solution_id=solution_id, kind=kind, request=request
+        )
+        return job_id, [event async for event in job_service.open_stream(owner_id, job_id)]
+
+    return _run(scenario())
 
 
 # ---------------------------------------------------------------------------
@@ -528,3 +556,192 @@ def test_jobs_endpoints_require_login(client, method, path, body):
     assert response.status_code == 401
     assert response.json()["detail"] == "请先登录后再使用该功能"
     assert response.json()["code"] == "UNAUTHORIZED"
+
+
+# ---------------------------------------------------------------------------
+# 文档落库：任务成功收尾时把权威正文写进 `documents`
+#
+# 「文档所有权在后端」的核心断言：**前端不需要自己拼一份正文存回去**，
+# 只要读 `documents` 就能拿到与 `done.reply` 逐字一致的内容。
+# ---------------------------------------------------------------------------
+
+
+def test_completed_prd_job_writes_document(client, monkeypatch):
+    """PRD 生成成功后：`documents` 里出现一份与 `done.reply` 逐字一致的正文。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+
+    _job_id, events = _run_job(
+        uid,
+        solution_id,
+        "prd",
+        {"requirements": "做一个演示产品", "product_name": "演示产品"},
+    )
+    done = next(event for event in events if event.type == "done")
+
+    doc = document_store.get_document(uid, solution_id, "prd")
+    assert doc is not None
+    # 逐字一致：落库正文直接取自 done.reply，不是前端再拼一遍
+    assert doc["content"] == done.data["reply"]
+    # 回执与正文同批写入：打开方案就能看到「上次生成花了多少」
+    assert doc["last_run_summary"] is not None
+    assert doc["last_run_summary"]["kind"] == "prd"
+    assert doc["updated_at"]
+
+
+def test_completed_api_docs_job_writes_its_own_kind(client, monkeypatch):
+    """接口文档任务写进 `api_docs`，不会串到 `prd` 那一份。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    _fake_service(monkeypatch, ScriptedLLM(["接口正文"]))
+
+    _run_job(uid, solution_id, "api_docs", {"prd_content": "# 演示产品 PRD"})
+
+    assert document_store.get_document(uid, solution_id, "api_docs") is not None
+    assert document_store.get_document(uid, solution_id, "prd") is None
+
+
+def test_failed_job_keeps_previous_document(client, monkeypatch):
+    """失败的任务**不覆写**已有文档：半截输出不该顶掉上一版可用正文。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# 上一版 PRD")
+
+    # 第一段吐完即断
+    _fake_service(monkeypatch, ScriptedLLM(["第一段正文", "第二段"], raise_at=1))
+    _job_id, events = _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品"})
+
+    assert events[-1].data["status"] == "failed"
+    doc = document_store.get_document(uid, solution_id, "prd")
+    assert doc is not None
+    assert doc["content"] == "# 上一版 PRD"
+
+
+def test_job_without_solution_does_not_write_document(client, monkeypatch):
+    """没有方案可挂（`solution_id=None`）时任务照常成功，只是没有文档可写。"""
+    register(client)
+    uid = _alice_id()
+    _fake_service(monkeypatch, ScriptedLLM(["正文"]))
+
+    job_id, events = _run_job(uid, None, "prompts", {"prd_content": "# PRD"})
+
+    assert events[-1].data["status"] == "completed"
+    assert GenerationJobRepository.get(uid, job_id)["status"] == "completed"
+
+
+def test_regenerating_prd_invalidates_downstream_documents(client, monkeypatch):
+    """重新生成 PRD 会让接口文档与提示词失效——它们是按旧 PRD 推导出来的。
+
+    这条不变量在前端「整份快照」时代是靠前端清空内存实现的；文档所有权搬到后端后，
+    必须由后端在落稿时一并清掉，否则刷新页面会看到一份自相矛盾的方案
+    （进度条认为接口文档已完成，而它对应的 PRD 已经换了一版）。
+    """
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# 旧 PRD")
+    document_store.save_document(uid, solution_id, "api_docs", "# 旧接口文档")
+    document_store.save_document(uid, solution_id, "prompts", "# 旧提示词")
+
+    _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+    _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
+
+    kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
+    assert kinds == {"prd"}
+
+
+def test_regenerating_api_docs_invalidates_only_prompts(client, monkeypatch):
+    """重新生成接口文档只让提示词失效；PRD 是它的上游，不受影响。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# PRD")
+    document_store.save_document(uid, solution_id, "api_docs", "# 旧接口文档")
+    document_store.save_document(uid, solution_id, "prompts", "# 旧提示词")
+
+    _fake_service(monkeypatch, ScriptedLLM(["接口正文"]))
+    _run_job(uid, solution_id, "api_docs", {"prd_content": "# PRD"})
+
+    kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
+    assert kinds == {"prd", "api_docs"}
+
+
+def test_optimize_writes_to_the_document_named_by_doc_kind(client, monkeypatch):
+    """就地优化按 `doc_kind` 决定写进哪一份——优化接口文档不该动 PRD。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# 原 PRD")
+    _fake_service(monkeypatch, ScriptedLLM(["优化后的接口文档"]))
+
+    _run_job(
+        uid,
+        solution_id,
+        "optimize",
+        {"document": "# 旧接口文档", "instruction": "补充分页说明", "doc_kind": "api_docs"},
+    )
+
+    api_docs = document_store.get_document(uid, solution_id, "api_docs")
+    assert api_docs is not None
+    assert api_docs["content"] == "优化后的接口文档"
+    # PRD 原样保留：优化是就地重写，不牵动别的文档
+    prd = document_store.get_document(uid, solution_id, "prd")
+    assert prd is not None and prd["content"] == "# 原 PRD"
+
+
+def test_optimize_without_doc_kind_writes_nothing(client, monkeypatch):
+    """`optimize` 未说明改的是哪一份时**不落库**：宁可不写，也不猜一个默认值写错位置。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    _fake_service(monkeypatch, ScriptedLLM(["优化结果"]))
+
+    _job_id, events = _run_job(
+        uid,
+        solution_id,
+        "optimize",
+        {"document": "# 旧接口文档", "instruction": "改一下"},
+    )
+
+    assert events[-1].data["status"] == "completed"
+    assert document_store.list_documents(uid, solution_id) == []
+
+
+def test_create_optimize_job_via_http_carries_doc_kind(client, monkeypatch):
+    """HTTP 面：`doc_kind` 从请求体一路透传到落库（防止「字段加了但没接上」）。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    _fake_service(monkeypatch, ScriptedLLM(["优化结果"]))
+
+    created = client.post(
+        "/api/jobs",
+        json={
+            "kind": "optimize",
+            "solution_id": solution_id,
+            "document": "# 旧提示词",
+            "instruction": "改一下",
+            "doc_kind": "prompts",
+        },
+    )
+    assert created.status_code == 201, created.text
+    client.get(f"/api/jobs/{created.json()['job_id']}/stream")
+
+    doc = document_store.get_document(uid, solution_id, "prompts")
+    assert doc is not None and doc["content"] == "优化结果"
+
+
+def test_doc_kind_rejects_unknown_value(client):
+    """`doc_kind` 只接受三种产物；写错的取值应被 422 挡在门口，而不是悄悄落库。"""
+    register(client)
+    _create_solution(client)
+
+    response = client.post(
+        "/api/jobs",
+        json={"kind": "optimize", "document": "x", "instruction": "y", "doc_kind": "nope"},
+    )
+    assert response.status_code == 422
