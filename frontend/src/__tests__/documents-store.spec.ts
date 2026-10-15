@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as documentApi from '../services/documentService'
 import { DOCUMENT_SAVE_DEBOUNCE_MS, useDocumentsStore } from '../stores/documents'
-import type { DocumentKind, DocumentRecord, RunSummary } from '../types'
+import type { DocumentKind, DocumentRecord, PendingItem, RunSummary } from '../types'
 
 /**
  * 文档 store 测试。
@@ -35,8 +35,15 @@ function makeRecord(
   kind: DocumentKind,
   content: string,
   runSummary: RunSummary | null = null,
+  pendingItems: PendingItem[] = [],
 ): DocumentRecord {
-  return { kind, content, runSummary, updatedAt: '2026-10-13T00:00:00' }
+  return {
+    kind,
+    content,
+    runSummary,
+    pendingItems,
+    updatedAt: '2026-10-13T00:00:00',
+  }
 }
 
 /** 造一份最小合法回执 */
@@ -97,6 +104,37 @@ describe('loadAll', () => {
     expect(documents.runSummaryOf('prd')?.requestId).toBe('prd-req')
     expect(documents.runSummaryOf('api-docs')).toBeNull()
     expect(documents.solutionId).toBe(7)
+  })
+
+  it('把三份文档的待确认清单一起装进工作副本（后端落库的那一份，原样镜像）', async () => {
+    const items: PendingItem[] = [
+      { id: 'overview-1', question: '指标口径谁拍板？', sections: ['2.1'], decider: '数据团队' },
+    ]
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# PRD', makeRunSummary('prd-req'), items),
+      makeRecord('api-docs', '# 接口文档'),
+    ])
+
+    await documents.loadAll(7)
+
+    expect(documents.pendingItemsOf('prd')).toEqual(items)
+    // 没生成过的文档是空清单，不是「后端没给」
+    expect(documents.pendingItemsOf('api-docs')).toEqual([])
+    expect(documents.pendingItemsOf('prompts')).toEqual([])
+  })
+
+  it('clear 把清单一并清空——切方案时不留下上一份的待确认项', async () => {
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# PRD', null, [
+        { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '' },
+      ]),
+    ])
+    await documents.loadAll(7)
+    expect(documents.pendingItemsOf('prd')).toHaveLength(1)
+
+    documents.clear()
+
+    expect(documents.pendingItemsOf('prd')).toEqual([])
   })
 
   it('404 时清空内容并记下原因——不继续显示上一份方案的正文', async () => {

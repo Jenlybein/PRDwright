@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import DocumentReview from '../components/DocumentReview.vue'
 import GeneratingStage from '../components/stages/GeneratingStage.vue'
 import ReviewStage from '../components/stages/ReviewStage.vue'
-import type { RunSummary } from '../types'
+import type { PendingItem, RunSummary } from '../types'
 
 /**
  * 「预览 / 编辑」视图切换的落点与行为。
@@ -285,6 +285,63 @@ describe('ReviewStage 的生成用量回执', () => {
   it('没有告警时不渲染告警块（大多数生成都逼近不了上限）', () => {
     const wrapper = mountWithSummary(runSummary())
     expect(wrapper.findAll('li')).toHaveLength(0)
+  })
+})
+
+/**
+ * 待确认清单的落点。
+ *
+ * 清单由后端在剥离正文标记块时算出、随正文落库，前端只读展示。放在正文下方、底栏之上
+ * ——它描述的是「这份文档还差哪些问题没敲定」，属于内容本身，不是「对文档做的事」，
+ * 因此不进底栏（ADR-015：主操作位只有一个）。
+ */
+describe('ReviewStage 的待确认清单', () => {
+  function mountWithItems(pendingItems: PendingItem[] | undefined): VueWrapper {
+    return mount(ReviewStage, {
+      props: {
+        title: '产品需求文档',
+        content: CONTENT,
+        viewState: 'review-prd',
+        canFinish: false,
+        hasPrd: true,
+        hasApiDocs: false,
+        hasPrompts: false,
+        pendingItems,
+      },
+    })
+  }
+
+  it('有待确认项时挂在正文下方展示', () => {
+    const wrapper = mountWithItems([
+      { id: 'overview-1', question: '指标口径谁拍板？', sections: ['2.1'], decider: '数据团队' },
+    ])
+
+    expect(wrapper.text()).toContain('待确认问题（1）')
+    expect(wrapper.text()).toContain('指标口径谁拍板？')
+    expect(wrapper.text()).toContain('拍板人：数据团队')
+  })
+
+  it('没有待确认项时整块不渲染（不留一个空的「待确认问题（0）」）', () => {
+    const wrapper = mountWithItems([])
+    expect(wrapper.text()).not.toContain('待确认')
+  })
+
+  it('后端没给清单时也不渲染（旧快照 / 手改过的文档）', () => {
+    const wrapper = mountWithItems(undefined)
+    expect(wrapper.text()).not.toContain('待确认')
+  })
+
+  it('清单不进底栏：它是内容的一部分，不是「对文档做的事」', () => {
+    const wrapper = mountWithItems([
+      { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '' },
+    ])
+    const bar = wrapper.find('.shell-action-bar')
+
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).not.toContain('分页上限取多少？')
+    // 也没有因为清单多出任何按钮（P4 的澄清入口会接在清单下面，不占主操作位）
+    const texts = wrapper.findAll('button').map((item) => item.text())
+    expect(texts).not.toContain('去澄清')
   })
 })
 

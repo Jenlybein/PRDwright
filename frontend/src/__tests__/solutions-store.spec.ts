@@ -514,7 +514,7 @@ describe('openSolution', () => {
     })
     // 正文不在快照里，要单独从后端取
     vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
-      { kind: 'prd', content: '# PRD', runSummary: null, updatedAt: '' },
+      { kind: 'prd', content: '# PRD', runSummary: null, pendingItems: [], updatedAt: '' },
     ])
 
     const opened = await solutions.openSolution(8)

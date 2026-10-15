@@ -14,6 +14,7 @@ import type {
   DocKind,
   DocumentKind,
   JobSnapshot,
+  PendingItem,
   PrdGenerationStage,
   PrdStageProgress,
   RequirementsSummary,
@@ -83,6 +84,18 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const runSummary = computed<RunSummary | null>(() => {
     const kind = docKindOfState(viewState.value)
     return kind ? documents.runSummaryOf(kind) : null
+  })
+
+  /**
+   * 当前审阅阶段应该显示的待确认清单。
+   *
+   * 与 `runSummary` 同源：由 `viewState` 反推产物种类，从文档 store 取那份的清单。
+   * 生成中等非审阅态返回空数组（审阅区那时不展示清单）。清单由后端随正文落库，
+   * 前端只读取、不修改——刷新后重新拉取即可对齐，无需额外状态。
+   */
+  const pendingItems = computed<PendingItem[]>(() => {
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.pendingItemsOf(kind) : []
   })
 
   // -------------------------------------------------------------------------
@@ -854,6 +867,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   prdShowingDraft,
   // 用量观测：运行摘要（生成后展示，按当前审阅文档取对应桶）+ 已用时（生成中展示）
   runSummary,
+  pendingItems,
   elapsedMs: job.elapsedMs,
     summaryChanges,
     summarySyncing,

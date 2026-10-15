@@ -24,7 +24,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { DocumentsNotFoundError, fetchDocuments, saveDocument } from '@/services/documentService'
-import type { DocumentKind, RunSummary } from '@/types'
+import type { DocumentKind, PendingItem, RunSummary } from '@/types'
 
 /** 手改的防抖时长：比方案快照短一些，让「保存」这件事显得更跟手 */
 export const DOCUMENT_SAVE_DEBOUNCE_MS = 800
@@ -38,12 +38,20 @@ function emptySummaries(): Record<DocumentKind, RunSummary | null> {
   return { prd: null, 'api-docs': null, prompts: null }
 }
 
+/** 三种产物的待确认清单各自的空值 */
+function emptyPending(): Record<DocumentKind, PendingItem[]> {
+  return { prd: [], 'api-docs': [], prompts: [] }
+}
+
 export const useDocumentsStore = defineStore('documents', () => {
   /** 三份正文的工作副本 */
   const contents = ref<Record<DocumentKind, string>>(emptyContents())
 
   /** 三份文档各自的「最后一次生成」回执；随正文一起从后端取回 */
   const runSummaries = ref<Record<DocumentKind, RunSummary | null>>(emptySummaries())
+
+  /** 三份文档各自的待确认清单；随正文一起从后端取回，前端只读、不修改 */
+  const pendingItems = ref<Record<DocumentKind, PendingItem[]>>(emptyPending())
 
   /** 这批内容属于哪份方案；`null` 表示还没有归属（新建中） */
   const solutionId = ref<number | null>(null)
@@ -119,19 +127,23 @@ export const useDocumentsStore = defineStore('documents', () => {
       if (token !== loadToken) return
       const nextContents = emptyContents()
       const nextSummaries = emptySummaries()
+      const nextPending = emptyPending()
       for (const record of records) {
         nextContents[record.kind] = record.content
         nextSummaries[record.kind] = record.runSummary
+        nextPending[record.kind] = record.pendingItems
       }
       // 尚未落库的手改优先：它们在时间上更新于这次响应
       for (const [kind, content] of pending) nextContents[kind] = content
       contents.value = nextContents
       runSummaries.value = nextSummaries
+      pendingItems.value = nextPending
     } catch (error) {
       if (token !== loadToken) return
       if (error instanceof DocumentsNotFoundError) {
         contents.value = emptyContents()
         runSummaries.value = emptySummaries()
+        pendingItems.value = emptyPending()
       }
       saveError.value = error instanceof Error ? error.message : '无法读取文档'
     } finally {
@@ -260,6 +272,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     changeEpoch += 1
     contents.value = emptyContents()
     runSummaries.value = emptySummaries()
+    pendingItems.value = emptyPending()
     solutionId.value = null
     saveError.value = ''
     // 让在途的加载结果作废：它的响应属于上一份方案，落地会把空内容又填回去
@@ -278,6 +291,11 @@ export const useDocumentsStore = defineStore('documents', () => {
     return runSummaries.value[kind]
   }
 
+  /** 某份文档的待确认清单（只读，由后端随正文落库） */
+  function pendingItemsOf(kind: DocumentKind): PendingItem[] {
+    return pendingItems.value[kind]
+  }
+
   const hasPrd = computed(() => contents.value.prd.trim() !== '')
   const hasApiDocs = computed(() => contents.value['api-docs'].trim() !== '')
   const hasPrompts = computed(() => contents.value.prompts.trim() !== '')
@@ -289,6 +307,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     // 状态
     contents,
     runSummaries,
+    pendingItems,
     solutionId,
     loading,
     saveError,
@@ -308,5 +327,6 @@ export const useDocumentsStore = defineStore('documents', () => {
     // 派生
     contentOf,
     runSummaryOf,
+    pendingItemsOf,
   }
 })

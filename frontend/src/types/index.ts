@@ -87,6 +87,28 @@ export type DocKind = 'prd' | 'api-docs' | 'prompts' | 'optimize'
 export type DocumentKind = 'prd' | 'api-docs' | 'prompts'
 
 /**
+ * 一条「待确认问题」。
+ *
+ * 由后端在生成收尾时从正文里剥离标记块、解析并重新分配 id 得出——前端只负责展示，
+ * 不解析、不编造。字段与 `backend.services.pending_items.extract` 产出的形状一致：
+ *
+ * - `id`：后端按出现顺序分配的全文档唯一标识（`p-1` / `overview-1` …），仅用于稳定渲染 key；
+ * - `question`：一条待确认的问题（必填）；
+ * - `sections`：受影响的章节编号数组（可为空）；
+ * - `decider`：拍板人（可为空字符串）。
+ */
+export interface PendingItem {
+  /** 后端分配的全文档唯一 id（仅用于渲染 key） */
+  id: string
+  /** 一条待确认的问题 */
+  question: string
+  /** 受影响的章节编号数组，如 `["2.1", "6.1"]` */
+  sections: string[]
+  /** 拍板人；未指明时为空串 */
+  decider: string
+}
+
+/**
  * 从后端取回的一份文档（`GET /api/solutions/{id}/documents` 的一项）。
  *
  * 正文、回执都由后端产出：正文来自任务收尾时的 `done.reply`，回执来自同一次收尾的
@@ -99,6 +121,13 @@ export interface DocumentRecord {
   content: string
   /** 最后一次生成的用量回执；后端尚未写过或记录不可信时为 null */
   runSummary: RunSummary | null
+  /**
+   * 本次生成的待确认清单。
+   *
+   * 与正文同源、同一次收尾落库——后端在剥离正文标记块时一并算出，前端无需自己重算，
+   * 因此不存在「换了正文却忘了重算清单」的可能。
+   */
+  pendingItems: PendingItem[]
   /** 最近更新时间（UTC ISO 8601） */
   updatedAt: string
 }
@@ -378,6 +407,12 @@ export interface JobSnapshot {
   errorCode: string
   /** 失败时的中文说明；正常为空串 */
   errorMessage: string
+  /**
+   * 本次生成的待确认清单。
+   *
+   * 刷新重连时从任务记录（`generation_jobs.pending_items`）一并恢复，前端无需另发一次请求。
+   */
+  pendingItems: PendingItem[]
   /**
    * 服务端算的任务已用时（毫秒）。
    *

@@ -16,7 +16,7 @@ import axios from 'axios'
 
 import http from '@/services/api'
 import { parseRunSummary } from '@/utils/workflow'
-import type { DocumentKind, DocumentRecord, RunSummary } from '@/types'
+import type { DocumentKind, DocumentRecord, PendingItem, RunSummary } from '@/types'
 
 /** 后端 `kind` 用下划线，前端 `DocumentKind` 用连字符——这里是唯一的转换点 */
 function toBackendKind(kind: DocumentKind): string {
@@ -53,6 +53,35 @@ export class DocumentsNotFoundError extends Error {
 }
 
 /**
+ * 把后端返回的待确认清单收敛成前端结构。
+ *
+ * 后端返回的 `pending_items` 是对象数组；逐条校验「有 id 且有 question」才收，
+ * 缺字段的脏数据直接丢弃（不该因为一条坏数据让整份文档读不出来）。这不是「分支判断」——
+ * 只是对外部输入的防御性清洗，最终只得到可信的 `PendingItem[]`。
+ */
+function toPendingItems(data: unknown): PendingItem[] {
+  if (!Array.isArray(data)) return []
+  const items: PendingItem[] = []
+  for (const entry of data) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const raw = entry as Record<string, unknown>
+    const id = raw.id
+    const question = raw.question
+    if (typeof id !== 'string' || typeof question !== 'string') continue
+    const sections = Array.isArray(raw.sections)
+      ? raw.sections.filter((s): s is string => typeof s === 'string')
+      : []
+    items.push({
+      id,
+      question,
+      sections,
+      decider: typeof raw.decider === 'string' ? raw.decider : '',
+    })
+  }
+  return items
+}
+
+/**
  * 把后端返回的一条文档收敛成前端结构。
  *
  * 回执用 `parseRunSummary` 校验后透传：迁移进来的旧回执是另一种字段风格，
@@ -68,6 +97,7 @@ function toRecord(data: unknown): DocumentRecord | null {
     kind,
     content: typeof raw.content === 'string' ? raw.content : '',
     runSummary: summary,
+    pendingItems: toPendingItems(raw.pending_items),
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
   }
 }

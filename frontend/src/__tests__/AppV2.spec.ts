@@ -194,6 +194,7 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     errorCode: '',
     errorMessage: '',
     elapsedMs: 0,
+    pendingItems: [],
     ...overrides,
   }
 }
@@ -460,7 +461,7 @@ function makeDocumentRecord(
   content: string,
   runSummary: RunSummary | null = null,
 ): DocumentRecord {
-  return { kind, content, runSummary, updatedAt: '2026-10-13T00:00:00' }
+  return { kind, content, runSummary, pendingItems: [], updatedAt: '2026-10-13T00:00:00' }
 }
 
 describe('AppV2 完整流程编排', () => {

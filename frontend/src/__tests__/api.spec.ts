@@ -470,6 +470,8 @@ describe('生成任务接口（jobs）', () => {
         solutionId: 3,
         errorCode: '',
         errorMessage: '',
+        // 刷新重连时把「上次生成留下的待确认清单」一并带回；这份快照没生成过，故为空
+        pendingItems: [],
         // 服务端算的已用时：刷新重连后用它给本地计时器打底，显示的仍是任务真实耗时
         elapsedMs: 4500,
       },

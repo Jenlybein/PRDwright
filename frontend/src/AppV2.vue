@@ -349,6 +349,7 @@ const {
   prdStatus,
   prdShowingDraft,
   runSummary,
+  pendingItems,
   elapsedMs,
   summaryChanges,
   summarySyncing,
@@ -574,6 +575,7 @@ function handleStepClick(stepId: StepId): void {
         :has-api-docs="hasApiDocs"
         :has-prompts="hasPrompts"
         :run-summary="runSummary"
+        :pending-items="pendingItems"
         :back-label="backLabel"
         @save="onSaveDocument"
         @optimize="onAiOptimize"

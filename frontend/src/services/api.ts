@@ -8,6 +8,7 @@ import type {
   DocKind,
   DocumentKind,
   JobSnapshot,
+  PendingItem,
   QuestionsConfig,
   RequirementAnswers,
   RequirementsSummary,
@@ -215,6 +216,29 @@ function readObjectArray(data: Record<string, unknown>, key: string): Record<str
 }
 
 /**
+ * 把快照里的 `pending_items` 归一成 `PendingItem[]`。
+ *
+ * 与 `documentService.toPendingItems` 同一口径：只保留「有 id 且有 question」的项，
+ * 坏数据（缺字段、非对象）直接丢弃——不该因为一条脏数据让整份快照失效。
+ * 这是刷新重连时待确认清单的还原点，与 `documents.pending_items` 形状一致。
+ */
+function parsePendingItems(data: Record<string, unknown>): PendingItem[] {
+  return readObjectArray(data, 'pending_items').flatMap((item) => {
+    const id = item.id
+    const question = item.question
+    if (typeof id !== 'string' || typeof question !== 'string') return []
+    return [
+      {
+        id,
+        question,
+        sections: readStringArray(item, 'sections'),
+        decider: readString(item, 'decider'),
+      },
+    ]
+  })
+}
+
+/**
  * 把 `stage` 事件的 `data` 归一成 `StreamStageEvent`。
  *
  * 后端字段是 snake_case，前端类型是 camelCase，转换收口在这里；
@@ -288,6 +312,7 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     solutionId: typeof rawSolutionId === 'number' ? rawSolutionId : null,
     errorCode: readString(data, 'error_code'),
     errorMessage: readString(data, 'error_message'),
+    pendingItems: parsePendingItems(data),
     elapsedMs: readNumber(data, 'elapsed_ms'),
   }
 }

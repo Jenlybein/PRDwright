@@ -129,6 +129,50 @@ describe('fetchDocuments', () => {
     expect(records[0]?.runSummary).toBeNull()
   })
 
+  it('待确认清单原样带出（后端落库的那一份，前端不重算）', async () => {
+    const pendingItems = [
+      { id: 'overview-1', question: '指标口径谁拍板？', sections: ['2.1'], decider: '数据团队' },
+      { id: 'p-2', question: '分页上限取多少？', sections: [], decider: '' },
+    ]
+    vi.mocked(http.get).mockResolvedValue({
+      data: { documents: [backendDocument({ pending_items: pendingItems })] },
+    })
+
+    const records = await fetchDocuments(7)
+
+    expect(records[0]?.pendingItems).toEqual(pendingItems)
+  })
+
+  it('清单缺字段时退化为空数组——「没有待确认项」，不影响文档本身', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: { documents: [backendDocument({ pending_items: [{ question: '缺 id' }, 42] })] },
+    })
+
+    const records = await fetchDocuments(7)
+
+    expect(records).toHaveLength(1)
+    expect(records[0]?.pendingItems).toEqual([])
+    expect(records[0]?.content).toBe('# 产品需求文档')
+  })
+
+  it('清单字段类型不对时按缺省值补齐（脏数据不该让整条文档读不出来）', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        documents: [
+          backendDocument({
+            pending_items: [{ id: 'p-1', question: '上限？', sections: ['2', 3], decider: 7 }],
+          }),
+        ],
+      },
+    })
+
+    const records = await fetchDocuments(7)
+
+    expect(records[0]?.pendingItems).toEqual([
+      { id: 'p-1', question: '上限？', sections: ['2'], decider: '' },
+    ])
+  })
+
   it('未知 kind 的那条被丢弃，其余照常返回', async () => {
     vi.mocked(http.get).mockResolvedValue({
       data: {

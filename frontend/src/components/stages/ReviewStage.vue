@@ -4,7 +4,8 @@ import { computed, ref } from 'vue'
 import DocumentReview from '@/components/DocumentReview.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
-import type { RunSummary, ViewState } from '@/types'
+import PendingItemsPanel from '@/components/ui/PendingItemsPanel.vue'
+import type { PendingItem, RunSummary, ViewState } from '@/types'
 import { formatDuration, formatTokens } from '@/utils/metering'
 
 /**
@@ -74,6 +75,11 @@ const props = defineProps<{
    * 不是「对文档做的事」，因此不放进底栏，也不加按钮。
    */
   runSummary?: RunSummary | null
+  /**
+   * 本次生成的待确认清单；文档生成时由后端从正文里剥离标记块算出并随正文落库，
+   * 前端只读不写。空数组表示「没有待确认项」——不渲染清单区。
+   */
+  pendingItems?: PendingItem[]
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -221,6 +227,11 @@ function submitOptimize(): void {
       :content="content"
       @save="emit('save', $event)"
     />
+
+    <!-- 待确认清单：本次生成产出的元数据，读后端随正文落库的那一份。
+         放在正文下方、底栏之上——它是「这份文档还差哪些问题没敲定」，归「内容本身」，
+         不是「对文档做的事」，因此不进底栏（P4 澄清提示条会接在它下面）。 -->
+    <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
 
     <AppActionBar>
       <!-- 内容行：常态是文档工具；点「AI 优化」原地变成指令输入，文档始终可见 -->

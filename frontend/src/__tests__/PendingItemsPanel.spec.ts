@@ -1,0 +1,78 @@
+import { mount } from '@vue/test-utils'
+import { describe, expect, it } from 'vitest'
+
+import PendingItemsPanel from '../components/ui/PendingItemsPanel.vue'
+import type { PendingItem } from '../types'
+
+/**
+ * 待确认清单是后端在剥离正文标记块时算出的产物，前端**只读**。
+ * 这里守的是展示口径：问题逐条列出、序号按位置、空字段不留空标签。
+ */
+const FULL: PendingItem = {
+  id: 'p-1',
+  question: '分页上限取多少？',
+  sections: ['2.1', '6.1'],
+  decider: '产品负责人',
+}
+const NO_SECTIONS: PendingItem = {
+  id: 'overview-2',
+  question: '指标口径谁拍板？',
+  sections: [],
+  decider: '数据团队',
+}
+const NO_DECIDER: PendingItem = {
+  id: 'p-3',
+  question: '这个功能要不要上？',
+  sections: [],
+  decider: '',
+}
+
+const ITEMS: PendingItem[] = [FULL, NO_SECTIONS, NO_DECIDER]
+
+describe('PendingItemsPanel', () => {
+  it('逐条展示问题，标题带上总条数', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+    const text = wrapper.text()
+
+    expect(text).toContain('待确认问题（3）')
+    expect(text).toContain('分页上限取多少？')
+    expect(text).toContain('指标口径谁拍板？')
+    expect(text).toContain('这个功能要不要上？')
+  })
+
+  it('章节与拍板人都给出来时一并展示', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: [FULL] } })
+    const text = wrapper.text()
+
+    expect(text).toContain('涉及章节：2.1、6.1')
+    expect(text).toContain('拍板人：产品负责人')
+  })
+
+  it('章节为空时不渲染「涉及章节」标签（不留空标签）', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: [NO_SECTIONS] } })
+    const text = wrapper.text()
+
+    expect(text).toContain('拍板人：数据团队')
+    expect(text).not.toContain('涉及章节')
+  })
+
+  it('拍板人为空时不渲染「拍板人」标签', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: [NO_DECIDER] } })
+    const text = wrapper.text()
+
+    expect(text).toContain('这个功能要不要上？')
+    expect(text).not.toContain('拍板人')
+  })
+
+  it('序号用位置下标，不把后端 id 暴露给用户', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+    // 只取直接挂在 li 下的徽标：章节与拍板人之间那个「·」分隔符也有 aria-hidden，需排除
+    const badges = wrapper.findAll('li > span[aria-hidden="true"]')
+
+    // 每项的序号徽标按 1、2、3 递增
+    expect(badges.map((badge) => badge.text())).toEqual(['1', '2', '3'])
+    // 后端 id（p-1 / overview-2）只作渲染 key，不进可见文案
+    expect(wrapper.text()).not.toContain('p-1')
+    expect(wrapper.text()).not.toContain('overview-2')
+  })
+})

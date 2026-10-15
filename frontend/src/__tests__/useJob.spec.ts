@@ -70,6 +70,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     errorCode: '',
     errorMessage: '',
     elapsedMs: 0,
+    pendingItems: [],
     ...overrides,
   }
 }
