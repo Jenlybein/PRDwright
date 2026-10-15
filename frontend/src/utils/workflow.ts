@@ -373,6 +373,11 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
       clarifyConversationId:
         typeof record.clarifyConversationId === 'string' ? record.clarifyConversationId : '',
       clarifyTarget: isDocumentKind(record.clarifyTarget) ? record.clarifyTarget : null,
+      // 与上面三个同理：旧快照没有 PRD 澄清这两个字段，说明那份方案没走过这一轮，
+      // 按「没做过」恢复（字符串空、布尔 false），不要把整份快照作废。
+      prdClarifyConversationId:
+        typeof record.prdClarifyConversationId === 'string' ? record.prdClarifyConversationId : '',
+      prdClarifying: record.prdClarifying === true,
     },
   }
 }

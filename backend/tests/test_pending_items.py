@@ -38,6 +38,19 @@ def test_render_spec_includes_literal_sentinels() -> None:
     assert "question" in spec
 
 
+def test_render_spec_mentions_importance_levels() -> None:
+    """生成指令里必须要求模型给每项标 P0/P1/P2，否则「越重要越先问」没有数据来源。
+
+    前端 relay 的澄清顺序完全依赖这个字段，所以指令里少一个等级，
+    整条「分级澄清」链路就断在数据入口上——用测试把它钉住。
+    """
+    spec = render_spec()
+    assert "importance" in spec
+    assert "P0" in spec
+    assert "P1" in spec
+    assert "P2" in spec
+
+
 # ---------------------------------------------------------------------------
 # extract：剥离 + 解析 + id 分配
 # ---------------------------------------------------------------------------
@@ -123,14 +136,104 @@ def test_extract_bad_json_block_is_ignored() -> None:
 
 
 def test_extract_whitelist_keeps_only_known_fields() -> None:
-    """只保留 question/sections/decider；模型夹带的其它字段被丢弃。"""
+    """只保留 question/sections/decider/importance；模型夹带的其它字段被丢弃。
+
+    模型同时给了非法 importance（`P9`）→ 兜底为 P1，说明白名单之外的值不会被照搬。
+    """
     doc = (
         f"{BEGIN_SENTINEL}\n"
-        '[{"question": "q", "sections": [], "decider": "x", "secret": "drop-me"}]\n'
+        '[{"question": "q", "sections": [], "decider": "x", "secret": "drop-me", '
+        '"importance": "P9"}]\n'
         f"{END_SENTINEL}\n"
     )
     _, items = extract(doc)
-    assert items[0] == {"id": "p-1", "question": "q", "sections": [], "decider": "x"}
+    assert items[0] == {
+        "id": "p-1",
+        "question": "q",
+        "sections": [],
+        "decider": "x",
+        "importance": "P1",
+    }
+
+
+def test_extract_sorts_by_importance_descending() -> None:
+    """清单按重要性从高到低排序：P0 → P1 → P2，id 按排好的顺序连续重分配。
+
+    这是「越重要越先提问」的地基——模型的书写顺序不代表重要程度，
+    顺序只由 `importance` 决定。
+    """
+    doc = (
+        "正文。\n"
+        f"{BEGIN_SENTINEL}\n"
+        "[\n"
+        '  {"question": "次要细节？", "importance": "P2"},\n'
+        '  {"question": "最要紧的前提？", "importance": "P0"},\n'
+        '  {"question": "次要的判断？", "importance": "P1"}\n'
+        "]\n"
+        f"{END_SENTINEL}\n"
+    )
+    _, items = extract(doc)
+    assert [item["question"] for item in items] == [
+        "最要紧的前提？",
+        "次要的判断？",
+        "次要细节？",
+    ]
+    assert [item["importance"] for item in items] == ["P0", "P1", "P2"]
+    # id 顺序即提问顺序
+    assert [item["id"] for item in items] == ["p-1", "p-2", "p-3"]
+
+
+def test_extract_normalizes_missing_or_illegal_importance_to_p1() -> None:
+    """没给等级 / 给了不认识的等级 → 一律兜底 P1，排序顺序依然成立。"""
+    doc = (
+        "正文。\n"
+        f"{BEGIN_SENTINEL}\n"
+        "[\n"
+        '  {"question": "没标等级？"},\n'
+        '  {"question": "乱标等级？", "importance": "critical"},\n'
+        '  {"question": "要紧的？", "importance": "P0"}\n'
+        "]\n"
+        f"{END_SENTINEL}\n"
+    )
+    _, items = extract(doc)
+    assert items[0]["question"] == "要紧的？"
+    assert items[0]["importance"] == "P0"
+    assert {item["importance"] for item in items[1:]} == {"P1"}
+
+
+def test_extract_keeps_stable_order_within_same_importance() -> None:
+    """同一等级内保持模型原本的书写顺序（稳定排序），避免顺序忽上忽下。"""
+    doc = (
+        "正文。\n"
+        f"{BEGIN_SENTINEL}\n"
+        "[\n"
+        '  {"question": "第一条 P1？", "importance": "P1"},\n'
+        '  {"question": "第二条 P1？", "importance": "P1"}\n'
+        "]\n"
+        f"{END_SENTINEL}\n"
+    )
+    _, items = extract(doc)
+    assert [item["question"] for item in items] == ["第一条 P1？", "第二条 P1？"]
+    assert [item["id"] for item in items] == ["p-1", "p-2"]
+
+
+def test_extract_sorts_across_multiple_blocks() -> None:
+    """分章节生成时每章一个块：跨块的条目也要一起按重要性重排并统一编号。"""
+    doc = (
+        "一章。\n"
+        f"{BEGIN_SENTINEL}\n"
+        '[{"question": "次要的？", "importance": "P2"}]\n'
+        f"{END_SENTINEL}\n"
+        "二章。\n"
+        f"{BEGIN_SENTINEL}\n"
+        '[{"question": "要紧的？", "importance": "P0"}]\n'
+        f"{END_SENTINEL}\n"
+    )
+    clean, items = extract(doc)
+    assert "一章。" in clean
+    assert "二章。" in clean
+    assert [item["importance"] for item in items] == ["P0", "P2"]
+    assert [item["id"] for item in items] == ["p-1", "p-2"]
 
 
 def test_extract_unclosed_block_retained_as_text() -> None:
@@ -301,6 +404,7 @@ def test_api_docs_line_strips_block_from_chunks_and_reply() -> None:
             "question": "分页上限取多少？",
             "sections": ["2.1"],
             "decider": "产品负责人",
+            "importance": "P1",
             "id": "p-1",
         }
     ]

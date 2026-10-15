@@ -131,8 +131,20 @@ describe('fetchDocuments', () => {
 
   it('待确认清单原样带出（后端落库的那一份，前端不重算）', async () => {
     const pendingItems = [
-      { id: 'overview-1', question: '指标口径谁拍板？', sections: ['2.1'], decider: '数据团队' },
-      { id: 'p-2', question: '分页上限取多少？', sections: [], decider: '' },
+      {
+        id: 'overview-1',
+        question: '指标口径谁拍板？',
+        sections: ['2.1'],
+        decider: '数据团队',
+        importance: 'P0',
+      },
+      {
+        id: 'p-2',
+        question: '分页上限取多少？',
+        sections: [],
+        decider: '',
+        importance: 'P1',
+      },
     ]
     vi.mocked(http.get).mockResolvedValue({
       data: { documents: [backendDocument({ pending_items: pendingItems })] },
@@ -141,6 +153,28 @@ describe('fetchDocuments', () => {
     const records = await fetchDocuments(7)
 
     expect(records[0]?.pendingItems).toEqual(pendingItems)
+  })
+
+  it('重要性等级缺失或非法时降级为 P1，而不是把整条清单丢掉', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        documents: [
+          backendDocument({
+            pending_items: [
+              { id: 'p-1', question: '没标等级？', sections: [], decider: '' },
+              { id: 'p-2', question: '乱标等级？', sections: [], decider: '', importance: 'X9' },
+            ],
+          }),
+        ],
+      },
+    })
+
+    const records = await fetchDocuments(7)
+
+    expect(records[0]?.pendingItems).toEqual([
+      { id: 'p-1', question: '没标等级？', sections: [], decider: '', importance: 'P1' },
+      { id: 'p-2', question: '乱标等级？', sections: [], decider: '', importance: 'P1' },
+    ])
   })
 
   it('清单缺字段时退化为空数组——「没有待确认项」，不影响文档本身', async () => {
@@ -169,7 +203,7 @@ describe('fetchDocuments', () => {
     const records = await fetchDocuments(7)
 
     expect(records[0]?.pendingItems).toEqual([
-      { id: 'p-1', question: '上限？', sections: ['2'], decider: '' },
+      { id: 'p-1', question: '上限？', sections: ['2'], decider: '', importance: 'P1' },
     ])
   })
 

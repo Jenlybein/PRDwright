@@ -13,18 +13,21 @@ const FULL: PendingItem = {
   question: '分页上限取多少？',
   sections: ['2.1', '6.1'],
   decider: '产品负责人',
+  importance: 'P1',
 }
 const NO_SECTIONS: PendingItem = {
   id: 'overview-2',
   question: '指标口径谁拍板？',
   sections: [],
   decider: '数据团队',
+  importance: 'P0',
 }
 const NO_DECIDER: PendingItem = {
   id: 'p-3',
   question: '这个功能要不要上？',
   sections: [],
   decider: '',
+  importance: 'P2',
 }
 
 const ITEMS: PendingItem[] = [FULL, NO_SECTIONS, NO_DECIDER]
@@ -74,5 +77,24 @@ describe('PendingItemsPanel', () => {
     // 后端 id（p-1 / overview-2）只作渲染 key，不进可见文案
     expect(wrapper.text()).not.toContain('p-1')
     expect(wrapper.text()).not.toContain('overview-2')
+  })
+
+  it('按重要性从高到低展示：P0 在最前、P2 在最后', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+    const questions = wrapper.findAll('li').map((li) => li.find('p').text())
+
+    // ITEMS 的声明顺序是 P1、P0、P2，重排后应当变成 P0、P1、P2
+    expect(questions[0]).toBe('指标口径谁拍板？')
+    expect(questions[1]).toBe('分页上限取多少？')
+    expect(questions[2]).toBe('这个功能要不要上？')
+  })
+
+  it('每条都标出重要性等级徽标', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+    const text = wrapper.text()
+
+    expect(text).toContain('P0')
+    expect(text).toContain('P1')
+    expect(text).toContain('P2')
   })
 })

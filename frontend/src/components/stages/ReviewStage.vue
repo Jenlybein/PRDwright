@@ -45,6 +45,8 @@ const emit = defineEmits<{
   finish: []
   /** 进入澄清页（对待确认项逐条澄清后改写这份文档） */
   clarify: []
+  /** 回到主对话栏继续澄清剩余问题（PRD 专用：复用同一条聊天记录） */
+  returnToChat: []
 }>()
 
 const props = defineProps<{
@@ -89,6 +91,13 @@ const props = defineProps<{
    * 事（澄清最终要落库，没有方案就无处可写）。组件只负责在允许时把它渲染出来。
    */
   canClarify?: boolean
+  /**
+   * 是否给出「回到对话」入口（PRD 专用，与 `canClarify` 互斥）。
+   *
+   * 同样由上层决定：能否走这条路径取决于「是不是在审 PRD」以及「有没有待确认项」，
+   * 两者都是上层才知道的事。
+   */
+  canReturnToChat?: boolean
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -268,6 +277,53 @@ function submitOptimize(): void {
         <span class="block text-sm font-medium text-fg">逐条澄清这些待确认项</span>
         <span class="mt-0.5 block text-xs text-subtle">
           和 AI 把 {{ pendingItems.length }} 个问题聊清楚，再按结论改写这份文档——只动涉及的章节。
+        </span>
+      </span>
+      <svg
+        class="h-4 w-4 shrink-0 text-subtle"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path
+          fill-rule="evenodd"
+          d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02Z"
+          clip-rule="evenodd"
+        />
+      </svg>
+    </button>
+
+    <!--
+      PRD 专属的「回到对话」入口（只在审阅 PRD 时出现）。
+
+      与上面那条「逐条澄清」的区别不在做什么，而在**去哪里**：这条把用户送回刚才那个对话框，
+      在同一条聊天记录后面接着聊（因此文案强调「回到对话」）；那条开一个独立的澄清页。
+      PRD 用前者是因为它是流程的第一份产物，用户刚从对话里出来，心智还连着那条时间线。
+    -->
+    <button
+      v-if="canReturnToChat && pendingItems && pendingItems.length"
+      type="button"
+      class="flex w-full items-center gap-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3 text-left transition-colors hover:border-primary-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-200 dark:border-primary-800 dark:bg-primary-950/30 dark:hover:border-primary-700"
+      @click="emit('returnToChat')"
+    >
+      <svg
+        class="h-4 w-4 shrink-0 text-primary-600 dark:text-primary-300"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path
+          fill-rule="evenodd"
+          d="M10 18a8 8 0 100-16 8 8 0 000 16Zm.75-11.5a.75.75 0 00-1.5 0v3.5c0 .2.08.39.22.53l2 2a.75.75 0 001.06-1.06l-1.78-1.78V6.5Z"
+          clip-rule="evenodd"
+        />
+      </svg>
+      <span class="min-w-0 flex-1">
+        <span class="block text-sm font-medium text-fg">
+          回到对话，确认剩下的 {{ pendingItems.length }} 个问题
+        </span>
+        <span class="mt-0.5 block text-xs text-subtle">
+          按 P0 → P1 → P2 从最要紧的问起；之前的对话都还在，聊够了随时写回 PRD。
         </span>
       </span>
       <svg

@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { continueConversationStream, startConversationStream } from '@/services/api'
 import { isApiError } from '@/services/errors'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { ChatMessage, RequirementAnswers, RequirementsSummary } from '@/types'
+import type { ChatMessage, ChatStage, RequirementAnswers, RequirementsSummary } from '@/types'
 import { buildAnswers } from '@/utils/requirements'
 
 /**
@@ -38,6 +38,21 @@ export interface ClarificationChatOptions {
   messages?: Ref<ChatMessage[]>
   /** 会话 id 的存放位置；默认是需求澄清的 `conversationId` */
   conversationId?: Ref<string>
+  /**
+   * 本轮澄清的阶段标记，写进新产生的每条消息。
+   *
+   * PRD 生成后的回过头来的澄清与需求澄清**共用一个消息列表**，靠它区分归属：
+   * 摘要回填只取 `requirement` 阶段的消息，文档答疑就不会被当成需求输入。
+   * 缺省为 `requirement`，因此旧代码路径无需改动。
+   */
+  stage?: ChatStage
+  /**
+   * 开新会话时是否清空已有的聊天记录；默认 `true`。
+   *
+   * PRD 生成后的澄清要传 `false`——那是「在同一条时间线上继续」，把前面的对话清掉
+   * 正好就是用户最反感的体验（他会以为之前的交流丢了）。
+   */
+  clearHistory?: boolean
 }
 
 /**
@@ -57,12 +72,23 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
   const messages = options.messages ?? state.messages
   const conversationId = options.conversationId ?? state.conversationId
   const profileKey = options.profileKey
+  const stage = options.stage ?? 'requirement'
 
   /** 正在流式生成的回复文本，作为列表末尾那条气泡的实时内容 */
   const streamingContent = ref('')
 
   /** 对话过程中的错误提示 */
   const chatError = ref('')
+
+  /**
+   * 只属于本阶段的消息，按发生顺序排列。
+   *
+   * 消息列表可能是两套澄清共用的一条时间线，而接续对话喂给后端的必须是**本轮**的内容：
+   * 把别阶段的对话混进去，模型会以为那些也是本轮的上下文（人设还是另一套）。
+   */
+  function history(): ChatMessage[] {
+    return messages.value.filter((message) => (message.stage ?? 'requirement') === stage)
+  }
 
   /**
    * 交给消息列表渲染的内容。
@@ -114,7 +140,8 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
       // 先结束流式状态再固化消息，否则列表里会短暂多出一条「思考中」气泡
       chatStreaming.value = false
       const content = reply.trim()
-      if (content) messages.value.push({ role: 'assistant', content })
+      // 带上阶段标记：这条消息属于哪一轮澄清，靠它在共享的时间线里分清归属
+      if (content) messages.value.push({ role: 'assistant', content, stage })
       streamingContent.value = ''
     }
   }
@@ -134,11 +161,12 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     const text = content.trim()
     if (!text || chatStreaming.value) return
 
-    messages.value.push({ role: 'user', content: text })
+    messages.value.push({ role: 'user', content: text, stage })
     chatError.value = ''
 
-    // 历史只取本轮之前的消息，本轮输入单独通过 content 传递
-    const history = messages.value
+    // 历史只取本阶段、本轮之前的消息，本轮输入单独通过 content 传递。
+    // 先按阶段过滤再去掉末尾刚推入的那一条（它被塞在上一步，一定在末尾）。
+    const prior = history()
       .slice(0, -1)
       .map((message) => ({ role: message.role, content: message.content }))
 
@@ -148,7 +176,7 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
           {
             content: text,
             conversationId: conversationId.value || undefined,
-            history,
+            history: prior,
             profileKey,
           },
           { onChunk: handleChunk },
@@ -160,7 +188,7 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
         conversationId.value = ''
         streamingContent.value = ''
         return continueConversationStream(
-          { content: text, history, profileKey },
+          { content: text, history: prior, profileKey },
           { onChunk: handleChunk },
         )
       }
@@ -178,9 +206,15 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     answers: RequirementAnswers,
     notice = '正在生成回复',
   ): Promise<void> {
-    // 先切阶段再发请求：用户立刻看到「思考中」，而不是停在原页面干等
-    messages.value = []
-    conversationId.value = ''
+    // 默认清空：需求澄清是一次全新的开始。
+    // PRD 生成后的澄清传 `clearHistory: false` ——它要在原有对话后面接下去，
+    // 而不是把用户前面聊过的内容抹掉。
+    if (options.clearHistory !== false) {
+      messages.value = []
+      conversationId.value = ''
+    } else {
+      conversationId.value = ''
+    }
     chatError.value = ''
     hooks.onEnterChat()
     hooks.onNotice(notice)

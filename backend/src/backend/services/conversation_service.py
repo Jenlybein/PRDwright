@@ -27,6 +27,7 @@ from backend.core.errors import AppError, ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import (
     DEFAULT_CONVERSATION_PROFILE,
+    DOC_CLARIFICATION_PROFILE_KEY,
     ConversationProfile,
     resolve_profile,
 )
@@ -424,9 +425,15 @@ class ConversationService:
         # 先校验档案再登记会话：未注册的标识当场拒绝，不留下一条用着错人设的会话
         profile: ConversationProfile = self.resolve_request_profile(profile_key)
         record = self._create_record(form_data, title, profile_key=profile.key)
+        # 状态文案跟档案走：文档澄清时说「已收到你的需求」会让人以为在讨论新需求。
+        status_text = (
+            "已读取文档，正在梳理待确认项…"
+            if profile.key == DOC_CLARIFICATION_PROFILE_KEY
+            else "已收到你的需求，正在整理分析…"
+        )
         yield StreamEvent(
             type="status",
-            content="已收到你的需求，正在整理分析…",
+            content=status_text,
             data={"conversation_id": record.id},
         )
 

@@ -80,9 +80,11 @@ describe('会话失效后的降级重试', () => {
     expect(store.conversationId).toBe('')
     // 重试成功，不该留下错误提示
     expect(chat.chatError.value).toBe('')
+    // stage 是消息自带的阶段标记（默认需求澄清），用于和 PRD 澄清区分
     expect(store.messages[store.messages.length - 1]).toEqual({
       role: 'assistant',
       content: '重试后的回复',
+      stage: 'requirement',
     })
   })
 

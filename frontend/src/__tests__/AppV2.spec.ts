@@ -465,6 +465,29 @@ function makeDocumentRecord(
   return { kind, content, runSummary, pendingItems, updatedAt: '2026-10-13T00:00:00' }
 }
 
+/**
+ * 从刚挂载的那棵应用树上取 workflow store。
+ *
+ * 不用裸 `useWorkflowStore()`：它取的是模块级的「当前活跃 pinia」，而本文件里每个用例
+ * 都会挂载自己的应用、把活跃 pinia 换成新的；一旦别的用例有异步副作用跨越了用例边界，
+ * 断言时取的就可能不是这个应用的 store（表现为「单独跑通过、整文件跑失败」）。
+ * 直接从组件的应用上下文里取，断言才只反映这一次挂载。
+ */
+function storeOf(wrapper: VueWrapper): ReturnType<typeof useWorkflowStore> {
+  const pinia = wrapper.vm.$.appContext.config.globalProperties.$pinia as Pinia
+  return useWorkflowStore(pinia)
+}
+
+/**
+ * 同 `storeOf`，取这个应用自己的文档 store。
+ *
+ * 与 workflow store 一样，不能裸调 `useDocumentsStore()`——那取的是模块级的活跃 pinia。
+ */
+function documentsOf(wrapper: VueWrapper): ReturnType<typeof useDocumentsStore> {
+  const pinia = wrapper.vm.$.appContext.config.globalProperties.$pinia as Pinia
+  return useDocumentsStore(pinia)
+}
+
 /** 一份「停在审阅页、没有任何进行中任务」的最小快照 */
 function reviewSnapshot(viewState: string): Record<string, unknown> {
   return {
@@ -480,6 +503,8 @@ function reviewSnapshot(viewState: string): Record<string, unknown> {
     clarifyMessages: [],
     clarifyConversationId: '',
     clarifyTarget: null,
+    prdClarifyConversationId: '',
+    prdClarifying: false,
   }
 }
 
@@ -603,6 +628,50 @@ describe('AppV2 完整流程编排', () => {
     // 回填结果已写回摘要，并作为生成输入下发
     expect(prdPayload?.summary?.target_users).toContain('小团队产品经理')
     expect(prdPayload?.summary?.mvp_features?.[0]?.user_value).toBe('省时间')
+  })
+
+  /**
+   * 闸门① 的向下游防漏：PRD 澄清的对话和它共用同一个 `messages` 列表。
+   *
+   * 回填摘要时若连文档答疑一起交给后端，模型会把「讨论 PRD 里某个待确认项」的片段
+   * 当成「用户补充的需求」，Diff 里凭空冒出条目。这里钉住：回填只吃 `requirement` 那一轮。
+   */
+  it('回填摘要只取需求澄清那一轮：PRD 澄清的对话不会被当成需求输入', async () => {
+    vi.mocked(api.syncSummaryFromConversation).mockImplementation(async ({ summary }) => ({
+      summary,
+      changed: false,
+    }))
+
+    const wrapper = await mountExistingSolution(
+      {
+        viewState: 'chatting',
+        entryMode: 'structured',
+        summary: SAMPLE_SUMMARY,
+        messages: [
+          { role: 'assistant', content: '我先确认几个关键点', stage: 'requirement' },
+          { role: 'assistant', content: '准备开始 P0 级问题的确认', stage: 'document' },
+        ],
+        conversationId: '',
+        quickInput: { productName: '', requirements: '' },
+        debugPrdText: '',
+        activeJobId: null,
+        activeJobKind: null,
+        clarifyMessages: [],
+        clarifyConversationId: '',
+        clarifyTarget: null,
+        prdClarifyConversationId: '',
+        prdClarifying: false,
+      },
+      1,
+    )
+    await flushPromises()
+
+    await clickButton(wrapper, '生成 PRD')
+    await flushPromises()
+
+    const syncPayload = vi.mocked(api.syncSummaryFromConversation).mock.calls[0]?.[0]
+    // 需求澄清那条在；PRD 澄清那条不在——两条共用列表，靠 stage 分开
+    expect(syncPayload?.history?.map((item) => item.content)).toEqual(['我先确认几个关键点'])
   })
 
   it('拒绝更改：摘要保持不变并回到对话页，不进入生成流程', async () => {
@@ -942,11 +1011,12 @@ describe('AppV2 完整流程编排', () => {
     }))
 
     const wrapper = await mountApp()
-    // 断言必须落在**挂载时那个 pinia** 的 store 上。`useWorkflowStore()` 取的是模块级的
-    // 「当前活跃 pinia」，而同一文件里每次挂载都会把它换成新实例；等到断言时再取，
-    // 拿到的就未必是这个应用的 store（会读到别的用例遗留的状态），断言随之随执行顺序漂移。
-    // 挂载后立刻取到手里，断言才只反映「这一次点击」的结果。
-    const workflow = useWorkflowStore()
+    // 断言必须落在**这个应用自己的 pinia** 上。`useWorkflowStore()` / `useDocumentsStore()`
+    // 取的是模块级的「当前活跃 pinia」，它未必是刚挂载那个应用的——一旦别的用例有异步
+    // 副作用跨过用例边界，这里就会读到别的用例遗留的状态（表现为「单独跑通、整文件跑挂」）。
+    // 因此两个 store 都从组件的应用上下文里取。
+    const workflow = storeOf(wrapper)
+    const documents = documentsOf(wrapper)
     await submitSampleForm(wrapper)
     await clickButton(wrapper, '重新开始')
     // 「重新开始」会先 flush 一次待保存的改动，再清空——因此要多等几拍
@@ -964,7 +1034,7 @@ describe('AppV2 完整流程编排', () => {
     expect(workflow.quickInput).toEqual({ productName: '', requirements: '' })
     expect(workflow.debugPrdText).toBe('')
     // 产物正文归文档 store（后端 documents 表的工作副本），同样要清干净
-    expect(useDocumentsStore().hasAny).toBe(false)
+    expect(documents.hasAny).toBe(false)
     expect(workflow.hasContent).toBe(false)
 
     // 再进完整流程时，表单是重建后的空表单（依赖 formKey 自增强制重建）
@@ -1399,7 +1469,13 @@ describe('AppV2 分章节生成的阶段展示', () => {
  */
 describe('AppV2 文档澄清', () => {
   const PENDING = [
-    { id: 'p-1', question: '分页上限取多少？', sections: ['4.3'], decider: '产品负责人' },
+    {
+      id: 'p-1',
+      question: '分页上限取多少？',
+      sections: ['4.3'],
+      decider: '产品负责人',
+      importance: 'P0' as const,
+    },
   ]
 
   async function mountReviewWithPending(): Promise<VueWrapper> {
@@ -1415,22 +1491,22 @@ describe('AppV2 文档澄清', () => {
     return wrapper
   }
 
-  it('审阅页给出澄清入口，并把正文与清单交给后端（场景点名，不递提示词）', async () => {
+  it('审阅 PRD 页给出「回到对话」入口，并把正文与清单交给后端（场景点名，不递提示词）', async () => {
     const wrapper = await mountReviewWithPending()
 
-    expect(wrapper.text()).toContain('逐条澄清这些待确认项')
-    await clickButton(wrapper, '逐条澄清这些待确认项')
+    expect(wrapper.text()).toContain('回到对话，确认剩下的 1 个问题')
+    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
     await flushPromises()
 
-    // 进入澄清页，标题跟着「澄清的是哪一份」走
-    expect(wrapper.text()).toContain('澄清 PRD 文档 里的待确认项')
+    // 回到的是**主对话栏**（标题切到 PRD 澄清），不是另开一个澄清页
+    expect(wrapper.text()).toContain('PRD 待确认项澄清')
 
     const payload = vi.mocked(api.startConversationStream).mock.calls[0]?.[0]
     // 前端只能点名场景：档案标识由后端解析成人设与开场白
     expect(payload?.profileKey).toBe('doc-clarification')
     expect(payload?.answers.document).toContain('分页上限：待确认')
     expect(payload?.answers.pending_items).toContain(
-      '1. 分页上限取多少？（涉及章节：4.3；拍板人：产品负责人）',
+      '1. [P0] 分页上限取多少？（涉及章节：4.3；拍板人：产品负责人）',
     )
   })
 
@@ -1443,7 +1519,7 @@ describe('AppV2 文档澄清', () => {
     })
 
     const wrapper = await mountReviewWithPending()
-    await clickButton(wrapper, '逐条澄清这些待确认项')
+    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
     await flushPromises()
 
     await clickButton(wrapper, '按澄清结果改写')
@@ -1457,7 +1533,7 @@ describe('AppV2 文档澄清', () => {
 
     // 改写完成 → 回到 PRD 的审阅页，并且正文已经是新的
     expect(wrapper.text()).toContain('PRD 文档')
-    expect(wrapper.text()).not.toContain('澄清 PRD 文档 里的待确认项')
+    expect(wrapper.text()).not.toContain('PRD 待确认项澄清')
   })
 
   it('没有待确认项时不给澄清入口（点进去只能闲聊）', async () => {
@@ -1467,19 +1543,66 @@ describe('AppV2 文档澄清', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('PRD 文档')
-    expect(wrapper.text()).not.toContain('逐条澄清这些待确认项')
+    expect(wrapper.text()).not.toContain('回到对话，确认剩下的')
     expect(api.startConversationStream).not.toHaveBeenCalled()
   })
 
-  it('澄清对话与需求澄清各存各的：文档答疑不会被当成需求输入', async () => {
+  it('PRD 澄清的消息追加进同一条 messages，并标着 document 阶段', async () => {
     const wrapper = await mountReviewWithPending()
+    const store = storeOf(wrapper)
+    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
+    await flushPromises()
+
+    // 与需求澄清**共用同一个列表**：用户看到的是一条连续的时间线
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0]?.stage).toBe('document')
+    // 但明细上分得开：需求澄清那一轮一条都没有
+    expect(
+      store.messages.filter((message) => (message.stage ?? 'requirement') === 'requirement'),
+    ).toHaveLength(0)
+    expect(store.prdClarifying).toBe(true)
+    expect(wrapper.text()).toContain('PRD 待确认项澄清')
+  })
+
+  it('再回到对话时不重新开场——同一段澄清继续聊（这是「复用」的要害）', async () => {
+    const wrapper = await mountReviewWithPending()
+    const store = storeOf(wrapper)
+    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
+    await flushPromises()
+    expect(vi.mocked(api.startConversationStream)).toHaveBeenCalledTimes(1)
+
+    // 回审阅页再进来：开场请求不应重发，否则每次回来都被问候一遍
+    await clickButton(wrapper, '返回审阅')
+    await flushPromises()
+    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
+    await flushPromises()
+
+    expect(vi.mocked(api.startConversationStream)).toHaveBeenCalledTimes(1)
+    expect(store.prdClarifying).toBe(true)
+    // 聊天记录没有被清空
+    expect(store.messages).toHaveLength(1)
+  })
+
+  it('接口文档仍走独立澄清页：这条老路径没有被 PRD 的新流程顶掉', async () => {
+    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
+      handlers?.onChunk?.('先问最关键的一个：分页上限取多少？')
+      return { conversationId: 'api-conv-1', reply: '先问最关键的一个：分页上限取多少？' }
+    })
+
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      makeDocumentRecord('prd', '# PRD'),
+      makeDocumentRecord('api-docs', '# 接口文档\n\n分页上限：待确认', null, PENDING),
+    ])
+    const store = storeOf(wrapper)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('逐条澄清这些待确认项')
     await clickButton(wrapper, '逐条澄清这些待确认项')
     await flushPromises()
 
-    const store = useWorkflowStore()
     expect(store.clarifyMessages).toHaveLength(1)
-    expect(store.clarifyTarget).toBe('prd')
-    // 需求澄清那套记录分毫未动
+    expect(store.clarifyTarget).toBe('api-docs')
+    // 主对话列表不受影响（PRD 那条新链路没污染它）
     expect(store.messages).toHaveLength(0)
   })
 })

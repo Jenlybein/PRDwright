@@ -29,7 +29,14 @@ END_SENTINEL = "<!-- PENDING:END -->"
 _CARRY_LEN = max(len(BEGIN_SENTINEL), len(END_SENTINEL)) - 1
 
 # 清单项允许从模型输出里保留的字段（其余一律丢弃；尤其是不信任模型给的 `id`）。
-_ITEM_FIELDS = ("question", "sections", "decider")
+_ITEM_FIELDS = ("question", "sections", "decider", "importance")
+
+# 待确认项的「重要性等级」，数字越小越重要。
+# 三个等级由模型在生成正文时随清单一起给出；澄清阶段据此逐级推进，
+# 保证「越重要越先问」。缺失或非法取值一律兜底为 _DEFAULT_IMPORTANCE，
+# 这样即便模型偷懒没标等级，排序顺序依然成立（全部同级 → 保持原有顺序）。
+IMPORTANCE_ORDER: dict[str, int] = {"P0": 0, "P1": 1, "P2": 2}
+_DEFAULT_IMPORTANCE = "P1"
 
 
 def render_spec() -> str:
@@ -45,11 +52,38 @@ def render_spec() -> str:
         "在文档末尾（所有正文之后）附上「待确认问题」清单，用如下 HTML 注释标记块包裹；"
         "块内是 JSON 数组，每项含 "
         "`question`（必填，一条待确认的问题）、`sections`（受影响章节编号数组，可为空）、"
-        "`decider`（拍板人，可为空）：\n"
+        "`decider`（拍板人，可为空）、`importance`（重要性等级）：\n"
         f"{BEGIN_SENTINEL}\n"
-        '[{{"question": "…", "sections": ["2.1", "6.1"], "decider": "产品负责人"}}]\n'
+        '[{{"question": "…", "sections": ["2.1", "6.1"], "decider": "产品负责人", '
+        '"importance": "P0"}}]\n'
         f"{END_SENTINEL}\n"
+        "`importance` 必须是 `P0` / `P1` / `P2` 三者之一，按「不问就没法开工」的程度排序："
+        "`P0` 最高（不确认会导致整份文档写错或无法开工）、`P1` 次之、`P2` 是可以后置的细节。"
+        "拿不准就标 `P1`。\n"
         "没有待确认项时附 `[]`。清单须与正文中的「待确认」一一对应；不要把这段标记写进章节里。"
+    )
+
+
+def _normalize_importance(raw: Any) -> str:
+    """把模型给的 importance 规范成 P0/P1/P2；缺失或不认识的值一律兜底为 P1。
+
+    Args:
+        raw: 模型输出里该项的 `importance` 原值，可能是任意类型。
+
+    Returns:
+        `IMPORTANCE_ORDER` 里的三个等级之一。
+    """
+    if isinstance(raw, str):
+        value = raw.strip().upper()
+        if value in IMPORTANCE_ORDER:
+            return value
+    return _DEFAULT_IMPORTANCE
+
+
+def _importance_rank(item: dict[str, Any]) -> int:
+    """清单项的排序键：重要性数字越小越靠前（P0 最优先）。"""
+    return IMPORTANCE_ORDER.get(
+        str(item.get("importance", "")), IMPORTANCE_ORDER[_DEFAULT_IMPORTANCE]
     )
 
 
@@ -61,8 +95,9 @@ def extract(
     设计要点：
 
     - 正文里可能有 0..N 个标记块（分章节生成时每章一个），逐个剥离。
-    - 清单里每项的 `id` 一律由后端按**出现顺序**重新分配为 ``{id_prefix}-{n}``，
-      不信任模型给的 `id`（保证全文档唯一、稳定，且与正文位置可对应）。
+    - 所有条目先收集，按 `importance` **从高到低（P0 → P1 → P2）稳定排序**后，
+      才按排好的顺序重新分配 `id` 为 ``{id_prefix}-{n}``，不信任模型给的 `id`。
+      于是「id 序号」天然等于「提问顺序」——越重要的排在越前面、越先被问到。
     - 某个块 JSON 非法 → 跳过该块（正文中不留块体），记 warning；生成不因此失败。
     - 没有任何块 → 返回（原文, []）。
 
@@ -77,10 +112,10 @@ def extract(
     if BEGIN_SENTINEL not in text:
         return text, []
 
-    items: list[dict[str, Any]] = []
+    # 先把所有块里的条目原样收集起来，统一排序后才分配 id。
+    collected: list[dict[str, Any]] = []
     parts = text.split(BEGIN_SENTINEL)
     out: list[str] = [parts[0]]
-    counter = 0
     for block in parts[1:]:
         end_idx = block.find(END_SENTINEL)
         if end_idx == -1:
@@ -100,12 +135,18 @@ def extract(
                 extra={"event": "pending.missing", "raw": raw_json[:200]},
             )
         else:
-            for entry in parsed:
-                counter += 1
-                record = dict(entry)
-                record["id"] = f"{id_prefix}-{counter}"
-                items.append(record)
+            collected.extend(parsed)
         out.append(tail)
+
+    # 规范等级（缺失/非法 → P1），再按重要性从高到低稳定排序：
+    # 同级保持模型原本的书写顺序，避免同一等级内顺序跳来跳去。
+    for record in collected:
+        record["importance"] = _normalize_importance(record.get("importance"))
+    collected.sort(key=_importance_rank)
+    items = [
+        {**record, "id": f"{id_prefix}-{index}"}
+        for index, record in enumerate(collected, start=1)
+    ]
 
     clean = "".join(out)
     # 移除块体后可能留下成片空行：压缩到连续两个换行以内并裁掉首尾空白，

@@ -18,6 +18,15 @@ export interface QuestionsConfig {
   advanced_questions: QuestionConfig[]
 }
 
+/**
+ * 一条消息属于哪一轮澄清。
+ *
+ * 需求澄清（表单 → PRD）与文档澄清（PRD 生成后回头确认剩余问题）共用同一个消息列表，
+ * 因此必须能区分归属：**摘要回填只吃 `requirement` 阶段的消息**，否则文档答疑会被当成
+ * 需求输入，闸门①的 Diff 里凭空冒出一堆变更。
+ */
+export type ChatStage = 'requirement' | 'document'
+
 /** 聊天消息，角色取值与后端 conversation_service 的 FrontendMessage 一致 */
 export interface ChatMessage {
   /** 消息角色；`system` 消息不展示在聊天界面里 */
@@ -26,6 +35,10 @@ export interface ChatMessage {
   content: string
   /** 是否正在流式生成中，用于显示光标 */
   streaming?: boolean
+  /**
+   * 属于哪一轮澄清；**缺省视为 `requirement`**，旧快照（没有这个字段）因此照样可用。
+   */
+  stage?: ChatStage
 }
 
 /**
@@ -92,15 +105,27 @@ export type DocKind = 'prd' | 'api-docs' | 'prompts' | 'optimize' | 'clarify'
 export type DocumentKind = 'prd' | 'api-docs' | 'prompts'
 
 /**
+ * 待确认项的「重要性等级」。
+ *
+ * P0 最关键（不确认会导致整份文档写错或没法开工）、P1 次之、P2 是可以后置的细节。
+ * 由模型在生成正文时随清单标出，后端按 P0 → P1 → P2 排序后返回，因此**数组的顺序
+ * 就是提问顺序**——越靠前的越先被问到。
+ */
+export type PendingImportance = 'P0' | 'P1' | 'P2'
+
+/**
  * 一条「待确认问题」。
  *
- * 由后端在生成收尾时从正文里剥离标记块、解析并重新分配 id 得出——前端只负责展示，
- * 不解析、不编造。字段与 `backend.services.pending_items.extract` 产出的形状一致：
+ * 由后端在生成收尾时从正文里剥离标记块、解析、按重要性排序并重新分配 id 得出——前端
+ * 只负责展示，不解析、不编造。字段与 `backend.services.pending_items.extract` 产出的
+ * 形状一致：
  *
- * - `id`：后端按出现顺序分配的全文档唯一标识（`p-1` / `overview-1` …），仅用于稳定渲染 key；
+ * - `id`：后端分配的全文档唯一标识（`p-1` / `overview-1` …），**按重要性排序后**分配，
+ *   所以序号越小越重要；仅用于稳定渲染 key；
  * - `question`：一条待确认的问题（必填）；
  * - `sections`：受影响的章节编号数组（可为空）；
- * - `decider`：拍板人（可为空字符串）。
+ * - `decider`：拍板人（可为空字符串）；
+ * - `importance`：重要性等级；模型没标或标了非法值时后端统一兜底为 `P1`。
  */
 export interface PendingItem {
   /** 后端分配的全文档唯一 id（仅用于渲染 key） */
@@ -111,6 +136,8 @@ export interface PendingItem {
   sections: string[]
   /** 拍板人；未指明时为空串 */
   decider: string
+  /** 重要性等级；后端保证一定是三者之一 */
+  importance: PendingImportance
 }
 
 /**
@@ -634,11 +661,29 @@ export interface SessionDataV2 {
    *
    * 混在一起的话，「从对话回填需求摘要」那道闸门会把文档答疑也当成需求输入读一遍，
    * Diff 里会凭空冒出条目；两套记录各存各的，互不干扰。
+   *
+   * 注：仅用于**接口文档 / 提示词**的独立澄清流程。PRD 生成后的澄清走的是另一条路——
+   * 它复用 `messages` 本身（见 `prdClarifying`），让用户在同一条时间线上接着聊。
    */
   clarifyMessages: ChatMessage[]
   /** 文档澄清的后端会话 ID；为空时接续退化无状态模式 */
   clarifyConversationId: string
   /** 本次澄清针对哪一份产物；为空表示还没进入澄清 */
   clarifyTarget: DocumentKind | null
+  /**
+   * PRD 生成后那轮「剩余问题澄清」的后端会话 ID。
+   *
+   * 这一轮与需求澄清是**两个后端会话**，但共用一个前端消息列表：用户看到的是一条连续的
+   * 时间线（需求澄清聊完 → PRD 生成 → 接着在同一栏里确认剩余问题），后端那侧因为人设不同
+   * 必须分开登记。为空表示这一轮还没开过。
+   */
+  prdClarifyConversationId: string
+  /**
+   * 对话栏当前是否在「PRD 剩余问题澄清」模式。
+   *
+   * 决定对话页底栏给「生成 PRD」还是「按澄清结果改写」，以及发送消息时该点哪一套人设。
+   * 它是持久化的：刷新回来用户应当仍在原来的模式里，而不是莫名其妙地能再生成一次 PRD。
+   */
+  prdClarifying: boolean
 }
 

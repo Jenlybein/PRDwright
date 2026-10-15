@@ -860,7 +860,13 @@ def test_generation_flows_pending_items_into_job_and_document(client, monkeypatc
 
     # 标记块被剥离、清单按出现顺序分配 id
     assert items == [
-        {"id": "p-1", "question": "确认登录方式", "sections": ["2.1"], "decider": "产品负责人"}
+        {
+            "id": "p-1",
+            "question": "确认登录方式",
+            "sections": ["2.1"],
+            "decider": "产品负责人",
+            "importance": "P1",
+        }
     ]
     # 正文干净：标记块不应出现在落库正文里
     assert "<!-- PENDING" not in done.data["reply"]

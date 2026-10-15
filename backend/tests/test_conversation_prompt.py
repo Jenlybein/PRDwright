@@ -28,10 +28,12 @@ from backend.api.schemas import ConversationContinueRequest, ConversationCreateR
 from backend.core.contracts import StreamEvent
 from backend.services.conversation_service import ConversationService
 from backend.services.prompts import (
+    CLARIFICATION_OPENING,
     CLARIFICATION_QUESTION_CAP,
     CLARIFICATION_QUESTION_RULE,
     CONVERSATION_PROFILES,
     DEFAULT_CONVERSATION_PROFILE,
+    DOC_CLARIFICATION_OPENING,
     resolve_profile,
 )
 
@@ -108,6 +110,50 @@ def test_questions_must_come_with_a_reference_frame() -> None:
     for key, profile in CONVERSATION_PROFILES.items():
         assert "带一点引导" in profile.opening, key
         assert "从零列举" in profile.opening, key
+
+
+def test_opening_states_what_the_model_received() -> None:
+    """第一次进对话时，AI 的第一句要说明「收到了什么、这一轮要做什么」。
+
+    用户不该在开口前先复述一遍背景——需求澄清要确认「已拿到结构化需求」，
+    文档澄清要确认「进入剩余问题的澄清」。两者措辞不同，因为场景确实不同。
+    """
+    assert "已经拿到我这份结构化需求" in CLARIFICATION_OPENING
+    assert "接下来是确认它里面剩余的问题" in DOC_CLARIFICATION_OPENING
+
+
+def test_grading_rule_lives_in_the_shared_rule_not_only_the_opening() -> None:
+    """分级澄清（P0 → P1 → P2）与「每级播报」必须写在**共享规则**里。
+
+    开场白只在第一轮出现；之后每一轮接续，模型只看人设。分级行为若只写进开场白，
+    用户从第二轮起就再也听不到「准备开始 P1 级」的播报了——这是历史上「上限口径被
+    盖过去」的同款陷阱，所以这一条必须落在 `CLARIFICATION_QUESTION_RULE`
+    （两个档案的 system_prompt 都引用它）。
+    """
+    for marker in ("P0", "P1", "P2", "播报", "准备开始 P0 级问题的确认"):
+        assert marker in CLARIFICATION_QUESTION_RULE, marker
+    for profile in CONVERSATION_PROFILES.values():
+        assert "P0" in profile.system_prompt, profile.key
+        assert "播报" in profile.system_prompt, profile.key
+
+
+def test_doc_clarification_opening_announces_each_level() -> None:
+    """文档澄清开场白要说清：按等级顺序走、每级开始前播报、觉得够了随时可改写。"""
+    opening = DOC_CLARIFICATION_OPENING
+    assert "P0 → P1 → P2" in opening
+    assert "准备开始 P0 级问题的确认" in opening
+    assert "P0 级已确认完毕" in opening
+    # 不必问到最后一级：用户觉得够了就能改写
+    assert "如果觉得已经足够，就可以开始按澄清结果改写" in opening
+
+
+def test_grading_is_conditional_so_it_does_not_disturb_requirements() -> None:
+    """分级规则是**条件句**：只在「待确认项带等级」时生效。
+
+    需求澄清那一轮手里根本没有带等级的清单，规则如果写成无条件指令，
+    会让模型在需求阶段凭空播报不存在的等级。
+    """
+    assert "待确认项带重要性等级" in CLARIFICATION_QUESTION_RULE
 
 
 def test_opening_fields_match_the_placeholders() -> None:

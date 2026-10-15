@@ -94,6 +94,8 @@ describe('useWorkflowStore', () => {
       clarifyMessages: [],
       clarifyConversationId: '',
       clarifyTarget: null,
+      prdClarifyConversationId: '',
+      prdClarifying: false,
     })
 
     expect(store.restoreTick).toBe(before + 1)
@@ -117,6 +119,8 @@ describe('useWorkflowStore', () => {
       clarifyMessages: [],
       clarifyConversationId: '',
       clarifyTarget: null,
+      prdClarifyConversationId: '',
+      prdClarifying: false,
     })
     await nextTick()
 
@@ -159,6 +163,8 @@ describe('useWorkflowStore', () => {
       clarifyMessages: [],
       clarifyConversationId: '',
       clarifyTarget: null,
+      prdClarifyConversationId: '',
+      prdClarifying: false,
     })
     // 运行态不在快照里
     expect('chatStreaming' in snapshot).toBe(false)
@@ -172,6 +178,82 @@ describe('useWorkflowStore', () => {
     fresh.applySnapshot(snapshot, null)
     expect(fresh.snapshot()).toEqual(snapshot)
     expect(fresh.downgrade).toBeNull()
+  })
+
+  /**
+   * PRD 生成后的那一轮澄清走的是同一个 `messages` 列表，靠 `stage` 区分轮次。
+   * 因此这三个东西都要能随快照原样进出，否则刷新一次「我在跟 AI 澄清剩余问题」
+   * 这件事就丢了——用户会发现底栏忽然又能生成 PRD 了。
+   */
+  it('PRD 澄清的两个字段与消息的 stage 标记随快照往返', () => {
+    const store = useWorkflowStore()
+    store.messages.push({ role: 'user', content: '我想做一个记账工具', stage: 'requirement' })
+    store.messages.push({ role: 'assistant', content: '好的，先确认几点', stage: 'requirement' })
+    store.messages.push({ role: 'assistant', content: '准备开始 P0 级确认', stage: 'document' })
+    store.prdClarifying = true
+    store.prdClarifyConversationId = 'prd-conv-9'
+
+    const snapshot = store.snapshot()
+    expect(snapshot.prdClarifying).toBe(true)
+    expect(snapshot.prdClarifyConversationId).toBe('prd-conv-9')
+    expect(snapshot.messages.map((message) => message.stage)).toEqual([
+      'requirement',
+      'requirement',
+      'document',
+    ])
+
+    const fresh = useWorkflowStore()
+    fresh.reset()
+    fresh.applySnapshot(snapshot, null)
+
+    expect(fresh.prdClarifying).toBe(true)
+    expect(fresh.prdClarifyConversationId).toBe('prd-conv-9')
+    // 两轮都在同一条时间线里，顺序不变
+    expect(fresh.messages).toHaveLength(3)
+    expect(fresh.messages.filter((m) => m.stage === 'document')).toHaveLength(1)
+  })
+
+  it('旧快照没有 PRD 澄清字段时按「没做过」恢复，而不是让整份快照作废', () => {
+    const store = useWorkflowStore()
+    store.applySnapshot(
+      {
+        viewState: 'review-prd',
+        entryMode: 'structured',
+        summary: null,
+        messages: [{ role: 'user', content: 'hi' }],
+        conversationId: '',
+        quickInput: { productName: '', requirements: '' },
+        debugPrdText: '',
+        activeJobId: null,
+        activeJobKind: null,
+        clarifyMessages: [],
+        clarifyConversationId: '',
+        clarifyTarget: null,
+        // 旧快照里确实没有这两个字段
+        prdClarifyConversationId: '',
+        prdClarifying: false,
+      },
+      null,
+    )
+
+    expect(store.prdClarifying).toBe(false)
+    expect(store.prdClarifyConversationId).toBe('')
+    // 消息照常恢复，stage 缺省视为需求澄清那一轮
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0]?.stage).toBeUndefined()
+  })
+
+  it('reset 把 PRD 澄清的标记一并清掉——「重新开始」不留任何痕迹', () => {
+    const store = useWorkflowStore()
+    store.messages.push({ role: 'assistant', content: '准备开始 P0 级确认', stage: 'document' })
+    store.prdClarifying = true
+    store.prdClarifyConversationId = 'prd-conv-9'
+
+    store.reset()
+
+    expect(store.prdClarifying).toBe(false)
+    expect(store.prdClarifyConversationId).toBe('')
+    expect(store.messages).toEqual([])
   })
 
   it('reset 清空数据并回到入口页', async () => {

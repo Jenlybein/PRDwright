@@ -118,6 +118,33 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const clarifyTarget = ref<DocumentKind | null>(null)
 
   // ------------------------------------------------------------------
+  // PRD 生成后的「剩余问题澄清」（与需求澄清共用同一条消息列表）
+  //
+  // 这一轮走的是**主对话栏**（阶段仍是 `chatting`）：用户生成完 PRD 回到对话，看到的是同一条
+  // 时间线继续往下聊，而不是换一个新页面、旧对话消失。这对同一份产物反复「澄清 → 改写」很关键。
+  //
+  // 消息明细上靠 `ChatMessage.stage` 区分：需求澄清的轮次标 `requirement`，这里的轮次标
+  // `document`。于是两套对话可以安全地共用一个列表——摘要回填只按 `requirement` 取，
+  // 文档答疑不会被当成需求输入（闸门①不会被污染）。
+  // ------------------------------------------------------------------
+
+  /**
+   * 这轮澄清在后端登记的会话 ID。
+   *
+   * 它是一个**独立于需求澄清**的会话：两侧人设不同（`doc-clarification` vs `clarification`），
+   * 强行共用一个后端会话会让后一轮带着前一轮的人设。前端合并展示、后端分开登记，各取所需。
+   */
+  const prdClarifyConversationId = ref('')
+
+  /**
+   * 对话栏当前是否处于「PRD 剩余问题澄清」模式。
+   *
+   * 为 true 时：底栏给「按澄清结果改写」而不是「生成 PRD」，发消息走文档澄清会话。
+   * 它随快照持久化——刷新回来仍应在同一个模式里，否则用户会发现自己的对话忽然又能生成 PRD 了。
+   */
+  const prdClarifying = ref(false)
+
+  // ------------------------------------------------------------------
   // 运行态（不写入快照）
   // ------------------------------------------------------------------
 
@@ -177,6 +204,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       clarifyMessages: clarifyMessages.value,
       clarifyConversationId: clarifyConversationId.value,
       clarifyTarget: clarifyTarget.value,
+      prdClarifyConversationId: prdClarifyConversationId.value,
+      prdClarifying: prdClarifying.value,
     }
   }
 
@@ -204,6 +233,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
     clarifyMessages.value = session.clarifyMessages ?? []
     clarifyConversationId.value = session.clarifyConversationId ?? ''
     clarifyTarget.value = session.clarifyTarget ?? null
+    // 这两个字段同样是「缺失即默认」：旧快照没有它们，代表还没走过 PRD 澄清这一轮。
+    prdClarifyConversationId.value = session.prdClarifyConversationId ?? ''
+    prdClarifying.value = session.prdClarifying ?? false
     downgrade.value = downgradeKind
     // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
     // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
@@ -232,6 +264,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       clarifyMessages,
       clarifyConversationId,
       clarifyTarget,
+      prdClarifyConversationId,
+      prdClarifying,
     ],
     () => {
       changeTick.value += 1
@@ -356,6 +390,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     clarifyMessages.value = []
     clarifyConversationId.value = ''
     clarifyTarget.value = null
+    prdClarifyConversationId.value = ''
+    prdClarifying.value = false
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
@@ -399,6 +435,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     clarifyMessages,
     clarifyConversationId,
     clarifyTarget,
+    prdClarifyConversationId,
+    prdClarifying,
     // 运行态
     chatStreaming,
     docGenerating,

@@ -12,6 +12,13 @@ import type { ChatMessage } from '@/types'
  *
  * 只负责呈现消息与收集输入；发请求、推进阶段由父组件决定，
  * 因此这里不持有任何流程状态。
+ *
+ * **同一块对话栏承担两轮澄清**：
+ * - `docClarification` 为 false：需求澄清（生成 PRD 之前），底栏给「生成 PRD」；
+ * - 为 true：PRD 生成完之后的「剩余问题澄清」，底栏换成「按澄清结果改写」。
+ *
+ * 做成同一个组件的两个模式而不是两个组件，是因为它们的差异只有底栏那几个按钮，
+ * 而**消息展示一模一样**——分两个组件就会各维护一份消息区，然后慢慢长歪。
  */
 const props = defineProps<{
   /** 交给列表渲染的消息（含流式接收中的那一条） */
@@ -22,6 +29,12 @@ const props = defineProps<{
   error?: string
   /** 是否已满足「生成 PRD」的条件 */
   canGeneratePrd?: boolean
+  /** 是否处于 PRD 剩余问题澄清模式 */
+  docClarification?: boolean
+  /** 文档澄清模式下「按澄清结果改写」是否可用 */
+  canRewrite?: boolean
+  /** 是否正在改写中 */
+  rewriting?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -33,6 +46,10 @@ const emit = defineEmits<{
   send: [content: string]
   /** 点击「生成 PRD」 */
   generatePrd: []
+  /** 点击「按澄清结果改写」（文档澄清模式的主操作） */
+  rewrite: []
+  /** 点击「返回审阅」（文档澄清模式的次级操作） */
+  back: []
 }>()
 
 /** 输入框实例，用于在一轮回复结束后把焦点交还给用户 */
@@ -57,10 +74,15 @@ watch(
     -->
     <div class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
       <div class="border-b border-line px-4 py-3 sm:px-6">
-        <h2 class="text-sm font-semibold text-fg">需求澄清对话</h2>
+        <h2 class="text-sm font-semibold text-fg">
+          {{ docClarification ? 'PRD 待确认项澄清' : '需求澄清对话' }}
+        </h2>
         <!-- 刻意不写具体数字：提问上限是后端提示词的口径（见 ADR-010），
              文案里再落一份数字就等于又多出一个需要手工同步的副本 -->
-        <p class="mt-0.5 text-xs text-subtle">
+        <p v-if="docClarification" class="mt-0.5 text-xs text-subtle">
+          按 P0 → P1 → P2 逐级确认剩余问题；聊够了随时可以写回文档
+        </p>
+        <p v-else class="mt-0.5 text-xs text-subtle">
           AI 会追问关键细节，逐步澄清后再生成文档
         </p>
       </div>
@@ -86,21 +108,46 @@ watch(
         <ChatInput ref="inputRef" embedded :loading="loading" @send="emit('send', $event)" />
       </template>
 
+      <!-- 文档澄清模式：PRD 已经生成过了，这里不需要「重新开始」——
+           那会连同前面的需求澄清与已生成的文档一起清掉，点错的代价太大 -->
       <template #danger>
-        <AppButton variant="danger" size="md" @click="emit('restart')">重新开始</AppButton>
+        <AppButton v-if="!docClarification" variant="danger" size="md" @click="emit('restart')">
+          重新开始
+        </AppButton>
       </template>
       <template #secondary>
-        <AppButton variant="secondary" size="md" @click="emit('editRequirements')">
+        <AppButton
+          v-if="docClarification"
+          variant="secondary"
+          size="md"
+          @click="emit('back')"
+        >
+          返回审阅
+        </AppButton>
+        <AppButton v-else variant="secondary" size="md" @click="emit('editRequirements')">
           改需求
         </AppButton>
       </template>
       <template #hint>
-        <p v-if="canGeneratePrd" class="text-xs text-subtle">
+        <p v-if="docClarification" class="text-xs text-subtle">
+          这一轮的结论会在你按下「按澄清结果改写」时写回 PRD；不改写的话文档分毫不动。
+        </p>
+        <p v-else-if="canGeneratePrd" class="text-xs text-subtle">
           需求已澄清。生成前会先让你确认「补充信息回填到需求摘要」的变更。
         </p>
       </template>
 
-      <AppButton v-if="canGeneratePrd" variant="primary" size="md" @click="emit('generatePrd')">
+      <!-- 文档澄清模式的主操作：改写（进行中时显示进度，仍由 AppButton 承载 loading 态） -->
+      <AppButton
+        v-if="docClarification"
+        variant="primary"
+        size="md"
+        :disabled="!canRewrite || rewriting"
+        @click="emit('rewrite')"
+      >
+        {{ rewriting ? '正在改写…' : '按澄清结果改写' }}
+      </AppButton>
+      <AppButton v-else-if="canGeneratePrd" variant="primary" size="md" @click="emit('generatePrd')">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             fill-rule="evenodd"

@@ -67,6 +67,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     debugPrdText,
     clarifyMessages,
     clarifyTarget,
+    prdClarifyConversationId,
+    prdClarifying,
     docGenerating: isGenerating,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
@@ -318,9 +320,25 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     clearTransient()
   }
 
-  /** 交给后端的历史消息（只保留角色与正文） */
+  /**
+   * 交给后端的历史消息（只保留角色与正文）。
+   *
+   * ⚠️ **只取需求澄清阶段（stage === 'requirement'）的消息**：PRD 生成之后，
+   * 同一条消息列表里会接着出现「剩余问题澄清」的轮次（stage === 'document'）。
+   * 若把它们一并交给摘要回填 / PRD 生成，文档答疑会被当成需求输入读一遍，
+   * 闸门①的 Diff 里就会凭空冒出条目。这里是那道过滤闸门，别省。
+   */
   function conversationHistory(): ChatMessage[] {
-    return messages.value.map(({ role, content }) => ({ role, content }))
+    return messages.value
+      .filter((message) => (message.stage ?? 'requirement') === 'requirement')
+      .map(({ role, content }) => ({ role, content }))
+  }
+
+  /** 只取「PRD 剩余问题澄清」这一轮的对话（stage === 'document'） */
+  function prdClarifyHistory(): ChatMessage[] {
+    return messages.value
+      .filter((message) => message.stage === 'document')
+      .map(({ role, content }) => ({ role, content }))
   }
 
   // -------------------------------------------------------------------------
@@ -674,6 +692,79 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     goTo(reviewStateFor(clarifyTarget.value ?? 'prd'))
   }
 
+  // -------------------------------------------------------------------------
+  // PRD 生成后的「剩余问题澄清」
+  //
+  // 与上面的 api-docs / prompts 澄清是**两条不同的路**：那一条走独立阶段 `clarifying`
+  // 和独立的消息字段 `clarifyMessages`；这一条走主对话栏（`chatting`）并复用 `messages`，
+  // 因为用户的心智是「生成完 PRD 回到刚才那个对话框接着聊」，而不是被送到一个新页面。
+  // 两者并存是有意的：接口文档 / 提示词的澄清规模小、一次性，保留原样成本更低。
+  // -------------------------------------------------------------------------
+
+  /**
+   * 审阅 PRD 页「回到对话」入口：切到对话栏，进入剩余问题澄清模式。
+   *
+   * 只做「摆好现场」——**不清空聊天记录**（这是本流程存在的意义）、切阶段并打上模式标记；
+   * 开场白由调用方发，因为聊天的流式状态归 `useClarificationChat` 管。
+   *
+   * 已经是澄清中（这一轮聊过）就不再重新开场：用户进出几次，看到的是同一段对话在继续，
+   * 而不是每次回来都被问候一遍「我们来确认剩余问题」。
+   *
+   * @returns 本次澄清的材料（PRD 正文 + 清单文本）；返回 `null` 表示没有可澄清的 PRD。
+   */
+  function startPrdDocClarification(): { document: string; pendingItems: string } | null {
+    const content = documents.contentOf('prd')
+    if (!content.trim()) return null
+
+    const alreadyChatting = messages.value.some((message) => message.stage === 'document')
+    prdClarifying.value = true
+    goTo('chatting')
+    if (alreadyChatting) return null
+
+    return {
+      document: content,
+      pendingItems: formatPendingItemsForChat(documents.pendingItemsOf('prd')),
+    }
+  }
+
+  /** 对话栏「返回审阅」：回到 PRD 审阅页；模式标记保留，再进来仍是同一段澄清对话 */
+  function backFromPrdClarification(): void {
+    goTo('review-prd')
+  }
+
+  /**
+   * 对话栏主操作「按澄清结果改写 PRD」：把这一轮的澄清对话交给后端改写 PRD。
+   *
+   * 与 `applyClarification` 同走 `clarify` 任务，差别只在两处：历史取自本轮的
+   * `stage === 'document'` 消息（而不是 `clarifyMessages`），目标恒为 `prd`。
+   *
+   * ⚠️ 同样**必须带 `docKind`**：少了它后端不会猜，而是拒绝落库。
+   */
+  async function applyPrdClarification(): Promise<void> {
+    const history = prdClarifyHistory()
+    const document = documents.contentOf('prd')
+    if (!document.trim() || history.length === 0) return
+
+    activeDocKey.value = 'prd'
+    docError.value = ''
+    const { reply, ok } = await job.start(
+      'clarify',
+      { document, history, docKind: 'prd' },
+      handlersForKind('clarify'),
+    )
+    if (!ok) {
+      // 改写失败：留在对话页，原文档分毫未动（后端失败不覆写）
+      docError.value = job.error.value || '按澄清结果改写失败'
+      clearActiveJob()
+      return
+    }
+    finishDoc('clarify', reply)
+    clearActiveJob()
+    // 改写完成回到审阅；对话留在 `messages` 里（不清空），用户还能再回去补充
+    goTo('review-prd')
+    hooks.onNotice('已按澄清结果更新 PRD')
+  }
+
   /**
    * 澄清页主操作「按澄清结果改写」：把这一轮对话交给后端改写文档。
    *
@@ -998,6 +1089,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     backFromClarifying,
     clarifyTarget,
     clarifyTargetTitle,
+    // PRD 剩余问题澄清（走主对话栏，复用同一条消息列表）
+    startPrdDocClarification,
+    applyPrdClarification,
+    backFromPrdClarification,
+    prdClarifying,
+    prdClarifyConversationId,
     // 闸门 1
     handleGeneratePrd,
     confirmSummaryDiff,

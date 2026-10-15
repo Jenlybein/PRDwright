@@ -108,7 +108,13 @@ describe('loadAll', () => {
 
   it('把三份文档的待确认清单一起装进工作副本（后端落库的那一份，原样镜像）', async () => {
     const items: PendingItem[] = [
-      { id: 'overview-1', question: '指标口径谁拍板？', sections: ['2.1'], decider: '数据团队' },
+      {
+        id: 'overview-1',
+        question: '指标口径谁拍板？',
+        sections: ['2.1'],
+        decider: '数据团队',
+        importance: 'P0',
+      },
     ]
     vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
       makeRecord('prd', '# PRD', makeRunSummary('prd-req'), items),
@@ -126,7 +132,7 @@ describe('loadAll', () => {
   it('clear 把清单一并清空——切方案时不留下上一份的待确认项', async () => {
     vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
       makeRecord('prd', '# PRD', null, [
-        { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '' },
+        { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '', importance: 'P1' },
       ]),
     ])
     await documents.loadAll(7)

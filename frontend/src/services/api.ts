@@ -1,5 +1,6 @@
 import axios from 'axios'
 
+import { normalizeImportance } from '@/utils/pendingItems'
 import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
 import type { BackendErrorCode } from '@/services/errors'
 import type {
@@ -221,6 +222,9 @@ function readObjectArray(data: Record<string, unknown>, key: string): Record<str
  * 与 `documentService.toPendingItems` 同一口径：只保留「有 id 且有 question」的项，
  * 坏数据（缺字段、非对象）直接丢弃——不该因为一条脏数据让整份快照失效。
  * 这是刷新重连时待确认清单的还原点，与 `documents.pending_items` 形状一致。
+ *
+ * 等级交给 `normalizeImportance` 收敛：非法值一律降级为 P1，不会因为一个拼错的等级
+ * 就把整条清单丢掉。
  */
 function parsePendingItems(data: Record<string, unknown>): PendingItem[] {
   return readObjectArray(data, 'pending_items').flatMap((item) => {
@@ -233,6 +237,7 @@ function parsePendingItems(data: Record<string, unknown>): PendingItem[] {
         question,
         sections: readStringArray(item, 'sections'),
         decider: readString(item, 'decider'),
+        importance: normalizeImportance(item.importance),
       },
     ]
   })

@@ -207,6 +207,8 @@ describe('会话快照解析', () => {
     clarifyMessages: [],
     clarifyConversationId: '',
     clarifyTarget: null,
+    prdClarifyConversationId: '',
+    prdClarifying: false,
   }
 
   it('空值与非法 JSON 一律返回 null', () => {
@@ -252,6 +254,8 @@ describe('会话快照解析', () => {
       'clarifyMessages',
       'clarifyConversationId',
       'clarifyTarget',
+      'prdClarifyConversationId',
+      'prdClarifying',
     ])
   })
 

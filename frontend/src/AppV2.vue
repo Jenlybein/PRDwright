@@ -77,6 +77,8 @@ const store = useWorkflowStore()
 const {
   viewState,
   summary,
+  // 聊天记录——同时也是 PRD 剩余问题澄清那一轮的载体（靠 `stage` 区分轮次）
+  messages,
   quickInput,
   debugPrdText,
   steps,
@@ -107,9 +109,16 @@ const {
  *
  * 两个条件缺一不可：这份文档真有正文（没正文就没什么可澄清），且真有待确认项
  * （清单为空时点进去只能闲聊，那不如不给入口）。
+ *
+ * ⚠️ **只管接口文档与提示词**：PRD 那一栏走的是另一条路——「回到对话栏接着聊」
+ * （见 `canReturnToChatFromPrd`），因为它的心智是接着同一条时间线，而不是换个新页面。
+ * 让 PRD 同时出现两个澄清入口，用户只会不知道该点哪个。
  */
 const canClarifyDocument = computed(
-  () => pendingItems.value.length > 0 && activeDocContent.value.trim() !== '',
+  () =>
+    pendingItems.value.length > 0 &&
+    activeDocContent.value.trim() !== '' &&
+    viewState.value !== 'review-prd',
 )
 
 /**
@@ -392,11 +401,18 @@ const {
   confirmSummaryDiff,
   rejectSummaryDiff,
   reconnectJob,
+  // 文档澄清（api-docs / prompts 的独立澄清页）
   startClarification,
   applyClarification,
   backFromClarifying,
   clarifyTarget,
   clarifyTargetTitle,
+  // PRD 剩余问题澄清（走主对话栏，复用同一条聊天记录）
+  startPrdDocClarification,
+  applyPrdClarification,
+  backFromPrdClarification,
+  prdClarifying,
+  prdClarifyConversationId,
   reset: resetPipeline,
 } = useDocumentPipeline({ onNotice: flashSavedTip })
 
@@ -438,6 +454,9 @@ const {
     profileKey: 'doc-clarification',
     messages: clarifyChatMessages,
     conversationId: clarifyConversationId,
+    // 同样标成 document：这条链路的消息虽然存在独立的 `clarifyMessages` 里，
+    // 标记保持一致，将来任何按阶段过滤的逻辑都不会误伤它们。
+    stage: 'document',
   },
 )
 
@@ -455,6 +474,89 @@ async function handleStartClarification(): Promise<void> {
     '正在梳理这份文档的待确认项',
   )
 }
+
+// ---------------------------------------------------------------------------
+// PRD 剩余问题澄清（生成完 PRD 回到主对话栏，接着同一条时间线聊）
+//
+// 与上面那套文档澄清的区别：这里**复用 `messages`**（不清空历史）、会话 id 单独记在
+// `prdClarifyConversationId`，阶段仍然停在 `chatting`。用户的心智始终是「回到那个对话框」。
+// ---------------------------------------------------------------------------
+
+const {
+  streaming: prdClarifyStreaming,
+  chatError: prdClarifyError,
+  displayMessages: prdClarifyDisplayMessages,
+  sendMessage: handleSendPrdClarifyMessage,
+  startConversationWithAnswers: startPrdClarifyChat,
+} = useClarificationChat(
+  {
+    onNotice: flashSavedTip,
+    // 这一轮就发生在对话栏里，因此「进入聊天」等于什么都不用切
+    onEnterChat: () => goTo('chatting'),
+  },
+  {
+    profileKey: 'doc-clarification',
+    messages,
+    conversationId: prdClarifyConversationId,
+    stage: 'document',
+    // 关键：不要清空——用户回到对话是为了接着聊，不是重新开始
+    clearHistory: false,
+  },
+)
+
+/**
+ * 审阅 PRD 页「回到对话」：进入剩余问题澄清模式，必要时让 AI 开第一轮追问。
+ *
+ * 已经聊过就不再开场（`startPrdDocClarification` 返回 null），
+ * 用户看到的是上一次的那段对话继续，而不是每回来都被问候一遍。
+ */
+async function handleStartPrdClarification(): Promise<void> {
+  const material = startPrdDocClarification()
+  if (!material) return
+  await startPrdClarifyChat(
+    { document: material.document, pending_items: material.pendingItems },
+    '正在梳理这份 PRD 里剩余的问题',
+  )
+}
+
+/**
+ * 对话栏当前该听哪一套。
+ *
+ * PRD 澄清模式下转发的是文档澄清那套（它的档案与人设都是文档澄清的），
+ * 其余情况是需求澄清。两套共用同一个 `messages` 列表，所以界面上是一条连续的线。
+ */
+// 注意这里有意识地 `.value` 取成了**普通值**：对象内部的 ref 不会在模板里被自动解包，
+// 直接塞 Ref 进去会拿到包装对象。外层仍是 computed，底层 ref 变化时照样重新求值。
+const activeChat = computed(() =>
+  prdClarifying.value
+    ? {
+        streaming: prdClarifyStreaming.value,
+        chatError: prdClarifyError.value,
+        displayMessages: prdClarifyDisplayMessages.value,
+        sendMessage: handleSendPrdClarifyMessage,
+      }
+    : {
+        streaming: streaming.value,
+        chatError: chatError.value,
+        displayMessages: displayMessages.value,
+        sendMessage: handleSendMessage,
+      },
+)
+
+/**
+ * 「按澄清结果改写」是否可用。
+ *
+ * 判据是**这一轮有没有聊过**（存在 `stage === 'document'` 的消息）：第一轮追问出来之前
+ * 改写没有结论可用，所以那时这个按钮点不动。
+ */
+const prdClarifyCanRewrite = computed(
+  () => prdClarifying.value && messages.value.some((message) => message.stage === 'document'),
+)
+
+/** 审阅 PRD 页是否给出「回到对话澄清剩余问题」的入口 */
+const canReturnToChatFromPrd = computed(
+  () => viewState.value === 'review-prd' && hasPrd.value && pendingItems.value.length > 0,
+)
 
 /** 是否处于入口选择页：这一步还没有进度可言，进度条不显示 */
 const isChoosingEntry = computed(() => viewState.value === 'entry')
@@ -604,17 +706,28 @@ function handleStepClick(stepId: StepId): void {
         @back="goTo('entry')"
       />
 
-      <!-- ================= 完整流程：与 AI 对话补充需求 ================= -->
+      <!--
+        ================= 完整流程：与 AI 对话补充需求 =================
+
+        同一块对话栏承担两轮澄清：需求澄清（生成 PRD 之前）与 PRD 剩余问题澄清
+        （生成完 PRD 回到这里）。两者共用 `messages`，因此按 `prdClarifying` 决定
+        用哪套发送/渲染/加载状态——详见 `activeChat`。
+      -->
       <ChatStage
         v-else-if="viewState === 'chatting'"
-        :messages="displayMessages"
-        :loading="streaming"
-        :error="chatError"
-        :can-generate-prd="canGeneratePrd"
+        :messages="activeChat.displayMessages"
+        :loading="activeChat.streaming"
+        :error="activeChat.chatError"
+        :can-generate-prd="prdClarifying ? false : canGeneratePrd"
+        :doc-clarification="prdClarifying"
+        :can-rewrite="prdClarifyCanRewrite"
+        :rewriting="isGenerating"
         @edit-requirements="goTo('form')"
         @restart="handleRestart"
-        @send="handleSendMessage"
+        @send="activeChat.sendMessage"
         @generate-prd="handleGeneratePrd"
+        @rewrite="applyPrdClarification"
+        @back="backFromPrdClarification"
       />
 
       <!-- 文档生成中 / 生成失败（PRD / 接口文档 / 提示词 / 优化共用） -->
@@ -645,6 +758,7 @@ function handleStepClick(stepId: StepId): void {
         :run-summary="runSummary"
         :pending-items="pendingItems"
         :can-clarify="canClarifyDocument"
+        :can-return-to-chat="canReturnToChatFromPrd"
         :back-label="backLabel"
         @save="onSaveDocument"
         @optimize="onAiOptimize"
@@ -654,6 +768,7 @@ function handleStepClick(stepId: StepId): void {
         @navigate="goTo"
         @finish="handleEndTask"
         @clarify="handleStartClarification"
+        @return-to-chat="handleStartPrdClarification"
       />
 
       <!-- 文档澄清：把「待确认」逐条聊清楚，再按结论就地改写那一份文档 -->

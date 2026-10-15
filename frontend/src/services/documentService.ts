@@ -16,6 +16,7 @@ import axios from 'axios'
 
 import http from '@/services/api'
 import { parseRunSummary } from '@/utils/workflow'
+import { normalizeImportance } from '@/utils/pendingItems'
 import type { DocumentKind, DocumentRecord, PendingItem, RunSummary } from '@/types'
 
 /** 后端 `kind` 用下划线，前端 `DocumentKind` 用连字符——这里是唯一的转换点 */
@@ -76,6 +77,8 @@ function toPendingItems(data: unknown): PendingItem[] {
       question,
       sections,
       decider: typeof raw.decider === 'string' ? raw.decider : '',
+      // 等级交给同一套收敛逻辑：与快照入口（`api.parsePendingItems`）同口径
+      importance: normalizeImportance(raw.importance),
     })
   }
   return items

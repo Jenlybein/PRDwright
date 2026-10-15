@@ -313,7 +313,13 @@ describe('ReviewStage 的待确认清单', () => {
 
   it('有待确认项时挂在正文下方展示', () => {
     const wrapper = mountWithItems([
-      { id: 'overview-1', question: '指标口径谁拍板？', sections: ['2.1'], decider: '数据团队' },
+      {
+        id: 'overview-1',
+        question: '指标口径谁拍板？',
+        sections: ['2.1'],
+        decider: '数据团队',
+        importance: 'P0',
+      },
     ])
 
     expect(wrapper.text()).toContain('待确认问题（1）')
@@ -333,7 +339,7 @@ describe('ReviewStage 的待确认清单', () => {
 
   it('清单不进底栏：它是内容的一部分，不是「对文档做的事」', () => {
     const wrapper = mountWithItems([
-      { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '' },
+      { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '', importance: 'P1' },
     ])
     const bar = wrapper.find('.shell-action-bar')
 
@@ -342,6 +348,70 @@ describe('ReviewStage 的待确认清单', () => {
     // 也没有因为清单多出任何按钮（P4 的澄清入口会接在清单下面，不占主操作位）
     const texts = wrapper.findAll('button').map((item) => item.text())
     expect(texts).not.toContain('去澄清')
+  })
+
+  /**
+   * 两个澄清入口互斥：PRD 给「回到对话」（复用主对话栏），其余文档给「逐条澄清」
+   * （独立澄清页）。由上层按阶段决定、组件只负责渲染——因此这里直接传两个开关。
+   */
+  it('PRD 给「回到对话」入口，其余文档给「逐条澄清」入口（两者互斥）', () => {
+    const items: PendingItem[] = [
+      { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '', importance: 'P0' },
+    ]
+    const baseProps = {
+      title: '文档',
+      content: CONTENT,
+      canFinish: false,
+      hasPrd: true,
+      hasApiDocs: false,
+      hasPrompts: false,
+      pendingItems: items,
+    }
+
+    const prd = mount(ReviewStage, {
+      props: { ...baseProps, viewState: 'review-prd', canReturnToChat: true, canClarify: false },
+    })
+    expect(prd.text()).toContain('回到对话，确认剩下的 1 个问题')
+    expect(prd.text()).not.toContain('逐条澄清这些待确认项')
+
+    const apiDocs = mount(ReviewStage, {
+      props: {
+        ...baseProps,
+        viewState: 'review-api-docs',
+        canReturnToChat: false,
+        canClarify: true,
+      },
+    })
+    expect(apiDocs.text()).toContain('逐条澄清这些待确认项')
+    expect(apiDocs.text()).not.toContain('回到对话，确认剩下的')
+  })
+
+  it('点「回到对话」发出 returnToChat 事件（走哪条路由由上层决定）', async () => {
+    const wrapper = mount(ReviewStage, {
+      props: {
+        title: '产品需求文档',
+        content: CONTENT,
+        viewState: 'review-prd',
+        canFinish: false,
+        hasPrd: true,
+        hasApiDocs: false,
+        hasPrompts: false,
+        pendingItems: [
+          { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '', importance: 'P0' },
+        ],
+        canReturnToChat: true,
+      },
+    })
+
+    const entry = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('回到对话，确认剩下的'))
+    expect(entry).toBeTruthy()
+    await entry?.trigger('click')
+
+    expect(wrapper.emitted('returnToChat')).toHaveLength(1)
+    // 不沿用旧的 clarify 事件：两条路是两回事，各行其道
+    expect(wrapper.emitted('clarify')).toBeUndefined()
   })
 })
 
