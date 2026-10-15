@@ -35,6 +35,7 @@ import {
   updateSolution,
 } from '@/services/solutionService'
 import { SolutionNotFoundError } from '@/services/solutionService'
+import { useDocumentsStore } from '@/stores/documents'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { EntryMode, SolutionSavePayload, SolutionSummary } from '@/types'
 import { parseSessionSnapshot } from '@/utils/workflow'
@@ -75,6 +76,9 @@ function nowLabel(): string {
 
 export const useSolutionsStore = defineStore('solutions', () => {
   const workflow = useWorkflowStore()
+  // 产物正文的持有者。方案切走 / 换掉时，内存里那份正文也要跟着走，
+  // 否则界面会继续显示上一份方案的文档。
+  const documents = useDocumentsStore()
 
   /** 左侧列表（只含摘要，不含快照正文） */
   const items = ref<SolutionSummary[]>([])
@@ -223,6 +227,9 @@ export const useSolutionsStore = defineStore('solutions', () => {
         const created = await createSolution(payload)
         currentId.value = created.id
         mergeIntoList(created)
+        // 把「这批产物属于哪份方案」告诉文档 store：此后审阅页的手改才有地方可写。
+        // 这里只登记归属、不拉取——方案刚建出来，后端还没有任何文档。
+        documents.attach(created.id)
         onCreated?.(created.id)
       } else {
         const targetId = currentId.value
@@ -236,6 +243,8 @@ export const useSolutionsStore = defineStore('solutions', () => {
           return
         }
         mergeIntoList(updated)
+        // 幂等登记：打开方案时已经登记过，这里兜住「方案是本会话新建、后来才落库」的路径
+        documents.attach(targetId)
       }
       saveError.value = ''
       dirty = false
@@ -313,6 +322,9 @@ export const useSolutionsStore = defineStore('solutions', () => {
         saveError.value = '这份方案的记录已损坏，无法恢复'
         return false
       }
+      // 产物正文单独取：它不属于会话快照，随方案存在后端的 `documents` 表里。
+      // 放在 `onOpened` 之前，保证「打开完成」的回调看到的是一个内容齐备的状态。
+      await documents.loadAll(detail.id)
       onOpened?.(detail.id)
       return true
     } catch (error) {
@@ -344,12 +356,15 @@ export const useSolutionsStore = defineStore('solutions', () => {
    * 旧方案仍留在侧边栏里。
    *
    * 清空之前先把压着的改动落库，理由同 `openSolution`：`reset()` 会把内容抹掉。
+   * 两条流水线各有一份待落库的改动（会话快照 + 文档正文），都要先冲干净。
    */
   async function startNew(): Promise<void> {
     await flushPendingSave()
+    await documents.flushPendingSave()
     clearTimer()
     currentId.value = null
     saveError.value = ''
+    // `workflow.reset()` 内部会一并清掉文档工作副本
     workflow.reset()
     onOpened?.(null)
   }

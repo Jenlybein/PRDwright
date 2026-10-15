@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   CompletedSection,
   DocKind,
+  DocumentKind,
   JobSnapshot,
   QuestionsConfig,
   RequirementAnswers,
@@ -797,6 +798,13 @@ function toJobStatus(data: unknown): JobStatusSummary {
 export interface CreateJobPayload {
   kind: DocKind
   solutionId?: number | null
+  /**
+   * 本次任务**作用在**哪一份产物上；只有 `optimize` 需要。
+   *
+   * `kind` 回答「做了什么」（生成 / 优化），`docKind` 回答「改的是哪一份」——
+   * 后端要落库就得知道后者。漏传时后端**不会**猜一个默认值，而是拒绝落库。
+   */
+  docKind?: DocumentKind
   summary?: RequirementsSummary | null
   requirements?: string
   productName?: string
@@ -814,6 +822,7 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
   const { data } = await http.post<{ job_id: number; status: string }>('/api/jobs', {
     kind: toBackendKind(payload.kind),
     solution_id: payload.solutionId ?? null,
+    doc_kind: payload.docKind ?? null,
     summary: payload.summary ?? null,
     requirements: payload.requirements ?? '',
     product_name: payload.productName ?? '',

@@ -7,10 +7,12 @@ import {
   type StreamHandlers,
 } from '@/services/api'
 import { useJob, type JobStartInput } from '@/composables/useJob'
+import { useDocumentsStore } from '@/stores/documents'
 import { useWorkflowStore } from '@/stores/workflow'
 import type {
   ChatMessage,
   DocKind,
+  DocumentKind,
   JobSnapshot,
   PrdGenerationStage,
   PrdStageProgress,
@@ -23,9 +25,10 @@ import type {
 } from '@/types'
 import { buildDocFilename, downloadFile, type DocType } from '@/utils/download'
 import { diffSummaries } from '@/utils/requirements'
+import { docKindOfState } from '@/utils/workflow'
 
-/** 受管的文档 key */
-type DocKey = 'prd' | 'api-docs' | 'prompts'
+/** 受管的文档 key（与 `DocumentKind` 同集：产物种类不含 `optimize`） */
+type DocKey = DocumentKind
 
 /** 文档流水线需要向外部借用的能力 */
 export interface PipelineHooks {
@@ -42,11 +45,17 @@ export interface PipelineHooks {
  * **按入口模式分流**只体现在三个地方：需求从哪来（结构化摘要 / 一段话）、
  * 「返回」回到哪个录入页、以及完成所需的最低文档集合；生成链路本身完全共用。
  *
- * 阶段本身（`viewState`）与三份文档正文都落在 Pinia store；这里只持有
- * 「这一次请求 / 这一次确认」的临时状态，因此刷新页面不会被脏状态影响。
+ * 阶段本身（`viewState`）落在 workflow store，三份产物正文落在 documents store
+ * （后端 `documents` 表在前端的工作副本）。这里只持有「这一次请求 / 这一次确认」的
+ * 临时状态，因此刷新页面不会被脏状态影响。
+ *
+ * **生成结果不由这里落库**：后端在任务收尾时已经把正文写进 `documents`，本文件只负责
+ * 「即时展示 `done.reply`」+「拉一次权威版本对齐」。前端因此不需要知道「正文该存哪」，
+ * 也就不可能出现「前端存了一份、后端存了另一份」。
  */
 export function useDocumentPipeline(hooks: PipelineHooks) {
   const store = useWorkflowStore()
+  const documents = useDocumentsStore()
   const {
     viewState,
     entryMode,
@@ -54,18 +63,27 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     messages,
     quickInput,
     debugPrdText,
-    prdContent,
-    apiDocsContent,
-    promptsContent,
     docGenerating: isGenerating,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
     canFinish: canFinishTask,
     canGeneratePrd,
-    // 必须经 storeToRefs 取：Pinia 的 store 代理会把 ref/computed **解包成值**，
-    // 直接写 `store.runSummary` 只会在调用时求值一次，丢失响应式（回执不会随阶段切换刷新）。
-    runSummary,
   } = storeToRefs(store)
+
+  /**
+   * 当前审阅阶段应该显示的回执。
+   *
+   * 由 `viewState` 反推产物种类，从文档 store 取那一份的回执——这正是
+   * 「回看 PRD 显示 PRD 回执」的落点。生成中等非审阅态一律返回 `null`
+   * （审阅区那时不展示回执）。
+   *
+   * 回执的来源是后端 `documents.last_run_summary`，不再由前端在生成收尾时自己记：
+   * 那样做需要前端知道「优化改的是哪一份」，而后端的 `doc_kind` 才是权威。
+   */
+  const runSummary = computed<RunSummary | null>(() => {
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.runSummaryOf(kind) : null
+  })
 
   // -------------------------------------------------------------------------
   // 交互态
@@ -307,10 +325,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 快照回调对两者都接——刷新重连时用它补全断线前已产出的正文。
    */
   function handlersForKind(kind: DocKind): StreamHandlers {
-    // 收尾的用量回执按文档种类写进 store 对应桶（优化改写的是 PRD，归入 prdRunSummary）。
-    // 这样回看任一阶段时，显示的都是该文档自己的回执，不再被「最后一次生成动作」串台。
-    const onRunSummary = (summary: RunSummary): void => {
-      store.setRunSummary(kind, summary)
+    /**
+     * 任务收尾时与后端对齐一次工作副本。
+     *
+     * 后端在**广播 `run_summary` 之前**已经写完 `documents`，所以这一刻拉回来的
+     * 就是权威版本：正文（与 `done.reply` 逐字一致）、待确认清单、用量回执一次拿全。
+     *
+     * 成功与失败都拉：失败时后端**没有**覆写正文，拉一次正好把「本次生成前被清掉的
+     * 下游产物」恢复回来（重新生成 PRD 会先清空下游的本地副本）。
+     */
+    const onRunSummary = (): void => {
+      void documents.reload()
     }
     if (kind === 'prd') {
       return {
@@ -373,27 +398,28 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (!docStreamingContent.value) docStreamingContent.value = snap.liveBuffer
   }
 
-  /** 把某份文档的生成结果落稿并按类型推进阶段 */
+  /**
+   * 把某份文档的生成结果展示出来，并按种类推进阶段。
+   *
+   * **这里不落库**——后端在任务收尾时已经把同一份正文写进 `documents` 了。本函数只做
+   * 两件事：把 `done.reply` 立即放进工作副本（用户不必等一次网络往返才看到内容），
+   * 以及在非优化场景下切到对应的待确认阶段。
+   *
+   * 与后端的对齐由 `handlersForKind` 的 `onRunSummary` 负责（那一刻后端已经写完），
+   * 因此这里不必再拉一次。
+   */
   function finishDoc(kind: DocKind, reply: string): void {
     const content = reply.trim()
     if (!content) return
     if (kind === 'optimize') {
       // 优化是就地替换：写回当前正在看的那份文档，不跳转
-      if (activeDocKey.value === 'prd') prdContent.value = content
-      else if (activeDocKey.value === 'api-docs') apiDocsContent.value = content
-      else promptsContent.value = content
+      documents.setLocal(activeDocKey.value, content)
       return
     }
-    if (kind === 'prd') {
-      prdContent.value = content
-      goTo('review-prd')
-    } else if (kind === 'api-docs') {
-      apiDocsContent.value = content
-      goTo('review-api-docs')
-    } else {
-      promptsContent.value = content
-      goTo('review-prompts')
-    }
+    documents.setLocal(kind, content)
+    if (kind === 'prd') goTo('review-prd')
+    else if (kind === 'api-docs') goTo('review-api-docs')
+    else goTo('review-prompts')
   }
 
   /** 生成结束后清掉任务指针：任务已终态，刷新无需再重连 */
@@ -488,9 +514,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function generatePrd(): Promise<void> {
     const payload = buildPrdPayload()
     if (!payload) return
-    // 重新生成 PRD 会让基于它的后续文档失效，进度回退到 PRD
-    apiDocsContent.value = ''
-    promptsContent.value = ''
+    // 重新生成 PRD 会让基于它的后续文档失效。**后端在收尾落稿时会一并删掉下游**
+    // （见 `document_store.DOWNSTREAM_KINDS`），这里同步清掉本地工作副本，
+    // 进度条才会立刻退回 PRD 那一步，而不是等收尾回来才动。
+    documents.setLocal('api-docs', '')
+    documents.setLocal('prompts', '')
     activeDocKey.value = 'prd'
     docStreamingContent.value = ''
     docError.value = ''
@@ -509,15 +537,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 生成接口文档：以 PRD 正文为输入，团队接口规范由技能包全量注入，无需前端检索确认 */
   async function generateApiDocs(): Promise<void> {
-    // 重新生成接口文档会让基于它的提示词失效，进度回退到接口文档
-    promptsContent.value = ''
+    // 重新生成接口文档会让基于它的提示词失效（后端收尾时同样会删掉下游）
+    documents.setLocal('prompts', '')
     activeDocKey.value = 'api-docs'
     docStreamingContent.value = ''
     docError.value = ''
     prdProgress.value = null
     const { reply, ok } = await job.start(
       'api-docs',
-      { prdContent: prdContent.value },
+      { prdContent: documents.contentOf('prd') },
       handlersForKind('api-docs'),
     )
     if (!ok) {
@@ -559,6 +587,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * `content` 由审阅区传入，可能包含用户尚未保存的编辑；必须以它为准，
    * 否则优化结果会把用户刚改的内容覆盖掉。
+   *
+   * **必须带 `docKind`**：`optimize` 这个种类只说明「做了一件优化」，后端要落库还得知道
+   * 「优化的是哪一份」。漏传的后果不是报错，而是后端**拒绝落库**（宁可本次不写，也不猜
+   * 一个默认值写错位置）——所以这里的 `activeDocKey` 是必需信息，不是可选提示。
    */
   async function optimizeCurrentDocument(content: string, instruction: string): Promise<void> {
     if (!content.trim() || !instruction.trim()) return
@@ -567,7 +599,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     docError.value = ''
     const { reply, ok } = await job.start(
       'optimize',
-      { document: content, instruction },
+      { document: content, instruction, docKind: activeDocKey.value },
       handlersForKind('optimize'),
     )
     if (!ok) {
@@ -580,12 +612,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     clearActiveJob()
   }
 
-  /** 审阅页「保存」：把编辑后的原文写回对应的文档状态 */
+  /**
+   * 审阅页「保存」：把编辑后的正文提交给后端。
+   *
+   * 走文档 store 的防抖单飞队列（见 `stores/documents.ts::save`）：连续输入会合并成一次
+   * 请求，且任一时刻至多一个 PUT 在途。本地工作副本同时更新，界面不必等往返。
+   */
   function onSaveDocument(content: string): void {
-    if (viewState.value === 'review-prd') prdContent.value = content
-    else if (viewState.value === 'review-api-docs') apiDocsContent.value = content
-    else if (viewState.value === 'review-prompts') promptsContent.value = content
-    hooks.onNotice('文档已保存到本地')
+    const kind = docKindOfState(viewState.value)
+    if (!kind) return
+    documents.save(kind, content)
+    hooks.onNotice('文档已保存')
   }
 
   /**
@@ -598,16 +635,16 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 审阅页「生成接口文档」入口：接口规范由技能包注入，直接进入生成态 */
   async function handleGenerateApiDocs(): Promise<void> {
-    if (!prdContent.value.trim()) return
+    if (!documents.contentOf('prd').trim()) return
     goTo('generating-api-docs')
     await generateApiDocs()
   }
 
   /** 审阅页「生成提示词套件」入口：接口文档完成后才能生成，先切到生成中状态再生成 */
   async function handleGeneratePrompts(): Promise<void> {
-    if (!apiDocsContent.value.trim()) return
+    if (!documents.contentOf('api-docs').trim()) return
     goTo('generating-prompts')
-    await generatePrompts(prdContent.value)
+    await generatePrompts(documents.contentOf('prd'))
   }
 
   /**
@@ -626,8 +663,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 提示词调试入口：用用户贴入的 PRD 直接生成提示词套件。
    *
-   * 刻意不把这份 PRD 写进 `prdContent`：那是「本工具生成的 PRD」的位置，混进用户
-   * 自带的内容会让进度、完成条件与下载列表都失真。它只作为生成的输入存在。
+   * 刻意不把这份 PRD 交付给文档 store：那是「本工具生成的 PRD」的位置，混进用户
+   * 自带的内容会让进度、完成条件与下载列表都失真。它只作为本次生成的输入存在。
    */
   async function handleGeneratePromptsFromDebugPrd(): Promise<void> {
     if (entryMode.value !== 'prompt-debug') return
@@ -701,10 +738,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 当前审阅阶段对应的文档正文（非生成态） */
   const activeDocContent = computed(() => {
-    if (viewState.value === 'review-prd') return prdContent.value
-    if (viewState.value === 'review-api-docs') return apiDocsContent.value
-    if (viewState.value === 'review-prompts') return promptsContent.value
-    return ''
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.contentOf(kind) : ''
   })
 
   // -------------------------------------------------------------------------
@@ -717,14 +752,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 都为空或含非法字符时由 `buildDocFilename` 兜底。
    */
   function downloadDocument(docType: DocType): void {
-    const content =
-      docType === 'prd'
-        ? prdContent.value
-        : docType === 'api-docs'
-          ? apiDocsContent.value
-          : promptsContent.value
     const productName = summary.value?.product_name ?? quickInput.value.productName
-    downloadFile(content, buildDocFilename(docType, productName))
+    downloadFile(documents.contentOf(docType), buildDocFilename(docType, productName))
   }
 
   // -------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
 import { fetchActiveJobs, onUnauthorized } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
+import { useDocumentsStore } from '@/stores/documents'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import { docKindOfState, generatingStateFor } from '@/utils/workflow'
@@ -82,10 +83,22 @@ const {
   reachedStepIndex,
   canGeneratePrd,
   downgradeNotice,
-  prdContent,
-  apiDocsContent,
-  promptsContent,
 } = storeToRefs(store)
+
+/**
+ * 三份产物正文的持有者。
+ *
+ * 正文不在 workflow store 里：所有权属于后端 `documents` 表，这里只是一份工作副本
+ * （见 `stores/documents.ts`）。本文件需要它的地方只有两处——审阅页「查看」入口
+ * 是否可用（`has*`），以及完成页的下载列表（`contents`）。
+ */
+const documents = useDocumentsStore()
+const {
+  contents: documentContents,
+  hasPrd,
+  hasApiDocs,
+  hasPrompts,
+} = storeToRefs(documents)
 
 /**
  * 表单组件的 key。
@@ -374,11 +387,6 @@ const {
   onEnterChat: () => goTo('chatting'),
 })
 
-/** 是否已有 PRD / 接口文档 / 提示词正文，决定审阅页的「查看」入口是否出现 */
-const hasPrd = computed(() => prdContent.value.trim().length > 0)
-const hasApiDocs = computed(() => apiDocsContent.value.trim().length > 0)
-const hasPrompts = computed(() => promptsContent.value.trim().length > 0)
-
 /** 是否处于入口选择页：这一步还没有进度可言，进度条不显示 */
 const isChoosingEntry = computed(() => viewState.value === 'entry')
 
@@ -579,9 +587,9 @@ function handleStepClick(stepId: StepId): void {
       <!-- 全部完成 -->
       <DoneStage
         v-else-if="viewState === 'done'"
-        :prd-content="prdContent"
-        :api-docs-content="apiDocsContent"
-        :prompts-content="promptsContent"
+        :prd-content="documentContents.prd"
+        :api-docs-content="documentContents['api-docs']"
+        :prompts-content="documentContents.prompts"
         :back-label="backLabel"
         @view="goTo"
         @download="downloadDocument"

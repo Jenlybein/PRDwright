@@ -23,11 +23,11 @@ import type {
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
-  RunSummary,
   SessionDataV2,
   Step,
   ViewState,
 } from '@/types'
+import { useDocumentsStore } from '@/stores/documents'
 import {
   canGeneratePrdFrom,
   DOWNGRADE_NOTICE,
@@ -48,6 +48,15 @@ const MODE_LANDING: Record<EntryMode, ViewState> = {
 }
 
 export const useWorkflowStore = defineStore('workflow', () => {
+  /**
+   * 三份产物正文的持有者。
+   *
+   * 它们**不在本 store 里**：所有权在后端 `documents` 表，前端只有一份工作副本
+   * （见 `stores/documents.ts`）。本 store 只借用它来判断「走到哪一步」——
+   * 进度条要不要解锁某一格、完成条件是否满足，都取决于产物有没有内容。
+   */
+  const documents = useDocumentsStore()
+
   // ------------------------------------------------------------------
   // 会话数据（写入本地快照）
   // ------------------------------------------------------------------
@@ -73,15 +82,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 提示词调试入口里用户贴入的 PRD 正文 */
   const debugPrdText = ref('')
 
-  /** 已生成的 PRD 正文（Markdown 源码） */
-  const prdContent = ref('')
-
-  /** 已生成的接口文档正文（Markdown 源码） */
-  const apiDocsContent = ref('')
-
-  /** 已生成的提示词套件正文（Markdown 源码） */
-  const promptsContent = ref('')
-
   /**
    * 当前进行中的生成任务 id；`null` 表示没有任务。
    *
@@ -93,17 +93,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
 
   /** 当前进行中任务的文档种类；与 `activeJobId` 成对写入 / 清空 */
   const activeJobKind = ref<DocKind | null>(null)
-
-  /**
-   * 各文档「最后一次生成的用量回执」；按**文档**分桶，而非按「最后一次生成动作」单例。
-   *
-   * 旧实现只有一份 `runSummary` 单例，谁最后生成完就覆盖谁，导致回看 PRD 时可能显示
-   * 接口文档的回执（技能包名 / token 数 / 耗时都对不上）。这里改成三份独立记录，
-   * 回看哪份文档就显示哪份的回执；优化（kind=optimize）改写的是 PRD，故归入 `prdRunSummary`。
-   */
-  const prdRunSummary = ref<RunSummary | null>(null)
-  const apiDocsRunSummary = ref<RunSummary | null>(null)
-  const promptsRunSummary = ref<RunSummary | null>(null)
 
   // ------------------------------------------------------------------
   // 运行态（不写入快照）
@@ -144,7 +133,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
   // 快照出入口：存储策略由 stores/solutions.ts 负责
   // ------------------------------------------------------------------
 
-  /** 导出当前会话的可持久化部分 */
+  /**
+   * 导出当前会话的可持久化部分。
+   *
+   * **不含三份产物正文与用量回执**：它们属于后端 `documents` 表，随方案一起存在
+   * 同一份数据库里，刷新后按方案 id 取回即可（`stores/documents.ts::loadAll`）。
+   * 快照里放一份副本只会制造第二个真源。
+   */
   function snapshot(): SessionDataV2 {
     return {
       viewState: viewState.value,
@@ -154,14 +149,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       conversationId: conversationId.value,
       quickInput: quickInput.value,
       debugPrdText: debugPrdText.value,
-      prdContent: prdContent.value,
-      apiDocsContent: apiDocsContent.value,
-      promptsContent: promptsContent.value,
       activeJobId: activeJobId.value,
       activeJobKind: activeJobKind.value,
-      prdRunSummary: prdRunSummary.value,
-      apiDocsRunSummary: apiDocsRunSummary.value,
-      promptsRunSummary: promptsRunSummary.value,
     }
   }
 
@@ -171,6 +160,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 调用方（`stores/solutions.ts`）负责先做校验与降级——快照可能来自旧版本的前端，
    * 或落在 `generating-*` 这种「刷新后无法继续」的中间态，那些判断在
    * `utils/workflow.ts` 里已有现成实现，不必在这里重做。
+   *
+   * 产物正文不在这里恢复：快照里本就没有它们，正文由 `stores/documents.ts` 单独按
+   * 方案 id 拉取。
    */
   function applySnapshot(session: SessionDataV2, downgradeKind: DowngradeKind | null = null): void {
     viewState.value = session.viewState
@@ -180,55 +172,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
     conversationId.value = session.conversationId
     quickInput.value = session.quickInput
     debugPrdText.value = session.debugPrdText
-    prdContent.value = session.prdContent
-    apiDocsContent.value = session.apiDocsContent
-    promptsContent.value = session.promptsContent
     activeJobId.value = session.activeJobId ?? null
     activeJobKind.value = session.activeJobKind ?? null
-    prdRunSummary.value = session.prdRunSummary ?? null
-    apiDocsRunSummary.value = session.apiDocsRunSummary ?? null
-    promptsRunSummary.value = session.promptsRunSummary ?? null
     downgrade.value = downgradeKind
     // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
     // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
     // 否则异步恢复回来的摘要会填不进表单（打开旧方案时肉眼可见）。
     restoreTick.value += 1
   }
-
-  /**
-   * 把一次生成的用量回执写进「对应文档」的桶。
-   *
-   * 映射按文档而非任务 kind：`prd` 与 `optimize`（优化改的是 PRD）都归 `prdRunSummary`，
-   * 接口文档 / 提示词各归各自。写入后由下方 watch 触发自动保存，回执随之持久化进方案。
-   *
-   * 注意 kind 的两套取值：调用方传的是前端 `DocKind`（`api-docs` 带连字符），
-   * 而回执自身的 `kind` 是后端原始值（`api_docs` 带下划线）——这里**两者都认**，
-   * 免得因为一个连字符就把接口文档的回执错投进 PRD 桶。
-   */
-  function setRunSummary(kind: DocKind | string, summary: RunSummary | null): void {
-    if (kind === 'api-docs' || kind === 'api_docs') apiDocsRunSummary.value = summary
-    else if (kind === 'prompts') promptsRunSummary.value = summary
-    else prdRunSummary.value = summary
-  }
-
-  /**
-   * 当前正在审阅的文档应该显示的回执。
-   *
-   * 由 `viewState` 反推文档种类，从对应桶取——这正是「回看 PRD 显示 PRD 回执」的落点。
-   * 生成中等非审阅态一律返回 `null`（审阅区那时不展示回执）。
-   */
-  const runSummary = computed<RunSummary | null>(() => {
-    switch (viewState.value) {
-      case 'review-prd':
-        return prdRunSummary.value
-      case 'review-api-docs':
-        return apiDocsRunSummary.value
-      case 'review-prompts':
-        return promptsRunSummary.value
-      default:
-        return null
-    }
-  })
 
   /**
    * 状态变化时自增 `changeTick`。
@@ -246,14 +197,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       conversationId,
       quickInput,
       debugPrdText,
-      prdContent,
-      apiDocsContent,
-      promptsContent,
       activeJobId,
       activeJobKind,
-      prdRunSummary,
-      apiDocsRunSummary,
-      promptsRunSummary,
     ],
     () => {
       changeTick.value += 1
@@ -276,14 +221,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 当前阶段在进度条上的下标 */
   const currentStepIndex = computed(() => stepIndexOf(viewState.value, entryMode.value))
 
-  /** 已到达的最远步骤下标（进度条可点击范围） */
+  /** 已到达的最远步骤下标（进度条可点击范围），解锁依据是**产物有没有内容** */
   const reachedStepIndex = computed(() =>
     computeReachedStepIndex({
       mode: entryMode.value,
       hasMessages: messages.value.length > 0,
-      hasPrd: prdContent.value.trim() !== '',
-      hasApiDocs: apiDocsContent.value.trim() !== '',
-      hasPrompts: promptsContent.value.trim() !== '',
+      hasPrd: documents.hasPrd,
+      hasApiDocs: documents.hasApiDocs,
+      hasPrompts: documents.hasPrompts,
       currentStepIndex: currentStepIndex.value,
     }),
   )
@@ -300,9 +245,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
    */
   const requiredDocsReady = computed(() =>
     hasRequiredDocuments(entryMode.value, {
-      prd: prdContent.value,
-      apiDocs: apiDocsContent.value,
-      prompts: promptsContent.value,
+      prd: documents.contents.prd,
+      apiDocs: documents.contents['api-docs'],
+      prompts: documents.contents.prompts,
     }),
   )
 
@@ -352,6 +297,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 只清内存——后端那份方案由 `stores/solutions.ts` 决定删不删。
    * 「重新开始」的语义是「开一份新的」，因此那边是**清掉当前 id 而不是删库**，
    * 旧方案仍留在侧边栏里可随时回来。
+   *
+   * 产物正文同步交给 `documents.clear()`：它们不属于本 store，但都属于「当前会话」，
+   * 一起清掉才不会出现「入口页回来了、上一份的正文还挂在内存里」。
    */
   function reset(): void {
     messages.value = []
@@ -359,16 +307,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
     summary.value = null
     quickInput.value = { productName: '', requirements: '' }
     debugPrdText.value = ''
-    prdContent.value = ''
-    apiDocsContent.value = ''
     activeJobId.value = null
     activeJobKind.value = null
-    prdRunSummary.value = null
-    apiDocsRunSummary.value = null
-    promptsRunSummary.value = null
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
+    documents.clear()
     // 与 `applySnapshot` 同理：这也是一次「整份换掉」，
     // 视图（尤其是只在 setup 读一次 `initial` 的表单）要据此重建，
     // 否则「重新开始」后表单里还留着上一轮的内容。
@@ -381,6 +325,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 只看内容字段，**不看 `viewState` / `entryMode` / `conversationId`**——
    * 它们描述的是「走到哪一步」而不是「有什么」；用户只是点进入口看一眼就又退回，
    * 不该因此留下一份空方案。
+   *
+   * 也**不看产物正文**：正文属于后端 `documents` 表，而「要不要建一份方案」这件事
+   * 发生在正文产生之前——第一份正文的生成本身就需要方案已经存在（任务要挂 `solution_id`）。
    */
   const hasContent = computed(
     () =>
@@ -388,10 +335,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       summary.value !== null ||
       quickInput.value.productName.trim() !== '' ||
       quickInput.value.requirements.trim() !== '' ||
-      debugPrdText.value.trim() !== '' ||
-      prdContent.value.trim() !== '' ||
-      apiDocsContent.value.trim() !== '' ||
-      promptsContent.value.trim() !== '',
+      debugPrdText.value.trim() !== '',
   )
 
   return {
@@ -403,15 +347,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     conversationId,
     quickInput,
     debugPrdText,
-    prdContent,
-    apiDocsContent,
-    promptsContent,
     activeJobId,
     activeJobKind,
-    prdRunSummary,
-    apiDocsRunSummary,
-    promptsRunSummary,
-    runSummary,
     // 运行态
     chatStreaming,
     docGenerating,
@@ -437,6 +374,5 @@ export const useWorkflowStore = defineStore('workflow', () => {
     reset,
     snapshot,
     applySnapshot,
-    setRunSummary,
   }
 })

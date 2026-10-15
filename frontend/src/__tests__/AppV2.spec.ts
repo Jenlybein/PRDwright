@@ -7,10 +7,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import AppV2 from '../AppV2.vue'
 import * as api from '../services/api'
 import * as authService from '../services/authService'
+import * as documentApi from '../services/documentService'
 import * as solutionApi from '../services/solutionService'
 import { useAuthStore } from '../stores/auth'
+import { useDocumentsStore } from '../stores/documents'
 import { useWorkflowStore } from '../stores/workflow'
 import type {
+  DocumentRecord,
   JobSnapshot,
   RequirementsSummary,
   RunSummary,
@@ -103,6 +106,25 @@ vi.mock('../services/solutionService', () => ({
   })),
   updateSolution: vi.fn(async () => null),
   deleteSolution: vi.fn(async () => undefined),
+}))
+
+/**
+ * 产物正文 mock。
+ *
+ * 三份文档的权威来源是后端 `documents` 表：打开方案时会拉一次，生成收尾时也会
+ * 拉一次。编排测试不关心这张表本身（那有 `documents-store` 与 `document-service`
+ * 各自的用例），这里只保证「打开方案」这条路径不会去打真实网络。
+ * 需要断言正文/回执的用例会用 `mountExistingSolution` 的第三个参数喂具体数据。
+ */
+vi.mock('../services/documentService', () => ({
+  DocumentsNotFoundError: class DocumentsNotFoundError extends Error {
+    constructor() {
+      super('方案不存在或已被删除')
+      this.name = 'DocumentsNotFoundError'
+    }
+  },
+  fetchDocuments: vi.fn(async () => []),
+  saveDocument: vi.fn(),
 }))
 
 /**
@@ -317,6 +339,9 @@ beforeEach(() => {
     data: payload.data,
   }))
   vi.mocked(solutionApi.deleteSolution).mockResolvedValue(undefined)
+
+  // 文档接口：默认「这份方案还没有任何文档」。打开方案的用例会各自喂具体内容。
+  vi.mocked(documentApi.fetchDocuments).mockResolvedValue([])
 })
 
 /**
@@ -414,14 +439,28 @@ function makeSolutionDetail(
 /**
  * 挂载一份「已存在」的方案：让 `fetchSolution` 返回指定快照，并从 `/v2/{id}` 进入。
  * AppV2 在登录后按地址拉详情，所以恢复动作发生在挂载后的异步阶段，这里等它就绪。
+ *
+ * 第三个参数是这份方案在三份产物上的内容（正文 + 各自回执）。它们**不在快照里**——
+ * 打开方案会另外拉一次 `documents` 接口，所以这里随快照一起把那次响应也备好。
  */
 async function mountExistingSolution(
   snapshot: Record<string, unknown>,
   id = 1,
+  documents: DocumentRecord[] = [],
 ): Promise<VueWrapper> {
   const detail = makeSolutionDetail(id, snapshot)
   vi.mocked(solutionApi.fetchSolution).mockResolvedValue(detail)
+  vi.mocked(documentApi.fetchDocuments).mockResolvedValue(documents)
   return mountEntry(`/v2/${id}`)
+}
+
+/** 造一条文档记录（正文 + 可选回执），供「打开方案」类用例使用 */
+function makeDocumentRecord(
+  kind: DocumentRecord['kind'],
+  content: string,
+  runSummary: RunSummary | null = null,
+): DocumentRecord {
+  return { kind, content, runSummary, updatedAt: '2026-10-13T00:00:00' }
 }
 
 describe('AppV2 完整流程编排', () => {
@@ -594,52 +633,55 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('接口文档')
   })
 
-  it('用量回执按文档各自留存：回看 PRD 不会显示接口文档的回执', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async () => ({
-      conversationId: 'conv-1',
-      reply: '已理解需求。',
-    }))
-    mockJobStream({
-      prd: async (handlers) => {
-        handlers.onChunk?.('# 产品需求文档\n')
-        handlers.onRunSummary?.(
-          makeRunSummary({
-            kind: 'prd',
-            requestId: 'prd-req',
-            durationMs: 1200,
-            injectedSkills: [
-              { name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' },
-            ],
-          }),
-        )
-        return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
-      },
-      'api-docs': async (handlers) => {
-        handlers.onChunk?.('# 接口文档\n')
-        handlers.onRunSummary?.(
-          makeRunSummary({
-            kind: 'api_docs',
-            requestId: 'api-req',
-            durationMs: 9000,
-            injectedSkills: [
-              { name: 'api-docs-generator', version: '0.1.0', fingerprint: 'd0582f1cbe0f' },
-            ],
-          }),
-        )
-        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n内容' }
-      },
-    })
+  it('用量回执按文档各自留存：切到哪份文档就显示哪份的回执', async () => {
+    // 回执不再由前端在生成收尾时顺手记下，而是随正文一起存在后端的 `documents` 表里
+    // （`last_run_summary`）。因此这里让「打开方案」那次读取返回两份各自带着回执的文档，
+    // 再验证审阅页取的是**当前这份文档**的回执，而不是「最后一次生成动作」的那份。
+    const prdRecord = makeDocumentRecord(
+      'prd',
+      '# 产品需求文档\n\n## 1. 项目背景\n内容',
+      makeRunSummary({
+        kind: 'prd',
+        requestId: 'prd-req',
+        durationMs: 1200,
+        injectedSkills: [{ name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' }],
+      }),
+    )
+    const apiRecord = makeDocumentRecord(
+      'api-docs',
+      '# 接口文档\n\n## 一、概述\n内容',
+      makeRunSummary({
+        kind: 'api_docs',
+        requestId: 'api-req',
+        durationMs: 9000,
+        injectedSkills: [
+          { name: 'api-docs-generator', version: '0.1.0', fingerprint: 'd0582f1cbe0f' },
+        ],
+      }),
+    )
 
-    const wrapper = await mountApp()
-    await reachPrdReview(wrapper)
+    const wrapper = await mountExistingSolution(
+      {
+        viewState: 'review-prd',
+        entryMode: 'structured',
+        summary: SAMPLE_SUMMARY,
+        messages: [
+          { role: 'user', content: '需求如下' },
+          { role: 'assistant', content: '已理解需求。' },
+        ],
+        conversationId: 'conv-1',
+      },
+      1,
+      [prdRecord, apiRecord],
+    )
 
     // PRD 待确认：显示 PRD 自己的回执
     expect(wrapper.text()).toContain('prd-req')
     expect(wrapper.text()).toContain('prd-generator')
     expect(wrapper.text()).not.toContain('api-req')
 
-    // 生成接口文档后：切到接口文档自己的回执
-    await clickButton(wrapper, '生成接口文档')
+    // 切到接口文档：换成接口文档自己的回执
+    await clickStep(wrapper, '接口文档')
     await flushPromises()
     expect(wrapper.text()).toContain('api-req')
     expect(wrapper.text()).toContain('api-docs-generator')
@@ -673,22 +715,25 @@ describe('AppV2 完整流程编排', () => {
   })
 
   it('重新打开已有方案：按后端快照恢复，回到原阶段并回填表单', async () => {
-    const wrapper = await mountExistingSolution({
-      viewState: 'review-prd',
-      entryMode: 'structured',
-      summary: SAMPLE_SUMMARY,
-      messages: [
-        { role: 'user', content: '需求如下' },
-        { role: 'assistant', content: '已理解需求。' },
-      ],
-      conversationId: 'conv-1',
-      prdContent: '# 产品需求文档\n历史内容',
-      apiDocsContent: '',
-      promptsContent: '',
-    })
+    const wrapper = await mountExistingSolution(
+      {
+        viewState: 'review-prd',
+        entryMode: 'structured',
+        summary: SAMPLE_SUMMARY,
+        messages: [
+          { role: 'user', content: '需求如下' },
+          { role: 'assistant', content: '已理解需求。' },
+        ],
+        conversationId: 'conv-1',
+      },
+      1,
+      [makeDocumentRecord('prd', '# 产品需求文档\n历史内容')],
+    )
 
     // 地址带了 id，AppV2 会去拉详情；快照把阶段定在 review-prd，直接落在那一步
     expect(solutionApi.fetchSolution).toHaveBeenCalledWith(1)
+    // 正文不在快照里，是「打开方案」时另外拉回来的
+    expect(documentApi.fetchDocuments).toHaveBeenCalledWith(1)
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('历史内容')
     expect((byId(wrapper, 'field-product_name').element as HTMLInputElement).value).toBe(
@@ -705,9 +750,6 @@ describe('AppV2 完整流程编排', () => {
       summary: SAMPLE_SUMMARY,
       messages: [],
       conversationId: '',
-      prdContent: '',
-      apiDocsContent: '',
-      promptsContent: '',
     })
 
     expect(wrapper.text()).toContain('上次的生成未完成')
@@ -721,9 +763,6 @@ describe('AppV2 完整流程编排', () => {
       summary: SAMPLE_SUMMARY,
       messages: [{ role: 'assistant', content: '已理解需求。' }],
       conversationId: 'conv-1',
-      prdContent: '',
-      apiDocsContent: '',
-      promptsContent: '',
     })
 
     expect(wrapper.text()).toContain('上次的确认步骤未完成')
@@ -756,9 +795,6 @@ describe('AppV2 完整流程编排', () => {
       summary: SAMPLE_SUMMARY,
       messages: [],
       conversationId: '',
-      prdContent: '',
-      apiDocsContent: '',
-      promptsContent: '',
       activeJobId: 42,
       activeJobKind: 'prd',
     })
@@ -795,9 +831,6 @@ describe('AppV2 完整流程编排', () => {
       summary: SAMPLE_SUMMARY,
       messages: [],
       conversationId: '',
-      prdContent: '',
-      apiDocsContent: '',
-      promptsContent: '',
     })
 
     // 兜底查询带上了当前方案与文档种类
@@ -817,9 +850,6 @@ describe('AppV2 完整流程编排', () => {
       summary: SAMPLE_SUMMARY,
       messages: [],
       conversationId: '',
-      prdContent: '',
-      apiDocsContent: '',
-      promptsContent: '',
     })
 
     expect(api.fetchActiveJobs).toHaveBeenCalledTimes(1)
@@ -838,9 +868,6 @@ describe('AppV2 完整流程编排', () => {
         conversationId: '',
         quickInput: { productName: '', requirements: '' },
         debugPrdText: '',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
         activeJobId: 42,
         activeJobKind: 'prd',
       }),
@@ -880,8 +907,10 @@ describe('AppV2 完整流程编排', () => {
     releaseAuth()
     await flushPromises()
 
-    // 同一份方案只加载一次、同一个任务只订阅一次——两路 SSE 事件不会交错写进同一份预览
+    // 同一份方案只加载一次、同一个任务只订阅一次——两路 SSE 事件不会交错写进同一份预览。
+    // 产物正文那次拉取同理只能有一次：重复装载会把用户尚未提交的手改盖掉。
     expect(solutionApi.fetchSolution).toHaveBeenCalledTimes(1)
+    expect(documentApi.fetchDocuments).toHaveBeenCalledTimes(1)
     expect(api.readJobStream).toHaveBeenCalledTimes(1)
     expect(api.readJobStream).toHaveBeenCalledWith(42, expect.anything(), expect.anything())
   })
@@ -914,7 +943,8 @@ describe('AppV2 完整流程编排', () => {
     expect(workflow.entryMode).toBeNull()
     expect(workflow.quickInput).toEqual({ productName: '', requirements: '' })
     expect(workflow.debugPrdText).toBe('')
-    expect(workflow.prdContent).toBe('')
+    // 产物正文归文档 store（后端 documents 表的工作副本），同样要清干净
+    expect(useDocumentsStore().hasAny).toBe(false)
     expect(workflow.hasContent).toBe(false)
 
     // 再进完整流程时，表单是重建后的空表单（依赖 formKey 自增强制重建）

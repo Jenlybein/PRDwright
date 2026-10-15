@@ -12,6 +12,7 @@ import { STEP_OF_STATE, STEPS } from '@/types'
 import type {
   ChatMessage,
   DocKind,
+  DocumentKind,
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
@@ -161,12 +162,16 @@ export function generatingStateFor(kind: DocKind): ViewState | null {
 }
 
 /**
- * 「待确认」阶段 → 文档种类。
+ * 「待确认」阶段 → 产物种类。
  *
  * 用于「刷新后无 activeJobId、但快照落在 generating-*」的兜底：降级后落到 review-*，
  * 由它反推原本在生成哪份文档，再去查活跃任务。
+ *
+ * 返回类型刻意收窄为 `DocumentKind`（不含 `optimize`）：审阅阶段描述的永远是
+ * 「在看哪一份产物」，而 `optimize` 是动作、不是产物。调用方拿它去查文档时，
+ * 类型系统因此能挡住「拿 optimize 当产物用」这类错。
  */
-export function docKindOfState(state: ViewState): DocKind | null {
+export function docKindOfState(state: ViewState): DocumentKind | null {
   switch (state) {
     case 'review-prd':
       return 'prd'
@@ -299,6 +304,10 @@ export interface ParsedSessionSnapshot {
  * 阶段若落在无法恢复的中间态（如 `generating-prd`），这里会一并给出降级结果；
  * 但若快照里记着一个进行中的任务（`activeJobId`），则 `generating-*` **不降级**——
  * 任务在后端继续跑，重连即可续上。
+ *
+ * **产物正文与用量回执不在这里解析**：它们已迁到后端 `documents` 表，由
+ * `stores/documents.ts` 按方案 id 单独取回。旧快照里残留的 `prdContent` 等字段
+ * 会被自然忽略——不是「兼容读取」，而是它们从此不再是快照的一部分。
  */
 export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot | null {
   if (typeof parsed !== 'object' || parsed === null) return null
@@ -321,14 +330,8 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
       conversationId: typeof record.conversationId === 'string' ? record.conversationId : '',
       quickInput: parseQuickInput(record.quickInput),
       debugPrdText: typeof record.debugPrdText === 'string' ? record.debugPrdText : '',
-      prdContent: typeof record.prdContent === 'string' ? record.prdContent : '',
-      apiDocsContent: typeof record.apiDocsContent === 'string' ? record.apiDocsContent : '',
-      promptsContent: typeof record.promptsContent === 'string' ? record.promptsContent : '',
       activeJobId,
       activeJobKind: hasActiveJob && isDocKind(record.activeJobKind) ? record.activeJobKind : null,
-      prdRunSummary: parseRunSummary(record.prdRunSummary),
-      apiDocsRunSummary: parseRunSummary(record.apiDocsRunSummary),
-      promptsRunSummary: parseRunSummary(record.promptsRunSummary),
     },
   }
 }

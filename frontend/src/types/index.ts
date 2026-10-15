@@ -77,6 +77,32 @@ export type EntryMode = 'structured' | 'prd-quick' | 'prompt-debug'
  */
 export type DocKind = 'prd' | 'api-docs' | 'prompts' | 'optimize'
 
+/**
+ * **产物**种类：三份文档各自的身份，与 `DocKind` 的差别在于它不含 `optimize`。
+ *
+ * 这个区分在「文档所有权后端化」之后变得要紧：`DocKind` 描述的是「做了一件什么事」
+ * （生成 / 优化是两类动作），而 `DocumentKind` 描述的是「东西是哪一份」。
+ * 落库、取回执、建立入口映射用的都是后者。
+ */
+export type DocumentKind = 'prd' | 'api-docs' | 'prompts'
+
+/**
+ * 从后端取回的一份文档（`GET /api/solutions/{id}/documents` 的一项）。
+ *
+ * 正文、回执都由后端产出：正文来自任务收尾时的 `done.reply`，回执来自同一次收尾的
+ * `run_summary`。前端不再自己拼一份存起来——两份真源迟早会对不上。
+ */
+export interface DocumentRecord {
+  /** 产物种类（前端口径，连字符） */
+  kind: DocumentKind
+  /** 文档正文（Markdown 原文） */
+  content: string
+  /** 最后一次生成的用量回执；后端尚未写过或记录不可信时为 null */
+  runSummary: RunSummary | null
+  /** 最近更新时间（UTC ISO 8601） */
+  updatedAt: string
+}
+
 /** PRD 快捷入口的录入内容 */
 export interface QuickPrdInput {
   /** 产品名称；为空时文档头退化为「未命名产品」 */
@@ -530,6 +556,12 @@ export interface SolutionSavePayload {
  *
  * 「还没提交、但已经敲了字」的两处录入内容（快捷入口的一段话、调试入口的 PRD）
  * 也一并落盘：它们是用户的手工输入，刷新一次就丢干净最让人恼火。
+ *
+ * **三份产物正文与三份用量回执不在这里。** 它们的所有权属于后端 `documents` 表
+ * （见 `DocumentRecord`），随方案一起存在同一份数据库里，刷新后由
+ * `stores/documents.ts` 按方案 id 取回。快照只留「走到哪一步、键盘敲了什么」这类
+ * 只属于本次会话的状态——把这些和几十 KB 的正文混在一起，正是「同一份内容两个真源」
+ * 的老问题。
  */
 export interface SessionDataV2 {
   /** 当前所处阶段 */
@@ -546,12 +578,6 @@ export interface SessionDataV2 {
   quickInput: QuickPrdInput
   /** 提示词调试入口里用户贴入的 PRD 正文 */
   debugPrdText: string
-  /** PRD 正文 */
-  prdContent: string
-  /** 接口文档正文 */
-  apiDocsContent: string
-  /** 提示词套件正文 */
-  promptsContent: string
   /**
    * 当前进行中的生成任务 id；`null` 表示没有任务。
    *
@@ -561,17 +587,5 @@ export interface SessionDataV2 {
   activeJobId: number | null
   /** 当前进行中任务的文档种类；与 `activeJobId` 成对出现，无任务时为 null */
   activeJobKind: DocKind | null
-  /**
-   * 各文档「最后一次生成的用量回执」；无则 `null`。
-   *
-   * 按**文档**而非按任务种类分桶：优化（kind=`optimize`）改写的是 PRD，
-   * 它的回执也归 `prdRunSummary`。这样回看任一阶段时，显示的是该文档自己的回执，
-   * 而不是「最后一次生成动作」的回执——旧实现是单例，会串台（看 PRD 却显示接口文档的回执）。
-   */
-  prdRunSummary?: RunSummary | null
-  /** 接口文档最后一次生成的用量回执 */
-  apiDocsRunSummary?: RunSummary | null
-  /** 提示词套件最后一次生成的用量回执 */
-  promptsRunSummary?: RunSummary | null
 }
 

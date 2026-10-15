@@ -2,7 +2,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it } from 'vitest'
 
+import { useDocumentsStore } from '@/stores/documents'
 import { useWorkflowStore } from '@/stores/workflow'
+import type { DocumentKind } from '@/types'
 
 /**
  * 会话流程 store 测试。
@@ -12,7 +14,17 @@ import { useWorkflowStore } from '@/stores/workflow'
  *
  * 持久化不再由本 store 负责（权威来源是后端，见 `stores/solutions.ts`），
  * 因此这里不再涉及 localStorage。
+ *
+ * **产物正文不在这里**：它们归 `stores/documents.ts`（后端 `documents` 表的工作副本）。
+ * 需要「有内容」的用例统一走 `setDocuments()`，而不是给 workflow store 赋正文。
  */
+function setDocuments(values: Partial<Record<DocumentKind, string>>): void {
+  const documents = useDocumentsStore()
+  for (const [kind, content] of Object.entries(values)) {
+    documents.setLocal(kind as DocumentKind, content ?? '')
+  }
+}
+
 describe('useWorkflowStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -38,10 +50,20 @@ describe('useWorkflowStore', () => {
     const store = useWorkflowStore()
     const before = store.changeTick
 
-    store.prdContent = '# 新 PRD'
+    store.debugPrdText = '# 贴进来的 PRD'
     await nextTick()
 
     expect(store.changeTick).toBeGreaterThan(before)
+  })
+
+  it('产物正文变化不触发 changeTick（它已不属于会话快照）', async () => {
+    const store = useWorkflowStore()
+    const before = store.changeTick
+
+    setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
+    await nextTick()
+
+    expect(store.changeTick).toBe(before)
   })
 
   it('运行态变化不触发 changeTick（不该被保存的状态）', () => {
@@ -67,9 +89,6 @@ describe('useWorkflowStore', () => {
       conversationId: '',
       quickInput: { productName: '', requirements: '' },
       debugPrdText: '',
-      prdContent: '',
-      apiDocsContent: '',
-      promptsContent: '',
       activeJobId: null,
       activeJobKind: null,
     })
@@ -89,10 +108,7 @@ describe('useWorkflowStore', () => {
       messages: [],
       conversationId: '',
       quickInput: { productName: '', requirements: '' },
-      debugPrdText: '',
-      prdContent: '# 恢复的 PRD',
-      apiDocsContent: '',
-      promptsContent: '',
+      debugPrdText: '# 恢复的 PRD',
       activeJobId: null,
       activeJobKind: null,
     })
@@ -105,11 +121,11 @@ describe('useWorkflowStore', () => {
 
   it('reset 也重置 restoreTick 之外的状态，避免旧方案内容回流', () => {
     const store = useWorkflowStore()
-    store.prdContent = '# 旧 PRD'
+    store.debugPrdText = '# 旧内容'
 
     store.reset()
 
-    expect(store.prdContent).toBe('')
+    expect(store.debugPrdText).toBe('')
   })
 
   it('snapshot 只导出可持久化字段，applySnapshot 能原样还原', () => {
@@ -119,10 +135,9 @@ describe('useWorkflowStore', () => {
     store.messages.push({ role: 'user', content: 'hi' })
     store.quickInput = { productName: '小账本', requirements: '记账' }
     store.debugPrdText = '# 贴进来的 PRD'
-    store.prdContent = '# PRD'
-    store.apiDocsContent = '# API'
-    store.promptsContent = '# Prompts'
     store.conversationId = 'conv-1'
+    // 产物正文改在文档 store 里：它不该出现在会话快照中
+    setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
 
     const snapshot = store.snapshot()
     expect(snapshot).toEqual({
@@ -133,18 +148,15 @@ describe('useWorkflowStore', () => {
       conversationId: 'conv-1',
       quickInput: { productName: '小账本', requirements: '记账' },
       debugPrdText: '# 贴进来的 PRD',
-      prdContent: '# PRD',
-      apiDocsContent: '# API',
-      promptsContent: '# Prompts',
       activeJobId: null,
       activeJobKind: null,
-      prdRunSummary: null,
-      apiDocsRunSummary: null,
-      promptsRunSummary: null,
     })
     // 运行态不在快照里
     expect('chatStreaming' in snapshot).toBe(false)
     expect('downgrade' in snapshot).toBe(false)
+    // 产物正文与回执也不在：它们属于后端 `documents`
+    expect('prdContent' in snapshot).toBe(false)
+    expect('prdRunSummary' in snapshot).toBe(false)
 
     const fresh = useWorkflowStore()
     fresh.reset()
@@ -153,66 +165,19 @@ describe('useWorkflowStore', () => {
     expect(fresh.downgrade).toBeNull()
   })
 
-  it('用量回执按文档分桶：优化归入 PRD 桶，且 runSummary 随审阅阶段切换', () => {
-    const store = useWorkflowStore()
-    const prdSummary = { kind: 'prd', requestId: 'a', durationMs: 1 } as never
-    const apiSummary = { kind: 'api_docs', requestId: 'b', durationMs: 2 } as never
-    const optSummary = { kind: 'optimize', requestId: 'c', durationMs: 3 } as never
-
-    // 写入三份文档各自的回执
-    store.setRunSummary('prd', prdSummary)
-    store.setRunSummary('api-docs', apiSummary)
-    // 优化改写的是 PRD，应归入 prdRunSummary
-    store.setRunSummary('optimize', optSummary)
-
-    // 注：Vue 会把赋给 ref 的对象包成响应式代理，故用 toEqual 而非 toBe（身份会变）
-    expect(store.prdRunSummary).toEqual(optSummary) // 被优化回执覆盖
-    expect(store.apiDocsRunSummary).toEqual(apiSummary)
-    expect(store.promptsRunSummary).toBeNull()
-
-    // 回看 PRD：显示的是 PRD 桶（最后一次是优化）
-    store.viewState = 'review-prd'
-    expect(store.runSummary).toEqual(optSummary)
-    // 回看接口文档：显示接口文档桶，不会串成 PRD 的回执
-    store.viewState = 'review-api-docs'
-    expect(store.runSummary).toEqual(apiSummary)
-    // 生成中等非审阅态不展示回执
-    store.viewState = 'generating-prd'
-    expect(store.runSummary).toBeNull()
-  })
-
-  it('回执随快照持久化与还原，reset 清空', () => {
-    const store = useWorkflowStore()
-    const prdSummary = { kind: 'prd', requestId: 'a', durationMs: 1 } as never
-    store.setRunSummary('prd', prdSummary)
-
-    const snapshot = store.snapshot()
-    expect(snapshot.prdRunSummary).toEqual(prdSummary)
-
-    const fresh = useWorkflowStore()
-    fresh.reset()
-    fresh.applySnapshot(snapshot, null)
-    expect(fresh.prdRunSummary).toEqual(prdSummary)
-    expect(fresh.runSummary).toBeNull() // 此时 viewState 是 entry，不展示
-
-    fresh.reset()
-    expect(fresh.prdRunSummary).toBeNull()
-  })
-
   it('reset 清空数据并回到入口页', async () => {
     const store = useWorkflowStore()
-    store.prdContent = '# PRD'
     store.messages.push({ role: 'user', content: 'hi' })
     store.summary = { product_name: 'X' } as never
     store.entryMode = 'prd-quick'
     store.quickInput = { productName: '小账本', requirements: '记账' }
     store.debugPrdText = '# 别人的 PRD'
     store.viewState = 'review-prd'
+    setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
     await nextTick()
 
     store.reset()
 
-    expect(store.prdContent).toBe('')
     expect(store.messages).toEqual([])
     expect(store.summary).toBeNull()
     // 入口模式与两处录入内容也要清掉，否则下一次进来会看到上一轮的残留
@@ -220,6 +185,8 @@ describe('useWorkflowStore', () => {
     expect(store.quickInput).toEqual({ productName: '', requirements: '' })
     expect(store.debugPrdText).toBe('')
     expect(store.viewState).toBe('entry')
+    // 产物正文一并清掉：它虽然不属于本 store，但同属「当前会话」
+    expect(useDocumentsStore().hasAny).toBe(false)
   })
 
   it('hasContent 只认内容字段，光选入口不算有内容', () => {
@@ -236,15 +203,12 @@ describe('useWorkflowStore', () => {
     expect(store.hasContent).toBe(true)
   })
 
-  it('hasContent 覆盖三处录入与三份文档', () => {
+  it('hasContent 覆盖三处录入字段（产物正文不再算「有内容」）', () => {
     type Store = ReturnType<typeof useWorkflowStore>
     const cases: Array<[string, (s: Store) => void]> = [
       ['快捷入口产品名', (s) => (s.quickInput.productName = '小账本')],
       ['快捷入口需求描述', (s) => (s.quickInput.requirements = '记账')],
       ['调试入口贴入的 PRD', (s) => (s.debugPrdText = '# PRD')],
-      ['PRD 正文', (s) => (s.prdContent = '# PRD')],
-      ['接口文档正文', (s) => (s.apiDocsContent = '# API')],
-      ['提示词正文', (s) => (s.promptsContent = '# Prompts')],
       ['结构化摘要', (s) => (s.summary = { product_name: 'X' } as never)],
     ]
 
@@ -257,14 +221,20 @@ describe('useWorkflowStore', () => {
     }
   })
 
-  it('派生状态跟随数据变化', async () => {
+  it('产物正文不再让 hasContent 变真：正文产生前方案必然已经存在', async () => {
+    const store = useWorkflowStore()
+    setDocuments({ prd: '# PRD' })
+    await nextTick()
+
+    expect(store.hasContent).toBe(false)
+  })
+
+  it('派生状态跟随产物正文变化（解锁进度条的是文档，不是会话快照）', async () => {
     const store = useWorkflowStore()
     expect(store.requiredDocsReady).toBe(false)
     expect(store.canFinish).toBe(false)
 
-    store.prdContent = '# PRD'
-    store.apiDocsContent = '# API'
-    store.promptsContent = '# Prompts'
+    setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
     await nextTick()
 
     expect(store.requiredDocsReady).toBe(true)
@@ -311,7 +281,7 @@ describe('useWorkflowStore', () => {
   it('完成条件按入口模式的交付物判断', async () => {
     const store = useWorkflowStore()
     store.entryMode = 'prd-quick'
-    store.prdContent = '# PRD'
+    setDocuments({ prd: '# PRD' })
     await nextTick()
     // 快捷入口只要 PRD 就能完成
     expect(store.canFinish).toBe(true)
@@ -322,8 +292,7 @@ describe('useWorkflowStore', () => {
 
     store.entryMode = 'prompt-debug'
     // 换成调试入口后，只有 PRD 反而不能完成
-    store.prdContent = ''
-    store.promptsContent = '# Prompts'
+    setDocuments({ prd: '', prompts: '# Prompts' })
     await nextTick()
     expect(store.canFinish).toBe(true)
   })

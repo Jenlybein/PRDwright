@@ -199,14 +199,8 @@ describe('会话快照解析', () => {
     conversationId: 'c1',
     quickInput: { productName: '', requirements: '' },
     debugPrdText: '',
-    prdContent: '# PRD',
-    apiDocsContent: '',
-    promptsContent: '',
     activeJobId: null,
     activeJobKind: null,
-    prdRunSummary: null,
-    apiDocsRunSummary: null,
-    promptsRunSummary: null,
   }
 
   it('空值与非法 JSON 一律返回 null', () => {
@@ -218,40 +212,38 @@ describe('会话快照解析', () => {
 
   it('正常快照原样还原', () => {
     const parsed = parseSessionSnapshot(JSON.stringify(full))
-    expect(parsed?.session.prdContent).toBe('# PRD')
     expect(parsed?.session.viewState).toBe('review-prd')
     expect(parsed?.session.entryMode).toBe('structured')
+    expect(parsed?.session.messages).toEqual([{ role: 'user', content: 'hi' }])
     expect(parsed?.downgrade).toBeNull()
   })
 
-  it('用量回执随快照还原：字段缺失或为脏数据时各退化为 null', () => {
-    const apiSummary = {
-      kind: 'api_docs',
-      status: 'completed',
-      durationMs: 1234,
-      totalCalls: 1,
-      failedCalls: 0,
-      promptTokens: 10,
-      completionTokens: 20,
-      steps: [],
-      injectedSkills: [],
-      warnings: [],
-      provider: 'ark',
-      model: 'x',
-      requestId: 'req-1',
-    }
+  it('产物正文与用量回执不再是快照的一部分：旧快照里残留的它们被忽略', () => {
+    // 这一条守的是「文档所有权在后端」——正文与回执已经搬到 `documents` 表，
+    // 快照里不该再出现它们。旧快照（上个版本存下来的）里当然还有，
+    // 解析器要做的是**丢掉**而不是还原。
     const parsed = parseSessionSnapshot(
       JSON.stringify({
         ...full,
-        viewState: 'review-api-docs',
+        prdContent: '# 旧快照里的正文',
+        apiDocsContent: '# 旧接口文档',
+        promptsContent: '# 旧提示词',
         prdRunSummary: { kind: 'prd', durationMs: 1, requestId: 'p' },
-        apiDocsRunSummary: apiSummary,
-        promptsRunSummary: { kind: 'prompts' }, // 缺 durationMs / requestId → 丢弃
       }),
     )
-    expect(parsed?.session.prdRunSummary).toEqual({ kind: 'prd', durationMs: 1, requestId: 'p' })
-    expect(parsed?.session.apiDocsRunSummary).toEqual(apiSummary)
-    expect(parsed?.session.promptsRunSummary).toBeNull()
+    expect(parsed?.session).not.toHaveProperty('prdContent')
+    expect(parsed?.session).not.toHaveProperty('prdRunSummary')
+    expect(Object.keys(parsed?.session ?? {})).toEqual([
+      'viewState',
+      'entryMode',
+      'summary',
+      'messages',
+      'conversationId',
+      'quickInput',
+      'debugPrdText',
+      'activeJobId',
+      'activeJobKind',
+    ])
   })
 
   it('parseRunSummary 只认带关键字段的对象，脏数据一律退化', () => {
@@ -313,7 +305,8 @@ describe('会话快照解析', () => {
     expect(parsed?.session.conversationId).toBe('')
     expect(parsed?.session.messages).toEqual([{ role: 'user', content: 'ok' }])
     // 同一条快照里合法的字段仍然保留
-    expect(parsed?.session.prdContent).toBe('# PRD')
+    expect(parsed?.session.viewState).toBe('review-prd')
+    expect(parsed?.session.summary).toEqual({ product_name: 'X' })
   })
 
   it('入口相关的脏值各退化为自己的默认值', () => {
@@ -354,9 +347,6 @@ describe('带任务指针的快照恢复', () => {
     conversationId: '',
     quickInput: { productName: '', requirements: '' },
     debugPrdText: '',
-    prdContent: '',
-    apiDocsContent: '',
-    promptsContent: '',
     activeJobId: 7,
     activeJobKind: 'prd',
   }

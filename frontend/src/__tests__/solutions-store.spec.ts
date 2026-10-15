@@ -1,7 +1,9 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import * as documentApi from '../services/documentService'
 import * as solutionApi from '../services/solutionService'
+import { useDocumentsStore } from '../stores/documents'
 import { SAVE_DEBOUNCE_MS, useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import type { SolutionSummary } from '../types'
@@ -16,6 +18,9 @@ import type { SolutionSummary } from '../types'
  *    半截正文不进快照；正因如此，刷新后才有东西可用来静默重连；
  * 4. 保存失败不阻断使用，且要把错误呈现给用户；
  * 5. 标题取产品名，取不到才退默认值。
+ *
+ * **打开方案会连带拉一次产物正文**（它不在快照里，归后端 `documents` 表），
+ * 因此这里也要把文档接口挡掉，否则用例会去打真实网络。
  */
 
 vi.mock('../services/solutionService', () => ({
@@ -30,6 +35,17 @@ vi.mock('../services/solutionService', () => ({
   createSolution: vi.fn(),
   updateSolution: vi.fn(),
   deleteSolution: vi.fn(),
+}))
+
+vi.mock('../services/documentService', () => ({
+  DocumentsNotFoundError: class DocumentsNotFoundError extends Error {
+    constructor() {
+      super('方案不存在或已被删除')
+      this.name = 'DocumentsNotFoundError'
+    }
+  },
+  fetchDocuments: vi.fn(),
+  saveDocument: vi.fn(),
 }))
 
 /** 造一份摘要 */
@@ -52,6 +68,7 @@ async function advanceDebounce(ms = SAVE_DEBOUNCE_MS): Promise<void> {
 
 let workflow: ReturnType<typeof useWorkflowStore>
 let solutions: ReturnType<typeof useSolutionsStore>
+let documents: ReturnType<typeof useDocumentsStore>
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -60,6 +77,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   workflow = useWorkflowStore()
   solutions = useSolutionsStore()
+  documents = useDocumentsStore()
 
   vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([])
   vi.mocked(solutionApi.createSolution).mockResolvedValue(summary(1))
@@ -68,6 +86,8 @@ beforeEach(() => {
     data: payload.data,
   }))
   vi.mocked(solutionApi.deleteSolution).mockResolvedValue(undefined)
+  // 默认「这份方案还没有任何文档」
+  vi.mocked(documentApi.fetchDocuments).mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -195,7 +215,6 @@ describe('生成期间也保存', () => {
     workflow.viewState = 'generating-prd'
     workflow.activeJobId = 7
     workflow.activeJobKind = 'prd'
-    workflow.prdContent = '# 半成品'
     await advanceDebounce()
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
@@ -241,7 +260,6 @@ describe('生成期间也保存', () => {
     await advanceDebounce()
 
     workflow.viewState = 'generating-prd'
-    workflow.prdContent = '# 半成品'
     await advanceDebounce()
     vi.mocked(solutionApi.updateSolution).mockClear()
 
@@ -249,15 +267,15 @@ describe('生成期间也保存', () => {
     workflow.activeJobId = null
     workflow.activeJobKind = null
     workflow.viewState = 'review-prd'
-    workflow.prdContent = '# 完整 PRD'
     await advanceDebounce()
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
     expect(payload?.stage).toBe('review-prd')
-    expect(payload?.data).toContain('完整 PRD')
     // 任务已终态，指针不再留在快照里
     expect(payload?.data).toContain('"activeJobId":null')
+    // 正文已不在快照里：它由后端 `documents` 表持有，前端只在需要时按方案 id 取回
+    expect(payload?.data).not.toContain('prdContent')
   })
 })
 
@@ -477,7 +495,7 @@ describe('列表维护', () => {
 // ============================================================================
 
 describe('openSolution', () => {
-  it('拉详情、校验快照并回填 workflow', async () => {
+  it('拉详情、校验快照并回填 workflow，同时按方案 id 拉回产物正文', async () => {
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(8),
       data: JSON.stringify({
@@ -492,18 +510,20 @@ describe('openSolution', () => {
         },
         messages: [],
         conversationId: '',
-        prdContent: '# PRD',
-        apiDocsContent: '',
-        promptsContent: '',
       }),
     })
+    // 正文不在快照里，要单独从后端取
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      { kind: 'prd', content: '# PRD', runSummary: null, updatedAt: '' },
+    ])
 
     const opened = await solutions.openSolution(8)
 
     expect(opened).toBe(true)
     expect(solutions.currentId).toBe(8)
     expect(workflow.viewState).toBe('review-prd')
-    expect(workflow.prdContent).toBe('# PRD')
+    expect(documentApi.fetchDocuments).toHaveBeenCalledWith(8)
+    expect(documents.contents.prd).toBe('# PRD')
   })
 
   it('快照落在生成中时降级到待确认状态', async () => {
@@ -515,9 +535,6 @@ describe('openSolution', () => {
         summary: null,
         messages: [],
         conversationId: '',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
       }),
     })
 
@@ -568,9 +585,6 @@ describe('openSolution', () => {
         summary: null,
         messages: [],
         conversationId: '',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
       }),
     })
     await solutions.openSolution(8)
@@ -595,9 +609,6 @@ describe('openSolution', () => {
         },
         messages: [],
         conversationId: '',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
       }),
     })
 
