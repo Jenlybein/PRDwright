@@ -93,6 +93,23 @@ def test_opening_forbids_dumping_the_whole_question_list() -> None:
         assert "不要把所有" in profile.opening
 
 
+def test_questions_must_come_with_a_reference_frame() -> None:
+    """提问必须带引导：先给「可判断的参照」，再让用户取舍。
+
+    这条口径来自一次真实体验反馈——首轮把「产品的核心功能有哪些？」原样抛回给用户，读起来像在填表：
+    用户得从零组织一份清单，而这正是他找 AI 的原因。带参照的提问把用户要做的事从「凭空列举」降级成
+    「在摆好的清单上增删」，回答质量也随之提高。
+
+    规则写在共享常量里，所以两个档案一起生效；开场白是对话里更靠后、更具体的那条指令，
+    必须在它里面也写明（否则会像历史上的上限口径一样被盖过去）。
+    """
+    assert "提问要带引导" in CLARIFICATION_QUESTION_RULE
+    assert "从零列举" in CLARIFICATION_QUESTION_RULE
+    for key, profile in CONVERSATION_PROFILES.items():
+        assert "带一点引导" in profile.opening, key
+        assert "从零列举" in profile.opening, key
+
+
 def test_opening_fields_match_the_placeholders() -> None:
     """开场白的占位符声明与模板必须**一一对应**。
 
