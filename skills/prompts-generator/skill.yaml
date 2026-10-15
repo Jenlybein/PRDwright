@@ -1,0 +1,48 @@
+# prompts-generator 技能包元数据
+# 与 SKILL.md 的 frontmatter 保持一致；SKILL.md 负责执行流程，本文件负责声明式描述。
+
+name: prompts-generator
+version: 0.1.0
+description: >-
+  根据 PRD 产出一套可直接使用的 AI 提示词文档（Prompt 文档），与产品真实业务场景绑定。
+  适用于提示词套件生成、提示词库初始化与团队提示词规范统一。
+
+# 本技能包服务于提示词套件产物。取值与后端任务类型 `kind` 一致（prd / api_docs / prompts）。
+# 生成管线按这个字段自动找到自己该用的技能包，**所以新增一个技能包只需要加一个目录**——
+# 不必回头改 Python（见 `services/skill_registry.py`）。
+applies_to:
+  - prompts
+
+entry: SKILL.md
+agent_created: true
+
+tags:
+  - prompt
+  - llm
+  - documentation
+
+# 输入：PRD 正文，由上游生成链路提供。
+inputs:
+  required:
+    - prd_content
+  optional: []
+
+# 输出产物
+outputs:
+  - path: "{{output_dir}}/{{product_name}}-PROMPTS.md"
+    description: 提示词套件正文，结构依据 references/prompts-guide.md 的产出要求。
+
+# 生成管线需要注入的资源。`key` 是程序取用时的语义键（必填，改它等于改契约）；
+# `purpose` / `load_at` 是给人读的说明。**列在这里的每一项都视为必需**：
+# 缺任何一个都意味着技能包不完整，生成会退回内置提示词，并在启动自检、
+# `/health` 与本次生成的回执上如实报出来，不会静默发生。
+references:
+  - key: prompts_guide
+    path: references/prompts-guide.md
+    purpose: 提示词套件的产出要求（设计原则、清单结构、变量约定、调优建议），生成时作为用户消息模板。
+    load_at: [render-sections]
+
+# 工作流阶段，与 SKILL.md 的阶段一一对应
+workflow:
+  - id: render-sections
+    description: 按 prompts-guide.md 的产出要求，从 PRD 提炼并写出提示词套件。

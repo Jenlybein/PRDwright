@@ -55,7 +55,7 @@ async def get_questions() -> schemas.QuestionsConfig:
 
 
 # ============================================================================
-# 结构化摘要回填 & 接口规范检索（一次性 JSON 接口，非流式）
+# 结构化摘要回填（一次性 JSON 接口，非流式）
 # ============================================================================
 
 
@@ -90,37 +90,6 @@ async def sync_summary_from_conversation(
         ) from exc
 
     return schemas.SummarySyncResponse(summary=updated, changed=updated != payload.summary)
-
-
-@router.post(
-    "/retrieve-api-docs-rag",
-    response_model=schemas.ApiDocsRagResponse,
-    summary="检索与 PRD 相关的接口规范与历史示例（RAG）",
-)
-async def retrieve_api_docs_rag(
-    payload: schemas.ApiDocsRagRequest,
-) -> schemas.ApiDocsRagResponse:
-    """在团队接口规范库里检索与当前 PRD 相关的规范条文与历史接口示例。
-
-    前端拿到命中列表后展示给用户确认，确认的条目再随
-    `/generate-api-docs-stream` 下发，作为生成接口文档时的对齐依据。
-    """
-    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
-    try:
-        hits = await document_service.retrieve_api_docs_rag_hits(
-            prd_content=payload.prd_content,
-            history=history,
-            limit=payload.limit,
-        )
-    except Exception as exc:  # noqa: BLE001 - 检索异常统一转成 500
-        raise AppError(
-            ErrorCode.INTERNAL_ERROR,
-            f"接口规范检索失败：{exc}",
-        ) from exc
-
-    return schemas.ApiDocsRagResponse(
-        hits=[schemas.RagHit.model_validate(hit) for hit in hits]
-    )
 
 
 @router.post("/start-stream", summary="提交问卷并开启会话（SSE 流式返回）")
@@ -227,12 +196,11 @@ async def generate_api_docs_stream(
 ) -> StreamingResponse:
     """根据 PRD 正文流式返回接口文档。
 
-    `rag_hits` 为用户在前端确认过的检索命中（团队接口规范 / 历史接口示例），
-    会作为「参考规范」拼进提示词，要求模型对齐团队既有约定。
+    团队接口规范（统一响应结构、错误码、分页、鉴权等）由 `api-docs-generator` 技能包
+    整段注入提示词，要求模型按团队约定对齐——不再做「按 PRD 关键词检索挑几条」的 RAG。
     """
     events = document_service.generate_api_docs_stream(
         prd_content=payload.prd_content,
-        rag_hits=[hit.model_dump() for hit in payload.rag_hits] or None,
     )
     return sse_response(events)
 

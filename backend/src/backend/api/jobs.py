@@ -72,14 +72,13 @@ def _requirements_text(payload: schemas.JobCreateRequest) -> str:
 
 
 def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
-    """把请求体摊平成 `job_service` 需要的生成参数（history / rag_hits 为空时置 None）。"""
+    """把请求体摊平成 `job_service` 需要的生成参数（history 为空时置 None）。"""
     return {
         "summary": payload.summary,
         "requirements": payload.requirements,
         "product_name": payload.product_name,
         "history": [message.model_dump() for message in payload.history] or None,
         "prd_content": payload.prd_content,
-        "rag_hits": [hit.model_dump() for hit in payload.rag_hits] or None,
         "document": payload.document,
         "instruction": payload.instruction,
     }

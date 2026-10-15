@@ -95,6 +95,7 @@ dependencies = [
     { name = "langchain-openai" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -111,6 +112,7 @@ requires-dist = [
     { name = "langchain-openai", specifier = ">=1.6.7" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [package.metadata.requires-dev]

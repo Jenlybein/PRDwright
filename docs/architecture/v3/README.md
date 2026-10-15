@@ -14,9 +14,11 @@
 
 两份怎么看：**先看 `ARCHITECTURE.md` 了解 v3 要建成什么样**，再看 `roadmap.md` 排期；
 Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节）随 R1-T5 落地，
-技能资产与日志体检（ADR-017 / R2-T7）也已落地，**下一步是 RAG 资产登记（R2-T8）**——
-它是 R3 Docker 打包的前置。注意 R1-T2 断点续传已裁决延后、自动切换供应商已裁决不做（ADR-016），
-动手前重点读第 4.2 / 4.6 节，实施状态以 `roadmap.md` 第八节为准。
+技能资产热重载与日志体检（ADR-017 / ADR-018）随 R2-T6 / T7 落地，
+**R2-T9「技能知识层统一」（ADR-019 / ADR-020）已落地**：技能注册表 + 三个技能包就位，
+14 条接口规范与提示词规范全部迁入技能包并由生成线全量注入，前端 RAG 确认页与本地词法检索整条下线。注意 R1-T2 断点续传已裁决延后、
+自动切换供应商已裁决不做（ADR-016），动手前重点读第 4.2 / 4.4 / 4.6 节，
+实施状态以 `roadmap.md` 第八节为准。
 
 ## 版本 ↔ 任务对照
 
@@ -25,7 +27,7 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 版本阶段 | 任务阶段 | 目标 |
 | --- | --- | --- |
 | v3.0 | R1 | 生成可靠性：生成 Job 中间态 + 成本计量与预算 / **单次调用自愈**（超时 + 有限重试）/ 断点续传 |
-| v3.1 | R2 | 技能资产加固（热重载 + fail-fast）✅、可观测性基线 ✅、RAG 资产登记 |
+| v3.1 | R2 | 技能资产加固（热重载 + fail-fast）✅、可观测性基线 ✅、**技能知识层统一 / RAG 下线 ✅**（原「RAG 资产登记」被它吸收） |
 | v3.2 | R3 | Docker 化、生产加固（Cookie Secure / 邀请码轮换）、部署态隔离验证 |
 
 ## 已拍板的三件事（前两件随 R1-T0 落地，第三件随 T4 决策）
@@ -56,13 +58,15 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 
 > 结构化日志与 `/health` 扩展已随 **R2-T7** 交付（见下一节）；其余（事后计量、`request_id` 贯通、事前预算）随 R1-T5 全部交付。
 
-## R2-T6 / R2-T7 落地点（2026-10-15）
+## R2-T6 / R2-T7 / R2-T9-1 落地点（2026-10-15）
 
 | 议题 | 落定做法 | 位置 |
 | --- | --- | --- |
-| 技能资源怎么缓存 | **按文件戳**（修改时间 + 大小）比对，改模板下一次生成即生效、不必重启；只有读成功才写缓存，文件消失时连缓存条目一起丢（ADR-017） | `services/prd_skill.py` |
-| 「用了技能包还是兜底」怎么看 | 每次 PRD 生成把 `SkillRef{name, version, fingerprint}` 写进 `run_summary.injected_skills`；为空即表示退回了内置提示词，前端据此显示告警 | `core/contracts.py` + `components/stages/ReviewStage.vue` |
-| 缺失要不要拦住启动 | `.env` 的 `PRDWRIGHT_SKILLS_STRICT`（默认 false）：本地只告警，部署设 true 则缺失即中止启动 | `core/config.py` + `main.py::lifespan` |
+| 技能资源怎么缓存 | **按文件戳**（修改时间 + 大小）比对，改模板下一次生成即生效、不必重启；只有读成功才写缓存，文件消失时连缓存条目一起丢（ADR-017）。R2-T9 起这套缓存由注册表统一提供 | `services/skill_registry.py` |
+| 「用了技能包还是兜底」怎么看 | 每次生成把 `SkillRef{name, version, fingerprint}` 写进 `run_summary.injected_skills`；为空即表示退回了内置提示词，前端据此显示告警 | `core/contracts.py` + `components/stages/ReviewStage.vue` |
+| 缺失要不要拦住启动 | `.env` 的 `PRDWRIGHT_SKILLS_STRICT`（默认 false）：本地只告警，部署设 true 则**任何问题**（元数据损坏 / 资源缺失 / 多包抢同一产物）即中止启动 | `core/config.py` + `main.py::lifespan` |
+| **哪个产物用哪个技能包** | 技能包在 `skill.yaml` 里用 `applies_to` 自述，程序扫 `<skills 根>/*/skill.yaml` 建索引——**加技能包 = 加目录**（ADR-019） | `services/skill_registry.py` |
+| **包里有哪些必需资源** | 同一份 `skill.yaml` 的 `references` 段声明，`key` 是生成管线取用的语义键；不再有第二份硬编码清单 | `services/skill_registry.py` + `services/prd_skill.py` |
 | 日志怎么带上请求号 | 格式化器从上下文变量**现取**，业务代码一行不改；`extra=` 挂的业务字段按「排除标准属性」的规则自动带出（ADR-018） | `core/logging_setup.py` |
 | 访问日志记在哪 | 记在最外层 `RequestIdMiddleware` 里，**被认证拦下的 401 同样留痕**；`uvicorn.access` 的级别抬到 WARNING，避免同一次请求出两行（一行有号一行没号） | `api/deps.py` |
-| 体检报什么 | 数据库 / 供应商 / 技能包三项分开报，`status` 取 `ok` / `degraded` 且**恒返回 200**；供应商一项只校验配置就位、**不发真实调用**（不假装验过） | `api/health.py` |
+| 体检报什么 | 数据库 / 供应商 / **技能资产**三项分开报，`status` 取 `ok` / `degraded` 且**恒返回 200**；供应商一项只校验配置就位、**不发真实调用**（不假装验过）；技能资产一项按注册表逐个报技能包身份，**没有写死的名单** | `api/health.py` |

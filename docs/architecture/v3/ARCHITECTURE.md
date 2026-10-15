@@ -31,7 +31,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | **A. 生成运行时（Job）** | 优化二 + R1-T2 / T4 | 一次生成 = 一个 Job，后台执行与浏览器连接解耦；SSE 订阅 + 刷新重连；已完成章节可续；**单次调用的超时与有限重试自愈（T4 的本期形态）** |
 | **B. 观测与 Token 预算** | 优化一 + R1-T5 | LLM 调用包装层：每步 step / tokens / duration；`request_id` 串联；调用前估算并做预算管控 |
 | **C. 文档生命周期** | 优化三 | `documents` + `document_versions` 两条后端自有表；三份产物各有独立版本链；Job 完成落版本 |
-| **D. Skill 知识层统一** | 优化五 + R2-T6 | `config/skills.yaml` 注册表 + 三个 skill 包；三条产线共用一条注入管线；注入内容可追溯 |
+| **D. Skill 知识层统一** | 优化五 + R2-T6 | **技能注册表（目录即注册，ADR-019）** + 三个技能包；三条产线共用一条注入管线；注入内容可追溯 |
 | **E. 交付质量** | 优化六 | 澄清收口判断、`quality_gate` 结构校验、需求基线确认与下游追溯、交付包 |
 
 ### 本期不做（明确推迟，不是遗漏）
@@ -108,9 +108,9 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | 关注点 | 设计 |
 | --- | --- |
 | 观测（事后） | 每次 HTTP 请求一个 `request_id`（ASGI 中间件注入）；每次 LLM 调用打 `step` 标签（`prd_writer` / `prd_review` / `chat_continue` …）；记录 input / output tokens、duration_ms |
-| 汇总 | 生成结束发 `run_summary`，含总 tokens、总耗时、调用次数、`failed_calls`、技能身份 `injected_skills`（R2-T6 起为 `SkillRef{name, version, fingerprint}`，PRD 任务才会填） |
+| 汇总 | 生成结束发 `run_summary`，含总 tokens、总耗时、调用次数、`failed_calls`、技能身份 `injected_skills`（R2-T6 起为 `SkillRef{name, version, fingerprint}`）。**哪些任务会填由技能包自己声明**（R2-T9 起）：注册表里该产物有技能包就有值；没有、或技能包不完整则为空列表 |
 | 日志 | 结构化输出（`LOG_FORMAT` 取 `text` 人读 / `json` 采集），**每条自动带 `request_id`**——业务代码只写 `logger.info(...)`，加字段只发生在格式化器一处；`extra=` 挂的业务字段自动带出 |
-| 体检 | `/health` 三项分开报：数据库连通性、供应商配置就位、技能包文件在位；`status` 取 `ok` / `degraded` |
+| 体检 | `/health` 三项分开报：数据库连通性、供应商配置就位、**技能资产**（R2-T9 起按注册表逐个报技能包身份与其服务的产物，并汇总「元数据损坏 / 资源缺失 / 多包抢同一产物」三类问题）；`status` 取 `ok` / `degraded` |
 | 预算（事前） | **两层上限**：物理顶来自模型注册表（按 provider 建模，不绑具体厂商），业务顶来自 `.env`（各 step 独立 cap，故意小于物理顶，让用户早点收束）；取两者较小值为有效预算 |
 | 估算 | 发送前按字符启发式估算 messages 大小（不引入 tiktoken 依赖）；接近阈值 warn 并回传 `context_usage`，超阈值 reject 并给出中文说明，**不消耗这次调用** |
 | 落点 | 计量累加只写在 `stream_reply` 这一处（v2 已把流式收敛到单一出口，这里正是回报） |
@@ -139,11 +139,13 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
   访问日志记在 `RequestIdMiddleware` 里（它已是最外层），因此**被认证拦下的 401 同样留痕**——
   排查「用户说打不开」时，第一个要确认的正是「请求到底有没有到过后端」。
   `uvicorn.access` 的级别抬到 WARNING：同一次请求出两行（一行有号、一行没号）只会让人多看一眼。
-- **体检侧（R2-T7）**：`api/health.py` 分三项报「数据库 / 供应商 / 技能包」，`status` 取 `ok` 或
-  `degraded`，**恒返回 200**——技能包缺失时服务仍可降级运行，用状态码表达失败会让编排器
+- **体检侧（R2-T7）**：`api/health.py` 分三项报「数据库 / 供应商 / 技能资产」，`status` 取 `ok` 或
+  `degraded`，**恒返回 200**——技能资产有缺时服务仍可降级运行，用状态码表达失败会让编排器
   踢掉还能用的容器。供应商一项**只校验配置就位、不发真实调用**（探针会高频触发，按次烧额度
   不合适），`detail` 里如实写明这一点，不假装验过。不报「备用供应商」是因为自动 failover
   已随 ADR-016 取消，预警没有了对象。
+  技能资产一项**不含任何写死的技能包名单**（R2-T9 起）：报出哪些包、各自服务什么产物，全部
+  来自扫描结果，新加技能包不必回来改体检。
 
 ### 4.3 文档生命周期
 
@@ -160,24 +162,42 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 
 ### 4.4 Skill 知识层统一
 
-现状已经比源文档描述的更进一步：`skills/prd-generator/` 已有 `skill.yaml` 契约，
-`prd_skill.py` 已提供 `resolve_skill_dir(skill_name)` 与 `load_skill_artifact(skill_name, path)`（按名字解析、lru 缓存）。
-**缺的是注册表和另外两个包**，不是「从硬编码里解放出来」。
+**第一步（R2-T9-1）已落地**：产物归属与必需资源清单不再写死在 Python 里，改由技能包在自己的
+`skill.yaml` 中声明，程序扫描建索引（ADR-019）：
+
+| 声明 | 含义 |
+| --- | --- |
+| `applies_to: [prd]` | 本技能包服务于哪些产物（取值 = 任务类型 `kind`） |
+| `references[].key` / `.path` | 生成管线要注入的资源，以及它对外暴露的语义键 |
+
+于是**「加一个技能包」等于「加一个目录」**：`services/skill_registry.py` 扫
+`<skills 根目录>/*/skill.yaml` 建索引，`job_service` 不再有任何种类判断，`/health` 与启动日志
+自动跟着变。`prd_skill.py` 随之瘦身——只留 PRD 专属的材料格式化与提示词拼接，而定位 / 加载 /
+指纹 / 自检这些**所有技能包共用的能力**整体搬进注册表。
 
 | 关注点 | 设计 |
 | --- | --- |
-| 注册表 | `config/skills.yaml`：声明 prd / api_docs / prompts 各绑哪些 skill 包、加载哪些 references |
-| 包 | 保留 `prd-generator`；新建 `api-docs-generator`（迁入 `core/api_doc_knowledge.json` 的接口规范）、`prompts-generator`（从 `prompts.py` 迁出提示词套件的生成规范） |
-| 加载 | `skill_loader` 作为**唯一读 skill 的入口**；三条产线都走它拼 prompt |
-| 可追溯 | `run_summary.injected_skills` 记录本次注入了哪些规范文件（R2-T6 起该字段不再是占位：填满 `SkillRef{name, version, fingerprint}`，指纹随模板内容变化，ADR-017） |
+| 注册表 | **不加中心文件**：技能包自述 + 扫描建索引（ADR-019）。中心登记表意味着「加目录 + 改文件」两处同步，而那正是要消灭的东西 |
+| 包 | 保留 `prd-generator`；新建 `api-docs-generator`（迁入 `core/api_doc_knowledge.json` 的接口规范）、`prompts-generator`（从 `prompts.py` 迁出提示词套件的生成规范）——各自由自己的 `applies_to` 认领产物 |
+| 加载 | `skill_registry` 是**唯一读技能资产的入口**；三条产线都经它取资源拼 prompt |
+| 缓存 | 资源内容与元数据都按文件戳（修改时间 + 大小）失效；**资源存在性判定不进缓存**——删文件不会改 `skill.yaml`，缓存它就会出现「文件已经没了还在报一切正常」 |
+| 可追溯 | `run_summary.injected_skills` 记录 `SkillRef{name, version, fingerprint}`（ADR-017），指纹随内容变化，改一个字即变 |
 
-**关于 RAG 闸门（与源文档分歧最大的一处）**：源文档要求「删除 RAG、删掉前端确认页」。
-本项目不这么做——闸门 2 是 ADR-011 明确的设计决策，它的价值是**让用户知道模型参考了什么**（可审计），
-真正的摩擦来自「必须点确认才能继续」。裁决如下：
+**关于 RAG 闸门（与源文档分歧最大的一处）**：源文档要求「删除 RAG、删掉前端确认页」。R2 立项时
+曾裁决保留闸门 2、只把阻塞式确认降级为只读展示；**该裁决已被 ADR-020 改判为整条移除**，因为
+原来的取舍把两件不同的事混在了一起：
 
-- 接口规范收进 `skills/api-docs-generator`，注入方式统一走 loader（**采纳源文档的工程目标**）；
-- 闸门从「阻塞式确认」降级为「只读展示」：生成前展示本次将注入哪些规范、命中了哪几条，用户可直接继续（**保留可见性，去掉阻塞**）；
-- 本地词法检索（`core/api_doc_knowledge.json`，TF-IDF）保留作为检索实现，将来换向量只需替换检索函数。
+- 闸门 1（摘要 Diff）确认的是**用户输入**——用户确实需要看见自己的话被理解成了什么，因此不动；
+- 闸门 2 注入的是**固定不变的团队规范**（14 条约 6000 字），不是每次都要重审的临时素材。
+  对静态资产要求逐条勾选不是「可见性」而是多余的摩擦；真正的可见性诉求由回执上的技能身份承担，
+  它更完整且不阻塞。
+
+**全量注入取代「挑前 5 条」**：规范总量远低于预算上限（12 万），而检索挑漏一条时，那次生成的
+接口文档就少了对齐依据、**且从输出上看不出来**。检索解决的本来是「候选集远超上下文预算」，
+这里条件不成立——将来规范真长到装不下，正确做法是重新引入检索，而不是怀念一条只挑 5 条、
+还不告诉人挑了哪 5 条的实现。
+
+落地顺序见 `./roadmap.md` 的 R2-T9：T9-2 迁规范、T9-3 换管线并删检索、T9-4 拆前端门控、T9-5 收口。
 
 ### 4.5 交付质量
 
@@ -270,8 +290,9 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 `POST /api/documents/{kind}/checkpoint`（保存为新版本）、`POST /api/document-versions/{id}/restore`（恢复为新的一版）。
 
 **run_summary**：`{ total_calls, failed_calls, prompt_tokens, completion_tokens, duration_ms, steps[], injected_skills[], warnings[], provider, model, request_id }`。
-`injected_skills` 的元素是 `SkillRef{ name, version, fingerprint }`（ADR-017）；只有 PRD 生成不为空，
-为空数组意味着这次走的是内置兜底提示词——前端会把这件事说给用户听，而不是静默过去。
+`injected_skills` 的元素是 `SkillRef{ name, version, fingerprint }`（ADR-017）。它是否为空由
+**技能包的声明**决定（R2-T9）：该产物在注册表里有对应技能包、且它完整，就有值；否则为空数组，
+意味着这次走的是内置兜底提示词——前端会把这件事说给用户听，而不是静默过去。
 
 **quality_gate**：`{ passed, issues[], checked_at, rules_version }`，随版本 metadata 落盘。
 
@@ -306,9 +327,9 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 | 5 | 优化二：「流式续传行不通，因为 LLM 无状态」 | token 级续传确实做不到；但**章节级续传可以**，且 `part` 事件已为此准备 | **纠正**：两者解决不同问题——Job 管「连接断了」，续传管「重跑浪费」，不冲突 |
 | 6 | 优化三：三字符串覆盖即丢失 | 属实（`prdContent` / `apiDocsContent` / `promptsContent`） | **采纳**，版本表另建以守住 ADR-009 |
 | 7 | 优化四：三 Tab 改成路径 chooser | `EntryStage` + `isChoosingEntry` 已在 v2 落地；`entryMode` 取值是 `prd-quick` / `prompt-debug` | **整篇作废**（源文档里的 `structured` / `prd` / `prompts` 三值与本仓库不符） |
-| 8 | 优化五：skill 路径写死、只认 `prd-generator` | 已有 `skill.yaml` + `resolve_skill_dir(name)` + `load_skill_artifact(name, path)` | **改**：基础设施已就位，缺的是注册表与另外两个包，工作量比源文档估的小 |
-| 9 | 优化五：接口规范在 `backend/knowledge/api_docs/` | 实际是 `core/api_doc_knowledge.json`，TF-IDF 词法检索 | **改**（路径与实现均按实际） |
-| 10 | 优化五：删除 RAG、删掉前端确认页 | 闸门 2 是 ADR-011 的核心决策，v2 才落地 | **否决下线**：改为降级为只读展示；统一注入管线的目标保留 |
+| 8 | 优化五：skill 路径写死、只认 `prd-generator` | `skill.yaml` 契约已在；R2-T9-1 起注册表就位，硬编码种类判断已消除 | **采纳并已完成第一步**：产物归属与资源清单改由技能包自述（ADR-019），**加技能包 = 加目录** |
+| 9 | 优化五：接口规范在 `backend/knowledge/api_docs/` | 实际是 `core/api_doc_knowledge.json`，TF-IDF 词法检索 | **改**（路径与实现均按实际）；R2-T9-2 会把它迁成 `skills/api-docs-generator` 下的 md |
+| 10 | 优化五：删除 RAG、删掉前端确认页 | 闸门 2 是 ADR-011 的核心决策，v2 才落地 | **改判为采纳**（ADR-020）：原裁决「降级为只读展示」把「用户输入的确认」与「静态资产的注入」混为一谈——闸门 1 保留不动，闸门 2 整条移除 |
 | 11 | 优化六：四层质量门禁 | 方向正确；澄清收口与 Review 已有部分基础（闸门 1 摘要 Diff、Review Agent） | **采纳并去重**，不重复造已有的判断 |
 
 另有一处与 `./roadmap.md` 的冲突需同步：roadmap 的 R1 写着「不做异步任务队列（当前同步流式体感更好）」，

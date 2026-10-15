@@ -57,7 +57,6 @@ const STAGE_LABELS: Record<string, string> = {
   'summary-diff': '确认摘要',
   'generating-prd': '生成 PRD',
   'review-prd': '已出 PRD',
-  'rag-preview': '确认规范',
   'generating-api-docs': '生成接口文档',
   'review-api-docs': '已出接口文档',
   'generating-prompts': '生成提示词',

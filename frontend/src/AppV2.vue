@@ -5,7 +5,6 @@ import { useRoute, useRouter } from 'vue-router'
 
 import AuthDialog from '@/components/AuthDialog.vue'
 import AppBadge from '@/components/ui/AppBadge.vue'
-import RagResultPanel from '@/components/RagResultPanel.vue'
 import RequirementsForm from '@/components/RequirementsForm.vue'
 import SolutionSidebar from '@/components/SolutionSidebar.vue'
 import SummaryDiffPanel from '@/components/SummaryDiffPanel.vue'
@@ -38,8 +37,8 @@ import type { EntryMode, RequirementsSummary, StepId } from '@/types'
  * 三条入口在「生成 → 审阅 → 下载」这段完全共用，模式的差异（进度条显示哪几步、
  * 完成需要哪几份文档、返回按钮回到哪里）由 `utils/workflow.ts` 与 store 推导。
  *
- * 完整流程另有两道**确认闸门**：生成 PRD 前先确认「对话补充信息回填到摘要」的 Diff；
- * 生成接口文档前先确认「检索到的团队接口规范」。这两道闸门只属于完整流程。
+ * 完整流程有一道**确认闸门**：生成 PRD 前先确认「对话补充信息回填到摘要」的 Diff。
+ * 这道闸门只属于完整流程。
  *
  * **未登录不允许创建任务**：选择任意入口前都会先检查登录态，拦下时弹登录窗并停在入口页；
  * 登录成功后只给一句提示，不自动进入——用户可能已经忘了刚才想选哪个入口。
@@ -341,9 +340,6 @@ const {
   summaryChanges,
   summarySyncing,
   summarySyncError,
-  ragHits,
-  ragRetrieving,
-  ragError,
   goTo,
   onSaveDocument,
   onAiOptimize,
@@ -358,8 +354,6 @@ const {
   handleGeneratePrd,
   confirmSummaryDiff,
   rejectSummaryDiff,
-  confirmRag,
-  cancelRag,
   reconnectJob,
   reset: resetPipeline,
 } = useDocumentPipeline({ onNotice: flashSavedTip })
@@ -514,16 +508,6 @@ function handleStepClick(stepId: StepId): void {
         :error="summarySyncError"
         @confirm="confirmSummaryDiff"
         @reject="rejectSummaryDiff"
-      />
-
-      <!-- ============ 确认闸门 2：接口规范检索结果（生成接口文档之前） ============ -->
-      <RagResultPanel
-        v-else-if="viewState === 'rag-preview'"
-        :hits="ragHits"
-        :loading="ragRetrieving"
-        :error="ragError"
-        @confirm="confirmRag"
-        @cancel="cancelRag"
       />
 
       <!-- ============ 入口 B：PRD 快捷（一段话 → 直接生成 PRD） ============ -->

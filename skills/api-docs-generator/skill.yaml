@@ -1,0 +1,49 @@
+# api-docs-generator 技能包元数据
+# 与 SKILL.md 的 frontmatter 保持一致；SKILL.md 负责执行流程，本文件负责声明式描述。
+
+name: api-docs-generator
+version: 0.1.0
+description: >-
+  根据 PRD 产出配套的 API 接口文档，并强制对齐团队既有的接口规范与历史接口示例。
+  适用于接口文档生成、接口评审与接口风格统一。
+
+# 本技能包服务于接口文档产物。取值与后端任务类型 `kind` 一致（prd / api_docs / prompts）。
+# 生成管线按这个字段自动找到自己该用的技能包，**所以新增一个技能包只需要加一个目录**——
+# 不必回头改 Python（见 `services/skill_registry.py`）。
+applies_to:
+  - api_docs
+
+entry: SKILL.md
+agent_created: true
+
+tags:
+  - api
+  - openapi
+  - interface
+  - documentation
+
+# 输入：PRD 正文，由上游生成链路提供。
+inputs:
+  required:
+    - prd_content
+  optional: []
+
+# 输出产物
+outputs:
+  - path: "{{output_dir}}/{{product_name}}-API.md"
+    description: 接口文档正文，依据 references/api-specs.md 的团队规范对齐风格与结构。
+
+# 生成管线需要注入的资源。`key` 是程序取用时的语义键（必填，改它等于改契约）；
+# `purpose` / `load_at` 是给人读的说明。**列在这里的每一项都视为必需**：
+# 缺任何一个都意味着技能包不完整，生成会退回内置提示词，并在启动自检、
+# `/health` 与本次生成的回执上如实报出来，不会静默发生。
+references:
+  - key: api_specs
+    path: references/api-specs.md
+    purpose: 团队接口规范与历史接口示例，生成时整段注入提示词，要求模型按团队约定对齐。
+    load_at: [render-sections]
+
+# 工作流阶段，与 SKILL.md 的阶段一一对应
+workflow:
+  - id: render-sections
+    description: 按团队规范设计接口，输出概述、错误码、接口列表、数据模型与附录。

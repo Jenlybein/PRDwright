@@ -7,7 +7,6 @@ import http, {
   generatePrdFromSummaryStream,
   onUnauthorized,
   readJobStream,
-  retrieveApiDocsRag,
   UnauthorizedError,
 } from '../services/api'
 import { ApiError } from '../services/errors'
@@ -328,15 +327,6 @@ describe('登录凭据与未登录处理', () => {
     expect(messages).toEqual(['请先登录后再使用该功能'])
   })
 
-  it('业务接口 401 时抛 UnauthorizedError，并把后端文案原样交给上层', async () => {
-    const messages: string[] = []
-    onUnauthorized((message) => messages.push(message))
-    http.defaults.adapter = rejectWith401('请先登录后再使用该功能')
-
-    await expect(retrieveApiDocsRag({ prdContent: 'x' })).rejects.toBeInstanceOf(UnauthorizedError)
-    expect(messages).toEqual(['请先登录后再使用该功能'])
-  })
-
   it('认证接口自身的 401 不触发登录弹窗（密码错误不是「未登录」）', async () => {
     const messages: string[] = []
     onUnauthorized((message) => messages.push(message))
@@ -369,7 +359,6 @@ describe('生成任务接口（jobs）', () => {
       kind: 'api-docs',
       solutionId: 3,
       prdContent: '# PRD',
-      ragHits: [],
     })
 
     expect(post).toHaveBeenCalledTimes(1)

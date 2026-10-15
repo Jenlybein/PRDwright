@@ -40,10 +40,6 @@ describe('阶段判定', () => {
       viewState: 'chatting',
       downgrade: 'pending',
     })
-    expect(resolveRestoredPhase('rag-preview')).toEqual({
-      viewState: 'review-prd',
-      downgrade: 'pending',
-    })
   })
 
   it('可直接恢复的阶段不降级，非法值回到入口页', () => {
@@ -100,7 +96,6 @@ describe('入口模式对进度与完成条件的影响', () => {
     // 快捷入口的「PRD」是它的第 1 步，而不是全局的第 3 步
     expect(stepIndexOf('prd-quick', 'prd-quick')).toBe(0)
     expect(stepIndexOf('review-api-docs', 'prd-quick')).toBe(1)
-    expect(stepIndexOf('rag-preview', 'prd-quick')).toBe(0)
     expect(stepIndexOf('review-prompts', 'prompt-debug')).toBe(0)
     expect(stepIndexOf('entry', null)).toBe(0)
     // 完整流程口径与全局一致
@@ -155,7 +150,6 @@ describe('进度条位置', () => {
     expect(stepIndexOf('form')).toBe(0)
     expect(stepIndexOf('chatting')).toBe(1)
     expect(stepIndexOf('summary-diff')).toBe(1)
-    expect(stepIndexOf('rag-preview')).toBe(2)
     expect(stepIndexOf('done')).toBe(4)
   })
 

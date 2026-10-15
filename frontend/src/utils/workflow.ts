@@ -30,7 +30,6 @@ export const VIEW_STATES: readonly ViewState[] = [
   'summary-diff',
   'generating-prd',
   'review-prd',
-  'rag-preview',
   'generating-api-docs',
   'review-api-docs',
   'generating-prompts',
@@ -93,8 +92,8 @@ export type DowngradeKind = 'generating' | 'pending'
  *
  * - `generating-*`：流式请求随页面销毁而中断，回退到对应的「待确认」，让用户看到
  *   已生成的结果并决定下一步。
- * - `summary-diff` / `rag-preview`：这两道确认闸门依赖内存里的一次性结果（Diff 与
- *   检索命中），刷新后无从恢复，回退到发起它们的步骤让用户重新发起。
+ * - `summary-diff`：这道确认闸门依赖内存里的一次性结果（Diff），刷新后无从恢复，
+ *   回退到发起它的步骤让用户重新发起。
  *
  * 两个录入页（`prd-quick` / `prompt-debug`）**不需要**降级：它们的内容落在 store 里
  * 并随会话快照一起持久化，刷新后原样还在。
@@ -106,7 +105,6 @@ export const STATE_DOWNGRADE: Partial<
   'generating-api-docs': { state: 'review-api-docs', kind: 'generating' },
   'generating-prompts': { state: 'review-prompts', kind: 'generating' },
   'summary-diff': { state: 'chatting', kind: 'pending' },
-  'rag-preview': { state: 'review-prd', kind: 'pending' },
 }
 
 /** 降级说明文案 */

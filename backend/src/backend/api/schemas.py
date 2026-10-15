@@ -79,43 +79,6 @@ class ConversationContinueRequest(BaseModel):
 # StreamEvent 已移至 core/contracts.py（见上方 re-export）。
 
 # ============================================================================
-# 接口文档检索增强（RAG）
-# ============================================================================
-
-
-class RagHit(BaseModel):
-    """一条检索命中（团队接口规范 / 历史接口示例）。"""
-
-    id: str = Field(default="", description="条目 ID")
-    source: str = Field(default="", description="来源，如「团队接口规范」「历史接口示例」")
-    title: str = Field(default="", description="条目标题")
-    content: str = Field(description="条目正文（规范条文或历史接口示例）")
-    tags: list[str] = Field(default_factory=list, description="标签，便于前端分组展示")
-    score: float = Field(default=0.0, description="相似度得分，越大越相关")
-    matched_terms: list[str] = Field(
-        default_factory=list,
-        description="命中的关键词，用于向用户解释「为什么检索到这条」",
-    )
-
-
-class ApiDocsRagRequest(BaseModel):
-    """接口文档检索请求。"""
-
-    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
-    history: list[MessageItem] = Field(
-        default_factory=list,
-        description="对话历史，作为检索查询的补充",
-    )
-    limit: int = Field(default=5, ge=1, le=20, description="返回条数上限")
-
-
-class ApiDocsRagResponse(BaseModel):
-    """接口文档检索响应。"""
-
-    hits: list[RagHit] = Field(default_factory=list, description="命中列表，按相关度降序")
-
-
-# ============================================================================
 # 文档流式生成（对应 document_service 的 *_stream 方法）
 # ============================================================================
 
@@ -170,13 +133,6 @@ class GenerateApiDocsStreamRequest(BaseModel):
     """生成接口文档的流式请求。"""
 
     prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
-    rag_hits: list[RagHit] = Field(
-        default_factory=list,
-        description=(
-            "用户确认后的检索命中（团队接口规范 / 历史接口示例）。"
-            "传入时作为「参考规范」参与生成，要求模型按团队约定对齐接口风格。"
-        ),
-    )
 
 
 class GeneratePromptsStreamRequest(BaseModel):
@@ -352,10 +308,6 @@ class JobCreateRequest(BaseModel):
     )
     # --- api_docs / prompts ---
     prd_content: str = Field(default="", description="PRD 正文（接口文档 / 提示词生成输入）")
-    rag_hits: list[RagHit] = Field(
-        default_factory=list,
-        description="用户确认后的检索命中（生成接口文档时的对齐依据）",
-    )
     # --- optimize ---
     document: str = Field(default="", description="待优化的原文档正文")
     instruction: str = Field(default="", description="用户的优化要求")

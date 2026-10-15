@@ -29,6 +29,8 @@ from backend.core.logging_setup import (  # noqa: PLC2701 - 断言要按标记�
 )
 from backend.core.request_context import reset_request_id, set_request_id
 
+from conftest import PRD_SKILL_ARTIFACTS, write_skill_package
+
 
 @pytest.fixture(autouse=True)
 def _clean_logging():
@@ -129,12 +131,12 @@ def test_health_flags_missing_api_key(make_client):
     assert body["checks"]["skills"]["ok"] is True
 
 
-def test_health_flags_missing_skill_assets(make_client, tmp_path):
-    """技能包不在位时要报「缺哪几个文件」，而不是让它在生成时静默降级。"""
+def test_health_flags_absent_skills_directory(make_client, tmp_path):
+    """skills 根目录整个不在位（部署漏打包）时要报出来，而不是让生成静默退回内置提示词。"""
     client = make_client(
         DEFAULT_LLM_PROVIDER="ark",
         ARK_API_KEY="test-key-not-real",
-        # 指到一个空目录：`resolve_skill_dir` 会去 `<该目录>/prd-generator` 找资源
+        # 指到一个不存在的目录：扫描结果为空，一个技能包也找不到
         PRDWRIGHT_SKILLS_DIR=str(tmp_path / "no-skills-here"),
     )
 
@@ -143,7 +145,53 @@ def test_health_flags_missing_skill_assets(make_client, tmp_path):
     assert body["status"] == "degraded"
     skills = body["checks"]["skills"]
     assert skills["ok"] is False
+    assert "未发现任何技能包" in skills["detail"]
+
+
+def test_health_reports_missing_skill_asset_by_name(make_client, tmp_path):
+    """资源缺了要报出缺的是哪个文件——照着自己补就行。"""
+    skills_root = tmp_path / "skills"
+    skill_dir = write_skill_package(skills_root, "prd-generator")
+    (skill_dir / PRD_SKILL_ARTIFACTS["writing_rules"]).unlink()
+
+    client = make_client(
+        DEFAULT_LLM_PROVIDER="ark",
+        ARK_API_KEY="test-key-not-real",
+        PRDWRIGHT_SKILLS_DIR=str(skills_root),
+    )
+
+    skills = client.get("/health").json()["checks"]["skills"]
+
+    assert skills["ok"] is False
     assert "缺少技能资源" in skills["detail"]
+    assert "writing-rules.md" in skills["detail"]
+
+
+def test_health_reports_skill_identity(make_client, tmp_path):
+    """齐备时报出加载了哪些包、各自服务哪些产物，并带上与回执同源的指纹。
+
+    与注册表相关的这一项不再是「只认 PRD 那一个包」：新技能包自己声明 `applies_to`
+    就会出现在这里，体检不必跟着改。
+    """
+    skills_root = tmp_path / "skills"
+    write_skill_package(skills_root, "prd-generator", version="0.4.0")
+
+    client = make_client(
+        DEFAULT_LLM_PROVIDER="ark",
+        ARK_API_KEY="test-key-not-real",
+        PRDWRIGHT_SKILLS_DIR=str(skills_root),
+    )
+
+    skills = client.get("/health").json()["checks"]["skills"]
+
+    assert skills["ok"] is True
+    assert len(skills["skills"]) == 1
+    entry = skills["skills"][0]
+    assert entry["name"] == "prd-generator"
+    assert entry["version"] == "0.4.0"
+    assert entry["applies_to"] == ["prd"]
+    # 指纹是 12 位十六进制，与回执上那个能直接对上
+    assert len(entry["fingerprint"]) == 12
 
 
 def test_health_flags_unavailable_database(isolated_db, monkeypatch, tmp_path):  # noqa: ARG001

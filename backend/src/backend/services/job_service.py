@@ -39,7 +39,7 @@ from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJ
 from backend.services import document_service
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import RunMeter, use_meter
-from backend.services.prd_skill import describe_skill
+from backend.services.skill_registry import describe_kind
 
 logger = logging.getLogger(__name__)
 
@@ -111,21 +111,26 @@ def create_job(
 
 
 def _resolve_skill_refs(kind: str) -> list[dict[str, Any]]:
-    """本次任务注入的技能包身份；只有 PRD 生成依赖技能包。
+    """本次任务注入的技能包身份：按产物类型去技能注册表里查。
 
-    技能包不在位时返回空列表——生成会降级到内置提示词，这件事必须能在回执上看得见，
-    所以这里既不填占位值也不抛异常让任务起不来（能否 fail-fast 由启动自检管，
-    见 `settings.skills_strict`）。
+    「哪个产物用哪个技能包」由技能包自己在 `skill.yaml` 的 `applies_to` 里声明，
+    这里**不再写死种类判断**——新加一个技能包不需要改这个函数（这正是注册表的意义）。
+
+    技能包没声明服务于该产物、不在位、元数据损坏或资源不齐时返回空列表——生成会降级
+    到内置提示词，这件事必须能在回执上看得见（债务 D8），所以这里既不填占位值也不抛异常
+    让任务起不来（能否 fail-fast 由启动自检管，见 `settings.skills_strict`）。
 
     读盘本身出意外（权限、编码）也按「没加载上」处理并留一条日志：它属于
     「该起的自检没拦住」，不让一次具体的生成请求无缘无故失败。
     """
-    if kind != "prd":
-        return []
     try:
-        described = describe_skill()
+        described = describe_kind(kind)
     except Exception:  # noqa: BLE001 - 自检类问题不该让生成任务起不来
-        logger.warning("读取 PRD 技能包身份信息失败，本次回执不记录技能版本", exc_info=True)
+        logger.warning(
+            "读取技能包身份信息失败，本次回执不记录技能版本",
+            extra={"event": "job.skill_ref_failed", "kind": kind},
+            exc_info=True,
+        )
         return []
     return [described] if described else []
 
@@ -511,7 +516,6 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
     if kind == "api_docs":
         return document_service.generate_api_docs_stream(
             prd_content=request.get("prd_content", "") or "",
-            rag_hits=request.get("rag_hits") or None,
         )
     if kind == "prompts":
         return document_service.generate_prompts_stream(

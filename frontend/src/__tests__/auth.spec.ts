@@ -27,7 +27,6 @@ vi.mock('../services/api', () => ({
   generatePromptsStream: vi.fn(),
   optimizeDocumentStream: vi.fn(),
   syncSummaryFromConversation: vi.fn(),
-  retrieveApiDocsRag: vi.fn(),
   // 生成任务接口：登录门禁用例不会触发，但整体 mock 一个模块时应列全，
   // 否则新增用例一旦走到任务链路，拿到的会是 `undefined` 而不是一个可断言的桩。
   createJob: vi.fn(),

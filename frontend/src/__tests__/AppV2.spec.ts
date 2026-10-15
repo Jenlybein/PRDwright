@@ -12,7 +12,6 @@ import { useAuthStore } from '../stores/auth'
 import { useWorkflowStore } from '../stores/workflow'
 import type {
   JobSnapshot,
-  RagHit,
   RequirementsSummary,
   StreamDocumentPart,
   StreamStageEvent,
@@ -46,7 +45,7 @@ const jobHarness = vi.hoisted(() => {
 
 /**
  * 编排层测试：把流式接口整体 mock 掉，专注验证「第一步换成结构化表单」后
- * 阶段流转、载荷映射、本地快照恢复，以及两道确认闸门（摘要 Diff / 规范检索）
+ * 阶段流转、载荷映射、本地快照恢复，以及摘要确认闸门
  * 是否按「先确认、后生成」的约定工作。
  */
 vi.mock('../services/api', () => ({
@@ -60,7 +59,6 @@ vi.mock('../services/api', () => ({
   fetchActiveJobs: vi.fn(async () => []),
   fetchJob: vi.fn(),
   syncSummaryFromConversation: vi.fn(),
-  retrieveApiDocsRag: vi.fn(),
   onUnauthorized: vi.fn(),
 }))
 
@@ -216,17 +214,6 @@ const SAMPLE_SUMMARY: RequirementsSummary = {
   mvp_features: [{ name: '问卷填写', description: '收集产品信息' }],
 }
 
-/** 一条检索命中 */
-const SAMPLE_HIT: RagHit = {
-  id: 'spec-pagination',
-  source: '团队接口规范',
-  title: '列表与分页规范',
-  content: '列表接口统一用 page / pageSize，响应带 total。',
-  tags: ['分页'],
-  score: 0.31,
-  matched_terms: ['分页', 'page'],
-}
-
 /**
  * 逐项填出与 `SAMPLE_SUMMARY` 完全一致的表单。
  * 不用「填充示例」按钮，是为了让字段映射断言有确定的期望值。
@@ -280,8 +267,6 @@ beforeEach(() => {
     summary,
     changed: false,
   }))
-  // 默认：没有检索到规范
-  vi.mocked(api.retrieveApiDocsRag).mockResolvedValue({ hits: [] })
   // 默认：三类文档各自生成成功（按任务 kind 派发，见 `defaultJobStream`）
   mockJobStream()
   // 默认：没有还在跑的活跃任务（兜底查询落空，保持降级提示）
@@ -566,12 +551,11 @@ describe('AppV2 完整流程编排', () => {
     expect((byId(wrapper, 'field-platform').element as HTMLInputElement).value).toBe('网页应用')
   })
 
-  it('满足条件时进入第 2 道闸门：先检索团队规范，确认后才生成接口文档', async () => {
+  it('点击「生成接口文档」直接进入生成态并产出接口文档（无检索确认闸门）', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
       reply: '已理解需求。',
     }))
-    vi.mocked(api.retrieveApiDocsRag).mockResolvedValue({ hits: [SAMPLE_HIT] })
     mockJobStream({
       'api-docs': async (handlers) => {
         handlers.onChunk?.('# 接口文档\n')
@@ -584,68 +568,9 @@ describe('AppV2 完整流程编排', () => {
     await clickButton(wrapper, '生成接口文档')
     await flushPromises()
 
-    // 停在检索结果面板：尚未生成
-    expect(wrapper.text()).toContain('接口规范检索结果')
-    expect(wrapper.text()).toContain('列表与分页规范')
-    expect(wrapper.text()).toContain('相关度 0.31')
-    expect(jobCount('api-docs')).toBe(0)
-
-    // 检索请求带上了 PRD 正文
-    const ragPayload = vi.mocked(api.retrieveApiDocsRag).mock.calls[0]?.[0]
-    expect(ragPayload?.prdContent).toContain('项目背景')
-
-    await clickButton(wrapper, '确认并生成接口文档')
-    await flushPromises()
-
+    // 不再经过检索确认闸门：直接进入生成、任务已创建
+    expect(jobCount('api-docs')).toBe(1)
     expect(wrapper.text()).toContain('接口文档')
-    expect(jobCount('api-docs')).toBe(1)
-    // 勾选的命中随生成请求下发
-    const docsPayload = jobPayload('api-docs')
-    expect(docsPayload?.ragHits?.[0]?.title).toBe('列表与分页规范')
-  })
-
-  it('取消检索结果：不调用生成接口，回到 PRD 待确认', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async () => ({
-      conversationId: 'conv-1',
-      reply: '已理解需求。',
-    }))
-    vi.mocked(api.retrieveApiDocsRag).mockResolvedValue({ hits: [SAMPLE_HIT] })
-
-    const wrapper = await mountApp()
-    await reachPrdReview(wrapper)
-    await clickButton(wrapper, '生成接口文档')
-    await flushPromises()
-
-    await clickButton(wrapper, '取消')
-    await flushPromises()
-
-    expect(jobCount('api-docs')).toBe(0)
-    expect(wrapper.text()).toContain('PRD 文档')
-    expect(wrapper.text()).not.toContain('接口规范检索结果')
-  })
-
-  it('检索失败也不卡流程：确认按钮降级为「跳过更新，直接生成接口文档」', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async () => ({
-      conversationId: 'conv-1',
-      reply: '已理解需求。',
-    }))
-    vi.mocked(api.retrieveApiDocsRag).mockRejectedValue(new Error('接口规范检索失败：文件缺失'))
-    mockJobStream({
-      'api-docs': async () => ({ conversationId: '', reply: '# 接口文档\n内容' }),
-    })
-
-    const wrapper = await mountApp()
-    await reachPrdReview(wrapper)
-    await clickButton(wrapper, '生成接口文档')
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('接口规范检索失败：文件缺失')
-
-    await clickButton(wrapper, '直接生成接口文档')
-    await flushPromises()
-
-    expect(jobCount('api-docs')).toBe(1)
-    expect(jobPayload('api-docs')?.ragHits).toEqual([])
   })
 
   it('「改需求」回到第一步，表单内容与对话记录都不丢', async () => {

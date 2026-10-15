@@ -6,7 +6,8 @@
 
 - **数据库**：连不上就存不了方案，也创建不了任务；
 - **大模型供应商**：密钥没配 / 配错供应商，生成必然失败；
-- **技能包**：文件不在位时不会报错，只会悄悄换成内置兜底提示词（见 ADR-017）。
+- **技能资产**：技能包不在位 / 元数据读不动 / 必需资源缺失时都**不会报错**，只会悄悄换成
+  内置兜底提示词（见 ADR-017）。这里按技能注册表逐个报出加载了哪些包、各自服务哪些产物。
 
 **`ok` 的语义要说清**：它表示「配置就位 / 依赖可达」，不是「功能已经验证过」。
 尤其是供应商这一项——这里**只校验密钥与型号是否配置**，不发真实调用：
@@ -26,7 +27,7 @@ from fastapi import APIRouter
 
 from backend.core.config import get_settings
 from backend.core.db import connect
-from backend.services.prd_skill import describe_skill, missing_skill_assets
+from backend.services.skill_registry import audit_skills, describe_manifest, skills_root
 
 router = APIRouter(tags=["system"])
 
@@ -79,22 +80,47 @@ def _check_llm() -> dict:
 
 
 def _check_skills() -> dict:
-    """探测技能包：缺失时报出缺哪几个文件，而不是让它在生成时静默降级。"""
-    missing = missing_skill_assets()
-    if missing:
-        return {"ok": False, "detail": "缺少技能资源：" + "、".join(missing)}
+    """探测技能资产：报出「加载了哪些包、各自服务哪些产物」，以及全部问题。
 
-    identity = describe_skill()
-    if identity is None:
-        # `missing_skill_assets` 说齐、身份却取不到：属于资源存在但读不动的边界情况
-        return {"ok": False, "detail": "技能资源存在但无法读取"}
+    上一版只认 PRD 那一个技能包；现在按**技能注册表**报（见
+    `services/skill_registry.py`），所以新增技能包不必回来改体检——
+    它自己声明 `applies_to` 就会出现在这里。
+    """
+    manifests, problems = audit_skills()
+    if problems:
+        return {
+            "ok": False,
+            "detail": "；".join(f"{item.skill} {item.reason}" for item in problems),
+        }
+    if not manifests:
+        # 一个包都没扫到：多为部署时漏打包 skills/ 目录，或本地没配 PRDWRIGHT_SKILLS_DIR
+        return {
+            "ok": False,
+            "detail": f"未发现任何技能包（skills 根目录 {skills_root()} 为空或未打包）",
+        }
+
+    entries = []
+    for manifest in manifests:
+        # `audit_skills` 已确认资源齐全，这里再取一次身份是为了拿指纹——
+        # 它与回执上那个指纹同源，能直接对上「这份文档是按哪一套写的」。
+        fingerprint = (describe_manifest(manifest) or {}).get("fingerprint", "")
+        entries.append(
+            {
+                "name": manifest.name,
+                "version": manifest.version,
+                "fingerprint": fingerprint,
+                "applies_to": list(manifest.applies_to),
+            }
+        )
 
     return {
         "ok": True,
-        "detail": f"{identity['name']} v{identity['version']} · {identity['fingerprint']}",
-        "name": identity["name"],
-        "version": identity["version"],
-        "fingerprint": identity["fingerprint"],
+        "detail": "；".join(
+            f"{item['name']} v{item['version']} · {item['fingerprint']}"
+            f"（{'/'.join(item['applies_to']) or '未声明产物'}）"
+            for item in entries
+        ),
+        "skills": entries,
     }
 
 

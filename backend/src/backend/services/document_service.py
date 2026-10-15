@@ -7,20 +7,20 @@
 对外暴露三类接口：
 - **流式生成**（`*_stream`，供路由层 `StreamingResponse` 消费）：
   - `generate_prd_stream`：根据对话历史 + 问卷答案生成 PRD。
-  - `generate_api_docs_stream`：根据 PRD 正文（可选叠加 RAG 命中）生成接口文档。
-  - `generate_prompts_stream`：根据 PRD 正文生成提示词套件。
+  - `generate_api_docs_stream`：根据 PRD 正文生成接口文档（团队规范由技能包全量注入）。
+  - `generate_prompts_stream`：根据 PRD 正文生成提示词套件（产出要求由技能包提供）。
   - `optimize_document_stream`：按用户指令优化既有文档。
 - **结构化摘要回填**（`sync_summary_from_conversation`）：从新增对话里抽取用户**明确补充
   或修正**的字段，回填成一份完整摘要，供前端做 Diff 与确认。
-- **检索增强（RAG）**（`retrieve_api_docs_rag_hits`）：在本地接口规范库里检索与 PRD 相关的
-  团队规范与历史接口示例，用户确认后作为生成接口文档时的对齐依据。
 
 提示词模板集中在 `services/prompts.py`，本模块只负责「加载模板 + 拼接变量
 + 调用模型流式生成」，不维护大段提示词文本。
 
-PRD 生成走技能包驱动：额外读取 `skills/prd-generator/references/` 下的字段契约、
-六章节模板与写作规范，拼进提示词（见 `_build_prd_prompt`）；
-技能包缺失时自动降级为 `prompts.py` 里的内置提示词。
+PRD / 接口文档 / 提示词套件三类生成均走技能包驱动：各自从对应技能包
+（`skills/prd-generator`、`skills/api-docs-generator`、`skills/prompts-generator`）取用
+字段契约、团队规范或产出要求，拼进提示词；技能包缺失时自动降级为 `prompts.py` 里的
+内置提示词。这一改动废弃了原先的 RAG 检索（见 ADR-020）：团队规范不再「按 PRD 关键词
+挑几条」下发，而是整段注入，避免「检索没命中就悄悄丢规范」的静默降级。
 
 按摘要生成 PRD 时优先走**分章节生成 + 写作/审核双 Agent**（`services/prd_section_writer.py`），
 只有技能包缺失时才降级为整篇一次性生成。
@@ -36,11 +36,6 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import math
-import re
-from collections import Counter
-from functools import lru_cache
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -58,7 +53,6 @@ from backend.services.prd_skill import (
 )
 from backend.services.prompts import (
     API_DOCS_GENERATION_PROMPT,
-    API_DOCS_RAG_REFERENCE_TEMPLATE,
     OPTIMIZE_DOCUMENT_PROMPT_TEMPLATE,
     PRD_GENERATION_PROMPT,
     PRD_SKILL_GENERATION_PROMPT,
@@ -67,152 +61,10 @@ from backend.services.prompts import (
     SUMMARY_SYNC_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
 )
+from backend.services.skill_registry import load_skill_artifacts
 from backend.services.stream_reply import collect_reply, iter_reply_events
 
 logger = logging.getLogger(__name__)
-
-# ----------------------------------------------------------------------------
-# 接口文档检索库（RAG）
-# ----------------------------------------------------------------------------
-
-# 接口规范 / 历史示例库：backend/src/backend/core/api_doc_knowledge.json
-API_DOC_KNOWLEDGE_PATH = Path(__file__).resolve().parents[1] / "core" / "api_doc_knowledge.json"
-
-# ASCII 词元（英文单词 / 数字 / 下划线标识符）
-_ASCII_TOKEN = re.compile(r"[a-z0-9_]{2,}")
-# 连续汉字串
-_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
-
-
-def _tokenize(text: str) -> list[str]:
-    """把文本切成检索用的词元。
-
-    英文 / 数字按「连续 2 个以上字符」切词；中文没有空格分隔，用**相邻二元组**
-    近似（如「接口规范」→ 接口 / 口规 / 规范），这是不引入分词依赖时最省事的
-    做法，召回效果足够支撑关键词级检索。
-
-    Args:
-        text: 待切分的任意文本。
-
-    Returns:
-        词元列表，可能包含重复项（调用方按需计数）。
-    """
-    lowered = text.lower()
-    tokens = _ASCII_TOKEN.findall(lowered)
-    for run in _CJK_RUN.findall(lowered):
-        if len(run) == 1:
-            tokens.append(run)
-        else:
-            tokens.extend(run[index : index + 2] for index in range(len(run) - 1))
-    return tokens
-
-
-@lru_cache(maxsize=1)
-def _load_api_doc_knowledge() -> tuple[dict[str, Any], ...]:
-    """读取接口规范库并缓存。
-
-    返回条目组成的元组（不可变，便于 `lru_cache` 缓存）。文件缺失或格式非法时
-    返回空元组，检索退化为「无命中」，不阻塞接口文档生成。
-
-    Returns:
-        知识库条目列表，每项至少包含 `id` / `source` / `title` / `content`。
-    """
-    try:
-        raw = API_DOC_KNOWLEDGE_PATH.read_text(encoding="utf-8")
-        parsed = json.loads(raw)
-    except (FileNotFoundError, json.JSONDecodeError):
-        logger.warning("接口规范库加载失败：%s，本次检索将返回空结果", API_DOC_KNOWLEDGE_PATH, exc_info=True)
-        return ()
-
-    documents = parsed.get("documents") if isinstance(parsed, dict) else None
-    if not isinstance(documents, list):
-        logger.warning("接口规范库格式不符合预期（缺少 documents 数组）")
-        return ()
-    return tuple(item for item in documents if isinstance(item, dict))
-
-
-@lru_cache(maxsize=1)
-def _build_knowledge_index() -> tuple[tuple[str, tuple[Any, ...]], ...]:
-    """预先构建知识库的词频索引（进程内缓存）。
-
-    标题权重 3、标签权重 2、正文权重 1：命中标题/标签说明主题相关，比正文里
-    顺带提到一次更有信号量。
-
-    Returns:
-        `((文档 id, 词频计数器), ...)` 形式的元组。
-    """
-    index: list[tuple[str, tuple[Any, ...]]] = []
-    for document in _load_api_doc_knowledge():
-        counter: Counter[str] = Counter()
-        counter.update({token: 3 for token in _tokenize(str(document.get("title", "")))})
-        tags = document.get("tags")
-        if isinstance(tags, list):
-            counter.update({token: 2 for token in _tokenize(" ".join(str(tag) for tag in tags))})
-        counter.update(_tokenize(str(document.get("content", ""))))
-        index.append((str(document.get("id", "")), tuple(counter.items())))
-    return tuple(index)
-
-
-def _lexical_search(query: str, limit: int) -> list[tuple[dict[str, Any], float, list[str]]]:
-    """在本地规范库里做 TF-IDF 余弦检索。
-
-    纯本地词法检索：不依赖向量库、不产生网络调用，离线可用。若后续接入向量检索
-    （embedding + 向量库），只需替换本函数，上层的 `retrieve_api_docs_rag_hits`
-    契约不变。
-
-    Args:
-        query: 查询文本（PRD 正文 + 对话历史）。
-        limit: 返回条数上限。
-
-    Returns:
-        `(条目, 相似度, 命中的关键词)` 三元组列表，按相似度降序、只保留相似度 > 0 的项。
-    """
-    documents = _load_api_doc_knowledge()
-    index = _build_knowledge_index()
-    if not documents or not index:
-        return []
-
-    query_counter: Counter[str] = Counter(_tokenize(query))
-    if not query_counter:
-        return []
-
-    document_count = len(index)
-    # 文档频率（df）：出现在多少个文档里，用于压低「每个文档都有」的通用词
-    document_frequency: Counter[str] = Counter()
-    for _, items in index:
-        document_frequency.update(dict(items).keys())
-
-    def idf(token: str) -> float:
-        return math.log(1 + document_count / (1 + document_frequency.get(token, 0)))
-
-    query_weights = {token: count * idf(token) for token, count in query_counter.items()}
-    query_norm = math.sqrt(sum(weight * weight for weight in query_weights.values())) or 1.0
-
-    scored: list[tuple[dict[str, Any], float, list[str]]] = []
-    for position, (doc_id, items) in enumerate(index):
-        doc_counter = dict(items)
-        dot = 0.0
-        overlaps: list[tuple[float, str]] = []
-        for token, weight in query_weights.items():
-            count = doc_counter.get(token, 0)
-            if not count:
-                continue
-            contribution = weight * count * idf(token)
-            dot += contribution
-            overlaps.append((contribution, token))
-        if dot <= 0:
-            continue
-
-        doc_norm = math.sqrt(sum(count * count * idf(token) ** 2 for token, count in doc_counter.items())) or 1.0
-        score = dot / (query_norm * doc_norm)
-        overlaps.sort(reverse=True)
-        document = documents[position] if position < len(documents) else {"id": doc_id}
-        scored.append((document, round(score, 4), [token for _, token in overlaps[:5]]))
-
-    # 相似度相同时按知识库原始顺序（规范在前、示例在后）稳定输出
-    scored.sort(key=lambda item: item[1], reverse=True)
-    return scored[:limit]
-
 
 # ----------------------------------------------------------------------------
 # 结构化摘要回填：候选值 → 与原始摘要合并
@@ -411,8 +263,12 @@ class DocumentService:
         模板统一收口在 `services/prompts.py`，这里提供按需取用的入口，便于
         后续扩展（如从文件加载自定义模板）。
 
+        `api_docs` / `prompts` 两类不再走这里：它们的生成提示词由各自的技能包
+        提供（`api-docs-generator` 注入团队规范、`prompts-generator` 提供产出要求），
+        见 `generate_api_docs_stream` / `generate_prompts_stream`。
+
         Args:
-            name: 模板名，取值 `prd` / `api_doc` / `prompts` / `optimize`。
+            name: 模板名，取值 `prd` / `optimize`。
 
         Returns:
             模板字符串，占位符为 `str.format()` 风格。
@@ -422,8 +278,6 @@ class DocumentService:
         """
         templates: dict[str, str] = {
             "prd": PRD_GENERATION_PROMPT,
-            "api_doc": API_DOCS_GENERATION_PROMPT,
-            "prompts": PROMPTS_GENERATION_PROMPT,
             "optimize": OPTIMIZE_DOCUMENT_PROMPT_TEMPLATE,
         }
         if name not in templates:
@@ -536,72 +390,6 @@ class DocumentService:
         return _merge_summary(summary, candidate)
 
     # ------------------------------------------------------------------
-    # 接口文档检索增强（RAG）
-    # ------------------------------------------------------------------
-
-    async def retrieve_api_docs_rag_hits(
-        self,
-        prd_content: str,
-        history: list[dict[str, Any]] | None = None,
-        limit: int = 5,
-    ) -> list[dict[str, Any]]:
-        """检索与当前 PRD 相关的团队接口规范与历史接口示例。
-
-        检索基于本地规范库（`core/api_doc_knowledge.json`）的词法 TF-IDF 相似度，
-        无外部依赖、离线可用；后续切换向量检索只需替换 `_lexical_search`。
-
-        Args:
-            prd_content: PRD 正文，作为检索的主要查询文本。
-            history: 对话历史，作为查询的补充（用户可能补充了未写进 PRD 的规范要求）。
-            limit: 返回条数上限，调用方需自行限制在合理范围。
-
-        Returns:
-            命中列表，每项含 `id` / `source` / `title` / `content` / `tags` /
-            `score` / `matched_terms`；无命中时返回空列表。
-        """
-        query_parts = [prd_content or ""]
-        conversation = format_conversation(history or [])
-        if conversation and conversation != "（无补充对话记录）":
-            query_parts.append(conversation)
-        query = "\n".join(part for part in query_parts if part)
-
-        hits: list[dict[str, Any]] = []
-        for document, score, matched in _lexical_search(query, limit):
-            hits.append(
-                {
-                    "id": str(document.get("id", "")),
-                    "source": str(document.get("source", "")),
-                    "title": str(document.get("title", "")),
-                    "content": str(document.get("content", "")),
-                    "tags": [str(tag) for tag in document.get("tags", []) or []],
-                    "score": score,
-                    "matched_terms": matched,
-                }
-            )
-        return hits
-
-    @staticmethod
-    def format_rag_hits(hits: list[dict[str, Any]] | None) -> str:
-        """把检索命中拼成提示词里的「参考规范与历史示例」文本。
-
-        Args:
-            hits: 用户在前端确认过的命中列表。
-
-        Returns:
-            形如 `### 1. 标题（来源：团队接口规范）\\n\\n正文` 的多段文本；无命中返回空串。
-        """
-        if not hits:
-            return ""
-
-        blocks: list[str] = []
-        for index, hit in enumerate(hits, start=1):
-            title = str(hit.get("title", "")).strip() or "未命名条目"
-            source = str(hit.get("source", "")).strip() or "团队规范库"
-            content = str(hit.get("content", "")).strip()
-            blocks.append(f"### {index}. {title}（来源：{source}）\n\n{content}")
-        return "\n\n".join(blocks)
-
-    # ------------------------------------------------------------------
     # 通用流式生成
     # ------------------------------------------------------------------
 
@@ -706,23 +494,32 @@ class DocumentService:
     async def generate_api_docs_stream(
         self,
         prd_content: str,
-        rag_hits: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """根据 PRD 正文生成接口文档。
 
+        团队接口规范（统一响应结构、错误码、分页、鉴权等）由 `api-docs-generator` 技能包
+        整段提供，生成时全量注入提示词，要求模型按团队约定对齐——不再做「按 PRD 关键词
+        挑几条」的 RAG 检索（见 ADR-020）。技能包缺失时退化为「不注入规范」的普通生成，
+        并在日志里如实报出。
+
         Args:
             prd_content: PRD 正文（Markdown）。
-            rag_hits: 用户确认后的检索命中（团队接口规范 / 历史接口示例）。
-                传入时作为「参考规范」拼进提示词，要求模型按团队约定对齐接口风格；
-                为空则退化为不检索的普通生成。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（接口文档正文）。
         """
-        user_content = self._load_template("api_doc").format(prd_content=prd_content)
-        rag_context = self.format_rag_hits(rag_hits)
-        if rag_context:
-            user_content += API_DOCS_RAG_REFERENCE_TEMPLATE.format(rag_context=rag_context)
+        artifacts = load_skill_artifacts("api_docs")
+        api_specs = artifacts.get("api_specs", "") if artifacts else ""
+        if not api_specs:
+            logger.warning(
+                "api-docs-generator 技能包未加载，接口文档生成将退化为不注入团队规范",
+                extra={"event": "api_docs.skill_missing"},
+            )
+            api_specs = "（团队接口规范未加载，请依据通用 REST 规范与产品 PRD 自行设计）"
+        user_content = API_DOCS_GENERATION_PROMPT.format(
+            prd_content=prd_content,
+            api_specs=api_specs,
+        )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
         async for event in iter_reply_events(
             self.llm,
@@ -738,13 +535,25 @@ class DocumentService:
     ) -> AsyncIterator[StreamEvent]:
         """根据 PRD 正文生成提示词套件。
 
+        产出要求（提示词套件的结构与写法）由 `prompts-generator` 技能包提供，生成时作为
+        用户消息模板使用（含 `{prd_content}` 占位符）；技能包缺失时退回 `prompts.py` 里的
+        内置兜底模板，保证服务不中断。
+
         Args:
             prd_content: PRD 正文（Markdown）。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（提示词套件正文）。
         """
-        user_content = self._load_template("prompts").format(prd_content=prd_content)
+        artifacts = load_skill_artifacts("prompts")
+        guide = artifacts.get("prompts_guide", "") if artifacts else ""
+        if not guide:
+            logger.warning(
+                "prompts-generator 技能包未加载，使用内置兜底提示词生成提示词套件",
+                extra={"event": "prompts.skill_missing"},
+            )
+            guide = PROMPTS_GENERATION_PROMPT
+        user_content = guide.format(prd_content=prd_content)
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
         async for event in iter_reply_events(
             self.llm,
@@ -827,13 +636,9 @@ async def generate_prd_from_summary_stream(
 
 async def generate_api_docs_stream(
     prd_content: str,
-    rag_hits: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """生成接口文档的流式入口。"""
-    async for event in get_service().generate_api_docs_stream(
-        prd_content=prd_content,
-        rag_hits=rag_hits,
-    ):
+    async for event in get_service().generate_api_docs_stream(prd_content=prd_content):
         yield event
 
 
@@ -845,19 +650,6 @@ async def sync_summary_from_conversation(
     return await get_service().sync_summary_from_conversation(
         summary=summary,
         history=history,
-    )
-
-
-async def retrieve_api_docs_rag_hits(
-    prd_content: str,
-    history: list[dict[str, Any]] | None = None,
-    limit: int = 5,
-) -> list[dict[str, Any]]:
-    """接口文档检索增强入口：PRD + 对话 → 相关规范与历史示例命中。"""
-    return await get_service().retrieve_api_docs_rag_hits(
-        prd_content=prd_content,
-        history=history,
-        limit=limit,
     )
 
 

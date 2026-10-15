@@ -8,7 +8,6 @@ import type {
   DocKind,
   JobSnapshot,
   QuestionsConfig,
-  RagHit,
   RequirementAnswers,
   RequirementsSummary,
   RunSummary,
@@ -585,28 +584,6 @@ export async function syncSummaryFromConversation(payload: {
   return data
 }
 
-/** 接口规范检索响应 */
-export interface ApiDocsRagResult {
-  hits: RagHit[]
-}
-
-/**
- * 检索与 PRD 相关的团队接口规范与历史接口示例。
- * 对应后端 `POST /api/conversation/retrieve-api-docs-rag`。
- */
-export async function retrieveApiDocsRag(payload: {
-  prdContent: string
-  history?: ChatMessage[]
-  limit?: number
-}): Promise<ApiDocsRagResult> {
-  const { data } = await http.post<ApiDocsRagResult>('/api/conversation/retrieve-api-docs-rag', {
-    prd_content: payload.prdContent,
-    history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
-    limit: payload.limit ?? 5,
-  })
-  return data
-}
-
 // ============================================================================
 // 文档流式生成（SSE）
 // ============================================================================
@@ -693,17 +670,16 @@ export function generatePrdFromSummaryStream(
  * 根据 PRD 正文生成接口文档，SSE 流式接收正文。
  * 对应后端 `POST /api/conversation/generate-api-docs-stream`。
  *
- * `ragHits` 为用户在前端确认过的检索命中，会作为「参考规范」随请求下发。
+ * 团队接口规范由技能包全量注入，前端不再检索、也不再随请求下发命中。
  */
 export function generateApiDocsStream(
-  payload: { prdContent: string; ragHits?: RagHit[] },
+  payload: { prdContent: string },
   handlers?: StreamHandlers,
 ): Promise<DocumentStreamResult> {
   return readStream(
     '/api/conversation/generate-api-docs-stream',
     {
       prd_content: payload.prdContent,
-      rag_hits: payload.ragHits ?? [],
     },
     handlers,
   )
@@ -826,7 +802,6 @@ export interface CreateJobPayload {
   productName?: string
   history?: ChatMessage[]
   prdContent?: string
-  ragHits?: RagHit[]
   document?: string
   instruction?: string
 }
@@ -845,7 +820,6 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     // 只保留后端认识的 role / content 两个字段
     history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
     prd_content: payload.prdContent ?? '',
-    rag_hits: payload.ragHits ?? [],
     document: payload.document ?? '',
     instruction: payload.instruction ?? '',
   })

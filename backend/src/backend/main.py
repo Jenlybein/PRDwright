@@ -26,7 +26,7 @@ from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
 from backend.core.logging_setup import configure_logging
 from backend.services import auth_service, job_service
-from backend.services.prd_skill import describe_skill, ensure_skill_assets
+from backend.services.skill_registry import ensure_skills
 
 logger = logging.getLogger(__name__)
 
@@ -52,31 +52,31 @@ async def lifespan(_: FastAPI):
         auth_service.ensure_dev_user()
     # 收上次进程残留的 running 生成任务：内存运行时已随进程消失，DB 里不可能还有真在跑的
     job_service.reap_orphans()
-    # 技能资源自检：默认只告警（本地调试缺 skills 也能起），
-    # 设 PRDWRIGHT_SKILLS_STRICT=true 后缺失即中止启动——给部署态用的 fail-fast。
-    missing_skills = ensure_skill_assets(strict=settings.skills_strict)
-    if missing_skills:
+    # 技能资产自检：扫一遍 skills 根目录，把「元数据读不动 / 必需资源缺失 /
+    # 同一产物被多个技能包声明」三类问题一次报出来。默认只告警（本地调试缺 skills
+    # 也能起服务），设 PRDWRIGHT_SKILLS_STRICT=true 后存在问题即中止启动——部署态用。
+    manifests, skill_problems = ensure_skills(strict=settings.skills_strict)
+    if skill_problems:
         logger.warning(
-            "PRD 技能资源缺失：%s，生成时将退回内置提示词（回执会标出）。"
-            "请用环境变量 PRDWRIGHT_SKILLS_DIR 指定 skills 根目录",
-            "、".join(missing_skills),
-            extra={"event": "service.skills_missing", "missing": missing_skills},
+            "技能资产自检未通过：%s。相关产物的生成将退回内置提示词（回执会标出）",
+            "；".join(f"{item.skill} {item.reason}" for item in skill_problems),
+            extra={"event": "service.skills_problem", "problem_count": len(skill_problems)},
         )
 
     # 一条启动记录，把「这次的进程究竟加载了哪套资产」钉在时间线上。
     # 排查「昨天还好、今天风格变了」这类问题时，第一眼要找的就是它。
-    identity = describe_skill()
     logger.info(
         "服务启动完成",
         extra={
             "event": "service.started",
             "log_format": current.log_format,
             "llm": f"{current.default_llm_provider}/{current.default_llm_model}",
-            "skill": (
-                f"{identity['name']} v{identity['version']}"
-                if identity
-                else "未加载（生成将退回内置提示词）"
-            ),
+            "skills": "、".join(
+                f"{manifest.name} v{manifest.version}"
+                f"（{'/'.join(manifest.applies_to) or '未声明产物'}）"
+                for manifest in manifests
+            )
+            or "未发现技能包（生成将退回内置提示词）",
         },
     )
     yield

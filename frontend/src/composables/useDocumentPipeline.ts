@@ -2,7 +2,6 @@ import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
 import {
-  retrieveApiDocsRag,
   syncSummaryFromConversation,
   type GeneratePrdFromSummaryPayload,
   type StreamHandlers,
@@ -15,7 +14,6 @@ import type {
   JobSnapshot,
   PrdGenerationStage,
   PrdStageProgress,
-  RagHit,
   RequirementsSummary,
   StreamDocumentPart,
   StreamStageEvent,
@@ -35,10 +33,10 @@ export interface PipelineHooks {
 }
 
 /**
- * 文档生成、审阅与两道确认闸门。
+ * 文档生成、审阅与摘要确认闸门。
  *
  * 覆盖从「点击生成 PRD」到「进入完成页」的全部编排：文档流式生成与优化、
- * 摘要回填 Diff 确认、接口规范检索确认、下载与完成守卫。
+ * 摘要回填 Diff 确认、下载与完成守卫。
  *
  * **按入口模式分流**只体现在三个地方：需求从哪来（结构化摘要 / 一段话）、
  * 「返回」回到哪个录入页、以及完成所需的最低文档集合；生成链路本身完全共用。
@@ -260,19 +258,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const summarySyncError = ref('')
 
   // -------------------------------------------------------------------------
-  // 确认闸门 2：接口规范检索（生成接口文档之前）
-  // -------------------------------------------------------------------------
-
-  /** 检索到的团队接口规范与历史接口示例 */
-  const ragHits = ref<RagHit[]>([])
-
-  /** 是否正在检索 */
-  const ragRetrieving = ref(false)
-
-  /** 检索失败原因 */
-  const ragError = ref('')
-
-  // -------------------------------------------------------------------------
   // 导航
   // -------------------------------------------------------------------------
 
@@ -282,7 +267,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     docStreamingContent.value = ''
     clearPrdPreview()
     summarySyncError.value = ''
-    ragError.value = ''
   }
 
   /**
@@ -512,8 +496,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     clearActiveJob()
   }
 
-  /** 生成接口文档：以 PRD 正文为输入，可带上用户确认过的检索命中作为参考规范 */
-  async function generateApiDocs(hits: RagHit[] = []): Promise<void> {
+  /** 生成接口文档：以 PRD 正文为输入，团队接口规范由技能包全量注入，无需前端检索确认 */
+  async function generateApiDocs(): Promise<void> {
     // 重新生成接口文档会让基于它的提示词失效，进度回退到接口文档
     promptsContent.value = ''
     activeDocKey.value = 'api-docs'
@@ -522,7 +506,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     prdProgress.value = null
     const { reply, ok } = await job.start(
       'api-docs',
-      { prdContent: prdContent.value, ragHits: hits },
+      { prdContent: prdContent.value },
       handlersForKind('api-docs'),
     )
     if (!ok) {
@@ -601,11 +585,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     await optimizeCurrentDocument(payload.content, payload.instruction)
   }
 
-  /** 审阅页「生成接口文档」入口：先去检索团队规范，用户确认后再生成 */
+  /** 审阅页「生成接口文档」入口：接口规范由技能包注入，直接进入生成态 */
   async function handleGenerateApiDocs(): Promise<void> {
     if (!prdContent.value.trim()) return
-    goTo('rag-preview')
-    await runRagRetrieve()
+    goTo('generating-api-docs')
+    await generateApiDocs()
   }
 
   /** 审阅页「生成提示词套件」入口：接口文档完成后才能生成，先切到生成中状态再生成 */
@@ -803,45 +787,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     hooks.onNotice('已拒绝本次摘要更新，摘要保持不变')
   }
 
-  // -------------------------------------------------------------------------
-  // 确认闸门 2：接口规范检索（RAG）
-  // -------------------------------------------------------------------------
-
-  /** 按当前 PRD 与对话检索团队接口规范与历史接口示例 */
-  async function runRagRetrieve(): Promise<void> {
-    ragRetrieving.value = true
-    ragError.value = ''
-    ragHits.value = []
-
-    try {
-      const result = await retrieveApiDocsRag({
-        prdContent: prdContent.value,
-        history: conversationHistory(),
-      })
-      ragHits.value = result.hits
-    } catch (error) {
-      ragError.value = error instanceof Error ? error.message : String(error)
-    } finally {
-      ragRetrieving.value = false
-    }
-  }
-
-  /** 确认：带着勾选的命中条目去生成接口文档 */
-  async function confirmRag(hits: RagHit[]): Promise<void> {
-    if (ragRetrieving.value) return
-    goTo('generating-api-docs')
-    await generateApiDocs(hits)
-  }
-
-  /** 取消：不调用生成接口，回到 PRD 待确认状态 */
-  function cancelRag(): void {
-    if (ragRetrieving.value) return
-    ragHits.value = []
-    ragError.value = ''
-    goTo('review-prd')
-    hooks.onNotice('已取消生成接口文档')
-  }
-
   /** 清空文档流水线相关的全部临时状态（重新开始时用） */
   function reset(): void {
     clearTransient()
@@ -850,8 +795,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     pendingSummary.value = null
     summaryChanges.value = []
     summarySyncing.value = false
-    ragHits.value = []
-    ragRetrieving.value = false
   }
 
   return {
@@ -875,9 +818,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     summaryChanges,
     summarySyncing,
     summarySyncError,
-    ragHits,
-    ragRetrieving,
-    ragError,
     // 导航
     goTo,
     // 生成与优化
@@ -897,9 +837,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     handleGeneratePrd,
     confirmSummaryDiff,
     rejectSummaryDiff,
-    // 闸门 2
-    confirmRag,
-    cancelRag,
     // 重置
     reset,
   }

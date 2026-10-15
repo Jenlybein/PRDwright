@@ -31,8 +31,8 @@ export interface ChatMessage {
 /**
  * 页面所处的阶段。
  * `generating-*` 表示文档正在生成中，`review-*` 表示文档已生成、待用户确认。
- * `summary-diff` / `rag-preview` 是两道**确认闸门**：前者让用户先确认「对话中补充的
- * 信息回填到摘要」的结果，后者让用户先确认「检索到的团队接口规范」；确认后才继续生成。
+ * `summary-diff` 是一道**确认闸门**：生成 PRD 前先让用户确认「对话中补充的信息回填到摘要」的结果，
+ * 确认后才继续生成。
  *
  * 三个入口相关的阶段：
  * - `entry`：入口选择页（还没选走哪条入口）；
@@ -46,7 +46,6 @@ export type ViewState =
   | 'summary-diff'
   | 'generating-prd'
   | 'review-prd'
-  | 'rag-preview'
   | 'generating-api-docs'
   | 'review-api-docs'
   | 'generating-prompts'
@@ -138,8 +137,6 @@ export const STEP_OF_STATE: Record<ViewState, StepId> = {
   'summary-diff': 'chatting',
   'generating-prd': 'review-prd',
   'review-prd': 'review-prd',
-  // 规范检索发生在生成接口文档之前，仍归属「PRD」这一步
-  'rag-preview': 'review-prd',
   'generating-api-docs': 'review-api-docs',
   'review-api-docs': 'review-api-docs',
   'generating-prompts': 'review-prompts',
@@ -217,7 +214,7 @@ export interface RequirementsSummary {
 export type RequirementAnswers = Record<string, string | string[]>
 
 // ============================================================================
-// 摘要回填 Diff 与接口规范检索（RAG）
+// 摘要回填 Diff
 // ============================================================================
 
 /** 变更类型：新增 / 修改 / 删除 */
@@ -240,27 +237,6 @@ export interface SummaryChange {
   before: unknown
   /** 变更后的值；删除时为 null */
   after: unknown
-}
-
-/**
- * 一条 RAG 检索命中（团队接口规范 / 历史接口示例）。
- * 字段与后端 `schemas.RagHit` 一致。
- */
-export interface RagHit {
-  /** 条目 ID */
-  id: string
-  /** 来源，如「团队接口规范」「历史接口示例」 */
-  source: string
-  /** 条目标题 */
-  title: string
-  /** 条目正文 */
-  content: string
-  /** 标签 */
-  tags: string[]
-  /** 相似度得分，越大越相关 */
-  score: number
-  /** 命中的关键词，用于解释「为什么检索到这条」 */
-  matched_terms: string[]
 }
 
 /**
