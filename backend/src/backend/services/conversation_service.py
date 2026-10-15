@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import QuestionsConfig, StreamEvent
-from backend.core.errors import ErrorCode
+from backend.core.errors import AppError, ErrorCode
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import (
     DEFAULT_CONVERSATION_PROFILE,
@@ -298,6 +298,53 @@ class ConversationService:
             return problem[:20]
         return "未命名会话"
 
+    def resolve_request_profile(self, profile_key: str) -> ConversationProfile:
+        """解析本次请求要用的对话档案。
+
+        留空时取本服务的默认档案；传了未注册的标识则**当场拒绝**（`INVALID_REQUEST`），
+        绝不静默回退到默认人设——那会让「前端点名了 A 场景，实际跑的是 B 场景」这种事
+        既没有报错、也没有日志，只表现为回复风格莫名不对。
+
+        Args:
+            profile_key: 本次请求指定的档案标识；空串表示用服务默认。
+
+        Returns:
+            对应的 `ConversationProfile`。
+
+        Raises:
+            AppError: 标识未在注册表中登记。
+        """
+        try:
+            return resolve_profile(profile_key or self.profile_key)
+        except KeyError as exc:
+            raise AppError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
+
+    @staticmethod
+    def _opening_context(
+        profile: ConversationProfile, record: _ConversationRecord
+    ) -> dict[str, str]:
+        """按档案声明的占位符名收集开场白的取值。
+
+        `requirements` 是唯一的**保留名**：它是「问卷答案整理成的需求文本」，由本地
+        格式化函数产出，而不是直接取自 `form_data`。其余名字一律按同名键从 `form_data`
+        里取（缺失即空串）——因此新增一个档案只需要声明自己要哪些占位符，
+        服务层不必认识任何具体档案。
+
+        Args:
+            profile: 本次使用的对话档案。
+            record: 已登记好的会话记录。
+
+        Returns:
+            占位符名 → 文本，可直接 `opening.format(**context)`。
+        """
+        context: dict[str, str] = {}
+        for name in profile.opening_fields:
+            if name == "requirements":
+                context[name] = record.requirements
+            else:
+                context[name] = _normalize_value(record.form_data.get(name))
+        return context
+
     def _create_record(
         self,
         form_data: dict[str, Any],
@@ -332,33 +379,41 @@ class ConversationService:
         self,
         form_data: dict[str, Any],
         title: str = "",
+        profile_key: str = "",
     ) -> AsyncIterator[StreamEvent]:
-        """提交问卷后开启会话，流式返回模型的第一轮回复。
+        """提交表单/文档后开启会话，流式返回模型的第一轮回复。
 
-        流程：登记会话 → 把问卷答案整理成需求文本 → 让模型先做理解确认与
-        追问 → 逐字推送 → 把这一轮写进会话历史。
+        流程：校验并解析档案 → 登记会话 → 按档案声明的占位符渲染开场白 →
+        让模型先做理解确认与追问 → 逐字推送 → 把这一轮写进会话历史。
 
-        人设与首轮开场白都取自对话档案（默认 `clarification`），调用方无法指定，
-        因此不可能出现「人设与开场白口径不一致」的情况。
+        人设与首轮开场白都取自对话档案，调用方**只能点名档案**（`profile_key`），
+        不能自带提示词；同一档案内两者同口径，跨档案则共用同一段提问规则。
 
         Args:
-            form_data: 问卷答案。
+            form_data: 提交上来的表单数据。`clarification` 档案用问卷答案（`QuestionConfig.name`
+                作键）；`doc-clarification` 档案用 `document`（文档正文）与 `pending_items`
+                （待确认清单文本）。
             title: 会话标题，留空则自动推断。
+            profile_key: 对话档案标识；留空取服务默认。
 
         Yields:
             `StreamEvent`。首个 `status` 事件的 `data` 里带 `conversation_id`，
             前端需要立刻记下来，后续接续对话要靠它。
+
+        Raises:
+            AppError: `profile_key` 未注册。
         """
-        record = self._create_record(form_data, title)
-        profile: ConversationProfile = resolve_profile(record.profile_key)
+        # 先校验档案再登记会话：未注册的标识当场拒绝，不留下一条用着错人设的会话
+        profile: ConversationProfile = self.resolve_request_profile(profile_key)
+        record = self._create_record(form_data, title, profile_key=profile.key)
         yield StreamEvent(
             type="status",
             content="已收到你的需求，正在整理分析…",
             data={"conversation_id": record.id},
         )
 
-        # 首轮的用户消息：需求文本 + 让模型先确认理解再追问
-        first_message = profile.opening.format(requirements=record.requirements)
+        # 首轮的用户消息：按档案声明的占位符填充（需求文本 / 文档正文 + 待确认清单）
+        first_message = profile.opening.format(**self._opening_context(profile, record))
         messages = _build_lc_messages(
             system_prompt=profile.system_prompt,
             user_message=first_message,
@@ -383,6 +438,7 @@ class ConversationService:
         user_message: str,
         conversation_id: str | None = None,
         history: list[FrontendMessage] | None = None,
+        profile_key: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """接续对话，流式返回模型对本轮输入的回复。
 
@@ -391,19 +447,24 @@ class ConversationService:
         - **无状态**：不传 `conversation_id` 而传 `history`，由前端携带完整历史，
           适合服务重启或多实例部署的场景。
 
-        人设按会话记录里的档案标识**实时解析**：无状态模式下记录已丢失，则回退到
-        服务默认档案——由于默认档案就是澄清人设，前端无需（也无从）重新下发提示词，
-        不会像以前那样「忘了重发就悄悄退回另一个人设」。
+        人设**按档案标识实时解析**，优先取会话记录里的那个（记录标明了这次对话点的是哪个
+        场景）；记录已丢失（服务重启 / 无状态模式）时才用请求带来的 `profile_key`，
+        两者都没有则回退默认档案。`profile_key` 只是点名场景、不是提示词，因此这不违反
+        「提示词全在后端」——否则服务重启后「文档澄清」会悄悄变回「需求澄清」。
 
         Args:
             user_message: 本轮用户输入。
             conversation_id: 会话 ID；给出时优先使用服务内的历史，并在生成
                 结束后把本轮问答写回该会话。
             history: 前端传入的历史消息；传入时优先于服务端历史。
+            profile_key: 会话记录缺失时用于解析人设的档案标识。
 
         Yields:
             `StreamEvent`。`done` 事件的 `data` 带 `conversation_id` 与完整
             `reply`，前端可用它做一次最终对齐。
+
+        Raises:
+            AppError: `profile_key` 未注册。
         """
         record = self._conversations.get(conversation_id) if conversation_id else None
 
@@ -423,7 +484,10 @@ class ConversationService:
         base_history: list[FrontendMessage] = list(history) if history else list(
             record.messages if record else []
         )
-        profile: ConversationProfile = resolve_profile(record.profile_key if record else "")
+        # 有记录就信记录（它标明了这次对话点的是哪个场景），没有才用请求带来的标识
+        profile: ConversationProfile = self.resolve_request_profile(
+            record.profile_key if record else profile_key
+        )
         messages = _build_lc_messages(
             system_prompt=profile.system_prompt,
             history=base_history,
@@ -465,15 +529,32 @@ def get_service() -> ConversationService:
     return _default_service
 
 
+def check_profile_key(profile_key: str) -> None:
+    """校验请求要用的对话档案；未注册的标识抛 `AppError(INVALID_REQUEST)`。
+
+    路由必须在**返回 SSE 响应之前**调用它：只有错误发生在流开始之前，才可能是一个真正
+    的 HTTP 400。等流内再报，前端拿到的是 200 加一条 `error` 事件，状态码就失去意义了。
+
+    Args:
+        profile_key: 请求带来的档案标识；空串表示用默认档案。
+
+    Raises:
+        AppError: 标识未在注册表中登记。
+    """
+    get_service().resolve_request_profile(profile_key)
+
+
 async def start_stream(
     form_data: dict[str, Any],
     title: str = "",
+    profile_key: str = "",
 ) -> AsyncIterator[StreamEvent]:
-    """提交问卷答案、创建会话，并以事件流形式产出模型的第一轮回复。
+    """提交表单数据、创建会话，并以事件流形式产出模型的第一轮回复。
 
     Args:
-        form_data: 问卷答案。
+        form_data: 提交上来的表单数据（含 `doc-clarification` 档案需要的文档正文）。
         title: 会话标题，留空则自动推断。
+        profile_key: 对话档案标识；留空取默认（需求澄清）。
 
     Yields:
         `StreamEvent`，首个 `status` 事件的 `data` 里带 `conversation_id`。
@@ -481,6 +562,7 @@ async def start_stream(
     async for event in get_service().start_conversation_stream(
         form_data=form_data,
         title=title,
+        profile_key=profile_key,
     ):
         yield event
 
@@ -489,6 +571,7 @@ async def continue_stream(
     user_message: str,
     conversation_id: str | None = None,
     history: list[FrontendMessage] | None = None,
+    profile_key: str = "",
 ) -> AsyncIterator[StreamEvent]:
     """接续对话，以事件流形式产出模型对本轮输入的回复。
 
@@ -496,6 +579,7 @@ async def continue_stream(
         user_message: 本轮用户输入。
         conversation_id: 会话 ID；为 `None` 时走无状态模式。
         history: 前端回传的历史消息；传入时优先于服务端保存的历史。
+        profile_key: 会话记录缺失时用于解析人设的档案标识。
 
     Yields:
         `StreamEvent`，`done` 事件的 `data` 带 `conversation_id` 与完整 `reply`。
@@ -504,5 +588,6 @@ async def continue_stream(
         user_message=user_message,
         conversation_id=conversation_id,
         history=history,
+        profile_key=profile_key,
     ):
         yield event

@@ -42,9 +42,12 @@ class ScriptedLLM:
         self._pieces = list(pieces or [])
         self._raise_at = raise_at
         self._usage = usage_metadata
+        # 每次调用收到的消息（供「提示词里到底注入了什么」这类断言使用）
+        self.calls: list[list[BaseMessage]] = []
 
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
         """异步流式产出；按 `raise_at` 在指定位置中断。"""
+        self.calls.append(list(messages))
         if self._raise_at == 0:
             raise STREAM_ERROR
         last = len(self._pieces) - 1

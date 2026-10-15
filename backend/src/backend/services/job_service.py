@@ -118,11 +118,32 @@ def create_job(
     return GenerationJobRepository.create(owner_id, kind, solution_id, input_fingerprint)
 
 
-def _resolve_skill_refs(kind: str) -> list[dict[str, Any]]:
-    """本次任务注入的技能包身份：按产物类型去技能注册表里查。
+def _target_product_kind(kind: str, request: dict[str, Any]) -> str | None:
+    """任务要**产出/改写**的是哪一份产物；无法确定时返回 `None`。
+
+    - `prd` / `api_docs` / `prompts`：整篇生成，种类本身就是产物类型。
+    - `optimize` / `clarify`：对某一份**已有**文档的动作，产物类型来自请求体的 `doc_kind`。
+
+    返回 `None` 表示取不到（如 `optimize` 漏传 `doc_kind`）。调用方据此**既不注入技能资源
+    也不在回执里报技能包身份**——报一个跟实际注入不符的包，比不报更糟。
+    """
+    if kind in DOCUMENT_KINDS:
+        return kind
+    if kind in ("optimize", "clarify"):
+        doc_kind = request.get("doc_kind")
+        return doc_kind if doc_kind in DOCUMENT_KINDS else None
+    return None
+
+
+def _resolve_skill_refs(kind: str, request: dict[str, Any]) -> list[dict[str, Any]]:
+    """本次任务注入的技能包身份：按**目标产物**去技能注册表里查。
 
     「哪个产物用哪个技能包」由技能包自己在 `skill.yaml` 的 `applies_to` 里声明，
-    这里**不再写死种类判断**——新加一个技能包不需要改这个函数（这正是注册表的意义）。
+    这里**不写死具体包名**——新加一个技能包不需要改这个函数（这正是注册表的意义）。
+
+    ⚠️ 查的是 `_target_product_kind` 而不是 `kind` 本身：`optimize` / `clarify` 的 `kind`
+    只说「做了一件什么事」，回执若照它去查，就会给「优化接口文档」标上 PRD 那个包——
+    而实际注入的（若 `doc_kind` 缺失则一包都没注入）与回执不符，又是一次静默不一致。
 
     技能包没声明服务于该产物、不在位、元数据损坏或资源不齐时返回空列表——生成会降级
     到内置提示词，这件事必须能在回执上看得见（债务 D8），所以这里既不填占位值也不抛异常
@@ -131,12 +152,15 @@ def _resolve_skill_refs(kind: str) -> list[dict[str, Any]]:
     读盘本身出意外（权限、编码）也按「没加载上」处理并留一条日志：它属于
     「该起的自检没拦住」，不让一次具体的生成请求无缘无故失败。
     """
+    product_kind = _target_product_kind(kind, request)
+    if product_kind is None:
+        return []
     try:
-        described = describe_kind(kind)
+        described = describe_kind(product_kind)
     except Exception:  # noqa: BLE001 - 自检类问题不该让生成任务起不来
         logger.warning(
             "读取技能包身份信息失败，本次回执不记录技能版本",
-            extra={"event": "job.skill_ref_failed", "kind": kind},
+            extra={"event": "job.skill_ref_failed", "kind": product_kind},
             exc_info=True,
         )
         return []
@@ -177,7 +201,7 @@ def dispatch(
             model=settings.default_llm_model,
         ),
     )
-    runtime.skill_refs = _resolve_skill_refs(kind)
+    runtime.skill_refs = _resolve_skill_refs(kind, runtime.request)
 
     task = asyncio.create_task(run_job(runtime))
     runtime.task = task
@@ -427,23 +451,30 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     job_bus.publish(runtime.job_id, _run_summary_event(summary))
 
 
-def _document_kind(runtime: JobRuntime) -> str | None:
-    """任务种类 → 产物类型；无法确定时返回 `None`（宁可不写，也不写错位置）。
+def _regenerates_whole_document(kind: str) -> bool:
+    """这次任务是否是「整篇重生成上游产物」——只有它会连带作废下游。
 
-    `prd` / `api_docs` / `prompts` 三种生成任务的种类就是产物类型，一目了然。
-    只有 `optimize` 需要额外信息——它优化的是「某一份」文档，而种类本身不带这个信息；
-    调用方必须通过 `doc_kind` 说明改的是哪一份。
+    依据是产物依赖链（`document_store.DOWNSTREAM_KINDS`）：下游由上游正文推导而来，
+    上游换了一版，下游就不再成立。反过来，`optimize`（按指令就地优化）与 `clarify`
+    （按澄清改写）动的都是**同一份**文档的局部，其它产物仍然是按同一份上游推出来的，
+    不该被顺手删掉。
 
-    ⚠️ `optimize` 缺 `doc_kind` 时**刻意返回 None**：猜一个默认值（比如 prd）会让
-    「优化接口文档」的结果覆盖掉 PRD 正文，那是**静默的数据损坏**。宁可这次不落库
-    （改动只留在当次会话里，与旧行为一致），也不要写错位置。
+    ⚠️ 这条判断以前是隐式的（一律 `invalidate_downstream=True`），后果是「优化接口文档」
+    会把基于它生成的提示词悄悄删掉——用户看不到任何提示，只是下次打开方案时东西不见了。
     """
-    if runtime.kind in DOCUMENT_KINDS:
-        return runtime.kind
-    if runtime.kind == "optimize":
-        doc_kind = runtime.request.get("doc_kind")
-        return doc_kind if doc_kind in DOCUMENT_KINDS else None
-    return None
+    return kind in DOCUMENT_KINDS
+
+
+def _document_kind(runtime: JobRuntime) -> str | None:
+    """任务要写的产物类型；无法确定时返回 `None`（宁可不写，也不写错位置）。
+
+    直接用 `_target_product_kind`：它与「回执报哪个包」用的是同一份判断，两处不会分叉。
+
+    ⚠️ `optimize` / `clarify` 缺 `doc_kind` 时**刻意返回 None**：猜一个默认值（比如 prd）
+    会让「优化接口文档」的结果覆盖掉 PRD 正文，那是**静默的数据损坏**。宁可这次不落库
+    （改动只留在当次会话里），也不要写错位置。
+    """
+    return _target_product_kind(runtime.kind, runtime.request)
 
 
 def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
@@ -472,8 +503,9 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             content,
             pending_items=runtime.pending_items,
             run_summary=summary,
-            # 整篇重生成会让下游产物失效；`optimize` 不在这一步（`kind` 不是产物类型）
-            invalidate_downstream=True,
+            # 只有整篇重生成才让下游失效；`optimize` / `clarify` 是对同一份文档的就地改写，
+            # 顺手删掉下游属于静默的数据丢失（见 `_regenerates_whole_document`）
+            invalidate_downstream=_regenerates_whole_document(runtime.kind),
         )
     except Exception:  # noqa: BLE001 - 落文档不该把已成功的任务判失败
         logger.warning(
@@ -638,5 +670,13 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
         return document_service.optimize_document_stream(
             document=request.get("document", "") or "",
             instruction=request.get("instruction", "") or "",
+            # 目标产物决定注入哪一套产出规范；与回执报的技能包用同一份判断
+            doc_kind=_target_product_kind(kind, request) or "",
+        )
+    if kind == "clarify":
+        return document_service.apply_clarification_stream(
+            document=request.get("document", "") or "",
+            history=request.get("history") or None,
+            doc_kind=_target_product_kind(kind, request) or "",
         )
     raise ValueError(f"未知的生成任务类型：{kind}")

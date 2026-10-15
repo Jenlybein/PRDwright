@@ -58,6 +58,7 @@ from backend.services.prd_skill import (
 )
 from backend.services.prompts import (
     API_DOCS_GENERATION_PROMPT,
+    CLARIFICATION_REWRITE_PROMPT,
     OPTIMIZE_DOCUMENT_PROMPT_TEMPLATE,
     PRD_GENERATION_PROMPT,
     PRD_SKILL_GENERATION_PROMPT,
@@ -216,6 +217,56 @@ def _merge_summary(original: dict[str, Any], candidate: dict[str, Any]) -> dict[
         if merged is not None:
             result[key] = merged
     return result
+
+
+# 改写既有文档（optimize / clarify）时注入哪些技能资源才算「产出规范」。
+#
+# 这份白名单本身就是取舍的落点：**不整包注入**。例如 PRD 的 `prd_template` 是给「从零生成」
+# 用的骨架，里面带 `{{字段名}}` 占位符；把它塞进「改写既有文档」的提示词里，只会诱导模型
+# 重新渲染一遍占位符，反而破坏原文。字段契约同理——改写不需要它。
+_REWRITE_REFERENCE_KEYS: dict[str, tuple[str, ...]] = {
+    "prd": ("writing_rules",),
+    "api_docs": ("api_specs",),
+    "prompts": ("prompts_guide",),
+}
+
+# 资源语义键 → 中文小标题（纯展示；没登记过的键直接用原文键名）
+_SKILL_KEY_LABELS: dict[str, str] = {
+    "writing_rules": "写作规范",
+    "prd_template": "PRD 模板",
+    "field_schema": "输入字段契约",
+    "api_specs": "团队接口规范",
+    "prompts_guide": "提示词套件产出要求",
+}
+
+
+def format_rewrite_reference(kind: str) -> str:
+    """按目标产物取「改写时要对齐的规范」文本（整段注入，见 ADR-020）。
+
+    技能包不在位或资源缺失时返回一句**显式**的降级说明，而不是空串：提示词里什么都不写，
+    模型会以为「没有规范要守」，而实际约定是被悄悄丢掉了——这类静默降级正是 ADR-020 要消灭的。
+
+    Args:
+        kind: 目标产物类型（`prd` / `api_docs` / `prompts`）。空串或未知取值一律降级。
+
+    Returns:
+        可直接拼进提示词的段落文本。
+    """
+    keys = _REWRITE_REFERENCE_KEYS.get(kind, ())
+    artifacts = (load_skill_artifacts(kind) or {}) if keys else {}
+    blocks = [
+        f"### {_SKILL_KEY_LABELS.get(key, key)}\n\n{artifacts[key]}"
+        for key in keys
+        if artifacts.get(key)
+    ]
+    if not blocks:
+        logger.warning(
+            "改写时未加载到 %s 的技能包规范，本次按原文风格保持一致",
+            kind or "（未知产物）",
+            extra={"event": "rewrite.skill_missing", "kind": kind},
+        )
+        return "（本次未加载产出规范，请严格保持原文的术语、结构与风格。）"
+    return "\n\n".join(blocks)
 
 
 class DocumentService:
@@ -622,12 +673,19 @@ class DocumentService:
         self,
         document: str,
         instruction: str,
+        doc_kind: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """按用户指令优化既有文档。
+
+        `doc_kind` 决定注入哪一套产出规范。它是「这次改的是哪一份产物」——没有它就只能
+        用降级说明，而回执却会照旧报出一个技能包身份，两边就对不上了（见 `job_service`
+        的 `_target_product_kind`）。非 job 通道（老的 `/optimize-document-stream`）不传，
+        因此这里给的是空串而不是默认 `prd`：宁可退回「不注入规范」，也不假装注入的是 PRD 那套。
 
         Args:
             document: 原文档正文（Markdown）。
             instruction: 用户的优化要求。
+            doc_kind: 目标产物类型（`prd` / `api_docs` / `prompts`）；为空则不注入规范。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（优化后的文档正文）。
@@ -635,6 +693,7 @@ class DocumentService:
         user_content = self._load_template("optimize").format(
             instruction=instruction,
             document=document,
+            skill_context=format_rewrite_reference(doc_kind),
         )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
         async for event in iter_reply_events(
@@ -644,6 +703,66 @@ class DocumentService:
             extra_data={"doc_type": "optimize"},
         ):
             yield event
+
+    async def apply_clarification_stream(
+        self,
+        document: str,
+        history: list[dict[str, Any]] | None = None,
+        doc_kind: str = "prd",
+    ) -> AsyncIterator[StreamEvent]:
+        """按本轮澄清对话改写文档，产出完整正文（含重算后的待确认清单）。
+
+        与 `optimize_document_stream` 的区别在**输入**：优化吃一句用户指令，这里吃一整轮
+        澄清对话——用户是在问答里把「待确认」逐条敲定的，结论散在对话记录中，因此必须把
+        完整对话交给模型，并明确要求它只动涉及到的章节（见 `CLARIFICATION_REWRITE_PROMPT`）。
+
+        **这里是「改写后重算清单」的落点**：改写输出末尾附一个新的待确认块，实时 `chunk`
+        先过抑制器、`done` 时再 `extract` 一次，与三条生成线完全同款——因此「换了正文却
+        忘了重算清单」在这条路径上同样没有落脚点。
+
+        Args:
+            document: 原文档正文（Markdown）。
+            history: 本轮澄清对话记录（`{role, content}` 列表）。
+            doc_kind: 目标产物类型，决定注入哪一套产出规范。
+
+        Yields:
+            `StreamEvent`；`done` 的 `data` 带完整 `reply` 与 `pending_items`（重算后的清单）。
+        """
+        user_content = CLARIFICATION_REWRITE_PROMPT.format(
+            history=format_conversation(history),
+            document=document,
+            skill_context=format_rewrite_reference(doc_kind),
+            pending_spec=render_spec(),
+        )
+        messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        suppressor = PendingBlockSuppressor()
+        async for event in iter_reply_events(
+            self.llm,
+            messages,
+            status_text="正在按澄清结果改写文档…",
+            extra_data={"doc_type": "clarify"},
+        ):
+            if event.type == "chunk":
+                clean = suppressor.feed(event.content)
+                if clean:
+                    yield StreamEvent(type="chunk", content=clean, data=event.data)
+            elif event.type == "done":
+                trailing = suppressor.flush()
+                if trailing:
+                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                reply = str(event.data.get("reply", ""))
+                clean_reply, items = extract(reply)
+                yield StreamEvent(
+                    type="done",
+                    content="",
+                    data={
+                        **(event.data or {}),
+                        "reply": clean_reply,
+                        "pending_items": items,
+                    },
+                )
+            else:
+                yield event
 
 
 # ----------------------------------------------------------------------------
@@ -719,10 +838,30 @@ async def generate_prompts_stream(
 async def optimize_document_stream(
     document: str,
     instruction: str,
+    doc_kind: str = "",
 ) -> AsyncIterator[StreamEvent]:
-    """优化文档的流式入口。"""
+    """优化文档的流式入口。
+
+    `doc_kind` 决定注入哪一套产出规范；老的 `/optimize-document-stream` 通道不传，
+    此时退回「不注入规范」的降级说明。
+    """
     async for event in get_service().optimize_document_stream(
         document=document,
         instruction=instruction,
+        doc_kind=doc_kind,
+    ):
+        yield event
+
+
+async def apply_clarification_stream(
+    document: str,
+    history: list[dict[str, Any]] | None = None,
+    doc_kind: str = "prd",
+) -> AsyncIterator[StreamEvent]:
+    """按澄清对话改写文档的流式入口（`clarify` 任务走这里）。"""
+    async for event in get_service().apply_clarification_stream(
+        document=document,
+        history=history,
+        doc_kind=doc_kind,
     ):
         yield event

@@ -60,6 +60,15 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
             raise AppError(ErrorCode.INVALID_REQUEST, "document 不能为空")
         if not payload.instruction.strip():
             raise AppError(ErrorCode.INVALID_REQUEST, "instruction 不能为空")
+    elif payload.kind == "clarify":
+        if not payload.document.strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "document 不能为空")
+        # `doc_kind` 决定两件事：注入哪一套产出规范、改写结果写回哪一份文档。
+        # 缺了它就只能「不落库」，那这次澄清等于白做——因此在门口直接拒掉。
+        if payload.doc_kind is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "clarify 必须指定 doc_kind")
+        if not payload.history:
+            raise AppError(ErrorCode.INVALID_REQUEST, "clarify 需要提供澄清对话记录（history）")
 
 
 def _requirements_text(payload: schemas.JobCreateRequest) -> str:

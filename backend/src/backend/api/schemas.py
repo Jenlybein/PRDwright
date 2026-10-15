@@ -38,13 +38,24 @@ class ConversationCreateRequest(BaseModel):
     """创建会话请求。
 
     不接受任何提示词参数：人设与首轮开场白由后端的对话档案决定
-    （见 `services/prompts.py`），前端只能选场景，不能自带提示词。
+    （见 `services/prompts.py`），前端只能**点名场景**，不能自带提示词。
     """
 
     title: str = Field(default="", description="会话标题，留空则由服务层自动生成")
     answers: dict[str, Any] = Field(
         default_factory=dict,
-        description="问卷答案，key 为 QuestionConfig.name",
+        description=(
+            "提交上来的数据。`clarification` 档案用问卷答案（key 为 QuestionConfig.name）；"
+            "`doc-clarification` 档案用 document（文档正文）与 pending_items（待确认清单文本）"
+        ),
+    )
+    profile_key: str = Field(
+        default="",
+        description=(
+            "对话档案标识（如 `doc-clarification`）；留空取默认档案“需求澄清”。"
+            "只认注册表里登记过的名字，未知取值直接 400——不静默回退，"
+            "否则「点名了 A 场景、实际跑的是 B 场景」既没报错也没日志"
+        ),
     )
 
 
@@ -58,8 +69,9 @@ class MessageItem(BaseModel):
 class ConversationContinueRequest(BaseModel):
     """接续对话请求。会话 ID 与历史至少提供一种。
 
-    同样不接受提示词参数：人设由会话记录里的档案标识实时解析，无状态模式下
-    回退到默认档案，前端不需要（也无法）重新下发。
+    同样不接受提示词参数：人设由会话记录里的档案标识实时解析，前端不需要（也无法）
+    重新下发。`profile_key` 也不是提示词，只是「点名场景」——服务重启后会话记录已丢失
+    （无状态模式），没有它就只能回退默认档案，于是「文档澄清」会在中途悄悄变回「需求澄清」。
     """
 
     conversation_id: str = Field(
@@ -70,6 +82,13 @@ class ConversationContinueRequest(BaseModel):
     history: list[MessageItem] = Field(
         default_factory=list,
         description="前端回传的历史消息；传入时优先于服务端保存的历史",
+    )
+    profile_key: str = Field(
+        default="",
+        description=(
+            "会话记录缺失（服务重启 / 无状态模式）时用于解析人设的档案标识；"
+            "有会话记录时以记录里的档案为准"
+        ),
     )
 
 
@@ -335,18 +354,20 @@ class DocumentSaveRequest(BaseModel):
 # 生成任务（generation_jobs）：把一次生成持久化并支持刷新重连
 # ============================================================================
 
-# 任务类型：与前端 `DocKind` 一一对应
-JobKind = Literal["prd", "api_docs", "prompts", "optimize"]
+# 任务类型。前三种是「整篇生成」，与前端 `DocumentKind` 一一对应；
+# `optimize`（按用户指令就地优化）与 `clarify`（按澄清对话就地改写）是**对某一份已有文档
+# 的动作**，因此它们必须额外带 `doc_kind` 才能落库。
+JobKind = Literal["prd", "api_docs", "prompts", "optimize", "clarify"]
 
 
 class JobCreateRequest(BaseModel):
     """创建一次生成任务的请求体。
 
-    一个模型承载四种生成：必填字段按 `kind` 区分（路由层校验），
+    一个模型承载五种任务：必填字段按 `kind` 区分（路由层校验），
     因此不同 `kind` 只用到各自相关的字段，其余留默认值即可。
     """
 
-    kind: JobKind = Field(description="任务类型：prd / api_docs / prompts / optimize")
+    kind: JobKind = Field(description="任务类型：prd / api_docs / prompts / optimize / clarify")
     solution_id: int | None = Field(
         default=None,
         description="关联方案 id；快捷入口等场景可为空（逃生口）",
@@ -354,8 +375,8 @@ class JobCreateRequest(BaseModel):
     doc_kind: DocumentKind | None = Field(
         default=None,
         description=(
-            "本次任务**作用在**哪一份产物上。仅 `optimize` 需要：它的 `kind` 表达的是"
-            "「做了一件什么事」，而落库要知道「东西写进哪一份文档」。缺省时不落库"
+            "本次任务**作用在**哪一份产物上。`optimize` 与 `clarify` 必须给：它们的 `kind`"
+            "表达的是「做了一件什么事」，而落库要知道「东西写进哪一份文档」。缺省时不落库"
             "（宁可本次改动只留在会话里，也不猜一个默认值写错位置）。"
         ),
     )
@@ -372,9 +393,9 @@ class JobCreateRequest(BaseModel):
     )
     # --- api_docs / prompts ---
     prd_content: str = Field(default="", description="PRD 正文（接口文档 / 提示词生成输入）")
-    # --- optimize ---
+    # --- optimize / clarify ---
     document: str = Field(default="", description="待优化的原文档正文")
-    instruction: str = Field(default="", description="用户的优化要求")
+    instruction: str = Field(default="", description="用户的优化要求（仅 optimize）")
 
 
 class JobCreated(BaseModel):

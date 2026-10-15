@@ -101,12 +101,17 @@ async def start_conversation_stream(
     事件序列：`status`（`data` 里带本次的 `conversation_id`，前端需立即记录）
     → 若干 `chunk`（增量文本）→ `done`（带完整 `reply`）；出错时为 `error`。
 
-    请求里没有提示词参数：本轮用哪套人设与开场白，由后端按默认对话档案决定
-    （`services/prompts.py` 的 `ConversationProfile`）。
+    请求里没有提示词参数：本轮用哪套人设与开场白，由后端按对话档案决定
+    （`services/prompts.py` 的 `ConversationProfile`）。`profile_key` 只用于**点名场景**
+    （留空取默认的「需求澄清」），未知取值直接 400——不静默回退默认档案。
     """
+    # 先同步校验档案：错误发生在流开始之前，才可能是一个真正的 400
+    # （进了 SSE 之后状态码恒为 200，前端只能靠错误码猜）
+    conversation_service.check_profile_key(payload.profile_key)
     events = conversation_service.start_stream(
         form_data=payload.answers,
         title=payload.title,
+        profile_key=payload.profile_key,
     )
     return sse_response(events)
 
@@ -125,10 +130,14 @@ async def continue_conversation_stream(
     """
     # 空列表视为「未传」，交给服务层回退到服务端历史
     history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    # 同 `/start-stream`：档案标识在进流之前校验
+    conversation_service.check_profile_key(payload.profile_key)
     events = conversation_service.continue_stream(
         user_message=payload.content,
         conversation_id=payload.conversation_id or None,
         history=history,
+        # 服务重启后会话记录已丢，靠它把「点的是哪个场景」带过来，避免人设悄悄换回默认
+        profile_key=payload.profile_key,
     )
     return sse_response(events)
 
