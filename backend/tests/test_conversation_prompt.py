@@ -252,3 +252,60 @@ def test_frontend_holds_no_prompt_text() -> None:
         )
 
     assert not offenders, "提示词又回到了前端：" + "；".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# 问卷文本化：已答项 + 未填题目汇总
+# ---------------------------------------------------------------------------
+
+
+def test_form_data_lists_unfilled_questions_in_one_line() -> None:
+    """未填的题目要汇总成一行，附在已答项末尾。
+
+    没有这一行，模型只看到「有答案的题」，无从判断某道题是「被问过、用户留空」
+    还是「压根不存在这道题」——后者会诱使它自己编一个答案补上。
+    """
+    from backend.services.conversation_service import format_form_data
+
+    text = format_form_data({"product_name": "演示产品", "core_features": "A、B"})
+
+    assert text.startswith("- **你想做的产品叫什么名字？**：演示产品")
+    assert "- **请列出产品的核心功能，建议 3-5 条，一行一条。**：A、B" in text
+    assert "以下题目用户未填写：" in text
+    # 已答项不出现在未填列表里
+    assert "你想做的产品叫什么名字？" not in text.split("以下题目用户未填写：")[1]
+
+
+def test_form_data_omits_the_line_when_nothing_is_missing() -> None:
+    """全部题目都答了就不加这一行——不留一句「以下题目用户未填写：（空）」。"""
+    from backend.services.conversation_service import format_form_data, load_questions_config
+
+    questions = load_questions_config()
+    assert questions is not None
+    answered = {
+        question.name: "有内容"
+        for question in [*questions.base_questions, *questions.advanced_questions]
+    }
+
+    text = format_form_data(answered)
+
+    assert "以下题目用户未填写：" not in text
+
+
+def test_form_data_treats_blank_string_as_unfilled() -> None:
+    """空串与「键不存在」同等看待——两者都是「用户没给这个信息」。"""
+    from backend.services.conversation_service import format_form_data
+
+    text = format_form_data({"product_name": "   ", "core_features": "A"})
+
+    assert "- **你想做的产品叫什么名字？**" not in text.split("以下题目用户未填写：")[0]
+    assert "你想做的产品叫什么名字？" in text.split("以下题目用户未填写：")[1]
+
+
+def test_form_data_without_config_keeps_showing_unknown_fields() -> None:
+    """配置不可用时退化为直接展示字段名，不把用户的答案丢掉。"""
+    from backend.services.conversation_service import format_form_data
+
+    text = format_form_data({"某个新字段": "值"})
+
+    assert "- **某个新字段**：值" in text

@@ -132,7 +132,18 @@ class TokenIssuer(Protocol):
     """
 
     def issue(self, user_id: int) -> tuple[str, datetime]:
-        """签发凭据。
+        """签发凭据（**不动**该用户已有的会话）。
+
+        Returns:
+            `(写入 Cookie 的值, 过期时间)`。
+        """
+        ...
+
+    def replace(self, user_id: int) -> tuple[str, datetime]:
+        """签发凭据并**吊销该用户此前的全部会话**。
+
+        单点登录的语义在这里：新登录让旧的立刻失效。删除与插入必须原子完成，
+        因此实现把它交给 `AuthSessionRepository.replace_for_user`。
 
         Returns:
             `(写入 Cookie 的值, 过期时间)`。
@@ -151,7 +162,7 @@ class TokenIssuer(Protocol):
 class OpaqueSessionIssuer:
     """不透明 token + SQLite 会话表。
 
-    选择它的理由：可以**即时吊销**（登出即删记录，改密码可强制下线），
+    选择它的理由：可以**即时吊销**（登出即删记录、改密码可强制下线、新登录踢掉旧的），
     而 JWT 在有效期内收不回来。代价是每次校验要查一次库——本项目里这是微秒级开销，
     相比动辄几十秒的 LLM 调用完全可以忽略。
     """
@@ -163,6 +174,12 @@ class OpaqueSessionIssuer:
         token = secrets.token_urlsafe(32)
         expires_at = utc_now() + self._ttl
         AuthSessionRepository.create(_sha256(token), user_id, expires_at)
+        return token, expires_at
+
+    def replace(self, user_id: int) -> tuple[str, datetime]:
+        token = secrets.token_urlsafe(32)
+        expires_at = utc_now() + self._ttl
+        AuthSessionRepository.replace_for_user(_sha256(token), user_id, expires_at)
         return token, expires_at
 
     def verify(self, credential: str) -> int | None:
@@ -303,10 +320,14 @@ def reset_password(username: str, password: str) -> None:
 def login(username: str, password: str) -> tuple[User, str, datetime]:
     """校验账号密码并签发会话。
 
-    注意两个安全细节：
+    注意三个细节：
     1. 用户不存在与密码错误**返回同一句提示**，避免泄露哪些用户名已注册（账号枚举）。
     2. 用户不存在时也执行一次等价的 scrypt 运算再返回，避免「响应更快」
        从时序上暴露该用户名不存在。
+    3. 签发走 `replace()` 而不是 `issue()`：这是**单点登录**——登录成功即吊销该用户
+       此前的全部会话（见 ADR-024）。代价是多设备会互相踢下线，这是明确接受的风险；
+       好处是不需要再维护一套「会话版本号 + 乐观锁」来对付并发登录，少一处状态就少一类
+       不一致。
 
     Returns:
         `(用户, 写入 Cookie 的凭据, 过期时间)`。
@@ -328,7 +349,7 @@ def login(username: str, password: str) -> tuple[User, str, datetime]:
         raise AuthError("该账号已被停用")
 
     user = _to_user(row)
-    credential, expires_at = get_token_issuer().issue(user.id)
+    credential, expires_at = get_token_issuer().replace(user.id)
     return user, credential, expires_at
 
 

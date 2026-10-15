@@ -130,18 +130,44 @@ def test_logout_is_idempotent(client):
     assert client.post("/api/auth/logout").status_code == 200
 
 
-def test_each_login_creates_an_independent_session(client):
-    """多次登录会签发多个会话，登出其中一个不影响其它。"""
-    register(client, username="alice", password="password123")
+def test_second_login_revokes_the_first_cookie(client):
+    """二次登录后旧 Cookie 立即 401——这是**单点登录**，不是「多端并存」。
 
+    这条契约在 ADR-024 里明确接受了一个代价：同一账号在另一台设备登录，这边会被踢下线。
+    换来的是「不需要再维护会话版本号 + 乐观锁」——那份状态本身才是真正会出错的地方。
+
+    旧用例曾断言「多次登录签发多个互不影响的会话」（多端并存），那是改动前的行为，
+    这里连同测试一起改口径。
+    """
+    register(client, username="alice", password="password123")
     first_token = client.cookies.get("prdwright_session")
+    assert client.get("/api/auth/me").status_code == 200
+
     login(client, username="alice", password="password123")
     second_token = client.cookies.get("prdwright_session")
     assert first_token != second_token, "每次登录都应签发新的会话凭据"
 
-    # 用第二个会话登出，再手动换回第一个，应当仍然有效
-    client.post("/api/auth/logout")
+    # 新 Cookie 可用
+    assert client.get("/api/auth/me").status_code == 200
+
+    # 换回旧 Cookie：已被新登录吊销
     client.cookies.set("prdwright_session", first_token)
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_first_login_does_not_affect_a_different_account(client):
+    """别人的登录态不受影响——单点登录只在同一个账号内生效。"""
+    register(client, username="alice", password="password123")
+    alice_token = client.cookies.get("prdwright_session")
+
+    register(client, username="bob", password="password123")
+    bob_token = client.cookies.get("prdwright_session")
+    assert bob_token != alice_token
+
+    login(client, username="alice", password="password123")
+
+    # bob 刚拿到的 Cookie 仍然有效
+    client.cookies.set("prdwright_session", bob_token)
     assert client.get("/api/auth/me").status_code == 200
 
 

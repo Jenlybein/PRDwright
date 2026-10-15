@@ -100,6 +100,33 @@ class AuthSessionRepository:
             conn.commit()
 
     @staticmethod
+    def replace_for_user(token_hash: str, user_id: int, expires_at: datetime) -> None:
+        """**吊销该用户的全部旧会话**并登记新会话（单点登录的落点）。
+
+        两步必须在**同一条事务**里完成：
+
+        - 先删后插：中间不留「旧会话已失效、新会话还没立」的窗口。分两次提交的话，
+          任何一步失败都会把用户留在「刚登录成功却判定未登录」的状态里。
+        - 插失败（如哈希撞上唯一约束）时**不提交**，连接关闭即回滚，旧会话照旧可用。
+
+        刻意**不按过期时间挑着删**：单点登录的语义是「新登录让旧的立刻失效」，
+        留着一条还没过期的旧会话就等于留着一个可用的第二登录态。
+
+        Args:
+            token_hash: 新会话 token 的 SHA-256 哈希。
+            user_id: 会话所属用户。
+            expires_at: 新会话的过期时间。
+        """
+        with connect() as conn:
+            conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            conn.execute(
+                "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (token_hash, user_id, utc_now_text(), expires_at.isoformat()),
+            )
+            conn.commit()
+
+    @staticmethod
     def fetch_valid(token_hash: str) -> dict[str, Any] | None:
         """取一条**未过期**的会话记录；不存在或已过期返回 None。
 
@@ -112,6 +139,27 @@ class AuthSessionRepository:
                 (token_hash, utc_now_text()),
             ).fetchone()
             return dict(row) if row else None
+
+    @staticmethod
+    def list_by_user(user_id: int) -> list[dict[str, Any]]:
+        """列出某用户的全部会话记录（诊断用）。
+
+        单点登录之后，「一个用户在库里应当**至多一条**会话」本身就是一条可核对的不变量，
+        出问题时（例如出现两条）这个方法是第一手证据，因此把它做成公开的读入口，
+        而不是让排查者临时去写 SQL。
+
+        Args:
+            user_id: 用户 id。
+
+        Returns:
+            该用户的会话行列表，按创建时间排序。
+        """
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM auth_sessions WHERE user_id = ? ORDER BY created_at",
+                (user_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     @staticmethod
     def delete(token_hash: str) -> None:

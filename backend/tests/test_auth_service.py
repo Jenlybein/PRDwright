@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from datetime import datetime
 
@@ -236,6 +237,80 @@ def test_delete_user_invalidates_existing_sessions():
 
     assert auth_service.current_user(credential) is None
     assert AuthSessionRepository.fetch_valid(token_hash) is None
+
+
+# ---------------------------------------------------------------------------
+# 单点登录：新登录吊销旧会话（ADR-024）
+# ---------------------------------------------------------------------------
+
+
+def test_second_login_revokes_the_first_session():
+    """二次登录后，第一个会话立即失效——单点登录的核心契约。"""
+    auth_service.create_user_direct("alice", "password123")
+    _, first, _ = auth_service.login("alice", "password123")
+    assert auth_service.current_user(first) is not None
+
+    _, second, _ = auth_service.login("alice", "password123")
+
+    assert second != first
+    assert auth_service.current_user(first) is None, "旧会话应当被新登录吊销"
+    assert auth_service.current_user(second) is not None
+
+
+def test_replace_for_user_keeps_exactly_one_session_per_user():
+    """换发之后，该用户在库里**只剩一条**会话记录。
+
+    只删「已过期」的那些是不够的：单点登录要的是「新登录让旧的立刻失效」，
+    留一条还没过期的旧会话就等于留着一个可用的第二登录态。
+    """
+    auth_service.create_user_direct("alice", "password123")
+    user_id = int(UserRepository.get_by_username("alice")["id"])  # type: ignore[index]
+    _, first, _ = auth_service.login("alice", "password123")
+    _, second, _ = auth_service.login("alice", "password123")
+
+    rows = AuthSessionRepository.list_by_user(user_id)
+    assert len(rows) == 1
+    assert rows[0]["token_hash"] == auth_service._sha256(second)  # noqa: SLF001
+    assert rows[0]["token_hash"] != auth_service._sha256(first)  # noqa: SLF001
+
+
+def test_one_users_login_does_not_touch_another():
+    """单点登录只清自己的会话——别人的登录态不该受影响。"""
+    auth_service.create_user_direct("alice", "password123")
+    auth_service.create_user_direct("bob", "password123")
+    _, alice_first, _ = auth_service.login("alice", "password123")
+    _, bob, _ = auth_service.login("bob", "password123")
+
+    auth_service.login("alice", "password123")
+
+    assert auth_service.current_user(bob) is not None
+    assert auth_service.current_user(alice_first) is None
+
+
+def test_replace_for_user_is_atomic():
+    """换发是**一条事务**：插入失败时旧会话必须还在。
+
+    这条守的是「先删后插、中间不留窗口」。若实现分两次提交，插入失败（这里故意让它撞上
+    主键）就会留下「旧的已删、新的没立」的库状态——用户刚登录成功却判定未登录。
+    """
+    auth_service.create_user_direct("alice", "password123")
+    auth_service.create_user_direct("bob", "password123")
+    _, alice_token, _ = auth_service.login("alice", "password123")
+    _, bob_token, _ = auth_service.login("bob", "password123")
+
+    alice_id = int(UserRepository.get_by_username("alice")["id"])  # type: ignore[index]
+    # 拿 bob 的哈希去给 alice 换发 → 撞 `auth_sessions` 的主键
+    with pytest.raises(sqlite3.IntegrityError):
+        AuthSessionRepository.replace_for_user(
+            auth_service._sha256(bob_token),  # noqa: SLF001
+            alice_id,
+            datetime(2099, 1, 1),
+        )
+
+    assert auth_service.current_user(alice_token) is not None, "插入失败后旧会话不该被删掉"
+    assert AuthSessionRepository.fetch_valid(
+        auth_service._sha256(alice_token)  # noqa: SLF001
+    ) is not None
 
 
 # ---------------------------------------------------------------------------

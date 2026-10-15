@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,6 +31,8 @@ from backend.services.prompts import (
     resolve_profile,
 )
 from backend.services.stream_reply import iter_reply_events
+
+logger = logging.getLogger(__name__)
 
 # 问卷配置文件：backend/src/backend/core/question_config.json
 QUESTION_CONFIG_PATH = Path(__file__).resolve().parents[1] / "core" / "question_config.json"
@@ -124,20 +127,30 @@ def format_form_data(
     """把问卷答案字典转成易读的 Markdown 文本。
 
     题目顺序和文案优先取自问卷配置（`name` → `label`）；配置里没有的字段
-    追加在末尾，直接用字段名展示，避免答案被静默丢弃。空值题目不输出。
+    追加在末尾，直接用字段名展示，避免答案被静默丢弃。空值题目不进已答列表。
+
+    **未填的题目会在末尾汇总成一行**（`以下题目用户未填写：…`）。这一行不是装饰：
+    没有它，模型只看到若干个「有答案的题」，无从判断某道题是「被问过、用户留空」还是
+    「压根不存在这道题」——后者会诱使它自己编一个答案补上。只列已答项等于把留空
+    当成了「没这回事」，而两者的处理方式正好相反（一个是该追问，一个是不该提）。
 
     Args:
         form_data: 问卷答案，key 为 `QuestionConfig.name`，value 为任意类型。
         questions: 问卷配置；不传则自动读取配置文件。
 
     Returns:
-        Markdown 无序列表文本，每形如 `- **题目文案**：答案`。
+        Markdown 无序列表文本，每形如 `- **题目文案**：答案`；末尾按需附未填题目汇总。
     """
     if not form_data:
         return "（用户尚未填写任何需求信息）"
 
     if questions is None:
         questions = load_questions_config()
+        if questions is None:
+            logger.warning(
+                "问卷配置未加载，本次无法汇总「未填写」的题目",
+                extra={"event": "requirements.config_missing"},
+            )
 
     # 建立 name → label 映射，并保留配置里的题目顺序
     ordered: list[tuple[str, str]] = []
@@ -147,14 +160,16 @@ def format_form_data(
 
     lines: list[str] = []
     handled: set[str] = set()
+    # 配置里声明过、但用户留空的题目（按配置顺序，便于与表单逐项对照）
+    unfilled: list[str] = []
 
     for name, label in ordered:
-        if name not in form_data:
-            continue
         handled.add(name)
-        text = _normalize_value(form_data[name])
+        text = _normalize_value(form_data.get(name))
         if text:
             lines.append(f"- **{label}**：{text}")
+        else:
+            unfilled.append(label)
 
     # 配置之外的字段（例如前端后续新增的题目）
     for key, value in form_data.items():
@@ -163,6 +178,9 @@ def format_form_data(
         text = _normalize_value(value)
         if text:
             lines.append(f"- **{key}**：{text}")
+
+    if unfilled:
+        lines.append(f"以下题目用户未填写：{'、'.join(unfilled)}")
 
     return "\n".join(lines) if lines else "（用户尚未填写任何需求信息）"
 

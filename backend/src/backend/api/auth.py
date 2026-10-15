@@ -47,6 +47,9 @@ async def register(
     """注册新账号。
 
     注册成功后**直接签发会话**（等同于自动登录），省去「注册完还要再登录一次」这一步。
+    走 `replace()` 与登录同一口径：新会话立起来的同时清掉该用户此前的会话。新账号本来
+    没有旧会话，这一步是空操作——但它保证「凡是签发登录态的地方都只有一个入口」，
+    不给「某个入口忘了吊销旧会话」留缝。
     """
     try:
         user = auth_service.register(payload.username, payload.password, payload.invite_code)
@@ -54,7 +57,7 @@ async def register(
         # 错误码由服务层给定，这里原样透传；状态码才是本层该决定的事
         raise AppError(exc.code, exc.message, status.HTTP_400_BAD_REQUEST) from exc
 
-    credential, _ = auth_service.get_token_issuer().issue(user.id)
+    credential, _ = auth_service.get_token_issuer().replace(user.id)
     _set_session_cookie(response, credential)
     return schemas.AuthUserResponse(id=user.id, username=user.username)
 
