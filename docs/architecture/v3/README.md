@@ -9,16 +9,19 @@
 
 | 文件 | 内容 | 状态 |
 | --- | --- | --- |
-| `ARCHITECTURE.md` | **v3 架构文档**：四条目标 → 范围 → 生成 Job 骨架 → 后端 / 前端设计 → 契约 → 取舍 → **与源文档《完整开发流程》的差异裁决（第 8 节）** | 进行中（第 4.1 / 4.2 节已落地） |
+| `ARCHITECTURE.md` | **v3 架构文档**：四条目标 → 范围 → 生成 Job 骨架 → 后端 / 前端设计 → 契约 → 取舍 → **与源文档《完整开发流程》的差异裁决（第 8 节）** | 进行中（第 4.1 / 4.2 / 4.3 节已落地） |
 | `roadmap.md` | R1 / R2 / R3 全景路线图（含 v1–v2 的历史盘点、债务清单、风险登记、**版本分期的唯一真源**） | 进行中 |
 
 两份怎么看：**先看 `ARCHITECTURE.md` 了解 v3 要建成什么样**，再看 `roadmap.md` 排期；
 Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节）随 R1-T5 落地，
 技能资产热重载与日志体检（ADR-017 / ADR-018）随 R2-T6 / T7 落地，
 **R2-T9「技能知识层统一」（ADR-019 / ADR-020）已落地**：技能注册表 + 三个技能包就位，
-14 条接口规范与提示词规范全部迁入技能包并由生成线全量注入，前端 RAG 确认页与本地词法检索整条下线。注意 R1-T2 断点续传已裁决延后、
-自动切换供应商已裁决不做（ADR-016），动手前重点读第 4.2 / 4.4 / 4.6 节，
-实施状态以 `roadmap.md` 第八节为准。
+14 条接口规范与提示词规范全部迁入技能包并由生成线全量注入，前端 RAG 确认页与本地词法检索整条下线。
+**C 层「文档所有权与清单」也已落地**（ADR-021 ~ 026，见下面落地点一节）：三份产物归后端
+`documents` 单表所有、待确认清单成为生成的第一类产物、可逐条澄清后就地改写、会话改单点登录；
+其中**版本链明确推迟**（第 4.3 节末）。
+注意 R1-T2 断点续传已裁决延后、自动切换供应商已裁决不做（ADR-016），
+动手前重点读第 4.2 / 4.3 / 4.4 / 4.6 节，实施状态以 `roadmap.md` 第八节为准。
 
 ## 版本 ↔ 任务对照
 
@@ -70,3 +73,29 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 日志怎么带上请求号 | 格式化器从上下文变量**现取**，业务代码一行不改；`extra=` 挂的业务字段按「排除标准属性」的规则自动带出（ADR-018） | `core/logging_setup.py` |
 | 访问日志记在哪 | 记在最外层 `RequestIdMiddleware` 里，**被认证拦下的 401 同样留痕**；`uvicorn.access` 的级别抬到 WARNING，避免同一次请求出两行（一行有号一行没号） | `api/deps.py` |
 | 体检报什么 | 数据库 / 供应商 / **技能资产**三项分开报，`status` 取 `ok` / `degraded` 且**恒返回 200**；供应商一项只校验配置就位、**不发真实调用**（不假装验过）；技能资产一项按注册表逐个报技能包身份，**没有写死的名单** | `api/health.py` |
+
+## C 层「文档所有权与清单」落地点（2026-10-15）
+
+三份产物归后端所有（ADR-021）+ 待确认清单成为生成的第一类产物（ADR-023）+ 澄清工作流（ADR-025）
++ 单点登录（ADR-024）。逐项落点：
+
+| 议题 | 落定做法 | 位置 |
+| --- | --- | --- |
+| 正文归谁 | **后端 `documents` 单表**为唯一真源，`(solution_id, kind)` 唯一；前端只有工作副本 | `repositories/document_repo.py` + `services/document_store.py` |
+| 写正文的入口 | **唯一**：job 成功收尾，正文 / 清单 / 回执**同批替换**；失败不写 | `job_service._write_document` → `document_store.commit_generated` |
+| 前端通道 | 只剩两条：`GET /api/solutions/{id}/documents`（读）、`PUT .../documents/{kind}`（手改，**不碰**清单与回执） | `services/documentService.ts` + `stores/documents.ts` |
+| 快照里的正文 | `SessionDataV2` 退役三个 `*Content` 与三个 `*RunSummary`；旧快照残留**被忽略**（不做兼容读） | `types/index.ts` + `utils/workflow.ts::normalizeSessionSnapshot` |
+| 加表 / 加列 | **有序幂等迁移**（`PRAGMA user_version`，每步独立事务、只跑增量）；`init_schema` 只建基线表 | `core/migrations.py` |
+| 待确认清单怎么来 | 模型在正文末尾附 **HTML 注释标记块**（渲染里不可见），收尾剥离解析、`id` 由后端按「章节 + 序号」分配 | `services/pending_items.py` |
+| 流式不漏标记 | 有状态逐 chunk 抑制器：块外态尾留「哨兵长度 − 1」字符应对边界切割，块内整段丢弃，流结束仍在块内则什么都不输出 | `services/pending_items.py::PendingBlockSuppressor` |
+| 清单怎么到前端 | 三路：`done.data.pending_items`（实时）、`snapshot`（刷新重连，迁移 v3 加列）、`GET .../documents`（打开方案即拿到） | `job_service`（两路快照）+ `api/solutions.py` |
+| 清单长什么样给用户看 | 只读面板（不解析、不重算、不编辑），序号用位置下标而非后端 `id`；挂正文下方、底栏之上 | `components/ui/PendingItemsPanel.vue` |
+| 澄清怎么聊 | 新增对话档案 `doc-clarification`（占位符 `{document}` / `{pending_items}`），与需求澄清**共用同一段提问规则常量**；未注册档案名 400、**不静默回退默认人设** | `services/prompts.py` + `api/conversation.py` |
+| 澄清怎么改写 | `clarify` 任务（复用 job 框架）：只改涉及章节、其余**逐字保留**、末尾附**重算后**的清单；按目标产物注入产出规范 | `services/document_service.py::apply_clarification_stream` |
+| 改写落哪一份 | 由请求体的 `doc_kind` 决定（缺它既不知道写哪、也不知道注入哪套规范 → 400）；回执的技能包身份与落库目标**共用** `_target_product_kind()` | `services/job_service.py` |
+| 就地改写与下游 | `optimize` / `clarify` **不作废下游**（它们动的是同一份文档的局部）；只有整篇重生成才删下游——这条以前默认为「总是重生成」，会静默删掉提示词 | `job_service._regenerates_whole_document` |
+| 澄清对话存哪 | 与需求澄清**完全分开**的三个字段（`clarifyMessages` / `clarifyConversationId` / `clarifyTarget`），否则闸门 1 的摘要 Diff 会把文档答疑读成需求输入 | `stores/workflow.ts` + `SessionDataV2` |
+| 澄清阶段怎么摆 | 新增 `clarifying`（四处同步）；不降级（会话随快照持久化）；步骤归属**按 `clarifyTarget` 现算**，否则澄清接口文档时进度条跳回 PRD 那格 | `utils/workflow.ts` + `stores/workflow.ts` |
+| 澄清入口放哪 | 正文下方清单下面的一条**普通区块**（不占底栏主操作位，ADR-015），只在真有待确认项时出现 | `components/stages/ReviewStage.vue` |
+| 会话回收 | **单点登录**：新登录在一条事务里「先删后插」吊销该用户全部旧会话（ADR-024），零 schema 变更、中间件零改动 | `repositories/auth_repo.py::replace_for_user` |
+| 未填题目怎么交代 | 已答项之后汇总一行「以下题目用户未填写：…」——否则模型分不清「问过但留空」与「没这道题」 | `conversation_service.format_form_data` |
