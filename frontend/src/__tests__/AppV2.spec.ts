@@ -1536,6 +1536,40 @@ describe('AppV2 文档澄清', () => {
     expect(wrapper.text()).not.toContain('PRD 待确认项澄清')
   })
 
+  it('点「按澄清结果改写」立刻进入 PRD 生成视图展示流式改写，完成后回到审阅页', async () => {
+    // 用挂起的 deferred 流制造「可观测的中间态」：改写会一直进行到 release() 被调用
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockJobStream({
+      clarify: async (handlers) => {
+        handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
+        await gate
+        return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条' }
+      },
+    })
+
+    const wrapper = await mountReviewWithPending()
+    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
+    await flushPromises()
+    const store = storeOf(wrapper)
+
+    await clickButton(wrapper, '按澄清结果改写')
+    await flushPromises()
+
+    // 中间态：已切到 PRD 生成视图、流式正文可见、对话栏标题消失
+    expect(store.viewState).toBe('generating-prd')
+    expect(wrapper.text()).toContain('PRD 文档')
+    expect(wrapper.text()).not.toContain('PRD 待确认项澄清')
+    expect(wrapper.text()).toContain('分页上限：50 条')
+
+    // 放行任务 → 落到审阅页
+    release()
+    await flushPromises()
+    expect(store.viewState).toBe('review-prd')
+  })
+
   it('没有待确认项时不给澄清入口（点进去只能闲聊）', async () => {
     const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
       makeDocumentRecord('prd', '# 产品需求文档\n\n正文'),

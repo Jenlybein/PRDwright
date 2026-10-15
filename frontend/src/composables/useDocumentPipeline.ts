@@ -699,6 +699,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // 和独立的消息字段 `clarifyMessages`；这一条走主对话栏（`chatting`）并复用 `messages`，
   // 因为用户的心智是「生成完 PRD 回到刚才那个对话框接着聊」，而不是被送到一个新页面。
   // 两者并存是有意的：接口文档 / 提示词的澄清规模小、一次性，保留原样成本更低。
+  //
+  // ⚠️ 阶段上还有一层区分：**澄清对话**发生在 `chatting`；而**按澄清结果改写**
+  // （`applyPrdClarification`）期间会切到 `generating-prd` 展示流式改写、完成后回到
+  // `review-prd`——否则改写那一二十秒里用户停在对话栏，看不到任何进展。
   // -------------------------------------------------------------------------
 
   /**
@@ -738,6 +742,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 与 `applyClarification` 同走 `clarify` 任务，差别只在两处：历史取自本轮的
    * `stage === 'document'` 消息（而不是 `clarifyMessages`），目标恒为 `prd`。
    *
+   * 与独立澄清页不同，这里**先切到 `generating-prd` 再发起任务**：改写可能要跑十几秒，
+   * 全程停在对话栏用户看不到任何进展（流式正文只有 `GeneratingStage` 会渲染）。切阶段必须
+   * 放在 `job.start` **之前**——它内部置位 `docGenerating` 后，`goTo` 会被 busy 守卫拦下。
+   * 失败时留在生成视图，由 `GeneratingStage` 的错误区说明原因（后端失败不覆写正文）。
+   *
    * ⚠️ 同样**必须带 `docKind`**：少了它后端不会猜，而是拒绝落库。
    */
   async function applyPrdClarification(): Promise<void> {
@@ -746,14 +755,25 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (!document.trim() || history.length === 0) return
 
     activeDocKey.value = 'prd'
-    docError.value = ''
+    // 就地改 PRD、不是分章节链路：清掉可能残留的阶段进度，否则生成页会顶出一条
+    // 与本次无关的章节条（`goTo` 内部的 `clearTransient` 不碰 `prdProgress`）
+    prdProgress.value = null
+    // 钉死重连目标：`docKeyForJob('clarify') = clarifyTarget ?? 'prd'`，若本会话先前
+    // 澄清过接口文档 / 提示词，`clarifyTarget` 会残留 → 改写中途刷新重连会把结果写进
+    // 那份下游文档并落到错误的审阅页。改写前显式设回 'prd'，快照里的目标即无歧义。
+    clarifyTarget.value = 'prd'
+    // 必须**先于** `job.start` 切阶段：`goTo` 在 `docGenerating` 置位后会被 busy 守卫
+    // 拦下（`busy = chatStreaming || docGenerating`），而它直到 `job.start` 内部才置位。
+    // `goTo` 顺带清空上一轮的流式缓冲 / 错误 / PRD 三段预览，本次改写从干净一屏开始。
+    goTo('generating-prd')
+
     const { reply, ok } = await job.start(
       'clarify',
       { document, history, docKind: 'prd' },
       handlersForKind('clarify'),
     )
     if (!ok) {
-      // 改写失败：留在对话页，原文档分毫未动（后端失败不覆写）
+      // 改写失败：留在生成视图，由 `GeneratingStage` 的错误区展示原因（后端失败不覆写正文）
       docError.value = job.error.value || '按澄清结果改写失败'
       clearActiveJob()
       return
