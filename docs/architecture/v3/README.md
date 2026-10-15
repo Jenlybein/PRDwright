@@ -94,8 +94,8 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 澄清怎么改写 | `clarify` 任务（复用 job 框架）：只改涉及章节、其余**逐字保留**、末尾附**重算后**的清单；按目标产物注入产出规范 | `services/document_service.py::apply_clarification_stream` |
 | 改写落哪一份 | 由请求体的 `doc_kind` 决定（缺它既不知道写哪、也不知道注入哪套规范 → 400）；回执的技能包身份与落库目标**共用** `_target_product_kind()` | `services/job_service.py` |
 | 就地改写与下游 | `optimize` / `clarify` **不作废下游**（它们动的是同一份文档的局部）；只有整篇重生成才删下游——这条以前默认为「总是重生成」，会静默删掉提示词 | `job_service._regenerates_whole_document` |
-| 澄清对话存哪 | 与需求澄清**完全分开**的三个字段（`clarifyMessages` / `clarifyConversationId` / `clarifyTarget`），否则闸门 1 的摘要 Diff 会把文档答疑读成需求输入 | `stores/workflow.ts` + `SessionDataV2` |
+| 澄清对话存哪 | PRD 的澄清**复用主对话线程**（`messages` + `stage` 标记 + `prdClarifying`，ADR-027）；接口文档 / 提示词仍各自独立（`clarifyMessages` / `clarifyConversationId` / `clarifyTarget`） | `stores/workflow.ts` + `SessionDataV2` |
 | 澄清阶段怎么摆 | 新增 `clarifying`（四处同步）；不降级（会话随快照持久化）；步骤归属**按 `clarifyTarget` 现算**，否则澄清接口文档时进度条跳回 PRD 那格 | `utils/workflow.ts` + `stores/workflow.ts` |
-| 澄清入口放哪 | 正文下方清单下面的一条**普通区块**（不占底栏主操作位，ADR-015），只在真有待确认项时出现 | `components/stages/ReviewStage.vue` |
+| 澄清入口放哪 | PRD 的入口在**底栏次操作组**（出现时顶替「返回」按钮，避免两个落点相同、名字近似的选择；只在完整流程下给），其余文档仍是正文下方清单下面的一条**普通区块**（不占底栏主操作位，ADR-015）；都只在真有待确认项时出现 | `components/stages/ReviewStage.vue` |
 | 会话回收 | **单点登录**：新登录在一条事务里「先删后插」吊销该用户全部旧会话（ADR-024），零 schema 变更、中间件零改动 | `repositories/auth_repo.py::replace_for_user` |
 | 未填题目怎么交代 | 已答项之后汇总一行「以下题目用户未填写：…」——否则模型分不清「问过但留空」与「没这道题」 | `conversation_service.format_form_data` |
