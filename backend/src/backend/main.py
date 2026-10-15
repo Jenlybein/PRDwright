@@ -24,6 +24,7 @@ from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
 from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
+from backend.core.migrations import run_migrations
 from backend.core.logging_setup import configure_logging
 from backend.services import auth_service, job_service
 from backend.services.skill_registry import ensure_skills
@@ -46,6 +47,10 @@ async def lifespan(_: FastAPI):
     configure_logging(level=current.log_level, fmt=current.log_format)
 
     init_schema()
+    # 建表之后立刻补齐 schema 演进：`init_schema` 只保证基线表存在（`IF NOT EXISTS`
+    # 对已存在的表是空操作），新增的表与列一律由迁移补上。顺序不能颠倒——迁移可能
+    # 依赖基线表（例如把旧快照回填进新表）。
+    run_migrations()
     auth_service.ensure_bootstrap()
     # 开发模式下预先备好内置用户，业务数据落归属时才有恒非空的 user_id
     if not settings.auth_enabled:
