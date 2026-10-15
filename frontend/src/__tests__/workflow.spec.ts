@@ -9,6 +9,7 @@ import {
   isDocKind,
   isEntryMode,
   isViewState,
+  parseRunSummary,
   parseSessionSnapshot,
   reachedStepIndex,
   resolveRestoredPhase,
@@ -203,6 +204,9 @@ describe('会话快照解析', () => {
     promptsContent: '',
     activeJobId: null,
     activeJobKind: null,
+    prdRunSummary: null,
+    apiDocsRunSummary: null,
+    promptsRunSummary: null,
   }
 
   it('空值与非法 JSON 一律返回 null', () => {
@@ -218,6 +222,45 @@ describe('会话快照解析', () => {
     expect(parsed?.session.viewState).toBe('review-prd')
     expect(parsed?.session.entryMode).toBe('structured')
     expect(parsed?.downgrade).toBeNull()
+  })
+
+  it('用量回执随快照还原：字段缺失或为脏数据时各退化为 null', () => {
+    const apiSummary = {
+      kind: 'api_docs',
+      status: 'completed',
+      durationMs: 1234,
+      totalCalls: 1,
+      failedCalls: 0,
+      promptTokens: 10,
+      completionTokens: 20,
+      steps: [],
+      injectedSkills: [],
+      warnings: [],
+      provider: 'ark',
+      model: 'x',
+      requestId: 'req-1',
+    }
+    const parsed = parseSessionSnapshot(
+      JSON.stringify({
+        ...full,
+        viewState: 'review-api-docs',
+        prdRunSummary: { kind: 'prd', durationMs: 1, requestId: 'p' },
+        apiDocsRunSummary: apiSummary,
+        promptsRunSummary: { kind: 'prompts' }, // 缺 durationMs / requestId → 丢弃
+      }),
+    )
+    expect(parsed?.session.prdRunSummary).toEqual({ kind: 'prd', durationMs: 1, requestId: 'p' })
+    expect(parsed?.session.apiDocsRunSummary).toEqual(apiSummary)
+    expect(parsed?.session.promptsRunSummary).toBeNull()
+  })
+
+  it('parseRunSummary 只认带关键字段的对象，脏数据一律退化', () => {
+    expect(parseRunSummary(null)).toBeNull()
+    expect(parseRunSummary('x')).toBeNull()
+    expect(parseRunSummary([])).toBeNull()
+    expect(parseRunSummary({ kind: 'prd' })).toBeNull()
+    expect(parseRunSummary({ kind: 'prd', durationMs: 1 })).toBeNull()
+    expect(parseRunSummary({ kind: 'prd', durationMs: 1, requestId: 'r' })).not.toBeNull()
   })
 
   it('入口模式与两处录入内容随快照还原', () => {

@@ -13,6 +13,7 @@ import { useWorkflowStore } from '../stores/workflow'
 import type {
   JobSnapshot,
   RequirementsSummary,
+  RunSummary,
   StreamDocumentPart,
   StreamStageEvent,
 } from '../types'
@@ -171,6 +172,26 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     errorCode: '',
     errorMessage: '',
     elapsedMs: 0,
+    ...overrides,
+  }
+}
+
+/** 造一份用量回执（`run_summary` 事件的载荷） */
+function makeRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    kind: 'prd',
+    status: 'completed',
+    durationMs: 1000,
+    totalCalls: 1,
+    failedCalls: 0,
+    promptTokens: 10,
+    completionTokens: 20,
+    steps: [],
+    injectedSkills: [],
+    warnings: [],
+    provider: 'ark',
+    model: 'doubao',
+    requestId: 'req-default',
     ...overrides,
   }
 }
@@ -571,6 +592,64 @@ describe('AppV2 完整流程编排', () => {
     // 不再经过检索确认闸门：直接进入生成、任务已创建
     expect(jobCount('api-docs')).toBe(1)
     expect(wrapper.text()).toContain('接口文档')
+  })
+
+  it('用量回执按文档各自留存：回看 PRD 不会显示接口文档的回执', async () => {
+    vi.mocked(api.startConversationStream).mockImplementation(async () => ({
+      conversationId: 'conv-1',
+      reply: '已理解需求。',
+    }))
+    mockJobStream({
+      prd: async (handlers) => {
+        handlers.onChunk?.('# 产品需求文档\n')
+        handlers.onRunSummary?.(
+          makeRunSummary({
+            kind: 'prd',
+            requestId: 'prd-req',
+            durationMs: 1200,
+            injectedSkills: [
+              { name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' },
+            ],
+          }),
+        )
+        return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
+      },
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.('# 接口文档\n')
+        handlers.onRunSummary?.(
+          makeRunSummary({
+            kind: 'api_docs',
+            requestId: 'api-req',
+            durationMs: 9000,
+            injectedSkills: [
+              { name: 'api-docs-generator', version: '0.1.0', fingerprint: 'd0582f1cbe0f' },
+            ],
+          }),
+        )
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n内容' }
+      },
+    })
+
+    const wrapper = await mountApp()
+    await reachPrdReview(wrapper)
+
+    // PRD 待确认：显示 PRD 自己的回执
+    expect(wrapper.text()).toContain('prd-req')
+    expect(wrapper.text()).toContain('prd-generator')
+    expect(wrapper.text()).not.toContain('api-req')
+
+    // 生成接口文档后：切到接口文档自己的回执
+    await clickButton(wrapper, '生成接口文档')
+    await flushPromises()
+    expect(wrapper.text()).toContain('api-req')
+    expect(wrapper.text()).toContain('api-docs-generator')
+    expect(wrapper.text()).not.toContain('prd-req')
+
+    // 回看 PRD 阶段：仍是 PRD 的回执，不再被「最后一次生成动作」顶掉
+    await clickStep(wrapper, 'PRD')
+    await flushPromises()
+    expect(wrapper.text()).toContain('prd-req')
+    expect(wrapper.text()).not.toContain('api-req')
   })
 
   it('「改需求」回到第一步，表单内容与对话记录都不丢', async () => {

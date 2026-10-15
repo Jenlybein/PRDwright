@@ -561,5 +561,17 @@ export interface SessionDataV2 {
   activeJobId: number | null
   /** 当前进行中任务的文档种类；与 `activeJobId` 成对出现，无任务时为 null */
   activeJobKind: DocKind | null
+  /**
+   * 各文档「最后一次生成的用量回执」；无则 `null`。
+   *
+   * 按**文档**而非按任务种类分桶：优化（kind=`optimize`）改写的是 PRD，
+   * 它的回执也归 `prdRunSummary`。这样回看任一阶段时，显示的是该文档自己的回执，
+   * 而不是「最后一次生成动作」的回执——旧实现是单例，会串台（看 PRD 却显示接口文档的回执）。
+   */
+  prdRunSummary?: RunSummary | null
+  /** 接口文档最后一次生成的用量回执 */
+  apiDocsRunSummary?: RunSummary | null
+  /** 提示词套件最后一次生成的用量回执 */
+  promptsRunSummary?: RunSummary | null
 }
 

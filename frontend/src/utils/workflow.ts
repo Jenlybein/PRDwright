@@ -15,6 +15,7 @@ import type {
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
+  RunSummary,
   SessionDataV2,
   Step,
   StepId,
@@ -325,6 +326,9 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
       promptsContent: typeof record.promptsContent === 'string' ? record.promptsContent : '',
       activeJobId,
       activeJobKind: hasActiveJob && isDocKind(record.activeJobKind) ? record.activeJobKind : null,
+      prdRunSummary: parseRunSummary(record.prdRunSummary),
+      apiDocsRunSummary: parseRunSummary(record.apiDocsRunSummary),
+      promptsRunSummary: parseRunSummary(record.promptsRunSummary),
     },
   }
 }
@@ -346,4 +350,25 @@ export function parseSessionSnapshot(raw: string | null): ParsedSessionSnapshot 
     return null
   }
   return normalizeSessionSnapshot(parsed)
+}
+
+/**
+ * 校验一份「生成用量回执」是否可信。
+ *
+ * 只核对几个**不可能由脏数据伪造**的字段（`kind` / `durationMs` / `requestId`），
+ * 其余字段原样透传——回执是后端产出的诊断信息，结构一旦变了我们更愿意直接报错而不是静默吞掉，
+ * 所以这里不做深校验。脏数据（非对象 / 缺关键字段 / 旧版本快照里根本没有这一项）一律退化为 `null`，
+ * 该文档就「不显示回执」，与上线前的行为一致。
+ */
+export function parseRunSummary(value: unknown): RunSummary | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.kind !== 'string' ||
+    typeof record.durationMs !== 'number' ||
+    typeof record.requestId !== 'string'
+  ) {
+    return null
+  }
+  return value as RunSummary
 }

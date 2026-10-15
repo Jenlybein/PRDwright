@@ -23,6 +23,7 @@ import type {
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
+  RunSummary,
   SessionDataV2,
   Step,
   ViewState,
@@ -93,6 +94,17 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 当前进行中任务的文档种类；与 `activeJobId` 成对写入 / 清空 */
   const activeJobKind = ref<DocKind | null>(null)
 
+  /**
+   * 各文档「最后一次生成的用量回执」；按**文档**分桶，而非按「最后一次生成动作」单例。
+   *
+   * 旧实现只有一份 `runSummary` 单例，谁最后生成完就覆盖谁，导致回看 PRD 时可能显示
+   * 接口文档的回执（技能包名 / token 数 / 耗时都对不上）。这里改成三份独立记录，
+   * 回看哪份文档就显示哪份的回执；优化（kind=optimize）改写的是 PRD，故归入 `prdRunSummary`。
+   */
+  const prdRunSummary = ref<RunSummary | null>(null)
+  const apiDocsRunSummary = ref<RunSummary | null>(null)
+  const promptsRunSummary = ref<RunSummary | null>(null)
+
   // ------------------------------------------------------------------
   // 运行态（不写入快照）
   // ------------------------------------------------------------------
@@ -147,6 +159,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       promptsContent: promptsContent.value,
       activeJobId: activeJobId.value,
       activeJobKind: activeJobKind.value,
+      prdRunSummary: prdRunSummary.value,
+      apiDocsRunSummary: apiDocsRunSummary.value,
+      promptsRunSummary: promptsRunSummary.value,
     }
   }
 
@@ -170,12 +185,50 @@ export const useWorkflowStore = defineStore('workflow', () => {
     promptsContent.value = session.promptsContent
     activeJobId.value = session.activeJobId ?? null
     activeJobKind.value = session.activeJobKind ?? null
+    prdRunSummary.value = session.prdRunSummary ?? null
+    apiDocsRunSummary.value = session.apiDocsRunSummary ?? null
+    promptsRunSummary.value = session.promptsRunSummary ?? null
     downgrade.value = downgradeKind
     // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
     // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
     // 否则异步恢复回来的摘要会填不进表单（打开旧方案时肉眼可见）。
     restoreTick.value += 1
   }
+
+  /**
+   * 把一次生成的用量回执写进「对应文档」的桶。
+   *
+   * 映射按文档而非任务 kind：`prd` 与 `optimize`（优化改的是 PRD）都归 `prdRunSummary`，
+   * 接口文档 / 提示词各归各自。写入后由下方 watch 触发自动保存，回执随之持久化进方案。
+   *
+   * 注意 kind 的两套取值：调用方传的是前端 `DocKind`（`api-docs` 带连字符），
+   * 而回执自身的 `kind` 是后端原始值（`api_docs` 带下划线）——这里**两者都认**，
+   * 免得因为一个连字符就把接口文档的回执错投进 PRD 桶。
+   */
+  function setRunSummary(kind: DocKind | string, summary: RunSummary | null): void {
+    if (kind === 'api-docs' || kind === 'api_docs') apiDocsRunSummary.value = summary
+    else if (kind === 'prompts') promptsRunSummary.value = summary
+    else prdRunSummary.value = summary
+  }
+
+  /**
+   * 当前正在审阅的文档应该显示的回执。
+   *
+   * 由 `viewState` 反推文档种类，从对应桶取——这正是「回看 PRD 显示 PRD 回执」的落点。
+   * 生成中等非审阅态一律返回 `null`（审阅区那时不展示回执）。
+   */
+  const runSummary = computed<RunSummary | null>(() => {
+    switch (viewState.value) {
+      case 'review-prd':
+        return prdRunSummary.value
+      case 'review-api-docs':
+        return apiDocsRunSummary.value
+      case 'review-prompts':
+        return promptsRunSummary.value
+      default:
+        return null
+    }
+  })
 
   /**
    * 状态变化时自增 `changeTick`。
@@ -198,6 +251,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       promptsContent,
       activeJobId,
       activeJobKind,
+      prdRunSummary,
+      apiDocsRunSummary,
+      promptsRunSummary,
     ],
     () => {
       changeTick.value += 1
@@ -307,6 +363,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
     apiDocsContent.value = ''
     activeJobId.value = null
     activeJobKind.value = null
+    prdRunSummary.value = null
+    apiDocsRunSummary.value = null
+    promptsRunSummary.value = null
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
@@ -349,6 +408,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
     promptsContent,
     activeJobId,
     activeJobKind,
+    prdRunSummary,
+    apiDocsRunSummary,
+    promptsRunSummary,
+    runSummary,
     // 运行态
     chatStreaming,
     docGenerating,
@@ -374,5 +437,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
     reset,
     snapshot,
     applySnapshot,
+    setRunSummary,
   }
 })

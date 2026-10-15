@@ -15,6 +15,7 @@ import type {
   PrdGenerationStage,
   PrdStageProgress,
   RequirementsSummary,
+  RunSummary,
   StreamDocumentPart,
   StreamStageEvent,
   SummaryChange,
@@ -61,6 +62,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     reviewing: isReviewing,
     canFinish: canFinishTask,
     canGeneratePrd,
+    // 必须经 storeToRefs 取：Pinia 的 store 代理会把 ref/computed **解包成值**，
+    // 直接写 `store.runSummary` 只会在调用时求值一次，丢失响应式（回执不会随阶段切换刷新）。
+    runSummary,
   } = storeToRefs(store)
 
   // -------------------------------------------------------------------------
@@ -303,12 +307,18 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 快照回调对两者都接——刷新重连时用它补全断线前已产出的正文。
    */
   function handlersForKind(kind: DocKind): StreamHandlers {
+    // 收尾的用量回执按文档种类写进 store 对应桶（优化改写的是 PRD，归入 prdRunSummary）。
+    // 这样回看任一阶段时，显示的都是该文档自己的回执，不再被「最后一次生成动作」串台。
+    const onRunSummary = (summary: RunSummary): void => {
+      store.setRunSummary(kind, summary)
+    }
     if (kind === 'prd') {
       return {
         onChunk: appendPrdChunk,
         onPart: handlePrdPart,
         onStage: handlePrdStage,
         onSnapshot: applyJobSnapshot,
+        onRunSummary,
       }
     }
     return {
@@ -316,6 +326,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
         docStreamingContent.value += chunk
       },
       onSnapshot: applyJobSnapshot,
+      onRunSummary,
     }
   }
 
@@ -812,8 +823,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   docError,
   prdStatus,
   prdShowingDraft,
-  // 用量观测：运行摘要（生成后展示）+ 已用时（生成中展示），均来自任务运行态
-  runSummary: job.runSummary,
+  // 用量观测：运行摘要（生成后展示，按当前审阅文档取对应桶）+ 已用时（生成中展示）
+  runSummary,
   elapsedMs: job.elapsedMs,
     summaryChanges,
     summarySyncing,
