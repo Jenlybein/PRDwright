@@ -62,6 +62,7 @@ const STAGE_LABELS: Record<string, string> = {
   'review-api-docs': '已出接口文档',
   'generating-prompts': '生成提示词',
   'review-prompts': '已出提示词',
+  clarifying: '澄清中',
   'prd-quick': '描述需求',
   'prompt-debug': '粘贴 PRD',
   done: '已完成',

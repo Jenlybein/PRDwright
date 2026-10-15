@@ -20,6 +20,7 @@ import { computed, ref, watch } from 'vue'
 import type {
   ChatMessage,
   DocKind,
+  DocumentKind,
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
@@ -35,6 +36,7 @@ import {
   isDocReviewPhase,
   isGeneratingPhase,
   reachedStepIndex as computeReachedStepIndex,
+  reviewStateFor,
   stepIndexOf,
   stepsForMode,
   type DowngradeKind,
@@ -95,6 +97,27 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const activeJobKind = ref<DocKind | null>(null)
 
   // ------------------------------------------------------------------
+  // 文档澄清会话（与需求澄清完全独立的一套字段）
+  //
+  // 为什么不复用 `messages` / `conversationId`：那是「表单 → PRD」那条链路的需求澄清记录，
+  // 混在一起会让「回填摘要」的输入凭空多出一段文档答疑（闸门①的 Diff 会莫名其妙地变），
+  // 而且用户在两个场景之间来回切换时对话会被互相冲掉。两套记录、两个会话 id，各说各的。
+  // ------------------------------------------------------------------
+
+  /** 文档澄清的聊天记录（含首轮 AI 追问） */
+  const clarifyMessages = ref<ChatMessage[]>([])
+
+  /** 文档澄清的后端会话 ID；为空时接续退化无状态模式 */
+  const clarifyConversationId = ref('')
+
+  /**
+   * 本次澄清针对哪一份产物；为空表示还没进入澄清。
+   *
+   * 它决定三件事：聊天开场白里放哪份正文、改写任务写回哪一份、改写完成后回到哪个审阅页。
+   */
+  const clarifyTarget = ref<DocumentKind | null>(null)
+
+  // ------------------------------------------------------------------
   // 运行态（不写入快照）
   // ------------------------------------------------------------------
 
@@ -151,6 +174,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       debugPrdText: debugPrdText.value,
       activeJobId: activeJobId.value,
       activeJobKind: activeJobKind.value,
+      clarifyMessages: clarifyMessages.value,
+      clarifyConversationId: clarifyConversationId.value,
+      clarifyTarget: clarifyTarget.value,
     }
   }
 
@@ -174,6 +200,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
     debugPrdText.value = session.debugPrdText
     activeJobId.value = session.activeJobId ?? null
     activeJobKind.value = session.activeJobKind ?? null
+    // 澄清会话随快照一起恢复，因此刷新后能接着聊（也就**不需要**降级）
+    clarifyMessages.value = session.clarifyMessages ?? []
+    clarifyConversationId.value = session.clarifyConversationId ?? ''
+    clarifyTarget.value = session.clarifyTarget ?? null
     downgrade.value = downgradeKind
     // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
     // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
@@ -199,6 +229,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       debugPrdText,
       activeJobId,
       activeJobKind,
+      clarifyMessages,
+      clarifyConversationId,
+      clarifyTarget,
     ],
     () => {
       changeTick.value += 1
@@ -218,8 +251,19 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 进度条要展示的步骤：由入口模式决定（完整流程五步，调试入口只有一步） */
   const steps = computed<readonly Step[]>(() => stepsForMode(entryMode.value))
 
-  /** 当前阶段在进度条上的下标 */
-  const currentStepIndex = computed(() => stepIndexOf(viewState.value, entryMode.value))
+  /**
+   * 当前阶段在进度条上的下标。
+   *
+   * `clarifying` 是个例外：它是「对某一篇文档做澄清」，而 `STEP_OF_STATE` 是静态表，
+   * 只能给一个兜底值（`review-prd`）。澄清接口文档时进度条若跳回 PRD 那一格，用户会以为
+   * 自己走错了流程——因此这里按 `clarifyTarget` 精确算一次。
+   */
+  const currentStepIndex = computed(() => {
+    if (viewState.value === 'clarifying') {
+      return stepIndexOf(reviewStateFor(clarifyTarget.value ?? 'prd'), entryMode.value)
+    }
+    return stepIndexOf(viewState.value, entryMode.value)
+  })
 
   /** 已到达的最远步骤下标（进度条可点击范围），解锁依据是**产物有没有内容** */
   const reachedStepIndex = computed(() =>
@@ -309,6 +353,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
     debugPrdText.value = ''
     activeJobId.value = null
     activeJobKind.value = null
+    clarifyMessages.value = []
+    clarifyConversationId.value = ''
+    clarifyTarget.value = null
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
@@ -349,6 +396,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
     debugPrdText,
     activeJobId,
     activeJobKind,
+    clarifyMessages,
+    clarifyConversationId,
+    clarifyTarget,
     // 运行态
     chatStreaming,
     docGenerating,

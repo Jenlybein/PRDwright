@@ -91,6 +91,9 @@ describe('useWorkflowStore', () => {
       debugPrdText: '',
       activeJobId: null,
       activeJobKind: null,
+      clarifyMessages: [],
+      clarifyConversationId: '',
+      clarifyTarget: null,
     })
 
     expect(store.restoreTick).toBe(before + 1)
@@ -111,6 +114,9 @@ describe('useWorkflowStore', () => {
       debugPrdText: '# 恢复的 PRD',
       activeJobId: null,
       activeJobKind: null,
+      clarifyMessages: [],
+      clarifyConversationId: '',
+      clarifyTarget: null,
     })
     await nextTick()
 
@@ -150,6 +156,9 @@ describe('useWorkflowStore', () => {
       debugPrdText: '# 贴进来的 PRD',
       activeJobId: null,
       activeJobKind: null,
+      clarifyMessages: [],
+      clarifyConversationId: '',
+      clarifyTarget: null,
     })
     // 运行态不在快照里
     expect('chatStreaming' in snapshot).toBe(false)

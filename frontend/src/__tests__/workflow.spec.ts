@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { STEP_OF_STATE } from '@/types'
 import type { ChatMessage, RequirementsSummary, SessionDataV2 } from '@/types'
 import {
   canGeneratePrdFrom,
@@ -7,12 +8,14 @@ import {
   generatingStateFor,
   hasRequiredDocuments,
   isDocKind,
+  isDocumentKind,
   isEntryMode,
   isViewState,
   parseRunSummary,
   parseSessionSnapshot,
   reachedStepIndex,
   resolveRestoredPhase,
+  reviewStateFor,
   stepIndexOf,
   stepsForMode,
   VIEW_STATES,
@@ -201,6 +204,9 @@ describe('会话快照解析', () => {
     debugPrdText: '',
     activeJobId: null,
     activeJobKind: null,
+    clarifyMessages: [],
+    clarifyConversationId: '',
+    clarifyTarget: null,
   }
 
   it('空值与非法 JSON 一律返回 null', () => {
@@ -243,6 +249,9 @@ describe('会话快照解析', () => {
       'debugPrdText',
       'activeJobId',
       'activeJobKind',
+      'clarifyMessages',
+      'clarifyConversationId',
+      'clarifyTarget',
     ])
   })
 
@@ -388,23 +397,72 @@ describe('带任务指针的快照恢复', () => {
     expect(parsed?.session.activeJobKind).toBeNull()
   })
 
-  it('isDocKind 只承认四种文档种类', () => {
+  it('isDocKind 只承认五种文档种类', () => {
     expect(isDocKind('prd')).toBe(true)
     expect(isDocKind('api-docs')).toBe(true)
     expect(isDocKind('prompts')).toBe(true)
     expect(isDocKind('optimize')).toBe(true)
+    expect(isDocKind('clarify')).toBe(true)
     expect(isDocKind('bogus')).toBe(false)
     expect(isDocKind(null)).toBe(false)
   })
 
-  it('generatingStateFor / docKindOfState 互为逆映射（optimize 不占阶段）', () => {
+  it('isDocumentKind 排除两个「动作」，只管「东西」', () => {
+    // 「澄清针对哪一份」必须用这个校验：快照里一个 `clarify` 若被当成产物，
+    // 前端会去 documents store 里找一份叫 clarify 的文档
+    expect(isDocumentKind('prd')).toBe(true)
+    expect(isDocumentKind('api-docs')).toBe(true)
+    expect(isDocumentKind('prompts')).toBe(true)
+    expect(isDocumentKind('optimize')).toBe(false)
+    expect(isDocumentKind('clarify')).toBe(false)
+  })
+
+  it('generatingStateFor / docKindOfState 互为逆映射（两个动作都不占生成阶段）', () => {
     expect(generatingStateFor('prd')).toBe('generating-prd')
     expect(generatingStateFor('api-docs')).toBe('generating-api-docs')
     expect(generatingStateFor('prompts')).toBe('generating-prompts')
+    // 就地动某一篇：优化留在审阅页、澄清留在澄清页，都不切到 generating-*
     expect(generatingStateFor('optimize')).toBeNull()
+    expect(generatingStateFor('clarify')).toBeNull()
     expect(docKindOfState('review-prd')).toBe('prd')
     expect(docKindOfState('review-api-docs')).toBe('api-docs')
     expect(docKindOfState('review-prompts')).toBe('prompts')
+    // 澄清阶段反推不出产物：是哪一份要看 `clarifyTarget`，不能靠阶段猜
+    expect(docKindOfState('clarifying')).toBeNull()
     expect(docKindOfState('entry')).toBeNull()
   })
+
+  it('reviewStateFor 是生成态映射的逆：产物 → 它的审阅页', () => {
+    expect(reviewStateFor('prd')).toBe('review-prd')
+    expect(reviewStateFor('api-docs')).toBe('review-api-docs')
+    expect(reviewStateFor('prompts')).toBe('review-prompts')
+  })
 })
+
+/**
+ * 澄清阶段（`clarifying`）的四处同步。
+ *
+ * 加一个 `ViewState` 要同时改四处（`ViewState` / `VIEW_STATES` / `STEP_OF_STATE` /
+ * `STATE_DOWNGRADE`），漏一处不会报错、只会表现为「进度条算错」或「刷新后进不去」。
+ * 这里把四处钉在一起，顺带把「澄清**不**降级」这条口径也钉住。
+ */
+describe('澄清阶段的登记与降级口径', () => {
+  it('已登记进 VIEW_STATES，且进度条归属挂在审阅步骤上', () => {
+    expect(VIEW_STATES).toContain('clarifying')
+    expect(isViewState('clarifying')).toBe(true)
+    // 静态兜底：精确的那一档由 store 按 `clarifyTarget` 算（见 stores/workflow.ts）
+    expect(STEP_OF_STATE_FOR_TEST('clarifying')).toBe('review-prd')
+  })
+
+  it('不做刷新降级：对话与目标都随快照持久化，刷新后能接着聊', () => {
+    expect(resolveRestoredPhase('clarifying')).toEqual({
+      viewState: 'clarifying',
+      downgrade: null,
+    })
+  })
+})
+
+/** 直接读 `STEP_OF_STATE`，避免在测试里重复一份映射表 */
+function STEP_OF_STATE_FOR_TEST(state: 'clarifying') {
+  return STEP_OF_STATE[state]
+}

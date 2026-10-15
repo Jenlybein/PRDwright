@@ -544,9 +544,11 @@ async function readStreamRequest(
  * 服务层 `_normalize_value` 会把数组拼成「、」连接的文本。
  *
  * 提示词（系统人设与首轮开场白）由后端的对话档案决定，请求里不携带任何提示词字段。
+ * `profileKey` 只用于**点名场景**（如「文档澄清」），留空取后端的默认档案；后端遇到
+ * 未注册的标识会直接 400，不会静默退回默认人设。
  */
 export async function startConversationStream(
-  payload: { answers: RequirementAnswers; title?: string },
+  payload: { answers: RequirementAnswers; title?: string; profileKey?: string },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
   return readStream(
@@ -554,6 +556,7 @@ export async function startConversationStream(
     {
       title: payload.title ?? '',
       answers: payload.answers,
+      profile_key: payload.profileKey ?? '',
     },
     handlers,
   )
@@ -564,11 +567,17 @@ export async function startConversationStream(
  * 对应后端 `POST /api/conversation/continue-stream`。
  *
  * 不传 `conversationId` 时后端走无状态模式，需要由 `history` 回传完整历史；
- * 两者都传时以后端收到的 `history` 为准。人设由后端按档案标识解析，无状态模式下
- * 回退到默认档案，因此前端不需要补发提示词。
+ * 两者都传时以后端收到的 `history` 为准。人设由后端按档案标识解析：有会话记录时以记录为准，
+ * 记录已丢（服务重启 / 无状态模式）时才用 `profileKey`——**没有它，文档澄清会在中途
+ * 悄悄变回需求澄清**，用户突然被问「要不要生成 PRD」却没有任何报错。
  */
 export async function continueConversationStream(
-  payload: { content: string; conversationId?: string; history?: ChatMessage[] },
+  payload: {
+    content: string
+    conversationId?: string
+    history?: ChatMessage[]
+    profileKey?: string
+  },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
   return readStream(
@@ -578,6 +587,7 @@ export async function continueConversationStream(
       content: payload.content,
       // 只保留后端认识的 role / content 两个字段
       history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+      profile_key: payload.profileKey ?? '',
     },
     handlers,
   )

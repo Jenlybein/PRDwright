@@ -43,6 +43,8 @@ const emit = defineEmits<{
   navigate: [state: ViewState]
   /** 进入完成页 */
   finish: []
+  /** 进入澄清页（对待确认项逐条澄清后改写这份文档） */
+  clarify: []
 }>()
 
 const props = defineProps<{
@@ -80,6 +82,13 @@ const props = defineProps<{
    * 前端只读不写。空数组表示「没有待确认项」——不渲染清单区。
    */
   pendingItems?: PendingItem[]
+  /**
+   * 是否给出「逐条澄清」入口。
+   *
+   * 由上层决定而不是这里判断：能否澄清取决于「有没有正文、有没有方案 id」这类上层才知道的
+   * 事（澄清最终要落库，没有方案就无处可写）。组件只负责在允许时把它渲染出来。
+   */
+  canClarify?: boolean
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -230,8 +239,50 @@ function submitOptimize(): void {
 
     <!-- 待确认清单：本次生成产出的元数据，读后端随正文落库的那一份。
          放在正文下方、底栏之上——它是「这份文档还差哪些问题没敲定」，归「内容本身」，
-         不是「对文档做的事」，因此不进底栏（P4 澄清提示条会接在它下面）。 -->
+         不是「对文档做的事」，因此不进底栏（澄清提示条紧接它下面）。 -->
     <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
+
+    <!-- 澄清入口：**普通区块，不占底栏的主操作位**（ADR-015 一屏只有一个主操作）。
+         只在真有待确认项时出现——没有待确认项却给一个「去澄清」的入口，点进去只能闲聊。
+         整块可点：这类「进入某个流程」的提示条比按钮更适合做成区块（与底栏那些
+         「对文档做的事」区分开）。 -->
+    <button
+      v-if="canClarify && pendingItems && pendingItems.length"
+      type="button"
+      class="flex w-full items-center gap-3 rounded-xl border border-accent/40 bg-accent-soft px-4 py-3 text-left transition-colors hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
+      @click="emit('clarify')"
+    >
+      <svg
+        class="h-4 w-4 shrink-0 text-accent"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path
+          fill-rule="evenodd"
+          d="M18 10c0 3.866-3.582 7-8 7a8.84 8.84 0 01-2.347-.306c-.584.296-1.925.864-4.181 1.234-.2.032-.352-.176-.273-.362.354-.836.674-1.95.77-2.966C3.365 13.376 3 11.752 3 10c0-3.866 3.582-7 8-7s7 3.134 7 7Zm-4.5-.25a.75.75 0 000-1.5h-4a.75.75 0 000 1.5h4Zm0 3.5a.75.75 0 000-1.5h-2a.75.75 0 000 1.5h2Z"
+          clip-rule="evenodd"
+        />
+      </svg>
+      <span class="min-w-0 flex-1">
+        <span class="block text-sm font-medium text-fg">逐条澄清这些待确认项</span>
+        <span class="mt-0.5 block text-xs text-subtle">
+          和 AI 把 {{ pendingItems.length }} 个问题聊清楚，再按结论改写这份文档——只动涉及的章节。
+        </span>
+      </span>
+      <svg
+        class="h-4 w-4 shrink-0 text-subtle"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path
+          fill-rule="evenodd"
+          d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02Z"
+          clip-rule="evenodd"
+        />
+      </svg>
+    </button>
 
     <AppActionBar>
       <!-- 内容行：常态是文档工具；点「AI 优化」原地变成指令输入，文档始终可见 -->

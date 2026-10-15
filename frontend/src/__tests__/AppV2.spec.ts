@@ -455,13 +455,32 @@ async function mountExistingSolution(
   return mountEntry(`/v2/${id}`)
 }
 
-/** 造一条文档记录（正文 + 可选回执），供「打开方案」类用例使用 */
+/** 造一条文档记录（正文 + 可选回执 + 可选待确认清单），供「打开方案」类用例使用 */
 function makeDocumentRecord(
   kind: DocumentRecord['kind'],
   content: string,
   runSummary: RunSummary | null = null,
+  pendingItems: DocumentRecord['pendingItems'] = [],
 ): DocumentRecord {
-  return { kind, content, runSummary, pendingItems: [], updatedAt: '2026-10-13T00:00:00' }
+  return { kind, content, runSummary, pendingItems, updatedAt: '2026-10-13T00:00:00' }
+}
+
+/** 一份「停在审阅页、没有任何进行中任务」的最小快照 */
+function reviewSnapshot(viewState: string): Record<string, unknown> {
+  return {
+    viewState,
+    entryMode: 'structured',
+    summary: null,
+    messages: [],
+    conversationId: '',
+    quickInput: { productName: '', requirements: '' },
+    debugPrdText: '',
+    activeJobId: null,
+    activeJobKind: null,
+    clarifyMessages: [],
+    clarifyConversationId: '',
+    clarifyTarget: null,
+  }
 }
 
 describe('AppV2 完整流程编排', () => {
@@ -1368,5 +1387,99 @@ describe('AppV2 分章节生成的阶段展示', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).not.toContain('第 1 /')
     expect(wrapper.text()).not.toContain('逐章撰写')
+  })
+})
+
+/**
+ * 文档澄清（P4）：从审阅页进入澄清、聊清楚、再按结论就地改写。
+ *
+ * 这条链路的三个落点必须在测试里钉住：① 交给后端的**只有**正文与清单（前端不递提示词，
+ * 只点名 `doc-clarification` 场景）；② 改写任务必须带 `docKind`（否则后端拒绝落库）；
+ * ③ 改写完成后回到那份文档的审阅页，而不是停在澄清页看一份旧正文。
+ */
+describe('AppV2 文档澄清', () => {
+  const PENDING = [
+    { id: 'p-1', question: '分页上限取多少？', sections: ['4.3'], decider: '产品负责人' },
+  ]
+
+  async function mountReviewWithPending(): Promise<VueWrapper> {
+    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
+      handlers?.onChunk?.('先问最关键的一个：分页上限取多少？')
+      return { conversationId: 'doc-conv-1', reply: '先问最关键的一个：分页上限取多少？' }
+    })
+
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n分页上限：待确认', null, PENDING),
+    ])
+    await flushPromises()
+    return wrapper
+  }
+
+  it('审阅页给出澄清入口，并把正文与清单交给后端（场景点名，不递提示词）', async () => {
+    const wrapper = await mountReviewWithPending()
+
+    expect(wrapper.text()).toContain('逐条澄清这些待确认项')
+    await clickButton(wrapper, '逐条澄清这些待确认项')
+    await flushPromises()
+
+    // 进入澄清页，标题跟着「澄清的是哪一份」走
+    expect(wrapper.text()).toContain('澄清 PRD 文档 里的待确认项')
+
+    const payload = vi.mocked(api.startConversationStream).mock.calls[0]?.[0]
+    // 前端只能点名场景：档案标识由后端解析成人设与开场白
+    expect(payload?.profileKey).toBe('doc-clarification')
+    expect(payload?.answers.document).toContain('分页上限：待确认')
+    expect(payload?.answers.pending_items).toContain(
+      '1. 分页上限取多少？（涉及章节：4.3；拍板人：产品负责人）',
+    )
+  })
+
+  it('点「按澄清结果改写」发起 clarify 任务，带 docKind 与这一轮对话，完成后回到审阅页', async () => {
+    mockJobStream({
+      clarify: async (handlers) => {
+        handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
+        return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条' }
+      },
+    })
+
+    const wrapper = await mountReviewWithPending()
+    await clickButton(wrapper, '逐条澄清这些待确认项')
+    await flushPromises()
+
+    await clickButton(wrapper, '按澄清结果改写')
+    await flushPromises()
+
+    const payload = jobPayload('clarify')
+    expect(payload?.docKind).toBe('prd')
+    // 对话记录随请求一起交给后端——改写依据就是它，后端不可能自己猜到
+    expect(payload?.history?.[0]?.content).toContain('分页上限取多少？')
+    expect(payload?.document).toContain('分页上限：待确认')
+
+    // 改写完成 → 回到 PRD 的审阅页，并且正文已经是新的
+    expect(wrapper.text()).toContain('PRD 文档')
+    expect(wrapper.text()).not.toContain('澄清 PRD 文档 里的待确认项')
+  })
+
+  it('没有待确认项时不给澄清入口（点进去只能闲聊）', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n正文'),
+    ])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('PRD 文档')
+    expect(wrapper.text()).not.toContain('逐条澄清这些待确认项')
+    expect(api.startConversationStream).not.toHaveBeenCalled()
+  })
+
+  it('澄清对话与需求澄清各存各的：文档答疑不会被当成需求输入', async () => {
+    const wrapper = await mountReviewWithPending()
+    await clickButton(wrapper, '逐条澄清这些待确认项')
+    await flushPromises()
+
+    const store = useWorkflowStore()
+    expect(store.clarifyMessages).toHaveLength(1)
+    expect(store.clarifyTarget).toBe('prd')
+    // 需求澄清那套记录分毫未动
+    expect(store.messages).toHaveLength(0)
   })
 })

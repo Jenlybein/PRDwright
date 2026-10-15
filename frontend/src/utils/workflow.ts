@@ -36,6 +36,7 @@ export const VIEW_STATES: readonly ViewState[] = [
   'review-api-docs',
   'generating-prompts',
   'review-prompts',
+  'clarifying',
   'prd-quick',
   'prompt-debug',
   'done',
@@ -51,10 +52,24 @@ export function isEntryMode(value: unknown): value is EntryMode {
   return value === 'structured' || value === 'prd-quick' || value === 'prompt-debug'
 }
 
+/**
+ * 判断任意值是否为合法**产物**种类（不含 `optimize` / `clarify` 这两个动作）。
+ *
+ * 与 `isDocKind` 的差别就是「东西」与「做的事」的差别：校验「澄清针对哪一份」必须用这个，
+ * 否则快照里一个 `clarify` 会让前端去 documents store 里找一份叫 `clarify` 的产物。
+ */
+export function isDocumentKind(value: unknown): value is DocumentKind {
+  return value === 'prd' || value === 'api-docs' || value === 'prompts'
+}
+
 /** 判断任意值是否为合法文档种类（生成任务的 kind） */
 export function isDocKind(value: unknown): value is DocKind {
   return (
-    value === 'prd' || value === 'api-docs' || value === 'prompts' || value === 'optimize'
+    value === 'prd' ||
+    value === 'api-docs' ||
+    value === 'prompts' ||
+    value === 'optimize' ||
+    value === 'clarify'
   )
 }
 
@@ -187,6 +202,24 @@ export function docKindOfState(state: ViewState): DocumentKind | null {
 /** 是否处于「文档待确认」阶段 */
 export function isDocReviewPhase(state: ViewState): boolean {
   return state.startsWith('review-')
+}
+
+/**
+ * 产物种类 → 对应的「待确认」阶段。
+ *
+ * 与 `generatingStateFor` 互为逆映射，用于「在别处处理完一份文档后回到它的审阅页」
+ * （按澄清结果改写、按 `doc_kind` 恢复落点等）。返回类型是 `DocumentKind`——
+ * `optimize` / `clarify` 是动作，它们各有自己的目标产物，不在此映射之列。
+ */
+export function reviewStateFor(kind: DocumentKind): ViewState {
+  switch (kind) {
+    case 'api-docs':
+      return 'review-api-docs'
+    case 'prompts':
+      return 'review-prompts'
+    default:
+      return 'review-prd'
+  }
 }
 
 /** 阶段在进度条上的下标（口径随入口模式变化）；未知阶段归零，保证进度条永远有可渲染的位置 */
@@ -332,6 +365,14 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
       debugPrdText: typeof record.debugPrdText === 'string' ? record.debugPrdText : '',
       activeJobId,
       activeJobKind: hasActiveJob && isDocKind(record.activeJobKind) ? record.activeJobKind : null,
+      // 旧快照没有这三个字段：澄清会话缺失是正常的（那份方案没做过澄清），
+      // 因此按「没有澄清过」恢复，而不是把整份快照作废
+      clarifyMessages: Array.isArray(record.clarifyMessages)
+        ? record.clarifyMessages.filter(isChatMessage)
+        : [],
+      clarifyConversationId:
+        typeof record.clarifyConversationId === 'string' ? record.clarifyConversationId : '',
+      clarifyTarget: isDocumentKind(record.clarifyTarget) ? record.clarifyTarget : null,
     },
   }
 }

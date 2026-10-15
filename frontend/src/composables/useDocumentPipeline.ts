@@ -25,8 +25,9 @@ import type {
   ViewState,
 } from '@/types'
 import { buildDocFilename, downloadFile, type DocType } from '@/utils/download'
+import { formatPendingItemsForChat } from '@/utils/pendingItems'
 import { diffSummaries } from '@/utils/requirements'
-import { docKindOfState } from '@/utils/workflow'
+import { docKindOfState, reviewStateFor } from '@/utils/workflow'
 
 /** 受管的文档 key（与 `DocumentKind` 同集：产物种类不含 `optimize`） */
 type DocKey = DocumentKind
@@ -64,6 +65,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     messages,
     quickInput,
     debugPrdText,
+    clarifyMessages,
+    clarifyTarget,
     docGenerating: isGenerating,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
@@ -424,15 +427,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   function finishDoc(kind: DocKind, reply: string): void {
     const content = reply.trim()
     if (!content) return
-    if (kind === 'optimize') {
-      // 优化是就地替换：写回当前正在看的那份文档，不跳转
+    if (kind === 'optimize' || kind === 'clarify') {
+      // 就地替换：写回**当前正在看的那一份**。`kind` 只说「做了一件什么事」，
+      // 是哪一份由 `activeDocKey`（已在任务开始时按 doc_kind 定好）回答。
+      // 也不在这里跳阶段——优化留在原地；澄清由调用方决定改写完成后去哪。
       documents.setLocal(activeDocKey.value, content)
       return
     }
     documents.setLocal(kind, content)
-    if (kind === 'prd') goTo('review-prd')
-    else if (kind === 'api-docs') goTo('review-api-docs')
-    else goTo('review-prompts')
+    goTo(reviewStateFor(kind))
   }
 
   /** 生成结束后清掉任务指针：任务已终态，刷新无需再重连 */
@@ -472,10 +475,22 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
   }
 
+  /**
+   * 任务种类 → 这次要落进哪一份产物。
+   *
+   * 三种生成任务的种类就是产物；`optimize` / `clarify` 是动作，目标来自别处：
+   * 优化看当前正在看的那份，澄清看快照里的 `clarifyTarget`。
+   */
+  function docKeyForJob(kind: DocKind): DocKey {
+    if (kind === 'api-docs' || kind === 'prompts') return kind
+    if (kind === 'clarify') return clarifyTarget.value ?? 'prd'
+    return 'prd'
+  }
+
   /** `reconnectJob` 的实际动作（与幂等守卫分离，便于阅读与测试） */
   async function reconnectAndSettle(jobId: number): Promise<void> {
     const kind = store.activeJobKind ?? 'prd'
-    activeDocKey.value = kind === 'api-docs' ? 'api-docs' : kind === 'prompts' ? 'prompts' : 'prd'
+    activeDocKey.value = docKeyForJob(kind)
     docStreamingContent.value = ''
     docError.value = ''
     if (kind === 'prd') {
@@ -494,6 +509,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       prdProgress.value = null
     } else {
       finishDoc(kind, result.reply)
+      // 澄清的落点不是 `generating-*`（那条链路不切阶段，用户一直留在澄清页），
+      // 因此改写跑完之后要显式回到那份文档的审阅页——否则会停在澄清页看一份旧正文。
+      if (kind === 'clarify') goTo(reviewStateFor(activeDocKey.value))
     }
     clearActiveJob()
   }
@@ -626,6 +644,77 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 审阅页「逐条澄清」入口：进入澄清页，并把要澄清的那一份记下来。
+   *
+   * 只做「摆好现场」——记目标、清掉上一轮澄清对话、切阶段；**开场白由调用方发**，
+   * 因为聊天那摊状态（流式缓冲、消息列表）归 `useClarificationChat` 管，不在本文件里。
+   *
+   * @returns 本次澄清的材料（正文 + 清单文本）；返回 `null` 表示当前没有可澄清的文档。
+   */
+  function startClarification(): { document: string; pendingItems: string } | null {
+    const kind = docKindOfState(viewState.value)
+    if (!kind) return null
+    const content = documents.contentOf(kind)
+    if (!content.trim()) return null
+
+    clarifyTarget.value = kind
+    clarifyMessages.value = []
+    store.clarifyConversationId = ''
+    goTo('clarifying')
+
+    return {
+      document: content,
+      // 清单摊成可读的行再交给后端：模型要在对话里逐条讨论它们，「第 2 条」这种指代才成立
+      pendingItems: formatPendingItemsForChat(documents.pendingItemsOf(kind)),
+    }
+  }
+
+  /** 澄清页「返回」：回到这次澄清的那份文档的审阅页（对话本身留在快照里，可再进来继续） */
+  function backFromClarifying(): void {
+    goTo(reviewStateFor(clarifyTarget.value ?? 'prd'))
+  }
+
+  /**
+   * 澄清页主操作「按澄清结果改写」：把这一轮对话交给后端改写文档。
+   *
+   * 走 `clarify` 任务（而非裸 SSE）：改写可能跑很久，任务化之后刷新 / 断线只断订阅，
+   * 后端照跑，重连时凭 `activeJobId` 接上——与三份文档的生成完全同一套机制。
+   *
+   * ⚠️ **必须带 `docKind`**：它既是「改写结果写回哪一份」的依据，也是「注入哪一套产出规范」
+   * 的依据。少了它后端不会猜，而是拒绝落库——那这次澄清就白做了。
+   */
+  async function applyClarification(): Promise<void> {
+    const target = clarifyTarget.value
+    if (!target) return
+    const document = documents.contentOf(target)
+    if (!document.trim()) return
+    if (clarifyMessages.value.length === 0) return
+
+    activeDocKey.value = target
+    docError.value = ''
+    const { reply, ok } = await job.start(
+      'clarify',
+      {
+        document,
+        // 只回传 role / content：后端按同一形状读历史（与 `optimize` 的入参口径一致）
+        history: clarifyMessages.value.map(({ role, content }) => ({ role, content })),
+        docKind: target,
+      },
+      handlersForKind('clarify'),
+    )
+    if (!ok) {
+      // 改写失败：留在澄清页，原文档分毫未动（后端失败不覆写）
+      docError.value = job.error.value || '按澄清结果改写失败'
+      clearActiveJob()
+      return
+    }
+    finishDoc('clarify', reply)
+    clearActiveJob()
+    goTo(reviewStateFor(target))
+    hooks.onNotice('已按澄清结果更新文档')
+  }
+
+  /**
    * 审阅页「保存」：把编辑后的正文提交给后端。
    *
    * 走文档 store 的防抖单飞队列（见 `stores/documents.ts::save`）：连续输入会合并成一次
@@ -746,8 +835,24 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       'generating-prompts': '提示词套件',
       'review-prompts': '提示词套件',
     }
+    if (viewState.value === 'clarifying') return clarifyTargetTitle.value
     return map[viewState.value] ?? '文档'
   })
+
+  /** 这份产物的展示名；澄清页与审阅页共用一套说法，不各写一份 */
+  function titleOf(kind: DocumentKind): string {
+    if (kind === 'api-docs') return '接口文档'
+    if (kind === 'prompts') return '提示词套件'
+    return 'PRD 文档'
+  }
+
+  /**
+   * 这次澄清针对的那份文档叫什么。
+   *
+   * 澄清页不新增步骤，进度条与标题都跟着 `clarifyTarget` 走——否则澄清接口文档时标题会
+   * 显示「PRD 文档」，用户第一眼就以为自己走错了地方。
+   */
+  const clarifyTargetTitle = computed(() => titleOf(clarifyTarget.value ?? 'prd'))
 
   /** 当前审阅阶段对应的文档正文（非生成态） */
   const activeDocContent = computed(() => {
@@ -887,6 +992,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     backFromForm,
     handleEndTask,
     downloadDocument,
+    // 文档澄清：进入澄清页 / 按澄清结果改写 / 从澄清页返回
+    startClarification,
+    applyClarification,
+    backFromClarifying,
+    clarifyTarget,
+    clarifyTargetTitle,
     // 闸门 1
     handleGeneratePrd,
     confirmSummaryDiff,

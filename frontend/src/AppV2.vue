@@ -9,6 +9,7 @@ import RequirementsForm from '@/components/RequirementsForm.vue'
 import SolutionSidebar from '@/components/SolutionSidebar.vue'
 import SummaryDiffPanel from '@/components/SummaryDiffPanel.vue'
 import ChatStage from '@/components/stages/ChatStage.vue'
+import ClarifyStage from '@/components/stages/ClarifyStage.vue'
 import DoneStage from '@/components/stages/DoneStage.vue'
 import EntryStage from '@/components/stages/EntryStage.vue'
 import GeneratingStage from '@/components/stages/GeneratingStage.vue'
@@ -95,10 +96,32 @@ const {
 const documents = useDocumentsStore()
 const {
   contents: documentContents,
+  pendingItems: documentPendingItems,
   hasPrd,
   hasApiDocs,
   hasPrompts,
 } = storeToRefs(documents)
+
+/**
+ * 审阅页是否给出「逐条澄清」入口。
+ *
+ * 两个条件缺一不可：这份文档真有正文（没正文就没什么可澄清），且真有待确认项
+ * （清单为空时点进去只能闲聊，那不如不给入口）。
+ */
+const canClarifyDocument = computed(
+  () => pendingItems.value.length > 0 && activeDocContent.value.trim() !== '',
+)
+
+/**
+ * 澄清页上显示的待确认项条数。
+ *
+ * 刻意不复用审阅页的 `pendingItems`：那个是按**当前阶段**反推产物种类的，而澄清阶段
+ * 反推不出任何产物（`docKindOfState('clarifying')` 是 null）。这里按这次澄清的**目标**
+ * 取，因此从接口文档的审阅页进来，数的就是接口文档那一份。
+ */
+const clarifyPendingCount = computed(
+  () => documentPendingItems.value[clarifyTarget.value ?? 'prd'].length,
+)
 
 /**
  * 表单组件的 key。
@@ -369,6 +392,11 @@ const {
   confirmSummaryDiff,
   rejectSummaryDiff,
   reconnectJob,
+  startClarification,
+  applyClarification,
+  backFromClarifying,
+  clarifyTarget,
+  clarifyTargetTitle,
   reset: resetPipeline,
 } = useDocumentPipeline({ onNotice: flashSavedTip })
 
@@ -387,6 +415,46 @@ const {
   onNotice: flashSavedTip,
   onEnterChat: () => goTo('chatting'),
 })
+
+// ---------------------------------------------------------------------------
+// 文档澄清对话（与需求澄清共用骨架，但记录与档案都独立）
+// ---------------------------------------------------------------------------
+
+const { clarifyMessages: clarifyChatMessages, clarifyConversationId } = storeToRefs(store)
+
+const {
+  streaming: clarifying,
+  chatError: clarifyError,
+  displayMessages: clarifyDisplayMessages,
+  sendMessage: handleSendClarifyMessage,
+  startConversationWithAnswers: startClarifyChat,
+} = useClarificationChat(
+  {
+    onNotice: flashSavedTip,
+    // 澄清页自己就是一个阶段，不需要「切到对话页」——这里只保证停在原地
+    onEnterChat: () => goTo('clarifying'),
+  },
+  {
+    profileKey: 'doc-clarification',
+    messages: clarifyChatMessages,
+    conversationId: clarifyConversationId,
+  },
+)
+
+/**
+ * 审阅页「逐条澄清」：摆好现场（记下要澄清哪一份）后，立刻让 AI 开第一轮追问。
+ *
+ * 首轮材料（文档正文 + 待确认清单）由流水线从 `documents` 工作副本取——那是后端随正文
+ * 落库的权威版本，不是前端另拼一份。
+ */
+async function handleStartClarification(): Promise<void> {
+  const material = startClarification()
+  if (!material) return
+  await startClarifyChat(
+    { document: material.document, pending_items: material.pendingItems },
+    '正在梳理这份文档的待确认项',
+  )
+}
 
 /** 是否处于入口选择页：这一步还没有进度可言，进度条不显示 */
 const isChoosingEntry = computed(() => viewState.value === 'entry')
@@ -576,6 +644,7 @@ function handleStepClick(stepId: StepId): void {
         :has-prompts="hasPrompts"
         :run-summary="runSummary"
         :pending-items="pendingItems"
+        :can-clarify="canClarifyDocument"
         :back-label="backLabel"
         @save="onSaveDocument"
         @optimize="onAiOptimize"
@@ -584,6 +653,21 @@ function handleStepClick(stepId: StepId): void {
         @generate-prompts="handleGeneratePrompts"
         @navigate="goTo"
         @finish="handleEndTask"
+        @clarify="handleStartClarification"
+      />
+
+      <!-- 文档澄清：把「待确认」逐条聊清楚，再按结论就地改写那一份文档 -->
+      <ClarifyStage
+        v-else-if="viewState === 'clarifying'"
+        :messages="clarifyDisplayMessages"
+        :target-label="clarifyTargetTitle"
+        :pending-count="clarifyPendingCount"
+        :loading="clarifying"
+        :rewriting="isGenerating"
+        :error="clarifyError || docError"
+        @send="handleSendClarifyMessage"
+        @rewrite="applyClarification"
+        @back="backFromClarifying"
       />
 
       <!-- 全部完成 -->

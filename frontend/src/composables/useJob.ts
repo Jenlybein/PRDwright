@@ -32,12 +32,18 @@ import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { DocKind, JobSnapshot, RunSummary, ViewState } from '@/types'
 
-/** 文档种类 → 对应的「生成中」阶段；`optimize` 就地流式、不改变阶段，故为 null */
+/**
+ * 文档种类 → 对应的「生成中」阶段。
+ *
+ * `optimize` 与 `clarify` 都是**就地**动某一篇已有文档：不切阶段，用户留在原来的界面上
+ * （优化留在审阅页、澄清留在澄清页），由那一页自己表现「正在干活」。因此为 null。
+ */
 const GENERATING_STATE: Record<DocKind, ViewState | null> = {
   prd: 'generating-prd',
   'api-docs': 'generating-api-docs',
   prompts: 'generating-prompts',
   optimize: null,
+  clarify: null,
 }
 
 /** `start` 的输入：任务种类 + 各类型各自的字段（`solutionId` 由本 composable 补） */
