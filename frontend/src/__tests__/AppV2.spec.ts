@@ -1510,6 +1510,20 @@ describe('AppV2 文档澄清', () => {
     )
   })
 
+  it('「PRD 快捷」的审阅页不给「回到对话」入口——那条路没有对话可回', async () => {
+    const wrapper = await mountExistingSolution(
+      { ...reviewSnapshot('review-prd'), entryMode: 'prd-quick' },
+      1,
+      [makeDocumentRecord('prd', '# 产品需求文档\n\n分页上限：待确认', null, PENDING)],
+    )
+    await flushPromises()
+
+    // 有待确认项、也真在审 PRD，但入口模式不是完整流程：不能给这个入口，
+    // 否则它会顶掉本该留着的「返回描述」（快捷入口压根没有那条聊天记录）
+    expect(wrapper.text()).not.toContain('回到对话，确认剩下的')
+    expect(wrapper.text()).toContain('返回描述')
+  })
+
   it('点「按澄清结果改写」发起 clarify 任务，带 docKind 与这一轮对话，完成后回到审阅页', async () => {
     mockJobStream({
       clarify: async (handlers) => {

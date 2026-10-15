@@ -128,14 +128,6 @@ watch(
           改需求
         </AppButton>
       </template>
-      <template #hint>
-        <p v-if="docClarification" class="text-xs text-subtle">
-          这一轮的结论会在你按下「按澄清结果改写」时写回 PRD；不改写的话文档分毫不动。
-        </p>
-        <p v-else-if="canGeneratePrd" class="text-xs text-subtle">
-          需求已澄清。生成前会先让你确认「补充信息回填到需求摘要」的变更。
-        </p>
-      </template>
 
       <!-- 文档澄清模式的主操作：改写（进行中时显示进度，仍由 AppButton 承载 loading 态） -->
       <AppButton

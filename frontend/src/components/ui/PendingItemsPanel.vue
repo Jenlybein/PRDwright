@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import type { PendingImportance, PendingItem } from '@/types'
 import { sortPendingItems } from '@/utils/pendingItems'
@@ -21,6 +21,9 @@ import { sortPendingItems } from '@/utils/pendingItems'
  * - 顺序由 `sortPendingItems` 保证是 P0 → P1 → P2，即**序号越小越要紧**；
  *   这点要让用户看得懂，所以面板副标题明确写出排列顺序含义。
  * - 章节 / 拍板人均为空时不渲染对应片段，避免露出「涉及章节：」「拍板人：」这种空标签。
+ * - **默认只铺开前 3 条**（`VISIBLE_LIMIT`），其余折起来由用户主动展开：清单可能长到十几条，
+ *   而它是要和正文一起看的（面板就在正文之上），全铺开会把正文挤到屏幕外。折叠只是**展示口径**，
+ *   不动数据：标题里的总数、后端算好的排序与等级都不变，展开状态也不进快照（纯会话内状态）。
  */
 const props = defineProps<{
   /** 待确认问题列表；调用方保证非空（空列表时连面板都不挂） */
@@ -49,6 +52,20 @@ const LEVEL_META: Record<
 
 /** 后端已排好序，这里再兜一次底：确保渲染顺序始终是从最重要到最次要。 */
 const sortedItems = computed(() => sortPendingItems(props.items))
+
+/** 折叠时最多铺开几条；超出的收起来，由用户主动展开 */
+const VISIBLE_LIMIT = 3
+
+/** 是否展开查看全部；初始收起——先给最要紧的前几条，需要时再展开 */
+const expanded = ref(false)
+
+/** 总条数是否超过折叠上限（不超过就不出现展开控件，避免一个点了没变化的按钮） */
+const hasMore = computed(() => sortedItems.value.length > VISIBLE_LIMIT)
+
+/** 实际渲染的条目：展开时全量，收起时只取前 VISIBLE_LIMIT 条 */
+const visibleItems = computed(() =>
+  expanded.value ? sortedItems.value : sortedItems.value.slice(0, VISIBLE_LIMIT),
+)
 
 /** 各级数量，用于头部一行说明（例如「P0 2 · P1 3」）。 */
 const counts = computed(() => {
@@ -94,7 +111,7 @@ function metaOf(level: PendingImportance) {
 
     <ul class="mt-2 divide-y divide-line">
       <li
-        v-for="(item, index) in sortedItems"
+        v-for="(item, index) in visibleItems"
         :key="item.id"
         class="flex gap-3 py-2 first:pt-0"
       >
@@ -130,5 +147,16 @@ function metaOf(level: PendingImportance) {
         </div>
       </li>
     </ul>
+
+    <!-- 展开 / 收起：只在真的被折叠过时才出现。文案带上总数，用户知道展开后能拿到多少 -->
+    <button
+      v-if="hasMore"
+      type="button"
+      class="mt-2 w-full rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:border-line-strong hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
+      :aria-expanded="expanded"
+      @click="expanded = !expanded"
+    >
+      {{ expanded ? '收起' : `展开全部 ${sortedItems.length} 条` }}
+    </button>
   </section>
 </template>

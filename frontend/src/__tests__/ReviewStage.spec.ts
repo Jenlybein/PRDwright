@@ -289,11 +289,15 @@ describe('ReviewStage 的生成用量回执', () => {
 })
 
 /**
- * 待确认清单的落点。
+ * 待确认清单与澄清入口的落点。
  *
- * 清单由后端在剥离正文标记块时算出、随正文落库，前端只读展示。放在正文下方、底栏之上
+ * 清单由后端在剥离正文标记块时算出、随正文落库，前端只读展示。它放在**正文之上**
  * ——它描述的是「这份文档还差哪些问题没敲定」，属于内容本身，不是「对文档做的事」，
  * 因此不进底栏（ADR-015：主操作位只有一个）。
+ *
+ * 而不做清单、只管「去澄清」的那个入口，是两个不同的去处：
+ * PRD 的落点就是对话页，已下沉到**底栏次操作组**并顶替「返回」；
+ * 接口文档 / 提示词要开一个独立澄清页，仍是本页正文下方的整块入口。
  */
 describe('ReviewStage 的待确认清单', () => {
   function mountWithItems(pendingItems: PendingItem[] | undefined): VueWrapper {
@@ -311,7 +315,7 @@ describe('ReviewStage 的待确认清单', () => {
     })
   }
 
-  it('有待确认项时挂在正文下方展示', () => {
+  it('有待确认项时挂在正文之上（先看到还差什么，再看正文本身）', () => {
     const wrapper = mountWithItems([
       {
         id: 'overview-1',
@@ -325,6 +329,10 @@ describe('ReviewStage 的待确认清单', () => {
     expect(wrapper.text()).toContain('待确认问题（1）')
     expect(wrapper.text()).toContain('指标口径谁拍板？')
     expect(wrapper.text()).toContain('拍板人：数据团队')
+
+    // 顺序断言：清单面板在文档卡片之前（卡片标题由 DocumentReview 的 h2 渲染，拿它当锚点）
+    const html = wrapper.html()
+    expect(html.indexOf('待确认问题（1）')).toBeLessThan(html.indexOf('产品需求文档'))
   })
 
   it('没有待确认项时整块不渲染（不留一个空的「待确认问题（0）」）', () => {
@@ -412,6 +420,64 @@ describe('ReviewStage 的待确认清单', () => {
     expect(wrapper.emitted('returnToChat')).toHaveLength(1)
     // 不沿用旧的 clarify 事件：两条路是两回事，各行其道
     expect(wrapper.emitted('clarify')).toBeUndefined()
+  })
+
+  it('「回到对话」入口落在底栏次操作组，并顶替「返回」按钮（不并排两个「回到对话」）', () => {
+    const wrapper = mount(ReviewStage, {
+      props: {
+        title: '产品需求文档',
+        content: CONTENT,
+        viewState: 'review-prd',
+        canFinish: false,
+        hasPrd: true,
+        hasApiDocs: false,
+        hasPrompts: false,
+        pendingItems: [
+          { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '', importance: 'P0' },
+        ],
+        canReturnToChat: true,
+      },
+    })
+
+    const bar = wrapper.find('.shell-action-bar')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('回到对话，确认剩下的 1 个问题')
+    // 两个入口的落点都是对话页，因此互斥渲染：底栏里不再并排一个「返回对话」
+    expect(bar.text()).not.toContain('返回对话')
+    // 全页只有底栏这一处入口（这次是「搬进底栏」，不是「再加一个」）
+    const entries = wrapper.findAll('button').filter((item) => item.text().includes('回到对话'))
+    expect(entries).toHaveLength(1)
+  })
+
+  it('没有该入口时底栏保留「返回」按钮（开关为 false，或压根没有待确认项）', () => {
+    const baseProps = {
+      title: '产品需求文档',
+      content: CONTENT,
+      viewState: 'review-prd' as const,
+      canFinish: false,
+      hasPrd: true,
+      hasApiDocs: false,
+      hasPrompts: false,
+    }
+
+    const noSwitch = mount(ReviewStage, {
+      props: {
+        ...baseProps,
+        pendingItems: [
+          { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '', importance: 'P0' },
+        ],
+        canReturnToChat: false,
+      },
+    })
+    expect(noSwitch.find('.shell-action-bar').text()).toContain('返回对话')
+    expect(noSwitch.text()).not.toContain('确认剩下的')
+
+    // 开关开了却没有待确认项：仍然不给入口——点进去只能和 AI 闲聊
+    const noItems = mount(ReviewStage, {
+      props: { ...baseProps, pendingItems: [], canReturnToChat: true },
+    })
+    expect(noItems.find('.shell-action-bar').text()).toContain('返回对话')
+    expect(noItems.text()).not.toContain('确认剩下的')
   })
 })
 

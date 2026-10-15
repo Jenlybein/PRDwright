@@ -553,9 +553,20 @@ const prdClarifyCanRewrite = computed(
   () => prdClarifying.value && messages.value.some((message) => message.stage === 'document'),
 )
 
-/** 审阅 PRD 页是否给出「回到对话澄清剩余问题」的入口 */
+/**
+ * 审阅 PRD 页是否给出「回到对话澄清剩余问题」的入口。
+ *
+ * ⚠️ 必须限定在**完整流程**（`entryMode === 'structured'`）：只有那条路才有需求对话可回。
+ * 「PRD 快捷」「提示词调试」同样会生成 PRD（kind 都是 `prd`），也一样会产出待确认清单，
+ * 但它们的入口页是描述 / PRD 文本框，压根没有那条聊天记录——若不限制，快捷入口的用户
+ * 会连本该留着的「返回描述」都被这个入口顶掉。
+ */
 const canReturnToChatFromPrd = computed(
-  () => viewState.value === 'review-prd' && hasPrd.value && pendingItems.value.length > 0,
+  () =>
+    viewState.value === 'review-prd' &&
+    store.entryMode === 'structured' &&
+    hasPrd.value &&
+    pendingItems.value.length > 0,
 )
 
 /** 是否处于入口选择页：这一步还没有进度可言，进度条不显示 */

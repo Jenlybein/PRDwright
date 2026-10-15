@@ -94,8 +94,9 @@ const props = defineProps<{
   /**
    * 是否给出「回到对话」入口（PRD 专用，与 `canClarify` 互斥）。
    *
-   * 同样由上层决定：能否走这条路径取决于「是不是在审 PRD」以及「有没有待确认项」，
-   * 两者都是上层才知道的事。
+   * 同样由上层决定：能否走这条路径取决于「是不是在审 PRD」「是不是完整流程（有对话可回）」
+   * 以及「有没有待确认项」，三者都是上层才知道的事。入口落在底栏的次操作组，
+   * 并**顶替**「返回」按钮（两者落点都是对话页，并排会给用户两个近乎同名的选择）。
    */
   canReturnToChat?: boolean
 }>()
@@ -114,6 +115,17 @@ const totalTokens = computed(() => {
  */
 const skillFallback = computed(
   () => props.runSummary?.kind === 'prd' && (props.runSummary.injectedSkills ?? []).length === 0,
+)
+
+/**
+ * 是否展示 PRD 专属的「回到对话澄清剩余问题」入口（在底栏次操作组，并顶替「返回」）。
+ *
+ * 上层按阶段与入口模式给出开关（`canReturnToChat`），这里再兜一层「真有待确认项」：
+ * 没有待确认项却给一个「去澄清」的入口，点进去只能闲聊。两处判据收在这一个 computed 里，
+ * 免得模板里「渲染入口」与「隐藏返回」各写一遍条件、日后改一处漏一处。
+ */
+const showReturnToChat = computed(
+  () => Boolean(props.canReturnToChat) && (props.pendingItems?.length ?? 0) > 0,
 )
 
 /** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制、保存、切换视图 */
@@ -238,6 +250,11 @@ function submitOptimize(): void {
       <li v-for="warning in runSummary.warnings" :key="warning">{{ warning }}</li>
     </ul>
 
+    <!-- 待确认清单：本次生成产出的元数据，读后端随正文落库的那一份。
+         放在**正文之上**——它是「这份文档还差哪些问题没敲定」，先看到还差什么、再看正文本身。
+         归「内容本身」而不是「对文档做的事」，所以不进底栏；面板自身默认只铺开前 3 条。 -->
+    <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
+
     <!-- 文档卡片：只有头部与正文，工具全部下沉到下面的底栏 -->
     <DocumentReview
       ref="doc"
@@ -246,15 +263,10 @@ function submitOptimize(): void {
       @save="emit('save', $event)"
     />
 
-    <!-- 待确认清单：本次生成产出的元数据，读后端随正文落库的那一份。
-         放在正文下方、底栏之上——它是「这份文档还差哪些问题没敲定」，归「内容本身」，
-         不是「对文档做的事」，因此不进底栏（澄清提示条紧接它下面）。 -->
-    <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
-
-    <!-- 澄清入口：**普通区块，不占底栏的主操作位**（ADR-015 一屏只有一个主操作）。
+    <!-- 逐条澄清入口（接口文档 / 提示词专用）：**普通区块，不占底栏的主操作位**（ADR-015）。
          只在真有待确认项时出现——没有待确认项却给一个「去澄清」的入口，点进去只能闲聊。
-         整块可点：这类「进入某个流程」的提示条比按钮更适合做成区块（与底栏那些
-         「对文档做的事」区分开）。 -->
+         这两份文档的澄清要开一个独立澄清页，整块入口足以承担；PRD 那条的落点就是对话页，
+         已下沉到下面的底栏由它顶替「返回」（见 `showReturnToChat`）。 -->
     <button
       v-if="canClarify && pendingItems && pendingItems.length"
       type="button"
@@ -294,51 +306,13 @@ function submitOptimize(): void {
     </button>
 
     <!--
-      PRD 专属的「回到对话」入口（只在审阅 PRD 时出现）。
+      PRD 专属的「回到对话」入口已下沉到下面的底栏（次操作组 `#secondary`）。
 
-      与上面那条「逐条澄清」的区别不在做什么，而在**去哪里**：这条把用户送回刚才那个对话框，
-      在同一条聊天记录后面接着聊（因此文案强调「回到对话」）；那条开一个独立的澄清页。
-      PRD 用前者是因为它是流程的第一份产物，用户刚从对话里出来，心智还连着那条时间线。
+      它是「进入某个流程」的入口，但落脚点就是**对话页**，所以按 ADR-015「底栏是全站唯一操作落点」
+      收进底栏反而更一致；只是因为不能占主操作位（那是「完成」的），所以进次操作组。
+      原来的整块区块按钮与底栏里的「返回」落点相同、名字也近似，两个并排会让用户不知道该点哪个，
+      因此改为：该入口出现时由它**顶替**「返回」按钮（见 `showReturnToChat`）。
     -->
-    <button
-      v-if="canReturnToChat && pendingItems && pendingItems.length"
-      type="button"
-      class="flex w-full items-center gap-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3 text-left transition-colors hover:border-primary-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-200 dark:border-primary-800 dark:bg-primary-950/30 dark:hover:border-primary-700"
-      @click="emit('returnToChat')"
-    >
-      <svg
-        class="h-4 w-4 shrink-0 text-primary-600 dark:text-primary-300"
-        viewBox="0 0 20 20"
-        fill="currentColor"
-        aria-hidden="true"
-      >
-        <path
-          fill-rule="evenodd"
-          d="M10 18a8 8 0 100-16 8 8 0 000 16Zm.75-11.5a.75.75 0 00-1.5 0v3.5c0 .2.08.39.22.53l2 2a.75.75 0 001.06-1.06l-1.78-1.78V6.5Z"
-          clip-rule="evenodd"
-        />
-      </svg>
-      <span class="min-w-0 flex-1">
-        <span class="block text-sm font-medium text-fg">
-          回到对话，确认剩下的 {{ pendingItems.length }} 个问题
-        </span>
-        <span class="mt-0.5 block text-xs text-subtle">
-          按 P0 → P1 → P2 从最要紧的问起；之前的对话都还在，聊够了随时写回 PRD。
-        </span>
-      </span>
-      <svg
-        class="h-4 w-4 shrink-0 text-subtle"
-        viewBox="0 0 20 20"
-        fill="currentColor"
-        aria-hidden="true"
-      >
-        <path
-          fill-rule="evenodd"
-          d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02Z"
-          clip-rule="evenodd"
-        />
-      </svg>
-    </button>
 
     <AppActionBar>
       <!-- 内容行：常态是文档工具；点「AI 优化」原地变成指令输入，文档始终可见 -->
@@ -435,9 +409,20 @@ function submitOptimize(): void {
         </div>
       </template>
 
-      <!-- 流程行：左「返回」，右按顺序推进 / 查看其它文档 / 完成 -->
+      <!-- 流程行：左「返回 / 回到对话」，右按顺序推进 / 查看其它文档 / 完成。
+           三段式顺序与「主操作永远最右且唯一」都不动（ADR-015），新入口进的是次操作组。 -->
       <template #secondary>
-        <AppButton variant="secondary" size="md" @click="emit('back')">
+        <!-- 两个入口的落点都是对话页，因此互斥渲染：有待确认项时由「回到对话」顶替「返回」，
+             否则并排会出现两个都叫「回到对话」的按钮，用户不知道该点哪个。 -->
+        <AppButton
+          v-if="showReturnToChat"
+          variant="secondary"
+          size="md"
+          @click="emit('returnToChat')"
+        >
+          回到对话，确认剩下的 {{ pendingItems?.length }} 个问题
+        </AppButton>
+        <AppButton v-else variant="secondary" size="md" @click="emit('back')">
           {{ backLabel ?? '返回对话' }}
         </AppButton>
       </template>
