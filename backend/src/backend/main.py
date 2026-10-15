@@ -18,13 +18,15 @@ from backend.api.auth import router as auth_router
 from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
 from backend.api.deps import AuthMiddleware, RequestIdMiddleware
+from backend.api.health import router as health_router
 from backend.api.jobs import router as jobs_router
 from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
 from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
+from backend.core.logging_setup import configure_logging
 from backend.services import auth_service, job_service
-from backend.services.prd_skill import ensure_skill_assets
+from backend.services.prd_skill import describe_skill, ensure_skill_assets
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,12 @@ async def lifespan(_: FastAPI):
 
     放在 lifespan 而不是 `@app.on_event` 的原因：后者已在新版本 FastAPI 中标记弃用。
     """
+    # 日志配置放在最前面：连「建库失败」这件事也应当带上时间与来源，
+    # 否则启动期的报错仍是难认的裸文本。这里重新取一次配置而不复用模块级
+    # `settings` 快照——测试与 `--reload` 都可能在本模块导入之后才改环境变量。
+    current = get_settings()
+    configure_logging(level=current.log_level, fmt=current.log_format)
+
     init_schema()
     auth_service.ensure_bootstrap()
     # 开发模式下预先备好内置用户，业务数据落归属时才有恒非空的 user_id
@@ -52,7 +60,25 @@ async def lifespan(_: FastAPI):
             "PRD 技能资源缺失：%s，生成时将退回内置提示词（回执会标出）。"
             "请用环境变量 PRDWRIGHT_SKILLS_DIR 指定 skills 根目录",
             "、".join(missing_skills),
+            extra={"event": "service.skills_missing", "missing": missing_skills},
         )
+
+    # 一条启动记录，把「这次的进程究竟加载了哪套资产」钉在时间线上。
+    # 排查「昨天还好、今天风格变了」这类问题时，第一眼要找的就是它。
+    identity = describe_skill()
+    logger.info(
+        "服务启动完成",
+        extra={
+            "event": "service.started",
+            "log_format": current.log_format,
+            "llm": f"{current.default_llm_provider}/{current.default_llm_model}",
+            "skill": (
+                f"{identity['name']} v{identity['version']}"
+                if identity
+                else "未加载（生成将退回内置提示词）"
+            ),
+        },
+    )
     yield
 
 
@@ -130,6 +156,8 @@ app.include_router(conversation_router)
 app.include_router(config_router)
 app.include_router(solutions_router)
 app.include_router(jobs_router)
+# 健康检查路径为 `/health`（无前缀），与认证白名单里的条目必须一致
+app.include_router(health_router)
 
 
 @app.get("/", summary="服务根路径")
@@ -140,12 +168,6 @@ async def root() -> dict:
         "status": "running",
         "docs": "/docs",
     }
-
-
-@app.get("/health", summary="健康检查")
-async def health() -> dict:
-    """健康检查接口，供容器探针或前端探活使用。"""
-    return {"status": "ok"}
 
 
 if __name__ == "__main__":

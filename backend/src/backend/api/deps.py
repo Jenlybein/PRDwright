@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from http.cookies import SimpleCookie
 from uuid import uuid4
 
@@ -22,6 +24,10 @@ from backend.core.config import get_settings
 from backend.core.errors import AppError, ErrorCode, error_payload
 from backend.core.request_context import reset_request_id, set_request_id
 from backend.services.auth_service import User, current_user, ensure_dev_user
+
+# 访问日志独立一个 logger 名：将来想单独调它的级别、或整体关掉，
+# 不必牵连应用自己的业务日志。
+_access_logger = logging.getLogger("backend.api.access")
 
 # 精确匹配的公开路径
 _PUBLIC_EXACT: frozenset[str] = frozenset(
@@ -165,6 +171,30 @@ def _incoming_request_id(scope: dict) -> str:
     return ""
 
 
+def _log_request(scope: dict, request_id: str, status_code: int, started_at: float) -> None:
+    """记一条访问日志：请求号、状态码、耗时。
+
+    耗时是「从收到请求到**开始**回响应」的时间。对普通请求约等于总耗时；对 SSE 是
+    **建立流**的耗时——整段生成多久不在这里，它由 `run_summary` 记录
+    （见 `services/stream_reply.py`）。两者刻意不混成一个字段：否则看日志的人
+    会以为「一次 PRD 生成只花了 40 毫秒」。
+
+    记在最外层中间件里，所以**被认证拦掉的 401 也有这一条**。排查「用户说打不开」
+    时，第一个要确认的问题正是「这个请求到底有没有到过后端」。
+    """
+    _access_logger.info(
+        "请求完成",
+        extra={
+            "event": "request.completed",
+            "request_id": request_id,
+            "method": scope["method"],
+            "path": scope["path"],
+            "status": status_code,
+            "duration_ms": round((time.perf_counter() - started_at) * 1000, 1),
+        },
+    )
+
+
 class RequestIdMiddleware:
     """给每个请求分配 `request_id`，并回写 `X-Request-ID` 响应头。
 
@@ -194,14 +224,24 @@ class RequestIdMiddleware:
         scope["state"]["request_id"] = request_id
         token = set_request_id(request_id)
 
+        started_at = time.perf_counter()
+        # 0 表示「还没开始回响应就结束了」（客户端提前断开、或下游直接抛异常）。
+        # 留一个能分辨的值，比事后看到 `status=None` 再回头翻代码要省事。
+        status_code = 0
+
         async def send_with_request_id(message) -> None:  # noqa: ANN001
+            nonlocal status_code
             if message["type"] == "http.response.start":
+                status_code = message["status"]
                 MutableHeaders(scope=message)["X-Request-ID"] = request_id
             await send(message)
 
         try:
             await self.app(scope, receive, send_with_request_id)
         finally:
+            # 先记日志再还原上下文：`extra` 里已经显式带了号（不依赖上下文变量），
+            # 但让上下文在格式化那一刻仍然有效，就没有「某种格式下才正确」的隐性前提。
+            _log_request(scope, request_id, status_code, started_at)
             reset_request_id(token)
 
 

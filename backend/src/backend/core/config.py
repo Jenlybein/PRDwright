@@ -23,6 +23,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILE = BACKEND_ROOT / ".env"
 
+# 供应商 → 密钥所在的环境变量名。
+# 错误文案（`require_api_key`）与健康检查的自检（`api/health.py`）共用这一份，
+# 避免两处各写一遍之后悄悄漂移——那会变成「报错说缺 A、体检说缺 B」的经典故障。
+API_KEY_ENV_VARS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "ark": "ARK_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
 
 class Settings(BaseSettings):
     """后端服务的运行时配置。"""
@@ -189,6 +198,19 @@ class Settings(BaseSettings):
         "而不是等某次生成的 PRD 风格悄悄变了才被发现。",
     )
 
+    # --- 可观测性（日志） ----------------------------------------------------
+    log_level: str = Field(
+        default="INFO",
+        description="日志级别（DEBUG / INFO / WARNING / ERROR）。认不出的名字退回 INFO，"
+        "不让一个拼错的配置把服务拦在启动之外。",
+    )
+    log_format: Literal["text", "json"] = Field(
+        default="text",
+        description="日志格式。`text` 给人看（本地开发默认）；`json` 一行一条 JSON，"
+        "给日志采集用（部署建议设为 json）。两者带**同一组字段**，"
+        "所以切换格式不会丢信息——尤其是每条日志里的 `request_id`。",
+    )
+
     # --- 认证（登录 / 注册） --------------------------------------------------
     auth_enabled: bool = Field(
         default=True,
@@ -289,6 +311,14 @@ class Settings(BaseSettings):
             return Path(self.db_path).expanduser().resolve()
         return BACKEND_ROOT / "prdwright.db"
 
+    def api_key_env_var(self) -> str:
+        """当前所选供应商对应的 API 密钥环境变量名；供应商未知时为空串。
+
+        给两处用：`require_api_key` 的报错文案、以及健康检查里「密钥没配」的自检。
+        **只有这一处知道「哪个供应商看哪个变量」**，加供应商时不会漏掉某一边。
+        """
+        return API_KEY_ENV_VARS.get(self.default_llm_provider, "")
+
     def require_api_key(self) -> str:
         """返回当前所选供应商对应的 API 密钥。
 
@@ -297,16 +327,14 @@ class Settings(BaseSettings):
         """
         if self.default_llm_provider == "anthropic":
             key = self.anthropic_api_key
-            env_var = "ANTHROPIC_API_KEY"
         elif self.default_llm_provider == "ark":
             key = self.ark_api_key
-            env_var = "ARK_API_KEY"
         else:
             key = self.openai_api_key
-            env_var = "OPENAI_API_KEY"
         if not key:
             raise RuntimeError(
-                f"尚未配置 {env_var}，但当前请求的供应商是 '{self.default_llm_provider}'。"
+                f"尚未配置 {self.api_key_env_var()}，但当前请求的供应商是"
+                f" '{self.default_llm_provider}'。"
                 f"请在 {ENV_FILE} 中设置（可参考 .env.example）。"
             )
         return key

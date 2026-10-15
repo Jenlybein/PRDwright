@@ -13,9 +13,10 @@
 | `roadmap.md` | R1 / R2 / R3 全景路线图（含 v1–v2 的历史盘点、债务清单、风险登记、**版本分期的唯一真源**） | 进行中 |
 
 两份怎么看：**先看 `ARCHITECTURE.md` 了解 v3 要建成什么样**，再看 `roadmap.md` 排期；
-Job 运行时（`ARCHITECTURE.md` 第 4.1 节）已随 R1-T0 落地，观测与事后计量（第 4.2 节的观测侧）已随 R1-T5 落地，
-**下一步是单次调用自愈（R1-T4）**——注意它**不是**自动切换供应商（该项已裁决取消，见新增 ADR-016），
-动手前重点读第 4.2 / 4.6 节（观测与预算、R1 实现细节），实施状态以 `roadmap.md` 第八节为准。
+Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节）随 R1-T5 落地，
+技能资产与日志体检（ADR-017 / R2-T7）也已落地，**下一步是 RAG 资产登记（R2-T8）**——
+它是 R3 Docker 打包的前置。注意 R1-T2 断点续传已裁决延后、自动切换供应商已裁决不做（ADR-016），
+动手前重点读第 4.2 / 4.6 节，实施状态以 `roadmap.md` 第八节为准。
 
 ## 版本 ↔ 任务对照
 
@@ -24,7 +25,7 @@ Job 运行时（`ARCHITECTURE.md` 第 4.1 节）已随 R1-T0 落地，观测与�
 | 版本阶段 | 任务阶段 | 目标 |
 | --- | --- | --- |
 | v3.0 | R1 | 生成可靠性：生成 Job 中间态 + 成本计量与预算 / **单次调用自愈**（超时 + 有限重试）/ 断点续传 |
-| v3.1 | R2 | 技能资产加固（热重载 + fail-fast）、可观测性基线、RAG 资产登记 |
+| v3.1 | R2 | 技能资产加固（热重载 + fail-fast）✅、可观测性基线 ✅、RAG 资产登记 |
 | v3.2 | R3 | Docker 化、生产加固（Cookie Secure / 邀请码轮换）、部署态隔离验证 |
 
 ## 已拍板的三件事（前两件随 R1-T0 落地，第三件随 T4 决策）
@@ -53,4 +54,15 @@ Job 运行时（`ARCHITECTURE.md` 第 4.1 节）已随 R1-T0 落地，观测与�
 | 逼近上限怎么办 | 只记告警、不拦截；同一步保留最严重的一条，随 `run_summary.warnings` 回传并在回执里展示 | `llm_meter.note_warning` + `ReviewStage.vue` |
 | 检查点在哪 | 与事后计量**同一个唯一出口**：`stream_reply.astream_text` 开头 | `services/stream_reply.py` |
 
-> 结构化日志与 `/health` 扩展归 R2-T7；其余（事后计量、`request_id` 贯通、事前预算）本期已全部交付。
+> 结构化日志与 `/health` 扩展已随 **R2-T7** 交付（见下一节）；其余（事后计量、`request_id` 贯通、事前预算）随 R1-T5 全部交付。
+
+## R2-T6 / R2-T7 落地点（2026-10-15）
+
+| 议题 | 落定做法 | 位置 |
+| --- | --- | --- |
+| 技能资源怎么缓存 | **按文件戳**（修改时间 + 大小）比对，改模板下一次生成即生效、不必重启；只有读成功才写缓存，文件消失时连缓存条目一起丢（ADR-017） | `services/prd_skill.py` |
+| 「用了技能包还是兜底」怎么看 | 每次 PRD 生成把 `SkillRef{name, version, fingerprint}` 写进 `run_summary.injected_skills`；为空即表示退回了内置提示词，前端据此显示告警 | `core/contracts.py` + `components/stages/ReviewStage.vue` |
+| 缺失要不要拦住启动 | `.env` 的 `PRDWRIGHT_SKILLS_STRICT`（默认 false）：本地只告警，部署设 true 则缺失即中止启动 | `core/config.py` + `main.py::lifespan` |
+| 日志怎么带上请求号 | 格式化器从上下文变量**现取**，业务代码一行不改；`extra=` 挂的业务字段按「排除标准属性」的规则自动带出（ADR-018） | `core/logging_setup.py` |
+| 访问日志记在哪 | 记在最外层 `RequestIdMiddleware` 里，**被认证拦下的 401 同样留痕**；`uvicorn.access` 的级别抬到 WARNING，避免同一次请求出两行（一行有号一行没号） | `api/deps.py` |
+| 体检报什么 | 数据库 / 供应商 / 技能包三项分开报，`status` 取 `ok` / `degraded` 且**恒返回 200**；供应商一项只校验配置就位、**不发真实调用**（不假装验过） | `api/health.py` |

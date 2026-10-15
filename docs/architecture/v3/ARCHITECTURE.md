@@ -108,7 +108,9 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | 关注点 | 设计 |
 | --- | --- |
 | 观测（事后） | 每次 HTTP 请求一个 `request_id`（ASGI 中间件注入）；每次 LLM 调用打 `step` 标签（`prd_writer` / `prd_review` / `chat_continue` …）；记录 input / output tokens、duration_ms |
-| 汇总 | 生成结束发 `run_summary`，含总 tokens、总耗时、调用次数、`failed_calls`、技能身份 `injected_skills`（R2-T6 起为 `SkillRef{name, version, fingerprint}`，PRD 任务才会填）；JSON 日志随 R2-T7 落地 |
+| 汇总 | 生成结束发 `run_summary`，含总 tokens、总耗时、调用次数、`failed_calls`、技能身份 `injected_skills`（R2-T6 起为 `SkillRef{name, version, fingerprint}`，PRD 任务才会填） |
+| 日志 | 结构化输出（`LOG_FORMAT` 取 `text` 人读 / `json` 采集），**每条自动带 `request_id`**——业务代码只写 `logger.info(...)`，加字段只发生在格式化器一处；`extra=` 挂的业务字段自动带出 |
+| 体检 | `/health` 三项分开报：数据库连通性、供应商配置就位、技能包文件在位；`status` 取 `ok` / `degraded` |
 | 预算（事前） | **两层上限**：物理顶来自模型注册表（按 provider 建模，不绑具体厂商），业务顶来自 `.env`（各 step 独立 cap，故意小于物理顶，让用户早点收束）；取两者较小值为有效预算 |
 | 估算 | 发送前按字符启发式估算 messages 大小（不引入 tiktoken 依赖）；接近阈值 warn 并回传 `context_usage`，超阈值 reject 并给出中文说明，**不消耗这次调用** |
 | 落点 | 计量累加只写在 `stream_reply` 这一处（v2 已把流式收敛到单一出口，这里正是回报） |
@@ -116,7 +118,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 **物理顶必须按 provider 建模**：当前默认供应商是 ark、默认模型 `doubao-seed-2-1-turbo-260628`。
 注册表按「provider + model」查上限，避免把某个厂商的窗口写死进代码。
 
-**落地状态（2026-10-14）**：上表**观测侧与预算侧都已随 R1-T5 落地**（仅「打一行 JSON 日志」除外，随 R2-T7）。
+**落地状态（2026-10-15）**：上表已**整体落地**——观测侧与预算侧随 R1-T5，日志与体检随 R2-T7。
 
 - **观测侧**：`request_id` 由纯 ASGI 中间件（`api/deps.py::RequestIdMiddleware`）
   经 `core/request_context.py` 的 `ContextVar` 贯通到业务层；`step` 标签由「任务类型 + 阶段」派生
@@ -130,6 +132,18 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
   （不引 tiktoken，误差方向刻意偏高估），超顶即抛 `BudgetExceededError`——**这次调用根本不发出**，
   错误码复用 `INVALID_REQUEST` 而不新增码；逼近上限只记一条告警，随 `run_summary.warnings` 回传。
   检查点同样唯一（`astream_text` 开头），与事后计量互为表里。
+- **日志侧（R2-T7）**：`core/logging_setup.py` 在 `lifespan` 里配置一次——给 root 装本项目 handler，
+  并把 uvicorn 已装的 handler 一并换上同一套格式。`request_id` 由**格式化器从上下文变量现取**，
+  所以业务代码那一行 `logger.info(...)` 一行都不用改，将来加字段（如 `user_id`）也只改这一处；
+  调用方用 `extra=` 挂的业务字段按「排除标准属性」的规则自动带出，不必回来登记。
+  访问日志记在 `RequestIdMiddleware` 里（它已是最外层），因此**被认证拦下的 401 同样留痕**——
+  排查「用户说打不开」时，第一个要确认的正是「请求到底有没有到过后端」。
+  `uvicorn.access` 的级别抬到 WARNING：同一次请求出两行（一行有号、一行没号）只会让人多看一眼。
+- **体检侧（R2-T7）**：`api/health.py` 分三项报「数据库 / 供应商 / 技能包」，`status` 取 `ok` 或
+  `degraded`，**恒返回 200**——技能包缺失时服务仍可降级运行，用状态码表达失败会让编排器
+  踢掉还能用的容器。供应商一项**只校验配置就位、不发真实调用**（探针会高频触发，按次烧额度
+  不合适），`detail` 里如实写明这一点，不假装验过。不报「备用供应商」是因为自动 failover
+  已随 ADR-016 取消，预警没有了对象。
 
 ### 4.3 文档生命周期
 
@@ -309,7 +323,7 @@ Job + 内存广播 + SSE 订阅保留真流式，所以应修订的是那条「�
 | 版本 | 内容 | 依据 |
 | --- | --- | --- |
 | **v3.0** | A 生成运行时（Job + 重连 + **已随 T0 落地的刷新恢复**）+ B 观测与预算 + **C 单次调用自愈（超时 + 有限重试）**。~~章节续传~~ 按实测推迟，见下表下说明 | 先立骨架与仪表，再动其余；三者共用 `stream_reply` 同一个出口 |
-| **v3.1** | C 文档生命周期 + D Skill 注册表 + E 交付质量 + **技能资产加固（热重载 / fail-fast / 回执可追溯，ADR-017，已完成）** | 依赖 v3.0 的 Job 完成事件与 run_summary |
+| **v3.1** | C 文档生命周期 + D Skill 注册表 + E 交付质量 + **技能资产加固（热重载 / fail-fast / 回执可追溯，ADR-017，已完成）** + **可观测性基线（结构化日志 + `/health` 三项体检，ADR-018，已完成）** | 依赖 v3.0 的 Job 完成事件与 run_summary |
 | **v3.2** | Docker 化、生产加固（Cookie Secure / 邀请码轮换）、部署态隔离验证 | 与 A–E 正交，可随时做 |
 
 顺序理由：**A 是地基**（其余三项都要读 Job 记录）；**B 是仪表**（动主链路前先能看见代价）；
