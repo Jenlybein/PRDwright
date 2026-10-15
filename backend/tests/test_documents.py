@@ -86,7 +86,7 @@ def _user_id(username: str) -> int:
 
 def test_real_plan_creates_documents_table() -> None:
     """真实的迁移清单跑完后，`documents` 表就位（防止清单与建表语句脱节）。"""
-    assert run_migrations() == 2
+    assert run_migrations() == 3
 
     with connect() as conn:
         row = conn.execute(
@@ -131,7 +131,7 @@ def test_backfill_skips_corrupt_row_and_continues() -> None:
     broken = _seed_solution(owner, "{这不是合法 JSON")
     good = _seed_solution(owner, _legacy_snapshot())
 
-    assert run_migrations() == 2
+    assert run_migrations() == 3
 
     assert _documents(broken) == {}
     assert set(_documents(good)) == {"prd", "api_docs", "prompts"}

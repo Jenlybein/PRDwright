@@ -92,6 +92,9 @@ class JobRuntime:
     # 注入的技能包身份（PRD 任务才有），进 `run_summary.injected_skills`。
     # 在 dispatch 那一刻定格：万一生成中途改了模板，回执仍能说明「这次用的是哪一套」。
     skill_refs: list[dict[str, Any]] = field(default_factory=list)
+    # 待确认清单：由 `done` 事件带来（生成器在定稿正文里剥离标记块后产出）。
+    # 与正文同源、同一次收尾落库，因此「换了正文却忘了重算清单」没有结构落脚点。
+    pending_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------------
@@ -331,6 +334,10 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         runtime.error_message = event.content
     elif event_type == "done":
         runtime.final_reply = str(event.data.get("reply", ""))
+        # 待确认清单随 `done` 一道抵达：生成器已在定稿正文里剥离标记块并算好。
+        # 用 `or []` 兜底，生成器漏带该字段时不至于把整型 / None 写进 DB。
+        pending = event.data.get("pending_items")
+        runtime.pending_items = pending if isinstance(pending, list) else []
 
 
 def _draft(runtime: JobRuntime) -> str:
@@ -349,6 +356,7 @@ def _maybe_flush(runtime: JobRuntime) -> None:
             draft_content=_draft(runtime),
             completed_sections=runtime.completed_sections,
             phase=runtime.phase,
+            pending_items=runtime.pending_items,
         )
         runtime.last_flush_at = now
         runtime.flushed_len = len(runtime.live_buffer)
@@ -400,6 +408,7 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             draft_content=draft,
             completed_sections=runtime.completed_sections,
             usage=usage,
+            pending_items=runtime.pending_items,
         )
         _write_document(runtime, summary)
     else:
@@ -412,6 +421,7 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             completed_sections=runtime.completed_sections,
             # 失败的任务同样烧了 token，用量一并落库——不然「这次为什么这么贵」无从追溯
             usage=usage,
+            pending_items=runtime.pending_items,
         )
 
     job_bus.publish(runtime.job_id, _run_summary_event(summary))
@@ -460,6 +470,7 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             runtime.solution_id,
             kind,
             content,
+            pending_items=runtime.pending_items,
             run_summary=summary,
             # 整篇重生成会让下游产物失效；`optimize` 不在这一步（`kind` 不是产物类型）
             invalidate_downstream=True,
@@ -505,6 +516,23 @@ def parse_usage(raw: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _load_pending_items(raw: Any) -> list[dict[str, Any]]:
+    """把 `generation_jobs.pending_items` 的 JSON 文本解析成清单；异常一律退化为空列表。
+
+    这一列在早年版本恒为 `NULL`、将来也可能被改过结构；读不出来就当「没有待确认项」，
+    不该让整个快照事件构造失败。
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def _elapsed_ms_from_row(row: dict[str, Any]) -> int:
     """由 DB 行的创建 / 更新时间推算耗时（毫秒）；时间格式异常时返回 0。
 
@@ -541,6 +569,8 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "solution_id": runtime.solution_id,
             "error_code": runtime.error_code,
             "error_message": runtime.error_message,
+            # 待确认清单：刷新重连时一并恢复，前端无需另发一次请求就能展示。
+            "pending_items": runtime.pending_items,
             # 服务端算的已用时：刷新重连后前端接着它继续走，客户端计时器归零也不影响
             "elapsed_ms": int(max(0.0, time.monotonic() - runtime.started_at) * 1000),
         },
@@ -555,6 +585,7 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
         sections = []
     if not isinstance(sections, list):
         sections = []
+    pending_items = _load_pending_items(row.get("pending_items"))
     return StreamEvent(
         type="snapshot",
         content="",
@@ -569,6 +600,8 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "solution_id": row.get("solution_id"),
             "error_code": row.get("error_code", "") or "",
             "error_message": row.get("error_message", "") or "",
+            # 待确认清单：DB 兜底快照同样携带，刷新重连后前端直接展示。
+            "pending_items": pending_items,
             "elapsed_ms": _elapsed_ms_from_row(row),
         },
     )

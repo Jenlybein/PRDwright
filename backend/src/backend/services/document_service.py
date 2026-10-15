@@ -43,6 +43,11 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from backend.core.contracts import StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object
+from backend.services.pending_items import (
+    PendingBlockSuppressor,
+    extract,
+    render_spec,
+)
 from backend.services.prd_section_writer import PrdSectionWriter, is_available as prd_sections_available
 from backend.services.prd_skill import (
     build_prd_system_prompt,
@@ -519,15 +524,40 @@ class DocumentService:
         user_content = API_DOCS_GENERATION_PROMPT.format(
             prd_content=prd_content,
             api_specs=api_specs,
+            pending_spec=render_spec(),
         )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
+        # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
+        suppressor = PendingBlockSuppressor()
         async for event in iter_reply_events(
             self.llm,
             messages,
             status_text="正在生成接口文档…",
             extra_data={"doc_type": "api_doc"},
         ):
-            yield event
+            if event.type == "chunk":
+                clean = suppressor.feed(event.content)
+                if clean:
+                    yield StreamEvent(type="chunk", content=clean, data=event.data)
+            elif event.type == "done":
+                # 流结束，把抑制器残留（不可能是完整块）吐出，保持正文完整；再发 done。
+                trailing = suppressor.flush()
+                if trailing:
+                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                reply = str(event.data.get("reply", ""))
+                clean_reply, items = extract(reply)
+                yield StreamEvent(
+                    type="done",
+                    content="",
+                    data={
+                        **(event.data or {}),
+                        "reply": clean_reply,
+                        "pending_items": items,
+                    },
+                )
+            else:
+                yield event
 
     async def generate_prompts_stream(
         self,
@@ -553,15 +583,40 @@ class DocumentService:
                 extra={"event": "prompts.skill_missing"},
             )
             guide = PROMPTS_GENERATION_PROMPT
-        user_content = guide.format(prd_content=prd_content)
+        # 待确认清单块同样注入：提示词套件也是一份「生成的第一类产物」，与
+        # PRD / 接口文档一致地把清单剥离进 `done.data.pending_items`。
+        user_content = guide.format(prd_content=prd_content, pending_spec=render_spec())
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        # 实时 chunk 先过抑制器（块被切在 chunk 边界时只漏安全前缀），`done` 时
+        # 对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
+        suppressor = PendingBlockSuppressor()
         async for event in iter_reply_events(
             self.llm,
             messages,
             status_text="正在生成提示词套件…",
             extra_data={"doc_type": "prompts"},
         ):
-            yield event
+            if event.type == "chunk":
+                clean = suppressor.feed(event.content)
+                if clean:
+                    yield StreamEvent(type="chunk", content=clean, data=event.data)
+            elif event.type == "done":
+                trailing = suppressor.flush()
+                if trailing:
+                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                reply = str(event.data.get("reply", ""))
+                clean_reply, items = extract(reply)
+                yield StreamEvent(
+                    type="done",
+                    content="",
+                    data={
+                        **(event.data or {}),
+                        "reply": clean_reply,
+                        "pending_items": items,
+                    },
+                )
+            else:
+                yield event
 
     async def optimize_document_stream(
         self,

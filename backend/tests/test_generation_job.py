@@ -745,3 +745,129 @@ def test_doc_kind_rejects_unknown_value(client):
         json={"kind": "optimize", "document": "x", "instruction": "y", "doc_kind": "nope"},
     )
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P3-b：待确认清单贯穿 generation_jobs（迁移 + 仓储三方法 + 两路快照）
+# ---------------------------------------------------------------------------
+
+
+def _sample_items() -> list[dict[str, Any]]:
+    """一份典型的待确认清单（与 `pending_items.extract` 产出的形状一致）。"""
+    return [
+        {"id": "p-1", "question": "确认登录方式", "sections": ["2.1"], "decider": "产品负责人"},
+        {"id": "p-2", "question": "分页大小是否固定为 20", "sections": ["4.3"], "decider": ""},
+    ]
+
+
+def test_persist_progress_writes_pending_items(alice):
+    """合并写把待确认清单落进 generation_jobs.pending_items。"""
+    items = _sample_items()
+    job_id = GenerationJobRepository.create(alice, "api_docs", None)
+    GenerationJobRepository.persist_progress(
+        alice,
+        job_id,
+        draft_content="正文",
+        completed_sections=[],
+        phase="writing",
+        pending_items=items,
+    )
+    row = GenerationJobRepository.get(alice, job_id)
+    assert json.loads(row["pending_items"]) == items
+
+
+def test_finish_writes_pending_items(alice):
+    """成功收尾把待确认清单与终态一并落库。"""
+    items = _sample_items()
+    job_id = GenerationJobRepository.create(alice, "prompts", None)
+    GenerationJobRepository.finish(
+        alice,
+        job_id,
+        draft_content="正文",
+        completed_sections=[],
+        pending_items=items,
+    )
+    row = GenerationJobRepository.get(alice, job_id)
+    assert row["status"] == "completed"
+    assert json.loads(row["pending_items"]) == items
+
+
+def test_fail_writes_pending_items(alice):
+    """失败收尾同样落清单：失败的任务也产出了待确认项，不该丢掉。"""
+    items = _sample_items()
+    job_id = GenerationJobRepository.create(alice, "prompts", None)
+    GenerationJobRepository.fail(
+        alice,
+        job_id,
+        error_code="LLM_UPSTREAM_ERROR",
+        error_message="上游中断",
+        draft_content="半截正文",
+        completed_sections=[],
+        pending_items=items,
+    )
+    row = GenerationJobRepository.get(alice, job_id)
+    assert row["status"] == "failed"
+    assert json.loads(row["pending_items"]) == items
+
+
+def test_db_snapshot_event_carries_pending_items(alice):
+    """DB 兜底快照（`_db_snapshot_event`）携带待确认清单，刷新重连后前端直接展示。"""
+    items = _sample_items()
+    job_id = GenerationJobRepository.create(alice, "api_docs", None)
+    GenerationJobRepository.persist_progress(
+        alice,
+        job_id,
+        draft_content="正文",
+        completed_sections=[{"section_id": "x", "heading": "小节", "text": "t"}],
+        phase="writing",
+        pending_items=items,
+    )
+    row = GenerationJobRepository.get(alice, job_id)
+    snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 测内部快照构造
+    assert snapshot.data["pending_items"] == items
+
+
+def test_snapshot_event_carries_pending_items():
+    """内存运行时快照（`_snapshot_event`）携带待确认清单。"""
+    items = _sample_items()
+    runtime = job_service.JobRuntime(
+        job_id=1, owner_id=1, solution_id=None, kind="api_docs", pending_items=items
+    )
+    snapshot = job_service._snapshot_event(runtime)  # noqa: SLF001 - 测内部快照构造
+    assert snapshot.data["pending_items"] == items
+
+
+def test_generation_flows_pending_items_into_job_and_document(client, monkeypatch):
+    """端到端：一次生成产出的待确认清单随 `done` 落到任务记录与文档，三者同源。
+
+    用 `api_docs` 线（比 PRD 的分章节线简单）：注入的假 LLM 在正文里带上标记块，
+    生成器在 `done` 时剥离块、产出清单，经 `job_service` 同一次收尾原子落库。
+    这条断言守的是 P3-b 与 P3-c 的交界：「换正文却忘重算清单」没有结构落脚点。
+    """
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    block = (
+        "<!-- PENDING:BEGIN -->\n"
+        '[{"question": "确认登录方式", "sections": ["2.1"], "decider": "产品负责人"}]\n'
+        "<!-- PENDING:END -->"
+    )
+    _fake_service(monkeypatch, ScriptedLLM([f"接口文档正文\n{block}"]))
+
+    job_id, events = _run_job(uid, solution_id, "api_docs", {"prd_content": "# PRD"})
+    done = next(event for event in events if event.type == "done")
+    items = done.data["pending_items"]
+
+    # 标记块被剥离、清单按出现顺序分配 id
+    assert items == [
+        {"id": "p-1", "question": "确认登录方式", "sections": ["2.1"], "decider": "产品负责人"}
+    ]
+    # 正文干净：标记块不应出现在落库正文里
+    assert "<!-- PENDING" not in done.data["reply"]
+
+    # 任务记录与文档都存了同一份清单（同一次收尾写入）
+    row = GenerationJobRepository.get(uid, job_id)
+    assert json.loads(row["pending_items"]) == items
+    doc = document_store.get_document(uid, solution_id, "api_docs")
+    assert doc is not None
+    assert doc["pending_items"] == items

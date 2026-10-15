@@ -72,6 +72,11 @@ from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object
+from backend.services.pending_items import (
+    PendingBlockSuppressor,
+    extract,
+    render_spec,
+)
 from backend.services.prd_skill import (
     build_prd_system_prompt,
     format_conversation,
@@ -179,17 +184,6 @@ PRD_SECTIONS: tuple[PrdSection, ...] = (
             "推断得来的功能项保留名称后的「（建议）」后缀；"
             "mvp_features 与 ui_pages 均为空时 6.1 写「待确认：MVP 功能清单未提供」，不要留空。"
             "6.2 不在范围内列入 v2_features 的每一项，并补充工程层面明确不属于本版的内容。"
-        ),
-    ),
-    PrdSection(
-        id="pending",
-        heading="## 附：待确认问题",
-        title="待确认问题",
-        focus=(
-            "汇总前文所有出现的「待确认」项，逐条写清「问题 —— 影响章节；需要谁拍板」；"
-            "第 2.1 节的 MVP 功能清单若为模型推断（功能点带「（建议）」后缀），须单独登记一条"
-            "「MVP 功能清单为模型推断，需确认或修改」并注明影响 2.1 / 6.1 章；"
-            "必须与正文中的「待确认」一一对应，无待确认项时写「无」。"
         ),
     ),
 )
@@ -414,8 +408,16 @@ class PrdSectionWriter:
         # 已定稿章节的正文，作为后续章节的上下文（含标题行）
         written: list[str] = []
 
+        # 待确认清单：跨章节累加，最终随 `done` 事件交给编排层落库。
+        # 每条的 id 由后端按「章节 + 序号」分配，保证全文档唯一、稳定。
+        pending_items: list[dict[str, Any]] = []
+
         for index, section in enumerate(PRD_SECTIONS):
             section_template = template_sections.get(section.heading, "")
+
+            # 每章一个抑制器：标记块可能被切在 chunk 边界，抑制器保证实时 chunk 流
+            # 永远不含哨兵（正文定稿后仍会再 `extract` 一次，这里是双保险）。
+            suppressor = PendingBlockSuppressor()
 
             # ---------------- 1. 撰写 ----------------
             yield _section_stage_event("writing", section, index, total)
@@ -434,10 +436,15 @@ class PrdSectionWriter:
                     )
                 ):
                     buffer.append(delta)
-                    yield StreamEvent(type="chunk", content=delta)
+                    clean = suppressor.feed(delta)
+                    if clean:
+                        yield StreamEvent(type="chunk", content=clean)
             except Exception as exc:  # noqa: BLE001 - 流式接口需把异常转成事件
                 yield error_event(exc)
                 return
+            trailing = suppressor.flush()
+            if trailing:
+                yield StreamEvent(type="chunk", content=trailing)
             section_text = "".join(buffer).strip()
 
             # ---------------- 2. 审核 + 3. 改写 ----------------
@@ -486,18 +493,28 @@ class PrdSectionWriter:
                             )
                         ):
                             buffer.append(delta)
-                            yield StreamEvent(type="chunk", content=delta)
+                            clean = suppressor.feed(delta)
+                            if clean:
+                                yield StreamEvent(type="chunk", content=clean)
                     except Exception as exc:  # noqa: BLE001
                         yield error_event(exc)
                         return
+                    trailing = suppressor.flush()
+                    if trailing:
+                        yield StreamEvent(type="chunk", content=trailing)
                     section_text = "".join(buffer).strip()
 
+            # 定稿后剥离标记块：正文落 `part` / `done.reply` / `documents.content` 三处
+            # 天然不含哨兵；清单按本章节累加（id 前缀用章节 id，跨章节不重号）。
             section_text = _ensure_heading(section_text, section.heading)
-            if section_text:
-                written.append(section_text)
+            clean_text, items = extract(section_text, id_prefix=section.id)
+            if items:
+                pending_items.extend(items)
+            if clean_text:
                 # 加工后的定稿正文整段下发：前端的实时缓冲只见过未加工的原始
                 # chunk（可能漏标题、章间没空行），这里把它替换成权威文本
-                part = f"{section_text}\n\n"
+                written.append(clean_text)
+                part = f"{clean_text}\n\n"
                 parts.append(part)
                 yield _part_event(part, section=section, index=index, total=total)
 
@@ -509,7 +526,11 @@ class PrdSectionWriter:
         yield StreamEvent(
             type="done",
             content="",
-            data={"doc_type": "prd", "reply": "".join(parts).strip()},
+            data={
+                "doc_type": "prd",
+                "reply": "".join(parts).strip(),
+                "pending_items": pending_items,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -537,6 +558,7 @@ class PrdSectionWriter:
             section_heading=section.heading,
             section_title=section.title,
             section_focus=section.focus,
+            pending_spec=render_spec(),
         )
         return _build_messages(system_prompt, user_content)
 
@@ -562,6 +584,7 @@ class PrdSectionWriter:
             section_heading=section.heading,
             section_title=section.title,
             section_focus=section.focus,
+            pending_spec=render_spec(),
         )
         user_content += PRD_SECTION_REWRITE_APPENDIX.format(
             issues=review.issues_text(),

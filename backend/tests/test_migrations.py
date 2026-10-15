@@ -206,3 +206,49 @@ def test_empty_plan_keeps_baseline(monkeypatch) -> None:
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", [])
     assert run_migrations() == 0
     assert _version() == 0
+
+
+def _table_info(name: str) -> list[dict[str, Any]]:
+    """读取某张表的列信息（`PRAGMA table_info`）。"""
+    with connect() as conn:
+        rows = conn.execute(f"PRAGMA table_info({name})").fetchall()
+    return [dict(row) for row in rows]
+
+
+def test_v3_migration_adds_pending_items_column_to_jobs() -> None:
+    """真实 v3 迁移给 `generation_jobs` 加 `pending_items` 列（NOT NULL，默认 '[]'）。
+
+    这是 P3-b 的全部落点依赖：刷新重连时待确认清单要从任务记录里一并恢复，没有这一列
+    `persist_progress` / `finish` / `fail` 的写入会直接报「no such column」。这里卡的是
+    「结构真的加进去了、且约束正确」。
+
+    基线用的是 `init_schema` 建出的表——`pending_items` 这一列只走迁移、不进 `init_schema`
+    的 `SCHEMA_SQL`（P0 约定：新列一律进迁移，避免新旧库两处各建一次结构对不上），所以
+    跑迁移前它不存在。
+    """
+    from backend.core.migrations import run_migrations
+
+    # 基线：只有 init_schema 的表，尚无该列
+    assert "pending_items" not in {row["name"] for row in _table_info("generation_jobs")}
+
+    # 跑真实迁移清单（含 v3），最终版本应为 3
+    assert run_migrations() == 3
+
+    cols = {row["name"]: row for row in _table_info("generation_jobs")}
+    assert "pending_items" in cols
+    # NOT NULL：零值语义是「空清单」而不是 NULL，读取侧据此免于空判断
+    assert cols["pending_items"]["notnull"] == 1
+
+    # 默认值真的生效：关掉外键插一行，不显式给 pending_items 也应当是 '[]'
+    with connect() as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(
+            "INSERT INTO generation_jobs "
+            "(owner_id, kind, solution_id, status, phase, draft_content, "
+            " completed_sections, created_at, updated_at) "
+            "VALUES (1, 'prd', NULL, 'running', '', '', '[]', 't', 't')"
+        )
+        raw = conn.execute(
+            "SELECT pending_items FROM generation_jobs WHERE owner_id = 1"
+        ).fetchone()["pending_items"]
+    assert raw == "[]"

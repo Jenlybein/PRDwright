@@ -29,6 +29,11 @@ def _dump_sections(sections: list[dict[str, Any]]) -> str:
     return json.dumps(sections or [], ensure_ascii=False)
 
 
+def _dump_pending_items(items: list[dict[str, Any]] | None) -> str:
+    """把待确认清单序列化成 JSON 文本（中文不转义）。`None` 视为空清单。"""
+    return json.dumps(items or [], ensure_ascii=False)
+
+
 class GenerationJobRepository:
     """`generation_jobs` 表的读写。所有用户面方法强制带 `owner_id`。"""
 
@@ -136,17 +141,20 @@ class GenerationJobRepository:
         draft_content: str,
         completed_sections: list[dict[str, Any]],
         phase: str,
+        pending_items: list[dict[str, Any]] | None = None,
     ) -> None:
-        """合并写一次进度（正文 / 章节 / 阶段）。WHERE 含 owner_id，改不到别人的任务。"""
+        """合并写一次进度（正文 / 章节 / 阶段 / 待确认清单）。WHERE 含 owner_id，改不到别人的任务。"""
         with connect() as conn:
             conn.execute(
                 "UPDATE generation_jobs "
-                "SET draft_content = ?, completed_sections = ?, phase = ?, updated_at = ? "
+                "SET draft_content = ?, completed_sections = ?, phase = ?, "
+                "    pending_items = ?, updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     draft_content,
                     _dump_sections(completed_sections),
                     phase,
+                    _dump_pending_items(pending_items),
                     utc_now_text(),
                     job_id,
                     owner_id,
@@ -162,18 +170,21 @@ class GenerationJobRepository:
         draft_content: str,
         completed_sections: list[dict[str, Any]],
         usage: str | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
     ) -> None:
         """标记任务完成，落最终正文与章节。清空错误字段。"""
         with connect() as conn:
             conn.execute(
                 "UPDATE generation_jobs "
                 "SET status = 'completed', draft_content = ?, completed_sections = ?, "
-                "    usage = ?, error_code = '', error_message = '', updated_at = ? "
+                "    usage = ?, error_code = '', error_message = '', pending_items = ?, "
+                "    updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     draft_content,
                     _dump_sections(completed_sections),
                     usage,
+                    _dump_pending_items(pending_items),
                     utc_now_text(),
                     job_id,
                     owner_id,
@@ -191,6 +202,7 @@ class GenerationJobRepository:
         draft_content: str,
         completed_sections: list[dict[str, Any]],
         usage: str | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
     ) -> None:
         """标记任务失败，保留已产出的半截正文、章节与已发生的用量。
 
@@ -201,7 +213,8 @@ class GenerationJobRepository:
             conn.execute(
                 "UPDATE generation_jobs "
                 "SET status = 'failed', error_code = ?, error_message = ?, "
-                "    draft_content = ?, completed_sections = ?, usage = ?, updated_at = ? "
+                "    draft_content = ?, completed_sections = ?, usage = ?, "
+                "    pending_items = ?, updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     error_code,
@@ -209,6 +222,7 @@ class GenerationJobRepository:
                     draft_content,
                     _dump_sections(completed_sections),
                     usage,
+                    _dump_pending_items(pending_items),
                     utc_now_text(),
                     job_id,
                     owner_id,

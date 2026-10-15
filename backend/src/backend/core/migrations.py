@@ -170,11 +170,32 @@ def _backfill_documents(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_pending_items_to_jobs(conn: sqlite3.Connection) -> None:
+    """v3：给 `generation_jobs` 加 `pending_items` 列。
+
+    待确认清单是「一次生成」产出的第一类元数据，刷新重连时要从 DB 快照里一并恢复，
+    因此任务记录也得存一份（与 `documents.pending_items` 单列同源，但职责不同：前者服务于
+    「任务进行中 / 刚结束的重连快照」，后者是「已落稿文档」的权威清单）。
+
+    设计取舍：
+
+    - **`NOT NULL DEFAULT '[]'`**：旧任务行没有这一列，加列时若不设默认值，SQLite 对
+      已有行会填上 NULL，反而要再写一次 `UPDATE` 兜底；直接给默认值更干净，且读取侧一律
+      按「缺省即空清单」处理。
+    - **走迁移而非改 `init_schema`**：已在 P0 约定「新表 / 新列一律走迁移」，新库也从
+      版本 0 起步逐条跑，避免「新库靠 init_schema、旧库靠迁移」两处各建一次结构。
+    """
+    conn.execute(
+        "ALTER TABLE generation_jobs ADD COLUMN pending_items TEXT NOT NULL DEFAULT '[]'"
+    )
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
     Migration(version=1, name="documents_table", apply=_create_documents_table),
     Migration(version=2, name="backfill_documents", apply=_backfill_documents),
+    Migration(version=3, name="jobs_pending_items", apply=_add_pending_items_to_jobs),
 ]
 
 
