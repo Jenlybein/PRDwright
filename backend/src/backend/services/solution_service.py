@@ -97,6 +97,15 @@ def delete_solution(owner_id: int, solution_id: int) -> bool:
     return SolutionRepository.delete(owner_id=owner_id, solution_id=solution_id)
 
 
+def solution_exists(owner_id: int, solution_id: int) -> bool:
+    """方案是否存在且属于当前用户。
+
+    给文档接口用：它要在返回空列表之前区分「这份方案不属于你」（→404）与
+    「它确实还没有文档」（→200 空列表）。路由层不直接碰仓储，所以在这里转一手。
+    """
+    return SolutionRepository.exists(owner_id=owner_id, solution_id=solution_id)
+
+
 def _to_summary(row: dict[str, Any]) -> dict[str, Any]:
     """把库行裁剪成列表 / 详情共用的摘要字段，顺带丢掉 data 以免误传给列表接口。
 

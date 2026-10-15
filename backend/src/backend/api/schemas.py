@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 # `from backend.api.schemas import StreamEvent / QuestionsConfig` 继续可用。
 # `RunSummary` 同时是 `run_summary` 事件与 `generation_jobs.usage` 的**同一份结构**。
 from backend.core.contracts import (
+    DocumentKind,
     QuestionConfig,
     QuestionsConfig,
     RunSummary,
@@ -273,6 +274,61 @@ class SolutionDeleteResponse(BaseModel):
     """删除方案响应。"""
 
     ok: bool = Field(default=True, description="是否成功删除")
+
+
+# ============================================================================
+# 文档（documents）：三份产物正文，后端持有
+# ============================================================================
+# 与 `solutions` 的关系：方案是「一次会话的全量快照」，文档是「某一份产物」。
+# 相位（当前阶段、对话记录）留在方案快照里，正文搬到文档表——两者生命周期不同：
+# 相位随操作频繁变，正文只在生成或用户手改时变。
+
+
+class DocumentItem(BaseModel):
+    """一份文档的对外结构。
+
+    刻意不给 `id` / `solution_id` / `content_sha`：调用方用「方案 id + 产物类型」
+    就能定位一份文档，主键是内部细节；内容指纹是排查用的，不属于对外契约。
+    """
+
+    kind: DocumentKind = Field(description="产物类型")
+    content: str = Field(
+        default="", description="文档正文（Markdown 原文；内部标记块已在后端剥离）"
+    )
+    pending_items: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "待确认清单：模型产出的结构化元数据，**不由用户编辑**，也不出现在正文里。"
+            "旧文档与尚未生成时为空列表。"
+        ),
+    )
+    last_run_summary: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "最后一次生成的用量回执。**按不透明对象透传**、不在后端校验字段："
+            "迁移自旧快照的回执是前端 camelCase 形状，而新写入的是后端形状，"
+            "两者并存；前端已有容错解析器，后端强校验只会把能显示的回执变成 500。"
+        ),
+    )
+    updated_at: str = Field(default="", description="最近更新时间（UTC ISO 8601）")
+
+
+class DocumentListResponse(BaseModel):
+    """某方案下的文档列表。包一层对象，与其它列表响应保持同一约定。"""
+
+    documents: list[DocumentItem] = Field(
+        default_factory=list, description="该方案下的文档（至多三份，取决于已生成到哪一步）"
+    )
+
+
+class DocumentSaveRequest(BaseModel):
+    """用户手改正文的提交体。
+
+    只有 `content`：归属由路径上的方案 id 决定、产物类型由路径上的 kind 决定。
+    刻意**不接收**待确认清单——它是模型产出的元数据，不该由用户或客户端改写。
+    """
+
+    content: str = Field(description="用户编辑后的完整文档正文")
 
 
 # ============================================================================

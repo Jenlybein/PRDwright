@@ -95,3 +95,18 @@ class SolutionRepository:
             )
             conn.commit()
             return cur.rowcount == 1
+
+    @staticmethod
+    def exists(owner_id: int, solution_id: int) -> bool:
+        """方案是否存在且属于该用户。
+
+        **只做存在性判断，不取 `data`**：文档接口需要在「返回空列表」之前区分
+        「这份方案不属于你」与「它确实还没有文档」，而前者只需一次存在性查询，
+        没有理由把几十 KB 的快照取回来。
+        """
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM solutions WHERE id = ? AND user_id = ?",
+                (solution_id, owner_id),
+            ).fetchone()
+            return row is not None
