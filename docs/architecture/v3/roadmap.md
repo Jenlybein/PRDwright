@@ -67,10 +67,11 @@
 > - **对外结构 `DocumentItem` 逐字段不变**，读文档的调用方（路由、前端 store）一行未改；版本是一组**新增**能力。
 > - **迁移三步**：v4 建表 + 加指针 → v5 逐行容错回填成 `version_no=1, source='migrated'` → v6 删 `documents` 的四个正文列。**v6 是单向门**（改完旧代码读不到 `documents.content`，回滚只能靠备份），用原生 `ALTER TABLE ... DROP COLUMN`——`PRAGMA foreign_keys` 在事务内是空操作，而迁移运行器把每步包在事务里，「关外键 + 重建表」那套在步骤内部关不掉外键。
 > - **四个端点挂在 solution 作用域**下（`GET /api/solutions/{id}/documents/{kind}/versions`、`.../versions/{version_id}`、`POST .../{kind}/checkpoint`、`POST .../{kind}/restore`），与 4.3 草稿的 `/api/documents/{kind}/...` 不同——后者没法在 SQL 层过滤归属。版本不存在**复用** `SOLUTION_NOT_FOUND`（404），不新增错误码（ADR-012）。
-> - **前端是右侧可收起抽屉**（`ui/VersionDrawer.vue`）：审阅页底栏内容行的「版本」按钮打开，默认收起、不遮底栏、不挤中部布局。**这是 ADR-015 的一次有意例外**（ADR-030）——抽屉里只放**内容操作**（存为新版本 / 恢复），**流程动作**（生成下一份 / 完成 / 返回）永远只在底栏。
+> - **前端是右侧可收起抽屉**（`ui/VersionDrawer.vue`）：审阅页底栏内容行的「版本」按钮打开，默认收起、不遮底栏、不挤中部布局。**这是 ADR-015 的一次有意例外**（ADR-030）——抽屉里只放**内容操作**（预览 / 存为新版本 / 恢复 / 删除），**流程动作**（生成下一份 / 完成 / 返回）永远只在底栏。
+> - **预览与删除**（同日补上，ADR-029 / 030 各一处补记）：点某一版即预览该版只读正文（抽屉就地加宽到 640px，不在主区域开新阶段——那要把 `ViewState` / 进度条 / 底栏都改一遍，而这件事不需要它们参与）；每条**历史**版本自带「删除」并二次确认，**当前版本不给删**（它是这份文档正在用的正文，换版本请用「恢复」；守卫写在仓储 SQL 的 `WHERE` 里，不是「先查后删」）。
 > - 本版**不做两版 diff**（差异渲染）：版本链落地后它不再是「依赖未完成」，但「回看 + 恢复」已经能回答用户的问题。
 >
-> 现用例数：**后端 381 / 前端 443**（全程离线零 token）。
+> 现用例数：**后端 389 / 前端 477**（全程离线零 token）。
 
 ---
 
@@ -322,7 +323,7 @@
 | **R2-T8 RAG 资产登记** | ⤵ | **被 R2-T9 吸收**：那份 JSON 本身会迁成技能包并被删除，不再需要单独登记为部署资产 |
 | **R2-T9 技能知识层统一** | ✅ | D13。**T9-1 技能注册表**（ADR-019）：`services/skill_registry.py` + 技能包自述 `applies_to` / `references`、扫描建索引，`job_service` 不再写死 `kind` 判断；显式引入 PyYAML 替代正则（正则失配是静默的）。**T9-2~T9-5**（`0fbc9f3`）：14 条接口规范迁成 `skills/api-docs-generator/references/api-specs.md` 并删除旧 JSON、两条生成线改从技能包全量注入、检索接口与前端确认页（`RagResultPanel` / `rag-preview` / `RagHit`）整条下线（ADR-020）。**指纹口径未变**（`prd-generator` 仍是 `e4f928df7be9`，历史回执仍可对得上）。最后一段残余见 C 层：`optimize` / `clarify` 按目标产物归包（ADR-026） |
 | **C 层 文档所有权与清单** | ✅ | 原 v3.1 的「C 文档生命周期」，分四批落地（`6dc283d` 迁移地基 → `7081986` 文档实体 → `77b8745` 收尾落稿 → `5c42daf` 前端退化，P0–P2）→ 待确认清单（`d32e161` / `f65c9f9`，P3）→ 澄清工作流（`2e54b39` / `ac56911`，P4）→ 单点登录与收口（P5），**ADR-027 收尾**（`a6857ca`，PRD 澄清复用主对话线程、待确认项按重要性分级排序）→ `c08ec58` 档位定稿 **P0~P6 并取消兜底**、面板默认折叠 2 条 → `c155608` **ADR-028**：四条澄清线程全部收进同一个对话页、用常驻子标签栏切换（`clarifying` 阶段与 `ClarifyStage.vue` 删除）。**版本链另见下一行** |
-| **文档版本管理（版本链落地）** | ✅ | 原「版本链本期明确推迟」的兑现（ADR-029 / 030）：正文全搬进 `document_versions`、`documents` 只留 `current_version_id` 指针；迁移 **v4** 建表 + 加指针 → **v5** 逐行容错回填（`version_no=1, source='migrated'`）→ **v6** 删原表四个正文列（**单向门**，原生 `ALTER TABLE ... DROP COLUMN`——`PRAGMA foreign_keys` 在事务内是空操作，重建表那套在迁移步骤里关不掉外键）。写入语义钉死：整篇生成**追加新版本** / `optimize`·`clarify`·手改**就地改当前版本** / checkpoint·restore**追加新版本**；**恢复 = 追加一条 `source='restore'` 的新版本**（历史只增不改）；清单与回执**随版本存档**。对外 `DocumentItem` **逐字段不变**（读文档的调用方一行未改）。四个端点挂 **solution 作用域**（`/api/solutions/{id}/documents/{kind}/versions` 等），版本不存在复用 `SOLUTION_NOT_FOUND`（404）。前端右侧**可收起抽屉**（`ui/VersionDrawer.vue` + `stores/documentVersions.ts`），入口在底栏内容行——**ADR-015 的一次有意例外**（ADR-030：抽屉里只放内容操作，流程动作仍只在底栏）。本版**不做两版 diff**。用例：后端 356→**381**、前端 396→**443** |
+| **文档版本管理（版本链落地）** | ✅ | 原「版本链本期明确推迟」的兑现（ADR-029 / 030）：正文全搬进 `document_versions`、`documents` 只留 `current_version_id` 指针；迁移 **v4** 建表 + 加指针 → **v5** 逐行容错回填（`version_no=1, source='migrated'`）→ **v6** 删原表四个正文列（**单向门**，原生 `ALTER TABLE ... DROP COLUMN`——`PRAGMA foreign_keys` 在事务内是空操作，重建表那套在迁移步骤里关不掉外键）。写入语义钉死：整篇生成**追加新版本** / `optimize`·`clarify`·手改**就地改当前版本** / checkpoint·restore**追加新版本**；**恢复 = 追加一条 `source='restore'` 的新版本**（历史只增不改）；清单与回执**随版本存档**。对外 `DocumentItem` **逐字段不变**（读文档的调用方一行未改）。四个端点挂 **solution 作用域**（`/api/solutions/{id}/documents/{kind}/versions` 等），版本不存在复用 `SOLUTION_NOT_FOUND`（404）。前端右侧**可收起抽屉**（`ui/VersionDrawer.vue` + `stores/documentVersions.ts`），入口在底栏内容行——**ADR-015 的一次有意例外**（ADR-030：抽屉里只放内容操作，流程动作仍只在底栏）。**随后补上预览与删除**（ADR-029 / 030 两处补记）：点某一版即**预览**该版只读正文（抽屉就地加宽到 640px，不在主区域开新阶段 → 零 `ViewState` 改动），每条**历史**版本自带「删除」（二次确认；**当前版本不给删**——它是正文，换版本请用「恢复」，守卫写在仓储 SQL 的 `WHERE` 里而不是「先查后删」；删除只重拉列表、不重拉当前文档）。本版**不做两版 diff**。用例：后端 356→**389**、前端 396→**477** |
 | **P5 单点登录 + 顺带修复** | ✅ | 新登录吊销该用户此前全部会话，`replace_for_user` 在一条事务里先删后插（ADR-024）；`format_form_data` 把「配置里声明但留空的题」汇总成一行（否则模型分不清「问过但留空」与「没这道题」）；`_resolve_skill_refs` 按目标产物归包（ADR-026） |
 | **R3 Docker / 加固 / 隔离验证** | ⬜ | D11 + 旧 P4-T6 |
 

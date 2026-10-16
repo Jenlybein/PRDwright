@@ -710,3 +710,137 @@ def test_version_routes_reject_invalid_kind(client) -> None:
     assert (
         client.get(f"/api/solutions/{solution_id}/documents/nope/versions").status_code == 422
     )
+
+
+# ---------------------------------------------------------------------------
+# 接口：删除历史版本
+#
+# 「删一条不满意的旧版」与「换掉当前在用的那一版」是两件事：前者只动历史、不碰正文，
+# 后者请用「恢复」（追加而非删除）。这批用例把这条边界钉死。
+# ---------------------------------------------------------------------------
+
+
+def test_delete_version_removes_history_and_keeps_current(client) -> None:
+    """删历史版本：列表少一条、当前正文**一点不变**。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第一版")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第二版")
+    first = [v for v in _versions(solution_id, "prd") if v["version_no"] == 1][0]
+
+    response = client.delete(
+        f"/api/solutions/{solution_id}/documents/prd/versions/{int(first['id'])}"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "version_id": int(first["id"])}
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [2]
+    # 当前正文不受影响：删的是历史，不是「换一版」
+    assert document_store.get_document(owner, solution_id, "prd")["content"] == "# 第二版"
+
+
+def test_deleting_current_version_is_rejected(client) -> None:
+    """当前版本不给删：它是这份文档正在用的正文。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第一版")
+    current = _versions(solution_id, "prd")[0]
+
+    response = client.delete(
+        f"/api/solutions/{solution_id}/documents/prd/versions/{int(current['id'])}"
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "INVALID_REQUEST"
+    assert "当前版本不能删除" in response.json()["detail"]
+    # 原样保留
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [1]
+
+
+def test_cannot_delete_the_only_remaining_version(client) -> None:
+    """删到只剩当前版本为止——最后一份正文不会凭空消失。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第一版")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第二版")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第三版")
+    by_no = {v["version_no"]: int(v["id"]) for v in _versions(solution_id, "prd")}
+
+    # v1、v2 都能删
+    assert client.delete(f"/api/solutions/{solution_id}/documents/prd/versions/{by_no[1]}").status_code == 200
+    assert client.delete(f"/api/solutions/{solution_id}/documents/prd/versions/{by_no[2]}").status_code == 200
+
+    # 只剩 v3（当前版本）——再删就是 400
+    assert client.delete(f"/api/solutions/{solution_id}/documents/prd/versions/{by_no[3]}").status_code == 400
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [3]
+
+
+def test_delete_unknown_version_returns_404(client) -> None:
+    """不存在的版本：404，且不动已有版本。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# x")
+
+    response = client.delete(f"/api/solutions/{solution_id}/documents/prd/versions/99999")
+
+    assert response.status_code == 404
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [1]
+
+
+def test_delete_version_requires_login(client) -> None:
+    """未登录不返回任何方案内容。"""
+    assert client.delete("/api/solutions/1/documents/prd/versions/1").status_code == 401
+
+
+def test_delete_version_invisible_to_other_users(client) -> None:
+    """别人的方案：等同不存在（404），且那条版本仍在。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第一版")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第二版")
+    first = [v for v in _versions(solution_id, "prd") if v["version_no"] == 1][0]
+
+    client.cookies.clear()
+    register(client, username="bob")
+
+    response = client.delete(
+        f"/api/solutions/{solution_id}/documents/prd/versions/{int(first['id'])}"
+    )
+
+    assert response.status_code == 404
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [2, 1]
+
+
+def test_delete_version_rejects_invalid_kind(client) -> None:
+    """`kind` 在删除路由上同样是闭集合：非法取值 422。"""
+    register(client)
+    solution_id = _new_solution(client)
+
+    assert (
+        client.delete(f"/api/solutions/{solution_id}/documents/nope/versions/1").status_code
+        == 422
+    )
+
+
+def test_delete_version_service_outcomes(client) -> None:
+    """服务层把三种结果分得很清楚（路由据此翻状态码，不拿文案判断）。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第一版")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第二版")
+    by_no = {v["version_no"]: int(v["id"]) for v in _versions(solution_id, "prd")}
+
+    # 不存在的版本 → missing
+    assert document_store.delete_version(owner, solution_id, "prd", 99999) == "missing"
+    # 当前版本 → is_current
+    assert document_store.delete_version(owner, solution_id, "prd", by_no[2]) == "is_current"
+    # 历史版本 → ok
+    assert document_store.delete_version(owner, solution_id, "prd", by_no[1]) == "ok"
+    # 已删掉的再删 → missing
+    assert document_store.delete_version(owner, solution_id, "prd", by_no[1]) == "missing"

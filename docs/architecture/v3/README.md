@@ -123,4 +123,7 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 前端状态放哪 | 另开 `stores/documentVersions.ts`（**不挂 `documents`**——后者已背 800ms 防抖 + 单飞 + `changeEpoch`，再叠一套状态会互相干扰）；归属直接读 `documents.solutionId`，不另存一份 | `stores/documentVersions.ts` |
 | 写动作之后必须做什么 | 先 `flushPendingSave`（否则 `loadAll` 会把未落库的旧草稿盖在恢复结果之上，用户以为「恢复没生效」），成功后**重新拉文档 + 重拉版本列表**（否则编辑器里还是旧正文） | `stores/documentVersions.ts::runMutation` |
 | 抽屉怎么摆 | 右侧**可收起浮层**：默认收起、`fixed`、以 `--shell-action-bar-h` 作下边距**不遮底栏**、不挤中部布局（正文仍 768px 居中）；入口在底栏内容行。**ADR-015 的有意例外**：抽屉里只放**内容操作**，流程动作（生成下一份 / 完成 / 返回）永远只在底栏 | `components/ui/VersionDrawer.vue` + `ADR-030` |
+| 怎么预览某一版 | 点条目即预览：抽屉**就地加宽**到 640px 显示该版只读 Markdown + 元信息（第几版 / 来源 / 时间 / 字数 / 备注），带「返回列表」与「恢复此版本」。**不在主区域开新阶段**——那要把 `ViewState` / 进度条 / 底栏都改一遍，而这件事不需要它们参与（ADR-030 补记）。详情按需单取（`fetchVersion`），不随列表下发 | `stores/documentVersions.ts::preview` + `utils/markdown.ts` |
+| 怎么删某一版 | 每条**历史**版本自带「删除」，**二次确认**（先展开「删除这一版？」再确认）。**当前版本不给删**——它是这份文档正在用的正文，换版本请用「恢复」（追加而非删除）；后端回 400 `INVALID_REQUEST` 并在 `detail` 里说明。守卫写在仓储 SQL 的 `WHERE` 里（`v.id != d.current_version_id`），不是「先查后删」 | `repositories/document_repo.py::delete_version` + `api/documents.py` |
+| 删除后要不要重拉当前文档 | **不要**。删的是历史、当前正文一点没变，只重拉版本列表；多拉一次当前文档只会平白闪一下编辑器（与「存为新版本 / 恢复」相反——那两者改变当前版本，必须重拉） | `stores/documentVersions.ts::remove` |
 | 本版不做什么 | **两版 diff**（差异渲染）不做——版本链落地后它不再是「依赖未完成」，但「回看 + 恢复」已经能回答用户的问题 | `ARCHITECTURE.md` §2 本期不做 |

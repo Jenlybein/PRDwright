@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from backend.core.digest import content_fingerprint
 from backend.repositories.document_repo import DocumentRepository
@@ -42,6 +42,12 @@ DOWNSTREAM_KINDS: dict[str, tuple[str, ...]] = {
     "api_docs": ("prompts",),
     "prompts": (),
 }
+
+# 删除版本的结果。**机器判据**，路由据此翻成 HTTP 状态码，不拿中文文案判断：
+# - `ok`          已删除
+# - `missing`     版本不存在，或不属于当前用户（两者对外不可区分）
+# - `is_current`  想删的是当前版本 —— 它不是「历史」
+DeleteVersionOutcome = Literal["ok", "missing", "is_current"]
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +233,34 @@ def restore(
     if new_id is None:
         return None
     return get_document(owner_id, solution_id, kind)
+
+
+# ---------------------------------------------------------------------------
+# 版本链：删除
+# ---------------------------------------------------------------------------
+
+
+def delete_version(
+    owner_id: int, solution_id: int, kind: str, version_id: int
+) -> DeleteVersionOutcome:
+    """删除一条**历史**版本，返回机器可读的结果码（见 `DeleteVersionOutcome`）。
+
+    **当前版本不允许删除**——它正被当作这份文档的正文在用，删掉等于把内容抽走，
+    而「当前是哪一版」这个指针就会指向空。想换当前版本请用 `restore`：那是**追加**
+    一条新版本，历史只增不改；「删掉当前版本」则是不可逆地抹掉一份正文，两者不是
+    同一件事，不该由同一个动作承担。
+
+    先查后删分两步，但**真正的守卫在仓储的 SQL 里**（`delete_version` 的 `WHERE`
+    带了「必须不是当前版本」），因此这两步之间的时间窗不会放进一次非法删除——
+    最坏情况是返回 `missing`（那条在此期间已经变了），不会误删。
+    """
+    row = DocumentRepository.get_version(owner_id, solution_id, kind, version_id)
+    if row is None:
+        return "missing"
+    if row["is_current"]:
+        return "is_current"
+    deleted = DocumentRepository.delete_version(owner_id, solution_id, kind, version_id)
+    return "ok" if deleted else "missing"
 
 
 # ---------------------------------------------------------------------------

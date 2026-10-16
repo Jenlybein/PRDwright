@@ -108,6 +108,34 @@ class DocumentRepository:
             ).fetchone()
             return dict(row) if row else None
 
+    @staticmethod
+    def delete_version(owner_id: int, solution_id: int, kind: str, version_id: int) -> bool:
+        """删除一条**历史**版本，删掉了返回 True。
+
+        ⚠️ **当前版本删不得**，而且这条限制写在 SQL 里（`v.id != d.current_version_id`）
+        而不是「先查一次、再决定删不删」：两次查询之间若发生别的写入（例如另一个标签页
+        刚好把它恢复成当前版本），先查后删就会放行——那时删掉的是文档正在用的正文。
+        把判据和动作收在同一条语句里，这个窗口就不存在。
+
+        归属仍经 `documents → solutions` 两级 JOIN 过滤，越权与不存在一样「删不掉」。
+
+        删除**历史**版本不影响当前正文，因此这里刻意不去动 `documents.updated_at`——
+        它表示「这份文档的当前内容什么时候变的」，删一条旧版并没有改变这件事。
+        """
+        with connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM document_versions WHERE id IN ("
+                "  SELECT v.id FROM document_versions v "
+                "  JOIN documents d ON d.id = v.document_id "
+                "  JOIN solutions s ON s.id = d.solution_id "
+                "  WHERE s.user_id = ? AND d.solution_id = ? AND d.kind = ? AND v.id = ? "
+                "    AND v.id != COALESCE(d.current_version_id, -1)"
+                ")",
+                (owner_id, solution_id, kind, version_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
     # ------------------------------------------------------------------
     # 写：追加版本 / 就地改当前版本
     # ------------------------------------------------------------------

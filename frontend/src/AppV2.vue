@@ -460,6 +460,28 @@ function openVersions(): void {
 /** 收起抽屉 */
 function closeVersions(): void {
   versionDrawerOpen.value = false
+  // 顺手退出预览：下次打开应当从列表开始，而不是停在上次看的那一版
+  versions.clearPreview()
+}
+
+/** 预览某一版：拉它的完整内容（正文 + 清单 + 回执），抽屉随之加宽显示只读正文 */
+function handlePreviewVersion(versionId: number): void {
+  const kind = activeDocKind.value
+  if (!kind) return
+  void versions.preview(kind, versionId)
+}
+
+/**
+ * 删除某一**历史**版本。
+ *
+ * 当前版本后端会拒（400），原因写在 `detail` 里——由 `versions.error` 兜住并闪一条提示，
+ * 因此这里只处理成功那一支。删的是历史、不动当前正文，所以不必重新拉文档。
+ */
+async function handleRemoveVersion(versionId: number): Promise<void> {
+  const kind = activeDocKind.value
+  if (!kind) return
+  const ok = await versions.remove(kind, versionId)
+  if (ok) flashSavedTip('已删除该版本')
 }
 
 /**
@@ -490,6 +512,7 @@ async function handleRestore(versionId: number): Promise<void> {
  */
 watch(activeDocKind, () => {
   versionDrawerOpen.value = false
+  versions.clearPreview()
 })
 
 /** 换方案时清掉上一个方案的版本列表（否则打开新方案会先闪一下旧方案的版本） */
@@ -903,9 +926,15 @@ function handleStepClick(stepId: StepId): void {
       :loading="versions.loading"
       :error="versions.error"
       :busy="isGenerating"
+      :preview="versions.previewDetail"
+      :preview-loading="versions.previewLoading"
+      :preview-error="versions.previewError"
       @close="closeVersions"
       @checkpoint="handleCheckpoint"
       @restore="handleRestore"
+      @preview="handlePreviewVersion"
+      @close-preview="versions.clearPreview()"
+      @remove="handleRemoveVersion"
     />
 
     <!-- 登录 / 注册弹窗。挂在根部，顶栏点击与接口 401 都通过 store 打开它 -->

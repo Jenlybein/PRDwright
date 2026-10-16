@@ -19,6 +19,8 @@ import { downloadFile } from '../utils/download'
 import type {
   ChatMessage,
   DocumentRecord,
+  DocumentVersionDetail,
+  DocumentVersionSummary,
   JobSnapshot,
   RequirementsSummary,
   RunSummary,
@@ -134,6 +136,7 @@ vi.mock('../services/documentService', () => ({
   fetchVersion: vi.fn(),
   checkpointDocument: vi.fn(),
   restoreVersion: vi.fn(),
+  deleteVersion: vi.fn(),
 }))
 
 /**
@@ -2116,7 +2119,9 @@ describe('AppV2 的版本历史抽屉', () => {
 
     await clickButton(wrapper, '版本', true)
     await flushPromises()
+    // 恢复要二次确认：先展开，再确认
     await clickButton(wrapper, '恢复此版本')
+    await clickButton(wrapper, '确认恢复')
     await flushPromises()
 
     expect(documentApi.restoreVersion).toHaveBeenCalledWith(1, 'prd', 11)
@@ -2131,5 +2136,152 @@ describe('AppV2 的版本历史抽屉', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('无法读取版本历史')
+  })
+})
+
+/**
+ * 版本抽屉的**预览与删除**接线。
+ *
+ * 两处容易接错的地方各有用例盯着：
+ * - 点条目要真的去取那一版的正文（只改选中态、不发请求 = 点了没反应）；
+ * - 删除要先把载荷送到后端、并把结果回灌到列表（删了却还显示着 = 界面在骗人）。
+ */
+describe('AppV2 的版本预览与删除', () => {
+  /** 造一条版本摘要 */
+  function versionSummary(overrides: Partial<DocumentVersionSummary> = {}): DocumentVersionSummary {
+    return {
+      versionId: 11,
+      versionNo: 2,
+      source: 'checkpoint',
+      note: '',
+      contentSha: 'sha',
+      contentLength: 10,
+      createdAt: '2026-10-16T00:00:00',
+      isCurrent: false,
+      ...overrides,
+    }
+  }
+
+  /** 造一份版本详情 */
+  function versionDetail(overrides: Partial<DocumentVersionDetail> = {}): DocumentVersionDetail {
+    return {
+      ...versionSummary(),
+      content: '# 第二版正文\n\n内容',
+      pendingItems: [],
+      runSummary: null,
+      updatedAt: '2026-10-16T00:00:00',
+      ...overrides,
+    }
+  }
+
+  /** 打开一份停在「PRD 待确认」的方案，并打开抽屉（列表里有一条历史版本） */
+  async function openDrawerWithOneVersion(): Promise<VueWrapper> {
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([versionSummary()])
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档'),
+      makeDocumentRecord('api-docs', '# 接口文档'),
+    ])
+    await flushPromises()
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+    return wrapper
+  }
+
+  /** 按文案点抽屉里的按钮（不按整页找：侧栏也有「删除」，整页找会点错对象） */
+  async function clickInDrawer(wrapper: VueWrapper, text: string): Promise<void> {
+    const drawer = wrapper.find('.shell-version-drawer')
+    const button = drawer.findAll('button').find((item) => item.text().trim() === text)
+    if (!button) throw new Error(`抽屉里未找到按钮：${text}`)
+    await button.trigger('click')
+  }
+
+  it('点某一版：取那一版的正文并进预览（抽屉加宽 + 渲染出正文）', async () => {
+    const wrapper = await openDrawerWithOneVersion()
+    vi.mocked(documentApi.fetchVersion).mockResolvedValue(versionDetail())
+
+    await wrapper.find('.shell-version-drawer button[aria-label="预览 v2"]').trigger('click')
+    await flushPromises()
+
+    expect(documentApi.fetchVersion).toHaveBeenCalledWith(1, 'prd', 11)
+    const drawer = wrapper.find('.shell-version-drawer')
+    expect(drawer.classes()).toContain('w-[640px]')
+    expect(drawer.find('.prose').text()).toContain('第二版正文')
+  })
+
+  it('预览里「恢复此版本」同样要确认，确认后走恢复接口', async () => {
+    const wrapper = await openDrawerWithOneVersion()
+    vi.mocked(documentApi.fetchVersion).mockResolvedValue(versionDetail())
+    vi.mocked(documentApi.restoreVersion).mockResolvedValue(
+      makeDocumentRecord('prd', '# 恢复的正文'),
+    )
+    await wrapper.find('.shell-version-drawer button[aria-label="预览 v2"]').trigger('click')
+    await flushPromises()
+
+    await clickInDrawer(wrapper, '恢复此版本')
+    await flushPromises()
+    expect(documentApi.restoreVersion).not.toHaveBeenCalled()
+
+    await clickInDrawer(wrapper, '确认恢复')
+    await flushPromises()
+
+    expect(documentApi.restoreVersion).toHaveBeenCalledWith(1, 'prd', 11)
+  })
+
+  it('当前版本没有预览热区：点它不弹预览（正文区里正在看的就是这一版）', async () => {
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([versionSummary({ isCurrent: true })])
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档'),
+    ])
+    await flushPromises()
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+
+    expect(wrapper.find('.shell-version-drawer button[aria-label="预览 v2"]').exists()).toBe(false)
+    expect(documentApi.fetchVersion).not.toHaveBeenCalled()
+  })
+
+  it('删除要先确认，确认后才真删、并闪一句提示', async () => {
+    const wrapper = await openDrawerWithOneVersion()
+    vi.mocked(documentApi.deleteVersion).mockResolvedValue(undefined)
+
+    // 第一下只是展开确认，不发请求
+    await clickInDrawer(wrapper, '删除')
+    expect(documentApi.deleteVersion).not.toHaveBeenCalled()
+
+    await clickInDrawer(wrapper, '确认删除')
+    await flushPromises()
+
+    expect(documentApi.deleteVersion).toHaveBeenCalledWith(1, 'prd', 11)
+    expect(wrapper.text()).toContain('已删除该版本')
+  })
+
+  it('删除当前版本被拒时，把后端的说明闪出来', async () => {
+    const wrapper = await openDrawerWithOneVersion()
+    vi.mocked(documentApi.deleteVersion).mockRejectedValue(
+      new Error('当前版本不能删除。想换用别的版本，请点「恢复此版本」'),
+    )
+
+    await clickInDrawer(wrapper, '删除')
+    await clickInDrawer(wrapper, '确认删除')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('当前版本不能删除')
+  })
+
+  it('关抽屉时退出预览：下次打开回到列表', async () => {
+    const wrapper = await openDrawerWithOneVersion()
+    vi.mocked(documentApi.fetchVersion).mockResolvedValue(versionDetail())
+    await wrapper.find('.shell-version-drawer button[aria-label="预览 v2"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.shell-version-drawer').classes()).toContain('w-[640px]')
+
+    await wrapper.find('.shell-version-drawer button[aria-label="关闭版本历史"]').trigger('click')
+    await flushPromises()
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+
+    // 回到列表：窄栏 + 没有 .prose 正文
+    expect(wrapper.find('.shell-version-drawer').classes()).toContain('w-[360px]')
+    expect(wrapper.find('.shell-version-drawer .prose').exists()).toBe(false)
   })
 })

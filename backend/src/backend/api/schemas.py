@@ -417,6 +417,17 @@ class DocumentRestoreRequest(BaseModel):
     version_id: int = Field(description="要恢复的历史版本 id")
 
 
+class DocumentVersionDeleteResponse(BaseModel):
+    """删除某个历史版本的响应。
+
+    刻意回 `version_id`（而不仅是 `ok`）：前端可能在多处同时持有版本引用，回一个被删掉
+    的 id 让调用方有机会把界面上那条记录一并收掉，不必再猜「我刚才删的是哪一版」。
+    """
+
+    ok: bool = Field(default=True, description="是否成功删除")
+    version_id: int = Field(description="被删除的版本 id")
+
+
 # ============================================================================
 # 生成任务（generation_jobs）：把一次生成持久化并支持刷新重连
 # ============================================================================

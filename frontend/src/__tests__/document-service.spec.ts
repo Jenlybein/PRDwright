@@ -5,6 +5,7 @@ import http from '../services/api'
 import {
   DocumentsNotFoundError,
   checkpointDocument,
+  deleteVersion,
   fetchDocuments,
   fetchVersion,
   fetchVersions,
@@ -394,10 +395,10 @@ describe('fetchVersion', () => {
     await expect(fetchVersion(7, 'prd', 11)).rejects.toThrow('无法读取该版本')
   })
 
-  it('404 抛 DocumentsNotFoundError', async () => {
+  it('404 时透传后端说明（版本级 404 有两种含义，不该拿「方案不存在」去套）', async () => {
     vi.mocked(http.get).mockRejectedValue(axiosError(404, '版本不存在'))
 
-    await expect(fetchVersion(7, 'prd', 99)).rejects.toBeInstanceOf(DocumentsNotFoundError)
+    await expect(fetchVersion(7, 'prd', 99)).rejects.toThrow('版本不存在')
   })
 })
 
@@ -456,5 +457,35 @@ describe('restoreVersion', () => {
     vi.mocked(http.post).mockRejectedValue(axiosError(404, '版本不存在'))
 
     await expect(restoreVersion(7, 'prd', 99)).rejects.toBeInstanceOf(DocumentsNotFoundError)
+  })
+})
+
+describe('deleteVersion', () => {
+  it('DELETE 到带下划线的产物段 + 版本号', async () => {
+    vi.mocked(http.delete).mockResolvedValue({ data: { ok: true, version_id: 11 } })
+
+    await deleteVersion(7, 'api-docs', 11)
+
+    expect(http.delete).toHaveBeenCalledWith('/api/solutions/7/documents/api_docs/versions/11')
+  })
+
+  it('当前版本被拒（400）时透传后端说明，不套兜底文案', async () => {
+    vi.mocked(http.delete).mockRejectedValue(
+      axiosError(400, '当前版本不能删除。想换用别的版本，请点「恢复此版本」'),
+    )
+
+    await expect(deleteVersion(7, 'prd', 11)).rejects.toThrow('当前版本不能删除')
+  })
+
+  it('404 同样透传后端说明', async () => {
+    vi.mocked(http.delete).mockRejectedValue(axiosError(404, '版本不存在'))
+
+    await expect(deleteVersion(7, 'prd', 99)).rejects.toThrow('版本不存在')
+  })
+
+  it('取不到 detail 时用兜底文案', async () => {
+    vi.mocked(http.delete).mockRejectedValue(new Error('网络断了'))
+
+    await expect(deleteVersion(7, 'prd', 11)).rejects.toThrow('删除版本失败')
   })
 })

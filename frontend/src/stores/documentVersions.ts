@@ -1,5 +1,5 @@
 /**
- * 文档版本 store：某份文档的版本历史 + 两个写动作（存为新版本 / 恢复）。
+ * 文档版本 store：某份文档的版本历史 + 三个动作（存为新版本 / 恢复 / 删除）+ 预览。
  *
  * ## 为什么另开一个 store，而不是挂在 `documents` 上
  *
@@ -17,6 +17,7 @@
  *
  * 「存为新版本」与「恢复」都会改变**当前文档**（前者把指针移到新版本，后者把旧版本
  * 搬成新的当前版本）。不重新拉一次，编辑器里的正文还是旧的，用户会以为「点了没反应」。
+ * 「删除」只动历史、不碰当前正文，所以它只重拉列表。
  */
 
 import { defineStore } from 'pinia'
@@ -24,11 +25,13 @@ import { ref } from 'vue'
 
 import {
   checkpointDocument,
+  deleteVersion,
+  fetchVersion,
   fetchVersions,
   restoreVersion,
 } from '@/services/documentService'
 import { useDocumentsStore } from '@/stores/documents'
-import type { DocumentKind, DocumentVersionSummary } from '@/types'
+import type { DocumentKind, DocumentVersionDetail, DocumentVersionSummary } from '@/types'
 
 /** 三份产物各自的版本列表初值 */
 function emptyVersions(): Record<DocumentKind, DocumentVersionSummary[]> {
@@ -47,6 +50,15 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
   /** 最近一次读 / 写版本失败的原因；成功时清空 */
   const error = ref('')
 
+  /** 正在预览的那一版详情；`null` 表示抽屉停在列表上 */
+  const previewDetail = ref<DocumentVersionDetail | null>(null)
+
+  /** 是否正在拉取预览的正文 */
+  const previewLoading = ref(false)
+
+  /** 预览失败的原因（与列表的 `error` 分开：一次预览失败不该把整份列表标红） */
+  const previewError = ref('')
+
   /**
    * 加载请求序号：只有最新一次的结果允许落地。
    *
@@ -55,10 +67,27 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
    */
   let loadToken = 0
 
-  /** 拉取某份文档的版本列表（新→旧）。方案还不存在时什么都不做。 */
+  /** 预览请求序号；用途同 `loadToken`（快速点两版时先发的后到） */
+  let previewToken = 0
+
+  /** 作废在途的预览请求并回到列表态 */
+  function clearPreview(): void {
+    previewToken += 1
+    previewDetail.value = null
+    previewLoading.value = false
+    previewError.value = ''
+  }
+
+  /**
+   * 拉取某份文档的版本列表（新→旧）。方案还不存在时什么都不做。
+   *
+   * 顺带**回到列表态**：列表一变，之前预览的那一版可能已经不在、或者已不是当时那个样子
+   * （恢复会追加新版本、删除会少一条），继续把它的详情摆在屏幕上就是展示一份已过期的历史。
+   */
   async function load(kind: DocumentKind): Promise<void> {
     const id = documents.solutionId
     if (id === null) return
+    clearPreview()
     const token = ++loadToken
     loading.value = true
     error.value = ''
@@ -72,6 +101,30 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
       error.value = e instanceof Error ? e.message : '无法读取版本历史'
     } finally {
       if (token === loadToken) loading.value = false
+    }
+  }
+
+  /**
+   * 预览某一版：拉它的完整内容（正文 + 清单 + 回执）。
+   *
+   * 详情单独取而不是随列表一起下发——列表可能很长，把每版正文都拖出来是纯浪费。
+   */
+  async function preview(kind: DocumentKind, versionId: number): Promise<void> {
+    const id = documents.solutionId
+    if (id === null) return
+    const token = ++previewToken
+    previewLoading.value = true
+    previewError.value = ''
+    previewDetail.value = null
+    try {
+      const detail = await fetchVersion(id, kind, versionId)
+      if (token !== previewToken) return
+      previewDetail.value = detail
+    } catch (e) {
+      if (token !== previewToken) return
+      previewError.value = e instanceof Error ? e.message : '无法读取该版本'
+    } finally {
+      if (token === previewToken) previewLoading.value = false
     }
   }
 
@@ -119,12 +172,36 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
     return runMutation(id, kind, () => restoreVersion(id, kind, versionId))
   }
 
+  /**
+   * 删除某个**历史**版本。
+   *
+   * 与上面两个动作不同，它**不重拉当前文档**：删的是历史，当前正文一点没变，
+   * 多拉一次只会平白闪一下编辑器。只重拉列表（`load` 顺带回到列表态）。
+   *
+   * 当前版本删不得——后端会回 400 并把原因写在 `detail` 里，这里原样收进 `error`
+   * 让用户看到「为什么不能删」，而不是一句笼统的失败。
+   */
+  async function remove(kind: DocumentKind, versionId: number): Promise<boolean> {
+    const id = documents.solutionId
+    if (id === null) return false
+    error.value = ''
+    try {
+      await deleteVersion(id, kind, versionId)
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '删除版本失败'
+      return false
+    }
+    await load(kind)
+    return true
+  }
+
   /** 清空并复位（切换方案 / 重新开始时用）；顺带作废在途的加载结果 */
   function clear(): void {
     loadToken += 1
     versionsByKind.value = emptyVersions()
     loading.value = false
     error.value = ''
+    clearPreview()
   }
 
   return {
@@ -132,10 +209,16 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
     versionsByKind,
     loading,
     error,
+    previewDetail,
+    previewLoading,
+    previewError,
     // 动作
     load,
+    preview,
+    clearPreview,
     checkpoint,
     restore,
+    remove,
     clear,
   }
 })

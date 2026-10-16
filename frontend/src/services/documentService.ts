@@ -190,17 +190,25 @@ function toVersionSummary(data: unknown): DocumentVersionSummary | null {
   }
 }
 
-/** 把后端返回的版本详情收敛成前端结构；摘要有问题则整条丢弃 */
+/** 把后端返回的版本详情收敛成前端结构；摘要里那几个定位字段缺了则整条丢弃 */
 function toVersionDetail(data: unknown): DocumentVersionDetail | null {
-  const summary = toVersionSummary(data)
-  if (summary === null) return null
+  if (typeof data !== 'object' || data === null) return null
   const raw = data as Record<string, unknown>
+  if (typeof raw.version_id !== 'number') return null
+  // 刻意**逐字段构造**而不是展开 `toVersionSummary` 的结果：摘要带 `content_sha` /
+  // `content_length`（列表为省正文才要这两项），详情里后端并不下发它们——展开会往
+  // 对象上挂两个类型里没有、也没人用的键，让「契约」与「实际形状」悄悄分叉。
   return {
-    ...summary,
+    versionId: raw.version_id,
+    versionNo: typeof raw.version_no === 'number' ? raw.version_no : 0,
     content: typeof raw.content === 'string' ? raw.content : '',
     pendingItems: toPendingItems(raw.pending_items),
     runSummary: parseRunSummary(raw.last_run_summary),
+    source: typeof raw.source === 'string' ? raw.source : '',
+    note: typeof raw.note === 'string' ? raw.note : '',
+    createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
+    isCurrent: raw.is_current === true,
   }
 }
 
@@ -233,6 +241,10 @@ export async function fetchVersions(
 /**
  * 读取某一条版本的完整内容（含正文 / 清单 / 回执）。
  * 对应 `GET /api/solutions/{id}/documents/{kind}/versions/{version_id}`。
+ *
+ * ⚠️ 这里的 404 **不**收敛成 `DocumentsNotFoundError`：版本级路由的 404 有两种含义
+ * （方案不可见 / 版本不存在），后端在 `detail` 里如实区分了，直接透传才准确——
+ * 拿「方案不存在或已被删除」去描述一条没找到的版本，会把用户引到错的方向。
  */
 export async function fetchVersion(
   solutionId: number,
@@ -247,9 +259,6 @@ export async function fetchVersion(
     if (detail === null) throw new Error('版本内容不可用')
     return detail
   } catch (error) {
-    if (axios.isAxiosError(error) && error.response?.status === 404) {
-      throw new DocumentsNotFoundError()
-    }
     throw new Error(backendMessage(error, '无法读取该版本'))
   }
 }
@@ -305,5 +314,26 @@ export async function restoreVersion(
       throw new DocumentsNotFoundError()
     }
     throw new Error(backendMessage(error, '恢复版本失败'))
+  }
+}
+
+/**
+ * 删除某一条**历史**版本。
+ * 对应 `DELETE /api/solutions/{id}/documents/{kind}/versions/{version_id}`。
+ *
+ * 当前版本删不得：后端返回 400 并在 `detail` 里说明原因，这里原样透传——「为什么不能删」
+ * 是用户需要看到的信息，不该被兜底文案盖掉。404 同样透传后端说明（版本不存在 / 方案不可见）。
+ */
+export async function deleteVersion(
+  solutionId: number,
+  kind: DocumentKind,
+  versionId: number,
+): Promise<void> {
+  try {
+    await http.delete(
+      `/api/solutions/${solutionId}/documents/${toBackendKind(kind)}/versions/${versionId}`,
+    )
+  } catch (error) {
+    throw new Error(backendMessage(error, '删除版本失败'))
   }
 }

@@ -4,7 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as documentApi from '../services/documentService'
 import { useDocumentsStore } from '../stores/documents'
 import { useDocumentVersionsStore } from '../stores/documentVersions'
-import type { DocumentKind, DocumentRecord, DocumentVersionSummary } from '../types'
+import type {
+  DocumentKind,
+  DocumentRecord,
+  DocumentVersionDetail,
+  DocumentVersionSummary,
+} from '../types'
 
 /**
  * 文档版本 store 测试。
@@ -31,6 +36,7 @@ vi.mock('../services/documentService', () => ({
   fetchVersion: vi.fn(),
   checkpointDocument: vi.fn(),
   restoreVersion: vi.fn(),
+  deleteVersion: vi.fn(),
 }))
 
 /** 造一条版本摘要 */
@@ -48,6 +54,17 @@ function summary(
     contentLength: 10,
     createdAt: '2026-10-16T00:00:00',
     isCurrent,
+  }
+}
+
+/** 造一份版本详情（摘要 + 正文） */
+function detail(versionId: number, versionNo: number, content: string): DocumentVersionDetail {
+  return {
+    ...summary(versionId, versionNo, false),
+    content,
+    pendingItems: [],
+    runSummary: null,
+    updatedAt: '2026-10-16T02:00:00',
   }
 }
 
@@ -202,5 +219,112 @@ describe('useDocumentVersionsStore 的复位', () => {
     expect(versions.versionsByKind).toEqual({ prd: [], 'api-docs': [], prompts: [] })
     expect(versions.error).toBe('')
     expect(versions.loading).toBe(false)
+  })
+})
+
+describe('useDocumentVersionsStore 的预览', () => {
+  it('preview：拉某一版的完整内容并落到 previewDetail', async () => {
+    const { versions } = setup()
+    vi.mocked(documentApi.fetchVersion).mockResolvedValue(detail(11, 2, '# 第二版正文'))
+
+    await versions.preview('prd', 11)
+
+    expect(documentApi.fetchVersion).toHaveBeenCalledWith(1, 'prd', 11)
+    expect(versions.previewDetail?.versionId).toBe(11)
+    expect(versions.previewDetail?.content).toBe('# 第二版正文')
+    expect(versions.previewError).toBe('')
+    expect(versions.previewLoading).toBe(false)
+  })
+
+  it('preview：失败时记原因且不留半份详情', async () => {
+    const { versions } = setup()
+    vi.mocked(documentApi.fetchVersion).mockRejectedValue(new Error('版本不存在'))
+
+    await versions.preview('prd', 99)
+
+    expect(versions.previewError).toBe('版本不存在')
+    expect(versions.previewDetail).toBeNull()
+    expect(versions.previewLoading).toBe(false)
+  })
+
+  it('preview：先发的响应后到时被丢弃', async () => {
+    const { versions } = setup()
+    let resolveFirst: (value: DocumentVersionDetail) => void = () => {}
+    vi.mocked(documentApi.fetchVersion)
+      .mockImplementationOnce(
+        () =>
+          new Promise<DocumentVersionDetail>((resolve) => {
+            resolveFirst = resolve
+          }),
+      )
+      .mockResolvedValueOnce(detail(12, 3, '# 第三版'))
+
+    const first = versions.preview('prd', 11)
+    const second = versions.preview('prd', 12)
+    await second
+    resolveFirst(detail(11, 2, '# 第二版'))
+    await first
+
+    expect(versions.previewDetail?.versionId).toBe(12)
+  })
+
+  it('clearPreview：回到列表态', async () => {
+    const { versions } = setup()
+    vi.mocked(documentApi.fetchVersion).mockResolvedValue(detail(11, 2, '# x'))
+    await versions.preview('prd', 11)
+
+    versions.clearPreview()
+
+    expect(versions.previewDetail).toBeNull()
+    expect(versions.previewError).toBe('')
+    expect(versions.previewLoading).toBe(false)
+  })
+
+  it('load：重新拉列表时回到列表态（列表一变，预览的那一版就可能过期了）', async () => {
+    const { versions } = setup()
+    vi.mocked(documentApi.fetchVersion).mockResolvedValue(detail(11, 2, '# x'))
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([summary(11, 2, true)])
+    await versions.preview('prd', 11)
+    expect(versions.previewDetail).not.toBeNull()
+
+    await versions.load('prd')
+
+    expect(versions.previewDetail).toBeNull()
+  })
+})
+
+describe('useDocumentVersionsStore 的删除', () => {
+  it('remove：删历史版本后重拉列表，但**不**重拉当前文档（正文没变）', async () => {
+    const { versions } = setup()
+    vi.mocked(documentApi.deleteVersion).mockResolvedValue(undefined)
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([summary(12, 2, true)])
+
+    const ok = await versions.remove('prd', 11)
+
+    expect(ok).toBe(true)
+    expect(documentApi.deleteVersion).toHaveBeenCalledWith(1, 'prd', 11)
+    expect(documentApi.fetchVersions).toHaveBeenCalledWith(1, 'prd')
+    expect(documentApi.fetchDocuments).not.toHaveBeenCalled()
+    expect(versions.error).toBe('')
+  })
+
+  it('remove：被拒（当前版本）时把后端说明记进 error', async () => {
+    const { versions } = setup()
+    vi.mocked(documentApi.deleteVersion).mockRejectedValue(
+      new Error('当前版本不能删除。想换用别的版本，请点「恢复此版本」'),
+    )
+
+    const ok = await versions.remove('prd', 11)
+
+    expect(ok).toBe(false)
+    expect(versions.error).toContain('当前版本不能删除')
+  })
+
+  it('remove：方案还没登记时直接 false，不发请求', async () => {
+    const { versions } = setup(null)
+
+    await expect(versions.remove('prd', 11)).resolves.toBe(false)
+
+    expect(documentApi.deleteVersion).not.toHaveBeenCalled()
   })
 })

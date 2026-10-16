@@ -32,6 +32,8 @@ router = APIRouter(prefix="/api/solutions/{solution_id}/documents", tags=["docum
 _NOT_FOUND_DETAIL = "方案不存在"
 # 版本不存在、或不属于该用户，回这一句；与上面的码相同、只是展示文案不同
 _VERSION_NOT_FOUND_DETAIL = "版本不存在"
+# 想删的是当前版本。它是这份文档正在用的正文，只能被「恢复」换掉，不能被删除
+_CURRENT_VERSION_DETAIL = "当前版本不能删除。想换用别的版本，请点「恢复此版本」"
 
 
 @router.get("", response_model=schemas.DocumentListResponse, summary="读取方案下的文档")
@@ -163,3 +165,32 @@ async def restore(
     if row is None:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _VERSION_NOT_FOUND_DETAIL)
     return schemas.DocumentItem(**row)
+
+
+@router.delete(
+    "/{kind}/versions/{version_id}",
+    response_model=schemas.DocumentVersionDeleteResponse,
+    summary="删除某个历史版本",
+)
+async def delete_version(
+    solution_id: int,
+    kind: DocumentKind,
+    version_id: int,
+    user: User = Depends(acting_user),
+) -> schemas.DocumentVersionDeleteResponse:
+    """删除一条**历史**版本（当前版本不给删）。
+
+    只删历史、不动当前正文：这份文档的内容不受影响，因此**不重新生成、不作废下游**——
+    删掉一条自己不满意的旧版，与「换掉当前用的那一版」是两件事。
+    """
+    if not solution_service.solution_exists(user.id, solution_id):
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
+
+    outcome = document_store.delete_version(user.id, solution_id, kind, version_id)
+    if outcome == "missing":
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _VERSION_NOT_FOUND_DETAIL)
+    if outcome == "is_current":
+        # 400 而不是 404/409：请求本身语法没问题，是「这个动作在这一版上不成立」——
+        # 与「超预算复用 INVALID_REQUEST」同一个口径（ADR-012：错误码表不膨胀）
+        raise AppError(ErrorCode.INVALID_REQUEST, _CURRENT_VERSION_DETAIL)
+    return schemas.DocumentVersionDeleteResponse(ok=True, version_id=version_id)

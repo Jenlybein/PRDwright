@@ -241,7 +241,8 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | 对外结构 | `DocumentItem` 逐字段**不变**（`kind` / `content` / `pending_items` / `last_run_summary` / `updated_at`），读文档的调用方一行未改；版本是一组**新增**的读 / 写能力 |
 | 环形外键与写入顺序 | `documents.current_version_id → document_versions.id`（SET NULL）与 `document_versions.document_id → documents.id`（CASCADE）互指。写入顺序必须是「**先空指针插文档行 → 插版本 → 回填指针**」，反过来会撞上「指针指向还不存在的版本」；删方案时两级级联清空，由测试钉死 |
 | 迁移 | v4 建表 + 加指针 → v5 把现有文档逐行容错地回填成 `version_no=1, source='migrated'` → v6 删 `documents` 的四个正文列。**v6 是单向门**（改完旧代码读不到 `documents.content`，回滚只能靠备份）；删列用原生 `ALTER TABLE ... DROP COLUMN`，因为 `PRAGMA foreign_keys` 在事务内是空操作，而迁移运行器把每步包在事务里，「关外键 + 重建表」那套在步骤内部关不掉外键 |
-| 展示 | 审阅页底栏内容行的「版本」按钮打开**右侧抽屉**（`ui/VersionDrawer.vue`）：默认收起、`fixed` 浮层、以底栏高度作下边距因此**不遮底栏**、不挤中部布局。列表给「第几版 · 怎么来的 · 什么时候 · 备注」，当前版本不可恢复；本版**不做两版 diff** |
+| 删除 | 只有**历史**版本能删；**当前版本不给删**（它是这份文档正在用的正文，想换一版请用「恢复」——那是追加，不是删除）。守卫写在仓储 SQL 的 `WHERE` 里（`v.id != d.current_version_id`），而不是「先查一次再决定删不删」——两次查询之间若有别的写入，先查后删会误删正文。删除只重拉版本列表、**不重拉当前文档**（正文没变，多拉一次只会平白闪一下编辑器） |
+| 展示 | 审阅页底栏内容行的「版本」按钮打开**右侧抽屉**（`ui/VersionDrawer.vue`）：默认收起、`fixed` 浮层、以底栏高度作下边距因此**不遮底栏**、不挤中部布局。列表给「第几版 · 怎么来的 · 什么时候 · 备注」，每项自带「恢复此版本 / 删除」（都要点开才动作，删除还要二次确认）；**点条目即预览**——抽屉就地加宽到 640px 显示该版的只读 Markdown（不在主区域开新阶段，见 ADR-030 补记），预览里同样能「恢复此版本」。当前版本不给动作，只说明为什么。本版**不做两版 diff** |
 | 为什么抽屉能是例外 | ADR-015 要防的是**流程动作**分散，不是「内容操作不能有自己的面板」。边界钉在 ADR-030：抽屉里只放**内容操作**，流程动作（生成下一份 / 完成 / 返回）永远只在底栏 |
 
 **`metadata` 是留给下一版的口袋**：v3.1 E 的 `quality_gate`（`{passed, issues[], checked_at, rules_version}`）
@@ -362,8 +363,8 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 | 文档所有权 | 三份正文的工作副本在 `stores/documents.ts`（后端 `documents` 表在前端的镜像，防抖 800ms + 单飞，与 `stores/solutions.ts` 同一套记账）；刷新 / 打开方案时按方案 id 拉一次即得权威版本。**审阅页没有「保存」按钮**：手改正文由编辑框逐次上报、经 800ms 防抖自动落库（静默，仅失败闪一条红色提示），未落库的草稿在「打开方案前 / `beforeunload` / 组件卸载」三处补冲；底栏空出来的位置改为「下载」，导出的是**用户眼前那份草稿**（可能比落库版本新） |
 | 待确认清单与澄清入口 | 清单面板在**正文之上**（每条带 P0~P6 等级徽标、按等级排序，默认只铺开前 2 条可展开，标题旁是按实际出现的等级渲染的彩色计数芯片）。三份文档共用**同一个入口**「和 AI 确认剩下的 N 个问题」，落点都是对话页对应的子标签；PRD 那条落在**底栏次操作组**并在出现时**顶替**「返回」按钮——两者落点都是对话页，并排会给用户两个近乎同名的选择——且只在完整流程（`entryMode === 'structured'`）下出现（PRD 快捷 / 提示词调试没有对话可回） |
 | 对话页的子标签栏 | `ui/ChatThreadTabs.vue`：四条线程**常驻**，未就绪的置灰并给出理由（`title`）；切换即切换消息区与底栏动作。`chatTab` 存的是用户意图、`activeChatTab` 是实际显示的那条（文档未生成时归落到第一条可用线程，**意图不回写**）。有请求在跑时全部禁用——切过去会看到一段与自己刚才操作无关的上下文，而流还在往原线程里写 |
-| 版本抽屉 | `ui/VersionDrawer.vue`：审阅页底栏内容行的「版本」按钮打开，默认收起、`fixed` 浮层、以 `--shell-action-bar-h` 作下边距（**不遮底栏**）、不挤中部布局。列表给「第几版 · 怎么来的 · 什么时候 · 备注」，每项带自己的「恢复此版本」（当前版本不给按钮——点了也是原地不动），顶部是「存为新版本 + 备注」。它是**纯展示**组件（props in / events out，不 import store），版本列表与两个写动作在 `stores/documentVersions.ts`，归属直接读 `documents.solutionId`（不另存一份） |
-| 版本抽屉的边界 | 它是 ADR-015 的**有意例外**（ADR-030）：抽屉里只放**内容操作**，流程动作（生成下一份 / 完成 / 返回）永远只在底栏；入口也在底栏内容行。写动作成功后必须**重新拉文档**——否则编辑器里还是旧正文，用户会以为「恢复没生效」；写动作之前先 `flushPendingSave`，否则 `loadAll` 会把未落库的旧草稿盖在恢复结果之上 |
+| 版本抽屉 | `ui/VersionDrawer.vue`：审阅页底栏内容行的「版本」按钮打开，默认收起、`fixed` 浮层、以 `--shell-action-bar-h` 作下边距（**不遮底栏**）、不挤中部布局。两态：**列表**（360px）给「第几版 · 怎么来的 · 什么时候 · 备注 · 约多少字」，每项自带「恢复此版本 / 删除」；**预览**（就地加宽到 640px）显示某一版的只读 Markdown + 该版元信息，带「返回列表」与「恢复此版本」。删除要**二次确认**（先展开「删除这一版？」）。当前版本两项都不给，只写一句为什么。它是**纯展示**组件（props in / events out，不 import store），列表 / 预览 / 三个写动作都在 `stores/documentVersions.ts`，归属直接读 `documents.solutionId`（不另存一份） |
+| 版本抽屉的边界 | 它是 ADR-015 的**有意例外**（ADR-030）：抽屉里只放**内容操作**（预览 / 恢复 / 删除 / 存为新版本），流程动作（生成下一份 / 完成 / 返回）永远只在底栏；入口也在底栏内容行。预览用「加宽」而不是切主区域，正是为了**不动 `ViewState`**（见 ADR-030 补记）。写动作成功后必须**重新拉文档**（否则编辑器里还是旧正文，用户会以为「恢复没生效」）；写动作之前先 `flushPendingSave`，否则 `loadAll` 会把未落库的旧草稿盖在恢复结果之上。**删除是例外**：它只动历史、不动当前正文，因此只重拉列表 |
 | 质量报告 | review 页展示 `quality_gate` 结果；接口文档 / 提示词展示 Review 意见 |
 | 入口 | **不改**：三入口选择器（`EntryStage`）在 v2 已落地，源文档「三 Tab 改 chooser」那篇针对的是旧状态 |
 | 保存 | 方案快照沿用 1.5s 防抖；**文档手改沿用 800ms 防抖 + 单飞**（`stores/documents.ts`），落库目标已是「就地更新当前版本」——版本化之后这条路径只改了 SQL，前端一行未动 |
@@ -394,10 +395,12 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 归一为 `'prd-clarify'`。
 
 **版本 API**：`GET /api/solutions/{id}/documents/{kind}/versions`（版本摘要列表，**不含正文**）、
-`GET /api/solutions/{id}/documents/{kind}/versions/{version_id}`（版本详情：正文 + 清单 + 回执）、
+`GET /api/solutions/{id}/documents/{kind}/versions/{version_id}`（版本详情：正文 + 清单 + 回执，供预览）、
 `POST /api/solutions/{id}/documents/{kind}/checkpoint`（存为新版本，body `{content, note}`）、
-`POST /api/solutions/{id}/documents/{kind}/restore`（恢复某一版，body `{version_id}`）。
-后两者返回**更新后的当前文档**（`DocumentItem`），因此调用方不需要再读一次。
+`POST /api/solutions/{id}/documents/{kind}/restore`（恢复某一版，body `{version_id}`）、
+`DELETE /api/solutions/{id}/documents/{kind}/versions/{version_id}`（删某一**历史**版本；
+删当前版本回 **400 `INVALID_REQUEST`**，`detail` 说明原因——换版本请用 `restore`）。
+checkpoint / restore 返回**更新后的当前文档**（`DocumentItem`），删除返回 `{ok, version_id}`。
 
 ⚠️ **路径与 4.3 草稿不同，这是有意的**：草稿写的是 `/api/documents/{kind}/versions`，但那个作用域
 **没法在 SQL 层过滤归属**（版本链只能经 `document_versions → documents → solutions` 两级 JOIN 判归属），
