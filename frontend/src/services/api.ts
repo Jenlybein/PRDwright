@@ -5,6 +5,7 @@ import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
 import type { BackendErrorCode } from '@/services/errors'
 import type {
   ChatMessage,
+  ClarificationAsk,
   CompletedSection,
   DocKind,
   DocumentKind,
@@ -183,6 +184,13 @@ export interface StreamResult {
   conversationId: string
   /** 模型这一轮的完整回复 */
   reply: string
+  /**
+   * 这一轮提问附带的**结构化选择题**；没有则为空数组。
+   *
+   * 澄清风才有（后端从回复末尾的标记块里剥出来）；三条生成线的 `done` 不带这个键，
+   * 因此它们拿到的永远是空数组——同一个解析器服务所有流，不额外分支。
+   */
+  asks: ClarificationAsk[]
 }
 
 /** SSE 流的结束标记，收到后不再解析 */
@@ -214,6 +222,42 @@ function readObjectArray(data: Record<string, unknown>, key: string): Record<str
   return value.filter(
     (item): item is Record<string, unknown> => typeof item === 'object' && item !== null,
   )
+}
+
+/**
+ * 把 `done` 事件里的 `clarification_asks` 归一成 `ClarificationAsk[]`。
+ *
+ * 与 `parsePendingItems` 同一口径：**逐项校验、坏数据丢弃**，能渲染多少算多少——
+ * 一条脏数据不该让整轮提问消失，更不该让对话报错。判据与实际渲染需求对齐：
+ * 没有题干、或凑不到两个选项的题，界面上既没法点也没地方安放答案，一律丢掉。
+ */
+function parseClarificationAsks(data: Record<string, unknown>): ClarificationAsk[] {
+  return readObjectArray(data, 'clarification_asks').flatMap((item) => {
+    const question = item.question
+    if (typeof question !== 'string' || !question.trim()) return []
+
+    const options = readObjectArray(item, 'options').flatMap((option, position) => {
+      const text = option.text
+      if (typeof text !== 'string' || !text.trim()) return []
+      // 标号正常由后端分配；这里兜一层是为了旧后端下发时仍能渲染出可点的卡片
+      const label = typeof option.label === 'string' && option.label
+        ? option.label
+        : String.fromCharCode(65 + position)
+      return [{ label, text }]
+    })
+    if (options.length < 2) return []
+
+    return [
+      {
+        id: typeof item.id === 'string' && item.id ? item.id : `ask-${question.slice(0, 8)}`,
+        question,
+        background: readString(item, 'background'),
+        // 只认真正的布尔真：后端已归一，这里再守一道，免得字符串形式的 "true" 被当成多选
+        multiple: item.multiple === true,
+        options,
+      },
+    ]
+  })
 }
 
 /**
@@ -472,6 +516,8 @@ async function readStreamRequest(
   let buffer = ''
   let conversationId = ''
   let reply = ''
+  // 这一轮提问附带的结构化选择题；只有澄清风会下发（见 `parseClarificationAsks`）
+  let asks: ClarificationAsk[] = []
   // 后端下发的 error 事件：HTTP 状态码是 200，分类信息全在事件的 code 里
   let failure: ApiError | null = null
 
@@ -496,6 +542,7 @@ async function readStreamRequest(
       case 'done':
         conversationId = readString(event.data, 'conversation_id') || conversationId
         reply = readString(event.data, 'reply') || reply
+        asks = parseClarificationAsks(event.data)
         break
       case 'snapshot': {
         const snapshot = parseSnapshotEvent(event.data)
@@ -540,7 +587,7 @@ async function readStreamRequest(
   // 包一层就把错误码弄丢了
   if (failure) throw failure
 
-  return { conversationId, reply }
+  return { conversationId, reply, asks }
 }
 
 /**

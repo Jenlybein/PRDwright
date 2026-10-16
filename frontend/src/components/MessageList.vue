@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
+import ClarificationAskList from '@/components/ClarificationAskList.vue'
 import { renderMarkdown } from '@/utils/markdown'
 import type { ChatMessage } from '@/types'
 
@@ -9,10 +10,18 @@ import type { ChatMessage } from '@/types'
  *
  * 只负责展示：过滤 system 消息、区分左右布局、渲染 AI 回复的 Markdown，
  * 并把滚动条保持在底部。消息的增删与流式追加全部由父组件驱动。
+ *
+ * 助手消息若带结构化选择题（`asks`），在 Markdown 之后接一组可点选项卡；卡片的**选择
+ * 状态留在卡片自己身上**，本组件只负责判断「这组还该不该可点」并把答案往上传。
  */
 const props = defineProps<{
   /** 完整消息列表；role 为 system 的消息不会渲染 */
   messages: ChatMessage[]
+}>()
+
+const emit = defineEmits<{
+  /** 用户在选项卡上提交了回答；载荷是组织好的一条消息文本 */
+  answer: [text: string]
 }>()
 
 /** 滚动容器，自动滚动到底部时使用 */
@@ -194,6 +203,21 @@ defineExpose({ scrollToBottom })
                 class="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-primary-500 align-text-bottom"
               />
             </div>
+
+            <!--
+              结构化选择题：只有**最后一条消息**可交互。
+
+              判据不是「最后一条 assistant 消息」——用户一作答，推入的就是 user 消息，
+              那条 assistant 仍是「最后一条 assistant」，卡片会一直能点（同一个问题能被
+              重复回答）。用「最后一条消息」还顺带解决了流式期间的可点性：流式气泡挂在
+              末尾，于是提问那条自动退成只读。
+            -->
+            <ClarificationAskList
+              v-if="message.asks?.length"
+              :asks="message.asks"
+              :interactive="index === visibleMessages.length - 1"
+              @answer="emit('answer', $event)"
+            />
           </template>
         </div>
       </div>

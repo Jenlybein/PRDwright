@@ -18,12 +18,13 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterable, Literal, TypedDict
+from typing import Any, AsyncIterator, Callable, Iterable, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import QuestionsConfig, StreamEvent
 from backend.core.errors import AppError, ErrorCode
+from backend.services.clarification_ask import extract_asks, make_ask_suppressor
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import (
     DEFAULT_CONVERSATION_PROFILE,
@@ -394,6 +395,65 @@ class ConversationService:
     # 流式对话
     # ------------------------------------------------------------------
 
+    async def _stream_with_asks(
+        self,
+        messages: list[BaseMessage],
+        *,
+        status_text: str | None = None,
+        extra_data: dict[str, Any] | None = None,
+        on_persist: Callable[[str], None] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """流式产出回复，并把结构化选择题块**抑制掉、解析进 `done`**。
+
+        与三条生成线（`document_service`）同款的两段式：实时增量先过抑制器（块被切在
+        chunk 边界时只漏出安全前缀），收尾时再对完整回复 `extract` 一次。两层都要有——
+        抑制器保证用户「看到」的正文干净，`extract` 保证拿到的是完整、可解析的那份。
+
+        ⚠️ `on_persist` 收到的是**剥离后的干净正文**，不是模型原始输出。这一点不能省：
+        带标记块的原文一旦写进会话历史，下一轮会被当作 assistant 消息喂回模型——
+        既污染上下文，又会让它学着继续吐块。
+
+        Args:
+            messages: 已组装好的 LangChain 消息。
+            status_text: 首个状态事件的提示语；为 `None` 时不发（调用方已发过）。
+            extra_data: 附加到 `done` 事件的数据（如会话 ID）。
+            on_persist: 生成成功后的回调，接收**干净正文**。
+        """
+        suppressor = make_ask_suppressor()
+        async for event in iter_reply_events(
+            self.llm,
+            messages,
+            status_text=status_text,
+            extra_data=extra_data,
+        ):
+            if event.type == "chunk":
+                clean = suppressor.feed(event.content)
+                if clean:
+                    yield StreamEvent(type="chunk", content=clean, data=event.data)
+            elif event.type == "done":
+                trailing = suppressor.flush()
+                if trailing:
+                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                reply = str(event.data.get("reply", ""))
+                clean_reply, asks = extract_asks(reply)
+                if on_persist is not None:
+                    on_persist(clean_reply)
+                yield StreamEvent(
+                    type="done",
+                    content="",
+                    data={
+                        **(event.data or {}),
+                        "reply": clean_reply,
+                        # 结构化选择题：前端据此把选项渲染成可点的卡片。
+                        # 没有块时是空数组——「没产块」是常态，不是异常。
+                        "clarification_asks": asks,
+                    },
+                )
+            else:
+                # status / error 原样透传。注意出错时上游**不发 done**，
+                # 因此 on_persist 的时机与原来的 `on_finish` 完全一致（只在成功时）。
+                yield event
+
     async def start_conversation_stream(
         self,
         form_data: dict[str, Any],
@@ -450,11 +510,11 @@ class ConversationService:
             record.messages.append({"role": "assistant", "content": reply})
             record.updated_at = datetime.now()
 
-        async for event in iter_reply_events(
-            self.llm,
+        # `_persist` 收到的是剥离掉选择题块之后的干净正文（见 `_stream_with_asks`）
+        async for event in self._stream_with_asks(
             messages,
-            on_finish=_persist,
             extra_data={"conversation_id": record.id},
+            on_persist=_persist,
         ):
             yield event
 
@@ -529,12 +589,11 @@ class ConversationService:
                 base_history.append({"role": "user", "content": user_message})
                 base_history.append({"role": "assistant", "content": reply})
 
-        async for event in iter_reply_events(
-            self.llm,
+        async for event in self._stream_with_asks(
             messages,
             status_text="正在思考…",
-            on_finish=_persist,
             extra_data={"conversation_id": conversation_id or ""},
+            on_persist=_persist,
         ):
             yield event
 

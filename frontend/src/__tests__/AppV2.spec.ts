@@ -165,17 +165,17 @@ async function defaultJobStream(
 ): Promise<api.StreamResult> {
   if (kind === 'prompts') {
     handlers.onChunk?.('# 提示词套件\n')
-    return { conversationId: '', reply: '# 提示词套件\n\n## 一、角色设定\n内容' }
+    return { conversationId: '', reply: '# 提示词套件\n\n## 一、角色设定\n内容', asks: [] }
   }
   if (kind === 'api-docs') {
     handlers.onChunk?.('# 接口文档\n')
-    return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构' }
+    return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构', asks: [] }
   }
   if (kind === 'optimize') {
-    return { conversationId: '', reply: '优化后的内容' }
+    return { conversationId: '', reply: '优化后的内容', asks: [] }
   }
   handlers.onChunk?.('# 产品需求文档\n')
-  return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
+  return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容', asks: [] }
 }
 
 /**
@@ -607,7 +607,7 @@ describe('AppV2 完整流程编排', () => {
   it('提交需求后进入对话阶段，映射后端题目字段且载荷不携带任何提示词', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
       handlers?.onChunk?.('我先复述一下理解：这是一个给独立开发者用的 PRD 生成器。')
-      return { conversationId: 'conv-1', reply: '我先复述一下理解：这是一个给独立开发者用的 PRD 生成器。' }
+      return { conversationId: 'conv-1', reply: '我先复述一下理解：这是一个给独立开发者用的 PRD 生成器。', asks: [] }
     })
 
     const wrapper = await mountApp()
@@ -630,10 +630,57 @@ describe('AppV2 完整流程编排', () => {
     expect(JSON.stringify(payload)).not.toContain('资深产品经理')
   })
 
+  it('澄清提问带结构化选项时渲染成选项卡，提交后作为一条用户消息发出、卡片退成只读', async () => {
+    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
+      handlers?.onChunk?.('你更倾向哪种做法？')
+      return {
+        conversationId: 'conv-1',
+        reply: '你更倾向哪种做法？',
+        asks: [
+          {
+            id: 'ask-1',
+            question: '第一版要不要做离线同步？',
+            background: '你提到用户常在弱网环境使用。',
+            multiple: false,
+            options: [
+              { label: 'A', text: '第一版就做离线同步' },
+              { label: 'B', text: '第一版只做在线' },
+            ],
+          },
+        ],
+      }
+    })
+    // 提交之后 AI 会回一句，于是那条带选项的消息不再是最后一条
+    vi.mocked(api.continueConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '好，那就先做离线草稿。',
+      asks: [],
+    })
+
+    const wrapper = await mountApp()
+    await submitSampleForm(wrapper)
+
+    const optionA = wrapper.findAll('button').find((item) => item.text().startsWith('A'))
+    expect(optionA, '后端下发了选项就应当渲染出可点的卡片').toBeTruthy()
+    expect(optionA?.attributes('disabled')).toBeUndefined()
+
+    await optionA?.trigger('click')
+    await clickButton(wrapper, '提交回答')
+    await flushPromises()
+
+    // 提交走的是**普通发送链路**：载荷里就是一条用户消息（带题干，模型才知道答的是哪题）
+    const payload = vi.mocked(api.continueConversationStream).mock.calls[0]?.[0]
+    expect(payload?.content).toBe('1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步')
+
+    // 作答之后它不再是最后一条消息，卡片退成只读——否则同一个问题能被反复回答
+    const after = wrapper.findAll('button').find((item) => item.text().startsWith('A'))
+    expect(after?.attributes('disabled')).toBeDefined()
+  })
+
   it('对话完成后可生成 PRD，并在生成完成时进入待确认阶段', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
       handlers?.onChunk?.('已理解需求。')
-      return { conversationId: 'conv-1', reply: '已理解需求。' }
+      return { conversationId: 'conv-1', reply: '已理解需求。', asks: [] }
     })
 
     const wrapper = await mountApp()
@@ -657,6 +704,7 @@ describe('AppV2 完整流程编排', () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
       reply: '已理解需求。',
+      asks: [],
     }))
     // 回填接口声称用户在对话里补了目标用户与一个 MVP 功能的价值
     vi.mocked(api.syncSummaryFromConversation).mockImplementation(async ({ summary }) => ({
@@ -751,6 +799,7 @@ describe('AppV2 完整流程编排', () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
       reply: '已理解需求。',
+      asks: [],
     }))
     vi.mocked(api.syncSummaryFromConversation).mockImplementation(async ({ summary }) => ({
       summary: { ...summary, platform: '命令行工具' },
@@ -777,11 +826,12 @@ describe('AppV2 完整流程编排', () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
       reply: '已理解需求。',
+      asks: [],
     }))
     mockJobStream({
       'api-docs': async (handlers) => {
         handlers.onChunk?.('# 接口文档\n')
-        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构' }
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构', asks: [] }
       },
     })
 
@@ -860,6 +910,7 @@ describe('AppV2 完整流程编排', () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
       reply: '已理解需求。',
+      asks: [],
     }))
 
     const wrapper = await mountApp()
@@ -984,7 +1035,7 @@ describe('AppV2 完整流程编排', () => {
         }),
       )
       handlers?.onChunk?.('续写')
-      return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n断线前的半句续写' }
+      return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n断线前的半句续写', asks: [] }
     })
 
     const wrapper = await mountExistingSolution({
@@ -1118,6 +1169,7 @@ describe('AppV2 完整流程编排', () => {
     vi.mocked(api.startConversationStream).mockImplementation(async () => ({
       conversationId: 'conv-1',
       reply: '已理解需求。',
+      asks: [],
     }))
 
     const wrapper = await mountApp()
@@ -1526,7 +1578,7 @@ describe('AppV2 入口模式', () => {
   it('从对话页「改需求」回到表单时，返回按钮改为回到对话', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
       handlers?.onChunk?.('已理解需求。')
-      return { conversationId: 'conv-1', reply: '已理解需求。' }
+      return { conversationId: 'conv-1', reply: '已理解需求。', asks: [] }
     })
 
     const wrapper = await mountApp()
@@ -1566,6 +1618,7 @@ describe('AppV2 分章节生成的阶段展示', () => {
     vi.mocked(api.startConversationStream).mockResolvedValue({
       conversationId: 'conv-1',
       reply: '已理解需求。',
+      asks: [],
     })
     // 用「手动放行」的 PRD 任务流替换默认实现，才能观察到生成过程中的中间态
     mockJobStream({
@@ -1573,7 +1626,7 @@ describe('AppV2 分章节生成的阶段展示', () => {
         state.handlers = handlers
         return new Promise<api.StreamResult>((resolve) => {
           state.finish = async (reply: string) => {
-            resolve({ conversationId: '', reply })
+            resolve({ conversationId: '', reply, asks: [] })
             await flushPromises()
           }
         })
@@ -1742,11 +1795,12 @@ describe('AppV2 分章节生成的阶段展示', () => {
     vi.mocked(api.startConversationStream).mockResolvedValue({
       conversationId: 'conv-1',
       reply: '已理解需求。',
+      asks: [],
     })
     mockJobStream({
       prd: async (handlers) => {
         handlers.onChunk?.('# 产品需求文档\n\n## 1. 项目背景\n内容')
-        return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容' }
+        return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容', asks: [] }
       },
     })
 
@@ -1798,7 +1852,7 @@ describe('AppV2 文档澄清', () => {
         ? '接口那边先确认分页'
         : '先问最关键的一个：分页上限取多少？'
       handlers?.onChunk?.(reply)
-      return { conversationId: `conv-${reply.slice(0, 2)}`, reply }
+      return { conversationId: `conv-${reply.slice(0, 2)}`, reply, asks: [] }
     })
   }
 
@@ -1874,7 +1928,7 @@ describe('AppV2 文档澄清', () => {
     mockJobStream({
       clarify: async (handlers) => {
         handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
-        return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条' }
+        return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条', asks: [] }
       },
     })
 
@@ -1897,7 +1951,11 @@ describe('AppV2 文档澄清', () => {
 
   it('接口文档的改写带 docKind: api-docs 并回到接口文档的审阅页（别写进 PRD）', async () => {
     mockJobStream({
-      clarify: async () => ({ conversationId: '', reply: '# 接口文档\n\n分页上限：50 条' }),
+      clarify: async () => ({
+        conversationId: '',
+        reply: '# 接口文档\n\n分页上限：50 条',
+        asks: [],
+      }),
     })
 
     const wrapper = await mountApiDocsReview()
@@ -1924,7 +1982,7 @@ describe('AppV2 文档澄清', () => {
       clarify: async (handlers) => {
         handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
         await gate
-        return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条' }
+        return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条', asks: [] }
       },
     })
 
@@ -2056,7 +2114,7 @@ describe('AppV2 对话页的子标签栏', () => {
         ? '接口那边先确认分页'
         : 'PRD 那边先确认分页'
       handlers?.onChunk?.(reply)
-      return { conversationId: `conv-${reply.slice(0, 2)}`, reply }
+      return { conversationId: `conv-${reply.slice(0, 2)}`, reply, asks: [] }
     })
   }
 

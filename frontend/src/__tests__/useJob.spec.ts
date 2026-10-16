@@ -106,7 +106,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
   vi.mocked(api.createJob).mockResolvedValue({ jobId: 12, status: 'running' })
-  vi.mocked(api.readJobStream).mockResolvedValue({ conversationId: '', reply: '' })
+  vi.mocked(api.readJobStream).mockResolvedValue({ conversationId: '', reply: '', asks: [] })
   vi.mocked(solutionApi.createSolution).mockResolvedValue({
     id: 1,
     title: '测试方案',
@@ -161,7 +161,7 @@ describe('useJob.start', () => {
       handlers?.onSnapshot?.(snap)
       handlers?.onChunk?.('增量')
       handlers?.onRunSummary?.(runSummary())
-      return { conversationId: '', reply: '# 正文\n增量' }
+      return { conversationId: '', reply: '# 正文\n增量', asks: [] }
     })
 
     const seen: string[] = []
@@ -191,7 +191,7 @@ describe('useJob.start', () => {
       seen.push(job.elapsedMs.value)
       handlers?.onRunSummary?.(runSummary({ durationMs: 45_000 }))
       seen.push(job.elapsedMs.value)
-      return { conversationId: '', reply: '' }
+      return { conversationId: '', reply: '', asks: [] }
     })
 
     await job.start('prd', { requirements: 'x' }, {})
@@ -205,7 +205,7 @@ describe('useJob.start', () => {
     const job = useJob()
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       handlers?.onRunSummary?.(runSummary({ durationMs: 9_000 }))
-      return { conversationId: '', reply: '' }
+      return { conversationId: '', reply: '', asks: [] }
     })
 
     await job.start('prd', { requirements: 'x' }, {})
@@ -215,7 +215,7 @@ describe('useJob.start', () => {
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       duringSecond.push(job.elapsedMs.value)
       handlers?.onSnapshot?.(snapshot({ elapsedMs: 1_000 }))
-      return { conversationId: '', reply: '' }
+      return { conversationId: '', reply: '', asks: [] }
     })
 
     await job.start('prd', { requirements: 'x' }, {})
@@ -229,7 +229,7 @@ describe('useJob.start', () => {
     const job = useJob()
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       handlers?.onRunSummary?.(runSummary({ durationMs: 1_000 }))
-      return { conversationId: '', reply: '' }
+      return { conversationId: '', reply: '', asks: [] }
     })
     await job.start('prd', { requirements: 'x' }, {})
     expect(job.runSummary.value).not.toBeNull()
@@ -238,7 +238,7 @@ describe('useJob.start', () => {
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       duringReconnect.push(job.runSummary.value)
       handlers?.onRunSummary?.(runSummary({ durationMs: 30_000, requestId: 'req-second' }))
-      return { conversationId: '', reply: '' }
+      return { conversationId: '', reply: '', asks: [] }
     })
 
     await job.reconnect(12, {})
@@ -279,7 +279,7 @@ describe('useJob.reconnect', () => {
     const snap = snapshot({ jobId: 5, status: 'running', liveBuffer: '半句' })
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       handlers?.onSnapshot?.(snap)
-      return { conversationId: '', reply: '半句续写' }
+      return { conversationId: '', reply: '半句续写', asks: [] }
     })
 
     const job = useJob()

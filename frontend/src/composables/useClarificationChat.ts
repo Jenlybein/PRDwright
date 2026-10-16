@@ -4,7 +4,14 @@ import { storeToRefs } from 'pinia'
 import { continueConversationStream, startConversationStream } from '@/services/api'
 import { isApiError } from '@/services/errors'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { ChatMessage, ChatStage, RequirementAnswers, RequirementsSummary } from '@/types'
+import type { StreamResult } from '@/services/api'
+import type {
+  ChatMessage,
+  ChatStage,
+  ClarificationAsk,
+  RequirementAnswers,
+  RequirementsSummary,
+} from '@/types'
 import { normalizeChatStage } from '@/utils/workflow'
 import { buildAnswers } from '@/utils/requirements'
 
@@ -148,9 +155,7 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
    *
    * @param request 实际发起请求的函数；接续对话需要在内部做重试，因此以闭包传入。
    */
-  async function runStream(
-    request: () => Promise<{ conversationId: string; reply: string }>,
-  ): Promise<void> {
+  async function runStream(request: () => Promise<StreamResult>): Promise<void> {
     // 两个状态各有各的读者：`streaming` 服务本线程的渲染，`chatStreaming` 是全局的
     // 「有请求在跑」，导航守卫（`store.busy`）靠它拦住跳转与切标签。
     streaming.value = true
@@ -159,21 +164,33 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     chatError.value = ''
 
     let reply = ''
+    // 这一轮提问附带的结构化选择题（后端从回复末尾的标记块剥出来的）
+    let asks: ClarificationAsk[] = []
     try {
       const result = await request()
       if (result.conversationId) conversationId.value = result.conversationId
       reply = result.reply
+      asks = result.asks
     } catch (error) {
       chatError.value = error instanceof Error ? error.message : String(error)
-      // 报错时把已经流出的半截内容保留下来
+      // 报错时把已经流出的半截内容保留下来；半截输出里没有可靠的选题，故 `asks` 留空
       reply = streamingContent.value
     } finally {
       // 先结束流式状态再固化消息，否则列表里会短暂多出一条「思考中」气泡
       streaming.value = false
       chatStreaming.value = false
       const content = reply.trim()
-      // 带上线程标记：这条消息属于哪条线程，靠它在共享的消息列表里分清归属
-      if (content) messages.value.push({ role: 'assistant', content, stage })
+      if (content) {
+        messages.value.push({
+          role: 'assistant',
+          content,
+          // 带上线程标记：这条消息属于哪条线程，靠它在共享的消息列表里分清归属
+          stage,
+          // ⚠️ 只在**有选项时**才带这个字段：几条既有用例按 `{role, content, stage}` 精确
+          // 断言消息对象，恒带一个空数组会把它们弄红，而那种红会让人误以为「不带也行」
+          ...(asks.length ? { asks } : {}),
+        })
+      }
       streamingContent.value = ''
     }
   }

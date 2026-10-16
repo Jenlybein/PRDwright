@@ -855,6 +855,11 @@ function handleStepClick(stepId: StepId): void {
 
         底栏动作随标签而变：需求澄清给「生成 PRD」，三条文档线程给「按澄清结果改写」。
       -->
+      <!--
+        澄清对话页。`@answer` 是结构化选择题的提交出口：选项卡攒出来的回答也走
+        **同一条发送链路**（带 stage、进本线程历史、`chatStreaming` 期间禁止再发）——
+        它就是一封普通的用户消息，分两条通道只会多出一处要同步的守卫。
+      -->
       <ChatStage
         v-else-if="viewState === 'chatting'"
         :messages="activeChat.displayMessages"
@@ -871,6 +876,7 @@ function handleStepClick(stepId: StepId): void {
         @edit-requirements="goTo('form')"
         @restart="handleRestart"
         @send="activeChat.sendMessage"
+        @answer="activeChat.sendMessage"
         @generate-prd="handleGeneratePrd"
         @rewrite="applyClarification"
       />

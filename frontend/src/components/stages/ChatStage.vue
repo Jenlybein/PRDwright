@@ -54,6 +54,13 @@ const emit = defineEmits<{
   restart: []
   /** 发送一条消息 */
   send: [content: string]
+  /**
+   * 用户在结构化选择题上提交了回答。
+   *
+   * 与 `send` 分开而不是复用：一个是「用户自己敲的」，一个是「点选项攒出来的」，
+   * 上层要分别处理（后者不该把文本回填进输入框）。载荷同样是**一条可直接发送的消息文本**。
+   */
+  answer: [text: string]
   /** 点击「生成 PRD」 */
   generatePrd: []
   /** 点击「按澄清结果改写」（三条文档线程的主操作） */
@@ -143,7 +150,7 @@ watch(
 
       <!-- 消息区：内部滚动。输入框移出后，这里就是一个纯粹的滚动容器 -->
       <div class="flex h-[min(60vh,560px)] flex-col bg-surface-2">
-        <MessageList :messages="messages" />
+        <MessageList :messages="messages" @answer="emit('answer', $event)" />
       </div>
     </div>
 

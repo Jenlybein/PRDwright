@@ -77,7 +77,7 @@ describe('会话失效后的降级重试', () => {
     vi.mocked(continueConversationStream)
       .mockRejectedValueOnce(new ApiError('随便写点什么', 'SESSION_NOT_FOUND'))
       // 无状态模式：后端不下发新的会话 ID
-      .mockResolvedValueOnce({ conversationId: '', reply: '重试后的回复' })
+      .mockResolvedValueOnce({ conversationId: '', reply: '重试后的回复', asks: [] })
 
     await chat.sendMessage('继续聊')
 
@@ -126,7 +126,7 @@ describe('会话失效后的降级重试', () => {
 
     vi.mocked(continueConversationStream)
       .mockRejectedValueOnce(new ApiError('随便写点什么', 'SESSION_NOT_FOUND'))
-      .mockResolvedValueOnce({ conversationId: '', reply: '好的' })
+      .mockResolvedValueOnce({ conversationId: '', reply: '好的', asks: [] })
 
     await chat.sendMessage('继续聊')
 
@@ -150,6 +150,7 @@ describe('四条线程互不串线', () => {
     vi.mocked(startConversationStream).mockResolvedValue({
       conversationId: 'conv-new',
       reply: '第一轮追问',
+      asks: [],
     })
 
     await chat.startConversationWithAnswers({ product_name: 'X' }, '正在生成回复')
@@ -174,6 +175,7 @@ describe('四条线程互不串线', () => {
     vi.mocked(startConversationStream).mockResolvedValue({
       conversationId: 'conv-doc',
       reply: '我们逐条来看',
+      asks: [],
     })
 
     await chat.startConversationWithAnswers({ document: '正文' }, '正在梳理')
@@ -198,6 +200,7 @@ describe('四条线程互不串线', () => {
     vi.mocked(continueConversationStream).mockResolvedValue({
       conversationId: '',
       reply: '好',
+      asks: [],
     })
 
     await chat.sendMessage('继续聊需求')
@@ -240,5 +243,64 @@ describe('四条线程互不串线', () => {
     // 关键：另一条线程完全不受影响——用全局 `chatStreaming` 判据的话，这里会多出一条空气泡
     expect(prd.streaming.value).toBe(false)
     expect(prd.displayMessages.value.map((message) => message.content)).toEqual(['PRD 那边的问题'])
+  })
+})
+
+describe('结构化选择题随助手消息固化', () => {
+  const ASKS = [
+    {
+      id: 'ask-1',
+      question: '第一版要不要做离线同步？',
+      background: '你提到用户常在弱网环境使用。',
+      multiple: false,
+      options: [
+        { label: 'A', text: '第一版就做离线同步' },
+        { label: 'B', text: '第一版只做在线' },
+      ],
+    },
+  ]
+
+  it('后端下发的选项挂到那条助手消息上，供消息列表渲染卡片', async () => {
+    const store = useWorkflowStore()
+    vi.mocked(startConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '你更倾向哪种做法？',
+      asks: ASKS,
+    })
+
+    await makeChat('requirement').startConversationWithAnswers({ product_name: 'X' })
+
+    const last = store.messages[store.messages.length - 1]
+    expect(last?.asks).toEqual(ASKS)
+    expect(last?.content).toBe('你更倾向哪种做法？')
+  })
+
+  it('没有选项时消息**不带**这个字段（既不渲染卡片，也不弄脏消息形状）', async () => {
+    const store = useWorkflowStore()
+    vi.mocked(startConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '信息已经足够，可以点击生成 PRD',
+      asks: [],
+    })
+
+    await makeChat('requirement').startConversationWithAnswers({ product_name: 'X' })
+
+    const last = store.messages[store.messages.length - 1]
+    expect(last).not.toHaveProperty('asks')
+  })
+
+  it('选项只跟着本线程：另一条线程的 displayMessages 里不会冒出卡片', async () => {
+    vi.mocked(startConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '你更倾向哪种做法？',
+      asks: ASKS,
+    })
+
+    const requirement = makeChat('requirement')
+    const prd = makeDocChat('prd-clarify')
+    await requirement.startConversationWithAnswers({ product_name: 'X' })
+
+    expect(requirement.displayMessages.value.some((message) => message.asks?.length)).toBe(true)
+    expect(prd.displayMessages.value).toEqual([])
   })
 })

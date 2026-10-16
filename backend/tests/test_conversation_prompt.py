@@ -95,6 +95,33 @@ def test_opening_forbids_dumping_the_whole_question_list() -> None:
         assert "不要把所有" in profile.opening
 
 
+def test_ask_spec_lives_in_the_shared_rule_and_reaches_every_profile() -> None:
+    """结构化选择题的规格写在**共享提问规则**里，因此每个澄清档案都带它。
+
+    写进共享规则（而不是某个 opening）有一个硬理由：`system_prompt` **每轮都在**、
+    opening 只在首轮，而这个块是「每轮提问都要产出」的。谁把它挪进某个档案，这条会红。
+    """
+    from backend.services.clarification_ask import ASK_BEGIN_SENTINEL, render_ask_spec
+
+    assert render_ask_spec() in CLARIFICATION_QUESTION_RULE
+    assert ASK_BEGIN_SENTINEL in CLARIFICATION_QUESTION_RULE
+    for key, profile in CONVERSATION_PROFILES.items():
+        assert ASK_BEGIN_SENTINEL in profile.system_prompt, key
+
+
+def test_ask_spec_goes_into_the_persona_not_the_opening() -> None:
+    """规格只能进人设，**不能**进开场白。
+
+    放错地方的表现很隐蔽：首轮有选项卡、之后每一轮退回纯文本——用户会以为功能坏了，
+    而日志里什么都看不到。这条与上一条一正一反地钉住落点。
+    """
+    from backend.services.clarification_ask import ASK_BEGIN_SENTINEL
+
+    for key, profile in CONVERSATION_PROFILES.items():
+        assert ASK_BEGIN_SENTINEL in profile.system_prompt, key
+        assert ASK_BEGIN_SENTINEL not in profile.opening, key
+
+
 def test_questions_must_come_with_a_reference_frame() -> None:
     """提问必须带引导：先给「可判断的参照」，再让用户取舍。
 

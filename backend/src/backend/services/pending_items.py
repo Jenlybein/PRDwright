@@ -23,10 +23,6 @@ logger = logging.getLogger(__name__)
 # 标记块哨兵：用 HTML 注释包裹，渲染时不可见。
 BEGIN_SENTINEL = "<!-- PENDING:BEGIN -->"
 END_SENTINEL = "<!-- PENDING:END -->"
-# 流式抑制时，块外态最多尾留的「可能被切断的哨兵前缀」长度（取两个哨兵的较大者 - 1）。
-# 只留 len-1 是因为：任何大于等于哨兵长度的串都可能是完整哨兵，必须全留进下一轮判断；
-# 小于它的部分绝不可能是完整哨兵，可以放心输出。
-_CARRY_LEN = max(len(BEGIN_SENTINEL), len(END_SENTINEL)) - 1
 
 # 清单项允许从模型输出里保留的字段（其余一律丢弃；尤其是不信任模型给的 `id`）。
 _ITEM_FIELDS = ("question", "sections", "decider", "importance")
@@ -185,7 +181,7 @@ def extract(
     # 移除块体后可能留下成片空行：压缩到连续两个换行以内并裁掉首尾空白，
     # 让落库正文与 `part` 预览视觉一致（不影响语义）。
     clean = "\n".join(line for line in re.split(r"\n{3,}", clean.strip()) if line.strip() or True)
-    clean = _collapse_blank_lines(clean)
+    clean = collapse_blank_lines(clean)
     return clean, items
 
 
@@ -211,13 +207,17 @@ def _parse_items(raw: str) -> list[dict[str, Any]] | None:
     return result
 
 
-def _collapse_blank_lines(text: str) -> str:
-    """把 3 个及以上连续换行压缩成 2 个，并裁掉首尾空白。"""
+def collapse_blank_lines(text: str) -> str:
+    """把 3 个及以上连续换行压缩成 2 个，并裁掉首尾空白。
+
+    剥离标记块后往往留下成片空行；压缩一下让落库正文与预览视觉一致（不影响语义）。
+    澄清提问那套（`clarification_ask`）也用同一件——两处各写一份迟早在阈值上漂移。
+    """
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 class PendingBlockSuppressor:
-    """有状态、逐 chunk 的标记块抑制器。
+    """有状态、逐 chunk 的**哨兵标记块**抑制器。
 
     模型是流式输出的，标记块可能被任意切成多段。本类保证：**即使抑制逻辑本身有漏，
     前端也永远看不到哨兵与块体**——而因为这些哨兵是 HTML 注释，即便漏出去在 Markdown
@@ -226,15 +226,28 @@ class PendingBlockSuppressor:
     状态机：
 
     - **块外（OUT）**：扫描起始哨兵；哨兵前的文本原样输出，哨兵之后的内容进入块内态并丢弃。
-      若本 chunk 内没找到完整起始哨兵，则尾留至多 `_CARRY_LEN` 个字符作为
+      若本 chunk 内没找到完整起始哨兵，则尾留至多 `carry_len` 个字符作为
       「可能被切断的哨兵前缀」，供下一轮判断。
     - **块内（IN）**：扫描结束哨兵；块内所有内容（含结束哨兵）丢弃，结束哨兵之后的文本回到 OUT 态输出。
     - **流结束仍在块内**：缓冲的块体**不输出**（不能把半截 JSON 当正文）。
+
+    **哨兵由构造参数给出**（默认即待确认清单那一对），因此澄清提问的标记块
+    （`clarification_ask.ASK_*`）也用它，不必再写一份。这段状态机的全部难度在
+    「哨兵被切在 chunk 边界」，复制一份等于把这个坑复制一份。
+
+    ⚠️ 名字里的 `Pending` 只是它的出身（先为待确认清单而写）：**类本身与块内是什么无关**。
+    不为此搬家改名——那要把既有测试的 import 全改一遍，换来的只是名字好看一点。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, begin: str = BEGIN_SENTINEL, end: str = END_SENTINEL) -> None:
+        self._begin = begin
+        self._end = end
+        # 块外态最多尾留的「可能被切断的哨兵前缀」长度（取两个哨兵的较大者 - 1）。
+        # 只留 len-1 是因为：任何大于等于哨兵长度的串都可能是完整哨兵，必须全留进下一轮判断；
+        # 小于它的部分绝不可能是完整哨兵，可以放心输出。
+        self._carry_len = max(len(begin), len(end)) - 1
         self._in_block = False
-        # 块外态下「可能被截断的哨兵前缀」，至多 _CARRY_LEN 个字符。
+        # 块外态下「可能被截断的哨兵前缀」，至多 `carry_len` 个字符。
         self._carry = ""
 
     def feed(self, chunk: str) -> str:
@@ -248,29 +261,29 @@ class PendingBlockSuppressor:
         return self._emit_out(data)
 
     def _emit_out(self, data: str) -> str:
-        idx = data.find(BEGIN_SENTINEL)
+        idx = data.find(self._begin)
         if idx == -1:
-            if len(data) > _CARRY_LEN:
-                self._carry = data[-_CARRY_LEN:]
-                return data[: -_CARRY_LEN]
+            if len(data) > self._carry_len:
+                self._carry = data[-self._carry_len:]
+                return data[: -self._carry_len]
             self._carry = data
             return ""
         before = data[:idx]
         self._in_block = True
-        rest = data[idx + len(BEGIN_SENTINEL):]
+        rest = data[idx + len(self._begin):]
         return before + self._emit_in(rest)
 
     def _emit_in(self, data: str) -> str:
-        idx = data.find(END_SENTINEL)
+        idx = data.find(self._end)
         if idx == -1:
             # 仍在块内：**整段块体内容丢弃**，只暂存末尾可能截断的结束哨兵前缀。
             # 这里绝不能把块体当正文输出——那会把半截 JSON 暴露成「正文」。
-            if len(data) > _CARRY_LEN:
-                self._carry = data[-_CARRY_LEN:]
+            if len(data) > self._carry_len:
+                self._carry = data[-self._carry_len:]
                 return ""
             self._carry = data
             return ""
-        after = data[idx + len(END_SENTINEL):]
+        after = data[idx + len(self._end):]
         self._in_block = False
         self._carry = ""
         return self._emit_out(after)
@@ -278,7 +291,7 @@ class PendingBlockSuppressor:
     def flush(self) -> str:
         """流结束时的收尾。
 
-        - OUT 态：把末尾的「可能前缀」原样输出（它不可能是完整哨兵，最多 _CARRY_LEN 字符）。
+        - OUT 态：把末尾的「可能前缀」原样输出（它不可能是完整哨兵，最多 `carry_len` 字符）。
         - IN 态：块体尚未闭合，**不输出**（半截 JSON 不能当正文）。
         """
         if self._in_block:

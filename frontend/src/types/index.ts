@@ -54,6 +54,33 @@ export const CHAT_STAGE_LABELS: Record<ChatStage, string> = {
 }
 
 /** 聊天消息，角色取值与后端 conversation_service 的 FrontendMessage 一致 */
+/** 结构化选择题里的一个选项。`label`（A/B/C…）由后端分配，卡片上只显示 `text` */
+export interface ClarificationAskOption {
+  /** 选项标号，形如 `A` */
+  label: string
+  /** 选项的一句话标题（正文里另有逐条解释，卡片不重复） */
+  text: string
+}
+
+/**
+ * 澄清对话里「一次提问」的结构化形式。
+ *
+ * 模型按提示词的约定在回复末尾附一个标记块，后端把它剥出来、随 SSE 的 `done` 下发
+ * （见 `services/clarification_ask.py`）。有它就把选项渲染成可点的卡片；
+ * **没有它就是普通文本提问——没产块是常态，不是异常**。
+ */
+export interface ClarificationAsk {
+  /** 由后端分配的 id，渲染 key 用 */
+  id: string
+  /** 题干；一轮问了两个问题时用它做分组标题 */
+  question: string
+  /** 一句背景（为什么问）；可为空串 */
+  background: string
+  /** 是否多选 */
+  multiple: boolean
+  options: ClarificationAskOption[]
+}
+
 export interface ChatMessage {
   /** 消息角色；`system` 消息不展示在聊天界面里 */
   role: 'system' | 'user' | 'assistant'
@@ -65,6 +92,17 @@ export interface ChatMessage {
    * 属于哪一轮澄清；**缺省视为 `requirement`**，旧快照（没有这个字段）因此照样可用。
    */
   stage?: ChatStage
+  /**
+   * 这条助手消息附带的**结构化选择题**；没有就**不带这个字段**（而不是空数组）。
+   *
+   * 挂在消息上而不是另开一个快照字段：消息经 `parseSessionSnapshot` 是整对象展开的，
+   * 未知字段会原样留下，所以刷新恢复天然带着它；而给 `SessionDataV2` 加顶层字段要同步
+   * 四处快照逻辑，还得改契约测试的字段清单。
+   *
+   * ⚠️ 「没有时省略」是有意的：几条既有用例按 `toEqual({role, content, stage})` 精确断言
+   * 消息对象，多一个 `asks: []` 就会把它们弄红——而那种红会让人误以为「不带选项也行」。
+   */
+  asks?: ClarificationAsk[]
 }
 
 /**

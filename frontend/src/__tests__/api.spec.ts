@@ -639,3 +639,97 @@ describe('生成任务接口（jobs）', () => {
     expect(jobs[0]).toMatchObject({ id: 7, kind: 'api_docs', status: 'running' })
   })
 })
+
+describe('结构化选择题的解析（done 事件的 clarification_asks）', () => {
+  /**
+   * 用一帧 `done` 跑完解析并返回结果。
+   *
+   * 解析器是各流式入口共用的，这里借用现成的 job 流入口覆盖它，不必再搭一套会话流。
+   * ⚠️ SSE 帧的形状是 `{type, content, data}`——载荷在**内层** `data` 里，
+   * 放外层会被静默忽略（表现为「什么都没解析出来」）。
+   */
+  async function readDone(payload: Record<string, unknown>) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => streamResponse([sseFrame('done', { type: 'done', content: '', data: payload })])),
+    )
+    return readJobStream(1)
+  }
+
+  it('把结构化块解析成带标号的题目', async () => {
+    const result = await readDone({
+      job_id: 1,
+      status: 'completed',
+      reply: '你更倾向哪种？',
+      clarification_asks: [
+        {
+          id: 'ask-1',
+          question: '第一版要不要做离线同步？',
+          background: '你提到用户常在弱网环境使用。',
+          multiple: false,
+          options: [
+            { label: 'A', text: '第一版就做离线同步' },
+            { label: 'B', text: '第一版只做在线' },
+          ],
+        },
+      ],
+    })
+
+    expect(result.reply).toBe('你更倾向哪种？')
+    expect(result.asks).toEqual([
+      {
+        id: 'ask-1',
+        question: '第一版要不要做离线同步？',
+        background: '你提到用户常在弱网环境使用。',
+        multiple: false,
+        options: [
+          { label: 'A', text: '第一版就做离线同步' },
+          { label: 'B', text: '第一版只做在线' },
+        ],
+      },
+    ])
+  })
+
+  it('没有这个键时给空数组（生成线本来就不带它，不该因此报错）', async () => {
+    const result = await readDone({ job_id: 1, status: 'completed', reply: '正文' })
+
+    expect(result.asks).toEqual([])
+    expect(result.reply).toBe('正文')
+  })
+
+  it('逐项丢弃坏数据：缺题目、选项不足、选项没有文字', async () => {
+    const result = await readDone({
+      job_id: 1,
+      status: 'completed',
+      reply: '正文',
+      clarification_asks: [
+        { question: '   ', options: [{ text: '甲' }, { text: '乙' }] },
+        { question: '只有一个选项', options: [{ text: '甲' }] },
+        { question: '选项没有文字', options: [{ text: '  ' }, { text: 42 }] },
+        '不是对象',
+        { question: '这道是好的', options: [{ text: '甲' }, { text: '乙' }] },
+      ],
+    })
+
+    expect(result.asks.map((item) => item.question)).toEqual(['这道是好的'])
+  })
+
+  it('后端没给标号时按顺序补 A/B，且 multiple 只认真正的布尔真', async () => {
+    const result = await readDone({
+      job_id: 1,
+      status: 'completed',
+      reply: '正文',
+      clarification_asks: [
+        {
+          question: '缺标号',
+          multiple: 'true',
+          options: [{ text: '甲' }, { text: '乙' }],
+        },
+      ],
+    })
+
+    expect(result.asks[0]?.options.map((option) => option.label)).toEqual(['A', 'B'])
+    // 字符串形式的 "true" 不能把单选题渲染成多选
+    expect(result.asks[0]?.multiple).toBe(false)
+  })
+})
