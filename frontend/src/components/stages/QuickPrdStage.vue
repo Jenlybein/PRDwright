@@ -5,7 +5,7 @@ import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 
 /**
- * PRD 快捷入口的录入页。
+ * 快捷流程入口的录入页。
  *
  * 只有两个字段：产品名称（可选）与一段话描述（必填）。刻意不做任何格式要求——
  * 用户在文本框里怎么写都行，剩下的结构化工作由后端的技能包与写作规范承担；

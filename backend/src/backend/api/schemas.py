@@ -471,6 +471,13 @@ class JobCreateRequest(BaseModel):
     )
     # --- api_docs / prompts ---
     prd_content: str = Field(default="", description="PRD 正文（接口文档 / 提示词生成输入）")
+    api_docs_content: str = Field(
+        default="",
+        description=(
+            "接口文档正文（仅 `prompts` 可选）。给「我有 PRD + 接口文档」入口用：这两份材料都在"
+            "手上时，提示词可以同时参考它们。留空表示没有这份材料，生成按「只有 PRD」处理。"
+        ),
+    )
     # --- optimize / clarify ---
     document: str = Field(default="", description="待优化的原文档正文")
     instruction: str = Field(default="", description="用户的优化要求（仅 optimize）")

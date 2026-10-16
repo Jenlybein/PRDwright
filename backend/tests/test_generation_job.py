@@ -448,6 +448,29 @@ def test_create_job_validates_required_input_by_kind(client):
         assert response.json()["code"] == "INVALID_REQUEST"
 
 
+def test_create_prompts_job_accepts_optional_api_docs(client, monkeypatch):
+    """`api_docs_content` 是**可选**入参：带上它不该被门口挡掉。
+
+    「我有 PRD + 接口文档」入口比「我有 PRD」多带一份材料，两者走的是同一个 `prompts`
+    任务类型。这里只守「带上了也能建任务」这一件事——材料怎么走到模型面前由
+    `test_prompts_input.py` 单独覆盖。
+    """
+    register(client)
+    _fake_service(monkeypatch, ScriptedLLM(["# 提示词套件"]))
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "kind": "prompts",
+            "prd_content": "# PRD 正文",
+            "api_docs_content": "# 接口文档正文",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["job_id"] > 0
+
+
 def test_get_job_status(client):
     """GET /api/jobs/{id} 返回状态摘要，且不含 draft_content。"""
     register(client)

@@ -59,6 +59,7 @@ from backend.services.prd_skill import (
 from backend.services.prompts import (
     API_DOCS_GENERATION_PROMPT,
     CLARIFICATION_REWRITE_PROMPT,
+    NO_API_DOCS_NOTE,
     OPTIMIZE_DOCUMENT_PROMPT_TEMPLATE,
     PRD_GENERATION_PROMPT,
     PRD_SKILL_GENERATION_PROMPT,
@@ -613,15 +614,20 @@ class DocumentService:
     async def generate_prompts_stream(
         self,
         prd_content: str,
+        api_docs_content: str = "",
     ) -> AsyncIterator[StreamEvent]:
-        """根据 PRD 正文生成提示词套件。
+        """根据 PRD 正文（可附带接口文档正文）生成提示词套件。
 
         产出要求（提示词套件的结构与写法）由 `prompts-generator` 技能包提供，生成时作为
-        用户消息模板使用（含 `{prd_content}` 占位符）；技能包缺失时退回 `prompts.py` 里的
-        内置兜底模板，保证服务不中断。
+        用户消息模板使用（含 `{prd_content}` / `{api_docs_content}` / `{pending_spec}`
+        占位符）；技能包缺失时退回 `prompts.py` 里的内置兜底模板，保证服务不中断。
 
         Args:
             prd_content: PRD 正文（Markdown）。
+            api_docs_content: 接口文档正文，**可选**。给「我有 PRD + 接口文档」入口用：
+                两份材料都在手上时，提示词可以同时参考。留空（默认）表示没有这份材料，
+                此时模板里那一节填 `NO_API_DOCS_NOTE`——写成「本次未提供」而不是留空，
+                免得模型把「空的一节」理解成「漏读了」，转头自己编一份接口契约出来。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（提示词套件正文）。
@@ -636,7 +642,11 @@ class DocumentService:
             guide = PROMPTS_GENERATION_PROMPT
         # 待确认清单块同样注入：提示词套件也是一份「生成的第一类产物」，与
         # PRD / 接口文档一致地把清单剥离进 `done.data.pending_items`。
-        user_content = guide.format(prd_content=prd_content, pending_spec=render_spec())
+        user_content = guide.format(
+            prd_content=prd_content,
+            api_docs_content=api_docs_content.strip() or NO_API_DOCS_NOTE,
+            pending_spec=render_spec(),
+        )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
         # 实时 chunk 先过抑制器（块被切在 chunk 边界时只漏安全前缀），`done` 时
         # 对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
@@ -829,9 +839,16 @@ async def sync_summary_from_conversation(
 
 async def generate_prompts_stream(
     prd_content: str,
+    api_docs_content: str = "",
 ) -> AsyncIterator[StreamEvent]:
-    """生成提示词套件的流式入口。"""
-    async for event in get_service().generate_prompts_stream(prd_content=prd_content):
+    """生成提示词套件的流式入口。
+
+    `api_docs_content` 可选：老的 `/generate-prompts-stream` 通道不传，按「只有 PRD」处理。
+    """
+    async for event in get_service().generate_prompts_stream(
+        prd_content=prd_content,
+        api_docs_content=api_docs_content,
+    ):
         yield event
 
 

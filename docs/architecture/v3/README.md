@@ -100,7 +100,7 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 澄清对话存哪 | 四条线程（需求 / PRD / 接口 / 提示词）共用**同一个 `messages` 数组**（`ChatMessage.stage`），对话页只渲染当前标签那一条。`chatTab` 存**用户意图**、`activeChatTab` 是实际显示的那条——文档未生成时归落到第一条可用线程，但意图**不回写**（ADR-027 / 028） | `stores/workflow.ts` + `SessionDataV2` |
 | 各线程的会话 id | 每条线程在后端**各有一条会话**，id 按线程存在 `conversationIds`（`Record<ChatStage, string>`）；`stage` 旧值 `'document'` 归一为 `'prd-clarify'`，过期快照按 `clarifyTarget` 把 `clarifyMessages` / `clarifyConversationId` 重分发进四条线程 | `utils/workflow.ts::normalizeSessionSnapshot` |
 | 澄清阶段怎么摆 | 四条线程都在 `chatting` 阶段里，用子标签栏常驻展示（`ui/ChatThreadTabs.vue`，未就绪的置灰并给理由）——**`clarifying` 这个状态已删除**。步骤归属**按当前线程现算**，否则澄清接口文档时进度条会跳回 PRD 那格 | `utils/workflow.ts` + `stores/workflow.ts` |
-| 澄清入口放哪 | 三份文档的审阅页共用**同一个入口**「和 AI 确认剩下的 N 个问题」，落点都是对话页对应的子标签、都在**底栏次操作组**；与「返回」落点相同时它**顶替**「返回」（并列会出现两个都通向对话页的名字近似的按钮），落点不同时（PRD 快捷 / 提示词调试没有需求对话）由 `keepBackButton` 让两者并存；只在真有待确认项时出现 | `components/stages/ReviewStage.vue` |
+| 澄清入口放哪 | 三份文档的审阅页共用**同一个入口**「和 AI 确认剩下的 N 个问题」，落点都是对话页对应的子标签、都在**底栏次操作组**；与「返回」落点相同时它**顶替**「返回」（并列会出现两个都通向对话页的名字近似的按钮），落点不同时（快捷流程 / 两个导入入口没有需求对话）由 `keepBackButton` 让两者并存；只在真有待确认项时出现 | `components/stages/ReviewStage.vue` |
 | 线程怎么作废 | 整篇重生成一份产物时，作废**它自己与下游**的线程（PRD → 三份，接口 → 接口 + 提示词，提示词 → 自己）；**就地改写不作废**。旧线程聊的是上一版的清单，留着会把结论写进新文档 | `composables/useDocumentPipeline.ts::dropThreadsFor` + `stores/workflow.ts::dropChatThread` |
 | 会话回收 | **单点登录**：新登录在一条事务里「先删后插」吊销该用户全部旧会话（ADR-024），零 schema 变更、中间件零改动 | `repositories/auth_repo.py::replace_for_user` |
 | 未填题目怎么交代 | 已答项之后汇总一行「以下题目用户未填写：…」——否则模型分不清「问过但留空」与「没这道题」 | `conversation_service.format_form_data` |
@@ -127,3 +127,19 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 怎么删某一版 | 每条**历史**版本自带「删除」，**二次确认**（先展开「删除这一版？」再确认）。**当前版本不给删**——它是这份文档正在用的正文，换版本请用「恢复」（追加而非删除）；后端回 400 `INVALID_REQUEST` 并在 `detail` 里说明。守卫写在仓储 SQL 的 `WHERE` 里（`v.id != d.current_version_id`），不是「先查后删」 | `repositories/document_repo.py::delete_version` + `api/documents.py` |
 | 删除后要不要重拉当前文档 | **不要**。删的是历史、当前正文一点没变，只重拉版本列表；多拉一次当前文档只会平白闪一下编辑器（与「存为新版本 / 恢复」相反——那两者改变当前版本，必须重拉） | `stores/documentVersions.ts::remove` |
 | 本版不做什么 | **两版 diff**（差异渲染）不做——版本链落地后它不再是「依赖未完成」，但「回看 + 恢复」已经能回答用户的问题 | `ARCHITECTURE.md` §2 本期不做 |
+
+## 入口页与四条入口落地点（2026-10-16）
+
+入口从「三张平铺卡片」改成「两组四叶子」，并把缺的第四条补成真流程（ADR-031）：
+
+| 议题 | 落定做法 | 位置 |
+| --- | --- | --- |
+| 为什么分两组 | 分组的两轴是**起点**而不是功能：`从零创建 PRD`（自己把需求说清楚）与 `导入已有素材`（材料已经有了）。先答「我属于哪种情况」比先答「我要哪个功能」快；而**四个叶子仍同屏可见**——分组加的是语义层级，不是多一屏要点的关卡 | `components/stages/EntryStage.vue` + `ADR-031` |
+| 四个叶子各自是什么 | `完整流程`（`structured`，表单 + 对话 + 摘要 Diff + 三份文档）、`快捷流程`（`prd-quick`，一段话 → PRD）、`我有 PRD`（`prompt-debug`，贴 PRD → 提示词套件）、`我有 PRD + 接口文档`（`prd-and-api-paste`，贴两份 → 提示词套件） | `types/index.ts::EntryMode` |
+| 模式影响什么 | 只有三件事：输入从哪来、进度条显示哪几步（`MODE_STEP_IDS`）、「完成」需要哪几份文档（`REQUIRED_DOCS`）。两个导入入口的产物都只有提示词，因此那两项各多一行**同值**数据 | `utils/workflow.ts` |
+| 第二份材料怎么进模型 | `JobCreateRequest` 新增**可选** `api_docs_content` → `job_service` 的 `prompts` 分支透传 → `generate_prompts_stream` 多收一个参数 → 模板里的 `{api_docs_content}`。留空时填 `NO_API_DOCS_NOTE`（一句「本次未提供」），**不是留空**——那一节在模板里始终存在，留空会让模型以为漏读了、转头自己编一份接口契约 | `api/schemas.py` + `services/document_service.py` + `services/prompts.py` |
+| 模板放哪（两份必须同步） | 技能包版 `skills/prompts-generator/references/prompts-guide.md`（首选，`skill.yaml` 里 `inputs.optional` 同步声明）与 `prompts.py::PROMPTS_GENERATION_PROMPT`（兜底）。两份的**占位符集合是一份跨文件契约**：少一个不是「那一节空着」而是 `KeyError` | `skills/prompts-generator/**` + `services/prompts.py` |
+| 贴进去的材料会变成产物吗 | **不会**。两个导入入口的粘贴内容只作为本次生成的输入存在，不写 `documents`——那是「本工具生成的产物」的位置，混进去会让进度、完成条件与下载列表全部失真 | `composables/useDocumentPipeline.ts::handleGeneratePromptsFromPair` |
+| 键名与文案不一致怎么办 | `prompt-debug` 这个名字**不改**（快照里存着它，改名要配一套兼容旧值的解析），对外说法改为「我有 PRD」；不一致由该类型的 docstring 与 ADR-031 备查 | `types/index.ts::EntryMode` |
+| 两份材料存哪 | 分开存（`pastePairInput`），**不共用** `debugPrdText`：两条入口是两个页面各自的草稿，合用一个字段会让「在这页贴了、退回入口、又从另一页进去」看到上一页的内容 | `stores/workflow.ts` + `SessionDataV2` |
+| 校验口径 | **不对称且明写**：PRD 必填（空则主操作禁用 + 缺失提示常驻在字段下方），接口文档选填，页面上直说「留空即按『只有 PRD』生成，与上一条入口效果一致」——不让用户猜那个框能不能空着 | `components/stages/PastePairStage.vue` |

@@ -91,6 +91,7 @@ describe('useWorkflowStore', () => {
       conversationIds: emptyConversationIds(),
       quickInput: { productName: '', requirements: '' },
       debugPrdText: '',
+      pastePairInput: { prd: '', apiDocs: '' },
       activeJobId: null,
       activeJobKind: null,
     })
@@ -112,6 +113,7 @@ describe('useWorkflowStore', () => {
       conversationIds: emptyConversationIds(),
       quickInput: { productName: '', requirements: '' },
       debugPrdText: '# 恢复的 PRD',
+      pastePairInput: { prd: '', apiDocs: '' },
       activeJobId: null,
       activeJobKind: null,
     })
@@ -153,6 +155,7 @@ describe('useWorkflowStore', () => {
       conversationIds: { ...emptyConversationIds(), requirement: 'conv-1' },
       quickInput: { productName: '小账本', requirements: '记账' },
       debugPrdText: '# 贴进来的 PRD',
+      pastePairInput: { prd: '', apiDocs: '' },
       activeJobId: null,
       activeJobKind: null,
     })
@@ -224,6 +227,7 @@ describe('useWorkflowStore', () => {
         conversationIds: undefined as never,
         quickInput: { productName: '', requirements: '' },
         debugPrdText: '',
+        pastePairInput: { prd: '', apiDocs: '' },
         activeJobId: null,
         activeJobKind: null,
       },
@@ -288,12 +292,14 @@ describe('useWorkflowStore', () => {
     expect(store.hasContent).toBe(true)
   })
 
-  it('hasContent 覆盖三处录入字段（产物正文不再算「有内容」）', () => {
+  it('hasContent 覆盖四处录入字段（产物正文不再算「有内容」）', () => {
     type Store = ReturnType<typeof useWorkflowStore>
     const cases: Array<[string, (s: Store) => void]> = [
       ['快捷入口产品名', (s) => (s.quickInput.productName = '小账本')],
       ['快捷入口需求描述', (s) => (s.quickInput.requirements = '记账')],
       ['调试入口贴入的 PRD', (s) => (s.debugPrdText = '# PRD')],
+      ['双粘贴入口的 PRD', (s) => (s.pastePairInput.prd = '# PRD')],
+      ['双粘贴入口的接口文档', (s) => (s.pastePairInput.apiDocs = '# 接口文档')],
       ['结构化摘要', (s) => (s.summary = { product_name: 'X' } as never)],
     ]
 
@@ -353,6 +359,23 @@ describe('useWorkflowStore', () => {
     expect(store.chooseEntry('prompt-debug')).toBe(true)
     expect(store.viewState).toBe('prompt-debug')
     expect(store.steps.map((step) => step.id)).toEqual(['review-prompts'])
+
+    // 第四条入口：落在自己的录入页，进度条口径与「我有 PRD」一致
+    expect(store.chooseEntry('prd-and-api-paste')).toBe(true)
+    expect(store.viewState).toBe('prd-and-api-paste')
+    expect(store.steps.map((step) => step.id)).toEqual(['review-prompts'])
+  })
+
+  it('双粘贴入口只需提示词就能完成（自带的两份材料不算产物）', () => {
+    const store = useWorkflowStore()
+    store.chooseEntry('prd-and-api-paste')
+
+    // 两份材料还躺在录入页里，不算「已产出」
+    setDocuments({})
+    expect(store.requiredDocsReady).toBe(false)
+
+    setDocuments({ prompts: '# 提示词套件' })
+    expect(store.requiredDocsReady).toBe(true)
   })
 
   it('请求进行中不允许切换入口', () => {

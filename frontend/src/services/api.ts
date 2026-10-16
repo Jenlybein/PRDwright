@@ -643,13 +643,13 @@ export interface GeneratePrdStreamPayload {
  * 生成 PRD 的请求体（需求输入二选一）。
  *
  * `summary` 与 `requirements` 对应两条入口：完整流程传结构化摘要，
- * PRD 快捷入口传用户写下的一段话。后端把它们汇合到同一条生成链路，
+ * 快捷流程入口传用户写下的一段话。后端把它们汇合到同一条生成链路，
  * 因此前端只需要按入口填其中一个字段。
  */
 export interface GeneratePrdFromSummaryPayload {
   /** 结构化需求摘要（与 field-schema.json 对齐）；与 requirements 二选一 */
   summary?: RequirementsSummary
-  /** 自由文本需求（PRD 快捷入口） */
+  /** 自由文本需求（快捷流程入口） */
   requirements?: string
   /** 产品名称，仅用于 PRD 文档头；摘要里已有 product_name 时以摘要为准 */
   productName?: string
@@ -683,7 +683,7 @@ export function generatePrdStream(
  * 由**需求**生成 PRD，SSE 流式接收正文。
  * 对应后端 `POST /api/conversation/generate-prd-from-summary-stream`。
  *
- * 需求可以是结构化摘要（完整流程）或自由文本（PRD 快捷入口），后端按输入形态
+ * 需求可以是结构化摘要（完整流程）或自由文本（快捷流程入口），后端按输入形态
  * 选格式化函数后走同一条「分章节撰写 → 审核 → 改写」链路——「需求 → PRD」
  * 只有一个实现，多入口复用同一份契约。
  *
@@ -852,6 +852,11 @@ export interface CreateJobPayload {
   productName?: string
   history?: ChatMessage[]
   prdContent?: string
+  /**
+   * 接口文档正文；只有 `prompts` 用得上（「我有 PRD + 接口文档」入口）。
+   * 不传表示没有这份材料，生成按「只有 PRD」处理。
+   */
+  apiDocsContent?: string
   document?: string
   instruction?: string
 }
@@ -871,6 +876,7 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     // 只保留后端认识的 role / content 两个字段
     history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
     prd_content: payload.prdContent ?? '',
+    api_docs_content: payload.apiDocsContent ?? '',
     document: payload.document ?? '',
     instruction: payload.instruction ?? '',
   })

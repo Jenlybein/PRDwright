@@ -76,6 +76,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     activeChatTab,
     quickInput,
     debugPrdText,
+    pastePairInput,
     docGenerating: isGenerating,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
@@ -651,13 +652,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * PRD 来源随入口模式而变（完整流程用本次生成的 PRD，调试入口用用户贴入的 PRD），
    * 因此由调用方把正文传进来，而不是在这里猜该读哪份状态。
    */
-  async function generatePrompts(prdText: string): Promise<void> {
+  async function generatePrompts(prdText: string, apiDocsText = ''): Promise<void> {
     docStreamingContent.value = ''
     docError.value = ''
     prdProgress.value = null
     const { reply, ok } = await job.start(
       'prompts',
-      { prdContent: prdText },
+      // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
+      { prdContent: prdText, apiDocsContent: apiDocsText },
       handlersForKind('prompts'),
     )
     if (!ok) {
@@ -843,7 +845,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * PRD 快捷入口：直接生成 PRD，不经过摘要 Diff 闸门。
+   * 快捷流程入口：直接生成 PRD，不经过摘要 Diff 闸门。
    *
    * 那道闸门的作用是把「对话里补充的信息」回填进结构化摘要，而快捷入口压根没有
    * 表单与对话——用户写的那段话本身就是唯一输入，没有任何东西需要回填与确认。
@@ -856,7 +858,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 提示词调试入口：用用户贴入的 PRD 直接生成提示词套件。
+   * 我有 PRD入口：用用户贴入的 PRD 直接生成提示词套件。
    *
    * 刻意不把这份 PRD 交付给文档 store：那是「本工具生成的 PRD」的位置，混进用户
    * 自带的内容会让进度、完成条件与下载列表都失真。它只作为本次生成的输入存在。
@@ -866,6 +868,21 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (!debugPrdText.value.trim()) return
     goTo('generating-prompts')
     await generatePrompts(debugPrdText.value)
+  }
+
+  /**
+   * 双粘贴入口：用用户贴入的 PRD（+ 可选的接口文档）生成提示词套件。
+   *
+   * 与 `handleGeneratePromptsFromDebugPrd` 同源，只多带一份材料。同样**不把这两份正文
+   * 交付给文档 store**：那是「本工具生成的产物」的位置，混进用户自带的内容会让进度、
+   * 完成条件与下载列表都失真。它们只作为本次生成的输入存在。
+   */
+  async function handleGeneratePromptsFromPair(): Promise<void> {
+    if (entryMode.value !== 'prd-and-api-paste') return
+    const { prd, apiDocs } = pastePairInput.value
+    if (!prd.trim()) return
+    goTo('generating-prompts')
+    await generatePrompts(prd, apiDocs)
   }
 
   /**
@@ -881,6 +898,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       goTo('prompt-debug')
       return
     }
+    if (entryMode.value === 'prd-and-api-paste') {
+      goTo('prd-and-api-paste')
+      return
+    }
     goTo('chatting')
   }
 
@@ -888,6 +909,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const backLabel = computed(() => {
     if (entryMode.value === 'prd-quick') return '返回描述'
     if (entryMode.value === 'prompt-debug') return '返回 PRD'
+    if (entryMode.value === 'prd-and-api-paste') return '返回素材'
     return '返回对话'
   })
 
@@ -1089,6 +1111,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     handleGeneratePrompts,
     handleGenerateQuickPrd,
     handleGeneratePromptsFromDebugPrd,
+    handleGeneratePromptsFromPair,
     backToInput,
     backFromForm,
     handleEndTask,

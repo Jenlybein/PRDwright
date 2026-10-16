@@ -12,6 +12,7 @@ import ChatStage from '@/components/stages/ChatStage.vue'
 import DoneStage from '@/components/stages/DoneStage.vue'
 import EntryStage from '@/components/stages/EntryStage.vue'
 import GeneratingStage from '@/components/stages/GeneratingStage.vue'
+import PastePairStage from '@/components/stages/PastePairStage.vue'
 import ProgressSteps from '@/components/stages/ProgressSteps.vue'
 import PromptDebugStage from '@/components/stages/PromptDebugStage.vue'
 import QuickPrdStage from '@/components/stages/QuickPrdStage.vue'
@@ -43,13 +44,17 @@ import {
 /**
  * 完整应用（V2）。
  *
- * 先选入口，再走流程。三条入口（完整流程 / PRD 快捷 / 提示词调试）只是**起点**不同：
+ * 先选入口，再走流程。四条入口按**起点**分两组（见 `stages/EntryStage.vue`，ADR-031）：
  *
- * 1. **完整流程**：结构化表单逐项录入 → AI 对话澄清 → PRD → 接口文档 → 提示词；
- * 2. **PRD 快捷**：一段话描述 → 直接逐章生成 PRD（跳过表单、对话与摘要确认闸门）；
- * 3. **提示词调试**：贴入现成 PRD → 生成提示词套件 → 用「AI 优化」反复迭代。
+ * 从零创建 PRD
+ *   1. **完整流程**（`structured`）：结构化表单逐项录入 → AI 对话澄清 → PRD → 接口文档 → 提示词；
+ *   2. **快捷流程**（`prd-quick`）：一段话描述 → 直接逐章生成 PRD（跳过表单、对话与摘要确认闸门）；
+ * 导入已有素材
+ *   3. **我有 PRD**（`prompt-debug`）：贴入现成 PRD → 生成提示词套件 → 用「AI 优化」反复迭代；
+ *   4. **我有 PRD + 接口文档**（`prd-and-api-paste`）：两份材料都贴进来 → 提示词套件，
+ *      接口文档也进那次请求，提示词因此能对齐真实的接口路径与字段名。
  *
- * 三条入口在「生成 → 审阅 → 下载」这段完全共用，模式的差异（进度条显示哪几步、
+ * 四条入口在「生成 → 审阅 → 下载」这段完全共用，模式的差异（进度条显示哪几步、
  * 完成需要哪几份文档、返回按钮回到哪里）由 `utils/workflow.ts` 与 store 推导。
  *
  * 完整流程有一道**确认闸门**：生成 PRD 前先确认「对话补充信息回填到摘要」的 Diff。
@@ -104,6 +109,7 @@ const {
   activeChatTab,
   quickInput,
   debugPrdText,
+  pastePairInput,
   steps,
   currentStepIndex,
   reachedStepIndex,
@@ -418,6 +424,7 @@ const {
   handleGeneratePrompts,
   handleGenerateQuickPrd,
   handleGeneratePromptsFromDebugPrd,
+  handleGeneratePromptsFromPair,
   backToInput,
   backFromForm,
   handleEndTask,
@@ -605,8 +612,8 @@ const canReturnToChat = computed(
  * 澄清入口出现时是否**保留**「返回」按钮。
  *
  * 澄清入口与「返回」落点相同时（完整流程：两者都回对话页）由它顶替「返回」；
- * 落点不同时（PRD 快捷 / 提示词调试：「返回」回的是录入页，那一页不在进度条上、
- * 没有别的入口）必须保留，否则用户再也回不去。
+ * 落点不同时（快捷流程 / 我有 PRD / 我有 PRD + 接口文档：「返回」回的是录入页，
+ * 那一页不在进度条上、没有别的入口）必须保留，否则用户再也回不去。
  */
 const keepBackButton = computed(() => store.entryMode !== 'structured')
 
@@ -779,7 +786,7 @@ function handleStepClick(stepId: StepId): void {
         {{ downgradeNotice }}
       </p>
 
-      <!-- ============ 第零步：选择入口（三条链路的起点） ============ -->
+      <!-- ============ 第零步：选择入口（四条链路的起点，分两组） ============ -->
       <EntryStage v-if="isChoosingEntry" @select="handleSelectEntry" />
 
       <!-- ============ 确认闸门 1：摘要回填结果 Diff（仅完整流程，生成 PRD 之前） ============ -->
@@ -792,7 +799,7 @@ function handleStepClick(stepId: StepId): void {
         @reject="rejectSummaryDiff"
       />
 
-      <!-- ============ 入口 B：PRD 快捷（一段话 → 直接生成 PRD） ============ -->
+      <!-- ============ 入口 B：快捷流程（一段话 → 直接生成 PRD） ============ -->
       <QuickPrdStage
         v-else-if="viewState === 'prd-quick'"
         v-model:product-name="quickInput.productName"
@@ -801,11 +808,20 @@ function handleStepClick(stepId: StepId): void {
         @back="goTo('entry')"
       />
 
-      <!-- ============ 入口 C：提示词调试（贴入 PRD → 生成提示词套件） ============ -->
+      <!-- ============ 入口 C：我有 PRD（贴入 PRD → 生成提示词套件） ============ -->
       <PromptDebugStage
         v-else-if="viewState === 'prompt-debug'"
         v-model:prd-text="debugPrdText"
         @generate="handleGeneratePromptsFromDebugPrd"
+        @back="goTo('entry')"
+      />
+
+      <!-- ============ 入口 B2：我有 PRD + 接口文档（贴两份材料 → 生成提示词套件） ============ -->
+      <PastePairStage
+        v-else-if="viewState === 'prd-and-api-paste'"
+        v-model:prd-text="pastePairInput.prd"
+        v-model:api-docs-text="pastePairInput.apiDocs"
+        @generate="handleGeneratePromptsFromPair"
         @back="goTo('entry')"
       />
 

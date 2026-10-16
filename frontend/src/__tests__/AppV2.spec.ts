@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import AppV2 from '../AppV2.vue'
 import AppBadge from '../components/ui/AppBadge.vue'
 import ChatStage from '../components/stages/ChatStage.vue'
+import EntryStage from '../components/stages/EntryStage.vue'
 import ReviewStage from '../components/stages/ReviewStage.vue'
 import * as api from '../services/api'
 import * as authService from '../services/authService'
@@ -528,22 +529,58 @@ function reviewSnapshot(viewState: string): Record<string, unknown> {
     },
     quickInput: { productName: '', requirements: '' },
     debugPrdText: '',
+    pastePairInput: { prd: '', apiDocs: '' },
     activeJobId: null,
     activeJobKind: null,
   }
 }
 
 describe('AppV2 完整流程编排', () => {
-  it('默认停在入口选择页：三条入口可选，且尚未发起任何请求', async () => {
+  it('默认停在入口选择页：两组四个入口都可见，且尚未发起任何请求', async () => {
     const wrapper = await mountEntry()
 
-    expect(wrapper.text()).toContain('选择一种开始方式')
-    expect(wrapper.text()).toContain('完整流程')
-    expect(wrapper.text()).toContain('PRD 快捷')
-    expect(wrapper.text()).toContain('提示词调试')
+    expect(wrapper.text()).toContain('新建 PRD 方案')
+    // 两组：先回答「我属于哪种情况」，再挑具体入口
+    expect(wrapper.text()).toContain('从零创建 PRD')
+    expect(wrapper.text()).toContain('导入已有素材')
+    // 四个叶子**同时可见**：分组是加一层语义，不是多一屏要点的关卡
+    for (const label of ['完整流程', '快捷流程', '我有 PRD', '我有 PRD + 接口文档']) {
+      expect(wrapper.text(), label).toContain(label)
+    }
     // 入口页还没有进度可言，进度条整体不出现
     expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(false)
     expect(api.startConversationStream).not.toHaveBeenCalled()
+  })
+
+  it('四个叶子各自落到自己的录入页（分组只是入口页的排布，不改变落点）', async () => {
+    const expected: Array<[string, string]> = [
+      ['完整流程', '告诉我们你的产品想法'],
+      ['快捷流程', '直接生成 PRD'],
+      ['我有 PRD', '从现有 PRD 生成提示词套件'],
+      ['我有 PRD + 接口文档', '从现有 PRD 与接口文档生成提示词套件'],
+    ]
+
+    for (const [label, marker] of expected) {
+      const wrapper = await mountEntry()
+      await clickButton(wrapper, label)
+      expect(wrapper.text(), label).toContain(marker)
+    }
+  })
+
+  it('入口页四个叶子的 DOM 顺序固定：导入组里「我有 PRD」先于「我有 PRD + 接口文档」', async () => {
+    const wrapper = await mountEntry()
+
+    // 既有用例用「文本包含」找按钮，而「我有 PRD」正是「我有 PRD + 接口文档」的前缀：
+    // 导入组里两条的顺序一旦颠倒，includes 会先命中后者，点错卡片（且文字断言仍可能蒙混过关）。
+    // 这里直接按叶子卡片的渲染顺序钉死，顺序问题不再靠间接推断。
+    const leaves = wrapper.findComponent(EntryStage).findAll('button')
+    // 一屏四叶：两组各两个，全部可见——分组是语义层级，不是「先点组再进第二屏」的关卡
+    expect(leaves).toHaveLength(4)
+    expect(leaves[0]?.text()).toMatch(/^完整流程/)
+    expect(leaves[1]?.text()).toMatch(/^快捷流程/)
+    // 短名在前：其标题后紧跟的不是「+」（负向先行断言把它们分开）
+    expect(leaves[2]?.text()).toMatch(/^我有 PRD(?!\s*\+)/)
+    expect(leaves[3]?.text()).toMatch(/^我有 PRD \+ 接口文档/)
   })
 
   it('选择「完整流程」后显示进度条与结构化表单，不显示对话区', async () => {
@@ -679,6 +716,7 @@ describe('AppV2 完整流程编排', () => {
         conversationId: '',
         quickInput: { productName: '', requirements: '' },
         debugPrdText: '',
+        pastePairInput: { prd: '', apiDocs: '' },
         activeJobId: null,
         activeJobKind: null,
         clarifyMessages: [],
@@ -982,6 +1020,7 @@ describe('AppV2 完整流程编排', () => {
         conversationId: '',
         quickInput: { productName: '', requirements: '' },
         debugPrdText: '',
+        pastePairInput: { prd: '', apiDocs: '' },
         activeJobId: 42,
         activeJobKind: 'prd',
       }),
@@ -1049,7 +1088,7 @@ describe('AppV2 完整流程编排', () => {
     await nextTick()
 
     // 重新开始回到入口页，而不是直接落回表单
-    expect(wrapper.text()).toContain('选择一种开始方式')
+    expect(wrapper.text()).toContain('新建 PRD 方案')
 
     // 会话内容确实被清空了——断言 store 里的空态，而不是磁盘上某个键的内容：
     // 持久化的权威来源已从 localStorage 换成后端，重开一次页面必须回到入口页，
@@ -1211,22 +1250,22 @@ describe('AppV2 的文档手改自动落库与下载', () => {
 })
 
 /**
- * 三条入口（第三步）的前端表现。
+ * 四条入口（第三步）的前端表现。
  *
- * 三条入口共用「生成 → 审阅 → 下载」链路，差异只有三处：需求从哪来、进度条显示哪几步、
+ * 四条入口共用「生成 → 审阅 → 下载」链路，差异只有三处：需求从哪来、进度条显示哪几步、
  * 完成需要哪几份文档。因此这里重点钉住这三处，外加一条硬约束——
  * **快捷入口不能经过摘要确认闸门**（那道闸门是给「对话补充信息回填」用的，
  * 快捷入口根本没有对话）。
  */
 describe('AppV2 入口模式', () => {
-  /** 进入 PRD 快捷入口并填好一段话 */
+  /** 进入 快捷流程入口并填好一段话 */
   async function fillQuickPrd(wrapper: VueWrapper): Promise<void> {
-    await clickButton(wrapper, 'PRD 快捷')
+    await clickButton(wrapper, '快捷流程')
     await byId(wrapper, 'field-quick-product-name').setValue('小账本')
     await byId(wrapper, 'field-quick-requirements').setValue('做一个记账 App，支持多人共享账本。')
   }
 
-  it('PRD 快捷：一段话直接生成 PRD，不经过摘要确认闸门', async () => {
+  it('快捷流程：一段话直接生成 PRD，不经过摘要确认闸门', async () => {
     const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
 
@@ -1256,9 +1295,9 @@ describe('AppV2 入口模式', () => {
     expect(wrapper.text()).toContain('项目背景')
   })
 
-  it('PRD 快捷：未填需求时不能提交', async () => {
+  it('快捷流程：未填需求时不能提交', async () => {
     const wrapper = await mountEntry()
-    await clickButton(wrapper, 'PRD 快捷')
+    await clickButton(wrapper, '快捷流程')
 
     const generate = wrapper.findAll('button').find((item) => item.text().trim() === '生成 PRD')
     expect(generate).toBeDefined()
@@ -1268,7 +1307,7 @@ describe('AppV2 入口模式', () => {
     expect(wrapper.text()).toContain('请至少写一句需求描述')
   })
 
-  it('PRD 快捷：「返回描述」回到录入页且内容还在，返回按钮文案随模式变化', async () => {
+  it('快捷流程：「返回描述」回到录入页且内容还在，返回按钮文案随模式变化', async () => {
     const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
     await clickButton(wrapper, '生成 PRD', true)
@@ -1286,7 +1325,7 @@ describe('AppV2 入口模式', () => {
     )
   })
 
-  it('PRD 快捷：只要 PRD 就能完成，完成页不留空文档卡片', async () => {
+  it('快捷流程：只要 PRD 就能完成，完成页不留空文档卡片', async () => {
     const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
     await clickButton(wrapper, '生成 PRD', true)
@@ -1309,9 +1348,9 @@ describe('AppV2 入口模式', () => {
     expect(doneCards[0]?.text()).not.toContain('提示词套件')
   })
 
-  it('提示词调试：贴入 PRD 直接生成提示词套件，且不出现「查看 PRD」', async () => {
+  it('我有 PRD：贴入 PRD 直接生成提示词套件，且不出现「查看 PRD」', async () => {
     const wrapper = await mountEntry()
-    await clickButton(wrapper, '提示词调试')
+    await clickButton(wrapper, '我有 PRD')
 
     expect(wrapper.text()).toContain('从现有 PRD 生成提示词套件')
     // 该模式的产物只有提示词，全程只有一步——单步进度条没有信息量，整体不显示
@@ -1342,9 +1381,9 @@ describe('AppV2 入口模式', () => {
     expect(doneCards[0]?.text()).not.toContain('接口文档')
   })
 
-  it('提示词调试：未贴入 PRD 时不能提交', async () => {
+  it('我有 PRD：未贴入 PRD 时不能提交', async () => {
     const wrapper = await mountEntry()
-    await clickButton(wrapper, '提示词调试')
+    await clickButton(wrapper, '我有 PRD')
 
     const generate = wrapper.findAll('button').find((item) => item.text().trim() === '生成提示词套件')
     expect((generate?.element as HTMLButtonElement).disabled).toBe(true)
@@ -1353,16 +1392,75 @@ describe('AppV2 入口模式', () => {
     expect(wrapper.text()).toContain('请先贴入 PRD 正文')
   })
 
+  it('我有 PRD + 接口文档：两份材料都随任务送出去，产出仍是提示词套件', async () => {
+    const wrapper = await mountEntry()
+    await clickButton(wrapper, '我有 PRD + 接口文档')
+
+    expect(wrapper.text()).toContain('从现有 PRD 与接口文档生成提示词套件')
+    // 与「我有 PRD」同属导入组：产物只有提示词，进度条整体不显示
+    expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(false)
+
+    await byId(wrapper, 'field-pair-prd').setValue(
+      '# 小账本 产品需求文档（PRD）\n\n## 1. 产品概述\n家庭记账工具',
+    )
+    await byId(wrapper, 'field-pair-api-docs').setValue(
+      '# 小账本 接口文档\n\n## 记账\nPOST /api/ledgers',
+    )
+    await clickButton(wrapper, '生成提示词套件', true)
+    await flushPromises()
+
+    const payload = jobPayload('prompts')
+    expect(payload?.prdContent).toContain('家庭记账工具')
+    // 这一条入口的全部意义：接口文档也要真的送到后端
+    expect(payload?.apiDocsContent).toContain('POST /api/ledgers')
+    expect(wrapper.text()).toContain('提示词套件')
+
+    // 自带的两份材料**不算**本工具的产物：返回目标也是录入页，且不出现「查看 PRD」
+    expect(wrapper.text()).not.toContain('查看 PRD')
+    expect(wrapper.text()).toContain('返回素材')
+  })
+
+  it('我有 PRD + 接口文档：接口文档选填，只贴 PRD 也能提交', async () => {
+    const wrapper = await mountEntry()
+    await clickButton(wrapper, '我有 PRD + 接口文档')
+
+    // 只有 PRD 时主操作就该可点——接口文档是「有更好」，不是必填
+    await byId(wrapper, 'field-pair-prd').setValue('# 小账本 PRD\n\n正文')
+    await clickButton(wrapper, '生成提示词套件', true)
+    await flushPromises()
+
+    expect(jobCount('prompts')).toBe(1)
+    expect(jobPayload('prompts')?.apiDocsContent).toBe('')
+  })
+
+  it('我有 PRD + 接口文档：未贴 PRD 时不能提交，缺失提示常驻', async () => {
+    const wrapper = await mountEntry()
+    await clickButton(wrapper, '我有 PRD + 接口文档')
+
+    const generate = wrapper
+      .findAll('button')
+      .find((item) => item.text().trim() === '生成提示词套件')
+    expect((generate?.element as HTMLButtonElement).disabled).toBe(true)
+
+    expect(jobCount('prompts')).toBe(0)
+    expect(wrapper.text()).toContain('请先贴入 PRD 正文')
+  })
+
   it('两个录入页都能「返回入口」，重新选另一条入口', async () => {
     const wrapper = await mountEntry()
-    await clickButton(wrapper, 'PRD 快捷')
+    await clickButton(wrapper, '快捷流程')
     expect(wrapper.text()).toContain('直接生成 PRD')
 
     await clickButton(wrapper, '返回入口', true)
-    expect(wrapper.text()).toContain('选择一种开始方式')
+    expect(wrapper.text()).toContain('新建 PRD 方案')
 
-    await clickButton(wrapper, '提示词调试')
+    await clickButton(wrapper, '我有 PRD')
     expect(wrapper.text()).toContain('从现有 PRD 生成提示词套件')
+
+    await clickButton(wrapper, '返回入口', true)
+    // 三个录入页都要能退回来，否则用户换一条路只能刷新页面
+    await clickButton(wrapper, '我有 PRD + 接口文档')
+    expect(wrapper.text()).toContain('从现有 PRD 与接口文档生成提示词套件')
 
     await clickButton(wrapper, '返回入口', true)
     await clickButton(wrapper, '完整流程')
@@ -1376,7 +1474,7 @@ describe('AppV2 入口模式', () => {
     expect(wrapper.text()).toContain('告诉我们你的产品想法')
 
     await clickButton(wrapper, '返回入口', true)
-    expect(wrapper.text()).toContain('选择一种开始方式')
+    expect(wrapper.text()).toContain('新建 PRD 方案')
   })
 
   it('从对话页「改需求」回到表单时，返回按钮改为回到对话', async () => {
@@ -1708,7 +1806,7 @@ describe('AppV2 文档澄清', () => {
     expect(storeOf(wrapper).chatTab).toBe('api-docs-clarify')
   })
 
-  it('「PRD 快捷」的审阅页也给入口，且与「返回描述」并存（两者落点不同）', async () => {
+  it('「快捷流程」的审阅页也给入口，且与「返回描述」并存（两者落点不同）', async () => {
     mockOpeningByDocument()
     const wrapper = await mountExistingSolution(
       { ...reviewSnapshot('review-prd'), entryMode: 'prd-quick' },
@@ -1717,7 +1815,7 @@ describe('AppV2 文档澄清', () => {
     )
     await flushPromises()
 
-    // 三条入口都开放澄清；快捷入口没有需求对话，所以文案是「和 AI 确认」而不是「回到对话」
+    // 四条入口都开放澄清；快捷入口没有需求对话，所以文案是「和 AI 确认」而不是「回到对话」
     expect(wrapper.text()).toContain('和 AI 确认剩下的 1 个问题')
     // 「返回描述」是回到录入页的唯一入口（也不在进度条上），不能被顶掉
     expect(wrapper.text()).toContain('返回描述')

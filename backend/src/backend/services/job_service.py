@@ -671,6 +671,8 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
     if kind == "prompts":
         return document_service.generate_prompts_stream(
             prd_content=request.get("prd_content", "") or "",
+            # 可选：来自「我有 PRD + 接口文档」入口。留空时生成口径与从前完全一致
+            api_docs_content=request.get("api_docs_content", "") or "",
         )
     if kind == "optimize":
         return document_service.optimize_document_stream(

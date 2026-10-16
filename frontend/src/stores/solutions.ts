@@ -46,8 +46,9 @@ export const SAVE_DEBOUNCE_MS = 1500
 /** 入口模式 → 中文名，用于列表展示 */
 const MODE_LABELS: Record<EntryMode, string> = {
   structured: '完整流程',
-  'prd-quick': 'PRD 快捷',
-  'prompt-debug': '提示词调试',
+  'prd-quick': '快捷流程',
+  'prompt-debug': '导入 PRD',
+  'prd-and-api-paste': '导入 PRD + 接口文档',
 }
 
 /** 阶段 → 中文名：列表里显示「进行到哪一步」 */
@@ -64,6 +65,7 @@ const STAGE_LABELS: Record<string, string> = {
   'review-prompts': '已出提示词',
   'prd-quick': '描述需求',
   'prompt-debug': '粘贴 PRD',
+  'prd-and-api-paste': '粘贴 PRD 与接口文档',
   done: '已完成',
 }
 
@@ -191,6 +193,11 @@ export const useSolutionsStore = defineStore('solutions', () => {
     // 调试入口贴入的 PRD：取首个一级标题，比「未命名」更有辨识度
     const heading = workflow.debugPrdText.match(/^#\s+(.+)$/m)
     if (heading?.[1]?.trim()) return heading[1].trim()
+
+    // 双粘贴入口同理：两份材料里 PRD 的标题就是这份方案的名字（接口文档是附属材料，
+    // 它的标题多半是「XX 接口文档」，拿来当方案名反而更差）
+    const pastedHeading = workflow.pastePairInput.prd.match(/^#\s+(.+)$/m)
+    if (pastedHeading?.[1]?.trim()) return pastedHeading[1].trim()
 
     return `未命名方案 · ${nowLabel()}`
   }

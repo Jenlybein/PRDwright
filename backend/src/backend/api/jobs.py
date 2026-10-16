@@ -88,6 +88,8 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
         "product_name": payload.product_name,
         "history": [message.model_dump() for message in payload.history] or None,
         "prd_content": payload.prd_content,
+        # 只有 prompts 会用到；其余任务类型忽略（与 prd_content 同一种处理方式）
+        "api_docs_content": payload.api_docs_content,
         "document": payload.document,
         "instruction": payload.instruction,
         # 落库用：`optimize` 靠它知道把结果写进哪一份产物

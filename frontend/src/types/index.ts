@@ -73,10 +73,11 @@ export interface ChatMessage {
  * `summary-diff` 是一道**确认闸门**：生成 PRD 前先让用户确认「对话中补充的信息回填到摘要」的结果，
  * 确认后才继续生成。
  *
- * 三个入口相关的阶段：
+ * 四个入口相关的阶段（入口选择页把它们分成两组，见 `EntryStage.vue`）：
  * - `entry`：入口选择页（还没选走哪条入口）；
- * - `prd-quick`：PRD 快捷入口的录入页（一段话描述 → 直接生成 PRD）；
- * - `prompt-debug`：提示词调试入口的录入页（贴一份 PRD → 生成提示词套件）。
+ * - `prd-quick`：「快捷流程」的录入页（一段话描述 → 直接生成 PRD）；
+ * - `prompt-debug`：「我有 PRD」的录入页（贴一份 PRD → 生成提示词套件）；
+ * - `prd-and-api-paste`：「我有 PRD + 接口文档」的录入页（贴两份材料 → 生成提示词套件）。
  */
 export type ViewState =
   | 'entry'
@@ -91,19 +92,34 @@ export type ViewState =
   | 'review-prompts'
   | 'prd-quick'
   | 'prompt-debug'
+  | 'prd-and-api-paste'
   | 'done'
 
 /**
- * 入口模式：三条链路的起点不同，但汇合到同一套「生成 → 审阅 → 下载」流程。
+ * 入口模式：四条链路的起点不同，但汇合到同一套「生成 → 审阅 → 下载」流程。
  *
- * - `structured`：完整流程——结构化表单 → AI 对话澄清 → PRD → 接口文档 → 提示词；
- * - `prd-quick`：只想快速拿到 PRD——一段话描述 + 产品名，跳过表单与对话；
- * - `prompt-debug`：手头已有 PRD——贴进来直接生成提示词套件，再用「AI 优化」反复迭代。
+ * 入口页把它们分成两组（`EntryStage.vue`）：
+ *
+ * - **从零创建 PRD**
+ *   - `structured`：完整流程——结构化表单 → AI 对话澄清 → PRD → 接口文档 → 提示词；
+ *   - `prd-quick`：快捷流程——一段话描述 + 产品名，跳过表单与对话，直接生成 PRD。
+ * - **导入已有素材**
+ *   - `prompt-debug`：我有 PRD——贴进来直接生成提示词套件，再用「AI 优化」反复迭代；
+ *   - `prd-and-api-paste`：我有 PRD + 接口文档——两份材料都贴进来生成提示词套件，
+ *     提示词因此能对齐真实的接口路径与字段。
  *
  * 模式只决定「输入怎么来、进度条显示哪几步、需要哪几份文档才算完成」，
- * 不决定文档怎么写——写作规范始终来自 `skills/prd-generator`。
+ * 不决定文档怎么写——写作规范始终来自 `skills/**` 里的技能包。
+ *
+ * ⚠️ `prompt-debug` 这个名字是历史遗留（它起初叫「我有 PRD」，靠反复 AI 优化调参），
+ * 现在对外的说法是「我有 PRD」。**键名不改**：快照里存着它，改名要配一套兼容旧值的迁移，
+ * 而收益只是好看一点——真正会误导人的是界面文案，那个已经改了。
  */
-export type EntryMode = 'structured' | 'prd-quick' | 'prompt-debug'
+export type EntryMode =
+  | 'structured'
+  | 'prd-quick'
+  | 'prompt-debug'
+  | 'prd-and-api-paste'
 
 /**
  * 生成任务的文档种类（与后端 `generation_jobs.kind` 一一对应）。
@@ -250,12 +266,25 @@ export interface DocumentVersionDetail {
   isCurrent: boolean
 }
 
-/** PRD 快捷入口的录入内容 */
+/** 快捷流程入口（「快捷流程」）的录入内容 */
 export interface QuickPrdInput {
   /** 产品名称；为空时文档头退化为「未命名产品」 */
   productName: string
   /** 用户用自然语言写下的一段话需求 */
   requirements: string
+}
+
+/**
+ * 「我有 PRD + 接口文档」入口的两份粘贴内容。
+ *
+ * 收成一个对象而不是两个散字段，与 `QuickPrdInput` 同一套写法：刷快照时少一个字段
+ * 就少一次「改了这个忘了存那个」，解析时也能在一处兜底。
+ */
+export interface PastePairInput {
+  /** 贴入的 PRD 正文（Markdown） */
+  prd: string
+  /** 贴入的接口文档正文（Markdown）；可以为空——两份材料里只有 PRD 是必填 */
+  apiDocs: string
 }
 
 /**
@@ -299,7 +328,7 @@ export type Step = (typeof STEPS)[number]
  *
  * 注意：这里给的是**全局**步骤归属，进度条实际展示哪几步由
  * `utils/workflow.ts` 的 `stepsForMode()` 按入口模式裁剪——
- * 例如 PRD 快捷入口没有「描述产品 / AI 对话」两步，提示词调试入口只有「提示词」一步。
+ * 例如 快捷流程入口没有「描述产品 / AI 对话」两步，我有 PRD入口只有「提示词」一步。
  */
 export const STEP_OF_STATE: Record<ViewState, StepId> = {
   // 入口页还没选模式，先按完整流程展示，避免进度条出现空档
@@ -316,8 +345,9 @@ export const STEP_OF_STATE: Record<ViewState, StepId> = {
   'review-prompts': 'review-prompts',
   // 快捷入口的录入产物就是 PRD
   'prd-quick': 'review-prd',
-  // 调试入口的录入产物就是提示词套件
+  // 两个导入入口的录入产物都是提示词套件（它们只差「带了哪些材料」）
   'prompt-debug': 'review-prompts',
+  'prd-and-api-paste': 'review-prompts',
   done: 'review-prompts',
 }
 
@@ -707,8 +737,9 @@ export interface SolutionSavePayload {
  * V2 完整流程的本地快照。
  * 与 V1 的 `SessionData` 分开存储，避免两套流程共用同一份缓存互相覆盖。
  *
- * 「还没提交、但已经敲了字」的两处录入内容（快捷入口的一段话、调试入口的 PRD）
- * 也一并落盘：它们是用户的手工输入，刷新一次就丢干净最让人恼火。
+ * 「还没提交、但已经敲了字」的三处录入内容（快捷入口的一段话、我有 PRD 的正文、
+ * 我有 PRD + 接口文档 的两份正文）也一并落盘：它们是用户的手工输入，
+ * 刷新一次就丢干净最让人恼火。
  *
  * **三份产物正文与三份用量回执不在这里。** 它们的所有权属于后端 `documents` 表
  * （见 `DocumentRecord`），随方案一起存在同一份数据库里，刷新后由
@@ -746,10 +777,12 @@ export interface SessionDataV2 {
    * 空串表示该线程还没开过会话，接续时退化为无状态模式。
    */
   conversationIds: Record<ChatStage, string>
-  /** PRD 快捷入口的录入内容 */
+  /** 快捷流程入口的录入内容 */
   quickInput: QuickPrdInput
-  /** 提示词调试入口里用户贴入的 PRD 正文 */
+  /** 我有 PRD入口（「我有 PRD」）里用户贴入的 PRD 正文 */
   debugPrdText: string
+  /** 「我有 PRD + 接口文档」入口里用户贴入的两份正文 */
+  pastePairInput: PastePairInput
   /**
    * 当前进行中的生成任务 id；`null` 表示没有任务。
    *

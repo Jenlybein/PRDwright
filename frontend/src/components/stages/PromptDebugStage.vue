@@ -5,7 +5,7 @@ import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 
 /**
- * 提示词调试入口的录入页。
+ * 我有 PRD入口的录入页。
  *
  * 场景是「PRD 已经有了」：可能是别的工具写的、别人给的，也可能是本次流程生成后
  * 手工改过的版本。所以这里只收一份 PRD 正文，不做任何解析——提示词套件本来就是

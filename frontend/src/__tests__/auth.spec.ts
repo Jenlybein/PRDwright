@@ -412,7 +412,7 @@ describe('AppV2 的登录门禁', () => {
 
     expect(document.body.textContent).toContain('创建任务需要先登录')
     // 关键：没有被放行到表单页
-    expect(wrapper.text()).toContain('选择一种开始方式')
+    expect(wrapper.text()).toContain('新建 PRD 方案')
     expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(false)
   })
 
@@ -426,7 +426,7 @@ describe('AppV2 的登录门禁', () => {
     // 弹窗关了
     expect(document.body.textContent).not.toContain('创建任务需要先登录')
     // 但仍停在入口页——把选择权交还给用户
-    expect(wrapper.text()).toContain('选择一种开始方式')
+    expect(wrapper.text()).toContain('新建 PRD 方案')
     // 提示语替代了「自动进入」的引导作用
     expect(wrapper.text()).toContain('已登录，请选择入口开始')
   })
@@ -440,6 +440,6 @@ describe('AppV2 的登录门禁', () => {
     await clickEntry(wrapper, '完整流程')
 
     expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(true)
-    expect(wrapper.text()).not.toContain('选择一种开始方式')
+    expect(wrapper.text()).not.toContain('新建 PRD 方案')
   })
 })

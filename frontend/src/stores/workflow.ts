@@ -23,6 +23,7 @@ import type {
   ChatStage,
   DocKind,
   EntryMode,
+  PastePairInput,
   QuickPrdInput,
   RequirementsSummary,
   SessionDataV2,
@@ -51,6 +52,7 @@ const MODE_LANDING: Record<EntryMode, ViewState> = {
   structured: 'form',
   'prd-quick': 'prd-quick',
   'prompt-debug': 'prompt-debug',
+  'prd-and-api-paste': 'prd-and-api-paste',
 }
 
 export const useWorkflowStore = defineStore('workflow', () => {
@@ -104,11 +106,20 @@ export const useWorkflowStore = defineStore('workflow', () => {
    */
   const conversationIds = ref<Record<ChatStage, string>>(emptyConversationIds())
 
-  /** PRD 快捷入口的录入内容（产品名 + 一段话描述） */
+  /** 快捷流程入口的录入内容（产品名 + 一段话描述） */
   const quickInput = ref<QuickPrdInput>({ productName: '', requirements: '' })
 
-  /** 提示词调试入口里用户贴入的 PRD 正文 */
+  /** 我有 PRD入口（「我有 PRD」）里用户贴入的 PRD 正文 */
   const debugPrdText = ref('')
+
+  /**
+   * 「我有 PRD + 接口文档」入口里用户贴入的两份正文。
+   *
+   * 与 `debugPrdText` **分开存**：两条入口虽然都是「贴材料」，但它们在快照里是两页各自的
+   * 草稿——合用一个字段会让「在这页贴了、退回入口、又从另一页进去」时看到上一页的内容，
+   * 而用户的理解是「我换了一条路，输入框该是空的」。
+   */
+  const pastePairInput = ref<PastePairInput>({ prd: '', apiDocs: '' })
 
   /**
    * 当前进行中的生成任务 id；`null` 表示没有任务。
@@ -186,6 +197,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       conversationIds: conversationIds.value,
       quickInput: quickInput.value,
       debugPrdText: debugPrdText.value,
+      pastePairInput: pastePairInput.value,
       activeJobId: activeJobId.value,
       activeJobKind: activeJobKind.value,
     }
@@ -208,6 +220,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     messages.value = session.messages
     quickInput.value = session.quickInput
     debugPrdText.value = session.debugPrdText
+    pastePairInput.value = session.pastePairInput
     activeJobId.value = session.activeJobId ?? null
     activeJobKind.value = session.activeJobKind ?? null
     // 澄清线程随快照一起恢复，因此刷新后能接着聊（也就**不需要**为它们降级）。
@@ -238,6 +251,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       conversationIds,
       quickInput,
       debugPrdText,
+      pastePairInput,
       activeJobId,
       activeJobKind,
     ],
@@ -414,6 +428,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     summary.value = null
     quickInput.value = { productName: '', requirements: '' }
     debugPrdText.value = ''
+    pastePairInput.value = { prd: '', apiDocs: '' }
     activeJobId.value = null
     activeJobKind.value = null
     downgrade.value = null
@@ -458,7 +473,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
       summary.value !== null ||
       quickInput.value.productName.trim() !== '' ||
       quickInput.value.requirements.trim() !== '' ||
-      debugPrdText.value.trim() !== '',
+      debugPrdText.value.trim() !== '' ||
+      pastePairInput.value.prd.trim() !== '' ||
+      pastePairInput.value.apiDocs.trim() !== '',
   )
 
   return {
@@ -471,6 +488,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     conversationIds,
     quickInput,
     debugPrdText,
+    pastePairInput,
     activeJobId,
     activeJobKind,
     // 运行态

@@ -2,7 +2,8 @@
  * 流程阶段机（纯函数）。
  *
  * 把「阶段 → 进度 / 守卫 / 刷新降级」这些判断从组件里搬出来，做成不依赖 Vue
- * 的纯函数：既能独立单测，也能被不同入口（完整流程 / PRD 快捷 / 提示词调试）复用。
+ * 的纯函数：既能独立单测，也能被四条入口（完整流程 / 快捷流程 / 我有 PRD /
+ * 我有 PRD + 接口文档）复用。
  *
  * **入口模式（`EntryMode`）在这里体现为三件事**：进度条展示哪几步、当前在第几步、
  * 以及「完成」需要哪几份文档。三件事都由模式推导，组件与 store 不再各写一套判断。
@@ -15,6 +16,7 @@ import type {
   DocKind,
   DocumentKind,
   EntryMode,
+  PastePairInput,
   QuickPrdInput,
   RequirementsSummary,
   RunSummary,
@@ -39,6 +41,7 @@ export const VIEW_STATES: readonly ViewState[] = [
   'review-prompts',
   'prd-quick',
   'prompt-debug',
+  'prd-and-api-paste',
   'done',
 ]
 
@@ -49,7 +52,12 @@ export function isViewState(value: unknown): value is ViewState {
 
 /** 判断任意值是否为合法入口模式 */
 export function isEntryMode(value: unknown): value is EntryMode {
-  return value === 'structured' || value === 'prd-quick' || value === 'prompt-debug'
+  return (
+    value === 'structured' ||
+    value === 'prd-quick' ||
+    value === 'prompt-debug' ||
+    value === 'prd-and-api-paste'
+  )
 }
 
 /**
@@ -141,8 +149,9 @@ const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
   structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts'],
   // 快捷入口跳过了表单与对话，进度条不该显示一步都点不动的空壳
   'prd-quick': ['review-prd', 'review-api-docs', 'review-prompts'],
-  // 调试入口的产物只有提示词套件
+  // 两个导入入口的产物只有提示词套件
   'prompt-debug': ['review-prompts'],
+  'prd-and-api-paste': ['review-prompts'],
 }
 
 /**
@@ -159,8 +168,9 @@ export const REQUIRED_DOCS: Record<EntryMode, readonly DocType[]> = {
   structured: ['prd', 'api-docs', 'prompts'],
   // 快捷入口的交付物就是 PRD；后续接口文档 / 提示词属可选加成
   'prd-quick': ['prd'],
-  // 调试入口的交付物只有提示词套件
+  // 两个导入入口的交付物都只有提示词套件（自带的那两份材料不算本工具的产物）
   'prompt-debug': ['prompts'],
+  'prd-and-api-paste': ['prompts'],
 }
 
 /** 刷新降级的类型：生成中断 / 确认步骤中断 */
@@ -174,8 +184,8 @@ export type DowngradeKind = 'generating' | 'pending'
  * - `summary-diff`：这道确认闸门依赖内存里的一次性结果（Diff），刷新后无从恢复，
  *   回退到发起它的步骤让用户重新发起。
  *
- * 两个录入页（`prd-quick` / `prompt-debug`）**不需要**降级：它们的内容落在 store 里
- * 并随会话快照一起持久化，刷新后原样还在。
+ * 三个录入页（`prd-quick` / `prompt-debug` / `prd-and-api-paste`）**不需要**降级：
+ * 它们的内容落在 store 里并随会话快照一起持久化，刷新后原样还在。
  */
 export const STATE_DOWNGRADE: Partial<
   Record<ViewState, { state: ViewState; kind: DowngradeKind }>
@@ -408,6 +418,16 @@ function parseQuickInput(value: unknown): QuickPrdInput {
   }
 }
 
+/** 解析快照里的「我有 PRD + 接口文档」录入内容；字段缺失或类型不符时退化为空 */
+function parsePastePairInput(value: unknown): PastePairInput {
+  if (typeof value !== 'object' || value === null) return { prd: '', apiDocs: '' }
+  const record = value as Partial<PastePairInput>
+  return {
+    prd: typeof record.prd === 'string' ? record.prd : '',
+    apiDocs: typeof record.apiDocs === 'string' ? record.apiDocs : '',
+  }
+}
+
 /** 解析快照里的进行中任务 id；缺失 / 非法 / 非正数一律退化为 null */
 function parseActiveJobId(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
@@ -540,6 +560,7 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
       conversationIds,
       quickInput: parseQuickInput(record.quickInput),
       debugPrdText: typeof record.debugPrdText === 'string' ? record.debugPrdText : '',
+      pastePairInput: parsePastePairInput(record.pastePairInput),
       activeJobId,
       activeJobKind: hasActiveJob && isDocKind(record.activeJobKind) ? record.activeJobKind : null,
     },

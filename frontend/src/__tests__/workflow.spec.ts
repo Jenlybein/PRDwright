@@ -96,6 +96,8 @@ describe('入口模式对进度与完成条件的影响', () => {
       'review-prompts',
     ])
     expect(stepsForMode('prompt-debug').map((step) => step.id)).toEqual(['review-prompts'])
+    // 双粘贴入口与它同为导入组：产物也只有提示词，进度条口径就该一样
+    expect(stepsForMode('prd-and-api-paste').map((step) => step.id)).toEqual(['review-prompts'])
     // 还没选入口（或旧快照）时按完整流程展示
     expect(stepsForMode(null).map((step) => step.id)).toEqual(
       stepsForMode('structured').map((step) => step.id),
@@ -214,6 +216,7 @@ describe('会话快照解析', () => {
     },
     quickInput: { productName: '', requirements: '' },
     debugPrdText: '',
+    pastePairInput: { prd: '', apiDocs: '' },
     activeJobId: null,
     activeJobKind: null,
   }
@@ -262,6 +265,7 @@ describe('会话快照解析', () => {
       'conversationIds',
       'quickInput',
       'debugPrdText',
+      'pastePairInput',
       'activeJobId',
       'activeJobKind',
     ])
@@ -283,6 +287,7 @@ describe('会话快照解析', () => {
         viewState: 'prompt-debug',
         entryMode: 'prompt-debug',
         debugPrdText: '# 别人的 PRD',
+        pastePairInput: { prd: '', apiDocs: '' },
         quickInput: { productName: '小账本', requirements: '记账' },
       }),
     )
@@ -350,11 +355,28 @@ describe('会话快照解析', () => {
         entryMode: 'bogus',
         quickInput: 'not-an-object',
         debugPrdText: 42,
+        pastePairInput: 'not-an-object',
       }),
     )
     expect(parsed?.session.entryMode).toBeNull()
     expect(parsed?.session.quickInput).toEqual({ productName: '', requirements: '' })
     expect(parsed?.session.debugPrdText).toBe('')
+    expect(parsed?.session.pastePairInput).toEqual({ prd: '', apiDocs: '' })
+  })
+
+  it('双粘贴入口的两份正文随快照还原，缺字段的那一份单独退化', () => {
+    const parsed = parseSessionSnapshot(
+      JSON.stringify({
+        ...full,
+        viewState: 'prd-and-api-paste',
+        entryMode: 'prd-and-api-paste',
+        pastePairInput: { prd: '# 我的 PRD', apiDocs: 42 },
+      }),
+    )
+
+    expect(parsed?.session.entryMode).toBe('prd-and-api-paste')
+    // 逐字段退化的意义：坏掉的那一份不该把好的那一份一起带走
+    expect(parsed?.session.pastePairInput).toEqual({ prd: '# 我的 PRD', apiDocs: '' })
   })
 
   it('录入内容字段部分缺失时逐字段退化', () => {
@@ -381,6 +403,7 @@ describe('带任务指针的快照恢复', () => {
     conversationId: '',
     quickInput: { productName: '', requirements: '' },
     debugPrdText: '',
+    pastePairInput: { prd: '', apiDocs: '' },
     activeJobId: 7,
     activeJobKind: 'prd',
   }

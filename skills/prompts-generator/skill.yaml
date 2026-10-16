@@ -21,11 +21,13 @@ tags:
   - llm
   - documentation
 
-# 输入：PRD 正文，由上游生成链路提供。
+# 输入：PRD 正文必给；接口文档正文可选（「我有 PRD + 接口文档」入口会带上，
+# 「我有 PRD」入口不带——不带时模板里那一节由后端填一句「本次未提供」的说明）。
 inputs:
   required:
     - prd_content
-  optional: []
+  optional:
+    - api_docs_content
 
 # 输出产物
 outputs:
@@ -39,7 +41,7 @@ outputs:
 references:
   - key: prompts_guide
     path: references/prompts-guide.md
-    purpose: 提示词套件的产出要求（设计原则、清单结构、变量约定、调优建议），生成时作为用户消息模板。
+    purpose: 提示词套件的产出要求（设计原则、清单结构、变量约定、调优建议），生成时作为用户消息模板。占位符：prd_content、api_docs_content、pending_spec。
     load_at: [render-sections]
 
 # 工作流阶段，与 SKILL.md 的阶段一一对应
