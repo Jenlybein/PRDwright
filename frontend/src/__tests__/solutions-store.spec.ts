@@ -57,6 +57,9 @@ function summary(id: number, overrides: Partial<SolutionSummary> = {}): Solution
     stage: 'form',
     created_at: '2026-10-13T00:00:00',
     updated_at: '2026-10-13T00:00:00',
+    // 默认与 `updated_at` 同值：绝大多数用例关心的是别的字段，不必为两根时间轴费心。
+    // 「两者不同」这件事由专门的用例构造。
+    content_updated_at: '2026-10-13T00:00:00',
     ...overrides,
   }
 }
@@ -766,5 +769,124 @@ describe('列表里的进度（stage）', () => {
     expect(solutionApi.updateSolution).toHaveBeenCalled()
     // 原位刷新：它还在第二位，没有被提到最前（那正是「侧栏自己跳一下」的来源）
     expect(solutions.items.map((item) => item.id)).toEqual([5, 1])
+  })
+})
+
+// ============================================================================
+// 内容变更判定：`content_changed`
+//
+// 后端不解析快照（见 `solution_repo` 的约定），分不出「翻了一页」与「改了内容」，
+// 所以这个标志由前端算、随载荷提交。算错的两个方向都有代价：
+// 多报 → 列表时间永远「刚刚」；少报 → 真改了内容时间却不动。
+// ============================================================================
+
+describe('内容变更判定（content_changed）', () => {
+  /** 造一份已落库的方案，并清掉建方案那次的调用记录 */
+  async function persistOnce(): Promise<void> {
+    workflow.chooseEntry('structured')
+    workflow.debugPrdText = '# 贴进来的 PRD'
+    await advanceDebounce()
+
+    expect(solutionApi.createSolution).toHaveBeenCalledTimes(1)
+    vi.mocked(solutionApi.updateSolution).mockClear()
+  }
+
+  /** 最近一次 PUT 的载荷 */
+  function sentPayload() {
+    const calls = vi.mocked(solutionApi.updateSolution).mock.calls
+    return calls[calls.length - 1]?.[1]
+  }
+
+  it('只切阶段：报「不是内容变更」（内容时间不该被翻页推动）', async () => {
+    await persistOnce()
+
+    workflow.viewState = 'review-prd'
+    await advanceDebounce()
+
+    expect(sentPayload()?.content_changed).toBe(false)
+  })
+
+  it('改了内容：报「是内容变更」', async () => {
+    await persistOnce()
+
+    workflow.debugPrdText = '# 又改了一版'
+    await advanceDebounce()
+
+    expect(sentPayload()?.content_changed).toBe(true)
+  })
+
+  it('写入产物正文：即使快照一字未动，也会触发保存并报内容变更', async () => {
+    await persistOnce()
+    vi.mocked(solutionApi.updateSolution).mockClear()
+
+    // 生成 / 手改 / 版本操作都走这条信号：正文住在后端表里，快照那条计数看不到它们。
+    // 没有这条路径，「生成完 PRD，列表时间还停在填表单那一刻」就会是常态。
+    documents.markContentWritten()
+    await advanceDebounce()
+
+    expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
+    expect(sentPayload()?.content_changed).toBe(true)
+  })
+
+  it('连续两次都是纯导航：第二次也报「不是内容变更」（基准已跟着走）', async () => {
+    await persistOnce()
+
+    workflow.viewState = 'review-prd'
+    await advanceDebounce()
+    vi.mocked(solutionApi.updateSolution).mockClear()
+
+    workflow.viewState = 'review-api-docs'
+    await advanceDebounce()
+
+    expect(sentPayload()?.content_changed).toBe(false)
+  })
+
+  it('保存失败不推进基准：下一次保存仍然报「内容变了」', async () => {
+    await persistOnce()
+
+    workflow.debugPrdText = '# 关键的一版'
+    vi.mocked(solutionApi.updateSolution).mockRejectedValueOnce(new Error('网络不可用'))
+    await advanceDebounce()
+
+    expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
+    vi.mocked(solutionApi.updateSolution).mockClear()
+
+    // 再触发一次保存（模拟下一次变更 / flush）。上一次没写进库，这一次必须**仍然**报
+    // 内容变更——否则 `content_updated_at` 就永久丢掉了那次改动，而且是静默的。
+    documents.markContentWritten()
+    await advanceDebounce()
+
+    expect(sentPayload()?.content_changed).toBe(true)
+  })
+
+  it('打开方案不报内容变更（读回来的内容不是「刚刚发生」的改动）', async () => {
+    await persistOnce()
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
+      ...summary(1),
+      data: JSON.stringify({
+        viewState: 'review-prd',
+        entryMode: 'structured',
+        summary: {
+          product_name: '订单系统',
+          product_goal: '收单',
+          target_users: [],
+          platform: '网页应用',
+          mvp_features: [],
+        },
+        messages: [],
+        conversationId: '',
+      }),
+    })
+
+    expect(await solutions.openSolution(1)).toBe(true)
+    vi.mocked(solutionApi.updateSolution).mockClear()
+
+    // 打开本身不该保存（`restoreTick` 那条守卫）；再切一次阶段触发保存，
+    // 这一次必须报「不是内容变更」——否则读完一份旧方案，它的内容时间会被顶到现在，
+    // 正好是「打开方案不该改内容时间」的反面。
+    workflow.viewState = 'chatting'
+    await advanceDebounce()
+
+    expect(sentPayload()?.content_changed).toBe(false)
   })
 })

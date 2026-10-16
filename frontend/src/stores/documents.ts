@@ -62,6 +62,21 @@ export const useDocumentsStore = defineStore('documents', () => {
   /** 最近一次读取 / 保存失败的原因；成功时清空 */
   const saveError = ref('')
 
+  /**
+   * **内容写入**计数：每成功写入一次正文就自增。
+   *
+   * 三份产物的正文住在后端 `documents` / `document_versions` 里，**不经过会话快照**，
+   * 因此 `workflow.changeTick` / `contentTick` 完全看不到它们。而「列表要显示的内容时间」
+   * 必须把「生成了一份 PRD」「手改了一段」「恢复了某一版」都算进去，否则会出现
+   * 「刚生成完 PRD，列表时间还停在填表单那一刻」。
+   *
+   * 由 `stores/solutions.ts` 消费（它同时依赖本 store 与 `workflow`，天然是两路计数的
+   * 汇合点）。放在这里而不是 `workflow`，是因为反向依赖会成环——`workflow` 已经依赖本 store。
+   *
+   * **只在写成功之后自增**：失败不记，否则一次网络抖动会被当成「内容变了」写进时间轴。
+   */
+  const contentWriteTick = ref(0)
+
   // ------------------------------------------------------------------
   // 内部：防抖与并发控制
   // ------------------------------------------------------------------
@@ -183,6 +198,17 @@ export const useDocumentsStore = defineStore('documents', () => {
   }
 
   /**
+   * 报告「刚刚写入了一份内容」。
+   *
+   * 给**不经本 store 的写入**用：生成收尾（后端在 `done` 之前就已落稿）、版本操作
+   * （checkpoint / 恢复 / 删历史版本）都改的是后端，本 store 只是在旁边看着。经办方在
+   * **写成功之后**调用——失败不报，否则失败的生成也会被记成「内容变了」。
+   */
+  function markContentWritten(): void {
+    contentWriteTick.value += 1
+  }
+
+  /**
    * 提交用户手改：先更新本地（界面立刻可见），再把落库排进防抖队列。
    *
    * 方案还没有 id 时不排队——没有方案可挂，请求发出去只会 404。这种情况只可能
@@ -232,6 +258,8 @@ export const useDocumentsStore = defineStore('documents', () => {
       try {
         await saveDocument(id, kind, content)
         saveError.value = ''
+        // 这一份真的写进库了——报告一次内容变更，让方案列表的时间与排序跟着走
+        markContentWritten()
       } catch (error) {
         if (error instanceof DocumentsNotFoundError) {
           // 方案没了：再重试也没有意义，记下原因让用户知道
@@ -311,6 +339,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     solutionId,
     loading,
     saveError,
+    contentWriteTick,
     hasPrd,
     hasApiDocs,
     hasPrompts,
@@ -321,6 +350,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     attach,
     setLocal,
     save,
+    markContentWritten,
     flushPendingSave,
     hasPendingSave,
     clear,

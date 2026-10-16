@@ -197,7 +197,13 @@ function open(item: SolutionSummary): void {
               <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
                 <span>{{ solutions.stageLabel(item.stage) }}</span>
                 <span aria-hidden="true">·</span>
-                <span>{{ relativeTime(item.updated_at) }}</span>
+                <!--
+                  时间用「内容最后一次真的变了」而不是 `updated_at`（最后写库）：
+                  后者在切阶段、切对话标签时也会被刷新，于是列表里永远是一片「刚刚」，
+                  什么信息都没说。`updated_at` 仍在接口里，留给诊断。
+                  回落是为了「新前端配旧后端」这种混布：那时拿不到新字段，至少还显示得出时间。
+                -->
+                <span>{{ relativeTime(item.content_updated_at || item.updated_at) }}</span>
               </span>
             </button>
 

@@ -350,6 +350,50 @@ def _drop_documents_content_columns(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE documents DROP COLUMN {column}")
 
 
+def _add_content_updated_at_to_solutions(conn: sqlite3.Connection) -> None:
+    """v7：给 `solutions` 加 `content_updated_at`——「最后一次**内容**变更的时间」。
+
+    为什么需要第二根时间轴
+    ----------------------
+    `updated_at` 是「最后一次写库」，而这份快照里同时装了**内容**（需求摘要、对话、
+    粘贴的材料）与**相位**（`viewState`、`activeJobId` 这类只是「我翻到哪一页」的量）。
+    两者的变化频率差着一个数量级：翻一下进度条、切一次对话标签都会写一次库，
+    于是列表里那行时间会被刷成「刚刚」，`updated_at` 排序也会把刚看过的方案顶到最前——
+    而作品其实一个字都没变。
+
+    `content_updated_at` 只在对**作品本身**发生写入时前进，列表的时间与排序都用它。
+    两个时间轴并存是刻意的，各回答一个不同的问题：
+
+    - `updated_at`：这份记录最近一次被写过是什么时候（诊断、备份口径）；
+    - `content_updated_at`：这份**东西**最近一次真的变了是什么时候（给人看）。
+
+    回填为什么取 `updated_at`
+    ------------------------
+    旧行没有依据可考，只能假设「最后一次写库就是最后一次改内容」——这是在**没有信息**
+    时的最保守选择：它保住了旧方案之间**原有的相对顺序**。若回填成迁移时刻的同一个值，
+    列表会在一夜之间变成「全部并列」，用户会以为所有方案的进度都重置了。
+
+    `NOT NULL DEFAULT ''` 之后立刻整体 `UPDATE`，因此迁移完成后不存在空值；
+    保留 `NOT NULL` 是为了让读取侧永远不必写 `or updated_at` 那种兜底分支——
+    兜底分支一旦写进查询条件，排序就没法用索引了。
+
+    索引与列都在这一步建：列也是这一步加的，没有更早的时机。新库同样从版本 0 起步、
+    逐条跑迁移，所以不必（也不该）在 `init_schema` 里再写一遍——两处各建一次迟早就对不上。
+    """
+    conn.execute(
+        "ALTER TABLE solutions ADD COLUMN content_updated_at TEXT NOT NULL DEFAULT ''"
+    )
+    # 刚加出来的列全是空串，这里一次性按「最后一次写库即最后一次改内容」回填。
+    conn.execute("UPDATE solutions SET content_updated_at = updated_at")
+    # 列表查询是「owner + 按内容时间倒序」，复合索引同时覆盖过滤与排序。
+    # 旧索引 `idx_solutions_owner(user_id, updated_at DESC)` 保留：`updated_at` 仍在写，
+    # 且「最近打开」这类查询将来若要回来，它还在。
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_solutions_owner_content "
+        "ON solutions(user_id, content_updated_at DESC)"
+    )
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -359,6 +403,11 @@ MIGRATIONS: list[Migration] = [
     Migration(version=4, name="document_versions_table", apply=_create_document_versions_table),
     Migration(version=5, name="backfill_document_versions", apply=_backfill_document_versions),
     Migration(version=6, name="documents_drop_content_columns", apply=_drop_documents_content_columns),
+    Migration(
+        version=7,
+        name="solutions_content_updated_at",
+        apply=_add_content_updated_at_to_solutions,
+    ),
 ]
 
 

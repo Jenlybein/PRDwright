@@ -143,3 +143,23 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 键名与文案不一致怎么办 | `prompt-debug` 这个名字**不改**（快照里存着它，改名要配一套兼容旧值的解析），对外说法改为「我有 PRD」；不一致由该类型的 docstring 与 ADR-031 备查 | `types/index.ts::EntryMode` |
 | 两份材料存哪 | 分开存（`pastePairInput`），**不共用** `debugPrdText`：两条入口是两个页面各自的草稿，合用一个字段会让「在这页贴了、退回入口、又从另一页进去」看到上一页的内容 | `stores/workflow.ts` + `SessionDataV2` |
 | 校验口径 | **不对称且明写**：PRD 必填（空则主操作禁用 + 缺失提示常驻在字段下方），接口文档选填，页面上直说「留空即按『只有 PRD』生成，与上一条入口效果一致」——不让用户猜那个框能不能空着 | `components/stages/PastePairStage.vue` |
+
+## 方案列表的两根时间轴落地点（2026-10-16）
+
+用户在列表里看到的「多久没动」，过去由 `solutions.updated_at` 决定——而它是**最后一次写库**，
+切一下进度条也会刷新它。这一批把「内容变更」单独记成一根轴（ADR-032）：
+
+| 议题 | 落定做法 | 位置 |
+| --- | --- | --- |
+| 为什么需要第二根轴 | 快照里同时住着**内容**（摘要 / 对话 / 粘贴材料 / 三份产物）与**相位**（`viewState` / `chatTab` / `activeJobId`）。相位的变化频率高一个数量级，于是列表时间永远是「刚刚」、排序把「刚点开看过的那份」顶到最前——而作品一个字都没变 | `ADR-032` |
+| 两根轴各答什么 | `updated_at` = 「这份记录最近一次被写」（诊断）；`content_updated_at` = 「这份**东西**最近一次真的变了」（给人看）。**列表的时间显示与排序都用后者**，前者照旧写、照旧在接口里 | `repositories/solution_repo.py` |
+| 「哪些改动算内容」 | 用户输入（表单 / 对话 / 粘贴的两份材料）＋ 三份产物的生成、AI 优化、手改、版本恢复与删除。**切阶段、翻看、切对话标签都不算**——这个口径是产品决定，写在这里备查 | `ADR-032` §Decision 6 |
+| 谁判定这次是不是内容变更 | **前端**，随载荷提交 `content_changed`（**缺省为假**）。后端不解析 `data`，分不出「翻了一页」与「改了内容」；让它去猜只能靠解析或 diff，两条路都把前端契约焊死在后端 | `api/schemas.py::SolutionSaveRequest` |
+| 前端怎么算出来 | 两个来源分开记数、在 `solutions` 里合并：`workflow.contentTick`（快照里的内容字段）＋ `documents.contentWriteTick`（正文写入）。**分开是为了不成环**——`workflow` 已依赖 `documents`，反向再依赖就循环了 | `stores/workflow.ts` + `stores/documents.ts` + `stores/solutions.ts` |
+| 为什么正文要单独记数 | 三份产物正文住在后端 `documents` 表里，**不经过快照**，快照那条计数完全看不到它们。少了它，「生成完 PRD，列表时间还停在填表单那一刻」会成为常态 | `stores/documents.ts::markContentWritten` |
+| 报告点在哪（三处） | ① 生成 / 优化 / 澄清收尾（`finishDoc`）；② 手改落库成功（`documents.saveNow`）；③ 版本抽屉的存为新版本 / 恢复 / 删历史版本。**都在写成功之后**，失败不报 | `composables/useDocumentPipeline.ts` + `stores/documents.ts` + `stores/documentVersions.ts` |
+| 基准什么时候推进 | **只在保存成功之后**。失败也推进的话，那次变更会被算作「已经记过」，下一次保存报 `content_changed=false`——时间轴静默丢掉一次内容变更 | `stores/solutions.ts::saveNow` |
+| 打开方案会不会误报 | 不会。`restoreTick` 那条守卫在跳过保存的同时把两个基准一起对齐——否则读完一份旧方案，之后任何一次保存都会声称「内容变了」 | `stores/solutions.ts` 的 watch |
+| 迁移怎么回填 | v7 加列并回填成 `updated_at`（**不是迁移时刻**）：旧行没有依据可考，取「最后一次写库」保住它们原有的相对顺序；全部并列会让列表看起来像被重排过 | `core/migrations.py` v7 |
+| 排序改在哪 | Repository 的列表查询改 `ORDER BY content_updated_at DESC, id DESC`，并建 `(user_id, content_updated_at DESC)` 复合索引。排序落在 SQL 里，因此刷新、换机器都成立，不再依赖前端的原位刷新 | `repositories/solution_repo.py::list_by_owner` |
+| 显示回落 | 侧栏那行时间取 `content_updated_at`，**为空串时回落到 `updated_at`**——「新前端配旧后端」这种混布下至少还显示得出时间 | `components/SolutionSidebar.vue` |

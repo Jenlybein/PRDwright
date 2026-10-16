@@ -231,8 +231,8 @@ def test_v3_migration_adds_pending_items_column_to_jobs() -> None:
     # 基线：只有 init_schema 的表，尚无该列
     assert "pending_items" not in {row["name"] for row in _table_info("generation_jobs")}
 
-    # 跑真实迁移清单（含 v3），最终版本应为 6（v4~v6 是文档版本链，与本步无关）
-    assert run_migrations() == 6
+    # 跑真实迁移清单（含 v3），最终版本应为 7（v4~v7 与本步无关）
+    assert run_migrations() == 7
 
     cols = {row["name"]: row for row in _table_info("generation_jobs")}
     assert "pending_items" in cols
@@ -314,7 +314,7 @@ def test_v4_v6_build_version_chain_and_backfill(monkeypatch) -> None:
 
     # 再跑完整清单：v4（建表 + 加指针）、v5（回填）、v6（删列）
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 6
+    assert run_migrations() == 7
 
     assert _table_exists("document_versions")
     cols = _columns("documents")
@@ -347,8 +347,8 @@ def test_v4_v6_is_idempotent(monkeypatch) -> None:
     solution_id = _seed_solution_with_document()
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 6
-    assert run_migrations() == 6
+    assert run_migrations() == 7
+    assert run_migrations() == 7
 
     with connect() as conn:
         count = conn.execute(
@@ -384,3 +384,75 @@ def test_v4_v6_cascade_clears_versions(monkeypatch) -> None:
     assert docs == 0
     assert versions == 0
     assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# v7：solutions 加 `content_updated_at`（把「内容变更」与「写库」分成两根时间轴）
+# ---------------------------------------------------------------------------
+
+
+def _seed_legacy_solution(username: str, now: str) -> int:
+    """在「还没有 `content_updated_at` 列」的旧库形态下造一份方案，返回其 id。
+
+    前提：调用前库里已跑过 v1~v6（`solutions` 表存在、且**没有**新列）。
+    """
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
+            (username, "hash", b"salt", now),
+        )
+        user_id = int(cur.lastrowid or 0)
+        cur = conn.execute(
+            "INSERT INTO solutions (user_id, title, mode, stage, data, created_at, updated_at) "
+            "VALUES (?, '旧方案', 'structured', 'review-prd', '{}', ?, ?)",
+            (user_id, now, now),
+        )
+        solution_id = int(cur.lastrowid or 0)
+        conn.commit()
+    return solution_id
+
+
+def test_v7_adds_content_updated_at_and_backfills(monkeypatch) -> None:
+    """真实 v7：加列、旧行回填成 `updated_at`、并建好排序用的复合索引。
+
+    回填口径必须是 `updated_at` 而**不是**「迁移时刻」：后者会把所有旧方案并列成同一个
+    时间，列表的相对顺序在一夜之间被重排（用户会以为所有方案的进度都重置了）。
+    这里用两条时间不同的旧行把这件事钉死。
+    """
+    from backend.core.migrations import MIGRATIONS
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS[:6])
+    assert run_migrations() == 6
+    # 迁移前这一列不该存在（新列一律走迁移，不进 init_schema 的基线 SQL）
+    assert "content_updated_at" not in _columns("solutions")
+
+    older = _seed_legacy_solution("legacy-old", "2026-01-01T00:00:00+00:00")
+    newer = _seed_legacy_solution("legacy-new", "2026-02-02T00:00:00+00:00")
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    assert run_migrations() == 7
+
+    cols = {row["name"]: row for row in _table_info("solutions")}
+    assert "content_updated_at" in cols
+    # NOT NULL：读取侧与排序都不必再写 `COALESCE(..., updated_at)` 那种兜底
+    assert cols["content_updated_at"]["notnull"] == 1
+
+    with connect() as conn:
+        stamps = {
+            int(row["id"]): row["content_updated_at"]
+            for row in conn.execute("SELECT id, content_updated_at FROM solutions").fetchall()
+        }
+        indexes = {row["name"] for row in conn.execute("PRAGMA index_list(solutions)")}
+    assert stamps[older] == "2026-01-01T00:00:00+00:00"
+    assert stamps[newer] == "2026-02-02T00:00:00+00:00"
+    assert "idx_solutions_owner_content" in indexes
+
+
+def test_v7_is_idempotent(monkeypatch) -> None:
+    """v7 跑第二次是空操作——`ALTER TABLE ADD COLUMN` 没有 `IF NOT EXISTS`，
+    全靠版本守卫挡住重跑；这条盯着那道守卫还在。"""
+    from backend.core.migrations import MIGRATIONS
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    assert run_migrations() == 7
+    assert run_migrations() == 7

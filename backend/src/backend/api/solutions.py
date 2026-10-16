@@ -90,6 +90,7 @@ async def update_solution(
         mode=payload.mode,
         stage=payload.stage,
         data=payload.data,
+        content_changed=payload.content_changed,
     )
     if row is None:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)

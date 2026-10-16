@@ -45,6 +45,7 @@ const PAYLOAD: SolutionSavePayload = {
   mode: 'structured',
   stage: 'form',
   data: '{"viewState":"form"}',
+  content_changed: true,
 }
 
 beforeEach(() => {

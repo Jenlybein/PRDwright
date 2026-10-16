@@ -466,6 +466,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 刻意不再用「当前正在处理的文档」那种内存变量去猜：它**在导航到审阅页时不会被赋值**，
     // 于是把接口文档的优化结果写进了 PRD（见 ADR-028 记录的那处修复）。
     documents.setLocal(target, content)
+    // 后端在 `done` 之前就已经把正文写进库了（「写正文的唯一入口 = job 成功收尾」），
+    // 所以这一句报的是**已经发生的事实**，不是「打算写」。方案列表的内容时间据此前进：
+    // 正文不经过会话快照，`workflow` 那套计数看不到它。
+    documents.markContentWritten()
     // 优化留在原地：审阅页就在眼前，跳一下反而多余。生成与澄清都落到那份文档的审阅页。
     if (kind !== 'optimize') goTo(reviewStateFor(target))
   }

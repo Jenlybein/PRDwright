@@ -32,13 +32,19 @@ def _payload(
     mode: str = "structured",
     stage: str = "review-prd",
     data: dict | None = None,
+    content_changed: bool = True,
 ) -> dict:
-    """构造保存请求体。`data` 走 json.dumps，模拟前端把快照序列化后提交。"""
+    """构造保存请求体。`data` 走 json.dumps，模拟前端把快照序列化后提交。
+
+    `content_changed` 缺省为真：这个参数是「这次保存报了一次内容变更」，绝大多数用例
+    模拟的都是一次真实编辑。要测「只翻页」的保存，显式传 `False`。
+    """
     return {
         "title": title,
         "mode": mode,
         "stage": stage,
         "data": json.dumps(data if data is not None else SNAPSHOT, ensure_ascii=False),
+        "content_changed": content_changed,
     }
 
 
@@ -287,3 +293,108 @@ def test_deleting_user_removes_their_solutions(client):
 
     auth_service.delete_user("alice")
     assert SolutionRepository.get(user["id"], created["id"]) is None
+
+
+# ---------------------------------------------------------------------------
+# 两根时间轴：`updated_at`（写库）与 `content_updated_at`（内容变更）
+#
+# 存在的理由：快照里同时住着内容（摘要、对话、粘贴的材料）与相位（`viewState`），
+# 而切阶段也会写库。没有这第二根轴，列表里永远是一片「刚刚」，排序也会被「刚点开
+# 看过的那份」占据。这里盯的是「哪次保存该推进它、哪次不该」。
+# ---------------------------------------------------------------------------
+
+
+def test_create_stamps_content_time(client):
+    """新建即内容非空（方案是「有内容了才建」的），两根时间轴都从此刻起步。"""
+    register(client)
+    created = _create(client)
+
+    assert created["content_updated_at"] != ""
+    assert created["content_updated_at"] == created["updated_at"]
+
+
+def test_navigation_save_keeps_content_time(client):
+    """只切阶段的保存**不**推进内容时间，但仍然刷新写库时间。
+
+    `updated_at` 照旧前进是刻意的：它回答的是「这份记录最近一次被写是什么时候」，
+    而这件事确实刚刚发生过。两根轴各答一个问题，不是二选一。
+    """
+    register(client)
+    created = _create(client)
+    before = created["content_updated_at"]
+
+    # 只换 stage，内容快照一字未动
+    response = client.put(
+        f"/api/solutions/{created['id']}",
+        json=_payload(stage="done", content_changed=False),
+    )
+    assert response.status_code == 200
+    after = response.json()
+
+    assert after["content_updated_at"] == before
+    assert after["updated_at"] >= created["updated_at"]
+
+
+def test_content_save_advances_content_time(client):
+    """`content_changed=True` 才推进内容时间。"""
+    register(client)
+    created = _create(client)
+
+    changed = {**SNAPSHOT, "debugPrdText": "# 新贴进来的一份 PRD"}
+    response = client.put(
+        f"/api/solutions/{created['id']}",
+        json=_payload(data=changed, content_changed=True),
+    )
+    assert response.status_code == 200
+
+    after = response.json()
+    assert after["content_updated_at"] >= created["content_updated_at"]
+    # 内容真的落库了（推进时间的那次保存不能是空写）
+    detail = client.get(f"/api/solutions/{created['id']}").json()
+    assert "新贴进来的一份 PRD" in detail["data"]
+
+
+def test_content_changed_defaults_to_false(client):
+    """请求体没带这个字段时按「不算内容变更」处理。
+
+    缺省取保守值：老前端（还没有这个字段）发的保存不该把内容时间顶到当下——
+    轴一旦被无意义的写入推着走，就再也读不出「作品何时真的变了」。
+    """
+    register(client)
+    created = _create(client)
+
+    payload = _payload(stage="chatting")
+    payload.pop("content_changed")
+    response = client.put(f"/api/solutions/{created['id']}", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["content_updated_at"] == created["content_updated_at"]
+
+
+def test_list_orders_by_content_time(client):
+    """列表按**内容时间**倒序，而不是按写库时间。
+
+    两条记录的时间由 SQL 直接写成确定值：真实流程里两次保存常落在同一秒内，
+    时间戳可能相同、排序就退化成按 id，测不出想测的东西。
+    这里让「只是被翻看过的那份」写库时间更新、内容时间更旧——按写库排会在前，
+    按内容排必须在后。
+    """
+    from backend.core.db import connect
+
+    register(client)
+    viewed = _create(client, title="只是被翻看过")
+    edited = _create(client, title="真的改了内容")
+
+    with connect() as conn:
+        conn.execute(
+            "UPDATE solutions SET content_updated_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00+00:00", "2026-09-09T00:00:00+00:00", viewed["id"]),
+        )
+        conn.execute(
+            "UPDATE solutions SET content_updated_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-05-05T00:00:00+00:00", "2026-05-05T00:00:00+00:00", edited["id"]),
+        )
+        conn.commit()
+
+    titles = [item["title"] for item in client.get("/api/solutions").json()["solutions"]]
+    assert titles == ["真的改了内容", "只是被翻看过"]

@@ -150,6 +150,9 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
     }
     await documents.reload()
     await load(kind)
+    // 存为新版本 / 恢复旧版本都改动了这份交付物（恢复还会换掉当前正文），
+    // 因此都算内容变更——方案列表的时间与排序该跟着走。
+    documents.markContentWritten()
     return true
   }
 
@@ -192,6 +195,9 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
       return false
     }
     await load(kind)
+    // 删掉一个历史版本同样改动了这份交付物（少了可回退的一版），算内容变更。
+    // 它**不重拉当前正文**（正文没变），所以这一句是这里唯一的「发生了变化」的信号。
+    documents.markContentWritten()
     return true
   }
 

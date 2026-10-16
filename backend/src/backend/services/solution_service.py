@@ -37,7 +37,13 @@ def _clean(text: str, limit: int) -> str:
     return text.strip()[:limit]
 
 
-def create_solution(owner_id: int, title: str, mode: str, stage: str, data: str) -> dict[str, Any]:
+def create_solution(
+    owner_id: int,
+    title: str,
+    mode: str,
+    stage: str,
+    data: str,
+) -> dict[str, Any]:
     """新建方案，返回其摘要（不含 data）。
 
     `data` 原样存取，**不做 JSON 解析**：快照结构属于前端契约，后端解析它就意味着
@@ -63,8 +69,15 @@ def update_solution(
     mode: str,
     stage: str,
     data: str,
+    content_changed: bool,
 ) -> dict[str, Any] | None:
-    """整份覆盖某方案；不存在或不属于当前用户时返回 None（由路由层翻成 404）。"""
+    """整份覆盖某方案；不存在或不属于当前用户时返回 None（由路由层翻成 404）。
+
+    `content_changed` 由前端给出，本层只转手：**只有前端知道这次改动到底动了什么**——
+    `viewState` 与「需求摘要 / 对话 / 粘贴的材料」同住一份快照，后端不解析 `data`
+    （见本模块开头），也就无从分辨「翻了一页」与「改了内容」。让后端去猜只能靠
+    解析或 diff 快照，两条路都会把前端契约焊死在后端。
+    """
     ok = SolutionRepository.update(
         owner_id=owner_id,
         solution_id=solution_id,
@@ -72,6 +85,7 @@ def update_solution(
         mode=_clean(mode, _MODE_MAX),
         stage=_clean(stage, _STAGE_MAX),
         data=data,
+        content_changed=content_changed,
     )
     if not ok:
         return None
@@ -119,4 +133,7 @@ def _to_summary(row: dict[str, Any]) -> dict[str, Any]:
         "stage": row["stage"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        # 两根时间轴都要给出去：界面显示的是 `content_updated_at`（作品何时真的变了），
+        # 而 `updated_at`（记录何时被写过）留给诊断，别让前端为了拿它再打一次接口。
+        "content_updated_at": row["content_updated_at"],
     }

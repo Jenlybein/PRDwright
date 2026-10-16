@@ -248,6 +248,11 @@ class SolutionSaveRequest(BaseModel):
     不必把大 JSON 取出来反序列化。冗余值由前端计算——「产品名该从 summary 还是
     quickInput 取」只有前端清楚。
 
+    `content_changed` 也是前端算的，理由同上且更硬：快照里同时住着**内容**（摘要、
+    对话、粘贴的材料）与**相位**（`viewState` / `activeJobId`）。后端不解析 `data`，
+    因此无从分辨「翻了一页」与「改了内容」；而这件事决定了要不要推进
+    `content_updated_at`——列表的时间与排序都看它。
+
     这三个字段的长度上限刻意放宽，**不在校验层拒绝超长值**：它们只是展示用的冗余，
     真正的正文在 `data` 里完好无损，为此把整次保存判为 422 是本末倒置——
     用户会看到「保存失败」，而数据其实一点问题都没有。超长值由服务层截断
@@ -258,6 +263,13 @@ class SolutionSaveRequest(BaseModel):
     mode: str = Field(default="", max_length=200, description="入口模式，列表展示用")
     stage: str = Field(default="", max_length=200, description="当前阶段，列表展示进度用")
     data: str = Field(min_length=1, description="完整会话快照的 JSON 文本")
+    content_changed: bool = Field(
+        default=False,
+        description=(
+            "本次改动是否动了作品内容（而非只是切换阶段 / 翻看）。"
+            "为真才推进 `content_updated_at`；缺省为假，即「这次保存不改变内容时间」。"
+        ),
+    )
 
 
 class SolutionSummary(BaseModel):
@@ -268,7 +280,16 @@ class SolutionSummary(BaseModel):
     mode: str = Field(default="", description="入口模式")
     stage: str = Field(default="", description="当前阶段")
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
-    updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
+    updated_at: str = Field(
+        description="最近一次写库时间（UTC ISO 8601）。注意它**含**「只是翻看」这类保存，"
+        "要回答「作品何时真的变了」请用 `content_updated_at`"
+    )
+    content_updated_at: str = Field(
+        description=(
+            "最后一次**内容**变更时间（UTC ISO 8601）：需求摘要 / 对话 / 粘贴材料变了，"
+            "或三份产物被生成、优化、手改、恢复时推进。列表的时间显示与排序都用它"
+        )
+    )
 
 
 class SolutionDetail(SolutionSummary):

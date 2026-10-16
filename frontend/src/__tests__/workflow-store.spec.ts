@@ -67,6 +67,38 @@ describe('useWorkflowStore', () => {
     expect(store.changeTick).toBe(before)
   })
 
+  it('contentTick 只跟内容走：切阶段 / 切标签 / 任务指针都不算内容变更', async () => {
+    const store = useWorkflowStore()
+    const contentBefore = store.contentTick
+    const changeBefore = store.changeTick
+
+    // 这些都是「我翻到哪一页」，作品一个字都没变
+    store.viewState = 'review-prd'
+    store.chatTab = 'prd-clarify'
+    store.activeJobId = 7
+    store.activeJobKind = 'prd'
+    await nextTick()
+
+    // 它们照样要落库（相位也是要存的状态），但不该推进内容时间——
+    // 否则列表里那行时间永远是一片「刚刚」
+    expect(store.changeTick).toBeGreaterThan(changeBefore)
+    expect(store.contentTick).toBe(contentBefore)
+  })
+
+  it('contentTick 跟着内容字段走：粘贴的材料与对话都算', async () => {
+    const store = useWorkflowStore()
+
+    const beforePaste = store.contentTick
+    store.debugPrdText = '# 贴进来的 PRD'
+    await nextTick()
+    expect(store.contentTick).toBeGreaterThan(beforePaste)
+
+    const beforeMessage = store.contentTick
+    store.messages.push({ role: 'user', content: '再加一个登录', stage: 'requirement' })
+    await nextTick()
+    expect(store.contentTick).toBeGreaterThan(beforeMessage)
+  })
+
   it('运行态变化不触发 changeTick（不该被保存的状态）', () => {
     const store = useWorkflowStore()
     const before = store.changeTick

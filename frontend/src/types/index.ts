@@ -713,8 +713,21 @@ export interface SolutionSummary {
   stage: string
   /** 创建时间（UTC ISO 8601 字符串） */
   created_at: string
-  /** 最近更新时间（UTC ISO 8601 字符串），列表按它倒序 */
+  /**
+   * 最近一次**写库**的时间（UTC ISO 8601 字符串）。
+   *
+   * 注意它包含「只是翻看」这类保存（切阶段、切对话标签都会写一次库），所以它不适合
+   * 直接展示给用户——要回答「这份东西最后一次真的变了」请用 `content_updated_at`。
+   */
   updated_at: string
+  /**
+   * 最后一次**内容**变更的时间（UTC ISO 8601 字符串）。列表的时间显示与排序都用它。
+   *
+   * 只在作品本身被写入时前进：需求摘要 / 对话 / 粘贴的材料变了，或三份产物被生成、
+   * AI 优化、手改、版本恢复时。翻页与切标签不动它——那样列表会给出一串「刚刚」，
+   * 却什么信息都没说。
+   */
+  content_updated_at: string
 }
 
 /** 方案详情：摘要 + 快照正文 */
@@ -735,6 +748,16 @@ export interface SolutionSavePayload {
   stage: string
   /** `SessionDataV2` 序列化后的 JSON 文本 */
   data: string
+  /**
+   * 这次改动是否动了**作品内容**（而不是只切了阶段 / 翻了页）。
+   *
+   * 字段名跟 API 走（`content_changed`，与 `created_at` 等同一种命名），因此这个载荷是
+   * **原样提交**的、没有第二层转换——改名会静默丢掉这个标志，进而让内容时间永不前进。
+   *
+   * 由前端判定、后端转手存下：快照里同时装着内容（摘要、对话、粘贴的材料）与相位
+   * （`viewState` / `activeJobId`），而后端不解析 `data`，它无从分辨这两者。
+   */
+  content_changed: boolean
 }
 
 /**

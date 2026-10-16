@@ -202,6 +202,22 @@ export const useSolutionsStore = defineStore('solutions', () => {
     return `未命名方案 · ${nowLabel()}`
   }
 
+  /**
+   * 上次**落库时**看到的两个内容变更计数。
+   *
+   * 内容有两个来源，各在自己那一层记数（分开记是为了不成环，见两处 docstring）：
+   *
+   * 1. `workflow.contentTick`：快照里的内容字段——需求摘要、对话、粘贴的两份材料；
+   * 2. `documents.contentWriteTick`：三份产物的正文写入——生成、AI 优化、手改、版本操作。
+   *    正文住在后端的 `documents` 表里，不经过快照，第 1 个计数完全看不到它们。
+   *
+   * 任一个与基准不等，就说明这批改动里有「作品真的变了」，该推进 `content_updated_at`。
+   * 这个判断只能在前端做：后端不解析快照（见 `solution_repo` 的约定），分不出
+   * 「翻了一页」与「改了内容」。
+   */
+  let lastSavedContentTick = workflow.contentTick
+  let lastSavedDocWriteTick = documents.contentWriteTick
+
   /** 组装保存载荷 */
   function buildPayload(): SolutionSavePayload {
     return {
@@ -211,6 +227,11 @@ export const useSolutionsStore = defineStore('solutions', () => {
       // 取 `viewState` 会让「点回 PRD 回看」把进度倒退成「已出 PRD」。见 `progressStage`。
       stage: workflow.progressStage,
       data: JSON.stringify(workflow.snapshot()),
+      // 相对**上次落库**的基准来比，而不是相对上一次调用：保存会因失败而重试，基准若
+      // 跟着每次调用走，一次失败的保存就把「内容变了」这件事吃掉了。
+      content_changed:
+        workflow.contentTick !== lastSavedContentTick ||
+        documents.contentWriteTick !== lastSavedDocWriteTick,
     }
   }
 
@@ -230,6 +251,10 @@ export const useSolutionsStore = defineStore('solutions', () => {
     }
 
     const payload = buildPayload()
+    // 记下这次请求带出去的两个内容计数：成功后才把它们设为新基准。要在 `await` **之前**取，
+    // 请求在途期间用户还能继续改，那些改动不能被这一次的回应误当成「已落库」。
+    const contentTickAtSend = workflow.contentTick
+    const docWriteTickAtSend = documents.contentWriteTick
 
     try {
       if (currentId.value === null) {
@@ -257,6 +282,11 @@ export const useSolutionsStore = defineStore('solutions', () => {
         documents.attach(targetId)
       }
       saveError.value = ''
+      // 内容变更这下真的进库了，推进基准。**只在成功路径上推进**：失败时若也推进，
+      // 那次变更会被算作「已经记过」，下次保存报 `content_changed=false`——
+      // `content_updated_at` 就永久丢了一次内容变更（而且是静默的）。
+      lastSavedContentTick = contentTickAtSend
+      lastSavedDocWriteTick = docWriteTickAtSend
       dirty = false
     } catch (error) {
       // 保存失败不阻断使用：内容还在内存里，下一次变更会再试。
@@ -455,14 +485,34 @@ export const useSolutionsStore = defineStore('solutions', () => {
   /** 上次自动保存看到过的 `restoreTick`，用来识别「这次变更是加载造成的」 */
   let lastSeenRestoreTick = workflow.restoreTick
 
+  /**
+   * 自动保存：订阅三个变更计数。
+   *
+   * - `changeTick`：快照里**任何**会入库的字段变了（含 `viewState` 这类相位）；
+   * - `contentTick`：快照里的**内容**变了（列表时间看它）；
+   * - `contentWriteTick`：三份产物的正文写成功了。它单独在这里是因为正文不经过快照——
+   *   没有这条订阅，「生成完 PRD，列表时间却没变」就会成为常态。
+   *
+   * 同一次刷新里多个来源一起变化只会触发一次回调：Vue 把同一次刷新的变更合批。即使真的
+   * 进来两次也无害——都只是置位 `dirty` 并重置防抖定时器。
+   */
   watch(
-    () => workflow.changeTick,
+    [
+      () => workflow.changeTick,
+      () => workflow.contentTick,
+      () => documents.contentWriteTick,
+    ],
     () => {
       // 这次变更来自「整份快照被换上」（打开已有方案），不是用户输入。
       // 跳过保存：刚读回来的内容原样存回去纯属白跑一趟请求，而且会顺带
       // 把 `updated_at` 刷新成现在——侧边栏的排序会因此乱掉。
       if (workflow.restoreTick !== lastSeenRestoreTick) {
         lastSeenRestoreTick = workflow.restoreTick
+        // 恢复回来的内容不是「刚刚发生的内容变更」，两个基准都要跟着走：否则读完一份旧
+        // 方案，之后任何一次保存都会声称「内容变了」，把 `content_updated_at` 顶到现在——
+        // 那正好是「打开方案不该改内容时间」的反面。
+        lastSavedContentTick = workflow.contentTick
+        lastSavedDocWriteTick = documents.contentWriteTick
         dirty = false
         clearTimer()
         return

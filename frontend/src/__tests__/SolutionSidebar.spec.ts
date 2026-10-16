@@ -41,6 +41,8 @@ function summary(id: number, overrides: Partial<SolutionSummary> = {}): Solution
     stage: 'form',
     created_at: '2026-10-13T00:00:00',
     updated_at: '2026-10-13T00:00:00',
+    // 默认同值，避免每条用例都要为两根时间轴分别构造；两者不同由专门用例覆盖
+    content_updated_at: '2026-10-13T00:00:00',
     ...overrides,
   }
 }
@@ -105,7 +107,34 @@ describe('列表展示', () => {
     expect(wrapper.text()).toContain('方案 1')
   })
 
+  it('那行时间显示的是内容变更时间，而不是最后写库时间', async () => {
+    vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([
+      summary(1, {
+        // 写库时间很新（刚点开翻看过），但作品其实三天没动
+        updated_at: new Date(Date.now() - 60_000).toISOString().slice(0, 19),
+        content_updated_at: '2026-10-13T00:00:00',
+      }),
+    ])
+
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.text()).toContain('10-13')
+    expect(wrapper.text()).not.toContain('1 分钟前')
+  })
+
+  it('旧后端没给内容时间时回落到写库时间（混布时不至于显示空白）', async () => {
+    vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([
+      summary(1, { content_updated_at: '' }),
+    ])
+
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.text()).toContain('10-13')
+  })
+
   it('没有方案时显示空态引导', async () => {
+    vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([])
+
     const wrapper = await mountSidebar()
 
     expect(wrapper.text()).toContain('还没有方案')

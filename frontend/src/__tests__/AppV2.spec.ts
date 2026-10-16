@@ -355,6 +355,7 @@ beforeEach(() => {
     stage: 'form',
     created_at: '2026-10-13T00:00:00',
     updated_at: '2026-10-13T00:00:00',
+    content_updated_at: '2026-10-13T00:00:00',
   })
   vi.mocked(solutionApi.updateSolution).mockImplementation(async (id, payload) => ({
     id,
@@ -363,6 +364,7 @@ beforeEach(() => {
     stage: payload.stage,
     created_at: '2026-10-13T00:00:00',
     updated_at: '2026-10-13T00:00:00',
+    content_updated_at: '2026-10-13T00:00:00',
     data: payload.data,
   }))
   vi.mocked(solutionApi.deleteSolution).mockResolvedValue(undefined)
@@ -459,6 +461,7 @@ function makeSolutionDetail(
     stage: overrides.stage ?? 'form',
     created_at: '2026-10-13T00:00:00',
     updated_at: '2026-10-13T00:00:00',
+    content_updated_at: '2026-10-13T00:00:00',
     data: JSON.stringify(snapshot),
   }
 }

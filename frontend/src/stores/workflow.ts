@@ -168,6 +168,24 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const changeTick = ref(0)
 
   /**
+   * **内容**变更计数：只统计「作品本身变了」的那些改动。
+   *
+   * 与 `changeTick` 并存是刻意的——后者把 `viewState` / `chatTab` 这类「我翻到哪一页」的
+   * 相位也算作一次改动（切一下进度条就是一次），而列表要回答的是「这份东西最后一次真的
+   * 变了是什么时候」。把翻页也记成内容变更，那根时间轴就没有意义了
+   * （见 `solutions.content_updated_at`）。
+   *
+   * ⚠️ 它只覆盖**快照里**的内容字段（需求摘要、对话、粘贴的两份材料），见下方那个 watch。
+   * 三份产物的正文**不在快照里**（住在后端 `documents` 表），改写它们一个字段都不会动到本
+   * store——那一路由 `stores/documents.ts` 的 `contentWriteTick` 单独记数，两者在
+   * `stores/solutions.ts` 里合并成「这次要不要推进内容时间」。
+   *
+   * 分成两个计数而不是让 `documents` 反过来调用本 store，是为了不让两个 store 互相引用：
+   * 本 store 已经依赖 `documents`（要按产物判断进度），反向再依赖就成环。
+   */
+  const contentTick = ref(0)
+
+  /**
    * 「整份快照被换上」的计数。
    *
    * 与 `changeTick` 的区别在于**谁引起的**：`changeTick` 是用户/流程让状态变了
@@ -258,6 +276,24 @@ export const useWorkflowStore = defineStore('workflow', () => {
     ],
     () => {
       changeTick.value += 1
+    },
+    { deep: true },
+  )
+
+  /**
+   * `changeTick` 的**内容子集**：只盯真正构成「作品」的那几个字段。
+   *
+   * 上面那个 watch 里的另外几个——`viewState`（翻页）、`entryMode`（选入口）、
+   * `chatTab`（切对话标签）、`activeJobId` / `activeJobKind`（在途任务指针）——都会变，
+   * 但作品一个字都没变，它们不该推进内容时间。
+   *
+   * 两个 watch 并存而不是「在一个 watch 里判断是谁变了」：后者要维护一份「哪些字段算内容」
+   * 的判断，而列表本身就写在这里（Vue 直接按依赖区分），漏改一个字段的代价是对不上账。
+   */
+  watch(
+    [summary, messages, conversationIds, quickInput, debugPrdText, pastePairInput],
+    () => {
+      contentTick.value += 1
     },
     { deep: true },
   )
@@ -535,6 +571,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     busy,
     downgrade,
     changeTick,
+    contentTick,
     restoreTick,
     // 派生状态
     downgradeNotice,

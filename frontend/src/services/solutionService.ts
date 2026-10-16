@@ -37,6 +37,10 @@ function toSummary(data: unknown): SolutionSummary {
     stage: typeof raw.stage === 'string' ? raw.stage : '',
     created_at: typeof raw.created_at === 'string' ? raw.created_at : '',
     updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : '',
+    // 缺省为空串而不是回落到 `updated_at`：这里只做「形状收敛」，把两种时间混起来会
+    // 让「旧后端没这列」这件事静默消失。展示层的回落写在用它的那个组件里，一眼可见。
+    content_updated_at:
+      typeof raw.content_updated_at === 'string' ? raw.content_updated_at : '',
   }
 }
 

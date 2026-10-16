@@ -114,6 +114,7 @@ beforeEach(() => {
     stage: 'form',
     created_at: '',
     updated_at: '',
+    content_updated_at: '',
   })
 })
 
