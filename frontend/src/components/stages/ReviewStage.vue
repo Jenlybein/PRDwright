@@ -6,6 +6,7 @@ import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import PendingItemsPanel from '@/components/ui/PendingItemsPanel.vue'
 import type { PendingItem, RunSummary, ViewState } from '@/types'
+import { DOWNLOAD_ICON } from '@/utils/icons'
 import { formatDuration, formatTokens } from '@/utils/metering'
 
 /**
@@ -17,10 +18,14 @@ import { formatDuration, formatTokens } from '@/utils/metering'
  *
  * ## 底栏两行，各自职责单一
  *
- * - **内容行**：这份文档自己的工具——AI 优化 / 复制 / 保存，以及「预览 / 编辑」视图切换。
+ * - **内容行**：这份文档自己的工具——AI 优化 / 复制 / 下载，以及「预览 / 编辑」视图切换。
  *   点「AI 优化」后原地换成指令输入，文档全程可见（改成弹窗就看不到了，而写优化指令时恰恰要
  *   对着文档）。
  * - **流程行**：这份文档之后往哪走——返回、生成下一份、完成。
+ *
+ * 内容行**没有「保存」按钮**：手改正文由 `DocumentReview` 的草稿变化事件驱动、自动防抖落库
+ * （800ms，见 `stores/documents.ts`），不需要用户记得点一下；原来那个位置改成「下载」，
+ * 把当前这份文档（含最新编辑）导出为 `.md`。
  *
  * 工具行的按钮是「对内容做的事」，但草稿、复制反馈、视图模式这些状态天然属于 `DocumentReview`，
  * 所以用 `ref` 取它的句柄来渲染；指令输入本身是底栏的 UI 状态，留在本组件里。
@@ -29,8 +34,20 @@ import { formatDuration, formatTokens } from '@/utils/metering'
  * 散在上下两处。现在收进底栏内容行，与文档工具排在一行，符合「文档相关的控件都在底栏」的约定。
  */
 const emit = defineEmits<{
-  /** 保存编辑后的正文 */
-  save: [content: string]
+  /**
+   * 草稿变化：用户改动了这份文档的可编辑原文。
+   *
+   * 载荷是**全文**。上层（`AppV2`）直接交给管线 → `documents.save` 落库，防抖与单飞都在 store 里。
+   * 这里**逐次输入如实上报**、不自己攒批——攒批会让「防抖窗口内切方案 / 关页面」丢掉最后一次编辑。
+   */
+  draftChange: [content: string]
+  /**
+   * 下载当前这份文档。
+   *
+   * 载荷是**组件里的草稿**（`draftContent`），而不是 store 的工作副本——防抖窗口内草稿可能更新，
+   * 下载必须拿到用户眼前这一版。
+   */
+  download: [content: string]
   /** 提交 AI 优化指令 */
   optimize: [payload: { content: string; instruction: string }]
   /** 返回对话 */
@@ -153,7 +170,7 @@ const returnToChatLabel = computed(() => {
 /** 是否渲染「返回」按钮：澄清入口在与「返回」落点相同处会顶替它，落点不同处则两者并存 */
 const showBack = computed(() => !showReturnToChat.value || Boolean(props.keepBackButton))
 
-/** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制、保存、切换视图 */
+/** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制与切换视图 */
 const doc = ref<InstanceType<typeof DocumentReview> | null>(null)
 
 /**
@@ -285,7 +302,7 @@ function submitOptimize(): void {
       ref="doc"
       :title="title"
       :content="content"
-      @save="emit('save', $event)"
+      @draft-change="emit('draftChange', $event)"
     />
 
     <!--
@@ -345,7 +362,7 @@ function submitOptimize(): void {
             </AppButton>
           </div>
 
-          <!-- 右端：视图切换 + 保存。两者都作用于「这份文档」，排在一起 -->
+          <!-- 右端：视图切换 + 下载。两者都作用于「这份文档」，排在一起 -->
           <div class="flex items-center gap-2">
             <!-- 预览 / 编辑：从文档卡片头部下沉过来，与文档工具同处底栏 -->
             <div
@@ -375,17 +392,22 @@ function submitOptimize(): void {
               </button>
             </div>
 
-            <!-- 保存：只要文档有正文、且没有生成在跑，就可点。
-                 曾按「原文被改过」（dirty）来决定禁用态，结果是**刚生成完的那一刻按钮是灰的**——
-                 用户把文档生成出来了却存不下去，观感上像功能坏了（自动落库是后台行为，用户看不到）。
-                 现在改为「有内容即可保存」，点一下至少能拿到明确的「已保存」回执。 -->
+            <!-- 下载：把当前这份文档（含用户改过的稿）导出为 .md，与完成页的下载是同一套视觉。
+                 原来这里是「保存」——现在手改已自动防抖落库，不需要用户点一下了，按钮改作下载。
+                 载荷取 `doc?.draftContent` 而不是 store 的工作副本：防抖窗口内用户刚敲的字还没落库，
+                 下载必须给出眼前这一版。
+                 「有正文才可点」是因为 downloadFile 对空内容会**静默 return**（utils/download.ts:21），
+                 禁用态避免一次「点了没反应」的死点击。 -->
             <AppButton
               variant="secondary"
               size="sm"
               :disabled="doc?.busy || !doc?.hasContent"
-              @click="doc?.save()"
+              @click="emit('download', doc?.draftContent ?? '')"
             >
-              保存
+              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" :d="DOWNLOAD_ICON" clip-rule="evenodd" />
+              </svg>
+              下载
             </AppButton>
           </div>
         </div>

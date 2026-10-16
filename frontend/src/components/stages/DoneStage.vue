@@ -5,6 +5,7 @@ import type { ViewState } from '@/types'
 import type { DocType } from '@/utils/download'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
+import { DOWNLOAD_ICON } from '@/utils/icons'
 
 /**
  * 全部完成阶段视图。
@@ -90,10 +91,6 @@ const cards = computed<DoneCard[]>(() => ALL_CARDS.value.filter((card) => card.l
 const headline = computed(() =>
   cards.value.length > 1 ? `${cards.value.length} 份文档已全部完成` : '文档已生成完毕',
 )
-
-/** 下载图标路径（三张卡片共用） */
-const DOWNLOAD_ICON =
- 'M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z'
 </script>
 
 <template>
@@ -153,6 +150,9 @@ const DOWNLOAD_ICON =
     <!--
       页面级操作栏：左「重新开始」│「返回」，右侧留空——本页已交付，没有「下一步」。
       下载入口留在各自的文档卡片上（「下载这份文档」属于文档本身的操作）。
+      审阅页（PRD / 接口文档 / 提示词）的底栏也有一个「下载」，两者是同一套视觉
+      （共用 `utils/icons.ts` 的 `DOWNLOAD_ICON`），只是出口不同：这里下载的是落库那一版，
+      审阅页下载的是**用户眼前这份草稿**（可能还在防抖窗口里，比落库版本新）。
     -->
     <AppActionBar>
       <template #danger>

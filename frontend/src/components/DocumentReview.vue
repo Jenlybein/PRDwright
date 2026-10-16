@@ -8,10 +8,13 @@ import { renderMarkdown } from '@/utils/markdown'
  *
  * 生成中只读展示流式内容；生成完成后切换为可编辑模式，支持「预览 / 编辑」两种视图切换。
  *
- * **卡片不再自带任何操作控件**：AI 优化 / 复制 / 保存这三个工具，以及「预览 / 编辑」视图切换，
+ * **卡片不再自带任何操作控件**：AI 优化 / 复制 / 下载这三个工具，以及「预览 / 编辑」视图切换，
  * 全部收在页面级底栏（`AppActionBar`）里——此前卡片头部塞着视图切换、卡片底部又垫一条工具栏，
  * 用户得上下两处找按钮。控件改由上层渲染，所以这里用 `defineExpose` 把「状态 + 动作」交出去
  * （含 `viewMode` 与 `setViewMode`），本组件只负责卡片本身（含 AI 优化的指令输入，见 `ReviewStage`）。
+ *
+ * 用户对原文的编辑不再「攒到点保存」，而是逐次上报给上层（`draftChange`）自动防抖落库，
+ * 编辑不再丢失。
  *
  * Markdown 渲染做了缓存：只有当原文（可编辑的 draft）真正发生变化时才重新
  * 调用 `renderMarkdown`，流式滚动刷新或反复切换视图不会触发重复解析。
@@ -44,8 +47,13 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  /** 点击底栏「保存」时触发，载荷为当前可编辑原文 */
-  save: [content: string]
+  /**
+   * 草稿变化：用户改动了可编辑原文。
+   *
+   * 载荷为「当前可编辑原文」的全文。上层（`AppV2`）拿到后直接交给 `documents` store 落库，
+   * 落库自身带防抖 + 单飞，所以这里**逐次输入都如实上报**、不用自己攒批。
+   */
+  draftChange: [content: string]
 }>()
 
 // ---------------------------------------------------------------------------
@@ -54,8 +62,8 @@ const emit = defineEmits<{
 
 /**
  * 当前可编辑的文档原文。
- * 生成完成后用 `content` 初始化；用户编辑时直接改这个 ref，仅在保存时才
- * 通过 `save` 事件回传，避免父组件在输入过程中被频繁触发。
+ * 生成完成后用 `content` 初始化；用户每次编辑都会触发 `draftChange` 事件（上层负责防抖落库），
+ * 本组件自己不关心何时真正写回后端。
  */
 const draft = ref(props.content)
 
@@ -66,6 +74,22 @@ watch(
     draft.value = value
   },
 )
+
+/**
+ * 用户编辑 → 上报草稿。
+ *
+ * ⚠️ **必须注册在上面那条 props 同步 watch 之后**：两条都是 `pre` 刷新队列的 watcher，
+ * 按创建顺序执行。`content` 落地时先由上面把 `draft` 拨成新值，本条再跑到这里，
+ * 此时 `value === props.content`，直接返回——**不会把「同步」误报成「用户编辑」**，
+ * 否则刚生成的文档会被立刻标记为待落库。
+ */
+watch(draft, (value) => {
+  // 生成中不落库：此时展示的是流式内容，可编辑区根本没露出来
+  if (props.generating) return
+  // 与当前正文一致 = 这是上面那条 watch 的同步，不是用户编辑
+  if (value === props.content) return
+  emit('draftChange', value)
+})
 
 /** 是否处于「编辑原文」视图；false 时为 Markdown 预览 */
 const viewMode = ref<'preview' | 'edit'>('preview')
@@ -115,21 +139,16 @@ async function copy(): Promise<void> {
   }, 2000)
 }
 
-/** 保存：把当前原文回传给父组件 */
-function save(): void {
-  emit('save', draft.value)
-}
-
 /**
  * 工具行与视图切换的按钮渲染在上层底栏里，因此这里把「状态 + 动作」暴露给 `ReviewStage`：
- * `busy` 决定按钮禁用态，`hasContent` 决定「保存」是否可点（有正文就能存，不看是否改过），
- * `copyTip` 决定按钮文案，`draftContent` 是 AI 优化 / 保存要取的载荷；
+ * `busy` 决定按钮禁用态，`hasContent` 决定「下载」是否可点（有正文就能下，不看是否改过），
+ * `copyTip` 决定按钮文案，`draftContent` 是 AI 优化 / 下载要取的载荷；
  * `viewMode` 供底栏渲染「预览 / 编辑」分段控件的高亮态，`setViewMode` 供它切换。
  */
 defineExpose({
   /** 生成中文档工具应处于禁用态 */
   busy: computed(() => props.generating),
-  /** 是否已有正文（决定「保存」是否可点） */
+  /** 是否已有正文（决定「下载」是否可点） */
   hasContent,
   /** 复制反馈文案（空串表示无提示） */
   copyTip,
@@ -143,8 +162,6 @@ defineExpose({
   },
   /** 一键复制 */
   copy,
-  /** 保存当前原文 */
-  save,
 })
 </script>
 

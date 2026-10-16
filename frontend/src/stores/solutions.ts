@@ -304,9 +304,15 @@ export const useSolutionsStore = defineStore('solutions', () => {
    *
    * 打开前先把当前压着的改动落库：马上 `applySnapshot` 会把内存整个盖掉，
    * 不先存就等于用户上一份方案的最后几笔编辑被无声丢弃。
+   *
+   * **文档队列也要冲**，而且必须在 `documents.loadAll` **之前**：`loadAll` 会把未落库的
+   * `pending` 盖在新方案的响应之上（`documents.ts:137`），随后防抖定时器把旧稿 PUT 到
+   * **新** solutionId —— 800ms 窗口内切方案就会串稿。两处 flush 都放在这里，用的是
+   * 此刻仍是旧值的 `solutionId`。
    */
   async function openSolution(id: number): Promise<boolean> {
     await flushPendingSave()
+    await documents.flushPendingSave()
     clearTimer()
     loading.value = true
     saveError.value = ''

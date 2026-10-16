@@ -805,16 +805,19 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 审阅页「保存」：把编辑后的正文提交给后端。
+   * 正文草稿变化 → 交给文档 store 落库。
    *
-   * 走文档 store 的防抖单飞队列（见 `stores/documents.ts::save`）：连续输入会合并成一次
-   * 请求，且任一时刻至多一个 PUT 在途。本地工作副本同时更新，界面不必等往返。
+   * 由审阅页的编辑框**逐次输入**触发（`DocumentReview` 的 `draftChange`），不是「用户点了保存」。
+   * 去抖（800ms）与单飞都在 store 里（见 `stores/documents.ts::save`）：连敲键盘只有最后一次
+   * 生效、任一时刻至多一个 PUT 在途；本地工作副本同步更新，界面不必等往返。
+   *
+   * ⚠️ **这里不发任何提示**：落库是后台行为，成功也弹一次会把界面淹没。失败由 `documents.saveError`
+   * 承载，`AppV2` 监听它闪一条红色提示。
    */
   function onSaveDocument(content: string): void {
     const kind = docKindOfState(viewState.value)
     if (!kind) return
     documents.save(kind, content)
-    hooks.onNotice('文档已保存')
   }
 
   /**
@@ -949,10 +952,28 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 下载文件名统一为「产品名称-文档类型」（如 `PRDwright-PRD.md`）。
    * 产品名优先取结构化摘要；快捷入口没有摘要，退回用户在录入页填的名称；
    * 都为空或含非法字符时由 `buildDocFilename` 兜底。
+   *
+   * `content` 给出时以它为准：审阅页必须取**组件里的草稿**（`DocumentReview` 暴露的
+   * `draftContent`），它可能比 store 的工作副本更新（还在 800ms 防抖窗口里）；完成页不传，
+   * 读工作副本即可。
    */
-  function downloadDocument(docType: DocType): void {
+  function downloadDocument(docType: DocType, content?: string): void {
     const productName = summary.value?.product_name ?? quickInput.value.productName
-    downloadFile(documents.contentOf(docType), buildDocFilename(docType, productName))
+    downloadFile(content ?? documents.contentOf(docType), buildDocFilename(docType, productName))
+  }
+
+  /**
+   * 审阅页「下载」：把当前这份文档（含用户最新编辑）导出为 `.md`。
+   *
+   * 「当前是哪一份」由 `viewState` 反推（`docKindOfState`），与 `onSaveDocument` 同一口径——
+   * 不另存一个「当前下载目标」字段，否则两个字段会各自漂移。空正文直接返回：`downloadFile`
+   * 本来也会静默丢弃（底栏的禁用态已经先挡了一道，这里只是兜底）。
+   */
+  function onDownloadDocument(content: string): void {
+    if (!content) return
+    const kind = docKindOfState(viewState.value)
+    if (!kind) return
+    downloadDocument(kind, content)
   }
 
   // -------------------------------------------------------------------------
@@ -1072,6 +1093,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     backFromForm,
     handleEndTask,
     downloadDocument,
+    onDownloadDocument,
     // 文档澄清：进入对话页的某条线程 / 按澄清结果改写
     startDocumentClarification,
     applyClarification,

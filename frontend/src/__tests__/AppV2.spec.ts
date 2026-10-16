@@ -5,14 +5,17 @@ import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppV2 from '../AppV2.vue'
+import AppBadge from '../components/ui/AppBadge.vue'
 import ChatStage from '../components/stages/ChatStage.vue'
+import ReviewStage from '../components/stages/ReviewStage.vue'
 import * as api from '../services/api'
 import * as authService from '../services/authService'
 import * as documentApi from '../services/documentService'
 import * as solutionApi from '../services/solutionService'
 import { useAuthStore } from '../stores/auth'
-import { useDocumentsStore } from '../stores/documents'
+import { DOCUMENT_SAVE_DEBOUNCE_MS, useDocumentsStore } from '../stores/documents'
 import { useWorkflowStore } from '../stores/workflow'
+import { downloadFile } from '../utils/download'
 import type {
   ChatMessage,
   DocumentRecord,
@@ -128,6 +131,18 @@ vi.mock('../services/documentService', () => ({
   fetchDocuments: vi.fn(async () => []),
   saveDocument: vi.fn(),
 }))
+
+/**
+ * 下载工具的**部分** mock：只把 `downloadFile` 换成探针（用来断言「导出的是哪一版正文、
+ * 叫什么文件名」），`buildDocFilename` / `DOC_TYPE_LABELS` 仍走真实实现——文件名拼装本身
+ * 有 `download.spec.ts` 覆盖，这里不必再验一遍它的规则。
+ *
+ * 必须 mock：jsdom 不实现 `URL.createObjectURL`，真跑一次下载会直接抛异常。
+ */
+vi.mock('../utils/download', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/download')>()
+  return { ...actual, downloadFile: vi.fn() }
+})
 
 /**
  * 默认任务流：按 kind 产出一段可断言的最小正文。
@@ -1055,6 +1070,136 @@ describe('AppV2 完整流程编排', () => {
 
     expect(wrapper.text()).toContain('需求澄清对话')
     expect(wrapper.text()).toContain('后端不可用')
+  })
+})
+
+/**
+ * 审阅页的「手改自动落库」与「下载」。
+ *
+ * 这两件事是一次改动里互为因果的两面：底栏原来那个「保存」按钮被撤掉，落库改成
+ * 「编辑即防抖上报」，空出来的位置换成「下载」。用例要同时钉住——
+ *
+ * 1. 不点任何按钮，编辑也会落库，而且**真的等满防抖窗口**（不是每敲一个字发一次）；
+ * 2. 下载拿到的是**组件里的草稿**，而不是 store 里可能还落后半拍的工作副本；
+ * 3. 落库失败**闪一次红色提示**，同一原因反复失败不再刷屏——否则一次网络抖动会把界面刷满。
+ *
+ * 断言必须落在这个应用自己的 pinia 上（`documentsOf`），不能用裸的 `useDocumentsStore()`。
+ */
+describe('AppV2 的文档手改自动落库与下载', () => {
+  /** 「停在 PRD 待确认」且带结构化摘要的快照——摘要里要有产品名，下载文件名才可预期 */
+  function prdReviewSnapshot(): Record<string, unknown> {
+    return { ...reviewSnapshot('review-prd'), summary: SAMPLE_SUMMARY }
+  }
+
+  /** 在「PRD 待确认」阶段挂载一份已存在的方案 */
+  async function mountPrdReview(): Promise<VueWrapper> {
+    return mountExistingSolution(prdReviewSnapshot(), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n历史内容'),
+    ])
+  }
+
+  /** 切到「编辑」视图并写入一段新正文 */
+  async function editContent(wrapper: VueWrapper, content: string): Promise<void> {
+    await clickButton(wrapper, '编辑', true)
+    await wrapper.findComponent(ReviewStage).find('textarea').setValue(content)
+  }
+
+  /** 推进一个完整的防抖窗口，并等保存请求落地 */
+  async function advanceDebounce(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(DOCUMENT_SAVE_DEBOUNCE_MS)
+    await flushPromises()
+  }
+
+  /**
+   * 当前状态条上的失败提示（红色药丸）。
+   *
+   * `AppBadge` 全仓只在 AppV2 这一处提示位上用，所以「找 variant=danger 的那个」不会误伤。
+   * 返回 null 表示此刻没有失败提示。
+   */
+  function failureTip(wrapper: VueWrapper) {
+    return (
+      wrapper.findAllComponents(AppBadge).find((item) => item.props('variant') === 'danger') ?? null
+    )
+  }
+
+  it('编辑正文后不点任何按钮，防抖到时自动落库', async () => {
+    const wrapper = await mountPrdReview()
+
+    // 挂载本身要等一串异步（拉方案详情 → 拉文档 → 应用快照），必须在这些落定**之后**
+    // 才接管定时器；反过来说，一开始就 fake，挂载期的那些 await 会等不到定时器。
+    vi.useFakeTimers()
+    try {
+      await editContent(wrapper, '# 改过的正文')
+
+      // 防抖窗口内一次请求都不该发：否则等于回到「每敲一个字发一次」的老路
+      await vi.advanceTimersByTimeAsync(DOCUMENT_SAVE_DEBOUNCE_MS / 2)
+      expect(documentApi.saveDocument).not.toHaveBeenCalled()
+
+      // 窗口走满 → 恰好一次 PUT，载荷是编辑后的**全文**
+      await advanceDebounce()
+      expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
+      expect(documentApi.saveDocument).toHaveBeenCalledWith(1, 'prd', '# 改过的正文')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('点「下载」导出的是编辑后的草稿，文件名带产品名与文档类型', async () => {
+    const wrapper = await mountPrdReview()
+    await editContent(wrapper, '# 改过的正文')
+    await nextTick()
+
+    await clickButton(wrapper, '下载', true)
+
+    // 此刻防抖窗口还没走完，store 的工作副本仍是历史版本——下载必须取组件里的草稿
+    expect(vi.mocked(downloadFile)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(downloadFile).mock.calls[0]?.[0]).toBe('# 改过的正文')
+    expect(vi.mocked(downloadFile).mock.calls[0]?.[1]).toBe('PRDwright-PRD.md')
+  })
+
+  it('自动落库失败闪一条红色提示，同一原因重试不刷屏', async () => {
+    vi.mocked(documentApi.saveDocument).mockRejectedValue(new Error('网络断了'))
+    const wrapper = await mountPrdReview()
+
+    vi.useFakeTimers()
+    try {
+      await editContent(wrapper, '# 第一版')
+      await advanceDebounce()
+
+      // 落库是静默的，失败是整条链路里唯一该让用户看见的信号
+      expect(failureTip(wrapper)?.text()).toContain('网络断了')
+      expect(failureTip(wrapper)?.props('variant')).toBe('danger')
+
+      // 2.5s 后自动淡出
+      await vi.advanceTimersByTimeAsync(2600)
+      await flushPromises()
+      await nextTick()
+      expect(failureTip(wrapper)).toBeNull()
+
+      // 同一原因再失败一次：`saveError` 没变，不重新闪（否则网络抖动会把界面刷满）
+      await editContent(wrapper, '# 第二版')
+      await advanceDebounce()
+      expect(documentApi.saveDocument).toHaveBeenCalledTimes(2)
+      expect(failureTip(wrapper)).toBeNull()
+
+      // 成功一次（`saveError` 被清空）之后再失败，算新问题，重新提示
+      vi.mocked(documentApi.saveDocument).mockImplementation(async (_id, kind, content) =>
+        makeDocumentRecord(kind, content),
+      )
+      await editContent(wrapper, '# 第三版')
+      await advanceDebounce()
+      expect(failureTip(wrapper)).toBeNull()
+
+      vi.mocked(documentApi.saveDocument).mockRejectedValue(new Error('又断了'))
+      await editContent(wrapper, '# 第四版')
+      await advanceDebounce()
+      expect(failureTip(wrapper)?.text()).toContain('又断了')
+
+      // 改动始终留在本地工作副本里：失败不该把用户刚敲的字丢掉
+      expect(documentsOf(wrapper).contentOf('prd')).toBe('# 第四版')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

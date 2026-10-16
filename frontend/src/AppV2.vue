@@ -113,9 +113,9 @@ const {
  * 三份产物正文的持有者。
  *
  * 正文不在 workflow store 里：所有权属于后端 `documents` 表，这里只是一份工作副本
- * （见 `stores/documents.ts`）。本文件需要它的地方只有三处——审阅页「查看」入口
- * 是否可用（`has*`）、完成页的下载列表（`contents`），以及「按澄清结果改写」是否有
- * 可改写的内容。
+ * （见 `stores/documents.ts`）。本文件需要它的地方有四处——审阅页「查看」入口
+ * 是否可用（`has*`）、完成页的下载列表（`contents`）、「按澄清结果改写」是否有
+ * 可改写的内容，以及监听 `saveError` 给手改落库失败闪提示。
  */
 const documents = useDocumentsStore()
 const { contents: documentContents, hasPrd, hasApiDocs, hasPrompts } = storeToRefs(documents)
@@ -151,6 +151,14 @@ watch(
 const savedTip = ref('')
 
 /**
+ * 与 `savedTip` 同生命周期的样式档位：决定是绿色成功药丸还是红色失败药丸。
+ *
+ * 失败态复用同一个提示位（而不是另开一处），是因为它俩本就不会同刻出现——
+ * 2.5s 自动淡出，冲突窗口可以接受。
+ */
+const savedTipVariant = ref<'success' | 'danger'>('success')
+
+/**
  * 正在「打开并恢复」的方案 id 集合（单飞守卫，见 `loadAndResume` 的说明）。
  *
  * 必须声明在**注册 watch 之前**：登录态 watch 是 `immediate` 的，会在 setup 阶段
@@ -162,8 +170,9 @@ const resumingSolutionIds = new Set<number>()
 let savedTipTimer: number | undefined
 
 /** 短暂展示提示，随后自动淡出 */
-function flashSavedTip(text: string): void {
+function flashSavedTip(text: string, variant: 'success' | 'danger' = 'success'): void {
   savedTip.value = text
+  savedTipVariant.value = variant
   window.clearTimeout(savedTipTimer)
   savedTipTimer = window.setTimeout(() => {
     savedTip.value = ''
@@ -324,6 +333,20 @@ watch(
 )
 
 /**
+ * 文档手改的落库是**静默**的：成功不提示——每敲几秒弹一次会把界面淹没。
+ * 只有**失败**才闪一次红色提示；同一原因反复重试（网络抖动）不再刷屏。
+ *
+ * 注意 `documents.saveError` 也承载「打开方案时读取文档失败」，这里不区分来源：
+ * 两者对用户都是「这份文档没对上」，共用一句提示可以接受。
+ */
+watch(
+  () => documents.saveError,
+  (message, previous) => {
+    if (message && message !== previous) flashSavedTip(message, 'danger')
+  },
+)
+
+/**
  * 地址里的 id 变化时切换方案（含浏览器前进后退）。
  *
  * 注意判断 `currentId`：创建后我们自己也 `replace` 了一次地址，那一次不需要重新加载——
@@ -342,11 +365,15 @@ watch(routeSolutionId, (id) => {
 /**
  * 离开页面前把防抖窗口里压着的那次保存冲掉。
  *
+ * 两份都要冲：方案的整包快照（`solutions`）与文档手改（`documents`）各有自己的队列，
+ * 漏掉一边就会丢掉一边最后几秒的编辑。
+ *
  * 只在 `beforeunload` 里做：它无法等待 async 完成，能起作用是「请求已经发出」这件事本身。
- * 真正可靠的落库时机是「进入下一阶段」与「路由切换」，`beforeunload` 只是兜底。
+ * 真正可靠的落库时机是「切换方案」与「组件卸载」，`beforeunload` 只是兜底。
  */
 function handleBeforeUnload(): void {
   void solutions.flushPendingSave()
+  void documents.flushPendingSave()
 }
 
 onMounted(() => {
@@ -356,6 +383,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   void solutions.flushPendingSave()
+  void documents.flushPendingSave()
 })
 
 // ---------------------------------------------------------------------------
@@ -392,6 +420,7 @@ const {
   backFromForm,
   handleEndTask,
   downloadDocument,
+  onDownloadDocument,
   handleGeneratePrd,
   confirmSummaryDiff,
   rejectSummaryDiff,
@@ -614,9 +643,17 @@ function handleStepClick(stepId: StepId): void {
           leave-active-class="transition duration-500"
           leave-to-class="opacity-0"
         >
-          <AppBadge v-if="savedTip" variant="success">
+          <AppBadge v-if="savedTip" :variant="savedTipVariant">
             <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <!-- 失败用叹号、成功用对勾：红色药丸顶着一个对勾，用户会以为「保存成功了」 -->
               <path
+                v-if="savedTipVariant === 'danger'"
+                fill-rule="evenodd"
+                d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-8-5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0v-4.5A.75.75 0 0 1 10 5Zm0 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
+                clip-rule="evenodd"
+              />
+              <path
+                v-else
                 fill-rule="evenodd"
                 d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 1-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
                 clip-rule="evenodd"
@@ -733,7 +770,8 @@ function handleStepClick(stepId: StepId): void {
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
         :back-label="backLabel"
-        @save="onSaveDocument"
+        @draft-change="onSaveDocument"
+        @download="onDownloadDocument"
         @optimize="onAiOptimize"
         @back="backToInput"
         @generate-api-docs="handleGenerateApiDocs"

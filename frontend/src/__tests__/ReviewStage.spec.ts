@@ -10,9 +10,12 @@ import type { PendingItem, RunSummary } from '../types'
 /**
  * 「预览 / 编辑」视图切换的落点与行为。
  *
- * 这两个按钮最初挂在文档卡片头部（卡片顶端），而 AI 优化 / 复制 / 保存挂在卡片底部的工具条，
+ * 这两个按钮最初挂在文档卡片头部（卡片顶端），而 AI 优化 / 复制 / 下载挂在卡片底部的工具条，
  * 同一份文档的控件被整篇正文隔在上下两处。现已全部收进页面级底栏（`AppActionBar`）的内容行。
  * 本文件锁定「在底栏、不在卡片里」这一事实——否则后续重构很容易又把它挪回卡片头部。
+ *
+ * 内容行**没有「保存」按钮**：手改正文由 `DocumentReview` 的草稿变化事件驱动、自动防抖落库
+ * （见本文件末尾的「自动落库」一组），原来那个位置改成了「下载」。
  */
 
 const CONTENT = '# 产品需求文档\n\n这是正文。'
@@ -60,7 +63,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
 }
 
 describe('ReviewStage 的「预览 / 编辑」切换', () => {
-  it('切换按钮渲染在页面级底栏里，且与「保存」同属内容行', () => {
+  it('切换按钮渲染在页面级底栏里，且与「下载」同属内容行', () => {
     const wrapper = mountReview()
 
     // 底栏（sticky 态带 .shell-action-bar）里能找到两个切换按钮
@@ -70,10 +73,10 @@ describe('ReviewStage 的「预览 / 编辑」切换', () => {
     expect(barTexts).toContain('预览')
     expect(barTexts).toContain('编辑')
 
-    // 与「保存」在同一个右端分组：切换按钮 → 切换容器 → 分组 === 保存的直接父节点
+    // 与「下载」在同一个右端分组：切换按钮 → 切换容器 → 分组 === 下载的直接父节点
     const preview = buttonByText(wrapper, '预览')
-    const save = buttonByText(wrapper, '保存')
-    expect(preview.element.parentElement?.parentElement).toBe(save.element.parentElement)
+    const download = buttonByText(wrapper, '下载')
+    expect(preview.element.parentElement?.parentElement).toBe(download.element.parentElement)
   })
 
   it('文档卡片内部不再有任何按钮（头部只剩标题与徽章）', () => {
@@ -114,40 +117,41 @@ describe('ReviewStage 的「预览 / 编辑」切换', () => {
 })
 
 /**
- * 「保存」的可用性。
+ * 「下载」的可用性。
  *
- * 曾经按「原文被改过」（dirty）决定禁用态，导致**刚生成完、还没编辑的那一刻按钮是灰的**：
- * 用户刚把文档生成出来，却点不动保存，观感上像功能坏了。自动落库是后台行为，用户看不到，
- * 因此判据改为「有正文即可保存」——只要文档有内容就该能按下去。
+ * 曾经这里按「原文被改过」（dirty）决定禁用态，导致**刚生成完、还没编辑的那一刻按钮是灰的**：
+ * 用户刚把文档生成出来，却点不动，观感上像功能坏了。现在判据是「有正文即可下载」——
+ * 空内容时 `downloadFile` 会**静默 return**（`utils/download.ts`），禁用态是为了避免一次
+ * 「点了没反应」的死点击。
  *
  * ⚠️ 断言禁用态前必须 `await nextTick()`：底栏读的是子组件句柄（模板 ref 在首次渲染**之后**
  * 才被赋值），挂载那一刻读到的是 `null`，要等重渲染落地才拿到真实状态。
  */
-describe('ReviewStage 的「保存」可用性', () => {
+describe('ReviewStage 的「下载」可用性', () => {
   it('文档生成结束、尚未编辑时即可点（不是灰色假按钮）', async () => {
     const wrapper = mountReview()
     await nextTick()
-    const save = buttonByText(wrapper, '保存')
-    expect((save.element as HTMLButtonElement).disabled).toBe(false)
+    const download = buttonByText(wrapper, '下载')
+    expect((download.element as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('点「保存」把当前原文以 save 事件抛出', async () => {
+  it('点「下载」把当前原文以 download 事件抛出', async () => {
     const wrapper = mountReview()
     await nextTick()
-    await buttonByText(wrapper, '保存').trigger('click')
-    expect(wrapper.emitted('save')).toEqual([[CONTENT]])
+    await buttonByText(wrapper, '下载').trigger('click')
+    expect(wrapper.emitted('download')).toEqual([[CONTENT]])
   })
 
-  it('编辑后点「保存」抛的是编辑后的原文', async () => {
+  it('编辑后点「下载」抛的是编辑后的原文', async () => {
     const wrapper = mountReview()
     await nextTick()
     await buttonByText(wrapper, '编辑').trigger('click')
     await wrapper.find('textarea').setValue(`${CONTENT}\n\n新增一段`)
-    await buttonByText(wrapper, '保存').trigger('click')
-    expect(wrapper.emitted('save')).toEqual([[`${CONTENT}\n\n新增一段`]])
+    await buttonByText(wrapper, '下载').trigger('click')
+    expect(wrapper.emitted('download')).toEqual([[`${CONTENT}\n\n新增一段`]])
   })
 
-  it('文档没有正文时「保存」禁用（没有东西可存）', async () => {
+  it('文档没有正文时「下载」禁用（没有东西可下）', async () => {
     const wrapper = mount(ReviewStage, {
       props: {
         title: '文档',
@@ -160,8 +164,38 @@ describe('ReviewStage 的「保存」可用性', () => {
       },
     })
     await nextTick()
-    const save = buttonByText(wrapper, '保存')
-    expect((save.element as HTMLButtonElement).disabled).toBe(true)
+    const download = buttonByText(wrapper, '下载')
+    expect((download.element as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+/**
+ * 手改正文的自动回传：`DocumentReview` 把草稿变化如实上报（`draftChange`），
+ * 去抖与单飞由 store 负责——本文件只锁到「事件抛没抛、抛的是什么」。
+ *
+ * 这里守的是**两件日后极易被改坏的事**：
+ *
+ * 1. 用户编辑**必须**上报。漏了它手改就只活在内存里，刷新即丢（这正是改动前的状态：
+ *    落库的唯一触发点是那个后来被换成「下载」的按钮）。
+ * 2. 父组件把权威正文同步进来（生成收尾 / 切文档 / 优化与澄清改写落回）**不能**上报。
+ *    否则刚生成的文档会被当成「用户改的」再 PUT 回去一趟，白写一次。
+ */
+describe('ReviewStage 的草稿自动回传', () => {
+  it('编辑即通过 draftChange 回传全文', async () => {
+    const wrapper = mountReview()
+    await buttonByText(wrapper, '编辑').trigger('click')
+    await wrapper.find('textarea').setValue(`${CONTENT}\n\n新增一段`)
+    // 草稿变化走的是 pre-flush watcher，要等一拍才抛出
+    await nextTick()
+    expect(wrapper.emitted('draftChange')).toEqual([[`${CONTENT}\n\n新增一段`]])
+  })
+
+  it('父组件同步正文（非用户编辑）不触发 draftChange', async () => {
+    const wrapper = mountReview()
+    await nextTick()
+    await wrapper.setProps({ content: '# 换了一份文档' })
+    await nextTick()
+    expect(wrapper.emitted('draftChange')).toBeUndefined()
   })
 })
 
