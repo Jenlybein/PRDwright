@@ -1,10 +1,11 @@
-import { computed, ref, type Ref } from 'vue'
+import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
 import { continueConversationStream, startConversationStream } from '@/services/api'
 import { isApiError } from '@/services/errors'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { ChatMessage, ChatStage, RequirementAnswers, RequirementsSummary } from '@/types'
+import { normalizeChatStage } from '@/utils/workflow'
 import { buildAnswers } from '@/utils/requirements'
 
 /**
@@ -25,32 +26,31 @@ export interface ChatHooks {
 }
 
 /**
- * 这套骨架服务的会话落在哪里、说的是哪一套人设。
+ * 这套骨架服务的线程是哪一条、说的是哪一套人设。
  *
- * 需求澄清与文档澄清共用同一套流式逻辑（缓冲、固化、断线重试），差异只有三点：聊天记录
- * 放在哪两个字段里、后端用哪个档案。把差异做成参数而不是复制一份 composable，
+ * 四条澄清线程（需求 / PRD / 接口 / 提示词）共用同一套流式逻辑（缓冲、固化、断线重试），
+ * 差异只有两点：**消息归属哪条线程**（`stage`，消息上带着它、会话 id 也按它取）与
+ * **后端用哪个档案**（`profileKey`）。把差异做成参数而不是复制四份 composable，
  * 是为了让「断线重试」「错误保留半截内容」这些细节只维护一处。
  */
 export interface ClarificationChatOptions {
-  /** 对话档案标识：后端据此选人设与开场白（如 `doc-clarification`） */
+  /** 对话档案标识：后端据此选人设与开场白（如 `doc-clarification`）；不传即后端的默认档案 */
   profileKey?: string
-  /** 聊天记录的存放位置；默认是需求澄清的 `messages` */
-  messages?: Ref<ChatMessage[]>
-  /** 会话 id 的存放位置；默认是需求澄清的 `conversationId` */
-  conversationId?: Ref<string>
   /**
-   * 本轮澄清的阶段标记，写进新产生的每条消息。
+   * 这条线程的标识。它决定三件事：
    *
-   * PRD 生成后的回过头来的澄清与需求澄清**共用一个消息列表**，靠它区分归属：
-   * 摘要回填只取 `requirement` 阶段的消息，文档答疑就不会被当成需求输入。
-   * 缺省为 `requirement`，因此旧代码路径无需改动。
+   * 1. 新产生的消息打哪个 `stage`（对话页据此过滤显示，摘要回填据此只取需求那一条）；
+   * 2. 从哪里读这条线程的后端会话 id（`conversationIds[stage]`）；
+   * 3. 「清空历史」时该清掉哪一段。
+   *
+   * 是必填的：四条线程共用一个消息数组，没有它就只能靠猜。
    */
-  stage?: ChatStage
+  stage: ChatStage
   /**
-   * 开新会话时是否清空已有的聊天记录；默认 `true`。
+   * 开新会话时是否清掉**本线程**已有的聊天记录；默认 `true`。
    *
-   * PRD 生成后的澄清要传 `false`——那是「在同一条时间线上继续」，把前面的对话清掉
-   * 正好就是用户最反感的体验（他会以为之前的交流丢了）。
+   * 文档澄清要传 `false`——那是「在同一条线程上继续」，把前面聊过的清掉正好就是用户
+   * 最反感的体验（他会以为之前的交流丢了）。
    */
   clearHistory?: boolean
 }
@@ -62,17 +62,34 @@ export interface ClarificationChatOptions {
  * 固化成消息的收尾逻辑。会话数据本身仍在 Pinia store 里，这里只做编排，
  * 因此组件侧不需要再持有任何流程状态。
  *
+ * **每条线程一个实例**：四条线程同时存在，各自持有自己的流式缓冲与错误提示，
+ * 因此 A 线程出错不会在 B 线程上冒出来。
+ *
  * @param hooks 需要向外部借用的能力（提示、切阶段）。
- * @param options 会话落点与档案标识；不传即需求澄清。
+ * @param options 线程标识与档案标识。
  */
-export function useClarificationChat(hooks: ChatHooks, options: ClarificationChatOptions = {}) {
+export function useClarificationChat(hooks: ChatHooks, options: ClarificationChatOptions) {
   const store = useWorkflowStore()
   const state = storeToRefs(store)
-  const { summary, chatStreaming } = state
-  const messages = options.messages ?? state.messages
-  const conversationId = options.conversationId ?? state.conversationId
-  const profileKey = options.profileKey
-  const stage = options.stage ?? 'requirement'
+  const { summary, messages, chatStreaming } = state
+  const { stage, profileKey } = options
+
+  /** 本线程（也是本实例）是否正在流式接收回复 */
+  const streaming = ref(false)
+
+  /**
+   * 本线程的后端会话 id。
+   *
+   * 四条线程各有一个会话，所以不能拿 store 里某个字符串字段当引用——用一层可写 computed
+   * 接上去：读的时候按 `stage` 取，写的时候只动自己那一个键。整体换一个新对象，让 store
+   * 的深 watch 稳稳看到变化（就地改也可，但换对象更不容易踩到「同一个引用没被察觉」）。
+   */
+  const conversationId = computed<string>({
+    get: () => store.conversationIds[stage],
+    set: (value) => {
+      store.conversationIds = { ...store.conversationIds, [stage]: value }
+    },
+  })
 
   /** 正在流式生成的回复文本，作为列表末尾那条气泡的实时内容 */
   const streamingContent = ref('')
@@ -80,25 +97,36 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
   /** 对话过程中的错误提示 */
   const chatError = ref('')
 
-  /**
-   * 只属于本阶段的消息，按发生顺序排列。
-   *
-   * 消息列表可能是两套澄清共用的一条时间线，而接续对话喂给后端的必须是**本轮**的内容：
-   * 把别阶段的对话混进去，模型会以为那些也是本轮的上下文（人设还是另一套）。
-   */
-  function history(): ChatMessage[] {
-    return messages.value.filter((message) => (message.stage ?? 'requirement') === stage)
+  /** 这条消息属于哪条线程；缺省视为需求澄清（旧快照的消息都没有这个字段） */
+  function stageOf(message: ChatMessage): ChatStage {
+    return normalizeChatStage(message.stage)
   }
 
   /**
-   * 交给消息列表渲染的内容。
-   * 流式生成期间在末尾挂一条 assistant 气泡：还没收到增量内容时 content 为空，
-   * 由列表渲染「思考中」动画指示；首字到达后自动切换为 Markdown 实时渲染。
+   * 只属于本线程的消息，按发生顺序排列。
+   *
+   * 消息列表是四条线程共用的一条，而喂给后端的必须是**本轮**的内容：把别线程的对话混进去，
+   * 模型会以为那些也是本轮上下文（人设还是另一套）。
+   */
+  function history(): ChatMessage[] {
+    return messages.value.filter((message) => stageOf(message) === stage)
+  }
+
+  /**
+   * 交给消息列表渲染的内容：**只含本线程**，外加流式生成中的那一条。
+   *
+   * 流式气泡挂在末尾（还没收到增量时 content 为空，由列表渲染「思考中」动画；
+   * 首字到达后自动切成 Markdown 实时渲染）。
+   *
+   * ⚠️ 判据用的是**本实例**的 `streaming`，不是 store 里全局的 `chatStreaming`：
+   * 后者只要有任何一条线程在跑就是 true，而 `streamingContent` 是本实例私有的——
+   * 用全局量判断，切到别的线程就会拿它那口空缓冲渲染出一条假的「思考中」。
    */
   const displayMessages = computed<ChatMessage[]>(() => {
-    if (!chatStreaming.value) return messages.value
+    const thread = history()
+    if (!streaming.value) return thread
     return [
-      ...messages.value,
+      ...thread,
       {
         role: 'assistant',
         content: streamingContent.value,
@@ -123,6 +151,9 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
   async function runStream(
     request: () => Promise<{ conversationId: string; reply: string }>,
   ): Promise<void> {
+    // 两个状态各有各的读者：`streaming` 服务本线程的渲染，`chatStreaming` 是全局的
+    // 「有请求在跑」，导航守卫（`store.busy`）靠它拦住跳转与切标签。
+    streaming.value = true
     chatStreaming.value = true
     streamingContent.value = ''
     chatError.value = ''
@@ -138,9 +169,10 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
       reply = streamingContent.value
     } finally {
       // 先结束流式状态再固化消息，否则列表里会短暂多出一条「思考中」气泡
+      streaming.value = false
       chatStreaming.value = false
       const content = reply.trim()
-      // 带上阶段标记：这条消息属于哪一轮澄清，靠它在共享的时间线里分清归属
+      // 带上线程标记：这条消息属于哪条线程，靠它在共享的消息列表里分清归属
       if (content) messages.value.push({ role: 'assistant', content, stage })
       streamingContent.value = ''
     }
@@ -198,23 +230,22 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
   /**
    * 用一组现成的表单数据开启会话：切到对话阶段 → 调流式接口 → 实时展示 AI 的第一轮追问。
    *
-   * 两条链路共用：需求澄清提交结构化摘要（由 `buildAnswers` 映射到后端题目的字段名），
-   * 文档澄清提交 `{document, pending_items}`。人设与首轮开场白由后端的对话档案决定，
+   * 四条线程共用：需求澄清提交结构化摘要（由 `buildAnswers` 映射到后端题目的字段名），
+   * 三条文档澄清提交 `{document, pending_items}`。人设与首轮开场白由后端的对话档案决定，
    * 前端只提交内容，不参与措辞。
    */
   async function startConversationWithAnswers(
     answers: RequirementAnswers,
     notice = '正在生成回复',
   ): Promise<void> {
-    // 默认清空：需求澄清是一次全新的开始。
-    // PRD 生成后的澄清传 `clearHistory: false` ——它要在原有对话后面接下去，
-    // 而不是把用户前面聊过的内容抹掉。
+    // 默认清空本线程的历史：需求澄清是一次全新的开始。
+    // ⚠️ **只清本线程**——四条线程共用一个 `messages` 数组，整数组清空会连带抹掉别的线程
+    // （那正是「回到某个标签发现自己聊过的内容没了」这类最难解释的 bug）。
+    // 文档澄清传 `clearHistory: false`：它要在原有对话后面接下去。
     if (options.clearHistory !== false) {
-      messages.value = []
-      conversationId.value = ''
-    } else {
-      conversationId.value = ''
+      messages.value = messages.value.filter((message) => stageOf(message) !== stage)
     }
+    conversationId.value = ''
     chatError.value = ''
     hooks.onEnterChat()
     hooks.onNotice(notice)
@@ -241,8 +272,8 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
   }
 
   return {
-    /** 是否正在流式接收回复 */
-    streaming: chatStreaming,
+    /** 本线程是否正在流式接收回复（渲染用；导航守卫看的是 store 的 `busy`） */
+    streaming,
     /** 对话错误提示 */
     chatError,
     /** 交给消息列表渲染的消息（含流式中的那一条） */

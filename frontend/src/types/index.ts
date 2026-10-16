@@ -19,13 +19,39 @@ export interface QuestionsConfig {
 }
 
 /**
- * 一条消息属于哪一轮澄清。
+ * 一条消息属于哪条澄清线程；同时也是对话页子标签栏的标识。
  *
- * 需求澄清（表单 → PRD）与文档澄清（PRD 生成后回头确认剩余问题）共用同一个消息列表，
- * 因此必须能区分归属：**摘要回填只吃 `requirement` 阶段的消息**，否则文档答疑会被当成
- * 需求输入，闸门①的 Diff 里凭空冒出一堆变更。
+ * 四条线程（需求澄清 / PRD 澄清 / 接口澄清 / 提示词澄清）**共用同一个 `messages` 数组**，
+ * 靠这个字段区分归属：
+ *
+ * - **摘要回填只吃 `requirement` 的消息**，否则文档答疑会被当成需求输入，闸门①的 Diff
+ *   里凭空冒出一堆变更；
+ * - 对话页也只渲染**当前标签那一条线程**的消息——切换标签就是切换过滤条件。
+ *
+ * 缺省视为 `requirement`：旧快照的消息没有这个字段，而它们都产生于本字段出现之前的需求澄清。
  */
-export type ChatStage = 'requirement' | 'document'
+export type ChatStage = 'requirement' | 'prd-clarify' | 'api-docs-clarify' | 'prompts-clarify'
+
+/** 全部澄清线程；顺序即子标签栏的展示顺序 */
+export const CHAT_STAGES: readonly ChatStage[] = [
+  'requirement',
+  'prd-clarify',
+  'api-docs-clarify',
+  'prompts-clarify',
+]
+
+/**
+ * 子标签栏上的展示名。
+ *
+ * 标签**常驻**（未就绪的置灰、不可点），不因为它还没发生就消失——否则用户不知道
+ * 后面还有哪些可以聊。
+ */
+export const CHAT_STAGE_LABELS: Record<ChatStage, string> = {
+  requirement: '需求澄清',
+  'prd-clarify': 'PRD 澄清',
+  'api-docs-clarify': '接口澄清',
+  'prompts-clarify': '提示词澄清',
+}
 
 /** 聊天消息，角色取值与后端 conversation_service 的 FrontendMessage 一致 */
 export interface ChatMessage {
@@ -63,7 +89,6 @@ export type ViewState =
   | 'review-api-docs'
   | 'generating-prompts'
   | 'review-prompts'
-  | 'clarifying'
   | 'prd-quick'
   | 'prompt-debug'
   | 'done'
@@ -229,8 +254,6 @@ export const STEP_OF_STATE: Record<ViewState, StepId> = {
   'review-api-docs': 'review-api-docs',
   'generating-prompts': 'review-prompts',
   'review-prompts': 'review-prompts',
-  // 文档澄清是对「当前正在审阅的某一篇」做的，进度条停在那一格上（不新增步骤）
-  clarifying: 'review-prd',
   // 快捷入口的录入产物就是 PRD
   'prd-quick': 'review-prd',
   // 调试入口的录入产物就是提示词套件
@@ -640,10 +663,29 @@ export interface SessionDataV2 {
   entryMode: EntryMode | null
   /** 结构化需求摘要；未提交过为 null */
   summary: RequirementsSummary | null
-  /** 已固化的聊天消息 */
+  /**
+   * 全部澄清线程的消息。
+   *
+   * 四条线程（需求 / PRD / 接口 / 提示词）**共用这一条列表**，按 `ChatMessage.stage`
+   * 区分归属（见 `ChatStage`）。数组顺序就是发生顺序，按 `stage` 过滤后即为该线程的顺序。
+   */
   messages: ChatMessage[]
-  /** 后端会话 ID（可为空，接续时退化无状态模式） */
-  conversationId: string
+  /**
+   * 对话页当前停留在哪条线程。
+   *
+   * 它决定渲染哪一段对话、底栏给哪个主操作（需求澄清给「生成 PRD」，其余给「按澄清结果改写」）。
+   * 随快照持久化：刷新回来应当仍在原来那条线程里。
+   */
+  chatTab: ChatStage
+  /**
+   * 各线程的后端会话 id（按 `ChatStage` 取）。
+   *
+   * 四条线程是**四个后端会话**：需求澄清与文档澄清的人设不同（`clarification` vs
+   * `doc-clarification`），三条文档线程又各自带着不同文档的开场白——共用一个会话会让
+   * 上下文串味。前端合并展示、后端分开登记，各取所需。
+   * 空串表示该线程还没开过会话，接续时退化为无状态模式。
+   */
+  conversationIds: Record<ChatStage, string>
   /** PRD 快捷入口的录入内容 */
   quickInput: QuickPrdInput
   /** 提示词调试入口里用户贴入的 PRD 正文 */
@@ -657,34 +699,5 @@ export interface SessionDataV2 {
   activeJobId: number | null
   /** 当前进行中任务的文档种类；与 `activeJobId` 成对出现，无任务时为 null */
   activeJobKind: DocKind | null
-  /**
-   * 文档澄清的聊天记录；与需求澄清的 `messages` **刻意分开**。
-   *
-   * 混在一起的话，「从对话回填需求摘要」那道闸门会把文档答疑也当成需求输入读一遍，
-   * Diff 里会凭空冒出条目；两套记录各存各的，互不干扰。
-   *
-   * 注：仅用于**接口文档 / 提示词**的独立澄清流程。PRD 生成后的澄清走的是另一条路——
-   * 它复用 `messages` 本身（见 `prdClarifying`），让用户在同一条时间线上接着聊。
-   */
-  clarifyMessages: ChatMessage[]
-  /** 文档澄清的后端会话 ID；为空时接续退化无状态模式 */
-  clarifyConversationId: string
-  /** 本次澄清针对哪一份产物；为空表示还没进入澄清 */
-  clarifyTarget: DocumentKind | null
-  /**
-   * PRD 生成后那轮「剩余问题澄清」的后端会话 ID。
-   *
-   * 这一轮与需求澄清是**两个后端会话**，但共用一个前端消息列表：用户看到的是一条连续的
-   * 时间线（需求澄清聊完 → PRD 生成 → 接着在同一栏里确认剩余问题），后端那侧因为人设不同
-   * 必须分开登记。为空表示这一轮还没开过。
-   */
-  prdClarifyConversationId: string
-  /**
-   * 对话栏当前是否在「PRD 剩余问题澄清」模式。
-   *
-   * 决定对话页底栏给「生成 PRD」还是「按澄清结果改写」，以及发送消息时该点哪一套人设。
-   * 它是持久化的：刷新回来用户应当仍在原来的模式里，而不是莫名其妙地能再生成一次 PRD。
-   */
-  prdClarifying: boolean
 }
 

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 import ChatInput from '@/components/ChatInput.vue'
 import MessageList from '@/components/MessageList.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
-import type { ChatMessage } from '@/types'
+import ChatThreadTabs from '@/components/ui/ChatThreadTabs.vue'
+import type { ChatMessage, ChatStage } from '@/types'
 
 /**
  * 对话阶段视图。
@@ -13,31 +14,40 @@ import type { ChatMessage } from '@/types'
  * 只负责呈现消息与收集输入；发请求、推进阶段由父组件决定，
  * 因此这里不持有任何流程状态。
  *
- * **同一块对话栏承担两轮澄清**：
- * - `docClarification` 为 false：需求澄清（生成 PRD 之前），底栏给「生成 PRD」；
- * - 为 true：PRD 生成完之后的「剩余问题澄清」，底栏换成「按澄清结果改写」。
+ * **同一块对话栏承担四条澄清线程**（需求澄清 / PRD 澄清 / 接口澄清 / 提示词澄清），
+ * 顶部由子标签栏切换（见 `ChatThreadTabs`）。做成同一个组件的四种模式而不是四个组件，
+ * 是因为它们的差异只有「标题那两句话」与「底栏那几个按钮」，而**消息展示一模一样**——
+ * 拆开就会各维护一份消息区，然后慢慢长歪。
  *
- * 做成同一个组件的两个模式而不是两个组件，是因为它们的差异只有底栏那几个按钮，
- * 而**消息展示一模一样**——分两个组件就会各维护一份消息区，然后慢慢长歪。
+ * 消息由父组件**按当前线程过滤好**再传进来：哪条消息属于哪条线程是数据层的事
+ * （`ChatMessage.stage`），视图不必重复判断一遍。
  */
 const props = defineProps<{
-  /** 交给列表渲染的消息（含流式接收中的那一条） */
+  /** 当前线程的消息（含流式接收中的那一条） */
   messages: ChatMessage[]
+  /** 子标签栏的全部标签，顺序即展示顺序 */
+  tabs: readonly ChatStage[]
+  /** 当前选中的标签 */
+  activeTab: ChatStage
+  /** 可点的标签；不在其中的置灰 */
+  availableTabs: ChatStage[]
   /** 是否正在流式接收回复 */
   loading?: boolean
   /** 对话过程中的错误提示 */
   error?: string
-  /** 是否已满足「生成 PRD」的条件 */
+  /** 是否已满足「生成 PRD」的条件（需求澄清线程的主操作） */
   canGeneratePrd?: boolean
-  /** 是否处于 PRD 剩余问题澄清模式 */
-  docClarification?: boolean
-  /** 文档澄清模式下「按澄清结果改写」是否可用 */
+  /** 澄清线程的主操作「按澄清结果改写」是否可用 */
   canRewrite?: boolean
   /** 是否正在改写中 */
   rewriting?: boolean
+  /** 有请求在跑；此时子标签栏全部禁用 */
+  busy?: boolean
 }>()
 
 const emit = defineEmits<{
+  /** 切换到另一条澄清线程 */
+  selectTab: [stage: ChatStage]
   /** 点击「改需求」 */
   editRequirements: []
   /** 点击「重新开始」 */
@@ -46,11 +56,46 @@ const emit = defineEmits<{
   send: [content: string]
   /** 点击「生成 PRD」 */
   generatePrd: []
-  /** 点击「按澄清结果改写」（文档澄清模式的主操作） */
+  /** 点击「按澄清结果改写」（三条文档线程的主操作） */
   rewrite: []
-  /** 点击「返回审阅」（文档澄清模式的次级操作） */
-  back: []
 }>()
+
+/**
+ * 是否停在**需求澄清**线程。
+ *
+ * 它决定两件事：底栏给「生成 PRD」还是「按澄清结果改写」，以及要不要出现「重新开始」——
+ * 那个按钮会清掉整份会话（连同已生成的文档），在澄清文档时点错的代价太大。
+ */
+const onRequirement = computed(() => props.activeTab === 'requirement')
+
+/** 头部标题：说清这一栏在聊的是哪份东西 */
+const heading = computed(() => {
+  switch (props.activeTab) {
+    case 'prd-clarify':
+      return 'PRD 待确认项澄清'
+    case 'api-docs-clarify':
+      return '接口文档待确认项澄清'
+    case 'prompts-clarify':
+      return '提示词套件待确认项澄清'
+    default:
+      return '需求澄清对话'
+  }
+})
+
+/**
+ * 头部副标题。
+ *
+ * 刻意不写具体数字：提问上限是后端提示词的口径（见 ADR-010），文案里再落一份数字
+ * 就等于又多出一个需要手工同步的副本。
+ */
+const subheading = computed(() =>
+  onRequirement.value
+    ? 'AI 会追问关键细节，逐步澄清后再生成文档'
+    : '按 P0 → P6 逐级确认剩余问题；聊够了随时可以写回文档',
+)
+
+/** 改写按钮的禁用态：这一轮还没聊出结论、或正在改写中，都点不动 */
+const rewriteDisabled = computed(() => !props.canRewrite || Boolean(props.rewriting))
 
 /** 输入框实例，用于在一轮回复结束后把焦点交还给用户 */
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null)
@@ -68,23 +113,23 @@ watch(
 
 <template>
   <section class="space-y-3">
+    <!-- 子标签栏：四条澄清线程常驻，切换即切换对话历史与底栏动作 -->
+    <ChatThreadTabs
+      :tabs="tabs"
+      :active="activeTab"
+      :available="availableTabs"
+      :busy="busy"
+      @select="emit('selectTab', $event)"
+    />
+
     <!--
       对话卡片只负责消息区。输入框已下沉到页面级底栏的内容行里——
       与「重新开始 / 改需求 / 生成 PRD」同处一条栏，用户不必在卡片底部与页面底部之间来回找。
     -->
     <div class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
       <div class="border-b border-line px-4 py-3 sm:px-6">
-        <h2 class="text-sm font-semibold text-fg">
-          {{ docClarification ? 'PRD 待确认项澄清' : '需求澄清对话' }}
-        </h2>
-        <!-- 刻意不写具体数字：提问上限是后端提示词的口径（见 ADR-010），
-             文案里再落一份数字就等于又多出一个需要手工同步的副本 -->
-        <p v-if="docClarification" class="mt-0.5 text-xs text-subtle">
-          按 P0 → P6 逐级确认剩余问题；聊够了随时可以写回文档
-        </p>
-        <p v-else class="mt-0.5 text-xs text-subtle">
-          AI 会追问关键细节，逐步澄清后再生成文档
-        </p>
+        <h2 class="text-sm font-semibold text-fg">{{ heading }}</h2>
+        <p class="mt-0.5 text-xs text-subtle">{{ subheading }}</p>
       </div>
 
       <!-- 出错时把原因贴在会话区顶部，不打断已有消息 -->
@@ -102,44 +147,37 @@ watch(
       </div>
     </div>
 
-    <!-- 页面级操作栏：内容行是输入框，流程行左「重新开始 │ 改需求」、右「生成 PRD」 -->
+    <!--
+      页面级操作栏。
+      需求澄清线程：左「重新开始 │ 改需求」、右「生成 PRD」；
+      三条文档澄清线程：只有右端的主操作「按澄清结果改写」——回审阅页靠顶部进度条，
+      不必再占一个按钮（ADR-028 的取舍）。
+    -->
     <AppActionBar>
       <template #tools>
         <ChatInput ref="inputRef" embedded :loading="loading" @send="emit('send', $event)" />
       </template>
 
-      <!-- 文档澄清模式：PRD 已经生成过了，这里不需要「重新开始」——
-           那会连同前面的需求澄清与已生成的文档一起清掉，点错的代价太大 -->
+      <!-- 「重新开始」会连同前面的需求澄清与已生成的文档一起清掉，点错的代价太大，
+           因此只在需求澄清线程里出现 -->
       <template #danger>
-        <AppButton v-if="!docClarification" variant="danger" size="md" @click="emit('restart')">
+        <AppButton v-if="onRequirement" variant="danger" size="md" @click="emit('restart')">
           重新开始
         </AppButton>
       </template>
       <template #secondary>
-        <AppButton
-          v-if="docClarification"
-          variant="secondary"
-          size="md"
-          @click="emit('back')"
-        >
-          返回审阅
-        </AppButton>
-        <AppButton v-else variant="secondary" size="md" @click="emit('editRequirements')">
+        <AppButton v-if="onRequirement" variant="secondary" size="md" @click="emit('editRequirements')">
           改需求
         </AppButton>
       </template>
 
-      <!-- 文档澄清模式的主操作：改写（进行中时显示进度，仍由 AppButton 承载 loading 态） -->
+      <!-- 需求澄清线程的主操作：聊够了去生成 PRD -->
       <AppButton
-        v-if="docClarification"
+        v-if="onRequirement && canGeneratePrd"
         variant="primary"
         size="md"
-        :disabled="!canRewrite || rewriting"
-        @click="emit('rewrite')"
+        @click="emit('generatePrd')"
       >
-        {{ rewriting ? '正在改写…' : '按澄清结果改写' }}
-      </AppButton>
-      <AppButton v-else-if="canGeneratePrd" variant="primary" size="md" @click="emit('generatePrd')">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             fill-rule="evenodd"
@@ -148,6 +186,17 @@ watch(
           />
         </svg>
         生成 PRD
+      </AppButton>
+
+      <!-- 文档线程的主操作：把这一轮的结论写回文档（进行中时由 AppButton 承载 loading 态） -->
+      <AppButton
+        v-else-if="!onRequirement"
+        variant="primary"
+        size="md"
+        :disabled="rewriteDisabled"
+        @click="emit('rewrite')"
+      >
+        {{ rewriting ? '正在改写…' : '按澄清结果改写' }}
       </AppButton>
     </AppActionBar>
   </section>

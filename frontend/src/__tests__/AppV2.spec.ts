@@ -5,6 +5,7 @@ import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppV2 from '../AppV2.vue'
+import ChatStage from '../components/stages/ChatStage.vue'
 import * as api from '../services/api'
 import * as authService from '../services/authService'
 import * as documentApi from '../services/documentService'
@@ -13,6 +14,7 @@ import { useAuthStore } from '../stores/auth'
 import { useDocumentsStore } from '../stores/documents'
 import { useWorkflowStore } from '../stores/workflow'
 import type {
+  ChatMessage,
   DocumentRecord,
   JobSnapshot,
   RequirementsSummary,
@@ -488,23 +490,24 @@ function documentsOf(wrapper: VueWrapper): ReturnType<typeof useDocumentsStore> 
   return useDocumentsStore(pinia)
 }
 
-/** 一份「停在审阅页、没有任何进行中任务」的最小快照 */
+/** 一份「停在某阶段、没有任何进行中任务」的最小快照 */
 function reviewSnapshot(viewState: string): Record<string, unknown> {
   return {
     viewState,
     entryMode: 'structured',
     summary: null,
     messages: [],
-    conversationId: '',
+    chatTab: 'requirement',
+    conversationIds: {
+      requirement: '',
+      'prd-clarify': '',
+      'api-docs-clarify': '',
+      'prompts-clarify': '',
+    },
     quickInput: { productName: '', requirements: '' },
     debugPrdText: '',
     activeJobId: null,
     activeJobKind: null,
-    clarifyMessages: [],
-    clarifyConversationId: '',
-    clarifyTarget: null,
-    prdClarifyConversationId: '',
-    prdClarifying: false,
   }
 }
 
@@ -1461,11 +1464,16 @@ describe('AppV2 分章节生成的阶段展示', () => {
 })
 
 /**
- * 文档澄清（P4）：从审阅页进入澄清、聊清楚、再按结论就地改写。
+ * 文档澄清：从审阅页进入**对话页的某条线程**、聊清楚、再按结论就地改写。
  *
- * 这条链路的三个落点必须在测试里钉住：① 交给后端的**只有**正文与清单（前端不递提示词，
- * 只点名 `doc-clarification` 场景）；② 改写任务必须带 `docKind`（否则后端拒绝落库）；
- * ③ 改写完成后回到那份文档的审阅页，而不是停在澄清页看一份旧正文。
+ * 三条文档线程（PRD / 接口 / 提示词）与需求澄清**共用同一个对话页**，靠顶部子标签栏切换；
+ * 消息共用一张表、靠 `stage` 分线（ADR-028）。这条链路的落点必须在测试里钉住：
+ *
+ * ① 交给后端的**只有**正文与清单（前端不递提示词，只点名 `doc-clarification` 场景）；
+ * ② 改写任务必须带 `docKind`——它既是「写回哪一份」也是「注入哪套产出规范」的依据，
+ *    少了后端不会猜，而是拒绝落库；写错则是一次**看起来挺合理**的静默错写；
+ * ③ 改写完成后回到**那份文档**的审阅页，而不是停在对话页看一份旧正文；
+ * ④ 对话区只显示当前标签那条线程——串线同样是静默的，用户只会觉得「我聊的怎么跑别处去了」。
  */
 describe('AppV2 文档澄清', () => {
   const PENDING = [
@@ -1478,12 +1486,29 @@ describe('AppV2 文档澄清', () => {
     },
   ]
 
-  async function mountReviewWithPending(): Promise<VueWrapper> {
-    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('先问最关键的一个：分页上限取多少？')
-      return { conversationId: 'doc-conv-1', reply: '先问最关键的一个：分页上限取多少？' }
-    })
+  /** 澄清入口的文案在完整流程下是「回到对话…」，另外两条入口是「和 AI 确认…」——按中间那截匹配即可 */
+  const ENTRY_TEXT = '确认剩下的'
 
+  /** 从审阅页点进澄清，等首轮追问落地 */
+  async function openClarification(wrapper: VueWrapper): Promise<void> {
+    await clickButton(wrapper, ENTRY_TEXT)
+    await flushPromises()
+  }
+
+  /** 造一个按「在哪份文档上澄清」回不同话术的开场 mock，便于区分各线程的消息 */
+  function mockOpeningByDocument(): void {
+    vi.mocked(api.startConversationStream).mockImplementation(async (payload, handlers) => {
+      const reply = String(payload.answers.document ?? '').startsWith('# 接口文档')
+        ? '接口那边先确认分页'
+        : '先问最关键的一个：分页上限取多少？'
+      handlers?.onChunk?.(reply)
+      return { conversationId: `conv-${reply.slice(0, 2)}`, reply }
+    })
+  }
+
+  /** 打开一份「PRD 有待确认项」的方案，停在 PRD 审阅页 */
+  async function mountReviewWithPending(): Promise<VueWrapper> {
+    mockOpeningByDocument()
     const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
       makeDocumentRecord('prd', '# 产品需求文档\n\n分页上限：待确认', null, PENDING),
     ])
@@ -1491,14 +1516,24 @@ describe('AppV2 文档澄清', () => {
     return wrapper
   }
 
-  it('审阅 PRD 页给出「回到对话」入口，并把正文与清单交给后端（场景点名，不递提示词）', async () => {
+  /** 打开一份「PRD 与接口文档都齐、接口文档有待确认项」的方案，停在接口文档审阅页 */
+  async function mountApiDocsReview(): Promise<VueWrapper> {
+    mockOpeningByDocument()
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档'),
+      makeDocumentRecord('api-docs', '# 接口文档\n\n分页上限：待确认', null, PENDING),
+    ])
+    await flushPromises()
+    return wrapper
+  }
+
+  it('审阅 PRD 页给出澄清入口，并把正文与清单交给后端（场景点名，不递提示词）', async () => {
     const wrapper = await mountReviewWithPending()
 
     expect(wrapper.text()).toContain('回到对话，确认剩下的 1 个问题')
-    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
-    await flushPromises()
+    await openClarification(wrapper)
 
-    // 回到的是**主对话栏**（标题切到 PRD 澄清），不是另开一个澄清页
+    // 回到的是**对话页**（标题切到 PRD 澄清），不是另开一个澄清页
     expect(wrapper.text()).toContain('PRD 待确认项澄清')
 
     const payload = vi.mocked(api.startConversationStream).mock.calls[0]?.[0]
@@ -1510,7 +1545,19 @@ describe('AppV2 文档澄清', () => {
     )
   })
 
-  it('「PRD 快捷」的审阅页不给「回到对话」入口——那条路没有对话可回', async () => {
+  it('接口文档的审阅页给的是同一个入口（三种审阅页不再各走一条路）', async () => {
+    const wrapper = await mountApiDocsReview()
+
+    expect(wrapper.text()).toContain('回到对话，确认剩下的 1 个问题')
+    await openClarification(wrapper)
+
+    // 进的是对话页的**接口澄清**那条线程
+    expect(wrapper.text()).toContain('接口文档待确认项澄清')
+    expect(storeOf(wrapper).chatTab).toBe('api-docs-clarify')
+  })
+
+  it('「PRD 快捷」的审阅页也给入口，且与「返回描述」并存（两者落点不同）', async () => {
+    mockOpeningByDocument()
     const wrapper = await mountExistingSolution(
       { ...reviewSnapshot('review-prd'), entryMode: 'prd-quick' },
       1,
@@ -1518,10 +1565,13 @@ describe('AppV2 文档澄清', () => {
     )
     await flushPromises()
 
-    // 有待确认项、也真在审 PRD，但入口模式不是完整流程：不能给这个入口，
-    // 否则它会顶掉本该留着的「返回描述」（快捷入口压根没有那条聊天记录）
-    expect(wrapper.text()).not.toContain('回到对话，确认剩下的')
+    // 三条入口都开放澄清；快捷入口没有需求对话，所以文案是「和 AI 确认」而不是「回到对话」
+    expect(wrapper.text()).toContain('和 AI 确认剩下的 1 个问题')
+    // 「返回描述」是回到录入页的唯一入口（也不在进度条上），不能被顶掉
     expect(wrapper.text()).toContain('返回描述')
+
+    await openClarification(wrapper)
+    expect(storeOf(wrapper).chatTab).toBe('prd-clarify')
   })
 
   it('点「按澄清结果改写」发起 clarify 任务，带 docKind 与这一轮对话，完成后回到审阅页', async () => {
@@ -1533,8 +1583,7 @@ describe('AppV2 文档澄清', () => {
     })
 
     const wrapper = await mountReviewWithPending()
-    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
-    await flushPromises()
+    await openClarification(wrapper)
 
     await clickButton(wrapper, '按澄清结果改写')
     await flushPromises()
@@ -1550,7 +1599,26 @@ describe('AppV2 文档澄清', () => {
     expect(wrapper.text()).not.toContain('PRD 待确认项澄清')
   })
 
-  it('点「按澄清结果改写」立刻进入 PRD 生成视图展示流式改写，完成后回到审阅页', async () => {
+  it('接口文档的改写带 docKind: api-docs 并回到接口文档的审阅页（别写进 PRD）', async () => {
+    mockJobStream({
+      clarify: async () => ({ conversationId: '', reply: '# 接口文档\n\n分页上限：50 条' }),
+    })
+
+    const wrapper = await mountApiDocsReview()
+    await openClarification(wrapper)
+
+    await clickButton(wrapper, '按澄清结果改写')
+    await flushPromises()
+
+    // 目标由**当前标签**反推：写错位置不会报错，只会静默地改错文档，因此必须钉住
+    expect(jobPayload('clarify')?.docKind).toBe('api-docs')
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    // 落回的正文在接口文档那一份上，PRD 没被碰
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('分页上限：50 条')
+    expect(documentsOf(wrapper).contentOf('prd')).toBe('# 产品需求文档')
+  })
+
+  it('点「按澄清结果改写」立刻进入对应的生成视图展示流式改写，完成后回到审阅页', async () => {
     // 用挂起的 deferred 流制造「可观测的中间态」：改写会一直进行到 release() 被调用
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
@@ -1565,8 +1633,7 @@ describe('AppV2 文档澄清', () => {
     })
 
     const wrapper = await mountReviewWithPending()
-    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
-    await flushPromises()
+    await openClarification(wrapper)
     const store = storeOf(wrapper)
 
     await clickButton(wrapper, '按澄清结果改写')
@@ -1591,66 +1658,233 @@ describe('AppV2 文档澄清', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('PRD 文档')
-    expect(wrapper.text()).not.toContain('回到对话，确认剩下的')
+    expect(wrapper.text()).not.toContain(ENTRY_TEXT)
     expect(api.startConversationStream).not.toHaveBeenCalled()
   })
 
-  it('PRD 澄清的消息追加进同一条 messages，并标着 document 阶段', async () => {
+  it('澄清的消息落在那条线程上，需求线程一条不动', async () => {
     const wrapper = await mountReviewWithPending()
     const store = storeOf(wrapper)
-    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
-    await flushPromises()
+    await openClarification(wrapper)
 
     // 与需求澄清**共用同一个列表**：用户看到的是一条连续的时间线
     expect(store.messages).toHaveLength(1)
-    expect(store.messages[0]?.stage).toBe('document')
+    expect(store.messages[0]?.stage).toBe('prd-clarify')
     // 但明细上分得开：需求澄清那一轮一条都没有
     expect(
       store.messages.filter((message) => (message.stage ?? 'requirement') === 'requirement'),
     ).toHaveLength(0)
-    expect(store.prdClarifying).toBe(true)
+    expect(store.chatTab).toBe('prd-clarify')
     expect(wrapper.text()).toContain('PRD 待确认项澄清')
   })
 
   it('再回到对话时不重新开场——同一段澄清继续聊（这是「复用」的要害）', async () => {
     const wrapper = await mountReviewWithPending()
     const store = storeOf(wrapper)
-    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
-    await flushPromises()
+    await openClarification(wrapper)
     expect(vi.mocked(api.startConversationStream)).toHaveBeenCalledTimes(1)
 
-    // 回审阅页再进来：开场请求不应重发，否则每次回来都被问候一遍
-    await clickButton(wrapper, '返回审阅')
+    // 回审阅页（澄清标签下没有「返回审阅」按钮，靠顶部进度条走回去）
+    await clickStep(wrapper, 'PRD')
     await flushPromises()
-    await clickButton(wrapper, '回到对话，确认剩下的 1 个问题')
-    await flushPromises()
+    expect(store.viewState).toBe('review-prd')
+
+    // 再进来：开场请求不应重发，否则每次回来都被问候一遍
+    await openClarification(wrapper)
 
     expect(vi.mocked(api.startConversationStream)).toHaveBeenCalledTimes(1)
-    expect(store.prdClarifying).toBe(true)
+    expect(store.chatTab).toBe('prd-clarify')
     // 聊天记录没有被清空
     expect(store.messages).toHaveLength(1)
   })
 
-  it('接口文档仍走独立澄清页：这条老路径没有被 PRD 的新流程顶掉', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('先问最关键的一个：分页上限取多少？')
-      return { conversationId: 'api-conv-1', reply: '先问最关键的一个：分页上限取多少？' }
-    })
+  it('整篇重新生成某一篇，会作废它自己与下游那条线程的对话', async () => {
+    mockOpeningByDocument()
+    mockJobStream()
 
-    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
-      makeDocumentRecord('prd', '# PRD'),
+    // 提示词有待确认项，先在那里聊过一轮
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prompts'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档'),
+      makeDocumentRecord('api-docs', '# 接口文档'),
+      makeDocumentRecord('prompts', '# 提示词套件\n\n分页上限：待确认', null, PENDING),
+    ])
+    await flushPromises()
+    const store = storeOf(wrapper)
+
+    await openClarification(wrapper)
+    expect(store.messages.filter((m) => m.stage === 'prompts-clarify')).toHaveLength(1)
+
+    // 换一版提示词：回到接口文档那一步，重新生成提示词套件
+    await clickStep(wrapper, '接口文档')
+    await flushPromises()
+    await clickButton(wrapper, '生成提示词套件')
+    await flushPromises()
+
+    // 旧线程聊的是**上一版**的待确认项。留着它，用户点「按澄清结果改写」就会把
+    // 针对旧文档的结论写进新文档——一次静默的错写，而且看起来还挺合理
+    expect(store.messages.filter((m) => m.stage === 'prompts-clarify')).toHaveLength(0)
+  })
+})
+
+/**
+ * 对话页的子标签栏：四条澄清线程常驻，切换即换对话历史与底栏动作。
+ *
+ * 这一块最容易出的错是**串线**：消息共用一张表，过滤口径一旦写歪，用户就会看到
+ * 别人那条线程的对话，或者自己的对话莫名其妙少了。串线不报错，所以必须有用例。
+ */
+describe('AppV2 对话页的子标签栏', () => {
+  const PENDING = [
+    {
+      id: 'p-1',
+      question: '分页上限取多少？',
+      sections: ['4.3'],
+      decider: '产品负责人',
+      importance: 'P0' as const,
+    },
+  ]
+
+  /** 当前交给对话区渲染的消息（组件拿到的已经是按当前标签过滤好的那些） */
+  function chatMessages(wrapper: VueWrapper): ChatMessage[] {
+    return wrapper.findComponent(ChatStage).props('messages') as ChatMessage[]
+  }
+
+  /** 底栏里出现过的按钮文案 */
+  function barButtons(wrapper: VueWrapper): string[] {
+    return wrapper.find('.shell-action-bar').findAll('button').map((item) => item.text())
+  }
+
+  /** 造一个按「在哪份文档上澄清」回不同话术的开场 mock，便于区分各线程的消息 */
+  function mockOpeningByDocument(): void {
+    vi.mocked(api.startConversationStream).mockImplementation(async (payload, handlers) => {
+      const reply = String(payload.answers.document ?? '').startsWith('# 接口文档')
+        ? '接口那边先确认分页'
+        : 'PRD 那边先确认分页'
+      handlers?.onChunk?.(reply)
+      return { conversationId: `conv-${reply.slice(0, 2)}`, reply }
+    })
+  }
+
+  async function openPromptsAndPrdClarification(): Promise<VueWrapper> {
+    mockOpeningByDocument()
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n分页上限：待确认', null, PENDING),
       makeDocumentRecord('api-docs', '# 接口文档\n\n分页上限：待确认', null, PENDING),
     ])
-    const store = storeOf(wrapper)
     await flushPromises()
 
-    expect(wrapper.text()).toContain('逐条澄清这些待确认项')
-    await clickButton(wrapper, '逐条澄清这些待确认项')
+    // 先在 PRD 那条线程上聊一轮
+    await clickButton(wrapper, '确认剩下的')
+    await flushPromises()
+    // 再去接口文档那条线程聊一轮
+    await clickStep(wrapper, '接口文档')
+    await flushPromises()
+    await clickButton(wrapper, '确认剩下的')
+    await flushPromises()
+    return wrapper
+  }
+
+  it('四条标签常驻，未就绪的置灰（标签就是地图）', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n分页上限：待确认', null, PENDING),
+    ])
+    await flushPromises()
+    await clickButton(wrapper, '确认剩下的')
     await flushPromises()
 
-    expect(store.clarifyMessages).toHaveLength(1)
-    expect(store.clarifyTarget).toBe('api-docs')
-    // 主对话列表不受影响（PRD 那条新链路没污染它）
-    expect(store.messages).toHaveLength(0)
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((item) => item.text())).toEqual([
+      '需求澄清',
+      'PRD 澄清',
+      '接口澄清',
+      '提示词澄清',
+    ])
+    // PRD 有正文且正停在这条线上 → 可点；接口 / 提示词还没有正文 → 置灰
+    const byLabel = (label: string) => tabs.find((item) => item.text() === label)
+    expect((byLabel('PRD 澄清')?.element as HTMLButtonElement).disabled).toBe(false)
+    expect((byLabel('接口澄清')?.element as HTMLButtonElement).disabled).toBe(true)
+    expect((byLabel('提示词澄清')?.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('对话区只显示当前标签那条线程，点标签即换对话', async () => {
+    const wrapper = await openPromptsAndPrdClarification()
+
+    // 当前停在接口澄清上，只看到接口那条线程的对话
+    expect(storeOf(wrapper).chatTab).toBe('api-docs-clarify')
+    expect(chatMessages(wrapper).map((message) => message.content)).toEqual([
+      '接口那边先确认分页',
+    ])
+
+    await clickButton(wrapper, 'PRD 澄清')
+    await flushPromises()
+
+    // 切过去只看到 PRD 那条；需求澄清一条都没有（它是空的，但也不该串进来别的）
+    expect(storeOf(wrapper).chatTab).toBe('prd-clarify')
+    expect(chatMessages(wrapper).map((message) => message.content)).toEqual([
+      'PRD 那边先确认分页',
+    ])
+    // 两条线程的消息都在同一张表里，一条没丢
+    expect(storeOf(wrapper).messages).toHaveLength(2)
+  })
+
+  it('底栏动作随标签切换：需求线程有「重新开始 / 改需求」，澄清线程只有「按澄清结果改写」', async () => {
+    const wrapper = await openPromptsAndPrdClarification()
+
+    // 澄清标签：主操作是改写；「重新开始」会连整份会话一起清掉，点错代价太大，不该出现
+    let buttons = barButtons(wrapper)
+    expect(buttons).toContain('按澄清结果改写')
+    expect(buttons).not.toContain('重新开始')
+    expect(buttons).not.toContain('改需求')
+    expect(buttons).not.toContain('生成 PRD')
+    // 澄清标签下也没有「返回审阅」：回审阅页靠顶部进度条（ADR-028 的取舍）
+    expect(buttons).not.toContain('返回审阅')
+
+    await clickButton(wrapper, '需求澄清')
+    await flushPromises()
+
+    buttons = barButtons(wrapper)
+    expect(buttons).toContain('重新开始')
+    expect(buttons).toContain('改需求')
+    expect(buttons).not.toContain('按澄清结果改写')
+  })
+
+  it('「改需求」只在需求线程可用：回到表单后再返回，落在对话页', async () => {
+    const wrapper = await openPromptsAndPrdClarification()
+    await clickButton(wrapper, '需求澄清')
+    await flushPromises()
+
+    await clickButton(wrapper, '改需求')
+    await flushPromises()
+    expect(storeOf(wrapper).viewState).toBe('form')
+
+    await clickButton(wrapper, '返回对话')
+    await flushPromises()
+    expect(storeOf(wrapper).viewState).toBe('chatting')
+  })
+
+  it('打开一份停在接口澄清的方案：落在对话页，并停回那条标签上', async () => {
+    const snapshot = {
+      ...reviewSnapshot('chatting'),
+      chatTab: 'api-docs-clarify',
+      conversationIds: {
+        requirement: '',
+        'prd-clarify': '',
+        'api-docs-clarify': 'conv-api',
+        'prompts-clarify': '',
+      },
+      messages: [
+        { role: 'user', content: '需求那边聊的' },
+        { role: 'user', content: '接口这边聊的', stage: 'api-docs-clarify' },
+      ],
+    }
+    const wrapper = await mountExistingSolution(snapshot, 1, [
+      makeDocumentRecord('prd', '# 产品需求文档'),
+      makeDocumentRecord('api-docs', '# 接口文档'),
+    ])
+    await flushPromises()
+
+    // 标签与各线程会话 id 都随快照回来了：刷新后接着聊，而不是被丢回需求澄清
+    expect(storeOf(wrapper).chatTab).toBe('api-docs-clarify')
+    expect(storeOf(wrapper).conversationIds['api-docs-clarify']).toBe('conv-api')
+    expect(chatMessages(wrapper).map((message) => message.content)).toEqual(['接口这边聊的'])
   })
 })

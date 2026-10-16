@@ -43,9 +43,12 @@ const emit = defineEmits<{
   navigate: [state: ViewState]
   /** 进入完成页 */
   finish: []
-  /** 进入澄清页（对待确认项逐条澄清后改写这份文档） */
-  clarify: []
-  /** 回到主对话栏继续澄清剩余问题（PRD 专用：复用同一条聊天记录） */
+  /**
+   * 去对话页澄清这份文档的待确认项（三种审阅页共用）。
+   *
+   * 三条文档线程现在都落在同一个对话页上，靠子标签栏切换，因此这里只需要「去哪一份」——
+   * 由上层按当前阶段决定，组件不必知道。
+   */
   returnToChat: []
 }>()
 
@@ -85,20 +88,25 @@ const props = defineProps<{
    */
   pendingItems?: PendingItem[]
   /**
-   * 是否给出「逐条澄清」入口。
+   * 是否给出「去对话页澄清这份文档」的入口。
    *
-   * 由上层决定而不是这里判断：能否澄清取决于「有没有正文、有没有方案 id」这类上层才知道的
-   * 事（澄清最终要落库，没有方案就无处可写）。组件只负责在允许时把它渲染出来。
-   */
-  canClarify?: boolean
-  /**
-   * 是否给出「回到对话」入口（PRD 专用，与 `canClarify` 互斥）。
+   * 由上层决定而不是这里判断：能否澄清取决于「有没有正文」这类上层才知道的事
+   * （澄清最终要落库，没有正文就无处可写）。组件只负责在允许时把它渲染出来。
    *
-   * 同样由上层决定：能否走这条路径取决于「是不是在审 PRD」「是不是完整流程（有对话可回）」
-   * 以及「有没有待确认项」，三者都是上层才知道的事。入口落在底栏的次操作组，
-   * 并**顶替**「返回」按钮（两者落点都是对话页，并排会给用户两个近乎同名的选择）。
+   * 入口落在底栏的次操作组，**并顶替「返回」按钮**——条件是两者的落点相同
+   * （完整流程下都是对话页，并排会给用户两个近乎同名的选择）。落点不同的入口模式
+   * （PRD 快捷 / 提示词调试：返回的是录入页，而录入页不在进度条上）由上层传
+   * `keepBackButton` 要求保留返回，两者并排。
    */
   canReturnToChat?: boolean
+  /**
+   * 澄清入口出现时，是否**保留**「返回」按钮。
+   *
+   * 只在澄清入口与「返回」落点不同时才传。典型场景是 PRD 快捷与提示词调试：它们没有
+   * 需求对话，但同样会产出待确认项；若让澄清入口顶替「返回」，用户就再也回不到
+   * 描述 / PRD 录入页（那一页不在进度条上，没有别的入口）。
+   */
+  keepBackButton?: boolean
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -118,7 +126,7 @@ const skillFallback = computed(
 )
 
 /**
- * 是否展示 PRD 专属的「回到对话澄清剩余问题」入口（在底栏次操作组，并顶替「返回」）。
+ * 是否展示「去对话页澄清剩余问题」入口（在底栏次操作组）。
  *
  * 上层按阶段与入口模式给出开关（`canReturnToChat`），这里再兜一层「真有待确认项」：
  * 没有待确认项却给一个「去澄清」的入口，点进去只能闲聊。两处判据收在这一个 computed 里，
@@ -127,6 +135,23 @@ const skillFallback = computed(
 const showReturnToChat = computed(
   () => Boolean(props.canReturnToChat) && (props.pendingItems?.length ?? 0) > 0,
 )
+
+/**
+ * 澄清入口的文案。
+ *
+ * 完整流程下它是「回到对话」——那里真有一段对话等着他；另外两条入口没有需求对话，
+ * 进去是**新开**一条澄清线程，说「回到对话」会让人以为自己的东西丢了，
+ * 因此换成「和 AI 确认」。
+ */
+const returnToChatLabel = computed(() => {
+  const count = props.pendingItems?.length ?? 0
+  return props.keepBackButton
+    ? `和 AI 确认剩下的 ${count} 个问题`
+    : `回到对话，确认剩下的 ${count} 个问题`
+})
+
+/** 是否渲染「返回」按钮：澄清入口在与「返回」落点相同处会顶替它，落点不同处则两者并存 */
+const showBack = computed(() => !showReturnToChat.value || Boolean(props.keepBackButton))
 
 /** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制、保存、切换视图 */
 const doc = ref<InstanceType<typeof DocumentReview> | null>(null)
@@ -263,55 +288,12 @@ function submitOptimize(): void {
       @save="emit('save', $event)"
     />
 
-    <!-- 逐条澄清入口（接口文档 / 提示词专用）：**普通区块，不占底栏的主操作位**（ADR-015）。
-         只在真有待确认项时出现——没有待确认项却给一个「去澄清」的入口，点进去只能闲聊。
-         这两份文档的澄清要开一个独立澄清页，整块入口足以承担；PRD 那条的落点就是对话页，
-         已下沉到下面的底栏由它顶替「返回」（见 `showReturnToChat`）。 -->
-    <button
-      v-if="canClarify && pendingItems && pendingItems.length"
-      type="button"
-      class="flex w-full items-center gap-3 rounded-xl border border-accent/40 bg-accent-soft px-4 py-3 text-left transition-colors hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
-      @click="emit('clarify')"
-    >
-      <svg
-        class="h-4 w-4 shrink-0 text-accent"
-        viewBox="0 0 20 20"
-        fill="currentColor"
-        aria-hidden="true"
-      >
-        <path
-          fill-rule="evenodd"
-          d="M18 10c0 3.866-3.582 7-8 7a8.84 8.84 0 01-2.347-.306c-.584.296-1.925.864-4.181 1.234-.2.032-.352-.176-.273-.362.354-.836.674-1.95.77-2.966C3.365 13.376 3 11.752 3 10c0-3.866 3.582-7 8-7s7 3.134 7 7Zm-4.5-.25a.75.75 0 000-1.5h-4a.75.75 0 000 1.5h4Zm0 3.5a.75.75 0 000-1.5h-2a.75.75 0 000 1.5h2Z"
-          clip-rule="evenodd"
-        />
-      </svg>
-      <span class="min-w-0 flex-1">
-        <span class="block text-sm font-medium text-fg">逐条澄清这些待确认项</span>
-        <span class="mt-0.5 block text-xs text-subtle">
-          和 AI 把 {{ pendingItems.length }} 个问题聊清楚，再按结论改写这份文档——只动涉及的章节。
-        </span>
-      </span>
-      <svg
-        class="h-4 w-4 shrink-0 text-subtle"
-        viewBox="0 0 20 20"
-        fill="currentColor"
-        aria-hidden="true"
-      >
-        <path
-          fill-rule="evenodd"
-          d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02Z"
-          clip-rule="evenodd"
-        />
-      </svg>
-    </button>
-
     <!--
-      PRD 专属的「回到对话」入口已下沉到下面的底栏（次操作组 `#secondary`）。
+      「去对话页澄清这些待确认项」的入口已下沉到下面的底栏（次操作组 `#secondary`）。
 
-      它是「进入某个流程」的入口，但落脚点就是**对话页**，所以按 ADR-015「底栏是全站唯一操作落点」
-      收进底栏反而更一致；只是因为不能占主操作位（那是「完成」的），所以进次操作组。
-      原来的整块区块按钮与底栏里的「返回」落点相同、名字也近似，两个并排会让用户不知道该点哪个，
-      因此改为：该入口出现时由它**顶替**「返回」按钮（见 `showReturnToChat`）。
+      它曾经是接口文档 / 提示词专用的**普通区块**——那时它们的澄清落在一个独立页面上，
+      整块入口足以承担；PRD 那条的落点就是对话页，所以先一步进了底栏。三条线程合并到同一个
+      对话页之后（ADR-028），三者落点完全一致，于是统一收进底栏，三种审阅页共用一套。
     -->
 
     <AppActionBar>
@@ -409,21 +391,22 @@ function submitOptimize(): void {
         </div>
       </template>
 
-      <!-- 流程行：左「返回 / 回到对话」，右按顺序推进 / 查看其它文档 / 完成。
+      <!-- 流程行：左「返回 / 去对话澄清」，右按顺序推进 / 查看其它文档 / 完成。
            三段式顺序与「主操作永远最右且唯一」都不动（ADR-015），新入口进的是次操作组。 -->
       <template #secondary>
-        <!-- 两个入口的落点都是对话页，因此互斥渲染：有待确认项时由「回到对话」顶替「返回」，
-             否则并排会出现两个都叫「回到对话」的按钮，用户不知道该点哪个。 -->
+        <!-- 澄清入口与「返回」落点相同时由它顶替「返回」——否则并排会出现两个都通向对话页、
+             名字也近似的按钮，用户不知道该点哪个。落点不同时（PRD 快捷 / 提示词调试：
+             「返回」回的是录入页）两者并存，顺序是「先退后进」。 -->
+        <AppButton v-if="showBack" variant="secondary" size="md" @click="emit('back')">
+          {{ backLabel ?? '返回对话' }}
+        </AppButton>
         <AppButton
           v-if="showReturnToChat"
           variant="secondary"
           size="md"
           @click="emit('returnToChat')"
         >
-          回到对话，确认剩下的 {{ pendingItems?.length }} 个问题
-        </AppButton>
-        <AppButton v-else variant="secondary" size="md" @click="emit('back')">
-          {{ backLabel ?? '返回对话' }}
+          {{ returnToChatLabel }}
         </AppButton>
       </template>
 

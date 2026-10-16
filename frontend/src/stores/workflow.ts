@@ -17,10 +17,11 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
+import { CHAT_STAGES } from '@/types'
 import type {
   ChatMessage,
+  ChatStage,
   DocKind,
-  DocumentKind,
   EntryMode,
   QuickPrdInput,
   RequirementsSummary,
@@ -31,10 +32,13 @@ import type {
 import { useDocumentsStore } from '@/stores/documents'
 import {
   canGeneratePrdFrom,
+  documentKindOfChatStage,
   DOWNGRADE_NOTICE,
+  emptyConversationIds,
   hasRequiredDocuments,
   isDocReviewPhase,
   isGeneratingPhase,
+  normalizeChatStage,
   reachedStepIndex as computeReachedStepIndex,
   reviewStateFor,
   stepIndexOf,
@@ -72,11 +76,33 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 结构化需求摘要；为空表示还没提交过需求 */
   const summary = ref<RequirementsSummary | null>(null)
 
-  /** 已固化的聊天消息；正在流式生成的那条不在其中 */
+  /**
+   * 全部澄清线程的消息；正在流式生成的那条不在其中。
+   *
+   * 四条线程（需求 / PRD / 接口 / 提示词）**共用这一个数组**，按 `ChatMessage.stage`
+   * 区分归属（见 `ChatStage`）。对话页只渲染当前标签那一条，摘要回填只读 `requirement`
+   * 那一条——两处过滤都由 `stage` 这一道标记兜住。
+   */
   const messages = ref<ChatMessage[]>([])
 
-  /** 后端会话 ID；为空表示后端没有可用会话，接续时退化为无状态模式 */
-  const conversationId = ref('')
+  /**
+   * 对话页当前停留在哪条线程。
+   *
+   * 它决定渲染哪一段对话、底栏给哪个主操作（需求澄清给「生成 PRD」，其余给「按澄清结果改写」）。
+   * 随快照持久化：刷新回来应当仍在原来那条线程里，而不是莫名其妙地又能再生成一次 PRD。
+   */
+  const chatTab = ref<ChatStage>('requirement')
+
+  /**
+   * 各线程的后端会话 id（按 `ChatStage` 取）。
+   *
+   * 四条线程是**四个后端会话**：需求澄清与文档澄清的人设不同（`clarification` vs
+   * `doc-clarification`），三条文档线程又各自带着不同文档的开场白——共用一个会话会让
+   * 上下文串味。前端合并展示、后端分开登记，各取所需。
+   *
+   * 收成一个表而不是四个字段：刷快照要同步的字段少一个，就少一次「改了这个忘了存那个」。
+   */
+  const conversationIds = ref<Record<ChatStage, string>>(emptyConversationIds())
 
   /** PRD 快捷入口的录入内容（产品名 + 一段话描述） */
   const quickInput = ref<QuickPrdInput>({ productName: '', requirements: '' })
@@ -96,53 +122,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 当前进行中任务的文档种类；与 `activeJobId` 成对写入 / 清空 */
   const activeJobKind = ref<DocKind | null>(null)
 
-  // ------------------------------------------------------------------
-  // 文档澄清会话（与需求澄清完全独立的一套字段）
-  //
-  // 为什么不复用 `messages` / `conversationId`：那是「表单 → PRD」那条链路的需求澄清记录，
-  // 混在一起会让「回填摘要」的输入凭空多出一段文档答疑（闸门①的 Diff 会莫名其妙地变），
-  // 而且用户在两个场景之间来回切换时对话会被互相冲掉。两套记录、两个会话 id，各说各的。
-  // ------------------------------------------------------------------
-
-  /** 文档澄清的聊天记录（含首轮 AI 追问） */
-  const clarifyMessages = ref<ChatMessage[]>([])
-
-  /** 文档澄清的后端会话 ID；为空时接续退化无状态模式 */
-  const clarifyConversationId = ref('')
-
-  /**
-   * 本次澄清针对哪一份产物；为空表示还没进入澄清。
-   *
-   * 它决定三件事：聊天开场白里放哪份正文、改写任务写回哪一份、改写完成后回到哪个审阅页。
-   */
-  const clarifyTarget = ref<DocumentKind | null>(null)
-
-  // ------------------------------------------------------------------
-  // PRD 生成后的「剩余问题澄清」（与需求澄清共用同一条消息列表）
-  //
-  // 这一轮走的是**主对话栏**（阶段仍是 `chatting`）：用户生成完 PRD 回到对话，看到的是同一条
-  // 时间线继续往下聊，而不是换一个新页面、旧对话消失。这对同一份产物反复「澄清 → 改写」很关键。
-  //
-  // 消息明细上靠 `ChatMessage.stage` 区分：需求澄清的轮次标 `requirement`，这里的轮次标
-  // `document`。于是两套对话可以安全地共用一个列表——摘要回填只按 `requirement` 取，
-  // 文档答疑不会被当成需求输入（闸门①不会被污染）。
-  // ------------------------------------------------------------------
-
-  /**
-   * 这轮澄清在后端登记的会话 ID。
-   *
-   * 它是一个**独立于需求澄清**的会话：两侧人设不同（`doc-clarification` vs `clarification`），
-   * 强行共用一个后端会话会让后一轮带着前一轮的人设。前端合并展示、后端分开登记，各取所需。
-   */
-  const prdClarifyConversationId = ref('')
-
-  /**
-   * 对话栏当前是否处于「PRD 剩余问题澄清」模式。
-   *
-   * 为 true 时：底栏给「按澄清结果改写」而不是「生成 PRD」，发消息走文档澄清会话。
-   * 它随快照持久化——刷新回来仍应在同一个模式里，否则用户会发现自己的对话忽然又能生成 PRD 了。
-   */
-  const prdClarifying = ref(false)
+  // 澄清线程的历史沿革（免得下一个人重蹈覆辙）：
+  // ADR-025 为了让闸门①读不到文档答疑，曾把接口文档 / 提示词的澄清做成**完全独立的一套**
+  // 字段（`clarifyMessages` / `clarifyConversationId` / `clarifyTarget`）并配一个独立页面；
+  // ADR-027 先让 PRD 澄清回到主对话栏（共用 `messages` + `stage` 标记）；本版把剩下两条
+  // 也并了进来。分开的理由（防闸门①污染）经核实不成立——闸门①只比对结构化摘要，
+  // 回填也只读 `requirement` 的消息。于是「一套字段 + 一个开关 + 一个页面」全部退役，
+  // 换成「一个消息数组 + 一个 stage 标记 + 一个对话页的四条线程」。
 
   // ------------------------------------------------------------------
   // 运行态（不写入快照）
@@ -196,16 +182,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
       entryMode: entryMode.value,
       summary: summary.value,
       messages: messages.value,
-      conversationId: conversationId.value,
+      chatTab: chatTab.value,
+      conversationIds: conversationIds.value,
       quickInput: quickInput.value,
       debugPrdText: debugPrdText.value,
       activeJobId: activeJobId.value,
       activeJobKind: activeJobKind.value,
-      clarifyMessages: clarifyMessages.value,
-      clarifyConversationId: clarifyConversationId.value,
-      clarifyTarget: clarifyTarget.value,
-      prdClarifyConversationId: prdClarifyConversationId.value,
-      prdClarifying: prdClarifying.value,
     }
   }
 
@@ -224,18 +206,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
     entryMode.value = session.entryMode
     summary.value = session.summary
     messages.value = session.messages
-    conversationId.value = session.conversationId
     quickInput.value = session.quickInput
     debugPrdText.value = session.debugPrdText
     activeJobId.value = session.activeJobId ?? null
     activeJobKind.value = session.activeJobKind ?? null
-    // 澄清会话随快照一起恢复，因此刷新后能接着聊（也就**不需要**降级）
-    clarifyMessages.value = session.clarifyMessages ?? []
-    clarifyConversationId.value = session.clarifyConversationId ?? ''
-    clarifyTarget.value = session.clarifyTarget ?? null
-    // 这两个字段同样是「缺失即默认」：旧快照没有它们，代表还没走过 PRD 澄清这一轮。
-    prdClarifyConversationId.value = session.prdClarifyConversationId ?? ''
-    prdClarifying.value = session.prdClarifying ?? false
+    // 澄清线程随快照一起恢复，因此刷新后能接着聊（也就**不需要**为它们降级）。
+    // `conversationIds` 是个对象，缺字段的旧快照要逐键兜底，不能整个替换。
+    chatTab.value = session.chatTab ?? 'requirement'
+    conversationIds.value = { ...emptyConversationIds(), ...(session.conversationIds ?? {}) }
     downgrade.value = downgradeKind
     // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
     // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
@@ -256,16 +234,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
       entryMode,
       summary,
       messages,
-      conversationId,
+      chatTab,
+      conversationIds,
       quickInput,
       debugPrdText,
       activeJobId,
       activeJobKind,
-      clarifyMessages,
-      clarifyConversationId,
-      clarifyTarget,
-      prdClarifyConversationId,
-      prdClarifying,
     ],
     () => {
       changeTick.value += 1
@@ -286,20 +260,64 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const steps = computed<readonly Step[]>(() => stepsForMode(entryMode.value))
 
   /**
+   * 对话页子标签栏里**可用**的那些线程。
+   *
+   * 判据是「这条线程要澄清的东西准备好了没有」：
+   * - 需求澄清只存在于完整流程——另外两条入口压根没有那条对话；
+   * - 三条文档线程看对应产物有没有正文（没正文就没什么可澄清的）。
+   *
+   * 不可用的线程**照样渲染**（置灰、不可点）：标签常驻，用户才知道后面还有哪些可以聊。
+   */
+  const availableChatTabs = computed<ChatStage[]>(() =>
+    CHAT_STAGES.filter((stage) => {
+      const kind = documentKindOfChatStage(stage)
+      if (!kind) return (entryMode.value ?? 'structured') === 'structured'
+      if (kind === 'prd') return documents.hasPrd
+      if (kind === 'api-docs') return documents.hasApiDocs
+      return documents.hasPrompts
+    }),
+  )
+
+  /**
+   * 对话页**实际显示**的那条线程。
+   *
+   * `chatTab` 是「用户选中的那条」（进快照、刷新后照原样恢复），本值是「此刻真的能显示的
+   * 那条」——两者在产物还没到位时会短暂分叉。
+   *
+   * 做成派生值，而不是「发现不可用就改写 `chatTab`」，是因为改写会引入一个**时序依赖**：
+   * 打开一份停在「接口澄清」的方案时，快照先落地、`documents` 后到达，中间那一小段时间里
+   * 「接口文档还没有正文」是事实，于是标签被改写成需求澄清——等正文到了也回不去了，
+   * 用户上次停在哪条线程上就这么静默丢了。派生之后没有写入，也就没有时序问题；
+   * 而 `chatTab` 里的**意图**留着，正文一回来视图自动回到那条线程上。
+   */
+  const activeChatTab = computed<ChatStage>(() => {
+    const tabs = availableChatTabs.value
+    if (tabs.includes(chatTab.value)) return chatTab.value
+    return tabs[0] ?? 'requirement'
+  })
+
+  /**
    * 当前阶段在进度条上的下标。
    *
-   * `clarifying` 是个例外：它是「对某一篇文档做澄清」，而 `STEP_OF_STATE` 是静态表，
-   * 只能给一个兜底值（`review-prd`）。澄清接口文档时进度条若跳回 PRD 那一格，用户会以为
-   * 自己走错了流程——因此这里按 `clarifyTarget` 精确算一次。
+   * 停在对话页的**文档线程**上时算个例外：那是在「对某一篇文档做澄清」，而
+   * `STEP_OF_STATE` 是静态表，只能按 `chatting` 给一格。澄清接口文档时进度条若跳回
+   * 「AI 对话」，用户会以为走错了流程——因此按当前标签对应的产物精确算一次（与原
+   * `clarifying` 阶段的口径一致）。
    */
   const currentStepIndex = computed(() => {
-    if (viewState.value === 'clarifying') {
-      return stepIndexOf(reviewStateFor(clarifyTarget.value ?? 'prd'), entryMode.value)
-    }
+    const clarifyKind =
+      viewState.value === 'chatting' ? documentKindOfChatStage(activeChatTab.value) : null
+    if (clarifyKind) return stepIndexOf(reviewStateFor(clarifyKind), entryMode.value)
     return stepIndexOf(viewState.value, entryMode.value)
   })
 
-  /** 已到达的最远步骤下标（进度条可点击范围），解锁依据是**产物有没有内容** */
+  /**
+   * 已到达的最远步骤下标（进度条可点击范围），解锁依据是**产物有没有内容**。
+   *
+   * `hasMessages` 的语义是「**任意**线程聊过」——从前只有需求澄清一条线程时它与
+   * 「需求聊过」等价；四条线程合流后依然等价：文档线程必然发生在需求线程之后
+   * （要先有对话才谈得上生成文档）。
+   */
   const reachedStepIndex = computed(() =>
     computeReachedStepIndex({
       mode: entryMode.value,
@@ -332,8 +350,18 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 是否允许进入完成页：所需文档齐备且没有进行中的请求 */
   const canFinish = computed(() => requiredDocsReady.value && !busy.value)
 
-  /** 对话阶段是否满足「生成 PRD」条件 */
-  const canGeneratePrd = computed(() => canGeneratePrdFrom(messages.value, busy.value))
+  /**
+   * 对话阶段是否满足「生成 PRD」条件。
+   *
+   * ⚠️ **只认需求澄清那一条线程**：`messages` 现在装着四条线程的消息，若拿整数组去数，
+   * 文档澄清里随便一条 AI 回复都会把「生成 PRD」点亮——而那时用户可能压根没聊过需求。
+   */
+  const canGeneratePrd = computed(() =>
+    canGeneratePrdFrom(
+      messages.value.filter((message) => normalizeChatStage(message.stage) === 'requirement'),
+      busy.value,
+    ),
+  )
 
   // ------------------------------------------------------------------
   // 动作
@@ -381,17 +409,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
    */
   function reset(): void {
     messages.value = []
-    conversationId.value = ''
+    chatTab.value = 'requirement'
+    conversationIds.value = emptyConversationIds()
     summary.value = null
     quickInput.value = { productName: '', requirements: '' }
     debugPrdText.value = ''
     activeJobId.value = null
     activeJobKind.value = null
-    clarifyMessages.value = []
-    clarifyConversationId.value = ''
-    clarifyTarget.value = null
-    prdClarifyConversationId.value = ''
-    prdClarifying.value = false
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
@@ -403,9 +427,25 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   /**
+   * 作废一条澄清线程：清掉它的消息与后端会话 id。
+   *
+   * 触发点是**整篇重新生成**那份产物（见 `useDocumentPipeline.handlersForKind`）。为什么必须
+   * 作废：旧线程聊的是**上一版**的待确认项，留着它，用户点「按澄清结果改写」就会把针对旧
+   * 文档的结论写进新文档——一次静默的错写，而且看起来还挺合理。
+   *
+   * 只动被点名的那条线程，其余线程原样保留。
+   */
+  function dropChatThread(stage: ChatStage): void {
+    messages.value = messages.value.filter(
+      (message) => normalizeChatStage(message.stage) !== stage,
+    )
+    conversationIds.value = { ...conversationIds.value, [stage]: '' }
+  }
+
+  /**
    * 快照里是否存在「值得保存」的内容。
    *
-   * 只看内容字段，**不看 `viewState` / `entryMode` / `conversationId`**——
+   * 只看内容字段，**不看 `viewState` / `entryMode` / `chatTab` / `conversationIds`**——
    * 它们描述的是「走到哪一步」而不是「有什么」；用户只是点进入口看一眼就又退回，
    * 不该因此留下一份空方案。
    *
@@ -427,16 +467,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
     entryMode,
     summary,
     messages,
-    conversationId,
+    chatTab,
+    conversationIds,
     quickInput,
     debugPrdText,
     activeJobId,
     activeJobKind,
-    clarifyMessages,
-    clarifyConversationId,
-    clarifyTarget,
-    prdClarifyConversationId,
-    prdClarifying,
     // 运行态
     chatStreaming,
     docGenerating,
@@ -454,11 +490,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
     requiredDocsReady,
     canFinish,
     canGeneratePrd,
+    availableChatTabs,
+    activeChatTab,
     hasContent,
     // 动作
     goTo,
     chooseEntry,
     backToEntry,
+    dropChatThread,
     reset,
     snapshot,
     applySnapshot,

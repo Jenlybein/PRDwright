@@ -11,6 +11,7 @@ import { useDocumentsStore } from '@/stores/documents'
 import { useWorkflowStore } from '@/stores/workflow'
 import type {
   ChatMessage,
+  ChatStage,
   DocKind,
   DocumentKind,
   JobSnapshot,
@@ -27,7 +28,16 @@ import type {
 import { buildDocFilename, downloadFile, type DocType } from '@/utils/download'
 import { formatPendingItemsForChat } from '@/utils/pendingItems'
 import { diffSummaries } from '@/utils/requirements'
-import { docKindOfState, reviewStateFor } from '@/utils/workflow'
+import {
+  chatStageForDocument,
+  docKindOfGeneratingState,
+  docKindOfState,
+  documentKindOfChatStage,
+  generatingStateFor,
+  jobDocumentKind,
+  normalizeChatStage,
+  reviewStateFor,
+} from '@/utils/workflow'
 
 /** 受管的文档 key（与 `DocumentKind` 同集：产物种类不含 `optimize`） */
 type DocKey = DocumentKind
@@ -63,12 +73,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     entryMode,
     summary,
     messages,
+    activeChatTab,
     quickInput,
     debugPrdText,
-    clarifyMessages,
-    clarifyTarget,
-    prdClarifyConversationId,
-    prdClarifying,
     docGenerating: isGenerating,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
@@ -119,9 +126,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /** 文档生成 / 优化过程中的错误提示 */
   const docError = ref('')
 
-  /** 当前正在处理的文档 key，用于定位流式内容与错误应落到哪一份 */
-  const activeDocKey = ref<DocKey>('prd')
-
   // -------------------------------------------------------------------------
   // PRD 分章节生成的阶段进度
   // -------------------------------------------------------------------------
@@ -164,9 +168,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   let deliveredSectionIds = new Set<string>()
   let headerDelivered = false
 
-  /** 分章节生成是否处于「写入中」等阶段（非 PRD 文档恒为 false） */
+  /**
+   * 分章节生成的阶段进度；不是 PRD 生成态时恒为 `null`。
+   *
+   * 判据用**阶段**而不是「当前正在处理哪一份」：PRD 生成必然处在 `generating-prd`，
+   * 而按澄清结果改写 PRD 也走这个阶段（那时 `prdProgress` 已被显式清空，同样得 `null`）。
+   */
   const prdStatus = computed<PrdStageProgress | null>(() =>
-    activeDocKey.value === 'prd' ? prdProgress.value : null,
+    viewState.value === 'generating-prd' ? prdProgress.value : null,
   )
 
   /** 预览当前显示的是否是「上一版草稿」（供审阅区降透明度提示） */
@@ -321,24 +330,26 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 交给后端的历史消息（只保留角色与正文）。
+   * 某条线程的对话（只保留角色与正文），交给后端当接续上下文。
    *
-   * ⚠️ **只取需求澄清阶段（stage === 'requirement'）的消息**：PRD 生成之后，
-   * 同一条消息列表里会接着出现「剩余问题澄清」的轮次（stage === 'document'）。
-   * 若把它们一并交给摘要回填 / PRD 生成，文档答疑会被当成需求输入读一遍，
-   * 闸门①的 Diff 里就会凭空冒出条目。这里是那道过滤闸门，别省。
+   * ⚠️ **必须按线程过滤**：四条线程共用一条消息列表，把别线程的对话一并交出去，
+   * 模型会以为那些也是本轮上下文（而且人设还是另一套）。
    */
-  function conversationHistory(): ChatMessage[] {
+  function chatHistoryOf(stage: ChatStage): ChatMessage[] {
     return messages.value
-      .filter((message) => (message.stage ?? 'requirement') === 'requirement')
+      .filter((message) => normalizeChatStage(message.stage) === stage)
       .map(({ role, content }) => ({ role, content }))
   }
 
-  /** 只取「PRD 剩余问题澄清」这一轮的对话（stage === 'document'） */
-  function prdClarifyHistory(): ChatMessage[] {
-    return messages.value
-      .filter((message) => message.stage === 'document')
-      .map(({ role, content }) => ({ role, content }))
+  /**
+   * 交给摘要回填 / PRD 生成的历史。
+   *
+   * **只取需求澄清那一条线程**：PRD 生成之后，同一个列表里会接着出现三条文档线程的轮次。
+   * 若把它们一并交出去，文档答疑会被当成需求输入读一遍，闸门①的 Diff 里就会凭空冒出条目。
+   * 这里是那道过滤闸门，别省。
+   */
+  function conversationHistory(): ChatMessage[] {
+    return chatHistoryOf('requirement')
   }
 
   // -------------------------------------------------------------------------
@@ -433,27 +444,49 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 把某份文档的生成结果展示出来，并按种类推进阶段。
+   * 把某份文档的结果展示出来，并按种类推进阶段。
    *
    * **这里不落库**——后端在任务收尾时已经把同一份正文写进 `documents` 了。本函数只做
    * 两件事：把 `done.reply` 立即放进工作副本（用户不必等一次网络往返才看到内容），
-   * 以及在非优化场景下切到对应的待确认阶段。
+   * 以及切到对应的待确认阶段（优化除外，它留在原地）。
    *
    * 与后端的对齐由 `handlersForKind` 的 `onRunSummary` 负责（那一刻后端已经写完），
    * 因此这里不必再拉一次。
+   *
+   * @param kind 做了什么（生成 / 优化 / 澄清）
+   * @param reply 后端产出的完整正文
+   * @param target 写回**哪一份**产物；由调用方显式给出
    */
-  function finishDoc(kind: DocKind, reply: string): void {
+  function finishDoc(kind: DocKind, reply: string, target: DocumentKind): void {
     const content = reply.trim()
     if (!content) return
-    if (kind === 'optimize' || kind === 'clarify') {
-      // 就地替换：写回**当前正在看的那一份**。`kind` 只说「做了一件什么事」，
-      // 是哪一份由 `activeDocKey`（已在任务开始时按 doc_kind 定好）回答。
-      // 也不在这里跳阶段——优化留在原地；澄清由调用方决定改写完成后去哪。
-      documents.setLocal(activeDocKey.value, content)
-      return
-    }
-    documents.setLocal(kind, content)
-    goTo(reviewStateFor(kind))
+    // 就地替换：写回 `target` 那一份。`kind` 只说「做了一件什么事」，写哪一份由 `target`
+    // 回答——调用方本来就知道（生成任务就是它的产物、优化看当前审阅页、澄清看当前标签）。
+    // 刻意不再用「当前正在处理的文档」那种内存变量去猜：它**在导航到审阅页时不会被赋值**，
+    // 于是把接口文档的优化结果写进了 PRD（见 ADR-028 记录的那处修复）。
+    documents.setLocal(target, content)
+    // 优化留在原地：审阅页就在眼前，跳一下反而多余。生成与澄清都落到那份文档的审阅页。
+    if (kind !== 'optimize') goTo(reviewStateFor(target))
+  }
+
+  /**
+   * 整篇重新生成一份产物后，作废**它自己与下游**的澄清线程。
+   *
+   * 与「整篇重生成才作废下游」（后端 `document_store.DOWNSTREAM_KINDS`）同口径：
+   * PRD 重生成 → 三份都作废；接口文档重生成 → 接口 + 提示词；提示词只作废自己。
+   *
+   * 为什么要作废：旧线程聊的是**上一版**的待确认项。留着它，用户点「按澄清结果改写」
+   * 就会把针对旧文档的结论写进新文档——一次静默的错写，而且看起来还挺合理。
+   * 只在生成**成功**后作废：失败时后端不覆写正文（下游也会被重新拉回来），线程该留着。
+   */
+  function dropThreadsFor(kind: DocumentKind): void {
+    const affected: DocumentKind[] =
+      kind === 'prd'
+        ? ['prd', 'api-docs', 'prompts']
+        : kind === 'api-docs'
+          ? ['api-docs', 'prompts']
+          : ['prompts']
+    for (const item of affected) store.dropChatThread(chatStageForDocument(item))
   }
 
   /** 生成结束后清掉任务指针：任务已终态，刷新无需再重连 */
@@ -496,19 +529,25 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 任务种类 → 这次要落进哪一份产物。
    *
-   * 三种生成任务的种类就是产物；`optimize` / `clarify` 是动作，目标来自别处：
-   * 优化看当前正在看的那份，澄清看快照里的 `clarifyTarget`。
+   * 三种生成任务的种类就是产物；`optimize` / `clarify` 是动作，目标另行反推：
+   * - 优化**不切阶段**，用户就停在那份文档的审阅页上，`viewState` 是权威（而且它是持久化的）；
+   * - 澄清改写**先切到 `generating-<kind>` 再发任务**（见 `applyClarification`），
+   *   阶段本身就是答案。
+   *
+   * 反推而不是另存一个「任务目标」字段：这两处的阶段本来就已经因为别的理由被持久化了，
+   * 再存一份就是第二个真源。
    */
   function docKeyForJob(kind: DocKind): DocKey {
-    if (kind === 'api-docs' || kind === 'prompts') return kind
-    if (kind === 'clarify') return clarifyTarget.value ?? 'prd'
-    return 'prd'
+    const own = jobDocumentKind(kind)
+    if (own) return own
+    if (kind === 'optimize') return docKindOfState(viewState.value) ?? 'prd'
+    return docKindOfGeneratingState(viewState.value) ?? 'prd'
   }
 
   /** `reconnectJob` 的实际动作（与幂等守卫分离，便于阅读与测试） */
   async function reconnectAndSettle(jobId: number): Promise<void> {
     const kind = store.activeJobKind ?? 'prd'
-    activeDocKey.value = docKeyForJob(kind)
+    const target = docKeyForJob(kind)
     docStreamingContent.value = ''
     docError.value = ''
     if (kind === 'prd') {
@@ -526,10 +565,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       docError.value = snap.errorMessage || '生成失败'
       prdProgress.value = null
     } else {
-      finishDoc(kind, result.reply)
-      // 澄清的落点不是 `generating-*`（那条链路不切阶段，用户一直留在澄清页），
-      // 因此改写跑完之后要显式回到那份文档的审阅页——否则会停在澄清页看一份旧正文。
-      if (kind === 'clarify') goTo(reviewStateFor(activeDocKey.value))
+      // 落点由 `finishDoc` 自己决定：优化留在原审阅页，生成 / 澄清都回到那份文档的审阅页
+      finishDoc(kind, result.reply, target)
     }
     clearActiveJob()
   }
@@ -568,7 +605,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 进度条才会立刻退回 PRD 那一步，而不是等收尾回来才动。
     documents.setLocal('api-docs', '')
     documents.setLocal('prompts', '')
-    activeDocKey.value = 'prd'
     docStreamingContent.value = ''
     docError.value = ''
     beginPrdStages()
@@ -580,7 +616,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       clearActiveJob()
       return
     }
-    finishDoc('prd', reply)
+    finishDoc('prd', reply, 'prd')
+    // 新一版 PRD = 三份文档的旧澄清线程全部作废（下游正文后端已删）
+    dropThreadsFor('prd')
     clearActiveJob()
   }
 
@@ -588,7 +626,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function generateApiDocs(): Promise<void> {
     // 重新生成接口文档会让基于它的提示词失效（后端收尾时同样会删掉下游）
     documents.setLocal('prompts', '')
-    activeDocKey.value = 'api-docs'
     docStreamingContent.value = ''
     docError.value = ''
     prdProgress.value = null
@@ -602,7 +639,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       clearActiveJob()
       return
     }
-    finishDoc('api-docs', reply)
+    finishDoc('api-docs', reply, 'api-docs')
+    // 新一版接口文档 = 它与提示词的旧澄清线程作废
+    dropThreadsFor('api-docs')
     clearActiveJob()
   }
 
@@ -613,7 +652,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 因此由调用方把正文传进来，而不是在这里猜该读哪份状态。
    */
   async function generatePrompts(prdText: string): Promise<void> {
-    activeDocKey.value = 'prompts'
     docStreamingContent.value = ''
     docError.value = ''
     prdProgress.value = null
@@ -627,7 +665,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       clearActiveJob()
       return
     }
-    finishDoc('prompts', reply)
+    finishDoc('prompts', reply, 'prompts')
+    // 新一版提示词 = 它自己的旧澄清线程作废
+    dropThreadsFor('prompts')
     clearActiveJob()
   }
 
@@ -639,16 +679,22 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * **必须带 `docKind`**：`optimize` 这个种类只说明「做了一件优化」，后端要落库还得知道
    * 「优化的是哪一份」。漏传的后果不是报错，而是后端**拒绝落库**（宁可本次不写，也不猜
-   * 一个默认值写错位置）——所以这里的 `activeDocKey` 是必需信息，不是可选提示。
+   * 一个默认值写错位置）。
+   *
+   * 目标是**当前审阅页的那一份**——判据取 `viewState` 而不是某个「当前正在处理的文档」
+   * 内存变量：那个变量只在生成流程里被写入，用户打开一份旧方案直接点「AI 优化」时它还是
+   * 初值 `'prd'`，于是接口文档的优化结果会被写进 PRD（见 ADR-028 记录的那处修复）。
    */
   async function optimizeCurrentDocument(content: string, instruction: string): Promise<void> {
     if (!content.trim() || !instruction.trim()) return
+    const target = docKindOfState(viewState.value)
+    if (!target) return
 
     docStreamingContent.value = ''
     docError.value = ''
     const { reply, ok } = await job.start(
       'optimize',
-      { document: content, instruction, docKind: activeDocKey.value },
+      { document: content, instruction, docKind: target },
       handlersForKind('optimize'),
     )
     if (!ok) {
@@ -657,28 +703,46 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       clearActiveJob()
       return
     }
-    finishDoc('optimize', reply)
+    finishDoc('optimize', reply, target)
     clearActiveJob()
   }
 
+  // -------------------------------------------------------------------------
+  // 文档澄清（PRD / 接口文档 / 提示词三条线程，共用一个对话页）
+  //
+  // 三条线程走**同一条路**：切到对话页（`chatting`）并把当前标签切到这份文档的线程 →
+  // 若这条线程还没聊过，由调用方发开场白（材料 = 该文档正文 + 它的待确认清单）→
+  // 聊够了点「按澄清结果改写」，交给后端就地改写那一份。
+  //
+  // 历史上它们是两条路：PRD 复用主对话栏，另两条走独立的 `clarifying` 页与
+  // `clarifyMessages` 字段。ADR-028 把两条并成一条，独立澄清页与那个阶段一并退役。
+  // -------------------------------------------------------------------------
+
   /**
-   * 审阅页「逐条澄清」入口：进入澄清页，并把要澄清的那一份记下来。
+   * 审阅页「回到对话」入口：切到对话页，并把当前标签设成这份文档的澄清线程。
    *
-   * 只做「摆好现场」——记目标、清掉上一轮澄清对话、切阶段；**开场白由调用方发**，
-   * 因为聊天那摊状态（流式缓冲、消息列表）归 `useClarificationChat` 管，不在本文件里。
+   * 只做「摆好现场」——**不清空聊天记录**（接着聊正是这个流程存在的意义）、换标签、切阶段；
+   * **开场白由调用方发**，因为聊天那摊状态（流式缓冲、消息列表）归 `useClarificationChat`
+   * 管，不在本文件里。
    *
-   * @returns 本次澄清的材料（正文 + 清单文本）；返回 `null` 表示当前没有可澄清的文档。
+   * 这条线程已经聊过就不再重新开场：用户进出几次，看到的是同一段对话在继续，而不是每次
+   * 回来都被问候一遍「我们来确认剩余问题」。
+   *
+   * @returns 本次澄清的材料（正文 + 清单文本）；返回 `null` 表示没有可澄清的正文，
+   *          或这条线程已经开过场。
    */
-  function startClarification(): { document: string; pendingItems: string } | null {
-    const kind = docKindOfState(viewState.value)
-    if (!kind) return null
+  function startDocumentClarification(
+    kind: DocumentKind,
+  ): { document: string; pendingItems: string } | null {
     const content = documents.contentOf(kind)
     if (!content.trim()) return null
 
-    clarifyTarget.value = kind
-    clarifyMessages.value = []
-    store.clarifyConversationId = ''
-    goTo('clarifying')
+    const stage = chatStageForDocument(kind)
+    // 先设标签再切阶段：对话页挂载时就要渲染对的那条线程，而不是先渲染一条再跳过去
+    store.chatTab = stage
+    goTo('chatting')
+
+    if (messages.value.some((message) => normalizeChatStage(message.stage) === stage)) return null
 
     return {
       document: content,
@@ -687,89 +751,45 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
   }
 
-  /** 澄清页「返回」：回到这次澄清的那份文档的审阅页（对话本身留在快照里，可再进来继续） */
-  function backFromClarifying(): void {
-    goTo(reviewStateFor(clarifyTarget.value ?? 'prd'))
-  }
-
-  // -------------------------------------------------------------------------
-  // PRD 生成后的「剩余问题澄清」
-  //
-  // 与上面的 api-docs / prompts 澄清是**两条不同的路**：那一条走独立阶段 `clarifying`
-  // 和独立的消息字段 `clarifyMessages`；这一条走主对话栏（`chatting`）并复用 `messages`，
-  // 因为用户的心智是「生成完 PRD 回到刚才那个对话框接着聊」，而不是被送到一个新页面。
-  // 两者并存是有意的：接口文档 / 提示词的澄清规模小、一次性，保留原样成本更低。
-  //
-  // ⚠️ 阶段上还有一层区分：**澄清对话**发生在 `chatting`；而**按澄清结果改写**
-  // （`applyPrdClarification`）期间会切到 `generating-prd` 展示流式改写、完成后回到
-  // `review-prd`——否则改写那一二十秒里用户停在对话栏，看不到任何进展。
-  // -------------------------------------------------------------------------
-
   /**
-   * 审阅 PRD 页「回到对话」入口：切到对话栏，进入剩余问题澄清模式。
+   * 对话页主操作「按澄清结果改写」：把当前标签这条线程的对话交给后端，改写对应文档。
    *
-   * 只做「摆好现场」——**不清空聊天记录**（这是本流程存在的意义）、切阶段并打上模式标记；
-   * 开场白由调用方发，因为聊天的流式状态归 `useClarificationChat` 管。
+   * 走 `clarify` 任务（而非裸 SSE）：改写可能跑很久，任务化之后刷新 / 断线只断订阅，
+   * 后端照跑，重连时凭 `activeJobId` 接上——与三份文档的生成完全同一套机制。
    *
-   * 已经是澄清中（这一轮聊过）就不再重新开场：用户进出几次，看到的是同一段对话在继续，
-   * 而不是每次回来都被问候一遍「我们来确认剩余问题」。
-   *
-   * @returns 本次澄清的材料（PRD 正文 + 清单文本）；返回 `null` 表示没有可澄清的 PRD。
-   */
-  function startPrdDocClarification(): { document: string; pendingItems: string } | null {
-    const content = documents.contentOf('prd')
-    if (!content.trim()) return null
-
-    const alreadyChatting = messages.value.some((message) => message.stage === 'document')
-    prdClarifying.value = true
-    goTo('chatting')
-    if (alreadyChatting) return null
-
-    return {
-      document: content,
-      pendingItems: formatPendingItemsForChat(documents.pendingItemsOf('prd')),
-    }
-  }
-
-  /** 对话栏「返回审阅」：回到 PRD 审阅页；模式标记保留，再进来仍是同一段澄清对话 */
-  function backFromPrdClarification(): void {
-    goTo('review-prd')
-  }
-
-  /**
-   * 对话栏主操作「按澄清结果改写 PRD」：把这一轮的澄清对话交给后端改写 PRD。
-   *
-   * 与 `applyClarification` 同走 `clarify` 任务，差别只在两处：历史取自本轮的
-   * `stage === 'document'` 消息（而不是 `clarifyMessages`），目标恒为 `prd`。
-   *
-   * 与独立澄清页不同，这里**先切到 `generating-prd` 再发起任务**：改写可能要跑十几秒，
-   * 全程停在对话栏用户看不到任何进展（流式正文只有 `GeneratingStage` 会渲染）。切阶段必须
-   * 放在 `job.start` **之前**——它内部置位 `docGenerating` 后，`goTo` 会被 busy 守卫拦下。
+   * **先切到 `generating-<kind>` 再发起任务**：改写要跑十几秒，全程停在对话栏用户看不到
+   * 任何进展（流式正文只有 `GeneratingStage` 会渲染）。切阶段必须放在 `job.start`
+   * **之前**——它内部置位 `docGenerating` 后，`goTo` 会被 busy 守卫拦下。
    * 失败时留在生成视图，由 `GeneratingStage` 的错误区说明原因（后端失败不覆写正文）。
    *
-   * ⚠️ 同样**必须带 `docKind`**：少了它后端不会猜，而是拒绝落库。
+   * ⚠️ **必须带 `docKind`**：它既是「改写结果写回哪一份」的依据，也是「注入哪一套产出规范」
+   * 的依据。少了它后端不会猜，而是拒绝落库——那这次澄清就白做了。
+   *
+   * 目标来自**当前标签**：改写期间没人能换标签（对话页那时已卸载，`busy` 也拦着），因此
+   * 快照里那份标签就是无歧义的目标。从前靠一个 `clarifyTarget` 字段，还得在改写前把它
+   * 「钉死」成 `'prd'` 才不出错——那个 hack 随字段一起删掉了。
+   *
+   * ⚠️ 读的是**实际显示**的那条（`activeChatTab`）而不是 `chatTab`：后者是用户选中的意图，
+   * 在产物暂时缺席时可能指向一条点不动的线程，而屏幕上那时显示的是另一条。
    */
-  async function applyPrdClarification(): Promise<void> {
-    const history = prdClarifyHistory()
-    const document = documents.contentOf('prd')
-    if (!document.trim() || history.length === 0) return
+  async function applyClarification(): Promise<void> {
+    const target = documentKindOfChatStage(activeChatTab.value)
+    if (!target) return
+    const document = documents.contentOf(target)
+    if (!document.trim()) return
+    const history = chatHistoryOf(activeChatTab.value)
+    if (history.length === 0) return
 
-    activeDocKey.value = 'prd'
-    // 就地改 PRD、不是分章节链路：清掉可能残留的阶段进度，否则生成页会顶出一条
-    // 与本次无关的章节条（`goTo` 内部的 `clearTransient` 不碰 `prdProgress`）
+    // 就地改写、不是分章节链路：清掉可能残留的阶段进度，否则生成页会顶出一条与本次无关的
+    // 章节条（`goTo` 内部的 `clearTransient` 不碰 `prdProgress`）
     prdProgress.value = null
-    // 钉死重连目标：`docKeyForJob('clarify') = clarifyTarget ?? 'prd'`，若本会话先前
-    // 澄清过接口文档 / 提示词，`clarifyTarget` 会残留 → 改写中途刷新重连会把结果写进
-    // 那份下游文档并落到错误的审阅页。改写前显式设回 'prd'，快照里的目标即无歧义。
-    clarifyTarget.value = 'prd'
-    // 必须**先于** `job.start` 切阶段：`goTo` 在 `docGenerating` 置位后会被 busy 守卫
-    // 拦下（`busy = chatStreaming || docGenerating`），而它直到 `job.start` 内部才置位。
-    // `goTo` 顺带清空上一轮的流式缓冲 / 错误 / PRD 三段预览，本次改写从干净一屏开始。
-    goTo('generating-prd')
+    // 阶段先于任务切（理由见上）；`goTo` 顺带清空上一轮的流式缓冲 / 错误 / PRD 三段预览
+    goTo(generatingStateFor(target) ?? 'generating-prd')
 
     const { reply, ok } = await job.start(
       'clarify',
-      { document, history, docKind: 'prd' },
+      // 只回传 role / content：后端按同一形状读历史（与 `optimize` 的入参口径一致）
+      { document, history, docKind: target },
       handlersForKind('clarify'),
     )
     if (!ok) {
@@ -778,51 +798,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       clearActiveJob()
       return
     }
-    finishDoc('clarify', reply)
+    // 落点（回到那份文档的审阅页）由 `finishDoc` 负责；对话留在 `messages` 里，可再回去补充
+    finishDoc('clarify', reply, target)
     clearActiveJob()
-    // 改写完成回到审阅；对话留在 `messages` 里（不清空），用户还能再回去补充
-    goTo('review-prd')
-    hooks.onNotice('已按澄清结果更新 PRD')
-  }
-
-  /**
-   * 澄清页主操作「按澄清结果改写」：把这一轮对话交给后端改写文档。
-   *
-   * 走 `clarify` 任务（而非裸 SSE）：改写可能跑很久，任务化之后刷新 / 断线只断订阅，
-   * 后端照跑，重连时凭 `activeJobId` 接上——与三份文档的生成完全同一套机制。
-   *
-   * ⚠️ **必须带 `docKind`**：它既是「改写结果写回哪一份」的依据，也是「注入哪一套产出规范」
-   * 的依据。少了它后端不会猜，而是拒绝落库——那这次澄清就白做了。
-   */
-  async function applyClarification(): Promise<void> {
-    const target = clarifyTarget.value
-    if (!target) return
-    const document = documents.contentOf(target)
-    if (!document.trim()) return
-    if (clarifyMessages.value.length === 0) return
-
-    activeDocKey.value = target
-    docError.value = ''
-    const { reply, ok } = await job.start(
-      'clarify',
-      {
-        document,
-        // 只回传 role / content：后端按同一形状读历史（与 `optimize` 的入参口径一致）
-        history: clarifyMessages.value.map(({ role, content }) => ({ role, content })),
-        docKind: target,
-      },
-      handlersForKind('clarify'),
-    )
-    if (!ok) {
-      // 改写失败：留在澄清页，原文档分毫未动（后端失败不覆写）
-      docError.value = job.error.value || '按澄清结果改写失败'
-      clearActiveJob()
-      return
-    }
-    finishDoc('clarify', reply)
-    clearActiveJob()
-    goTo(reviewStateFor(target))
-    hooks.onNotice('已按澄清结果更新文档')
+    hooks.onNotice(`已按澄清结果更新 ${titleOf(target)}`)
   }
 
   /**
@@ -946,24 +925,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       'generating-prompts': '提示词套件',
       'review-prompts': '提示词套件',
     }
-    if (viewState.value === 'clarifying') return clarifyTargetTitle.value
     return map[viewState.value] ?? '文档'
   })
 
-  /** 这份产物的展示名；澄清页与审阅页共用一套说法，不各写一份 */
+  /** 这份产物的展示名；澄清与审阅共用一套说法，不各写一份 */
   function titleOf(kind: DocumentKind): string {
     if (kind === 'api-docs') return '接口文档'
     if (kind === 'prompts') return '提示词套件'
     return 'PRD 文档'
   }
-
-  /**
-   * 这次澄清针对的那份文档叫什么。
-   *
-   * 澄清页不新增步骤，进度条与标题都跟着 `clarifyTarget` 走——否则澄清接口文档时标题会
-   * 显示「PRD 文档」，用户第一眼就以为自己走错了地方。
-   */
-  const clarifyTargetTitle = computed(() => titleOf(clarifyTarget.value ?? 'prd'))
 
   /** 当前审阅阶段对应的文档正文（非生成态） */
   const activeDocContent = computed(() => {
@@ -1059,7 +1029,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /** 清空文档流水线相关的全部临时状态（重新开始时用） */
   function reset(): void {
     clearTransient()
-    activeDocKey.value = 'prd'
     prdProgress.value = null
     pendingSummary.value = null
     summaryChanges.value = []
@@ -1103,18 +1072,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     backFromForm,
     handleEndTask,
     downloadDocument,
-    // 文档澄清：进入澄清页 / 按澄清结果改写 / 从澄清页返回
-    startClarification,
+    // 文档澄清：进入对话页的某条线程 / 按澄清结果改写
+    startDocumentClarification,
     applyClarification,
-    backFromClarifying,
-    clarifyTarget,
-    clarifyTargetTitle,
-    // PRD 剩余问题澄清（走主对话栏，复用同一条消息列表）
-    startPrdDocClarification,
-    applyPrdClarification,
-    backFromPrdClarification,
-    prdClarifying,
-    prdClarifyConversationId,
     // 闸门 1
     handleGeneratePrd,
     confirmSummaryDiff,

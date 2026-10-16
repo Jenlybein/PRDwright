@@ -8,9 +8,10 @@
  * 以及「完成」需要哪几份文档。三件事都由模式推导，组件与 store 不再各写一套判断。
  */
 
-import { STEP_OF_STATE, STEPS } from '@/types'
+import { CHAT_STAGES, STEP_OF_STATE, STEPS } from '@/types'
 import type {
   ChatMessage,
+  ChatStage,
   DocKind,
   DocumentKind,
   EntryMode,
@@ -36,7 +37,6 @@ export const VIEW_STATES: readonly ViewState[] = [
   'review-api-docs',
   'generating-prompts',
   'review-prompts',
-  'clarifying',
   'prd-quick',
   'prompt-debug',
   'done',
@@ -71,6 +71,68 @@ export function isDocKind(value: unknown): value is DocKind {
     value === 'optimize' ||
     value === 'clarify'
   )
+}
+
+// ----------------------------------------------------------------------------
+// 澄清线程（对话页的四条线程）
+// ----------------------------------------------------------------------------
+
+/**
+ * 判断任意值是否为合法澄清线程。
+ *
+ * ⚠️ **刻意不接受旧的 `'document'`**：它已改名为 `'prd-clarify'`。全仓唯一需要认识旧值的
+ * 地方是快照解析（`normalizeChatStage`），其余代码一律只认新值——让「旧的也能过」等于把
+ * 这次改名做了一半，将来没人知道该按哪套值判断。
+ */
+export function isChatStage(value: unknown): value is ChatStage {
+  return typeof value === 'string' && (CHAT_STAGES as readonly string[]).includes(value)
+}
+
+/**
+ * 把快照里的 `stage` 归一成当前取值。
+ *
+ * - 旧值 `'document'` → `'prd-clarify'`：改名之前只有「需求澄清」与「文档澄清」两种，
+ *   而落在 `messages` 里的 `'document'` **一定**是 PRD 澄清（那时接口文档 / 提示词的
+ *   澄清另存在 `clarifyMessages` 里）；
+ * - 缺失或无法识别 → `'requirement'`：消息没有这个字段只可能是旧快照的需求澄清轮次。
+ *   这里**不丢弃消息**——丢掉一条用户聊过的内容，比把它归到需求线程要糟得多。
+ */
+export function normalizeChatStage(value: unknown): ChatStage {
+  if (value === 'document') return 'prd-clarify'
+  return isChatStage(value) ? value : 'requirement'
+}
+
+/** 这条线程在澄清哪一份产物；需求澄清不对应任何产物，返回 `null` */
+export function documentKindOfChatStage(stage: ChatStage): DocumentKind | null {
+  switch (stage) {
+    case 'prd-clarify':
+      return 'prd'
+    case 'api-docs-clarify':
+      return 'api-docs'
+    case 'prompts-clarify':
+      return 'prompts'
+    default:
+      return null
+  }
+}
+
+/** 某一份产物对应的澄清线程；与 `documentKindOfChatStage` 互为逆映射 */
+export function chatStageForDocument(kind: DocumentKind): ChatStage {
+  switch (kind) {
+    case 'api-docs':
+      return 'api-docs-clarify'
+    case 'prompts':
+      return 'prompts-clarify'
+    default:
+      return 'prd-clarify'
+  }
+}
+
+/** 空的「各线程会话 id」表（新建 / 重置时的初值） */
+export function emptyConversationIds(): Record<ChatStage, string> {
+  const ids = {} as Record<ChatStage, string>
+  for (const stage of CHAT_STAGES) ids[stage] = ''
+  return ids
 }
 
 /** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`） */
@@ -177,6 +239,26 @@ export function generatingStateFor(kind: DocKind): ViewState | null {
 }
 
 /**
+ * 「生成中」阶段 → 产物种类；与 `generatingStateFor` 互为逆映射（非生成态返回 `null`）。
+ *
+ * 用来回答「这次任务正在写哪一份文档」——澄清改写（`clarify`）的目标就靠它反推：
+ * 改写**先切到 `generating-<kind>` 再发任务**（见 `useDocumentPipeline.applyClarification`），
+ * 因此阶段本身就是权威答案，不必再单独持久化一个「改写目标」字段。
+ */
+export function docKindOfGeneratingState(state: ViewState): DocumentKind | null {
+  switch (state) {
+    case 'generating-prd':
+      return 'prd'
+    case 'generating-api-docs':
+      return 'api-docs'
+    case 'generating-prompts':
+      return 'prompts'
+    default:
+      return null
+  }
+}
+
+/**
  * 「待确认」阶段 → 产物种类。
  *
  * 用于「刷新后无 activeJobId、但快照落在 generating-*」的兜底：降级后落到 review-*，
@@ -197,6 +279,16 @@ export function docKindOfState(state: ViewState): DocumentKind | null {
     default:
       return null
   }
+}
+
+/**
+ * 任务种类自带的产物身份：三种**整篇生成**任务的种类就是它写的那份产物。
+ *
+ * `optimize` / `clarify` 是动作而非产物，返回 `null`——它们的目标另有来源
+ * （优化看 `docKindOfState(viewState)`，澄清看 `docKindOfGeneratingState(viewState)`）。
+ */
+export function jobDocumentKind(kind: DocKind): DocumentKind | null {
+  return kind === 'prd' || kind === 'api-docs' || kind === 'prompts' ? kind : null
 }
 
 /** 是否处于「文档待确认」阶段 */
@@ -321,6 +413,35 @@ function parseActiveJobId(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 }
 
+/** 解析「各线程会话 id」；缺失 / 类型不符的项退化为空串（那条线程接续时走无状态模式） */
+function parseConversationIds(value: unknown): Record<ChatStage, string> {
+  const ids = emptyConversationIds()
+  if (typeof value !== 'object' || value === null) return ids
+  const record = value as Record<string, unknown>
+  for (const stage of CHAT_STAGES) {
+    if (typeof record[stage] === 'string') ids[stage] = record[stage]
+  }
+  return ids
+}
+
+/**
+ * 快照里那些**已改名 / 已退役**的字段，只在迁移时读一次，永不写回。
+ *
+ * 单独列出而不是塞进 `SessionDataV2`：后者描述的是当前形态，把历史字段混进去，
+ * 下一个人就分不清哪个才是真要写的。
+ */
+interface LegacyChatFields {
+  /** 旧的「需求澄清」会话 id */
+  conversationId?: unknown
+  /** 旧的独立澄清消息（接口文档 / 提示词那条链路，消息标记与 PRD 澄清共用 `'document'`） */
+  clarifyMessages?: unknown
+  clarifyConversationId?: unknown
+  /** 旧的澄清目标产物；迁移时靠它把那批消息落到正确的线程上 */
+  clarifyTarget?: unknown
+  prdClarifyConversationId?: unknown
+  prdClarifying?: unknown
+}
+
 /** 快照解析结果 */
 export interface ParsedSessionSnapshot {
   session: SessionDataV2
@@ -341,14 +462,69 @@ export interface ParsedSessionSnapshot {
  * **产物正文与用量回执不在这里解析**：它们已迁到后端 `documents` 表，由
  * `stores/documents.ts` 按方案 id 单独取回。旧快照里残留的 `prdContent` 等字段
  * 会被自然忽略——不是「兼容读取」，而是它们从此不再是快照的一部分。
+ *
+ * **澄清线程的迁移**（四条线程合流那次改名）在这里一次做完，而不是让全仓代码去认识旧值：
+ * `'clarifying'` 阶段 → `'chatting'`、消息的 `stage: 'document'` → `'prd-clarify'`、
+ * 旧 `clarifyMessages` 按其 `clarifyTarget` 并入对应线程、旧会话 id 落到 `conversationIds`
+ * 对应键。**消息一条都不丢**——聊过的内容比字段整洁要紧得多。
  */
 export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot | null {
   if (typeof parsed !== 'object' || parsed === null) return null
 
-  const record = parsed as Partial<SessionDataV2>
+  const record = parsed as Partial<SessionDataV2> & LegacyChatFields
   const activeJobId = parseActiveJobId(record.activeJobId)
   const hasActiveJob = activeJobId !== null
-  const { viewState, downgrade } = resolveRestoredPhase(record.viewState, hasActiveJob)
+
+  // ---- 迁移第一步：把「独立澄清页」换算成新形态 ----
+  // 旧的 `clarifying` 页面本质上就是一个对话页，因此阶段换算成 `chatting`；
+  // **停在哪条线程**才需要 `clarifyTarget`（见下面的 `chatTab` 推断）。
+  // 若不换算，`isViewState('clarifying')` 判定失败，用户打开一份正在澄清的方案会被直接丢回入口页。
+  const legacyStage = isDocumentKind(record.clarifyTarget)
+    ? chatStageForDocument(record.clarifyTarget)
+    : null
+  // 旧阶段名单独按 unknown 读：它已不在 `ViewState` 里，直接拿 `record.viewState` 去比会被
+  // 类型系统判成「两个不相交的类型」——而这里要的正是「认识旧值」这件事本身。
+  const legacyPage: unknown = (record as { viewState?: unknown }).viewState
+  const legacyClarifying = legacyPage === 'clarifying'
+  const { viewState, downgrade } = resolveRestoredPhase(
+    legacyClarifying ? 'chatting' : record.viewState,
+    hasActiveJob,
+  )
+
+  // 消息：四条线程合在一张表里，`stage` 归一到当前取值
+  const messages: ChatMessage[] = Array.isArray(record.messages)
+    ? record.messages.filter(isChatMessage).map((message) => ({
+        ...message,
+        stage: normalizeChatStage(message.stage),
+      }))
+    : []
+
+  // 旧的独立澄清消息按当时的 `clarifyTarget` 并入对应线程。**不能一律当 PRD 澄清**：
+  // 那会把「接口文档澄清」的结论塞进 PRD 线程，之后点「按澄清结果改写」就会把错的结论
+  // 送进错的文档——两条线程串味的后果比丢消息还糟。
+  if (legacyStage && Array.isArray(record.clarifyMessages)) {
+    for (const message of record.clarifyMessages.filter(isChatMessage)) {
+      messages.push({ ...message, stage: legacyStage })
+    }
+  }
+
+  // ---- 迁移第二步：三个旧会话 id 各归各位 ----
+  const conversationIds = parseConversationIds(record.conversationIds)
+  if (typeof record.conversationId === 'string') conversationIds.requirement = record.conversationId
+  if (typeof record.prdClarifyConversationId === 'string') {
+    conversationIds['prd-clarify'] = record.prdClarifyConversationId
+  }
+  if (legacyStage && typeof record.clarifyConversationId === 'string') {
+    conversationIds[legacyStage] = record.clarifyConversationId
+  }
+
+  // ---- 迁移第三步：当前标签 ----
+  // 新字段优先；旧快照按「当时停在哪」推断——停在澄清页就是对应的文档线程，
+  // `prdClarifying` 为真就是 PRD 线程，其余都是需求澄清。
+  let chatTab: ChatStage = 'requirement'
+  if (isChatStage(record.chatTab)) chatTab = record.chatTab
+  else if (legacyClarifying && legacyStage) chatTab = legacyStage
+  else if (record.prdClarifying === true) chatTab = 'prd-clarify'
 
   return {
     downgrade,
@@ -359,25 +535,13 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
         typeof record.summary === 'object' && record.summary !== null
           ? (record.summary as RequirementsSummary)
           : null,
-      messages: Array.isArray(record.messages) ? record.messages.filter(isChatMessage) : [],
-      conversationId: typeof record.conversationId === 'string' ? record.conversationId : '',
+      messages,
+      chatTab,
+      conversationIds,
       quickInput: parseQuickInput(record.quickInput),
       debugPrdText: typeof record.debugPrdText === 'string' ? record.debugPrdText : '',
       activeJobId,
       activeJobKind: hasActiveJob && isDocKind(record.activeJobKind) ? record.activeJobKind : null,
-      // 旧快照没有这三个字段：澄清会话缺失是正常的（那份方案没做过澄清），
-      // 因此按「没有澄清过」恢复，而不是把整份快照作废
-      clarifyMessages: Array.isArray(record.clarifyMessages)
-        ? record.clarifyMessages.filter(isChatMessage)
-        : [],
-      clarifyConversationId:
-        typeof record.clarifyConversationId === 'string' ? record.clarifyConversationId : '',
-      clarifyTarget: isDocumentKind(record.clarifyTarget) ? record.clarifyTarget : null,
-      // 与上面三个同理：旧快照没有 PRD 澄清这两个字段，说明那份方案没走过这一轮，
-      // 按「没做过」恢复（字符串空、布尔 false），不要把整份快照作废。
-      prdClarifyConversationId:
-        typeof record.prdClarifyConversationId === 'string' ? record.prdClarifyConversationId : '',
-      prdClarifying: record.prdClarifying === true,
     },
   }
 }
