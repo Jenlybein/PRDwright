@@ -328,15 +328,18 @@ async function loadAndResume(id: number): Promise<void> {
 }
 
 /**
- * 加载完后若地址带了 id 但方案打不开（被删 / 越权），退回新建页并说明原因，
- * 否则用户会停在一片空白里，不知道发生了什么。
+ * 方案保存失败一律浮层提示（红色）。
+ *
+ * 从前这里只管「地址指向的方案打不开」，其余保存失败靠内容区那一行内联红字兜着；那一行
+ * 撤掉之后（提示改成了全局浮层，见模板），这里就得把**所有**失败接住——自动保存成功可以
+ * 静默，失败不能没有交代。
+ *
+ * `message !== previous` 是防刷屏：同一原因每 1.5 秒重试一次，文案没变就不再闪。
  */
 watch(
   () => solutions.saveError,
-  (message) => {
-    if (message && routeSolutionId.value !== null && solutions.currentId === null) {
-      flashSavedTip(message)
-    }
+  (message, previous) => {
+    if (message && message !== previous) flashSavedTip(message, 'danger')
   },
 )
 
@@ -735,20 +738,44 @@ function handleStepClick(stepId: StepId): void {
       `--shell-action-bar-h`，这里跟着算，长文档的最后一行才不会被压住。
     -->
     <main class="mx-auto w-full max-w-3xl px-4 pt-10 pb-[calc(var(--shell-action-bar-h)+2.5rem)]">
-      <!-- 保存状态 / 提示：原顶栏的信息下沉到内容区右上角，无状态时不占空间 -->
-      <div
-        v-if="solutions.saving || solutions.saveError || savedTip"
-        class="mb-4 flex items-center justify-end gap-3 text-xs"
-      >
-        <span v-if="solutions.saving" class="text-subtle">保存中…</span>
-        <span v-else-if="solutions.saveError" class="text-danger">{{ solutions.saveError }}</span>
+      <!--
+        全局浮层：保存 / 操作提示 + 「刷新降级说明」。放在 `<main>` 里只是就近——它是
+        `fixed` 的，脱离文档流，与这里的布局无关。
+
+        ⚠️ 它**必须**不占布局：这两条从前是顶在进度条上方的一行，而 `solutions.saving`
+        每次翻转都会建 / 删整行，把下面的内容整体推下去再弹回来（1.5 秒防抖保存一次就
+        抖一次）。现在这里出现什么，正文都不会挪动。
+      -->
+      <div class="fixed right-4 top-4 z-50 flex w-72 flex-col items-end gap-2">
+        <!-- 刷新降级说明：比普通提示「重」，所以常驻到用户自己关掉 -->
+        <div
+          v-if="downgradeNotice"
+          class="flex w-full items-start gap-2 rounded-xl border border-line bg-surface px-3 py-2 text-xs text-subtle shadow-card dark:shadow-none"
+          role="status"
+        >
+          <span class="flex-1 leading-relaxed">{{ downgradeNotice }}</span>
+          <button
+            type="button"
+            class="-mr-1 shrink-0 rounded-md p-1 text-subtle transition hover:bg-surface-2 hover:text-fg"
+            aria-label="关闭降级说明"
+            @click="store.clearDowngrade()"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
+              />
+            </svg>
+          </button>
+        </div>
+
+        <!-- 保存 / 操作提示：失败红、动作确认绿，2.5s 自动淡出（`flashSavedTip`） -->
         <Transition
           enter-active-class="transition duration-200"
           enter-from-class="opacity-0 translate-y-1"
           leave-active-class="transition duration-500"
           leave-to-class="opacity-0"
         >
-          <AppBadge v-if="savedTip" :variant="savedTipVariant">
+          <AppBadge v-if="savedTip" :variant="savedTipVariant" class="shadow-card">
             <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
               <!-- 失败用叹号、成功用对勾：红色药丸顶着一个对勾，用户会以为「保存成功了」 -->
               <path
@@ -778,13 +805,7 @@ function handleStepClick(stepId: StepId): void {
         @select="handleStepClick"
       />
 
-      <!-- 刷新时落在无法恢复的状态：说明为什么不是原来的阶段 -->
-      <p
-        v-if="downgradeNotice"
-        class="mb-4 rounded-xl border border-line bg-surface px-4 py-2 text-xs text-subtle"
-      >
-        {{ downgradeNotice }}
-      </p>
+      <!-- 提示：刷新降级说明已上移到 <main> 顶部的全局浮层——它不再占正文布局 -->
 
       <!-- ============ 第零步：选择入口（四条链路的起点，分两组） ============ -->
       <EntryStage v-if="isChoosingEntry" @select="handleSelectEntry" />

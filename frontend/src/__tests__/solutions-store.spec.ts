@@ -219,7 +219,9 @@ describe('生成期间也保存', () => {
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
-    expect(payload?.stage).toBe('generating-prd')
+    // 列表里的进度只认**产物**：此刻 PRD 还没生成出来，所以显示的是「填写需求」。
+    // 若这里又变回 `generating-prd`，说明退回成「跟着当前页走」了（回看旧文档就会倒退）。
+    expect(payload?.stage).toBe('form')
     // 任务指针随快照一起持久化——这正是「刷新后能静默重连」的落点
     expect(payload?.data).toContain('"activeJobId":7')
     expect(payload?.data).toContain('"activeJobKind":"prd"')
@@ -263,7 +265,9 @@ describe('生成期间也保存', () => {
     await advanceDebounce()
     vi.mocked(solutionApi.updateSolution).mockClear()
 
-    // 生成结束：清掉任务指针并切到 review 态
+    // 生成结束：清掉任务指针并切到 review 态。产物正文此时已经拿到了，
+    // 因此列表里的进度应当前进到「已出 PRD」——它算的是**产物**，不是当前页。
+    documents.setLocal('prd', '# 订单系统 PRD')
     workflow.activeJobId = null
     workflow.activeJobKind = null
     workflow.viewState = 'review-prd'
@@ -664,5 +668,103 @@ describe('startNew 与 flushPendingSave', () => {
 
     expect(solutionApi.createSolution).toHaveBeenCalledTimes(1)
     expect(solutions.hasPendingSave()).toBe(false)
+  })
+})
+
+// ============================================================================
+// 列表里的「进度」（stage）：只认产物，不跟随当前页
+//
+// 列表回答的是「这份**做到哪了**」，不是「你上次翻到哪一页」。判据分开之后有两个好处：
+// 回看旧文档不会让进度倒退；切一下阶段也不会重写一次列表（用户看不到进度变化，列表却在动）。
+// ============================================================================
+
+describe('列表里的进度（stage）', () => {
+  /** 让这份方案三份产物齐全（进度推到最远），并保证它已经存在（走 PUT 而不是 POST） */
+  async function setupWithAllDocs(): Promise<void> {
+    workflow.chooseEntry('structured')
+    workflow.summary = {
+      product_name: '订单系统',
+      product_goal: '收单',
+      target_users: [],
+      platform: '网页应用',
+      mvp_features: [],
+    }
+    await advanceDebounce()
+
+    documents.setLocal('prd', '# PRD')
+    documents.setLocal('api-docs', '# 接口文档')
+    documents.setLocal('prompts', '# 提示词')
+    workflow.viewState = 'review-prompts'
+    await advanceDebounce()
+  }
+
+  /** 最近一次 PUT 的载荷 */
+  function lastPayload() {
+    const calls = vi.mocked(solutionApi.updateSolution).mock.calls
+    return calls[calls.length - 1]?.[1]
+  }
+
+  it('回看旧文档不会让进度倒退', async () => {
+    await setupWithAllDocs()
+    expect(lastPayload()?.stage).toBe('review-prompts')
+
+    // 点回 PRD 回看：当前页确实回到了 review-prd，但产物一件没少
+    workflow.viewState = 'review-prd'
+    await advanceDebounce()
+
+    expect(lastPayload()?.stage).toBe('review-prompts')
+  })
+
+  it('「已完成」不会被「已出提示词」顶掉', async () => {
+    await setupWithAllDocs()
+
+    workflow.viewState = 'done'
+    await advanceDebounce()
+
+    expect(lastPayload()?.stage).toBe('done')
+  })
+
+  it('还没选入口时直通当前阶段（保留「未开始」这类录入期说法）', async () => {
+    // 未选入口，但粘贴入口的正文已经算「有内容」，因此会落库（首次走 POST）
+    workflow.debugPrdText = '# 别人给的 PRD'
+    expect(workflow.entryMode).toBeNull()
+    expect(workflow.viewState).toBe('entry')
+
+    await advanceDebounce()
+
+    expect(vi.mocked(solutionApi.createSolution).mock.calls[0]?.[0].stage).toBe('entry')
+  })
+
+  it('更新已有方案时原位刷新，不会跳到列表最前', async () => {
+    vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([summary(5), summary(1)])
+    await solutions.loadList()
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
+      ...summary(1),
+      data: JSON.stringify({
+        viewState: 'form',
+        entryMode: 'structured',
+        summary: {
+          product_name: '订单系统',
+          product_goal: '收单',
+          target_users: [],
+          platform: '网页应用',
+          mvp_features: [],
+        },
+        messages: [],
+        conversationId: '',
+      }),
+    })
+
+    // 打开列表里排在第二位的方案 1
+    expect(await solutions.openSolution(1)).toBe(true)
+    expect(solutions.items.map((item) => item.id)).toEqual([5, 1])
+
+    // 改点东西触发一次自动保存（走 PUT）
+    workflow.viewState = 'review-prd'
+    await advanceDebounce()
+
+    expect(solutionApi.updateSolution).toHaveBeenCalled()
+    // 原位刷新：它还在第二位，没有被提到最前（那正是「侧栏自己跳一下」的来源）
+    expect(solutions.items.map((item) => item.id)).toEqual([5, 1])
   })
 })

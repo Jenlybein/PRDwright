@@ -348,15 +348,17 @@ export interface ReachedStepInput {
 }
 
 /**
- * 历史中实际到达过的最远步骤下标。
- *
- * 进度条的可点击范围以「已生成内容 + 当前所处」的最远位置为准，而非当前所处步骤——
- * 这样回看前面的阶段后，已经生成好的后续阶段依然能点回去。
+ * 由**产物内容**推出的「最远里程碑」下标——**不含**「此刻在看哪一步」。
  *
  * 判断口径按模式裁剪后的步骤来数（而不是写死 1/2/3/4）：快捷入口的「PRD」是它的
  * 第 1 步，用全局下标会算出越界的位置。
+ *
+ * 单独拆出来是因为它有第二个用处：方案列表要显示「这份做到哪了」——那个语义**只该看
+ * 产物**，不能把「用户正在翻看哪一页」算进去，否则回看旧文档时列表里的进度会倒退。
  */
-export function reachedStepIndex(input: ReachedStepInput): number {
+export function farthestContentStepIndex(
+  input: Omit<ReachedStepInput, 'currentStepIndex'>,
+): number {
   const unlocked: Record<StepId, boolean> = {
     // 第一步永远可达：随时可以回去改描述
     form: true,
@@ -370,7 +372,17 @@ export function reachedStepIndex(input: ReachedStepInput): number {
   stepsForMode(input.mode).forEach((step, index) => {
     if (unlocked[step.id]) reached = Math.max(reached, index)
   })
-  return Math.max(reached, input.currentStepIndex)
+  return reached
+}
+
+/**
+ * 历史中实际到达过的最远步骤下标（进度条的可点击范围）。
+ *
+ * 以「已生成内容 + 当前所处」的最远位置为准，而非当前所处步骤——这样回看前面的阶段后，
+ * 已经生成好的后续阶段依然能点回去。
+ */
+export function reachedStepIndex(input: ReachedStepInput): number {
+  return Math.max(farthestContentStepIndex(input), input.currentStepIndex)
 }
 
 /** 对话是否已具备「生成 PRD」的条件：至少一轮 AI 回复，且当前没有进行中的请求 */

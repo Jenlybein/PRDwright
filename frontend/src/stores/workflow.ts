@@ -36,6 +36,7 @@ import {
   documentKindOfChatStage,
   DOWNGRADE_NOTICE,
   emptyConversationIds,
+  farthestContentStepIndex,
   hasRequiredDocuments,
   isDocReviewPhase,
   isGeneratingPhase,
@@ -343,6 +344,33 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }),
   )
 
+  /**
+   * 方案列表要显示的「进度」：由**产物**推出的最远里程碑，而不是「此刻在看的这一页」。
+   *
+   * 两处刻意的例外：
+   * - 还没选入口（`entryMode === null`）时直通 `viewState`，保留「未开始」这类录入期说法；
+   * - `done` 直通——「已完成」是比「已出提示词」更靠后的终态，不该被后者覆盖掉。
+   *
+   * ⚠️ 不要退回成 `viewState`：那会让「点回 PRD 回看」把列表里的进度**倒退**成「已出 PRD」
+   * （三份都做完了却显示只做到 PRD），也会让「切一下阶段」就重写一次列表。
+   * 另外，生成期间它显示的是**上一个做好的里程碑**——「生成中」不是一个已完成的事实，
+   * 侧栏是「这份做到哪了」的地方，不是「现在在忙什么」的地方。
+   */
+  const progressStage = computed(() => {
+    if (entryMode.value === null) return viewState.value
+    if (viewState.value === 'done') return 'done'
+    const modeSteps = stepsForMode(entryMode.value)
+    const index = farthestContentStepIndex({
+      mode: entryMode.value,
+      hasMessages: messages.value.length > 0,
+      hasPrd: documents.hasPrd,
+      hasApiDocs: documents.hasApiDocs,
+      hasPrompts: documents.hasPrompts,
+    })
+    // step id 恰好与 `STAGE_LABELS` 的键同形（form / chatting / review-prd / …），无需再映射
+    return modeSteps[index]?.id ?? viewState.value
+  })
+
   /** 当前是否处于「文档生成中」阶段 */
   const generating = computed(() => isGeneratingPhase(viewState.value))
 
@@ -380,6 +408,16 @@ export const useWorkflowStore = defineStore('workflow', () => {
   // ------------------------------------------------------------------
   // 动作
   // ------------------------------------------------------------------
+
+  /**
+   * 关掉「刷新降级说明」那个浮层（用户点了上面的「×」）。
+   *
+   * `downgrade` 是运行态：不进快照、也不在 `changeTick` 的 watch 列表里，
+   * 因此清它不会触发一次保存，更不会影响恢复逻辑。
+   */
+  function clearDowngrade(): void {
+    downgrade.value = null
+  }
 
   /**
    * 统一的状态导航入口，收口所有阶段赋值并做流程安全校验：
@@ -503,6 +541,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     steps,
     currentStepIndex,
     reachedStepIndex,
+    progressStage,
     generating,
     reviewing,
     requiredDocsReady,
@@ -513,6 +552,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     hasContent,
     // 动作
     goTo,
+    clearDowngrade,
     chooseEntry,
     backToEntry,
     dropChatThread,

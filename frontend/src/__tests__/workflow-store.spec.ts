@@ -78,6 +78,20 @@ describe('useWorkflowStore', () => {
     expect(store.changeTick).toBe(before)
   })
 
+  it('clearDowngrade 关掉降级说明，且不触发保存', () => {
+    const store = useWorkflowStore()
+    store.downgrade = 'generating'
+    expect(store.downgradeNotice).not.toBe('')
+
+    const before = store.changeTick
+    store.clearDowngrade()
+
+    expect(store.downgrade).toBeNull()
+    expect(store.downgradeNotice).toBe('')
+    // 它是纯运行态：关掉说明不该被当成一次「内容变更」而落一次库
+    expect(store.changeTick).toBe(before)
+  })
+
   it('applySnapshot 自增 restoreTick，供视图重建那些只读一次初始值的组件', () => {
     const store = useWorkflowStore()
     const before = store.restoreTick

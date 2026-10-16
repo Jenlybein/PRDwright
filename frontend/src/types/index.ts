@@ -705,7 +705,11 @@ export interface SolutionSummary {
   title: string
   /** 入口模式；空串表示未选（兼容旧数据） */
   mode: string
-  /** 当前阶段（`ViewState` 的字面值），用于显示进度 */
+  /**
+   * 到达过的**最远里程碑**（`ViewState` / `StepId` 的字面值），用于在列表里显示进度。
+   *
+   * 刻意不是「当前所在的阶段」：列表回答的是「这份做到哪了」，而不是「你上次翻到哪一页」。
+   */
   stage: string
   /** 创建时间（UTC ISO 8601 字符串） */
   created_at: string

@@ -207,7 +207,9 @@ export const useSolutionsStore = defineStore('solutions', () => {
     return {
       title: computeTitle(),
       mode: workflow.entryMode ?? '',
-      stage: workflow.viewState,
+      // 列表显示的是「这份**做到哪了**」，因此取最远里程碑而非当前所在阶段：
+      // 取 `viewState` 会让「点回 PRD 回看」把进度倒退成「已出 PRD」。见 `progressStage`。
+      stage: workflow.progressStage,
       data: JSON.stringify(workflow.snapshot()),
     }
   }
@@ -233,7 +235,8 @@ export const useSolutionsStore = defineStore('solutions', () => {
       if (currentId.value === null) {
         const created = await createSolution(payload)
         currentId.value = created.id
-        mergeIntoList(created)
+        // 新建才提到最前；后续的自动保存都是「原位刷新」，不再动排序
+        mergeIntoList(created, true)
         // 把「这批产物属于哪份方案」告诉文档 store：此后审阅页的手改才有地方可写。
         // 这里只登记归属、不拉取——方案刚建出来，后端还没有任何文档。
         documents.attach(created.id)
@@ -274,10 +277,26 @@ export const useSolutionsStore = defineStore('solutions', () => {
   // 列表维护
   // ------------------------------------------------------------------
 
-  /** 把一份摘要并入列表（新建时插到最前，更新时原位刷新并提到最前） */
-  function mergeIntoList(summary: SolutionSummary): void {
+  /**
+   * 把一份摘要并入列表。
+   *
+   * - **更新**（默认）：**原位替换**——自动保存每 1.5 秒就可能来一次（切一下阶段也算一次
+   *   改动），若每次 `unshift`，当前方案会不停往列表顶部蹦：用户看到「侧栏自己跳了一下」，
+   *   却看不到任何进度变化。
+   * - **新建**（`toTop = true`）：插到最前，符合「最近的在上面」。
+   */
+  function mergeIntoList(summary: SolutionSummary, toTop = false): void {
     const index = items.value.findIndex((item) => item.id === summary.id)
-    if (index >= 0) items.value.splice(index, 1)
+    if (index < 0) {
+      items.value.unshift(summary)
+      return
+    }
+    if (!toTop) {
+      items.value.splice(index, 1, summary)
+      return
+    }
+    // 新建时列表里已有同 id（打开方案后本会话又新建、或列表拉取与创建竞态）：摘掉再插到最前
+    items.value.splice(index, 1)
     items.value.unshift(summary)
   }
 

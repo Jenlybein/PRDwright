@@ -15,6 +15,7 @@ import * as documentApi from '../services/documentService'
 import * as solutionApi from '../services/solutionService'
 import { useAuthStore } from '../stores/auth'
 import { DOCUMENT_SAVE_DEBOUNCE_MS, useDocumentsStore } from '../stores/documents'
+import { useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import { downloadFile } from '../utils/download'
 import type {
@@ -513,6 +514,12 @@ function documentsOf(wrapper: VueWrapper): ReturnType<typeof useDocumentsStore> 
   return useDocumentsStore(pinia)
 }
 
+/** 同 `storeOf`，取这个应用自己的方案 store */
+function solutionsOf(wrapper: VueWrapper): ReturnType<typeof useSolutionsStore> {
+  const pinia = wrapper.vm.$.appContext.config.globalProperties.$pinia as Pinia
+  return useSolutionsStore(pinia)
+}
+
 /** 一份「停在某阶段、没有任何进行中任务」的最小快照 */
 function reviewSnapshot(viewState: string): Record<string, unknown> {
   return {
@@ -906,6 +913,42 @@ describe('AppV2 完整流程编排', () => {
 
     expect(wrapper.text()).toContain('上次的生成未完成')
     expect(wrapper.text()).toContain('PRD 文档')
+  })
+
+  it('降级说明是可关闭的浮层：点「×」即消失，且不影响阶段本身', async () => {
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+    })
+    expect(wrapper.text()).toContain('上次的生成未完成')
+
+    // 它是浮层、且带关闭按钮（不是会自动消失的 toast：这条说明要留到用户看完）
+    const close = wrapper.find('button[aria-label="关闭降级说明"]')
+    expect(close.exists()).toBe(true)
+    await close.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('上次的生成未完成')
+    // 关掉的是「说明」，不是「降级」这件事本身：阶段仍是降级后的可操作状态
+    expect(storeOf(wrapper).downgrade).toBeNull()
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+  })
+
+  it('方案保存失败弹红色提示（不再只在「方案打不开」时才说）', async () => {
+    const wrapper = await mountEntry()
+
+    // 自动保存成功 / 保存中都静默，失败是唯一该让用户看见的信号
+    solutionsOf(wrapper).saveError = '后端不可用'
+    await nextTick()
+    await flushPromises()
+
+    const tip = wrapper
+      .findAllComponents(AppBadge)
+      .find((item) => item.props('variant') === 'danger')
+    expect(tip?.text()).toContain('后端不可用')
   })
 
   it('恢复时若快照停在确认闸门，回到发起该步骤的阶段并给出说明', async () => {
