@@ -18,7 +18,9 @@ import { formatDuration, formatTokens } from '@/utils/metering'
  *
  * ## 底栏两行，各自职责单一
  *
- * - **内容行**：这份文档自己的工具——AI 优化 / 复制 / 下载，以及「预览 / 编辑」视图切换。
+ * - **内容行**：这份文档自己的工具——左端是 AI 优化 / 版本（对文档本身做事），右端是
+ *   「预览 / 编辑」视图切换 + 复制 / 下载（把文档拿出去：一个进剪贴板、一个存成文件，
+ *   因此并邻、复制在下载左边）。
  *   点「AI 优化」后原地换成指令输入，文档全程可见（改成弹窗就看不到了，而写优化指令时恰恰要
  *   对着文档）。
  * - **流程行**：这份文档之后往哪走——返回、生成下一份、完成。
@@ -355,14 +357,6 @@ function submitOptimize(): void {
               AI 优化
             </AppButton>
 
-            <AppButton variant="secondary" size="sm" :disabled="doc?.busy" @click="doc?.copy()">
-              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                <path d="M7 9a2 2 0 012-2h6a2 2 0 012 2v6a2 2 0 01-2 2H9a2 2 0 01-2-2V9z" />
-                <path d="M5 3a2 2 0 00-2 2v6a2 2 0 002 2h1V7a2 2 0 012-2h6V5a2 2 0 00-2-2H5z" />
-              </svg>
-              {{ doc?.copyTip || '复制' }}
-            </AppButton>
-
             <!-- 版本历史：抽屉的**入口**落在底栏内容行（ADR-015 的唯一操作落点），
                  抽屉内只有内容操作（存为新版本 / 恢复），不出现流程动作（见 ADR-030）。 -->
             <AppButton variant="secondary" size="sm" @click="emit('openVersions')">
@@ -377,7 +371,8 @@ function submitOptimize(): void {
             </AppButton>
           </div>
 
-          <!-- 右端：视图切换 + 下载。两者都作用于「这份文档」，排在一起 -->
+          <!-- 右端：视图切换 + 复制 / 下载。后两者是同一类事——「把这份文档拿出去」
+               （一个进剪贴板、一个存成文件），因此排在一起、复制紧挨在下载左边 -->
           <div class="flex items-center gap-2">
             <!-- 预览 / 编辑：从文档卡片头部下沉过来，与文档工具同处底栏 -->
             <div
@@ -406,6 +401,16 @@ function submitOptimize(): void {
                 编辑
               </button>
             </div>
+
+            <!-- 复制：把当前这份文档整段塞进剪贴板，与下载并邻（同类动作），在下载左边。
+                 文案随复制结果变（`copyTip`），所以它天然属于 `DocumentReview` 的状态。 -->
+            <AppButton variant="secondary" size="sm" :disabled="doc?.busy" @click="doc?.copy()">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path d="M7 9a2 2 0 012-2h6a2 2 0 012 2v6a2 2 0 01-2 2H9a2 2 0 01-2-2V9z" />
+                <path d="M5 3a2 2 0 00-2 2v6a2 2 0 002 2h1V7a2 2 0 012-2h6V5a2 2 0 00-2-2H5z" />
+              </svg>
+              {{ doc?.copyTip || '复制' }}
+            </AppButton>
 
             <!-- 下载：把当前这份文档（含用户改过的稿）导出为 .md，与完成页的下载是同一套视觉。
                  原来这里是「保存」——现在手改已自动防抖落库，不需要用户点一下了，按钮改作下载。

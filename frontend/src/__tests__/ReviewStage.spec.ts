@@ -79,6 +79,18 @@ describe('ReviewStage 的「预览 / 编辑」切换', () => {
     expect(preview.element.parentElement?.parentElement).toBe(download.element.parentElement)
   })
 
+  it('「复制」与「下载」并邻，且排在下载左边', () => {
+    const wrapper = mountReview()
+
+    const copy = buttonByText(wrapper, '复制')
+    const download = buttonByText(wrapper, '下载')
+
+    // 同一个右端分组（复制不再跟 AI 优化 / 版本待在一起）
+    expect(copy.element.parentElement).toBe(download.element.parentElement)
+    // 且紧挨着下载的左邻——不是「同组就行」，中间隔着别的按钮也算过
+    expect(copy.element.nextElementSibling).toBe(download.element)
+  })
+
   it('文档卡片内部不再有任何按钮（头部只剩标题与徽章）', () => {
     const wrapper = mountReview()
     const card = wrapper.findComponent(DocumentReview)
