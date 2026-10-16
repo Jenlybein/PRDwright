@@ -80,7 +80,7 @@ watch(
         <!-- 刻意不写具体数字：提问上限是后端提示词的口径（见 ADR-010），
              文案里再落一份数字就等于又多出一个需要手工同步的副本 -->
         <p v-if="docClarification" class="mt-0.5 text-xs text-subtle">
-          按 P0 → P1 → P2 逐级确认剩余问题；聊够了随时可以写回文档
+          按 P0 → P6 逐级确认剩余问题；聊够了随时可以写回文档
         </p>
         <p v-else class="mt-0.5 text-xs text-subtle">
           AI 会追问关键细节，逐步澄清后再生成文档

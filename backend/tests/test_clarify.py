@@ -99,11 +99,21 @@ def _create_solution(client) -> int:
 
 
 def _pending_block(question: str, sections: list[str] | None = None) -> str:
-    """拼一个合法的待确认标记块。"""
+    """拼一个合法的待确认标记块。
+
+    `importance` 不能省：等级缺失或不合法时 `extract` 会把该项直接丢弃。
+    """
     import json
 
     payload = json.dumps(
-        [{"question": question, "sections": sections or [], "decider": ""}],
+        [
+            {
+                "question": question,
+                "sections": sections or [],
+                "decider": "",
+                "importance": "P1",
+            }
+        ],
         ensure_ascii=False,
     )
     return f"{BEGIN_SENTINEL}\n{payload}\n{END_SENTINEL}"

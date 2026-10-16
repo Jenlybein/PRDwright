@@ -50,16 +50,16 @@ describe('formatPendingItemsForChat', () => {
     expect(text).toBe('1. [P0] 登录方式？')
   })
 
-  it('按 P0 → P1 → P2 重排后再编号，越重要的排得越靠前', () => {
+  it('按 P0 → P6 重排后再编号，越重要的排得越靠前', () => {
     const text = formatPendingItemsForChat([
-      { id: 'a', question: '可后置的？', sections: [], decider: '', importance: 'P2' },
+      { id: 'a', question: '最后再问的？', sections: [], decider: '', importance: 'P6' },
       { id: 'b', question: '最要紧的？', sections: [], decider: '', importance: 'P0' },
-      { id: 'c', question: '次要的？', sections: [], decider: '', importance: 'P1' },
+      { id: 'c', question: '中间某档？', sections: [], decider: '', importance: 'P3' },
     ])
     const lines = text.split('\n')
     expect(lines[0]).toBe('1. [P0] 最要紧的？')
-    expect(lines[1]).toBe('2. [P1] 次要的？')
-    expect(lines[2]).toBe('3. [P2] 可后置的？')
+    expect(lines[1]).toBe('2. [P3] 中间某档？')
+    expect(lines[2]).toBe('3. [P6] 最后再问的？')
   })
 
   it('sortPendingItems 返回新数组，不改动传入的原数据', () => {
@@ -74,11 +74,12 @@ describe('formatPendingItemsForChat', () => {
     expect(source.map((item) => item.importance)).toEqual(['P2', 'P0'])
   })
 
-  it('sortPendingItems 对非法等级降级为 P1 而不是抛错', () => {
+  it('sortPendingItems 对认不出的等级不抛错，并把它排到合法等级之后', () => {
     const sorted = sortPendingItems([
       { id: 'a', question: '乱标？', sections: [], decider: '', importance: 'X' as never },
+      { id: 'b', question: '正常？', sections: [], decider: '', importance: 'P6' },
     ])
-    expect(sorted).toHaveLength(1)
+    expect(sorted.map((item) => item.id)).toEqual(['b', 'a'])
   })
 
   it('清单为空时给一句明确的说明，而不是空字符串', () => {

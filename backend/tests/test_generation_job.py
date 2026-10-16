@@ -849,7 +849,8 @@ def test_generation_flows_pending_items_into_job_and_document(client, monkeypatc
     solution_id = _create_solution(client)
     block = (
         "<!-- PENDING:BEGIN -->\n"
-        '[{"question": "确认登录方式", "sections": ["2.1"], "decider": "产品负责人"}]\n'
+        '[{"question": "确认登录方式", "sections": ["2.1"], "decider": "产品负责人", '
+        '"importance": "P1"}]\n'
         "<!-- PENDING:END -->"
     )
     _fake_service(monkeypatch, ScriptedLLM([f"接口文档正文\n{block}"]))

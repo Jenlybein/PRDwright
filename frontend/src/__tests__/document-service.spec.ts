@@ -155,7 +155,7 @@ describe('fetchDocuments', () => {
     expect(records[0]?.pendingItems).toEqual(pendingItems)
   })
 
-  it('重要性等级缺失或非法时降级为 P1，而不是把整条清单丢掉', async () => {
+  it('重要性等级缺失或非法时丢弃这一条，而不是替它挑一档', async () => {
     vi.mocked(http.get).mockResolvedValue({
       data: {
         documents: [
@@ -163,6 +163,8 @@ describe('fetchDocuments', () => {
             pending_items: [
               { id: 'p-1', question: '没标等级？', sections: [], decider: '' },
               { id: 'p-2', question: '乱标等级？', sections: [], decider: '', importance: 'X9' },
+              { id: 'p-3', question: '超范围？', sections: [], decider: '', importance: 'P7' },
+              { id: 'p-4', question: '正常？', sections: [], decider: '', importance: 'P3' },
             ],
           }),
         ],
@@ -171,9 +173,9 @@ describe('fetchDocuments', () => {
 
     const records = await fetchDocuments(7)
 
+    // 与后端口径一致：等级不合法就是不合法，不兜底——兜底会产出一份「等级是猜的」清单
     expect(records[0]?.pendingItems).toEqual([
-      { id: 'p-1', question: '没标等级？', sections: [], decider: '', importance: 'P1' },
-      { id: 'p-2', question: '乱标等级？', sections: [], decider: '', importance: 'P1' },
+      { id: 'p-4', question: '正常？', sections: [], decider: '', importance: 'P3' },
     ])
   })
 
@@ -194,7 +196,9 @@ describe('fetchDocuments', () => {
       data: {
         documents: [
           backendDocument({
-            pending_items: [{ id: 'p-1', question: '上限？', sections: ['2', 3], decider: 7 }],
+            pending_items: [
+              { id: 'p-1', question: '上限？', sections: ['2', 3], decider: 7, importance: 'p3' },
+            ],
           }),
         ],
       },
@@ -203,7 +207,8 @@ describe('fetchDocuments', () => {
     const records = await fetchDocuments(7)
 
     expect(records[0]?.pendingItems).toEqual([
-      { id: 'p-1', question: '上限？', sections: ['2'], decider: '', importance: 'P1' },
+      // 等级顺带被规整成大写（`p3` → `P3`）
+      { id: 'p-1', question: '上限？', sections: ['2'], decider: '', importance: 'P3' },
     ])
   })
 

@@ -123,14 +123,14 @@ def test_opening_states_what_the_model_received() -> None:
 
 
 def test_grading_rule_lives_in_the_shared_rule_not_only_the_opening() -> None:
-    """分级澄清（P0 → P1 → P2）与「每级播报」必须写在**共享规则**里。
+    """分级澄清（P0 → P6）与「每级播报」必须写在**共享规则**里。
 
     开场白只在第一轮出现；之后每一轮接续，模型只看人设。分级行为若只写进开场白，
     用户从第二轮起就再也听不到「准备开始 P1 级」的播报了——这是历史上「上限口径被
     盖过去」的同款陷阱，所以这一条必须落在 `CLARIFICATION_QUESTION_RULE`
     （两个档案的 system_prompt 都引用它）。
     """
-    for marker in ("P0", "P1", "P2", "播报", "准备开始 P0 级问题的确认"):
+    for marker in ("P0", "P6", "播报", "准备开始 P0 级问题的确认"):
         assert marker in CLARIFICATION_QUESTION_RULE, marker
     for profile in CONVERSATION_PROFILES.values():
         assert "P0" in profile.system_prompt, profile.key
@@ -140,7 +140,7 @@ def test_grading_rule_lives_in_the_shared_rule_not_only_the_opening() -> None:
 def test_doc_clarification_opening_announces_each_level() -> None:
     """文档澄清开场白要说清：按等级顺序走、每级开始前播报、觉得够了随时可改写。"""
     opening = DOC_CLARIFICATION_OPENING
-    assert "P0 → P1 → P2" in opening
+    assert "P0 → P6" in opening
     assert "准备开始 P0 级问题的确认" in opening
     assert "P0 级已确认完毕" in opening
     # 不必问到最后一级：用户觉得够了就能改写

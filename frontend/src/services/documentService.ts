@@ -72,13 +72,16 @@ function toPendingItems(data: unknown): PendingItem[] {
     const sections = Array.isArray(raw.sections)
       ? raw.sections.filter((s): s is string => typeof s === 'string')
       : []
+    // 等级交给同一套收敛逻辑：与快照入口（`api.parsePendingItems`）同口径。
+    // 认不出来 → 丢弃这一条（后端也不兜底，两边行为一致）。
+    const importance = normalizeImportance(raw.importance)
+    if (importance === null) continue
     items.push({
       id,
       question,
       sections,
       decider: typeof raw.decider === 'string' ? raw.decider : '',
-      // 等级交给同一套收敛逻辑：与快照入口（`api.parsePendingItems`）同口径
-      importance: normalizeImportance(raw.importance),
+      importance,
     })
   }
   return items

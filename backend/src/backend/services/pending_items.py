@@ -32,11 +32,22 @@ _CARRY_LEN = max(len(BEGIN_SENTINEL), len(END_SENTINEL)) - 1
 _ITEM_FIELDS = ("question", "sections", "decider", "importance")
 
 # 待确认项的「重要性等级」，数字越小越重要。
-# 三个等级由模型在生成正文时随清单一起给出；澄清阶段据此逐级推进，
-# 保证「越重要越先问」。缺失或非法取值一律兜底为 _DEFAULT_IMPORTANCE，
-# 这样即便模型偷懒没标等级，排序顺序依然成立（全部同级 → 保持原有顺序）。
-IMPORTANCE_ORDER: dict[str, int] = {"P0": 0, "P1": 1, "P2": 2}
-_DEFAULT_IMPORTANCE = "P1"
+# 七个等级由模型在生成正文时随清单一起给出；澄清阶段据此逐级推进，
+# 保证「越重要越先问」。
+#
+# ⚠️ **没有兜底等级**：等级缺失或取值不合法时，该项**不通过校验、直接丢弃**
+# （见 `_normalize_importance` 与 `extract`）。不替模型猜一个默认档，是因为猜出来的
+# 等级既会打乱「越重要越先问」的顺序，又会把一条没标级的问题伪装成已分级——
+# 静默的错误排序比少一条问题更难被发现。
+IMPORTANCE_ORDER: dict[str, int] = {
+    "P0": 0,
+    "P1": 1,
+    "P2": 2,
+    "P3": 3,
+    "P4": 4,
+    "P5": 5,
+    "P6": 6,
+}
 
 
 def render_spec() -> str:
@@ -57,34 +68,42 @@ def render_spec() -> str:
         '[{{"question": "…", "sections": ["2.1", "6.1"], "decider": "产品负责人", '
         '"importance": "P0"}}]\n'
         f"{END_SENTINEL}\n"
-        "`importance` 必须是 `P0` / `P1` / `P2` 三者之一，按「不问就没法开工」的程度排序："
-        "`P0` 最高（不确认会导致整份文档写错或无法开工）、`P1` 次之、`P2` 是可以后置的细节。"
-        "拿不准就标 `P1`。\n"
+        "`importance` **必填**，取值必须是 `P0` / `P1` / `P2` / `P3` / `P4` / `P5` / `P6` 之一"
+        "（数字越小越要紧），按「不问就没法开工」的程度递减：`P0` 是不确认就会让整份文档写错、"
+        "或整个项目无法开工的问题，`P6` 是可以留到最后再敲定的措辞与细节。"
+        "请按实际严重程度**分散取值**，不要把所有条目都堆在同一个等级上——"
+        "等级是澄清时「先问哪一批」的依据，堆在一档就等于没分级。"
+        "**缺了等级、或写了 `P0` ~ `P6` 之外的值，该项会被直接丢弃**，请务必逐项给出。\n"
         "没有待确认项时附 `[]`。清单须与正文中的「待确认」一一对应；不要把这段标记写进章节里。"
     )
 
 
-def _normalize_importance(raw: Any) -> str:
-    """把模型给的 importance 规范成 P0/P1/P2；缺失或不认识的值一律兜底为 P1。
+def _normalize_importance(raw: Any) -> str | None:
+    """把模型给的 importance 规范成 `P0` ~ `P6`；缺失或不认识的值返回 `None`。
+
+    返回 `None` 表示**该项没通过校验**——调用方据此丢弃它，而不是替它挑一个默认等级。
+    大小写与首尾空白会被规整（` p3 ` → `P3`），其余一律视为不合法。
 
     Args:
         raw: 模型输出里该项的 `importance` 原值，可能是任意类型。
 
     Returns:
-        `IMPORTANCE_ORDER` 里的三个等级之一。
+        `IMPORTANCE_ORDER` 里的某一个等级；不合法时为 `None`。
     """
     if isinstance(raw, str):
         value = raw.strip().upper()
         if value in IMPORTANCE_ORDER:
             return value
-    return _DEFAULT_IMPORTANCE
+    return None
 
 
 def _importance_rank(item: dict[str, Any]) -> int:
-    """清单项的排序键：重要性数字越小越靠前（P0 最优先）。"""
-    return IMPORTANCE_ORDER.get(
-        str(item.get("importance", "")), IMPORTANCE_ORDER[_DEFAULT_IMPORTANCE]
-    )
+    """清单项的排序键：重要性数字越小越靠前（P0 最优先）。
+
+    `extract` 已把等级非法的项挡在排序之前，这里的 `.get` 兜底只是让排序键永远可比较
+    （拿不到等级的项排在最后），不承担「替模型猜等级」的职责。
+    """
+    return IMPORTANCE_ORDER.get(str(item.get("importance", "")), len(IMPORTANCE_ORDER))
 
 
 def extract(
@@ -95,8 +114,9 @@ def extract(
     设计要点：
 
     - 正文里可能有 0..N 个标记块（分章节生成时每章一个），逐个剥离。
-    - 所有条目先收集，按 `importance` **从高到低（P0 → P1 → P2）稳定排序**后，
-      才按排好的顺序重新分配 `id` 为 ``{id_prefix}-{n}``，不信任模型给的 `id`。
+    - 所有条目先收集，**校验重要性等级**（缺失或不合法 → 丢弃该项并记 warning），
+      再按 `importance` **从高到低（P0 → P6）稳定排序**后，才按排好的顺序重新分配
+      `id` 为 ``{id_prefix}-{n}``，不信任模型给的 `id`。
       于是「id 序号」天然等于「提问顺序」——越重要的排在越前面、越先被问到。
     - 某个块 JSON 非法 → 跳过该块（正文中不留块体），记 warning；生成不因此失败。
     - 没有任何块 → 返回（原文, []）。
@@ -138,14 +158,27 @@ def extract(
             collected.extend(parsed)
         out.append(tail)
 
-    # 规范等级（缺失/非法 → P1），再按重要性从高到低稳定排序：
+    # 等级校验：缺失或非法 → **丢弃该项**（绝不兜底），再按重要性从高到低稳定排序。
     # 同级保持模型原本的书写顺序，避免同一等级内顺序跳来跳去。
+    validated: list[dict[str, Any]] = []
     for record in collected:
-        record["importance"] = _normalize_importance(record.get("importance"))
-    collected.sort(key=_importance_rank)
+        level = _normalize_importance(record.get("importance"))
+        if level is None:
+            logger.warning(
+                "待确认项缺少合法的重要性等级，已丢弃该项",
+                extra={
+                    "event": "pending.bad_importance",
+                    "raw": record.get("importance"),
+                    "question": str(record.get("question", ""))[:120],
+                },
+            )
+            continue
+        validated.append({**record, "importance": level})
+
+    validated.sort(key=_importance_rank)
     items = [
         {**record, "id": f"{id_prefix}-{index}"}
-        for index, record in enumerate(collected, start=1)
+        for index, record in enumerate(validated, start=1)
     ]
 
     clean = "".join(out)

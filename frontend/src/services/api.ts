@@ -223,21 +223,23 @@ function readObjectArray(data: Record<string, unknown>, key: string): Record<str
  * 坏数据（缺字段、非对象）直接丢弃——不该因为一条脏数据让整份快照失效。
  * 这是刷新重连时待确认清单的还原点，与 `documents.pending_items` 形状一致。
  *
- * 等级交给 `normalizeImportance` 收敛：非法值一律降级为 P1，不会因为一个拼错的等级
- * 就把整条清单丢掉。
+ * 等级交给 `normalizeImportance` 收敛：**认不出来就丢弃这一条**，与后端口径一致
+ * （后端收尾时逐项校验等级，缺失或超出 P0~P6 的项根本不会落库），不替它挑一档。
  */
 function parsePendingItems(data: Record<string, unknown>): PendingItem[] {
   return readObjectArray(data, 'pending_items').flatMap((item) => {
     const id = item.id
     const question = item.question
     if (typeof id !== 'string' || typeof question !== 'string') return []
+    const importance = normalizeImportance(item.importance)
+    if (importance === null) return []
     return [
       {
         id,
         question,
         sections: readStringArray(item, 'sections'),
         decider: readString(item, 'decider'),
-        importance: normalizeImportance(item.importance),
+        importance,
       },
     ]
   })

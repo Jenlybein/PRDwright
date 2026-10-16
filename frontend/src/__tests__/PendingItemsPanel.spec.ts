@@ -6,7 +6,7 @@ import type { PendingImportance, PendingItem } from '../types'
 
 /**
  * 待确认清单是后端在剥离正文标记块时算出的产物，前端**只读**。
- * 这里守的是展示口径：问题逐条列出、序号按位置、空字段不留空标签。
+ * 这里守的是展示口径：问题逐条列出、序号按位置、空字段不留空标签、等级用七档强弱区分。
  */
 const FULL: PendingItem = {
   id: 'p-1',
@@ -32,9 +32,43 @@ const NO_DECIDER: PendingItem = {
 
 const ITEMS: PendingItem[] = [FULL, NO_SECTIONS, NO_DECIDER]
 
+/** 造 n 条问题，等级按给定的档位轮转 */
+function makeItems(
+  n: number,
+  levels: readonly PendingImportance[] = ['P0', 'P3', 'P6'],
+): PendingItem[] {
+  return Array.from({ length: n }, (_unused, index) => ({
+    id: `p-${index + 1}`,
+    question: `第 ${index + 1} 个待确认问题`,
+    sections: [],
+    decider: '',
+    importance: levels[index % levels.length] as PendingImportance,
+  }))
+}
+
+/**
+ * 展开全部条目后再断言。
+ *
+ * 面板默认只铺开前 2 条（它就贴在正文之上，全铺开会把正文挤出屏幕），所以关心
+ * 「每一条怎么渲染」的用例要先点一下展开，否则断言会被折叠口径挡住。
+ */
+async function mountExpanded(items: PendingItem[]) {
+  const wrapper = mount(PendingItemsPanel, { props: { items } })
+  const toggle = wrapper.find('button')
+  if (toggle.exists()) await toggle.trigger('click')
+  return wrapper
+}
+
 describe('PendingItemsPanel', () => {
-  it('逐条展示问题，标题带上总条数', () => {
+  it('默认只铺开前 2 条，但标题给的是总数', () => {
     const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+
+    expect(wrapper.text()).toContain('待确认问题（3）')
+    expect(wrapper.findAll('li')).toHaveLength(2)
+  })
+
+  it('展开后逐条展示问题，标题仍带总数', async () => {
+    const wrapper = await mountExpanded(ITEMS)
     const text = wrapper.text()
 
     expect(text).toContain('待确认问题（3）')
@@ -67,8 +101,8 @@ describe('PendingItemsPanel', () => {
     expect(text).not.toContain('拍板人')
   })
 
-  it('序号用位置下标，不把后端 id 暴露给用户', () => {
-    const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+  it('序号用位置下标，不把后端 id 暴露给用户', async () => {
+    const wrapper = await mountExpanded(ITEMS)
     // 只取直接挂在 li 下的徽标：章节与拍板人之间那个「·」分隔符也有 aria-hidden，需排除
     const badges = wrapper.findAll('li > span[aria-hidden="true"]')
 
@@ -79,8 +113,8 @@ describe('PendingItemsPanel', () => {
     expect(wrapper.text()).not.toContain('overview-2')
   })
 
-  it('按重要性从高到低展示：P0 在最前、P2 在最后', () => {
-    const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+  it('按重要性从高到低展示：P0 在最前、P2 在最后', async () => {
+    const wrapper = await mountExpanded(ITEMS)
     const questions = wrapper.findAll('li').map((li) => li.find('p').text())
 
     // ITEMS 的声明顺序是 P1、P0、P2，重排后应当变成 P0、P1、P2
@@ -89,39 +123,57 @@ describe('PendingItemsPanel', () => {
     expect(questions[2]).toBe('这个功能要不要上？')
   })
 
-  it('每条都标出重要性等级徽标', () => {
-    const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
+  it('每条都标出重要性等级徽标', async () => {
+    const wrapper = await mountExpanded(ITEMS)
     const text = wrapper.text()
 
     expect(text).toContain('P0')
     expect(text).toContain('P1')
     expect(text).toContain('P2')
   })
+
+  it('P0~P6 七档都能渲染出徽标', async () => {
+    const levels: PendingImportance[] = ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6']
+    const wrapper = await mountExpanded(makeItems(7, levels))
+
+    expect(wrapper.findAll('li')).toHaveLength(7)
+    const text = wrapper.text()
+    for (const level of levels) expect(text).toContain(level)
+  })
+
+  it('标题旁按等级给彩色计数芯片，且 P0 不再挂括号说明', () => {
+    const wrapper = mount(PendingItemsPanel, {
+      props: {
+        items: [
+          ...makeItems(2, ['P0']),
+          ...makeItems(1, ['P3']).map((item) => ({ ...item, id: 'q-1' })),
+          ...makeItems(1, ['P6']).map((item) => ({ ...item, id: 'q-2' })),
+        ],
+      },
+    })
+    const chips = wrapper.findAll('p span[title]')
+
+    // 只列实际存在的等级，按从重到轻；计数跟在等级后面
+    expect(chips.map((chip) => chip.text().replace(/\s+/g, ''))).toEqual([
+      'P0×2',
+      'P3×1',
+      'P6×1',
+    ])
+    expect(wrapper.text()).not.toContain('（最要紧）')
+  })
 })
 
 /**
  * 折叠口径。
  *
- * 清单可能长到十几条，而它就贴在正文之上——全铺开会把正文挤出屏幕。所以默认只铺开前 3 条，
+ * 清单可能长到十几条，而它就贴在正文之上——全铺开会把正文挤出屏幕。所以默认只铺开前 2 条，
  * 其余折起来由用户主动展开。折叠只影响「铺开多少」：总数、排序、等级一概不变。
  */
 describe('PendingItemsPanel 的折叠', () => {
-  /** 造 n 条问题，等级按 P0 / P1 / P2 轮转（用来验证展开取的仍是排序后的前缀） */
-  function makeItems(n: number): PendingItem[] {
-    const levels: PendingImportance[] = ['P0', 'P1', 'P2']
-    return Array.from({ length: n }, (_unused, index) => ({
-      id: `p-${index + 1}`,
-      question: `第 ${index + 1} 个待确认问题`,
-      sections: [],
-      decider: '',
-      importance: levels[index % levels.length]!,
-    }))
-  }
-
-  it('超过 3 条时默认只铺开前 3 条，展开后全部铺开，可再收起', async () => {
+  it('超过 2 条时默认只铺开前 2 条，展开后全部铺开，可再收起', async () => {
     const wrapper = mount(PendingItemsPanel, { props: { items: makeItems(5) } })
 
-    expect(wrapper.findAll('li')).toHaveLength(3)
+    expect(wrapper.findAll('li')).toHaveLength(2)
     // 折叠不改总数：标题里始终是这份清单的全部条数
     expect(wrapper.text()).toContain('待确认问题（5）')
     expect(wrapper.text()).toContain('展开全部 5 条')
@@ -131,22 +183,21 @@ describe('PendingItemsPanel 的折叠', () => {
     expect(wrapper.text()).toContain('收起')
 
     await wrapper.find('button').trigger('click')
-    expect(wrapper.findAll('li')).toHaveLength(3)
+    expect(wrapper.findAll('li')).toHaveLength(2)
   })
 
-  it('恰好 3 条时不出现展开控件（点了也不会有变化）', () => {
-    const wrapper = mount(PendingItemsPanel, { props: { items: makeItems(3) } })
+  it('恰好 2 条时不出现展开控件（点了也不会有变化）', () => {
+    const wrapper = mount(PendingItemsPanel, { props: { items: makeItems(2) } })
 
-    expect(wrapper.findAll('li')).toHaveLength(3)
+    expect(wrapper.findAll('li')).toHaveLength(2)
     expect(wrapper.find('button').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('展开全部')
   })
 
   it('展开后仍是「最要紧的在前」：折叠取的是排序后的前缀，不是原始顺序', async () => {
-    const wrapper = mount(PendingItemsPanel, { props: { items: makeItems(5) } })
-    await wrapper.find('button').trigger('click')
+    const wrapper = await mountExpanded(makeItems(5))
 
-    // 等级 P0、P1、P2 轮转 + 同等级稳定排序 → P0 的第 1、4 条排在最前
+    // 等级 P0、P3、P6 轮转 + 同等级稳定排序 → P0 的第 1、4 条排在最前
     const questions = wrapper.findAll('li').map((li) => li.find('p').text())
     expect(questions[0]).toBe('第 1 个待确认问题')
     expect(questions[1]).toBe('第 4 个待确认问题')

@@ -39,16 +39,17 @@ def test_render_spec_includes_literal_sentinels() -> None:
 
 
 def test_render_spec_mentions_importance_levels() -> None:
-    """生成指令里必须要求模型给每项标 P0/P1/P2，否则「越重要越先问」没有数据来源。
+    """生成指令里必须给出**完整的 P0~P6**，并说明「缺了等级会被丢弃」。
 
-    前端 relay 的澄清顺序完全依赖这个字段，所以指令里少一个等级，
-    整条「分级澄清」链路就断在数据入口上——用测试把它钉住。
+    前端 relay 的澄清顺序完全依赖这个字段；等级集少写一档，模型就可能标出后端不认的
+    值，那一条会在校验时被丢掉——用测试把指令与校验口径钉在一起。
     """
     spec = render_spec()
     assert "importance" in spec
-    assert "P0" in spec
-    assert "P1" in spec
-    assert "P2" in spec
+    for level in ("P0", "P1", "P2", "P3", "P4", "P5", "P6"):
+        assert level in spec, level
+    # 没有兜底等级：指令必须把「缺失/超范围会被丢弃」讲明白
+    assert "丢弃" in spec
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +62,8 @@ def test_extract_returns_clean_text_and_items() -> None:
     doc = (
         "# 产品需求文档\n\n## 1. 概述\n正文。\n\n"
         f"{BEGIN_SENTINEL}\n"
-        '[{"question": "是否要做海外版？", "sections": ["2.1"], "decider": "产品负责人"}]\n'
+        '[{"question": "是否要做海外版？", "sections": ["2.1"], "decider": "产品负责人", '
+        '"importance": "P0"}]\n'
         f"{END_SENTINEL}\n"
     )
     clean, items = extract(doc)
@@ -73,6 +75,7 @@ def test_extract_returns_clean_text_and_items() -> None:
     assert items[0]["question"] == "是否要做海外版？"
     assert items[0]["sections"] == ["2.1"]
     assert items[0]["decider"] == "产品负责人"
+    assert items[0]["importance"] == "P0"
 
 
 def test_extract_without_block_returns_text_untouched() -> None:
@@ -88,7 +91,7 @@ def test_extract_strips_model_supplied_id() -> None:
     doc = (
         "正文。\n"
         f"{BEGIN_SENTINEL}\n"
-        '[{"id": "EVIL", "question": "问题？"}]\n'
+        '[{"id": "EVIL", "question": "问题？", "importance": "P2"}]\n'
         f"{END_SENTINEL}\n"
     )
     _, items = extract(doc)
@@ -98,8 +101,8 @@ def test_extract_strips_model_supplied_id() -> None:
 
 def test_extract_assigns_prefix_based_ids() -> None:
     """分章节生成传 section.id 作前缀，跨章节不重号。"""
-    doc1 = f"a\n{BEGIN_SENTINEL}\n[{{\"question\": \"q1\"}}]\n{END_SENTINEL}\n"
-    doc2 = f"b\n{BEGIN_SENTINEL}\n[{{\"question\": \"q2\"}}]\n{END_SENTINEL}\n"
+    doc1 = f"a\n{BEGIN_SENTINEL}\n[{{\"question\": \"q1\", \"importance\": \"P1\"}}]\n{END_SENTINEL}\n"
+    doc2 = f"b\n{BEGIN_SENTINEL}\n[{{\"question\": \"q2\", \"importance\": \"P1\"}}]\n{END_SENTINEL}\n"
     _, items1 = extract(doc1, id_prefix="features")
     _, items2 = extract(doc2, id_prefix="scope")
     assert items1[0]["id"] == "features-1"
@@ -109,9 +112,11 @@ def test_extract_assigns_prefix_based_ids() -> None:
 def test_extract_multiple_blocks_accumulate() -> None:
     """一份正文里多个块：全部剥离，id 按出现顺序连续分配。"""
     doc = (
-        f"{BEGIN_SENTINEL}\n[{{\"question\": \"q1\"}}]\n{END_SENTINEL}\n"
+        f"{BEGIN_SENTINEL}\n[{{\"question\": \"q1\", \"importance\": \"P1\"}}]\n{END_SENTINEL}\n"
         "中段。\n"
-        f"{BEGIN_SENTINEL}\n[{{\"question\": \"q2\"}}, {{\"question\": \"q3\"}}]\n{END_SENTINEL}\n"
+        f"{BEGIN_SENTINEL}\n"
+        '[{"question": "q2", "importance": "P0"}, {"question": "q3", "importance": "P2"}]\n'
+        f"{END_SENTINEL}\n"
     )
     clean, items = extract(doc)
     assert "中段。" in clean
@@ -138,12 +143,12 @@ def test_extract_bad_json_block_is_ignored() -> None:
 def test_extract_whitelist_keeps_only_known_fields() -> None:
     """只保留 question/sections/decider/importance；模型夹带的其它字段被丢弃。
 
-    模型同时给了非法 importance（`P9`）→ 兜底为 P1，说明白名单之外的值不会被照搬。
+    顺带覆盖等级的大小写规整：模型写小写 `p3` 也认。
     """
     doc = (
         f"{BEGIN_SENTINEL}\n"
         '[{"question": "q", "sections": [], "decider": "x", "secret": "drop-me", '
-        '"importance": "P9"}]\n'
+        '"importance": "p3"}]\n'
         f"{END_SENTINEL}\n"
     )
     _, items = extract(doc)
@@ -152,12 +157,12 @@ def test_extract_whitelist_keeps_only_known_fields() -> None:
         "question": "q",
         "sections": [],
         "decider": "x",
-        "importance": "P1",
+        "importance": "P3",
     }
 
 
 def test_extract_sorts_by_importance_descending() -> None:
-    """清单按重要性从高到低排序：P0 → P1 → P2，id 按排好的顺序连续重分配。
+    """清单按重要性从高到低排序（P0 → P6），id 按排好的顺序连续重分配。
 
     这是「越重要越先提问」的地基——模型的书写顺序不代表重要程度，
     顺序只由 `importance` 决定。
@@ -166,39 +171,45 @@ def test_extract_sorts_by_importance_descending() -> None:
         "正文。\n"
         f"{BEGIN_SENTINEL}\n"
         "[\n"
-        '  {"question": "次要细节？", "importance": "P2"},\n'
+        '  {"question": "最后再问的细节？", "importance": "P6"},\n'
         '  {"question": "最要紧的前提？", "importance": "P0"},\n'
-        '  {"question": "次要的判断？", "importance": "P1"}\n'
+        '  {"question": "中间某档？", "importance": "P3"}\n'
         "]\n"
         f"{END_SENTINEL}\n"
     )
     _, items = extract(doc)
     assert [item["question"] for item in items] == [
         "最要紧的前提？",
-        "次要的判断？",
-        "次要细节？",
+        "中间某档？",
+        "最后再问的细节？",
     ]
-    assert [item["importance"] for item in items] == ["P0", "P1", "P2"]
+    assert [item["importance"] for item in items] == ["P0", "P3", "P6"]
     # id 顺序即提问顺序
     assert [item["id"] for item in items] == ["p-1", "p-2", "p-3"]
 
 
-def test_extract_normalizes_missing_or_illegal_importance_to_p1() -> None:
-    """没给等级 / 给了不认识的等级 → 一律兜底 P1，排序顺序依然成立。"""
+def test_extract_drops_items_without_a_valid_importance() -> None:
+    """没给等级 / 给了不认识的等级 / 超出 P0~P6 → 该项**不通过校验、被丢弃**。
+
+    这里刻意**不兜底**：猜一个默认等级会打乱「越重要越先问」的顺序，还会把一条
+    没标级的问题伪装成已分级；丢弃只影响这一项，合法的项照常保留。
+    """
     doc = (
         "正文。\n"
         f"{BEGIN_SENTINEL}\n"
         "[\n"
         '  {"question": "没标等级？"},\n'
         '  {"question": "乱标等级？", "importance": "critical"},\n'
+        '  {"question": "超范围？", "importance": "P7"},\n'
         '  {"question": "要紧的？", "importance": "P0"}\n'
         "]\n"
         f"{END_SENTINEL}\n"
     )
     _, items = extract(doc)
-    assert items[0]["question"] == "要紧的？"
+    assert [item["question"] for item in items] == ["要紧的？"]
     assert items[0]["importance"] == "P0"
-    assert {item["importance"] for item in items[1:]} == {"P1"}
+    # 丢弃不占号：留下的仍然是连续的 p-1
+    assert items[0]["id"] == "p-1"
 
 
 def test_extract_keeps_stable_order_within_same_importance() -> None:
@@ -326,9 +337,20 @@ def test_suppressor_carries_cross_chunk_prefix() -> None:
 
 
 def _pending_block(question: str) -> str:
-    """拼一个合法的标记块，模拟模型在正文末尾附的清单。"""
+    """拼一个合法的标记块，模拟模型在正文末尾附的清单。
+
+    带 `importance` 是**必须**的：等级缺失或不合法时 `extract` 会把该项直接丢弃，
+    这里若省掉，整条链路的用例都会变成「清单为空」。
+    """
     payload = json.dumps(
-        [{"question": question, "sections": ["2.1"], "decider": "产品负责人"}],
+        [
+            {
+                "question": question,
+                "sections": ["2.1"],
+                "decider": "产品负责人",
+                "importance": "P1",
+            }
+        ],
         ensure_ascii=False,
     )
     return f"{BEGIN_SENTINEL}\n{payload}\n{END_SENTINEL}"

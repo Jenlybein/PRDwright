@@ -107,11 +107,12 @@ export type DocumentKind = 'prd' | 'api-docs' | 'prompts'
 /**
  * 待确认项的「重要性等级」。
  *
- * P0 最关键（不确认会导致整份文档写错或没法开工）、P1 次之、P2 是可以后置的细节。
- * 由模型在生成正文时随清单标出，后端按 P0 → P1 → P2 排序后返回，因此**数组的顺序
- * 就是提问顺序**——越靠前的越先被问到。
+ * P0 最关键（不确认会导致整份文档写错或没法开工），数字越大越可以后置，直到 P6。
+ * 由模型在生成正文时随清单标出；后端**逐项校验**——等级缺失或超出 `P0` ~ `P6` 的项
+ * 会被直接丢弃（不兜底），因此前端拿到的每一项都带着合法等级。排序（P0 → P6）同样由
+ * 后端完成，所以**数组的顺序就是提问顺序**——越靠前的越先被问到。
  */
-export type PendingImportance = 'P0' | 'P1' | 'P2'
+export type PendingImportance = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'
 
 /**
  * 一条「待确认问题」。
@@ -125,7 +126,7 @@ export type PendingImportance = 'P0' | 'P1' | 'P2'
  * - `question`：一条待确认的问题（必填）；
  * - `sections`：受影响的章节编号数组（可为空）；
  * - `decider`：拍板人（可为空字符串）；
- * - `importance`：重要性等级；模型没标或标了非法值时后端统一兜底为 `P1`。
+ * - `importance`：重要性等级；后端保证是 `P0` ~ `P6` 之一（缺失或非法的项在收尾校验时已被丢弃）。
  */
 export interface PendingItem {
   /** 后端分配的全文档唯一 id（仅用于渲染 key） */
@@ -136,7 +137,7 @@ export interface PendingItem {
   sections: string[]
   /** 拍板人；未指明时为空串 */
   decider: string
-  /** 重要性等级；后端保证一定是三者之一 */
+  /** 重要性等级；后端保证一定是 `P0` ~ `P6` 之一 */
   importance: PendingImportance
 }
 

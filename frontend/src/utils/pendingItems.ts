@@ -14,53 +14,59 @@ import type { PendingImportance, PendingItem } from '@/types'
 /**
  * 重要性等级的排序权重，数字越小越重要。
  *
- * 后端已按 P0 → P1 → P2 排好序再返回，这里保留一份同口径的常量，是为了让前端在
+ * 后端已按 P0 → P6 排好序再返回，这里保留一份同口径的常量，是为了让前端在
  * 渲染前再兜一次底——万一将来后端改了顺序，展示顺序不会跟着乱掉。
  */
 const IMPORTANCE_ORDER: Record<PendingImportance, number> = {
   P0: 0,
   P1: 1,
   P2: 2,
+  P3: 3,
+  P4: 4,
+  P5: 5,
+  P6: 6,
 }
-
-/** 后端万一漏了等级时的兜底值，与后端 `_DEFAULT_IMPORTANCE` 一致。 */
-const DEFAULT_IMPORTANCE: PendingImportance = 'P1'
 
 /**
  * 把任意外部输入收敛成重要性等级。
  *
- * 这是纯防御：后端在 `pending_items.extract` 里已经把缺失/非法值兜成 P1 了，
+ * 这是纯防御：后端在收尾时**逐项校验**过等级（缺失或超出 P0~P6 的项已被丢弃），
  * 但前端两个入口（`api.parsePendingItems` 读快照、`documentService.toPendingItems`
  * 读接口）都要处理外部数据，各自写一遍判定就容易走偏，所以收口在这里。
  *
+ * ⚠️ **不兜底**：认不出来就返回 `null`，由调用方决定怎么处置（排序时排到最后、
+ * 展示时原样呈现）。替它猜一个等级，等于把一条没标级的问题伪装成已分级。
+ *
  * @param raw 外部数据里的重要性字段，可能是任何类型
- * @returns `P0` / `P1` / `P2` 之一
+ * @returns `P0` ~ `P6` 之一；认不出来时为 `null`
  */
-export function normalizeImportance(raw: unknown): PendingImportance {
+export function normalizeImportance(raw: unknown): PendingImportance | null {
   if (typeof raw === 'string') {
     const value = raw.trim().toUpperCase()
-    if (value === 'P0' || value === 'P1' || value === 'P2') {
-      return value
+    if (value in IMPORTANCE_ORDER) {
+      return value as PendingImportance
     }
   }
-  return DEFAULT_IMPORTANCE
+  return null
+}
+
+/** 某个等级的排序权重；认不出来的等级排在所有合法等级之后（而不是插到中间）。 */
+function rankOf(item: PendingItem): number {
+  const level = normalizeImportance(item.importance)
+  return level === null ? Object.keys(IMPORTANCE_ORDER).length : IMPORTANCE_ORDER[level]
 }
 
 /**
- * 按重要性从高到低排序（P0 → P1 → P2），同等级内保持原有顺序。
+ * 按重要性从高到低排序（P0 → P6），同等级内保持原有顺序。
  *
  * 后端提取时已经排过一次，这里做的是防御性重排；返回新数组，不改原数据。
- * 非法等级在这里也会走 `normalizeImportance` 兜底，不会退化成 NaN 排序。
+ * 认不出来的等级不会退化成 NaN 排序，而是统一排到最后。
  *
  * @param items 后端返回的待确认清单
  * @returns 排序后的新数组
  */
 export function sortPendingItems(items: PendingItem[]): PendingItem[] {
-  return [...items].sort((a, b) => {
-    const rankA = IMPORTANCE_ORDER[normalizeImportance(a.importance)]
-    const rankB = IMPORTANCE_ORDER[normalizeImportance(b.importance)]
-    return rankA - rankB
-  })
+  return [...items].sort((a, b) => rankOf(a) - rankOf(b))
 }
 
 /**
@@ -81,8 +87,8 @@ export function formatPendingItemsForChat(items: PendingItem[]): string {
       if (item.sections.length) details.push(`涉及章节：${item.sections.join('、')}`)
       if (item.decider) details.push(`拍板人：${item.decider}`)
       const suffix = details.length ? `（${details.join('；')}）` : ''
-      const level = normalizeImportance(item.importance)
-      return `${index + 1}. [${level}] ${item.question}${suffix}`
+      // 后端保证等级合法（非法的项已在收尾时丢弃），这里直接原样输出，不兜底
+      return `${index + 1}. [${item.importance}] ${item.question}${suffix}`
     })
     .join('\n')
 }
