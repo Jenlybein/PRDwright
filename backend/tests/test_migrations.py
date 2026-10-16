@@ -13,7 +13,7 @@ import sqlite3
 
 import pytest
 
-from backend.core.db import connect
+from backend.core.db import connect, utc_now_text
 from backend.core.migrations import Migration, current_version, run_migrations
 
 
@@ -231,8 +231,8 @@ def test_v3_migration_adds_pending_items_column_to_jobs() -> None:
     # 基线：只有 init_schema 的表，尚无该列
     assert "pending_items" not in {row["name"] for row in _table_info("generation_jobs")}
 
-    # 跑真实迁移清单（含 v3），最终版本应为 3
-    assert run_migrations() == 3
+    # 跑真实迁移清单（含 v3），最终版本应为 6（v4~v6 是文档版本链，与本步无关）
+    assert run_migrations() == 6
 
     cols = {row["name"]: row for row in _table_info("generation_jobs")}
     assert "pending_items" in cols
@@ -252,3 +252,135 @@ def test_v3_migration_adds_pending_items_column_to_jobs() -> None:
             "SELECT pending_items FROM generation_jobs WHERE owner_id = 1"
         ).fetchone()["pending_items"]
     assert raw == "[]"
+
+
+# ---------------------------------------------------------------------------
+# v4~v6：文档版本链（documents 退化为「身份 + 当前版本指针」，正文搬进版本表）
+# ---------------------------------------------------------------------------
+
+
+def _seed_solution_with_document(
+    kind: str = "prd",
+    content: str = "# 旧正文",
+    *,
+    content_sha: str = "sha000000000",
+    last_run_summary: str | None = '{"kind": "prd"}',
+) -> int:
+    """在「documents 仍带正文列」的旧库形态下，造一个用户 + 方案 + 一行文档。
+
+    前提：调用前库里已跑过 v1~v3（`documents` 表已存在且带正文列）。返回 `solution_id`。
+    """
+    now = utc_now_text()
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
+            ("legacy", "hash", b"salt", now),
+        )
+        user_id = int(cur.lastrowid or 0)
+        cur = conn.execute(
+            "INSERT INTO solutions (user_id, title, mode, stage, data, created_at, updated_at) "
+            "VALUES (?, '', '', '', '{}', ?, ?)",
+            (user_id, now, now),
+        )
+        solution_id = int(cur.lastrowid or 0)
+        conn.execute(
+            "INSERT INTO documents "
+            "(solution_id, kind, content, content_sha, pending_items, "
+            " last_run_summary, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, '[]', ?, ?, ?)",
+            (solution_id, kind, content, content_sha, last_run_summary, now, now),
+        )
+        conn.commit()
+    return solution_id
+
+
+def _columns(name: str) -> set[str]:
+    """某张表的列名集合。"""
+    return {row["name"] for row in _table_info(name)}
+
+
+def test_v4_v6_build_version_chain_and_backfill(monkeypatch) -> None:
+    """真实 v4~v6：建版本表、旧文档行回填成版本 1、原表四列被删、指针已接。
+
+    这是「正文全搬进版本表」这条单向门的核心——跑完之后 `documents` 不再有正文列，
+    正文只能从版本表读；旧行必须原样搬成 `version_no=1, source='migrated'`。
+    """
+    from backend.core.migrations import MIGRATIONS
+
+    # 先把库推到 v3：documents 仍是「带正文列」的旧形态
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS[:3])
+    assert run_migrations() == 3
+    solution_id = _seed_solution_with_document()
+
+    # 再跑完整清单：v4（建表 + 加指针）、v5（回填）、v6（删列）
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    assert run_migrations() == 6
+
+    assert _table_exists("document_versions")
+    cols = _columns("documents")
+    assert {"content", "content_sha", "pending_items", "last_run_summary"}.isdisjoint(cols)
+    assert "current_version_id" in cols
+
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT d.current_version_id, v.version_no, v.content, v.content_sha, "
+            "       v.source, v.last_run_summary "
+            "FROM documents d JOIN document_versions v ON v.id = d.current_version_id "
+            "WHERE d.solution_id = ?",
+            (solution_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["version_no"] == 1
+    assert row["content"] == "# 旧正文"
+    # 原样搬运：指纹与回执都不重算、不改形状
+    assert row["content_sha"] == "sha000000000"
+    assert row["last_run_summary"] == '{"kind": "prd"}'
+    assert row["source"] == "migrated"
+
+
+def test_v4_v6_is_idempotent(monkeypatch) -> None:
+    """版本链迁移跑第二次是空操作：不重复建版本、不报错。"""
+    from backend.core.migrations import MIGRATIONS
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS[:3])
+    run_migrations()
+    solution_id = _seed_solution_with_document()
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    assert run_migrations() == 6
+    assert run_migrations() == 6
+
+    with connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM document_versions v "
+            "JOIN documents d ON d.id = v.document_id WHERE d.solution_id = ?",
+            (solution_id,),
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_v4_v6_cascade_clears_versions(monkeypatch) -> None:
+    """删方案要连带清掉 documents 与该文档的全部版本，不留孤儿、不报错。
+
+    环形外键（documents ↔ document_versions）在这里最容易出问题，必须钉死。
+    """
+    from backend.core.migrations import MIGRATIONS
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS[:3])
+    run_migrations()
+    solution_id = _seed_solution_with_document()
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    run_migrations()
+
+    with connect() as conn:
+        conn.execute("DELETE FROM solutions WHERE id = ?", (solution_id,))
+        conn.commit()
+        docs = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE solution_id = ?", (solution_id,)
+        ).fetchone()[0]
+        versions = conn.execute("SELECT COUNT(*) FROM document_versions").fetchone()[0]
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    assert docs == 0
+    assert versions == 0
+    assert violations == []

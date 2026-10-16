@@ -190,12 +190,175 @@ def _add_pending_items_to_jobs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _create_document_versions_table(conn: sqlite3.Connection) -> None:
+    """v4：建 `document_versions`，并把 `documents` 改成「只留一个当前版本指针」。
+
+    在此之前，`documents` 一行既是「文档」也是「正文」——每次生成/改写都**直接覆盖**
+    同一行的 `content`，改坏了无从回头。这一步把「正文」抽成一条**版本链**：正文只存在
+    `document_versions` 里，`documents` 行退化为「这份文档的身份 + 它当前指向哪一版」。
+
+    为什么拆成两步（本步只建结构、v5 才回填、v6 才删列）：
+
+    - `documents.current_version_id → document_versions.id`（`ON DELETE SET NULL`）与
+      `document_versions.document_id → documents.id`（`ON DELETE CASCADE`）**互指**，
+      是一对环。回填时必须「先空着指针插版本行、再回填指针」，否则环形约束过不去——
+      所以结构先就位，数据下一小步单独搬。
+    - 删列是**不可逆的单向门**（改完旧代码读不到 `documents.content`），单独成步，
+      让它与「建结构 / 搬数据」这两件可反复排查的事分开。
+
+    `metadata` 是给后续阶段留的口袋（例如 v3.1 的 `quality_gate`），本期只写入 `'{}'`。
+    `pending_items` / `last_run_summary` 仍是**显式列**、不塞进口袋：它们是「一次生成」
+    的第一类产物（见 ADR-023），与「附加信息」要分清主次。
+    """
+    conn.execute(
+        """
+        CREATE TABLE document_versions (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id      INTEGER NOT NULL
+                             REFERENCES documents(id) ON DELETE CASCADE,
+            version_no       INTEGER NOT NULL,
+            content          TEXT    NOT NULL DEFAULT '',
+            content_sha      TEXT    NOT NULL DEFAULT '',
+            pending_items    TEXT    NOT NULL DEFAULT '[]',
+            last_run_summary TEXT,
+            source           TEXT    NOT NULL DEFAULT 'generated',
+            note             TEXT    NOT NULL DEFAULT '',
+            metadata         TEXT    NOT NULL DEFAULT '{}',
+            created_at       TEXT    NOT NULL,
+            updated_at       TEXT    NOT NULL,
+            UNIQUE (document_id, version_no)
+        )
+        """
+    )
+    # 不再另建索引：`UNIQUE(document_id, version_no)` 已生成一个以 `document_id` 打头的
+    # 索引，「按文档列版本 / 取最大 version_no」都由它覆盖。
+    #
+    # 用 ALTER 加列而非重建 `documents`：本机 SQLite 支持 ADD COLUMN 带 REFERENCES，
+    # 且**只在默认值为 NULL 时允许**——这里没有默认值即 NULL，恰好合法。
+    # 也不用「关外键 + 重建表」那套：`PRAGMA foreign_keys` 在事务内是空操作，而迁移
+    # 运行器把每一步包在 `BEGIN ... COMMIT` 里，步骤内部根本关不掉外键（见 §2 说明）。
+    conn.execute(
+        "ALTER TABLE documents ADD COLUMN current_version_id INTEGER "
+        "REFERENCES document_versions(id) ON DELETE SET NULL"
+    )
+
+
+def _backfill_document_versions(conn: sqlite3.Connection) -> None:
+    """v5：把现有 `documents` 行的正文/清单/回执搬成各自的第一条版本。
+
+    分两步、且顺序不能反：**先插版本行拿到 id，再回填 `current_version_id`**。
+    反过来（先给一个还不存在的版本 id 赋指针）会撞上环形外键。
+
+    三处刻意选择，与 v2 回填同一套理由：
+
+    - **逐行容错**：回填读的是历史用户数据，某一行损坏不该拦死整个服务的启动；坏行跳过、
+      记一条告警，其余照常。旧正文仍留在 `documents` 列里，下一步（v6）才删。
+    - **幂等**：`WHERE NOT EXISTS` 只挑「还没有任何版本」的文档行 + `ON CONFLICT DO NOTHING`
+      双保险，重复启动不会重复写、也不会覆盖已有版本。
+    - **原样搬运**：`content_sha` / `pending_items` / `last_run_summary` 不改形状、不重算——
+      回执是历史产物，重算反而失真。`source='migrated'` 让这一条能一眼认出是回填来的。
+    """
+    now = utc_now_text()
+    scanned = written = skipped = 0
+
+    rows = conn.execute(
+        "SELECT id, content, content_sha, pending_items, last_run_summary, "
+        "       created_at, updated_at "
+        "FROM documents d "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM document_versions v WHERE v.document_id = d.id"
+        ")"
+    ).fetchall()
+
+    for row in rows:
+        scanned += 1
+        document_id = int(row["id"])
+        try:
+            cursor = conn.execute(
+                "INSERT INTO document_versions "
+                "(document_id, version_no, content, content_sha, pending_items, "
+                " last_run_summary, source, note, metadata, created_at, updated_at) "
+                "VALUES (?, 1, ?, ?, ?, ?, 'migrated', '', '{}', ?, ?) "
+                "ON CONFLICT(document_id, version_no) DO NOTHING",
+                (
+                    document_id,
+                    row["content"] or "",
+                    row["content_sha"] or "",
+                    row["pending_items"] or "[]",
+                    row["last_run_summary"],
+                    row["created_at"] or now,
+                    row["updated_at"] or now,
+                ),
+            )
+            version_id = int(cursor.lastrowid or 0)
+            if cursor.rowcount == 0:
+                # ON CONFLICT 命中时 `lastrowid` 不可靠，显式取回已存在的版本 1
+                existing = conn.execute(
+                    "SELECT id FROM document_versions "
+                    "WHERE document_id = ? AND version_no = 1",
+                    (document_id,),
+                ).fetchone()
+                version_id = int(existing["id"]) if existing else 0
+            if version_id:
+                conn.execute(
+                    "UPDATE documents SET current_version_id = ? "
+                    "WHERE id = ? AND current_version_id IS NULL",
+                    (version_id, document_id),
+                )
+                written += 1
+        except Exception:  # noqa: BLE001 - 回填逐行容错：坏行跳过，不拦死启动
+            skipped += 1
+            logger.warning(
+                "迁移跳过无法回填的文档行：document_id=%s",
+                document_id,
+                extra={"event": "migration.version_row_skipped", "document_id": document_id},
+            )
+
+    logger.info(
+        "文档版本回填完成：扫描 %d 行，写入 %d 条版本，跳过 %d 行",
+        scanned,
+        written,
+        skipped,
+        extra={
+            "event": "migration.document_versions_backfilled",
+            "scanned": scanned,
+            "written": written,
+            "skipped": skipped,
+        },
+    )
+
+
+def _drop_documents_content_columns(conn: sqlite3.Connection) -> None:
+    """v6：删掉 `documents` 上已被版本表接管的四列——**单向门**。
+
+    删完旧代码再也读不到 `documents.content`，回滚只能靠迁移前的数据库文件备份。
+    之所以敢删：正文已在上一步完整搬进 `document_versions`，且两份并存会立刻引出
+    「谁是当前正文的真源」这种迟早出错的歧义。删列让「正文只有一个家」成为结构事实。
+
+    为什么用原生 `DROP COLUMN` 而不是「重建表」：
+
+    - 本机 SQLite ≥ 3.35，这四列都是普通列（非主键、无 UNIQUE、未进索引 / 外键 /
+      CHECK / 触发器 / 视图），原生删列直接可用，不必重建。
+    - 重建表那套要先 `PRAGMA foreign_keys=OFF`，而**该 PRAGMA 在事务内是空操作**，
+      迁移运行器又把每一步包在事务里——步骤内部关不掉外键。为个别需求去改运行器
+      不划算，所以走原生删列。
+
+    级联链在删列后依旧成立：删方案 → 删 `documents` 行 → 删其 `document_versions`。
+    """
+    for column in ("content", "content_sha", "pending_items", "last_run_summary"):
+        # 列名来自本文件内的固定字面量，不是外部输入，没有注入面。
+        conn.execute(f"ALTER TABLE documents DROP COLUMN {column}")
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
     Migration(version=1, name="documents_table", apply=_create_documents_table),
     Migration(version=2, name="backfill_documents", apply=_backfill_documents),
     Migration(version=3, name="jobs_pending_items", apply=_add_pending_items_to_jobs),
+    Migration(version=4, name="document_versions_table", apply=_create_document_versions_table),
+    Migration(version=5, name="backfill_document_versions", apply=_backfill_document_versions),
+    Migration(version=6, name="documents_drop_content_columns", apply=_drop_documents_content_columns),
 ]
 
 

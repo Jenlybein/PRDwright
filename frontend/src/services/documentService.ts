@@ -17,7 +17,14 @@ import axios from 'axios'
 import http from '@/services/api'
 import { parseRunSummary } from '@/utils/workflow'
 import { normalizeImportance } from '@/utils/pendingItems'
-import type { DocumentKind, DocumentRecord, PendingItem, RunSummary } from '@/types'
+import type {
+  DocumentKind,
+  DocumentRecord,
+  DocumentVersionDetail,
+  DocumentVersionSummary,
+  PendingItem,
+  RunSummary,
+} from '@/types'
 
 /** 后端 `kind` 用下划线，前端 `DocumentKind` 用连字符——这里是唯一的转换点 */
 function toBackendKind(kind: DocumentKind): string {
@@ -154,5 +161,149 @@ export async function saveDocument(
     // 兜底文案与上面 `toRecord` 失配时抛的错同源：非 axios 错误一律收敛成它，
     // 因此这里不必再分辨「是不是自己抛的」——那会变成拿中文文案做判断。
     throw new Error(backendMessage(error, '保存文档失败'))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 版本链：读列表 / 读详情 / 存为新版本 / 恢复
+// ---------------------------------------------------------------------------
+
+/**
+ * 把后端返回的一条版本摘要收敛成前端结构。
+ *
+ * 逐字段防御：`version_id` 是恢复动作的引用键，缺了它就是一条不可用的记录，直接丢弃；
+ * 其余字段缺省时退化为空值，不让一条信息不全的版本把整个列表拖没。
+ */
+function toVersionSummary(data: unknown): DocumentVersionSummary | null {
+  if (typeof data !== 'object' || data === null) return null
+  const raw = data as Record<string, unknown>
+  if (typeof raw.version_id !== 'number') return null
+  return {
+    versionId: raw.version_id,
+    versionNo: typeof raw.version_no === 'number' ? raw.version_no : 0,
+    source: typeof raw.source === 'string' ? raw.source : '',
+    note: typeof raw.note === 'string' ? raw.note : '',
+    contentSha: typeof raw.content_sha === 'string' ? raw.content_sha : '',
+    contentLength: typeof raw.content_length === 'number' ? raw.content_length : 0,
+    createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
+    isCurrent: raw.is_current === true,
+  }
+}
+
+/** 把后端返回的版本详情收敛成前端结构；摘要有问题则整条丢弃 */
+function toVersionDetail(data: unknown): DocumentVersionDetail | null {
+  const summary = toVersionSummary(data)
+  if (summary === null) return null
+  const raw = data as Record<string, unknown>
+  return {
+    ...summary,
+    content: typeof raw.content === 'string' ? raw.content : '',
+    pendingItems: toPendingItems(raw.pending_items),
+    runSummary: parseRunSummary(raw.last_run_summary),
+    updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
+  }
+}
+
+/**
+ * 读取某份文档的版本列表（摘要，不含正文）。
+ * 对应 `GET /api/solutions/{id}/documents/{kind}/versions`。
+ *
+ * 「方案不可见」是 404（抛错），「还没有任何版本」是 200 + 空列表。
+ */
+export async function fetchVersions(
+  solutionId: number,
+  kind: DocumentKind,
+): Promise<DocumentVersionSummary[]> {
+  try {
+    const { data } = await http.get<{ versions?: unknown[] }>(
+      `/api/solutions/${solutionId}/documents/${toBackendKind(kind)}/versions`,
+    )
+    const items = Array.isArray(data?.versions) ? data.versions : []
+    return items
+      .map(toVersionSummary)
+      .filter((item): item is DocumentVersionSummary => item !== null)
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      throw new DocumentsNotFoundError()
+    }
+    throw new Error(backendMessage(error, '无法读取版本历史'))
+  }
+}
+
+/**
+ * 读取某一条版本的完整内容（含正文 / 清单 / 回执）。
+ * 对应 `GET /api/solutions/{id}/documents/{kind}/versions/{version_id}`。
+ */
+export async function fetchVersion(
+  solutionId: number,
+  kind: DocumentKind,
+  versionId: number,
+): Promise<DocumentVersionDetail> {
+  try {
+    const { data } = await http.get(
+      `/api/solutions/${solutionId}/documents/${toBackendKind(kind)}/versions/${versionId}`,
+    )
+    const detail = toVersionDetail(data)
+    if (detail === null) throw new Error('版本内容不可用')
+    return detail
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      throw new DocumentsNotFoundError()
+    }
+    throw new Error(backendMessage(error, '无法读取该版本'))
+  }
+}
+
+/**
+ * 把当前正文存为一个新版本（打里程碑）。
+ * 对应 `POST /api/solutions/{id}/documents/{kind}/checkpoint`。
+ *
+ * `content` 由调用方给出（取用户**眼前**那一版）：后端会把它连同当前版本的清单 / 回执
+ * 一起存成新的一版，返回更新后的当前文档。
+ */
+export async function checkpointDocument(
+  solutionId: number,
+  kind: DocumentKind,
+  content: string,
+  note = '',
+): Promise<DocumentRecord> {
+  try {
+    const { data } = await http.post(
+      `/api/solutions/${solutionId}/documents/${toBackendKind(kind)}/checkpoint`,
+      { content, note },
+    )
+    const record = toRecord(data)
+    if (record === null) throw new Error('保存为新版本失败')
+    return record
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      throw new DocumentsNotFoundError()
+    }
+    throw new Error(backendMessage(error, '保存为新版本失败'))
+  }
+}
+
+/**
+ * 把某个历史版本恢复为当前版本（后端实现为「追加一条新版本」）。
+ * 对应 `POST /api/solutions/{id}/documents/{kind}/restore`。
+ */
+export async function restoreVersion(
+  solutionId: number,
+  kind: DocumentKind,
+  versionId: number,
+): Promise<DocumentRecord> {
+  try {
+    const { data } = await http.post(
+      `/api/solutions/${solutionId}/documents/${toBackendKind(kind)}/restore`,
+      { version_id: versionId },
+    )
+    const record = toRecord(data)
+    if (record === null) throw new Error('恢复版本失败')
+    return record
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      throw new DocumentsNotFoundError()
+    }
+    throw new Error(backendMessage(error, '恢复版本失败'))
   }
 }

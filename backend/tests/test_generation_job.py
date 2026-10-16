@@ -748,6 +748,101 @@ def test_doc_kind_rejects_unknown_value(client):
 
 
 # ---------------------------------------------------------------------------
+# 文档落库：版本语义（整篇生成追加版本；优化 / 澄清就地改当前版本）
+# ---------------------------------------------------------------------------
+
+
+def _versions(uid: int, solution_id: int, kind: str) -> list[dict]:
+    """取某方案某产物的版本摘要列表（新→旧）。"""
+    return document_store.list_versions(uid, solution_id, kind)
+
+
+def test_completed_generation_appends_a_version(client, monkeypatch):
+    """整篇生成成功 = 追加一条新版本，来源标为该产物类型，且它就是当前版本。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+
+    _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
+
+    versions = _versions(uid, solution_id, "prd")
+    assert [v["version_no"] for v in versions] == [1]
+    assert versions[0]["source"] == "prd"
+    assert versions[0]["is_current"] is True
+
+
+def test_regenerating_prd_appends_version_and_clears_downstream_versions(client, monkeypatch):
+    """重新生成 PRD：PRD 追加一条新版本，下游文档**连同它们的版本**一起退场。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# 旧 PRD")
+    document_store.save_document(uid, solution_id, "prompts", "# 旧提示词")
+    assert len(_versions(uid, solution_id, "prompts")) == 1
+
+    _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+    _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
+
+    assert [v["version_no"] for v in _versions(uid, solution_id, "prd")] == [2, 1]
+    # 下游被删，其版本随 CASCADE 消失
+    assert _versions(uid, solution_id, "prompts") == []
+
+
+def test_optimize_rewrites_current_version_without_new_entry(client, monkeypatch):
+    """就地优化**不新增版本条目**、不动下游：版本数不变，当前版本正文被改写。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# 原 PRD")
+    document_store.save_document(uid, solution_id, "prompts", "# 原提示词")
+    before = len(_versions(uid, solution_id, "prd"))
+
+    _fake_service(monkeypatch, ScriptedLLM(["优化后的 PRD"]))
+    _run_job(
+        uid,
+        solution_id,
+        "optimize",
+        {"document": "# 原 PRD", "instruction": "补一段", "doc_kind": "prd"},
+    )
+
+    assert len(_versions(uid, solution_id, "prd")) == before  # 条目数不增
+    assert document_store.get_document(uid, solution_id, "prd")["content"] == "优化后的 PRD"
+    # 下游不被顺手删掉
+    assert {d["kind"] for d in document_store.list_documents(uid, solution_id)} == {
+        "prd",
+        "prompts",
+    }
+
+
+def test_clarify_rewrites_current_version_without_new_entry(client, monkeypatch):
+    """按澄清改写同样就地改当前版本：不新增条目、不删下游。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# 原 PRD")
+    before = len(_versions(uid, solution_id, "prd"))
+
+    _fake_service(monkeypatch, ScriptedLLM(["按澄清改写后的 PRD"]))
+    _run_job(
+        uid,
+        solution_id,
+        "clarify",
+        {
+            "document": "# 原 PRD",
+            "history": [{"role": "user", "content": "登录方式确定为手机号"}],
+            "doc_kind": "prd",
+        },
+    )
+
+    assert len(_versions(uid, solution_id, "prd")) == before
+    assert (
+        document_store.get_document(uid, solution_id, "prd")["content"]
+        == "按澄清改写后的 PRD"
+    )
+
+
+# ---------------------------------------------------------------------------
 # P3-b：待确认清单贯穿 generation_jobs（迁移 + 仓储三方法 + 两路快照）
 # ---------------------------------------------------------------------------
 

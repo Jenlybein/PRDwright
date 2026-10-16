@@ -350,6 +350,73 @@ class DocumentSaveRequest(BaseModel):
     content: str = Field(description="用户编辑后的完整文档正文")
 
 
+# ---------------------------------------------------------------------------
+# 文档版本（document_versions）：存为新版本 / 看历史 / 恢复
+# ---------------------------------------------------------------------------
+# 「正文只住在版本表」之后，documents 行只是一份文档的身份 + 当前版本指针。
+# 对外读文档（DocumentItem）的结构**不变**，版本是**新增**的一组读 / 写能力。
+
+
+class DocumentVersionItem(BaseModel):
+    """版本摘要，用于版本列表。刻意**不含正文**——列表可能很长，只给概览。"""
+
+    version_id: int = Field(description="版本 id（供恢复引用）")
+    version_no: int = Field(description="版本序号，从 1 开始、单调递增")
+    source: str = Field(
+        description="这一版的来源：prd / api_docs / prompts（整篇生成）、optimize / clarify（就地改写）、"
+        "manual（手改）、checkpoint（用户存为新版本）、restore（恢复）、migrated（迁移回填）"
+    )
+    note: str = Field(default="", description="「存为新版本」时用户写的备注；其它来源为空")
+    content_sha: str = Field(default="", description="内容指纹（排查用，不属于展示契约）")
+    content_length: int = Field(default=0, description="正文字符数（概览用，不下发正文）")
+    created_at: str = Field(description="创建时间（UTC ISO 8601）")
+    is_current: bool = Field(default=False, description="是否为当前版本")
+
+
+class DocumentVersionDetail(BaseModel):
+    """版本详情：摘要 + 正文 + 清单 + 回执。"""
+
+    version_id: int = Field(description="版本 id")
+    version_no: int = Field(description="版本序号")
+    content: str = Field(default="", description="该版本文档正文（Markdown）")
+    pending_items: list[dict[str, Any]] = Field(
+        default_factory=list, description="该版本当时的待确认清单"
+    )
+    last_run_summary: dict[str, Any] | None = Field(
+        default=None, description="该版本当时的用量回执；缺失为 null"
+    )
+    source: str = Field(description="这一版的来源（见 DocumentVersionItem.source）")
+    note: str = Field(default="", description="备注")
+    created_at: str = Field(description="创建时间（UTC ISO 8601）")
+    updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
+    is_current: bool = Field(default=False, description="是否为当前版本")
+
+
+class DocumentVersionListResponse(BaseModel):
+    """某份文档的版本列表。包一层对象，与其它列表响应保持同一约定。"""
+
+    versions: list[DocumentVersionItem] = Field(
+        default_factory=list, description="版本摘要，按版本号从新到旧"
+    )
+
+
+class DocumentCheckpointRequest(BaseModel):
+    """把当前正文「存为一个新版本」的提交体。
+
+    `content` 由客户端给出（取用户**眼前**这一版）——防抖窗口内用户刚敲的字可能还没落库，
+    直接存库里那份会丢掉它。清单与回执则从服务端当前版本继承，不由客户端改。
+    """
+
+    content: str = Field(description="要存为新版本的完整文档正文")
+    note: str = Field(default="", max_length=200, description="这一版的备注，可有可无")
+
+
+class DocumentRestoreRequest(BaseModel):
+    """恢复某个历史版本的提交体。"""
+
+    version_id: int = Field(description="要恢复的历史版本 id")
+
+
 # ============================================================================
 # 生成任务（generation_jobs）：把一次生成持久化并支持刷新重连
 # ============================================================================

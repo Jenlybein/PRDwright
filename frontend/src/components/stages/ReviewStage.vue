@@ -48,6 +48,8 @@ const emit = defineEmits<{
    * 下载必须拿到用户眼前这一版。
    */
   download: [content: string]
+  /** 打开版本历史抽屉 */
+  openVersions: []
   /** 提交 AI 优化指令 */
   optimize: [payload: { content: string; instruction: string }]
   /** 返回对话 */
@@ -359,6 +361,19 @@ function submitOptimize(): void {
                 <path d="M5 3a2 2 0 00-2 2v6a2 2 0 002 2h1V7a2 2 0 012-2h6V5a2 2 0 00-2-2H5z" />
               </svg>
               {{ doc?.copyTip || '复制' }}
+            </AppButton>
+
+            <!-- 版本历史：抽屉的**入口**落在底栏内容行（ADR-015 的唯一操作落点），
+                 抽屉内只有内容操作（存为新版本 / 恢复），不出现流程动作（见 ADR-030）。 -->
+            <AppButton variant="secondary" size="sm" @click="emit('openVersions')">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+              版本
             </AppButton>
           </div>
 

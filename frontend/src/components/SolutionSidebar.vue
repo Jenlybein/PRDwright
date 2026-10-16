@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useSolutionsStore } from '@/stores/solutions'
 import type { SolutionSummary } from '@/types'
+import { relativeTime } from '@/utils/time'
 import AppButton from '@/components/ui/AppButton.vue'
 import ThemeMenu from '@/components/ui/ThemeMenu.vue'
 import UserMenu from '@/components/UserMenu.vue'
@@ -43,27 +44,6 @@ onMounted(() => {
 
 /** 当前打开的方案在列表里的位置，用于高亮 */
 const activeId = computed(() => solutions.currentId)
-
-/** 把 UTC 时间转成「刚刚 / 3 分钟前 / 10-13 15:20」这种相对说法 */
-function relativeTime(iso: string): string {
-  if (!iso) return ''
-  // 后端存的是不带时区后缀的 UTC 字符串，直接 new Date 会被当成本地时间，
-  // 因此这里补上 Z 再解析，否则在东八区会显示成「8 小时前」这样的错值。
-  const parsed = new Date(iso.endsWith('Z') ? iso : `${iso}Z`)
-  if (Number.isNaN(parsed.getTime())) return ''
-
-  const diffMs = Date.now() - parsed.getTime()
-  const minutes = Math.floor(diffMs / 60_000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟前`
-
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
-
-  const d = parsed
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
 
 function confirmDelete(item: SolutionSummary): void {
   pendingDeleteId.value = item.id

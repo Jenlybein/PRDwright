@@ -452,12 +452,15 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
 
 
 def _regenerates_whole_document(kind: str) -> bool:
-    """这次任务是否是「整篇重生成上游产物」——只有它会连带作废下游。
+    """这次任务是否是「整篇重生成上游产物」——只有它会连带作废下游、且追加新版本。
 
     依据是产物依赖链（`document_store.DOWNSTREAM_KINDS`）：下游由上游正文推导而来，
     上游换了一版，下游就不再成立。反过来，`optimize`（按指令就地优化）与 `clarify`
     （按澄清改写）动的都是**同一份**文档的局部，其它产物仍然是按同一份上游推出来的，
     不该被顺手删掉。
+
+    这个判断现在同时驱动两件事，且二者**恒等**（故合成一个 `append_version` 标志）：
+    整篇生成 → 追加新版本 + 删下游；就地改写 → 改当前版本、不删下游。
 
     ⚠️ 这条判断以前是隐式的（一律 `invalidate_downstream=True`），后果是「优化接口文档」
     会把基于它生成的提示词悄悄删掉——用户看不到任何提示，只是下次打开方案时东西不见了。
@@ -503,9 +506,12 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             content,
             pending_items=runtime.pending_items,
             run_summary=summary,
-            # 只有整篇重生成才让下游失效；`optimize` / `clarify` 是对同一份文档的就地改写，
-            # 顺手删掉下游属于静默的数据丢失（见 `_regenerates_whole_document`）
-            invalidate_downstream=_regenerates_whole_document(runtime.kind),
+            # `append_version=True`（整篇生成）同时意味着「追加新版本 + 让下游失效」；
+            # `False`（optimize / clarify）就是就地改当前版本、不删下游。两个语义收在一个
+            # 标志上，避免「该追加却不删下游」这类两标志打架的组合（见 `_regenerates_whole_document`）
+            append_version=_regenerates_whole_document(runtime.kind),
+            # 版本来源标签：整篇生成时是产物类型，就地改写时是动作类型（optimize / clarify）
+            source=runtime.kind,
         )
     except Exception:  # noqa: BLE001 - 落文档不该把已成功的任务判失败
         logger.warning(

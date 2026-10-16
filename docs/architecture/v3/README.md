@@ -18,8 +18,10 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 **R2-T9「技能知识层统一」（ADR-019 / ADR-020）已落地**：技能注册表 + 三个技能包就位，
 14 条接口规范与提示词规范全部迁入技能包并由生成线全量注入，前端 RAG 确认页与本地词法检索整条下线。
 **C 层「文档所有权与清单」也已落地**（ADR-021 ~ 028，见下面落地点一节）：三份产物归后端
-`documents` 单表所有、待确认清单成为生成的第一类产物（按 P0~P6 分级）、四条澄清线程收进
-同一个对话页、会话改单点登录；其中**版本链明确推迟**（第 4.3 节末）。
+`documents` / `document_versions` 所有、待确认清单成为生成的第一类产物（按 P0~P6 分级）、四条澄清线程收进
+同一个对话页、会话改单点登录。
+**版本链随后也落地**（ADR-029 / 030，原「本期明确推迟」由此作废）：正文全搬进
+`document_versions`、`documents` 只留当前版本指针，能存为新版本、回看、恢复，展示为右侧可收起抽屉。
 注意 R1-T2 断点续传已裁决延后、自动切换供应商已裁决不做（ADR-016），
 动手前重点读第 4.2 / 4.3 / 4.4 / 4.6 节，实施状态以 `roadmap.md` 第八节为准。
 
@@ -30,7 +32,7 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 版本阶段 | 任务阶段 | 目标 |
 | --- | --- | --- |
 | v3.0 | R1 | 生成可靠性：生成 Job 中间态 + 成本计量与预算 / **单次调用自愈**（超时 + 有限重试）/ 断点续传 |
-| v3.1 | R2 | 技能资产加固（热重载 + fail-fast）✅、可观测性基线 ✅、**技能知识层统一 / RAG 下线 ✅**（原「RAG 资产登记」被它吸收） |
+| v3.1 | R2 | 技能资产加固（热重载 + fail-fast）✅、可观测性基线 ✅、**技能知识层统一 / RAG 下线 ✅**（原「RAG 资产登记」被它吸收）；另含 **C 文档生命周期 ✅**（所有权 + 清单 + 澄清 + 单点登录 + **版本链**，ADR-021 ~ 030） |
 | v3.2 | R3 | Docker 化、生产加固（Cookie Secure / 邀请码轮换）、部署态隔离验证 |
 
 ## 已拍板的三件事（前两件随 R1-T0 落地，第三件随 T4 决策）
@@ -81,8 +83,8 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 
 | 议题 | 落定做法 | 位置 |
 | --- | --- | --- |
-| 正文归谁 | **后端 `documents` 单表**为唯一真源，`(solution_id, kind)` 唯一；前端只有工作副本 | `repositories/document_repo.py` + `services/document_store.py` |
-| 写正文的入口 | **唯一**：job 成功收尾，正文 / 清单 / 回执**同批替换**；失败不写 | `job_service._write_document` → `document_store.commit_generated` |
+| 正文归谁 | **后端**为唯一真源：`documents` 一行表示「这份文档的身份 + 当前版本指针」（`(solution_id, kind)` 唯一），正文住在 `document_versions`（版本链落地后，见下一节）；前端只有工作副本 | `repositories/document_repo.py` + `services/document_store.py` |
+| 写正文的入口 | **唯一**：job 成功收尾，正文 / 清单 / 回执**同批写入一版**（整篇生成追加新版本，`optimize` / `clarify` 就地改当前版本）；失败不写 | `job_service._write_document` → `document_store.commit_generated` |
 | 前端通道 | 只剩两条：`GET /api/solutions/{id}/documents`（读）、`PUT .../documents/{kind}`（手改，**不碰**清单与回执） | `services/documentService.ts` + `stores/documents.ts` |
 | 快照里的正文 | `SessionDataV2` 退役三个 `*Content` 与三个 `*RunSummary`；旧快照残留**被忽略**（不做兼容读） | `types/index.ts` + `utils/workflow.ts::normalizeSessionSnapshot` |
 | 加表 / 加列 | **有序幂等迁移**（`PRAGMA user_version`，每步独立事务、只跑增量）；`init_schema` 只建基线表 | `core/migrations.py` |
@@ -102,3 +104,23 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 线程怎么作废 | 整篇重生成一份产物时，作废**它自己与下游**的线程（PRD → 三份，接口 → 接口 + 提示词，提示词 → 自己）；**就地改写不作废**。旧线程聊的是上一版的清单，留着会把结论写进新文档 | `composables/useDocumentPipeline.ts::dropThreadsFor` + `stores/workflow.ts::dropChatThread` |
 | 会话回收 | **单点登录**：新登录在一条事务里「先删后插」吊销该用户全部旧会话（ADR-024），零 schema 变更、中间件零改动 | `repositories/auth_repo.py::replace_for_user` |
 | 未填题目怎么交代 | 已答项之后汇总一行「以下题目用户未填写：…」——否则模型分不清「问过但留空」与「没这道题」 | `conversation_service.format_form_data` |
+
+## 文档版本管理落地点（2026-10-16）
+
+版本链兑现（ADR-029）+ 抽屉例外（ADR-030）。正文从「单表一行」变成「一条只增不改的历史」：
+
+| 议题 | 落定做法 | 位置 |
+| --- | --- | --- |
+| 正文住在哪 | **`document_versions`**（`UNIQUE(document_id, version_no)`，`document_id` 外键 `ON DELETE CASCADE`）；`documents` 退化为「身份 + 当前版本指针」（`current_version_id`，`ON DELETE SET NULL`）。**正文只有一个家** | `core/migrations.py` v4 + `repositories/document_repo.py` |
+| 版本何时产生 | 整篇生成**追加新版本**；`optimize` / `clarify` / 用户手改**就地改当前版本**（不新增条目）；checkpoint / restore **追加新版本**。判定与「是否删下游」共用 `_regenerates_whole_document`，收敛成一个 `append_version` 标志（两个语义恒等） | `job_service._write_document` + `document_store.commit_generated` |
+| 恢复怎么做 | 读源版本 → **追加一条 `source='restore'` 的新版本**，**不拨指针**：历史只增不改，恢复这个动作本身也留痕 | `document_store.restore` |
+| 清单 / 回执跟着版本吗 | 跟着。它们是版本行上的**显式列**（不塞进 `metadata` 口袋），恢复某一版时**清单一起还原**，不会还原出一份与正文对不上的旧清单 | `document_versions` 列 + `document_store._to_version_detail` |
+| 迁移三步 | v4 建表 + 加指针 → v5 逐行容错回填成 `version_no=1, source='migrated'`（先插入空指针的文档行 → 插版本 → 回填指针，环形外键决定的顺序）→ v6 删 `documents` 的四个正文列（**单向门**） | `core/migrations.py` |
+| 为什么用原生删列 | `PRAGMA foreign_keys` **在事务内是空操作**，而迁移运行器把每步包在 `BEGIN ... COMMIT` 里 → 「关外键 + 重建表」那套在步骤内部关不掉外键；四列都是普通列，原生 `ALTER TABLE ... DROP COLUMN` 直接可用 | `core/migrations.py::_drop_documents_content_columns` |
+| 对外结构变了吗 | **没变**。`DocumentItem` 仍返回 `kind / content / pending_items / last_run_summary / updated_at`，读文档的调用方（路由、前端 store）**一行未改**；版本是一组**新增**能力 | `document_store._to_item` |
+| 版本路由挂哪 | **solution 作用域**：`GET .../documents/{kind}/versions`、`.../versions/{version_id}`、`POST .../{kind}/checkpoint`、`POST .../{kind}/restore`。草稿里的 `/api/documents/{kind}/...` 没法在 SQL 层过滤归属（版本链只能经两级 JOIN 判归属），会破坏「越权不可区分」的口径 | `api/documents.py` |
+| 版本不存在怎么办 | **复用 `SOLUTION_NOT_FOUND`（404）**，不新增错误码（ADR-012）；「方案不可见」是 404、「还没有任何版本」是 200 + 空列表 | `api/documents.py` |
+| 前端状态放哪 | 另开 `stores/documentVersions.ts`（**不挂 `documents`**——后者已背 800ms 防抖 + 单飞 + `changeEpoch`，再叠一套状态会互相干扰）；归属直接读 `documents.solutionId`，不另存一份 | `stores/documentVersions.ts` |
+| 写动作之后必须做什么 | 先 `flushPendingSave`（否则 `loadAll` 会把未落库的旧草稿盖在恢复结果之上，用户以为「恢复没生效」），成功后**重新拉文档 + 重拉版本列表**（否则编辑器里还是旧正文） | `stores/documentVersions.ts::runMutation` |
+| 抽屉怎么摆 | 右侧**可收起浮层**：默认收起、`fixed`、以 `--shell-action-bar-h` 作下边距**不遮底栏**、不挤中部布局（正文仍 768px 居中）；入口在底栏内容行。**ADR-015 的有意例外**：抽屉里只放**内容操作**，流程动作（生成下一份 / 完成 / 返回）永远只在底栏 | `components/ui/VersionDrawer.vue` + `ADR-030` |
+| 本版不做什么 | **两版 diff**（差异渲染）不做——版本链落地后它不再是「依赖未完成」，但「回看 + 恢复」已经能回答用户的问题 | `ARCHITECTURE.md` §2 本期不做 |

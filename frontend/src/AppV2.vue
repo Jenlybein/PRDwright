@@ -16,11 +16,13 @@ import ProgressSteps from '@/components/stages/ProgressSteps.vue'
 import PromptDebugStage from '@/components/stages/PromptDebugStage.vue'
 import QuickPrdStage from '@/components/stages/QuickPrdStage.vue'
 import ReviewStage from '@/components/stages/ReviewStage.vue'
+import VersionDrawer from '@/components/ui/VersionDrawer.vue'
 import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
 import { fetchActiveJobs, onUnauthorized } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useDocumentsStore } from '@/stores/documents'
+import { useDocumentVersionsStore } from '@/stores/documentVersions'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import {
@@ -432,6 +434,79 @@ const {
 } = useDocumentPipeline({ onNotice: flashSavedTip })
 
 // ---------------------------------------------------------------------------
+// 文档版本抽屉：存为新版本 / 看历史 / 恢复
+//
+// 入口在审阅页底栏的内容行（ADR-015 的唯一操作落点），抽屉本身只承载**内容操作**、
+// 不出现流程动作，并以底栏高度为下边距避免遮挡（见 ADR-030）。版本列表与两个写动作
+// 都在 `stores/documentVersions.ts`，本文件只做接线。
+// ---------------------------------------------------------------------------
+
+const versions = useDocumentVersionsStore()
+
+/** 版本抽屉是否展开 */
+const versionDrawerOpen = ref(false)
+
+/** 当前审阅的是哪一份产物；非审阅阶段为 null（抽屉只在审阅页可用） */
+const activeDocKind = computed(() => docKindOfState(viewState.value))
+
+/** 打开抽屉：先摆出当前文档的展示名，再拉一次版本列表 */
+function openVersions(): void {
+  const kind = activeDocKind.value
+  if (!kind) return
+  versionDrawerOpen.value = true
+  void versions.load(kind)
+}
+
+/** 收起抽屉 */
+function closeVersions(): void {
+  versionDrawerOpen.value = false
+}
+
+/**
+ * 存为新版本：正文取 `documents` 的工作副本。
+ *
+ * 工作副本在每次输入时就已同步（`documents.save` 先改本地再排队落库），因此它就是
+ * 用户眼前那一版；抽屉是纯展示组件，不持有编辑器草稿。
+ */
+async function handleCheckpoint(note: string): Promise<void> {
+  const kind = activeDocKind.value
+  if (!kind) return
+  const ok = await versions.checkpoint(kind, documentContents.value[kind], note)
+  if (ok) flashSavedTip('已存为新版本')
+}
+
+/** 恢复历史版本：成功后当前文档会换成被恢复的那一版 */
+async function handleRestore(versionId: number): Promise<void> {
+  const kind = activeDocKind.value
+  if (!kind) return
+  const ok = await versions.restore(kind, versionId)
+  if (ok) flashSavedTip('已恢复到所选版本')
+}
+
+/**
+ * 离开审阅页、或换了另一份文档，就把抽屉收起来。
+ *
+ * 不收的话它会浮在那儿，标题与列表却已经不是它描述的那份文档了——比看不见更糟。
+ */
+watch(activeDocKind, () => {
+  versionDrawerOpen.value = false
+})
+
+/** 换方案时清掉上一个方案的版本列表（否则打开新方案会先闪一下旧方案的版本） */
+watch(
+  () => documents.solutionId,
+  () => versions.clear(),
+)
+
+/** 版本操作失败（读取 / 写入）闪一条红色提示；抽屉列表区也会显示同一原因 */
+watch(
+  () => versions.error,
+  (message, previous) => {
+    if (message && message !== previous) flashSavedTip(message, 'danger')
+  },
+)
+
+// ---------------------------------------------------------------------------
 // 澄清对话：四条线程，各一个实例
 //
 // 四条线程（需求 / PRD / 接口 / 提示词）**跑的是同一套骨架**，差异只有两点：
@@ -773,6 +848,7 @@ function handleStepClick(stepId: StepId): void {
         @draft-change="onSaveDocument"
         @download="onDownloadDocument"
         @optimize="onAiOptimize"
+        @open-versions="openVersions"
         @back="backToInput"
         @generate-api-docs="handleGenerateApiDocs"
         @generate-prompts="handleGeneratePrompts"
@@ -815,6 +891,22 @@ function handleStepClick(stepId: StepId): void {
       改成吸底操作栏后它与操作栏直接重叠，而品牌在侧栏顶端已有，故移除。
     -->
     </div>
+
+    <!--
+      版本历史抽屉：固定在右侧、默认收起，只在审阅页有内容可看时才展开。
+      挂在根部（`main` 之外）：它是 `fixed` 浮层，不该受内容区 `max-w-3xl` 的宽度约束。
+    -->
+    <VersionDrawer
+      :open="versionDrawerOpen"
+      :title="activeDocTitle"
+      :versions="activeDocKind ? versions.versionsByKind[activeDocKind] : []"
+      :loading="versions.loading"
+      :error="versions.error"
+      :busy="isGenerating"
+      @close="closeVersions"
+      @checkpoint="handleCheckpoint"
+      @restore="handleRestore"
+    />
 
     <!-- 登录 / 注册弹窗。挂在根部，顶栏点击与接口 401 都通过 store 打开它 -->
     <AuthDialog />

@@ -4,8 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import http from '../services/api'
 import {
   DocumentsNotFoundError,
+  checkpointDocument,
   fetchDocuments,
+  fetchVersion,
+  fetchVersions,
   fromBackendKind,
+  restoreVersion,
   saveDocument,
 } from '../services/documentService'
 
@@ -290,5 +294,167 @@ describe('saveDocument', () => {
     vi.mocked(http.put).mockResolvedValue({ data: { kind: '不认识的产物' } })
 
     await expect(saveDocument(7, 'prd', '# PRD')).rejects.toThrow('保存文档失败')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 版本链
+// ---------------------------------------------------------------------------
+
+/** 后端形状的一条版本摘要 */
+function backendVersion(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version_id: 11,
+    version_no: 2,
+    source: 'checkpoint',
+    note: '定稿',
+    content_sha: 'abcdef123456',
+    content_length: 128,
+    created_at: '2026-10-16T02:00:00',
+    is_current: true,
+    ...overrides,
+  }
+}
+
+describe('fetchVersions', () => {
+  it('把路径拼成带下划线的产物段，并把摘要折成 camelCase', async () => {
+    vi.mocked(http.get).mockResolvedValue({ data: { versions: [backendVersion()] } })
+
+    const list = await fetchVersions(7, 'api-docs')
+
+    expect(http.get).toHaveBeenCalledWith('/api/solutions/7/documents/api_docs/versions')
+    expect(list).toHaveLength(1)
+    expect(list[0]).toEqual({
+      versionId: 11,
+      versionNo: 2,
+      source: 'checkpoint',
+      note: '定稿',
+      contentSha: 'abcdef123456',
+      contentLength: 128,
+      createdAt: '2026-10-16T02:00:00',
+      isCurrent: true,
+    })
+  })
+
+  it('缺 version_id 的那一条被丢弃（它是恢复动作的引用键），其余照常保留', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: { versions: [backendVersion(), { version_no: 1 }] },
+    })
+
+    const list = await fetchVersions(7, 'prd')
+
+    expect(list.map((v) => v.versionId)).toEqual([11])
+  })
+
+  it('没有版本时返回空列表（200 + 空，不是错误）', async () => {
+    vi.mocked(http.get).mockResolvedValue({ data: {} })
+
+    await expect(fetchVersions(7, 'prd')).resolves.toEqual([])
+  })
+
+  it('404 抛 DocumentsNotFoundError', async () => {
+    vi.mocked(http.get).mockRejectedValue(axiosError(404, '方案不存在'))
+
+    await expect(fetchVersions(7, 'prd')).rejects.toBeInstanceOf(DocumentsNotFoundError)
+  })
+
+  it('其它错误透传后端 detail，取不到时用兜底文案', async () => {
+    vi.mocked(http.get).mockRejectedValue(axiosError(500, '数据库连接失败'))
+    await expect(fetchVersions(7, 'prd')).rejects.toThrow('数据库连接失败')
+
+    vi.mocked(http.get).mockRejectedValue(new Error('网络断了'))
+    await expect(fetchVersions(7, 'prd')).rejects.toThrow('无法读取版本历史')
+  })
+})
+
+describe('fetchVersion', () => {
+  it('读单个版本，含正文、清单与回执', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        ...backendVersion(),
+        content: '# 定稿正文',
+        pending_items: [{ id: 'p-1', question: '确认登录方式', importance: 'P0' }],
+        last_run_summary: { kind: 'prd', durationMs: 1, requestId: 'req-1' },
+        updated_at: '2026-10-16T02:30:00',
+      },
+    })
+
+    const detail = await fetchVersion(7, 'prd', 11)
+
+    expect(http.get).toHaveBeenCalledWith('/api/solutions/7/documents/prd/versions/11')
+    expect(detail.content).toBe('# 定稿正文')
+    expect(detail.pendingItems).toHaveLength(1)
+    expect(detail.runSummary?.requestId).toBe('req-1')
+    expect(detail.updatedAt).toBe('2026-10-16T02:30:00')
+  })
+
+  it('摘要字段不合法（缺 version_id）时抛错，不静默返回空版本', async () => {
+    vi.mocked(http.get).mockResolvedValue({ data: { content: '# x' } })
+
+    await expect(fetchVersion(7, 'prd', 11)).rejects.toThrow('无法读取该版本')
+  })
+
+  it('404 抛 DocumentsNotFoundError', async () => {
+    vi.mocked(http.get).mockRejectedValue(axiosError(404, '版本不存在'))
+
+    await expect(fetchVersion(7, 'prd', 99)).rejects.toBeInstanceOf(DocumentsNotFoundError)
+  })
+})
+
+describe('checkpointDocument', () => {
+  it('POST 到 checkpoint，带上正文与备注', async () => {
+    vi.mocked(http.post).mockResolvedValue({ data: backendDocument({ content: '# 存档版' }) })
+
+    const record = await checkpointDocument(7, 'api-docs', '# 存档版', '定稿')
+
+    expect(http.post).toHaveBeenCalledWith('/api/solutions/7/documents/api_docs/checkpoint', {
+      content: '# 存档版',
+      note: '定稿',
+    })
+    expect(record.content).toBe('# 存档版')
+  })
+
+  it('备注缺省时提交空串（后端字段是必填的）', async () => {
+    vi.mocked(http.post).mockResolvedValue({ data: backendDocument() })
+
+    await checkpointDocument(7, 'prd', '# PRD')
+
+    expect(http.post).toHaveBeenCalledWith('/api/solutions/7/documents/prd/checkpoint', {
+      content: '# PRD',
+      note: '',
+    })
+  })
+
+  it('404 抛 DocumentsNotFoundError', async () => {
+    vi.mocked(http.post).mockRejectedValue(axiosError(404, '方案不存在'))
+
+    await expect(checkpointDocument(7, 'prd', '# PRD')).rejects.toBeInstanceOf(
+      DocumentsNotFoundError,
+    )
+  })
+
+  it('响应不是一份合法文档时抛错，不静默成功', async () => {
+    vi.mocked(http.post).mockResolvedValue({ data: { kind: '不认识的产物' } })
+
+    await expect(checkpointDocument(7, 'prd', '# PRD')).rejects.toThrow('保存为新版本失败')
+  })
+})
+
+describe('restoreVersion', () => {
+  it('POST 到 restore，把 version_id 用下划线传给后端', async () => {
+    vi.mocked(http.post).mockResolvedValue({ data: backendDocument({ content: '# 恢复后的正文' }) })
+
+    const record = await restoreVersion(7, 'prd', 11)
+
+    expect(http.post).toHaveBeenCalledWith('/api/solutions/7/documents/prd/restore', {
+      version_id: 11,
+    })
+    expect(record.content).toBe('# 恢复后的正文')
+  })
+
+  it('404 抛 DocumentsNotFoundError', async () => {
+    vi.mocked(http.post).mockRejectedValue(axiosError(404, '版本不存在'))
+
+    await expect(restoreVersion(7, 'prd', 99)).rejects.toBeInstanceOf(DocumentsNotFoundError)
   })
 })

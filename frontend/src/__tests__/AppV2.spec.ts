@@ -130,6 +130,10 @@ vi.mock('../services/documentService', () => ({
   },
   fetchDocuments: vi.fn(async () => []),
   saveDocument: vi.fn(),
+  fetchVersions: vi.fn(async () => []),
+  fetchVersion: vi.fn(),
+  checkpointDocument: vi.fn(),
+  restoreVersion: vi.fn(),
 }))
 
 /**
@@ -2031,5 +2035,101 @@ describe('AppV2 对话页的子标签栏', () => {
     expect(storeOf(wrapper).chatTab).toBe('api-docs-clarify')
     expect(storeOf(wrapper).conversationIds['api-docs-clarify']).toBe('conv-api')
     expect(chatMessages(wrapper).map((message) => message.content)).toEqual(['接口这边聊的'])
+  })
+})
+
+/**
+ * 版本历史抽屉的装配。
+ *
+ * 抽屉本身由 `VersionDrawer` 的用例单独覆盖（纯展示）；这里验证的是**接线**：
+ * 入口在审阅页底栏、打开时按当前文档拉版本、切文档自动收起、两个动作把载荷送到后端。
+ * 这几处任一接错，用户看到的是「点了没反应」或「抽屉里是另一份文档的版本」。
+ */
+describe('AppV2 的版本历史抽屉', () => {
+  /** 打开一份停在「PRD 待确认」的方案，并备好两份文档 */
+  async function openReviewWithDocs(): Promise<VueWrapper> {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档'),
+      makeDocumentRecord('api-docs', '# 接口文档'),
+    ])
+    await flushPromises()
+    return wrapper
+  }
+
+  it('点底栏「版本」打开抽屉，并按当前文档拉取版本列表', async () => {
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([])
+    const wrapper = await openReviewWithDocs()
+
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+
+    expect(documentApi.fetchVersions).toHaveBeenCalledWith(1, 'prd')
+    expect(wrapper.find('.shell-version-drawer').classes()).toContain('translate-x-0')
+  })
+
+  it('切到另一份文档时自动收起（否则标题与列表会与内容对不上）', async () => {
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([])
+    const wrapper = await openReviewWithDocs()
+
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+    await clickButton(wrapper, '查看接口文档')
+    await flushPromises()
+
+    expect(wrapper.find('.shell-version-drawer').classes()).toContain('translate-x-full')
+  })
+
+  it('「存为新版本」把当前正文与备注送到后端，成功后给一句提示', async () => {
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([])
+    vi.mocked(documentApi.checkpointDocument).mockResolvedValue(
+      makeDocumentRecord('prd', '# 产品需求文档'),
+    )
+    const wrapper = await openReviewWithDocs()
+
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+    await wrapper.find('.shell-version-drawer input').setValue('定稿')
+    await clickButton(wrapper, '存为新版本')
+    await flushPromises()
+
+    expect(documentApi.checkpointDocument).toHaveBeenCalledWith(1, 'prd', '# 产品需求文档', '定稿')
+    expect(wrapper.text()).toContain('已存为新版本')
+  })
+
+  it('「恢复此版本」调用恢复接口，成功后给一句提示', async () => {
+    vi.mocked(documentApi.fetchVersions).mockResolvedValue([
+      {
+        versionId: 11,
+        versionNo: 2,
+        source: 'checkpoint',
+        note: '',
+        contentSha: 'sha',
+        contentLength: 10,
+        createdAt: '2026-10-16T00:00:00',
+        isCurrent: false,
+      },
+    ])
+    vi.mocked(documentApi.restoreVersion).mockResolvedValue(
+      makeDocumentRecord('prd', '# 恢复的正文'),
+    )
+    const wrapper = await openReviewWithDocs()
+
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+    await clickButton(wrapper, '恢复此版本')
+    await flushPromises()
+
+    expect(documentApi.restoreVersion).toHaveBeenCalledWith(1, 'prd', 11)
+    expect(wrapper.text()).toContain('已恢复到所选版本')
+  })
+
+  it('版本接口失败时闪一条失败提示', async () => {
+    vi.mocked(documentApi.fetchVersions).mockRejectedValue(new Error('无法读取版本历史'))
+    const wrapper = await openReviewWithDocs()
+
+    await clickButton(wrapper, '版本', true)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('无法读取版本历史')
   })
 })

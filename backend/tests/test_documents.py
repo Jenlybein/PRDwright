@@ -65,12 +65,34 @@ def _legacy_snapshot(**overrides) -> str:
 
 
 def _documents(solution_id: int) -> dict[str, dict]:
-    """按产物类型取出某方案下的文档行。"""
+    """按产物类型取出某方案下的文档行，并带上**当前版本**的正文元数据。
+
+    版本模型下正文住在 `document_versions`，`documents` 只剩身份 + 当前版本指针，
+    因此这里 JOIN 当前版本取回 `content / content_sha / pending_items / last_run_summary`，
+    让断言仍能从 `docs[kind]["content"]` 取到正文。
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM documents WHERE solution_id = ?", (solution_id,)
+            "SELECT d.kind, v.content, v.content_sha, v.pending_items, v.last_run_summary "
+            "FROM documents d "
+            "LEFT JOIN document_versions v ON v.id = d.current_version_id "
+            "WHERE d.solution_id = ?",
+            (solution_id,),
         ).fetchall()
     return {row["kind"]: dict(row) for row in rows}
+
+
+def _versions(solution_id: int, kind: str) -> list[dict]:
+    """取某方案某产物的全部版本行（从新到旧），供版本语义断言使用。"""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT v.* FROM document_versions v "
+            "JOIN documents d ON d.id = v.document_id "
+            "WHERE d.solution_id = ? AND d.kind = ? "
+            "ORDER BY v.version_no DESC",
+            (solution_id, kind),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _user_id(username: str) -> int:
@@ -85,14 +107,18 @@ def _user_id(username: str) -> int:
 
 
 def test_real_plan_creates_documents_table() -> None:
-    """真实的迁移清单跑完后，`documents` 表就位（防止清单与建表语句脱节）。"""
-    assert run_migrations() == 3
+    """真实的迁移清单跑完后，`documents` 与 `document_versions` 表就位（防止清单与建表语句脱节）。"""
+    assert run_migrations() == 6
 
     with connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'documents'"
         ).fetchone()
+        versions = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_versions'"
+        ).fetchone()
     assert row is not None
+    assert versions is not None
 
 
 def test_backfill_moves_three_documents() -> None:
@@ -131,7 +157,7 @@ def test_backfill_skips_corrupt_row_and_continues() -> None:
     broken = _seed_solution(owner, "{这不是合法 JSON")
     good = _seed_solution(owner, _legacy_snapshot())
 
-    assert run_migrations() == 3
+    assert run_migrations() == 6
 
     assert _documents(broken) == {}
     assert set(_documents(good)) == {"prd", "api_docs", "prompts"}
@@ -311,3 +337,376 @@ def test_deleting_solution_cascades_to_documents(client) -> None:
             "SELECT COUNT(*) FROM documents WHERE solution_id = ?", (solution_id,)
         ).fetchone()[0]
     assert left == 0
+
+
+# ---------------------------------------------------------------------------
+# 版本链：写入语义（生成追加、手改/就地改不追加、checkpoint/restore 追加）
+# ---------------------------------------------------------------------------
+
+
+def test_generation_appends_version_and_manual_edit_reuses_it(client) -> None:
+    """整篇生成 = 追加新版本；手改 = 就地改当前版本、不新增条目。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+
+    document_store.commit_generated(owner, solution_id, "prd", "第一版")
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [1]
+
+    body = client.put(
+        f"/api/solutions/{solution_id}/documents/prd", json={"content": "手改一版"}
+    ).json()
+
+    assert body["content"] == "手改一版"
+    versions = _versions(solution_id, "prd")
+    assert [v["version_no"] for v in versions] == [1]  # 条目数不变
+    assert versions[0]["content"] == "手改一版"  # 就地改了当前版本
+
+
+def test_in_place_rewrite_replaces_all_three_fields_without_new_version(client) -> None:
+    """`optimize` / `clarify` 的就地改写不新增版本，但正文 + 清单 + 回执同批替换。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+
+    document_store.commit_generated(
+        owner, solution_id, "prd", "生成版", pending_items=[{"id": "a"}], run_summary={"kind": "prd"}
+    )
+    document_store.commit_generated(
+        owner,
+        solution_id,
+        "prd",
+        "改写版",
+        pending_items=[{"id": "b"}],
+        run_summary={"kind": "prd", "duration_ms": 9},
+        append_version=False,
+        source="optimize",
+    )
+
+    versions = _versions(solution_id, "prd")
+    assert [v["version_no"] for v in versions] == [1]
+    assert versions[0]["content"] == "改写版"
+    assert json.loads(versions[0]["pending_items"]) == [{"id": "b"}]
+    assert json.loads(versions[0]["last_run_summary"]) == {"kind": "prd", "duration_ms": 9}
+
+
+def test_regenerating_appends_version_and_drops_downstream(client) -> None:
+    """整篇重生成：追加新版本，并让下游产物（连同其版本）退场。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+
+    document_store.commit_generated(owner, solution_id, "prd", "PRD v1")
+    document_store.commit_generated(owner, solution_id, "api_docs", "接口 v1")
+    document_store.commit_generated(owner, solution_id, "prompts", "提示词 v1")
+
+    document_store.commit_generated(owner, solution_id, "prd", "PRD v2")
+
+    assert set(_documents(solution_id)) == {"prd"}
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [2, 1]
+    # 下游文档被删，其版本随 CASCADE 一起消失
+    assert _versions(solution_id, "api_docs") == []
+    assert _versions(solution_id, "prompts") == []
+
+
+def test_checkpoint_appends_version_and_inherits_meta(client) -> None:
+    """「存为新版本」追加一条 checkpoint 版本，清单 / 回执从当前版本继承。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    item = {"id": "x", "question": "?"}
+    document_store.commit_generated(
+        owner, solution_id, "prd", "生成版", pending_items=[item], run_summary={"kind": "prd"}
+    )
+
+    saved = document_store.checkpoint(owner, solution_id, "prd", "手工存的一版", "满意")
+
+    assert saved is not None
+    assert saved["content"] == "手工存的一版"
+    versions = _versions(solution_id, "prd")
+    assert [v["version_no"] for v in versions] == [2, 1]
+    assert versions[0]["source"] == "checkpoint"
+    assert versions[0]["note"] == "满意"
+    assert json.loads(versions[0]["pending_items"]) == [item]
+    assert json.loads(versions[0]["last_run_summary"]) == {"kind": "prd"}
+
+
+def test_restore_appends_new_version_copying_source(client) -> None:
+    """恢复历史版本 = 追加一条新版本（source='restore'），正文 / 清单取源版本。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+
+    document_store.commit_generated(
+        owner, solution_id, "prd", "第一版", pending_items=[{"id": "v1"}]
+    )
+    document_store.commit_generated(
+        owner, solution_id, "prd", "第二版", pending_items=[{"id": "v2"}]
+    )
+    first = [v for v in _versions(solution_id, "prd") if v["version_no"] == 1][0]
+
+    restored = document_store.restore(owner, solution_id, "prd", int(first["id"]))
+
+    assert restored is not None
+    assert restored["content"] == "第一版"
+    assert restored["pending_items"] == [{"id": "v1"}]
+    versions = _versions(solution_id, "prd")
+    assert [v["version_no"] for v in versions] == [3, 2, 1]  # 历史只增不改
+    assert versions[0]["source"] == "restore"
+    assert versions[0]["content"] == "第一版"
+
+
+def test_restore_unknown_version_returns_none(client) -> None:
+    """恢复一个不存在的版本：返回 None（路由翻 404），不改动当前文档。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "当前版")
+
+    assert document_store.restore(owner, solution_id, "prd", 99999) is None
+    assert [v["version_no"] for v in _versions(solution_id, "prd")] == [1]
+
+
+# ---------------------------------------------------------------------------
+# 版本链：读取
+# ---------------------------------------------------------------------------
+
+
+def test_list_versions_summary_marks_current(client) -> None:
+    """版本摘要按新→旧排序，标出当前版本，且**不带正文**。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "第一版")
+    document_store.commit_generated(owner, solution_id, "prd", "第二版")
+
+    versions = document_store.list_versions(owner, solution_id, "prd")
+
+    assert [v["version_no"] for v in versions] == [2, 1]
+    assert versions[0]["is_current"] is True
+    assert versions[1]["is_current"] is False
+    # 摘要是列表用的，不含正文
+    assert "content" not in versions[0]
+    assert versions[0]["content_length"] == len("第二版")
+
+
+def test_get_version_returns_full_content(client) -> None:
+    """版本详情含正文 / 清单 / 回执；不存在时返回 None。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(
+        owner, solution_id, "prd", "第一版", pending_items=[{"id": "a"}], run_summary={"kind": "prd"}
+    )
+    version_id = int(_versions(solution_id, "prd")[0]["id"])
+
+    detail = document_store.get_version(owner, solution_id, "prd", version_id)
+    assert detail is not None
+    assert detail["content"] == "第一版"
+    assert detail["pending_items"] == [{"id": "a"}]
+    assert detail["last_run_summary"] == {"kind": "prd"}
+    assert detail["is_current"] is True
+
+    assert document_store.get_version(owner, solution_id, "prd", 99999) is None
+
+
+def test_document_outward_shape_is_unchanged(client) -> None:
+    """回归护栏：`GET documents` 的对外结构不因版本化而增删字段。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 正文")
+
+    body = client.get(f"/api/solutions/{solution_id}/documents").json()
+
+    assert set(body) == {"documents"}
+    assert set(body["documents"][0]) == {
+        "kind",
+        "content",
+        "pending_items",
+        "last_run_summary",
+        "updated_at",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 接口：版本链（列表 / 详情 / 存为新版本 / 恢复）
+# ---------------------------------------------------------------------------
+
+
+def test_version_endpoints_require_login(client) -> None:
+    """未登录时四个版本端点都拒绝，不泄露任何方案内容。"""
+    assert client.get("/api/solutions/1/documents/prd/versions").status_code == 401
+    assert client.get("/api/solutions/1/documents/prd/versions/1").status_code == 401
+    assert (
+        client.post(
+            "/api/solutions/1/documents/prd/checkpoint", json={"content": "x"}
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/api/solutions/1/documents/prd/restore", json={"version_id": 1}
+        ).status_code
+        == 401
+    )
+
+
+def test_version_list_is_empty_for_new_solution(client) -> None:
+    """方案可见但还没有任何版本时，返回 200 + 空列表（不是 404）。"""
+    register(client)
+    solution_id = _new_solution(client)
+
+    response = client.get(f"/api/solutions/{solution_id}/documents/prd/versions")
+
+    assert response.status_code == 200
+    assert response.json() == {"versions": []}
+
+
+def test_version_list_and_detail_via_http(client) -> None:
+    """列表给摘要（不含正文 / 标出当前版本）；详情给完整正文与清单。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(
+        owner,
+        solution_id,
+        "prd",
+        "# 第一版",
+        pending_items=[{"id": "a"}],
+        run_summary={"kind": "prd"},
+    )
+
+    listed = client.get(f"/api/solutions/{solution_id}/documents/prd/versions").json()
+    assert len(listed["versions"]) == 1
+    item = listed["versions"][0]
+    assert item["version_no"] == 1
+    assert item["is_current"] is True
+    assert item["source"] == "prd"
+    assert "content" not in item  # 摘要不带正文
+
+    detail = client.get(
+        f"/api/solutions/{solution_id}/documents/prd/versions/{item['version_id']}"
+    ).json()
+    assert detail["content"] == "# 第一版"
+    assert detail["pending_items"] == [{"id": "a"}]
+    assert detail["last_run_summary"] == {"kind": "prd"}
+
+
+def test_checkpoint_via_http_appends_version(client) -> None:
+    """「存为新版本」把给定正文追加为新版本，并把当前文档切到它。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 生成版")
+
+    response = client.post(
+        f"/api/solutions/{solution_id}/documents/prd/checkpoint",
+        json={"content": "# 存档版", "note": "满意"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["content"] == "# 存档版"
+    listed = client.get(f"/api/solutions/{solution_id}/documents/prd/versions").json()
+    assert [v["version_no"] for v in listed["versions"]] == [2, 1]
+    assert listed["versions"][0]["source"] == "checkpoint"
+    assert listed["versions"][0]["note"] == "满意"
+
+
+def test_checkpoint_requires_content(client) -> None:
+    """`content` 是必填：缺了它无法确定「要留档的是哪一版」，应被 422 挡住。"""
+    register(client)
+    solution_id = _new_solution(client)
+
+    response = client.post(
+        f"/api/solutions/{solution_id}/documents/prd/checkpoint", json={"note": "x"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_restore_via_http_switches_current_back(client) -> None:
+    """恢复历史版本后，读到的当前文档就是被恢复的那一版。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第一版")
+    document_store.commit_generated(owner, solution_id, "prd", "# 第二版")
+    first = [v for v in _versions(solution_id, "prd") if v["version_no"] == 1][0]
+
+    restored = client.post(
+        f"/api/solutions/{solution_id}/documents/prd/restore",
+        json={"version_id": int(first["id"])},
+    )
+
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["content"] == "# 第一版"
+    # 读「当前文档」应看到恢复后的那一版
+    listed_docs = client.get(f"/api/solutions/{solution_id}/documents").json()["documents"]
+    current = next(d for d in listed_docs if d["kind"] == "prd")
+    assert current["content"] == "# 第一版"
+    listed = client.get(f"/api/solutions/{solution_id}/documents/prd/versions").json()
+    assert [v["version_no"] for v in listed["versions"]] == [3, 2, 1]
+    assert listed["versions"][0]["is_current"] is True
+
+
+def test_unknown_version_returns_404(client) -> None:
+    """版本不存在：列表外的 id 在详情与恢复上都回 404。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# x")
+
+    assert (
+        client.get(f"/api/solutions/{solution_id}/documents/prd/versions/99999").status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/solutions/{solution_id}/documents/prd/restore", json={"version_id": 99999}
+        ).status_code
+        == 404
+    )
+
+
+def test_versions_are_invisible_to_other_users(client) -> None:
+    """别人的方案：读版本、存版本、恢复都等同不存在（404）。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "# 私有")
+    version_id = int(_versions(solution_id, "prd")[0]["id"])
+
+    client.cookies.clear()
+    register(client, username="bob")
+
+    assert client.get(f"/api/solutions/{solution_id}/documents/prd/versions").status_code == 404
+    assert (
+        client.get(
+            f"/api/solutions/{solution_id}/documents/prd/versions/{version_id}"
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/solutions/{solution_id}/documents/prd/checkpoint", json={"content": "篡改"}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/solutions/{solution_id}/documents/prd/restore",
+            json={"version_id": version_id},
+        ).status_code
+        == 404
+    )
+
+
+def test_version_routes_reject_invalid_kind(client) -> None:
+    """`kind` 在版本路由上同样是闭集合：非法取值 422。"""
+    register(client)
+    solution_id = _new_solution(client)
+
+    assert (
+        client.get(f"/api/solutions/{solution_id}/documents/nope/versions").status_code == 422
+    )

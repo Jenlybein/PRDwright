@@ -190,6 +190,66 @@ export interface DocumentRecord {
   updatedAt: string
 }
 
+// ============================================================================
+// 文档版本（document_versions）：存为新版本 / 看历史 / 恢复
+// ============================================================================
+
+/**
+ * 一条文档版本的**摘要**（`GET .../documents/{kind}/versions` 的一项）。
+ *
+ * 刻意**不含正文**：版本列表只给概览（第几版、怎么来的、什么时候、多长），
+ * 正文只在看单个版本详情时按需取——列表可能很长，把正文都拖出来是纯浪费。
+ */
+export interface DocumentVersionSummary {
+  /** 版本 id；恢复时要引用它 */
+  versionId: number
+  /** 版本序号，从 1 开始、单调递增 */
+  versionNo: number
+  /**
+   * 这一版的来源（后端原始取值）。
+   *
+   * 整篇生成是产物类型（`prd` / `api_docs` / `prompts`），就地改写是动作类型
+   * （`optimize` / `clarify`），此外还有 `manual`（手改）/ `checkpoint`（存为新版本）/
+   * `restore`（恢复）/ `migrated`（迁移回填）。类型保持 `string`：后端可能新增取值，
+   * 前端展示层对认不出的来源原样显示，不因此丢掉这一条。
+   */
+  source: string
+  /** 「存为新版本」时用户写的备注；其它来源为空串 */
+  note: string
+  /** 内容指纹（排查用，不展示） */
+  contentSha: string
+  /** 正文字符数（概览用） */
+  contentLength: number
+  /** 创建时间（UTC ISO 8601） */
+  createdAt: string
+  /** 是否为当前版本 */
+  isCurrent: boolean
+}
+
+/** 一条文档版本的**完整内容**（`GET .../versions/{version_id}`）。 */
+export interface DocumentVersionDetail {
+  /** 版本 id */
+  versionId: number
+  /** 版本序号 */
+  versionNo: number
+  /** 该版本文档正文（Markdown 原文） */
+  content: string
+  /** 该版本当时的待确认清单 */
+  pendingItems: PendingItem[]
+  /** 该版本当时的用量回执；缺失为 null */
+  runSummary: RunSummary | null
+  /** 这一版的来源（见 `DocumentVersionSummary.source`） */
+  source: string
+  /** 备注 */
+  note: string
+  /** 创建时间（UTC ISO 8601） */
+  createdAt: string
+  /** 最近更新时间（UTC ISO 8601） */
+  updatedAt: string
+  /** 是否为当前版本 */
+  isCurrent: boolean
+}
+
 /** PRD 快捷入口的录入内容 */
 export interface QuickPrdInput {
   /** 产品名称；为空时文档头退化为「未命名产品」 */

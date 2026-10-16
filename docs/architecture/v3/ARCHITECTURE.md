@@ -30,7 +30,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | --- | --- | --- |
 | **A. 生成运行时（Job）** | 优化二 + R1-T2 / T4 | 一次生成 = 一个 Job，后台执行与浏览器连接解耦；SSE 订阅 + 刷新重连；已完成章节可续；**单次调用的超时与有限重试自愈（T4 的本期形态）** |
 | **B. 观测与 Token 预算** | 优化一 + R1-T5 | LLM 调用包装层：每步 step / tokens / duration；`request_id` 串联；调用前估算并做预算管控 |
-| **C. 文档生命周期** | 优化三 | `documents` 成为三份产物的**所有权归属地**（单表 + 迁移，ADR-021 / 022），Job 成功收尾唯一落稿；**待确认清单**作为生成的第一类产物随正文同批写入（ADR-023），每条带 **P0~P6** 重要性等级（等级缺失或非法的条目直接丢弃）；清单的出口是**澄清工作流**（对话 + 就地改写，ADR-025），其中**四条澄清线程（需求 / PRD / 接口 / 提示词）收在同一个对话页**、用子标签栏切换（ADR-027 / 028）。版本链本期明确推迟，见 4.3 末节 |
+| **C. 文档生命周期** | 优化三 | `documents` 成为三份产物的**所有权归属地**（单表 + 迁移，ADR-021 / 022），Job 成功收尾唯一落稿；**待确认清单**作为生成的第一类产物随正文同批写入（ADR-023），每条带 **P0~P6** 重要性等级（等级缺失或非法的条目直接丢弃）；清单的出口是**澄清工作流**（对话 + 就地改写，ADR-025），其中**四条澄清线程（需求 / PRD / 接口 / 提示词）收在同一个对话页**、用子标签栏切换（ADR-027 / 028）；**版本链已落地**（ADR-029）：正文全搬进 `document_versions`、`documents` 只留当前版本指针，能存为新版本、回看、恢复，见 4.3 |
 | **D. Skill 知识层统一** | 优化五 + R2-T6 | **技能注册表（目录即注册，ADR-019）** + 三个技能包；三条产线共用一条注入管线；注入内容可追溯 |
 | **E. 交付质量** | 优化六 | 澄清收口判断、`quality_gate` 结构校验、需求基线确认与下游追溯、交付包 |
 
@@ -42,7 +42,7 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | **R1-T2 章节续传（跳过已完成节）** | 2026-10-15 按实测推迟：用户实测「生成中刷新不丢章节」是 T0 的效果，T2 针对的「任务本身中断」日常尚未发生。中间态仍逐节落库（`generation_jobs.completed_sections`），届时它只差「跳过已完成节」这一段接线，不涉及结构调整 |
 | 多实例 / 分布式 Worker（Celery + Redis） | 单进程 `asyncio` 任务已够；Job 表与 API 形状按「将来可换执行层」设计 |
 | 真向量 RAG 与知识库入库 | 现有词法检索服务于「检索团队规范」这一固定场景，换成向量的收益不抵成本 |
-| 两版文档 diff 对比 | 依赖版本链先落地；本版只做「回看与恢复」，不做差异渲染 |
+| 两版文档 diff 对比 | 版本链已落地（ADR-029），因此它不再是「依赖未完成」；但它要的是一套差异渲染与高亮规则，而「回看 + 恢复」已经能回答用户的问题（「我想回到那一版」）。**本期只做回看与恢复，不做差异渲染** |
 | 定稿 / 审核工作流、多人协作 | 产品定位是单机需求工作台，不是团队协作 ALM |
 | 计费与配额 | 先做到「看得见」，不做「限制与结算」 |
 | 多租户、角色权限、Skill 市场 | 超出当前使用规模 |
@@ -61,8 +61,8 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
         │                 │                    │                  │
    A 运行时            B 观测/预算         A 章节续传          C 文档落稿
  status / phase      step / tokens       completed_sections   Job 成功写
- draft_content       duration_ms         （按节不重跑）       documents 单表
- job_bus 广播        request_id                              + 清单 + 回执
+ draft_content       duration_ms         （按节不重跑）       documents + document_versions
+ job_bus 广播        request_id                              （正文只住版本表）
         │                 │                    │                  │
         └──────── SSE 订阅 / 刷新重连 ────────┴──────────────────┘
                                       │
@@ -77,14 +77,14 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
   → 每节定稿：写 completed_sections（续传依据）+ job_bus 广播
   → 前端 GET /api/jobs/{id}/stream 订阅：先收 snapshot，再收 live chunk
   → 刷新：同一 jobId 重连，已有内容整段显示，新字继续打字机
-  → Job 完成：把正文 + 待确认清单 + run_summary 同批写进 documents（失败则不写）
+  → Job 完成：把正文 + 待确认清单 + run_summary 同批写进一版（失败则不写）
 ```
 
 ```text
 生成完之后的下一步（清单的出口）
 
 三份文档的审阅页（同一个入口：和 AI 确认剩下的 N 个问题）
-  → 展示只读清单（来自 documents.pending_items，每条带 P0~P6 等级）
+  → 展示只读清单（来自当前版本的 pending_items，每条带 P0~P6 等级）
   → 点它：进 chatting 阶段并切到那份文档的子标签
     （doc-clarification 档案；后端为这条线程另开一条会话，回复追加进同一个 messages）
   → 用户点「按澄清结果改写」：clarify 任务 → 只改涉及章节、逐字保留其余、重算清单
@@ -94,7 +94,8 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
   → 消息区只渲染当前标签那一条线程（同一个 messages 数组按 stage 过滤）
   → 底栏按线程给动作：需求澄清是「生成 PRD」，三条文档线程是「按澄清结果改写」
 
-三条文档线程的收尾都写同一个 documents 行（ADR-021 的同一个写入口）
+三条文档线程的收尾都写进同一份文档的当前版本（ADR-021 的同一个写入口；整篇生成追加新版本、
+就地改写改当前版本，ADR-029）
 ```
 
 **为什么是这个形状**：Job 表把「过程」从内存里搬到磁盘上，A 的重连、B 的计量、续传的进度、C 的版本来源
@@ -173,12 +174,12 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 
 | 关注点 | 设计 |
 | --- | --- |
-| 表 | **`documents` 单表**：`owner_id / solution_id / kind / content / pending_items / last_run_summary / content_sha / updated_at`，`(solution_id, kind)` 唯一。kind ∈ prd / api_docs / prompts |
-| 归属 | 仍由 `solutions` 决定；仓储的每个查询经 `JOIN solutions` 在 **SQL 层**过滤 `owner_id`，越权与不存在一样 404（沿用 ADR-009 口径） |
-| 写入口 | **唯一**：job 成功收尾时 `job_service._write_document` → `document_store.commit_generated`，正文 / 待确认清单 / 用量回执**同批替换**。失败的任务不写——半截输出不该顶掉一份完整文档 |
-| 前端通道 | 只剩两条：`GET /api/solutions/{id}/documents`（读）与 `PUT .../documents/{kind}`（用户手改）。手改只动正文，**不碰**清单与回执 |
-| 生成期 | 只写 `generation_jobs.draft_content`（Job 草稿），**不碰 `documents`**；成功才落稿。刷新期间的正文来自 Job 快照，不是从文档表读 |
-| 下游失效 | 整篇重生成上游会让下游失效（`DOWNSTREAM_KINDS`，删 + 写同一事务）；`optimize` / `clarify` 是**就地改写同一份**，不牵动下游——判定由 `_regenerates_whole_document` 显式传入，不再默认按「重生成」处理 |
+| 表 | **两张表**（ADR-029）：`documents` 是「身份 + 当前版本指针」——`id / solution_id / kind / current_version_id / created_at / updated_at`，`(solution_id, kind)` 唯一；`document_versions` 是**正文唯一的家**——`document_id / version_no / content / content_sha / pending_items / last_run_summary / source / note / metadata / created_at / updated_at`，`UNIQUE(document_id, version_no)`。kind ∈ prd / api_docs / prompts |
+| 归属 | 仍由 `solutions` 决定；仓储的每个查询经 `documents → solutions` 两级 `JOIN` 在 **SQL 层**过滤 `owner_id`，越权与不存在一样 404（沿用 ADR-009 口径） |
+| 写入口 | **唯一**：job 成功收尾时 `job_service._write_document` → `document_store.commit_generated`，正文 / 待确认清单 / 用量回执**同批写入一版**——整篇生成**追加新版本**，`optimize` / `clarify` **就地改当前版本**。失败的任务不写——半截输出不该顶掉一份完整文档 |
+| 前端通道 | `GET /api/solutions/{id}/documents`（读三份）与 `PUT .../documents/{kind}`（用户手改）仍是**正文**的两条通道；版本另加四个端点（见第 6 节）。手改只动正文，**不碰**清单与回执；两个版本动作是**内容操作**（追加一版），不是「写正文」的第三条通道 |
+| 生成期 | 只写 `generation_jobs.draft_content`（Job 草稿），**不碰 `documents` / `document_versions`**；成功才落稿。刷新期间的正文来自 Job 快照，不是从文档表读 |
+| 下游失效 | 整篇重生成上游会让下游失效（`DOWNSTREAM_KINDS`，删 + 写同一事务；删下游文档会**级联删掉它们的版本**）；`optimize` / `clarify` 是**就地改写同一份**，不牵动下游——判定由 `_regenerates_whole_document` 显式传入，且它**同时**决定「追加版本」与「删下游」（两个语义恒等，收敛成一个 `append_version` 标志） |
 | 迁移 | 加表 / 加列走 `core/migrations.py` 的有序幂等清单（`PRAGMA user_version`，ADR-022），`init_schema` 只建基线表 |
 | 与快照的关系 | `solutions.data` 仍是**前端持有的不透明快照**（ADR-009 不变）；`SessionDataV2` 退役三个 `*Content` 与三个 `*RunSummary`，旧快照里残留的**被忽略**（不做兼容读取——那等于长期维护两份真源） |
 
@@ -226,15 +227,25 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 **闸门①不受影响**：摘要回填用的 `conversationHistory()` 只取 `stage === 'requirement'` 的 turns；
 即便不靠这层过滤，闸门①本身也只比对结构化的 `RequirementsSummary`，根本不读 `messages`。
 
-#### 本期明确推迟：版本链
+#### 版本链：可回看、可恢复（ADR-029）
 
-原设计里的 `document_versions`（每份文档一条版本链、可回看与恢复）**本期不做**，理由是它解决的问题
-（「改坏了想回到上一版」）在日常使用中尚未出现，而它要新增的是一整套「版本号 + current 指针 +
-恢复语义」的状态。本期把**结构位置留好了**：`documents` 是后端自有表，将来加版本链是往上叠一张表
-（`document_id / version_no / content / metadata`）并把 `content` 换成「指向 current 版本」，
-不涉及今天这份设计里任何一条约束的推翻。**它是下一版的需求来源**：
-在文档已经归后端所有、且每次改写都留下清单与回执之后，「哪一版被谁改过」才成为一个答得清的问题——
-今天连「改了几次」都还没有地方记。
+正文**只有一个家**：`document_versions`。`documents` 退化为「这份文档的身份 + 它当前指向哪一版」
+（`current_version_id`）。这兑现了上一版预留的结构位置——当时的判断是「先把结构摆好、往上叠一张表即可」，
+实际落地确实没有推翻此前任何一条约束。
+
+| 关注点 | 设计 |
+| --- | --- |
+| 版本何时产生 | 整篇生成 = **追加新版本**；`optimize` / `clarify` 与用户手改 = **就地改当前版本**（不新增条目）；「存为新版本」(checkpoint) 与「恢复」(restore) = **追加新版本** |
+| 恢复怎么实现 | 读源版本 → **追加一条 `source='restore'` 的新版本**，**不把指针拨回去**。历史只增不改：拨指针会篡改被就地改过的旧版本，也会丢掉「曾经恢复到哪一版」的痕迹 |
+| 随版本存档的东西 | 正文 + `content_sha` + **待确认清单** + **用量回执**，都是版本行上的显式列。恢复某一版时清单一起还原，不会恢复出一份与正文对不上的旧清单 |
+| 对外结构 | `DocumentItem` 逐字段**不变**（`kind` / `content` / `pending_items` / `last_run_summary` / `updated_at`），读文档的调用方一行未改；版本是一组**新增**的读 / 写能力 |
+| 环形外键与写入顺序 | `documents.current_version_id → document_versions.id`（SET NULL）与 `document_versions.document_id → documents.id`（CASCADE）互指。写入顺序必须是「**先空指针插文档行 → 插版本 → 回填指针**」，反过来会撞上「指针指向还不存在的版本」；删方案时两级级联清空，由测试钉死 |
+| 迁移 | v4 建表 + 加指针 → v5 把现有文档逐行容错地回填成 `version_no=1, source='migrated'` → v6 删 `documents` 的四个正文列。**v6 是单向门**（改完旧代码读不到 `documents.content`，回滚只能靠备份）；删列用原生 `ALTER TABLE ... DROP COLUMN`，因为 `PRAGMA foreign_keys` 在事务内是空操作，而迁移运行器把每步包在事务里，「关外键 + 重建表」那套在步骤内部关不掉外键 |
+| 展示 | 审阅页底栏内容行的「版本」按钮打开**右侧抽屉**（`ui/VersionDrawer.vue`）：默认收起、`fixed` 浮层、以底栏高度作下边距因此**不遮底栏**、不挤中部布局。列表给「第几版 · 怎么来的 · 什么时候 · 备注」，当前版本不可恢复；本版**不做两版 diff** |
+| 为什么抽屉能是例外 | ADR-015 要防的是**流程动作**分散，不是「内容操作不能有自己的面板」。边界钉在 ADR-030：抽屉里只放**内容操作**，流程动作（生成下一份 / 完成 / 返回）永远只在底栏 |
+
+**`metadata` 是留给下一版的口袋**：v3.1 E 的 `quality_gate`（`{passed, issues[], checked_at, rules_version}`）
+往这一列落，不必再动结构。本期只写入 `'{}'`。
 
 ### 4.4 Skill 知识层统一
 
@@ -351,11 +362,12 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 | 文档所有权 | 三份正文的工作副本在 `stores/documents.ts`（后端 `documents` 表在前端的镜像，防抖 800ms + 单飞，与 `stores/solutions.ts` 同一套记账）；刷新 / 打开方案时按方案 id 拉一次即得权威版本。**审阅页没有「保存」按钮**：手改正文由编辑框逐次上报、经 800ms 防抖自动落库（静默，仅失败闪一条红色提示），未落库的草稿在「打开方案前 / `beforeunload` / 组件卸载」三处补冲；底栏空出来的位置改为「下载」，导出的是**用户眼前那份草稿**（可能比落库版本新） |
 | 待确认清单与澄清入口 | 清单面板在**正文之上**（每条带 P0~P6 等级徽标、按等级排序，默认只铺开前 2 条可展开，标题旁是按实际出现的等级渲染的彩色计数芯片）。三份文档共用**同一个入口**「和 AI 确认剩下的 N 个问题」，落点都是对话页对应的子标签；PRD 那条落在**底栏次操作组**并在出现时**顶替**「返回」按钮——两者落点都是对话页，并排会给用户两个近乎同名的选择——且只在完整流程（`entryMode === 'structured'`）下出现（PRD 快捷 / 提示词调试没有对话可回） |
 | 对话页的子标签栏 | `ui/ChatThreadTabs.vue`：四条线程**常驻**，未就绪的置灰并给出理由（`title`）；切换即切换消息区与底栏动作。`chatTab` 存的是用户意图、`activeChatTab` 是实际显示的那条（文档未生成时归落到第一条可用线程，**意图不回写**）。有请求在跑时全部禁用——切过去会看到一段与自己刚才操作无关的上下文，而流还在往原线程里写 |
-| 版本侧栏 | **本期推迟**（随版本链一起）：review 页的列表 + 只读预览 + 「保存为新版本」+「恢复此版本」 |
+| 版本抽屉 | `ui/VersionDrawer.vue`：审阅页底栏内容行的「版本」按钮打开，默认收起、`fixed` 浮层、以 `--shell-action-bar-h` 作下边距（**不遮底栏**）、不挤中部布局。列表给「第几版 · 怎么来的 · 什么时候 · 备注」，每项带自己的「恢复此版本」（当前版本不给按钮——点了也是原地不动），顶部是「存为新版本 + 备注」。它是**纯展示**组件（props in / events out，不 import store），版本列表与两个写动作在 `stores/documentVersions.ts`，归属直接读 `documents.solutionId`（不另存一份） |
+| 版本抽屉的边界 | 它是 ADR-015 的**有意例外**（ADR-030）：抽屉里只放**内容操作**，流程动作（生成下一份 / 完成 / 返回）永远只在底栏；入口也在底栏内容行。写动作成功后必须**重新拉文档**——否则编辑器里还是旧正文，用户会以为「恢复没生效」；写动作之前先 `flushPendingSave`，否则 `loadAll` 会把未落库的旧草稿盖在恢复结果之上 |
 | 质量报告 | review 页展示 `quality_gate` 结果；接口文档 / 提示词展示 Review 意见 |
 | 入口 | **不改**：三入口选择器（`EntryStage`）在 v2 已落地，源文档「三 Tab 改 chooser」那篇针对的是旧状态 |
-| 保存 | 沿用 1.5s 防抖；落库目标从「覆盖快照三字段」逐步改为「更新 current 版本」，镜像写回保持不变直到迁移完成 |
-| 操作落点 | 所有新操作（保存为新版本、恢复、导出交付包）一律进 `AppActionBar`，不新增第二处操作区（ADR-015） |
+| 保存 | 方案快照沿用 1.5s 防抖；**文档手改沿用 800ms 防抖 + 单飞**（`stores/documents.ts`），落库目标已是「就地更新当前版本」——版本化之后这条路径只改了 SQL，前端一行未动 |
+| 操作落点 | **流程**操作（生成下一份、完成、返回、保存为新版本之外的流程动作）一律进 `AppActionBar`，不新增第二处流程区（ADR-015）。**内容**操作可以有自己的面板，但边界写死在 ADR-030（版本抽屉即唯一实例） |
 
 ## 6. 关键契约
 
@@ -367,7 +379,8 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 
 **文档 API**：`GET /api/solutions/{id}/documents`（读三份产物：正文 + 清单 + 回执）、
 `PUT /api/solutions/{id}/documents/{kind}`（用户手改，只动正文）。**写正文没有第三个入口**——
-生成 / 优化 / 澄清改写都由 job 收尾写入（ADR-021）。
+生成 / 优化 / 澄清改写都由 job 收尾写入（ADR-021）。checkpoint / restore 不是例外：它们是
+**内容操作**（把已有的某一版留档或搬回来），**不产出新正文**，见下。
 
 **澄清 API**：`POST /api/conversation/start-stream` / `continue-stream` 接受 `profile_key`
 （点名场景，如 `doc-clarification`；留空取默认，未知取值 400）；改写走 `POST /api/jobs` 的
@@ -380,16 +393,25 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 （旧快照的消息都产生于这个字段出现之前，只可能是需求澄清轮次），旧值 `'document'` 在快照解析时
 归一为 `'prd-clarify'`。
 
-**版本 API**：`GET /api/documents/{kind}/versions`、`GET /api/document-versions/{id}`（只读预览）、
-`POST /api/documents/{kind}/checkpoint`（保存为新版本）、`POST /api/document-versions/{id}/restore`（恢复为新的一版）。
-**本期推迟**（随版本链一起，见 4.3）。
+**版本 API**：`GET /api/solutions/{id}/documents/{kind}/versions`（版本摘要列表，**不含正文**）、
+`GET /api/solutions/{id}/documents/{kind}/versions/{version_id}`（版本详情：正文 + 清单 + 回执）、
+`POST /api/solutions/{id}/documents/{kind}/checkpoint`（存为新版本，body `{content, note}`）、
+`POST /api/solutions/{id}/documents/{kind}/restore`（恢复某一版，body `{version_id}`）。
+后两者返回**更新后的当前文档**（`DocumentItem`），因此调用方不需要再读一次。
+
+⚠️ **路径与 4.3 草稿不同，这是有意的**：草稿写的是 `/api/documents/{kind}/versions`，但那个作用域
+**没法在 SQL 层过滤归属**（版本链只能经 `document_versions → documents → solutions` 两级 JOIN 判归属），
+会破坏「越权与不存在不可区分」的口径（ADR-009）。版本不存在**复用 `SOLUTION_NOT_FOUND`（404）**、
+不新增错误码（ADR-012）——前端按 404 状态分支，不拿中文 `detail` 判断。「方案不可见」与「还没有任何版本」
+分开：前者 404，后者 200 + 空列表。
 
 **run_summary**：`{ total_calls, failed_calls, prompt_tokens, completion_tokens, duration_ms, steps[], injected_skills[], warnings[], provider, model, request_id }`。
 `injected_skills` 的元素是 `SkillRef{ name, version, fingerprint }`（ADR-017）。它是否为空由
 **技能包的声明**决定（R2-T9）：该产物在注册表里有对应技能包、且它完整，就有值；否则为空数组，
 意味着这次走的是内置兜底提示词——前端会把这件事说给用户听，而不是静默过去。
 
-**quality_gate**：`{ passed, issues[], checked_at, rules_version }`，随版本 metadata 落盘。
+**quality_gate**：`{ passed, issues[], checked_at, rules_version }`，随版本的 `metadata` 列落盘
+（`document_versions.metadata`，ADR-029 已把这一列留好；本期只写入 `'{}'`）。
 
 **错误**：一律 `{detail, code}`，Job 失败时码落进 `generation_jobs.error_code`（ADR-012 的 8 个码复用，不新增）。
 
@@ -403,7 +425,10 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 | 观测与预算共用一条 LLM 包装层 | 一次调用同时拿到「事前估算」与「事后计量」，避免两处埋点漂移 |
 | 物理顶按 provider + model 建模，不写死 DeepSeek 之类 | 当前默认是 ark；写死厂商会让换模型变成改代码 |
 | 文档正文归后端单表，而不是继续留在前端快照里 | 「一份内容两个真源」没有裁决者；写入口分散在多条路径上，而「改的是哪一份」只有前端知道（ADR-021） |
-| 版本链另建表、本期推迟，而不是往 `solutions.data` 里塞 | ADR-009 要求后端不解析快照；塞进去等于为了版本管理破坏这条约束。而它解决的问题（改坏了想回退）日常尚未出现——先落地「单表所有权」这一步，版本链往上叠即可 |
+| 正文全搬进 `document_versions`、`documents` 只留当前版本指针，而不是「版本表只存旧稿、当前稿仍留在 `documents.content`」 | 正文只能有一个家。留两处就得靠约定维持「当前稿」与「历史最新那条」谁是权威，迟早漂移——而「一个内容两个真源」正是 ADR-021 要消灭的东西。代价（读正文一律走 JOIN、删列是单向门）明确接受（ADR-029） |
+| 恢复 = 追加一条新版本，而不是把指针拨回旧版本 | 拨指针会篡改历史：旧版本一旦被就地改（手改 / 优化），回看时看到的就不是当时那一版；「曾经恢复到哪一版」的痕迹也会丢。**只增不改**是版本链唯一站得住的性质（ADR-029） |
+| 版本链另建表，而不是往 `solutions.data` 里塞 | ADR-009 要求后端不解析快照；塞进去等于为了版本管理破坏这条约束 |
+| 内容操作可以有面板（版本抽屉），而不是「一律进底栏」 | ADR-015 防的是**流程动作**分散，不是「内容操作不能就地表达」；把两者混为一谈，规矩就从「防止迷路」变成「限制表达」。边界钉死在 ADR-030：抽屉里只放内容操作，流程动作永远只在底栏 |
 | 待确认清单由模型随正文一起产出，而不是前端从正文里解析 | 清单与正文同一次调用、同一次写入，因此不需要任何同步机制（ADR-023）；前端解析的做法把口径写在两端，措辞一改就静默失配 |
 | 澄清做成「对话 + 就地改写」，而不是生成时一次问完或让用户直接改正文 | 生成时用户还没看到文档；直接改正文则丢掉了推理过程，且改完清单过期（ADR-025） |
 | 澄清复用主对话线程（前端单线程 / 后端多会话），而不是继续用独立澄清栏 | 独立栏会让历史断裂——PRD 的问题正是从那份 PRD 里长出来的，最需要前面的上下文；而当初分开的理由（闸门①会读到文档答疑）经核实不成立：闸门①只比对结构化摘要，根本不读 `messages`。后端保持多条会话则让 `conversation_service` 一行都不用改（ADR-027） |
@@ -413,7 +438,7 @@ ADR-011（生成前双闸门）、ADR-012（错误契约 8 码）、ADR-013（�
 | RAG 闸门整条移除，而不是降级为只读 | 原裁决把「用户输入的确认」与「静态资产的注入」混为一谈；闸门 1 保留不动，闸门 2 注入的是固定不变的团队规范，不该每次要求逐条勾选（ADR-020） |
 | 接口文档 / 提示词只 Review 不自动 Rewrite | 它们是 PRD 的派生物，自动改稿会偏离已确认基线 |
 | 结构校验兜底，而不是再加一轮 LLM Review | 确定性规则不会「无输出让用户以为卡死」，也不额外增加半分钟等待 |
-| 新操作一律进底栏 | ADR-015 的「唯一操作落点」不能因为功能变多就破例 |
+| **流程**操作一律进底栏 | ADR-015 的「唯一操作落点」不能因为功能变多就破例；**内容**操作的例外边界见 ADR-030（目前只有版本抽屉一例） |
 
 ## 8. 与源文档《完整开发流程》的差异裁决
 
@@ -446,7 +471,7 @@ Job + 内存广播 + SSE 订阅保留真流式，所以应修订的是那条「�
 | 版本 | 内容 | 依据 |
 | --- | --- | --- |
 | **v3.0** | A 生成运行时（Job + 重连 + **已随 T0 落地的刷新恢复**）+ B 观测与预算 + **C 单次调用自愈（超时 + 有限重试）**。~~章节续传~~ 按实测推迟，见下表下说明 | 先立骨架与仪表，再动其余；三者共用 `stream_reply` 同一个出口 |
-| **v3.1** | **C 文档生命周期（单表所有权 + 迁移 + 待确认清单（P0~P6 分级）+ 澄清工作流，已完成；**四条澄清线程收进同一个对话页，ADR-027 / 028，已完成**；版本链推迟）** + D Skill 注册表 + E 交付质量 + **技能资产加固（热重载 / fail-fast / 回执可追溯，ADR-017，已完成）** + **可观测性基线（结构化日志 + `/health` 三项体检，ADR-018，已完成）** | 依赖 v3.0 的 Job 完成事件与 run_summary |
+| **v3.1** | **C 文档生命周期（单表所有权 + 迁移 + 待确认清单（P0~P6 分级）+ 澄清工作流，已完成；**四条澄清线程收进同一个对话页，ADR-027 / 028，已完成**；**版本链已落地，ADR-029 / 030**）** + D Skill 注册表 + E 交付质量 + **技能资产加固（热重载 / fail-fast / 回执可追溯，ADR-017，已完成）** + **可观测性基线（结构化日志 + `/health` 三项体检，ADR-018，已完成）** | 依赖 v3.0 的 Job 完成事件与 run_summary |
 | **v3.2** | Docker 化、生产加固（Cookie Secure / 邀请码轮换）、部署态隔离验证 | 与 A–E 正交，可随时做 |
 
 顺序理由：**A 是地基**（其余三项都要读 Job 记录）；**B 是仪表**（动主链路前先能看见代价）；

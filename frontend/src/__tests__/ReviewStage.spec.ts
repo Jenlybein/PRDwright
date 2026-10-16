@@ -528,3 +528,42 @@ describe('GeneratingStage 的已用时', () => {
     expect(wrapper.text()).toContain('生成失败')
   })
 })
+
+/**
+ * 版本历史入口。
+ *
+ * 入口是底栏内容行里的一个按钮——抽屉本身不在这里渲染（它由 `AppV2` 装配），
+ * 本组件只负责把「用户想开版本历史」这件事抛上去（见 ADR-030：底栏仍是唯一操作落点）。
+ */
+describe('ReviewStage 的版本入口', () => {
+  it('「版本」按钮渲染在底栏内容行，与文档工具排在一起', () => {
+    const wrapper = mountReview()
+
+    const bar = wrapper.find('.shell-action-bar')
+    expect(bar.findAll('button').map((item) => item.text())).toContain('版本')
+  })
+
+  it('点它抛出 openVersions 事件', async () => {
+    const wrapper = mountReview()
+
+    await buttonByText(wrapper, '版本').trigger('click')
+
+    expect(wrapper.emitted('openVersions')).toHaveLength(1)
+  })
+
+  it('文档没有正文时仍可点（没有版本时抽屉自己给空态，入口不必先藏起来）', () => {
+    const wrapper = mount(ReviewStage, {
+      props: {
+        title: '产品需求文档',
+        content: '',
+        viewState: 'review-prd',
+        canFinish: false,
+        hasPrd: false,
+        hasApiDocs: false,
+        hasPrompts: false,
+      },
+    })
+
+    expect(buttonByText(wrapper, '版本').attributes('disabled')).toBeUndefined()
+  })
+})
