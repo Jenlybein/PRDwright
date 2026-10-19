@@ -24,9 +24,14 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from backend.core.contracts import QuestionsConfig, StreamEvent
 from backend.core.errors import AppError, ErrorCode
-from backend.services.clarification_ask import extract_asks, make_ask_suppressor
+from backend.services.clarification_ask import (
+    ASK_BEGIN_SENTINEL,
+    extract_asks,
+    make_ask_suppressor,
+)
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import (
+    CLARIFICATION_ASK_REMINDER,
     DEFAULT_CONVERSATION_PROFILE,
     DOC_CLARIFICATION_PROFILE_KEY,
     ConversationProfile,
@@ -228,6 +233,23 @@ def _build_lc_messages(
             messages.append(HumanMessage(content=user_message))
 
     return messages
+
+
+def _reminded_history(
+    history: Iterable[FrontendMessage | dict[str, Any]],
+    profile: ConversationProfile,
+) -> list[FrontendMessage | dict[str, Any]]:
+    """续聊轮次在历史末尾追加一条「格式重申」系统消息（仅本轮发送，不落库）。
+
+    长对话里模型会模仿自己历史中「只写 A/B/C 文字、不附块」的写法，把结构化块丢掉，
+    导致前端选项卡弹不出来。把重申作为离当前最近的一条系统消息补到末尾，专门点破这个退化点。
+    只在澄清类档案上注入；返回副本，绝不改动调用方的历史（避免被持久化或随前端历史回传累积）。
+    """
+    if profile.key not in (DEFAULT_CONVERSATION_PROFILE, DOC_CLARIFICATION_PROFILE_KEY):
+        return list(history)
+    reminded: list[FrontendMessage | dict[str, Any]] = list(history)
+    reminded.append({"role": "system", "content": CLARIFICATION_ASK_REMINDER})
+    return reminded
 
 
 # ----------------------------------------------------------------------------
@@ -436,6 +458,22 @@ class ConversationService:
                     yield StreamEvent(type="chunk", content=trailing, data=event.data)
                 reply = str(event.data.get("reply", ""))
                 clean_reply, asks = extract_asks(reply)
+                # 每轮必打的汇总信号：无论哪类失败，都能从这一行看出「块在不在、出了几题」。
+                # `block_present=false` + `asks_count=0` 即「模型没产块」（配合 ask.no_block）；
+                # `block_present=true` + `asks_count=0` 即「块在但全被丢弃」（配合 ask.missing / unclosed / too_few_options）。
+                logger.info(
+                    "澄清选择题解析结果",
+                    extra={
+                        "event": "ask.result",
+                        "block_present": ASK_BEGIN_SENTINEL in reply,
+                        "asks_count": len(asks),
+                    },
+                )
+                # 需要看模型到底写了什么时，把输出级别调到 DEBUG 即可拿到块体尾部（块在末尾）。
+                logger.debug(
+                    "澄清回复原文尾部（含选择题块）",
+                    extra={"event": "ask.raw_reply", "tail": reply[-800:]},
+                )
                 if on_persist is not None:
                     on_persist(clean_reply)
                 yield StreamEvent(
@@ -575,7 +613,7 @@ class ConversationService:
         )
         messages = _build_lc_messages(
             system_prompt=profile.system_prompt,
-            history=base_history,
+            history=_reminded_history(base_history, profile),
             user_message=user_message,
         )
 

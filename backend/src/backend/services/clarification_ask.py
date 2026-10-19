@@ -109,6 +109,12 @@ def extract_asks(
         `id` 与各选项的 `label`。
     """
     if ASK_BEGIN_SENTINEL not in text:
+        # 观测盲点：模型没产块是「功能静默退化」的最常见形态，但若不记一条日志，
+        # 就无法把「没产块」和「前端刷新丢了 asks」区分开。这里补上明确信号。
+        logger.info(
+            "澄清回复未包含选择题块（模型未产块，按纯文本提问降级）",
+            extra={"event": "ask.no_block"},
+        )
         return text, []
 
     collected: list[dict[str, Any]] = []
