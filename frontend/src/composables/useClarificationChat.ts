@@ -8,9 +8,12 @@ import type { StreamResult } from '@/services/api'
 import type {
   ChatMessage,
   ChatStage,
+  ClarificationAnswerItem,
   ClarificationAsk,
   RequirementAnswers,
   RequirementsSummary,
+  ToolCallRef,
+  ToolResultPayload,
 } from '@/types'
 import { normalizeChatStage } from '@/utils/workflow'
 import { buildAnswers } from '@/utils/requirements'
@@ -164,16 +167,20 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     chatError.value = ''
 
     let reply = ''
-    // 这一轮提问附带的结构化选择题（后端从回复末尾的标记块剥出来的）
+    // 这一轮提问附带的结构化选择题（后端从工具调用参数里取出来的）
     let asks: ClarificationAsk[] = []
+    // 本轮助手发起的工具调用；回传历史时不能裁（见 `tool_calls` 的说明）
+    let toolCalls: ToolCallRef[] = []
     try {
       const result = await request()
       if (result.conversationId) conversationId.value = result.conversationId
       reply = result.reply
       asks = result.asks
+      toolCalls = result.toolCalls ?? []
     } catch (error) {
       chatError.value = error instanceof Error ? error.message : String(error)
       // 报错时把已经流出的半截内容保留下来；半截输出里没有可靠的选题，故 `asks` 留空
+      // 工具调用同理：没走完 `done` 就无从得知这次调用的 id
       reply = streamingContent.value
     } finally {
       // 先结束流式状态再固化消息，否则列表里会短暂多出一条「思考中」气泡
@@ -189,6 +196,9 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
           // ⚠️ 只在**有选项时**才带这个字段：几条既有用例按 `{role, content, stage}` 精确
           // 断言消息对象，恒带一个空数组会把它们弄红，而那种红会让人误以为「不带也行」
           ...(asks.length ? { asks } : {}),
+          // 同 `asks` 的口径：只在真有值时挂上去。它要跟着消息进历史回传给后端，
+          // 丢了就会留下「调了工具却没人应答」的悬空调用。
+          ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
         })
       }
       streamingContent.value = ''
@@ -205,19 +215,46 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
    * 判据是**错误码**而不是文案：这个错误发生在 SSE 流内（HTTP 状态码仍是 200），
    * 只能靠事件里的 `code` 识别；早先这里匹配的是「会话不存在」这句中文，
    * 后端改一个字降级逻辑就静默失效——那正是本次改造要消灭的耦合。
+   *
+   * @param content 本轮输入。选项卡提交时它是拼好的展示文本：**照旧发给后端**——
+   *   降级（拿不到 `tool_call_id`）时模型唯一能读到的就是它，所以这里
+   *   刻意保留完整题干与选项文本，不为了界面好看而改短。
+   * @param toolResult 结构化作答（**给模型**的回灌）。带上时后端按工具结果回给
+   *   当初提问的那次工具调用；缺 `tool_call_id` 时不带，后端按纯文本处理。
+   * @param answers 逐题作答（**给界面**的回执）。点选项卡提交就有，与
+   *   `toolResult` 能否发出**无关**；不挂时这条消息渲染成普通气泡。
    */
-  async function sendMessage(content: string): Promise<void> {
+  async function sendMessage(
+    content: string,
+    toolResult?: ToolResultPayload,
+    answers?: ClarificationAnswerItem[],
+  ): Promise<void> {
     const text = content.trim()
     if (!text || chatStreaming.value) return
 
-    messages.value.push({ role: 'user', content: text, stage })
+    // `answers` 只由「点选项卡提交」产生（自由文本作答不传），于是它天然就是
+    // 「这条消息是选出来的」的标记。同 `asks` 的口径：只在真有值时挂键，别挂空数组。
+    messages.value.push({
+      role: 'user',
+      content: text,
+      stage,
+      ...(answers?.length ? { answers } : {}),
+    })
     chatError.value = ''
 
     // 历史只取本阶段、本轮之前的消息，本轮输入单独通过 content 传递。
     // 先按阶段过滤再去掉末尾刚推入的那一条（它被塞在上一步，一定在末尾）。
+    //
+    // ⚠️ `tool_calls` 不能裁：它是后端把随后的用户文本包成工具应答、完成配对的
+    // 依据。裁掉会让历史里留下悬空的 tool_call，上游 API 直接报错。
+    // 同 `asks` 的口径，只在真有值时带上。
     const prior = history()
       .slice(0, -1)
-      .map((message) => ({ role: message.role, content: message.content }))
+      .map(({ role, content, tool_calls }) => ({
+        role,
+        content,
+        ...(tool_calls?.length ? { tool_calls } : {}),
+      }))
 
     await runStream(async () => {
       try {
@@ -227,6 +264,7 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
             conversationId: conversationId.value || undefined,
             history: prior,
             profileKey,
+            toolResult,
           },
           { onChunk: handleChunk },
         )
@@ -237,7 +275,7 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
         conversationId.value = ''
         streamingContent.value = ''
         return continueConversationStream(
-          { content: text, history: prior, profileKey },
+          { content: text, history: prior, profileKey, toolResult },
           { onChunk: handleChunk },
         )
       }

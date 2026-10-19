@@ -101,12 +101,12 @@ def test_ask_spec_lives_in_the_shared_rule_and_reaches_every_profile() -> None:
     写进共享规则（而不是某个 opening）有一个硬理由：`system_prompt` **每轮都在**、
     opening 只在首轮，而这个块是「每轮提问都要产出」的。谁把它挪进某个档案，这条会红。
     """
-    from backend.services.clarification_ask import ASK_BEGIN_SENTINEL, render_ask_spec
+    from backend.services.clarification_ask import ASK_TOOL_NAME, render_ask_tool_instruction
 
-    assert render_ask_spec() in CLARIFICATION_QUESTION_RULE
-    assert ASK_BEGIN_SENTINEL in CLARIFICATION_QUESTION_RULE
+    assert render_ask_tool_instruction() in CLARIFICATION_QUESTION_RULE
+    assert ASK_TOOL_NAME in CLARIFICATION_QUESTION_RULE
     for key, profile in CONVERSATION_PROFILES.items():
-        assert ASK_BEGIN_SENTINEL in profile.system_prompt, key
+        assert ASK_TOOL_NAME in profile.system_prompt, key
 
 
 def test_ask_spec_goes_into_the_persona_not_the_opening() -> None:
@@ -115,11 +115,11 @@ def test_ask_spec_goes_into_the_persona_not_the_opening() -> None:
     放错地方的表现很隐蔽：首轮有选项卡、之后每一轮退回纯文本——用户会以为功能坏了，
     而日志里什么都看不到。这条与上一条一正一反地钉住落点。
     """
-    from backend.services.clarification_ask import ASK_BEGIN_SENTINEL
+    from backend.services.clarification_ask import ASK_TOOL_NAME
 
     for key, profile in CONVERSATION_PROFILES.items():
-        assert ASK_BEGIN_SENTINEL in profile.system_prompt, key
-        assert ASK_BEGIN_SENTINEL not in profile.opening, key
+        assert ASK_TOOL_NAME in profile.system_prompt, key
+        assert ASK_TOOL_NAME not in profile.opening, key
 
 
 def test_questions_must_come_with_a_reference_frame() -> None:
@@ -220,14 +220,18 @@ def test_conversation_requests_expose_no_prompt_field() -> None:
 class _RecordingLLM:
     """记录收到的消息的假 LLM：用来断言「到底把什么填进了提示词」。
 
-    只实现 `astream`（满足 `StreamingChatModel` 协议），吐一个字就够了——本组测试关心的是
-    输入侧，不是输出侧。
+    实现 `StreamingChatModel` 协议的两个方法（`bind_tools` / `astream`），吐一个字就够
+    ——本组测试关心的是输入侧，不是输出侧。`bind_tools` 直接返回自己（假模型不在乎
+    绑了什么工具），与 `test_conversation_asks_stream.py` 的 `_ScriptedLLM` 同款。
     """
 
     def __init__(self) -> None:
         self.calls: list[list[BaseMessage]] = []
 
-    async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
+    def bind_tools(self, tools, *, tool_choice=None, parallel_tool_calls=None, **kwargs):  # noqa: ANN001, ANN003
+        return self
+
+    async def astream(self, messages: list[BaseMessage], **kwargs) -> AsyncIterator[AIMessageChunk]:  # noqa: ANN003
         self.calls.append(list(messages))
         yield AIMessageChunk(content="收到")
 

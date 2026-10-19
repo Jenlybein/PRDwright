@@ -19,6 +19,8 @@ import type {
   StepUsage,
   StreamDocumentPart,
   StreamStageEvent,
+  ToolCallRef,
+  ToolResultPayload,
 } from '@/types'
 
 /**
@@ -187,10 +189,27 @@ export interface StreamResult {
   /**
    * 这一轮提问附带的**结构化选择题**；没有则为空数组。
    *
-   * 澄清风才有（后端从回复末尾的标记块里剥出来）；三条生成线的 `done` 不带这个键，
-   * 因此它们拿到的永远是空数组——同一个解析器服务所有流，不额外分支。
+   * 澄清风才有（后端从 `ask_clarification_questions` 的工具调用参数里取出来）；
+   * 三条生成线的 `done` 不带这个键，因此它们拿到的永远是空数组——
+   * 同一个解析器服务所有流，不额外分支。
+   *
+   * 每道题上的 `tool_call_id` 才是作答回灌的配对依据（缺失即降级为纯文本）。
    */
   asks: ClarificationAsk[]
+  /**
+   * 本轮提问对应的**工具调用 id**（`done` 顶层那个）；后端没给时**不带这个键**。
+   *
+   * 与 `asks[].tool_call_id` 同源，都是「当初提问的那次调用」。选项卡的作答回灌走
+   * 后者（逐题配对更稳），这里保留是因为它是 `done` 事件的原始解析结果——同一个
+   * 解析器服务所有流，多读一个字段不额外分支。
+   */
+  toolCallId?: string
+  /**
+   * 本轮助手消息携带的工具调用（`[{id, name, args}]`）；没有时**不带这个键**。
+   *
+   * 回传历史时要原样带回：裁掉它，后端就只剩「调了工具却没人应答」的悬空调用。
+   */
+  toolCalls?: ToolCallRef[]
 }
 
 /** SSE 流的结束标记，收到后不再解析 */
@@ -225,11 +244,40 @@ function readObjectArray(data: Record<string, unknown>, key: string): Record<str
 }
 
 /**
+ * 把 `done` 事件里的 `tool_calls` 归一成 `ToolCallRef[]`。
+ *
+ * 与另一个工具链解析器（`parseClarificationAsks`）同一口径：**逐项校验、坏数据丢弃**。
+ * 缺 `id` 或 `name` 的调用下游无从配对，整项丢弃；`args` 缺失退化为空对象——
+ * 它只用于回传历史时还原调用参数，取不到不该让整条工具链断掉。
+ */
+function parseToolCalls(data: Record<string, unknown>): ToolCallRef[] {
+  return readObjectArray(data, 'tool_calls').flatMap((item) => {
+    const id = item.id
+    const name = item.name
+    if (typeof id !== 'string' || !id) return []
+    if (typeof name !== 'string' || !name) return []
+    const args = item.args
+    return [
+      {
+        id,
+        name,
+        args: typeof args === 'object' && args !== null && !Array.isArray(args)
+          ? (args as Record<string, unknown>)
+          : {},
+      },
+    ]
+  })
+}
+
+/**
  * 把 `done` 事件里的 `clarification_asks` 归一成 `ClarificationAsk[]`。
  *
  * 与 `parsePendingItems` 同一口径：**逐项校验、坏数据丢弃**，能渲染多少算多少——
  * 一条脏数据不该让整轮提问消失，更不该让对话报错。判据与实际渲染需求对齐：
  * 没有题干、或凑不到两个选项的题，界面上既没法点也没地方安放答案，一律丢掉。
+ *
+ * 题目由后端从**工具调用参数**里取出（见 `services/clarification_ask.py`），
+ * 来源调用带 id 时每道题会挂一个 `tool_call_id`——作答回灌靠它配对。
  */
 function parseClarificationAsks(data: Record<string, unknown>): ClarificationAsk[] {
   return readObjectArray(data, 'clarification_asks').flatMap((item) => {
@@ -247,6 +295,10 @@ function parseClarificationAsks(data: Record<string, unknown>): ClarificationAsk
     })
     if (options.length < 2) return []
 
+    // 只在**非空字符串**时才挂：空壳的 tool_call_id 会让前端误以为可以结构化回灌，
+    // 而缺失这个键才是「请降级为纯文本作答」的信号
+    const toolCallId = typeof item.tool_call_id === 'string' ? item.tool_call_id : ''
+
     return [
       {
         id: typeof item.id === 'string' && item.id ? item.id : `ask-${question.slice(0, 8)}`,
@@ -255,6 +307,7 @@ function parseClarificationAsks(data: Record<string, unknown>): ClarificationAsk
         // 只认真正的布尔真：后端已归一，这里再守一道，免得字符串形式的 "true" 被当成多选
         multiple: item.multiple === true,
         options,
+        ...(toolCallId ? { tool_call_id: toolCallId } : {}),
       },
     ]
   })
@@ -518,6 +571,10 @@ async function readStreamRequest(
   let reply = ''
   // 这一轮提问附带的结构化选择题；只有澄清风会下发（见 `parseClarificationAsks`）
   let asks: ClarificationAsk[] = []
+  // 本轮的工具链，都取自 `done`：`toolCallId` 是提问那次调用的 id，
+  // `toolCalls` 是这次调用本身（回传历史时不能裁，否则留下悬空调用）
+  let toolCallId = ''
+  let toolCalls: ToolCallRef[] = []
   // 后端下发的 error 事件：HTTP 状态码是 200，分类信息全在事件的 code 里
   let failure: ApiError | null = null
 
@@ -543,6 +600,8 @@ async function readStreamRequest(
         conversationId = readString(event.data, 'conversation_id') || conversationId
         reply = readString(event.data, 'reply') || reply
         asks = parseClarificationAsks(event.data)
+        toolCallId = readString(event.data, 'tool_call_id')
+        toolCalls = parseToolCalls(event.data)
         break
       case 'snapshot': {
         const snapshot = parseSnapshotEvent(event.data)
@@ -587,7 +646,15 @@ async function readStreamRequest(
   // 包一层就把错误码弄丢了
   if (failure) throw failure
 
-  return { conversationId, reply, asks }
+  // 两个工具链字段同样只在**真有值**时挂上去：恒挂一个空串 / 空数组会让调用方
+  // 误判「本轮有工具调用」，进而发一条配不上对的 tool_result
+  return {
+    conversationId,
+    reply,
+    asks,
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}),
+  }
 }
 
 /**
@@ -624,6 +691,10 @@ export async function startConversationStream(
  * 两者都传时以后端收到的 `history` 为准。人设由后端按档案标识解析：有会话记录时以记录为准，
  * 记录已丢（服务重启 / 无状态模式）时才用 `profileKey`——**没有它，文档澄清会在中途
  * 悄悄变回需求澄清**，用户突然被问「要不要生成 PRD」却没有任何报错。
+ *
+ * `toolResult` 是结构化选择题的**作答回灌**：带上它时后端把答案作为工具结果回给
+ * 当初提问的那次工具调用，**不再重复把这段人话投喂给模型**。`content` 仍要传——
+ * 它是气泡里给人看的展示文本。不带它时就是普通续聊。
  */
 export async function continueConversationStream(
   payload: {
@@ -631,6 +702,7 @@ export async function continueConversationStream(
     conversationId?: string
     history?: ChatMessage[]
     profileKey?: string
+    toolResult?: ToolResultPayload
   },
   handlers?: StreamHandlers,
 ): Promise<StreamResult> {
@@ -639,9 +711,18 @@ export async function continueConversationStream(
     {
       conversation_id: payload.conversationId ?? '',
       content: payload.content,
-      // 只保留后端认识的 role / content 两个字段
-      history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
+      // ⚠️ 这里**不能**只留 role / content：助手消息上的 `tool_calls` 是后端把
+      // 随后的用户文本包成工具应答、完成配对的唯一依据，裁掉就会让后端看到
+      // 「调了工具却没人应答」的悬空调用，上游 API 直接报错。
+      // 同 `asks` 的口径：只在真有值时带上，避免给普通消息挂空壳。
+      history: (payload.history ?? []).map(({ role, content, tool_calls }) => ({
+        role,
+        content,
+        ...(tool_calls?.length ? { tool_calls } : {}),
+      })),
       profile_key: payload.profileKey ?? '',
+      // 有值才带这个键：后端据此在「工具结果回灌」与「普通续聊」之间分支
+      ...(payload.toolResult ? { tool_result: payload.toolResult } : {}),
     },
     handlers,
   )

@@ -630,7 +630,7 @@ describe('AppV2 完整流程编排', () => {
     expect(JSON.stringify(payload)).not.toContain('资深产品经理')
   })
 
-  it('澄清提问带结构化选项时渲染成选项卡，提交后作为一条用户消息发出、卡片退成只读', async () => {
+  it('澄清提问带结构化选项时渲染成选项卡，提交后作为一条用户消息发出、卡片随之消失', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
       handlers?.onChunk?.('你更倾向哪种做法？')
       return {
@@ -672,9 +672,67 @@ describe('AppV2 完整流程编排', () => {
     const payload = vi.mocked(api.continueConversationStream).mock.calls[0]?.[0]
     expect(payload?.content).toBe('1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步')
 
-    // 作答之后它不再是最后一条消息，卡片退成只读——否则同一个问题能被反复回答
+    // 作答之后它不再是最后一条消息：卡片整块消失，而不是留下点不动的只读卡片
     const after = wrapper.findAll('button').find((item) => item.text().startsWith('A'))
-    expect(after?.attributes('disabled')).toBeDefined()
+    expect(after).toBeUndefined()
+  })
+
+  it('选项卡的作答沿 emit 链原样透传到接口的结构化 tool_result', async () => {
+    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
+      handlers?.onChunk?.('你更倾向哪种做法？')
+      return {
+        conversationId: 'conv-1',
+        reply: '你更倾向哪种做法？',
+        asks: [
+          {
+            id: 'ask-1',
+            question: '第一版要不要做离线同步？',
+            background: '',
+            multiple: false,
+            options: [
+              { label: 'A', text: '第一版就做离线同步' },
+              { label: 'B', text: '第一版只做在线' },
+            ],
+            // 后端随 done 下发的来源工具调用 id
+            tool_call_id: 'call-1',
+          },
+        ],
+      }
+    })
+    vi.mocked(api.continueConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '好，那就先做离线草稿。',
+      asks: [],
+    })
+
+    const wrapper = await mountApp()
+    await submitSampleForm(wrapper)
+
+    await wrapper.findAll('button').find((item) => item.text().startsWith('A'))?.trigger('click')
+    await clickButton(wrapper, '提交回答')
+    await flushPromises()
+
+    const payload = vi.mocked(api.continueConversationStream).mock.calls[0]?.[0]
+    // 结构化作答：把答案对回当初提问的那次工具调用
+    expect(payload?.toolResult).toEqual({
+      tool_call_id: 'call-1',
+      answers: [
+        {
+          ask_id: 'ask-1',
+          labels: ['A'],
+          question: '第一版要不要做离线同步？',
+          texts: ['第一版就做离线同步'],
+      },
+      ],
+    })
+    // 展示文本照旧发给后端：它是降级时模型唯一能读到的东西
+    expect(payload?.content).toBe('1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步')
+
+    // 但界面上不再念这段话：改用一行轻回执，只列选中的标号
+    const receipt = wrapper.find('[aria-label="你选了 A"]')
+    expect(receipt.exists()).toBe(true)
+    expect(receipt.text()).not.toContain('第一版就做离线同步')
+    expect(receipt.text()).not.toContain('第一版要不要做离线同步？')
   })
 
   it('对话完成后可生成 PRD，并在生成完成时进入待确认阶段', async () => {

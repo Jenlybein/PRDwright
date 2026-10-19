@@ -5,7 +5,7 @@ import { useClarificationChat, type ChatHooks } from '@/composables/useClarifica
 import { continueConversationStream, startConversationStream } from '@/services/api'
 import { ApiError } from '@/services/errors'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { ChatStage } from '@/types'
+import type { ChatMessage, ChatStage, ToolResultPayload } from '@/types'
 
 /**
  * 澄清对话：**线程隔离**与降级重试。
@@ -36,10 +36,20 @@ vi.mock('@/services/api', () => ({
 /** 四条线程共用的外部能力；本文件不关心提示语与阶段切换 */
 const hooks: ChatHooks = { onNotice: () => undefined, onEnterChat: () => undefined }
 
-/** 接续对话的请求载荷，只留这里要断言的两个字段 */
+/** 接续对话的请求载荷，只留这里要断言的字段 */
 interface ContinueCall {
   content: string
   conversationId?: string
+  history?: unknown[]
+  toolResult?: unknown
+}
+
+/** 一条「问过选题」的助手消息；`tool_calls` 是后端配对工具应答的依据 */
+const ASKED: ChatMessage = {
+  role: 'assistant',
+  content: '你更倾向哪种做法？',
+  stage: 'requirement',
+  tool_calls: [{ id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } }],
 }
 
 /** 建一条线程的对话实例（不传记录参数——记录与 id 都在 store 里按 `stage` 取） */
@@ -57,6 +67,8 @@ function continueCalls(): ContinueCall[] {
   return vi.mocked(continueConversationStream).mock.calls.map(([payload]) => ({
     content: payload.content,
     conversationId: payload.conversationId,
+    history: payload.history,
+    toolResult: payload.toolResult,
   }))
 }
 
@@ -243,6 +255,253 @@ describe('四条线程互不串线', () => {
     // 关键：另一条线程完全不受影响——用全局 `chatStreaming` 判据的话，这里会多出一条空气泡
     expect(prd.streaming.value).toBe(false)
     expect(prd.displayMessages.value.map((message) => message.content)).toEqual(['PRD 那边的问题'])
+  })
+})
+
+describe('结构化作答的回灌', () => {
+  const TOOL_RESULT: ToolResultPayload = {
+    tool_call_id: 'call-1',
+    answers: [
+      {
+        ask_id: 'ask-1',
+        labels: ['A'],
+        question: '第一版要不要做离线同步？',
+        texts: ['第一版就做离线同步'],
+      },
+    ],
+  }
+
+  it('sendMessage 带上 toolResult 时把它交给接口', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(continueConversationStream).mockResolvedValue({
+      conversationId: '',
+      reply: '好',
+      asks: [],
+    })
+
+    await chat.sendMessage('展示文本', TOOL_RESULT)
+
+    const call = continueCalls()[0]
+    expect(call?.toolResult).toEqual(TOOL_RESULT)
+    expect(call?.content).toBe('展示文本')
+  })
+
+  it('不带 toolResult 时接口收不到它（普通续聊，行为与先前一致）', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(continueConversationStream).mockResolvedValue({
+      conversationId: '',
+      reply: '好',
+      asks: [],
+    })
+
+    await chat.sendMessage('普通消息')
+
+    expect(continueCalls()[0]?.toolResult).toBeUndefined()
+  })
+
+  it('点选项卡提交时推入的消息带 answers（界面据此渲染成回执而不是气泡）', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(continueConversationStream).mockResolvedValue({
+      conversationId: '',
+      reply: '好',
+      asks: [],
+    })
+
+    await chat.sendMessage(
+      '1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步',
+      TOOL_RESULT,
+      TOOL_RESULT.answers,
+    )
+
+    // 推入的第一条是用户消息（第二条是随后固化的助手回复）
+    expect(store.messages[0]).toEqual({
+      role: 'user',
+      content: '1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步',
+      stage: 'requirement',
+      answers: TOOL_RESULT.answers,
+    })
+  })
+
+  it('自由文本作答的消息**没有** answers 这个键（仍是普通气泡）', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(continueConversationStream).mockResolvedValue({
+      conversationId: '',
+      reply: '好',
+      asks: [],
+    })
+
+    await chat.sendMessage('我直接说说我的想法')
+
+    // 推入的第一条是用户消息（第二条是随后固化的助手回复）
+    const user = store.messages[0]
+    expect(user).not.toHaveProperty('answers')
+    // 与既有精确形状断言一致：普通消息就只有这三个键
+    expect(user).toEqual({
+      role: 'user',
+      content: '我直接说说我的想法',
+      stage: 'requirement',
+    })
+  })
+
+  it('降级（题目缺 tool_call_id）时消息**仍然**带 answers：界面不退成气泡', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(continueConversationStream).mockResolvedValue({
+      conversationId: '',
+      reply: '好',
+      asks: [],
+    })
+
+    // 拿不到工具调用 id 只影响**模型**那一路（`toolResult` 不發）；
+    // 界面那一路照旧，因为用户看不到模型收到了什么。
+    await chat.sendMessage(
+      '1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步',
+      undefined,
+      [
+        {
+          ask_id: 'ask-1',
+          labels: ['A'],
+          question: '第一版要不要做离线同步？',
+          texts: ['第一版就做离线同步'],
+        },
+      ],
+    )
+
+    expect(store.messages[0]).toEqual({
+      role: 'user',
+      content: '1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步',
+      stage: 'requirement',
+      answers: [
+        {
+          ask_id: 'ask-1',
+        labels: ['A'],
+          question: '第一版要不要做离线同步？',
+        texts: ['第一版就做离线同步'],
+        },
+      ],
+    })
+    // 同时：请求体里不该有 tool_result（降级的两面一起钉住）
+    expect(continueCalls()[0]?.toolResult).toBeUndefined()
+  })
+
+  it('回传的历史保留 assistant 的 tool_calls（裁掉会让后端看到悬空的 tool_call）', async () => {
+    const store = useWorkflowStore()
+    store.messages = [{ role: 'user', content: '开始吧', stage: 'requirement' }, ASKED]
+    const chat = makeChat('requirement')
+    vi.mocked(continueConversationStream).mockResolvedValue({
+      conversationId: '',
+      reply: '好',
+      asks: [],
+    })
+
+    await chat.sendMessage('答：A')
+
+    expect(continueCalls()[0]?.history).toEqual([
+      { role: 'user', content: '开始吧' },
+      // stage 本来就不回传（后端不认），但 tool_calls 必须在
+      { role: 'assistant', content: '你更倾向哪种做法？', tool_calls: ASKED.tool_calls },
+    ])
+  })
+
+  it('done 下发的 tool_calls 挂到固化后的助手消息上', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(startConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '你更倾向哪种做法？',
+      asks: [
+        {
+          id: 'ask-1',
+          question: '第一版要不要做离线同步？',
+          background: '',
+          multiple: false,
+          options: [
+            { label: 'A', text: '第一版就做离线同步' },
+            { label: 'B', text: '第一版只做在线' },
+          ],
+          tool_call_id: 'call-1',
+        },
+      ],
+      toolCallId: 'call-1',
+      toolCalls: [
+        { id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } },
+      ],
+    })
+
+    await chat.startConversationWithAnswers({ product_name: 'X' })
+
+    expect(store.messages[store.messages.length - 1]).toEqual({
+      role: 'assistant',
+      content: '你更倾向哪种做法？',
+      stage: 'requirement',
+      asks: [
+        {
+          id: 'ask-1',
+          question: '第一版要不要做离线同步？',
+          background: '',
+          multiple: false,
+          options: [
+            { label: 'A', text: '第一版就做离线同步' },
+            { label: 'B', text: '第一版只做在线' },
+          ],
+          tool_call_id: 'call-1',
+        },
+      ],
+      tool_calls: [{ id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } }],
+    })
+    // 工具应答（tool 角色）由后端自己落：这里不该出现那两个字段
+    expect(store.messages[store.messages.length - 1]).not.toHaveProperty('tool_call_id')
+    expect(store.messages[store.messages.length - 1]).not.toHaveProperty('tool_result')
+  })
+
+  it('固化后的助手消息不带 tool_call_id / tool_result（前端不产生 tool 消息）', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(startConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '信息已经足够',
+      asks: [],
+      toolCallId: 'call-1',
+      toolCalls: [
+        { id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } },
+      ],
+    })
+
+    await chat.startConversationWithAnswers({ product_name: 'X' })
+
+    const last = store.messages[store.messages.length - 1]
+    // 工具应答是后端自己落的：前端只回传 assistant 发起的调用，不伪造 tool 角色消息
+    expect(last).not.toHaveProperty('tool_call_id')
+    expect(last).not.toHaveProperty('tool_result')
+    expect(last?.tool_calls).toEqual([
+      { id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } },
+    ])
+  })
+
+  it('没有工具链时助手消息**不带** tool_calls 这个键（保持既有精确形状断言不红）', async () => {
+    const store = useWorkflowStore()
+    store.messages = []
+    const chat = makeChat('requirement')
+    vi.mocked(startConversationStream).mockResolvedValue({
+      conversationId: 'conv-1',
+      reply: '信息已经足够',
+      asks: [],
+    })
+
+    await chat.startConversationWithAnswers({ product_name: 'X' })
+
+    expect(store.messages[store.messages.length - 1]).not.toHaveProperty('tool_calls')
   })
 })
 

@@ -59,11 +59,47 @@ class ConversationCreateRequest(BaseModel):
     )
 
 
-class MessageItem(BaseModel):
-    """单条聊天消息，用于前端回传历史（无状态接续对话）。"""
+class ClarificationAnswerItem(BaseModel):
+    """结构化选择题里**一道题的作答**（工具结果回灌用）。
 
-    role: Literal["system", "user", "assistant"] = Field(description="消息角色")
+    `question` / `texts` 是冗余的自解释字段：工具结果要能独立看懂（对齐
+    Claude Code `AskUserQuestion` 的结果形状），不能只给 `A` 这种标号——
+    模型还得回头翻自己的工具调用参数才知道 `A` 是什么。
+    """
+
+    ask_id: str = Field(description="题目 id（后端分配的 ask-1 / ask-2）")
+    labels: list[str] = Field(default_factory=list, description="选中项标号，如 [\"A\", \"B\"]")
+    question: str = Field(default="", description="题干（自解释用）")
+    texts: list[str] = Field(default_factory=list, description="选中项的选项文本")
+
+
+class ToolResultPayload(BaseModel):
+    """作答回灌的结构化载荷：一次「回答选择题」对应一条工具结果。"""
+
+    tool_call_id: str = Field(description="要回答的工具调用 id（随 done 下发）")
+    answers: list[ClarificationAnswerItem] = Field(
+        default_factory=list, description="逐题作答；允许只答一部分"
+    )
+
+
+class MessageItem(BaseModel):
+    """单条聊天消息，用于前端回传历史（无状态接续对话）。
+
+    带 `tool_calls` / `tool_call_id` / `tool_result` 的消息是**工具调用链**的一环：
+    助手提问走 `tool_calls`，用户作答走 `tool` 角色（`tool_result` 带结构化答案）。
+    三者都可缺省——普通对话消息不需要它们。
+    """
+
+    role: Literal["system", "user", "assistant", "tool"] = Field(description="消息角色")
     content: str = Field(default="", description="消息正文")
+    tool_calls: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="assistant 消息携带的工具调用，形如 [{id, name, args}]",
+    )
+    tool_call_id: str = Field(default="", description="tool 消息应答的工具调用 id")
+    tool_result: ToolResultPayload | None = Field(
+        default=None, description="tool 消息携带的结构化答案（有它时正文由它重新组装）"
+    )
 
 
 class ConversationContinueRequest(BaseModel):
@@ -72,6 +108,10 @@ class ConversationContinueRequest(BaseModel):
     同样不接受提示词参数：人设由会话记录里的档案标识实时解析，前端不需要（也无法）
     重新下发。`profile_key` 也不是提示词，只是「点名场景」——服务重启后会话记录已丢失
     （无状态模式），没有它就只能回退默认档案，于是「文档澄清」会在中途悄悄变回「需求澄清」。
+
+    `tool_result` 是结构化选择题的**作答回灌**：带上它时本轮不再投喂普通用户消息，
+    改为向提问那次工具调用回一条 `ToolMessage`（对齐 Claude Code / Codex 的做法）。
+    `content` 仍保留——它是给人看的展示文本（前端气泡）。
     """
 
     conversation_id: str = Field(
@@ -88,6 +128,13 @@ class ConversationContinueRequest(BaseModel):
         description=(
             "会话记录缺失（服务重启 / 无状态模式）时用于解析人设的档案标识；"
             "有会话记录时以记录里的档案为准"
+        ),
+    )
+    tool_result: ToolResultPayload | None = Field(
+        default=None,
+        description=(
+            "结构化选择题的作答回灌。带上时本轮按工具结果回灌（ToolMessage），"
+            "不重复投喂普通用户消息；`content` 仍保留作为展示文本"
         ),
     )
 

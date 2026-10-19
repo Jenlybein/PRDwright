@@ -18,6 +18,7 @@ import PromptDebugStage from '@/components/stages/PromptDebugStage.vue'
 import QuickPrdStage from '@/components/stages/QuickPrdStage.vue'
 import ReviewStage from '@/components/stages/ReviewStage.vue'
 import VersionDrawer from '@/components/ui/VersionDrawer.vue'
+import type { AnswerPayload } from '@/components/ClarificationAskList.vue'
 import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
 import { fetchActiveJobs, onUnauthorized } from '@/services/api'
@@ -718,6 +719,23 @@ function handleRestart(): void {
 function handleStepClick(stepId: StepId): void {
   goTo(stepId)
 }
+
+/**
+ * 提交结构化选择题的回答。
+ *
+ * 与「自己敲一段字」走同一条发送链路，只是多带一份结构化作答：
+ *
+ * - `payload.text` 照旧发给后端——它是后端存下的正文，也是降级（拿不到
+ *   `tool_call_id`）时模型唯一能读到的东西；
+ * - `payload.toolResult` 让后端把它作为工具结果回灌给当初提问的那次工具调用；
+ *   拿不到（题目没带 `tool_call_id`）时就不带，后端按纯文本处理；
+ * - `payload.answers` 由 `sendMessage` 挂到推入的消息上，界面据此把这轮渲染成
+ *   一行轻回执，而不是把上面那段文本原样念回给用户。**它与 `toolResult`
+ *   无关**——即便降级，用户看到的也仍是回执，因为他看不到模型收到了什么。
+ */
+function handleClarificationAnswer(payload: AnswerPayload): void {
+  void activeChat.value.sendMessage(payload.text, payload.toolResult, payload.answers)
+}
 </script>
 
 <template>
@@ -876,7 +894,7 @@ function handleStepClick(stepId: StepId): void {
         @edit-requirements="goTo('form')"
         @restart="handleRestart"
         @send="activeChat.sendMessage"
-        @answer="activeChat.sendMessage"
+        @answer="handleClarificationAnswer"
         @generate-prd="handleGeneratePrd"
         @rewrite="applyClarification"
       />

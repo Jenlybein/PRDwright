@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessageChunk, BaseMessage
 from backend.api.schemas import StreamEvent
 from backend.core.errors import ErrorCode
 from backend.services.stream_reply import (
+    _merge_tool_calls,
     astream_text,
     collect_reply,
     error_event,
@@ -181,6 +182,59 @@ def test_error_event_defaults_to_llm_upstream_code() -> None:
     assert event.type == "error"
     assert event.code == ErrorCode.LLM_UPSTREAM_ERROR.value
     assert event.data is not None and event.data["error_type"] == "ValueError"
+
+
+# ---------------------------------------------------------------------------
+# _merge_tool_calls：把流式工具调用分片拼回完整调用
+#
+# ⚠️ 这一组守的是**真实模型**的分片形态（一次调用被切成很多片送来）。
+# 只造「一整片发完」的假数据测不出问题——线上就是这么漏过去的：拼装方式错了，
+# 模型明明调了工具，题目却一个都取不到，选项卡一张都不弹。
+# ---------------------------------------------------------------------------
+
+
+def test_split_tool_call_chunks_merge_into_one_complete_call() -> None:
+    """一次工具调用被切成多片：参数必须按 index 拼回一条完整调用。
+
+    这是线上「选项卡一张都不弹」的根因：若按分片逐个解析，首片（`args=""`）
+    解析成空对象、后续残片各自解析失败，一次调用就变成「一条空调用 + 若干条废调用」。
+    """
+    shards = [
+        {"name": "ask_clarification_questions", "args": "", "id": "call-abc", "index": 0},
+        {"name": None, "args": '{"questions": [{"question": "要不要离线", "opti', "id": None, "index": 0},
+        {"name": None, "args": 'ons": [{"text": "做"}, {"text": "不做"}]}]}', "id": None, "index": 0},
+    ]
+
+    merged = _merge_tool_calls(shards)
+
+    assert len(merged) == 1, f"分片应当拼成一条调用，实际是 {merged}"
+    assert merged[0]["name"] == "ask_clarification_questions"
+    assert merged[0]["id"] == "call-abc"
+    assert merged[0]["args"] == {
+        "questions": [
+            {"question": "要不要离线", "options": [{"text": "做"}, {"text": "不做"}]}
+        ]
+    }
+
+
+def test_two_tool_calls_stay_separate() -> None:
+    """两次调用（index 0 / 1）各拼各的，不能被并成一条。"""
+    shards = [
+        {"name": "ask_clarification_questions", "args": '{"questions": [{"question": "第一题",', "id": "c1", "index": 0},
+        {"name": None, "args": ' "options": [{"text": "A"}, {"text": "B"}]}]}', "id": None, "index": 0},
+        {"name": "ask_clarification_questions", "args": '{"questions": [{"question": "第二题", "options": [{"text": "C"}, {"text": "D"}]}]}', "id": "c2", "index": 1},
+    ]
+
+    merged = _merge_tool_calls(shards)
+
+    assert [call["id"] for call in merged] == ["c1", "c2"]
+    assert merged[0]["args"]["questions"][0]["question"] == "第一题"
+    assert merged[1]["args"]["questions"][0]["question"] == "第二题"
+
+
+def test_merge_without_chunks_is_empty() -> None:
+    """没有工具调用分片就是空列表——没调工具是常态，不是异常。"""
+    assert _merge_tool_calls([]) == []
 
 
 def test_services_hold_no_duplicate_stream_implementation() -> None:

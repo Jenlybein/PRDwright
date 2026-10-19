@@ -32,6 +32,22 @@ QUESTIONS_CONFIG_PATH = Path(__file__).resolve().parents[1] / "core" / "question
 # 路由统一改用 `sse_response(events)`，分帧行为逐字节不变。
 
 
+def _message_to_history_item(message: schemas.MessageItem) -> dict[str, Any]:
+    """把前端回传的历史消息转成服务层的 `FrontendMessage` 形状。
+
+    工具调用链字段只在真有值时带上：`_build_lc_messages` 按 `.get()` 取可选字段，
+    空壳键只会让历史变脏。`tool_result` 是 Pydantic 模型，要摊成 dict。
+    """
+    item: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.tool_calls:
+        item["tool_calls"] = list(message.tool_calls)
+    if message.tool_call_id:
+        item["tool_call_id"] = message.tool_call_id
+    if message.tool_result is not None:
+        item["tool_result"] = message.tool_result.model_dump()
+    return item
+
+
 @router.get("/questions", response_model=schemas.QuestionsConfig, summary="获取需求澄清问卷")
 async def get_questions() -> schemas.QuestionsConfig:
     """读取问卷配置并返回，前端据此渲染表单。"""
@@ -128,8 +144,10 @@ async def continue_conversation_stream(
     人设由会话记录里的档案标识实时解析；无状态模式（服务端会话已丢失）下回退到
     默认档案，前端不需要也没有通道重新下发提示词。
     """
-    # 空列表视为「未传」，交给服务层回退到服务端历史
-    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    # 空列表视为「未传」，交给服务层回退到服务端历史。
+    # 工具调用链字段（tool_calls / tool_call_id / tool_result）要原样带过去：
+    # 作答轮要把答案对回发起提问的那次调用，裁掉就只剩悬空的 tool_call。
+    history = [_message_to_history_item(m) for m in payload.history] or None
     # 同 `/start-stream`：档案标识在进流之前校验
     conversation_service.check_profile_key(payload.profile_key)
     events = conversation_service.continue_stream(
@@ -138,6 +156,10 @@ async def continue_conversation_stream(
         history=history,
         # 服务重启后会话记录已丢，靠它把「点的是哪个场景」带过来，避免人设悄悄换回默认
         profile_key=payload.profile_key,
+        # 结构化作答回灌：带上时本轮按 ToolMessage 应答工具调用，不重复投喂人话
+        tool_result=(
+            payload.tool_result.model_dump() if payload.tool_result is not None else None
+        ),
     )
     return sse_response(events)
 

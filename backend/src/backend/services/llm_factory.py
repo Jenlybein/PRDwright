@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol
+from typing import Any, AsyncIterator, Protocol
 
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
@@ -20,11 +20,24 @@ class StreamingChatModel(Protocol):
     """只需满足异步流式产出 `AIMessageChunk` 的聊天模型协议。
 
     用于解耦业务层与具体供应商 SDK：LangChain 模型与火山方舟封装
-    （`VolcanoArkChatModel`）都实现了 `astream`，可互换使用。
+    （`VolcanoArkChatModel`，已子类化 `BaseChatModel`）都实现了 `astream`，可互换使用。
+    `bind_tools` 用于澄清选择题等工具调用：绑定后 `astream` 的分块会带上
+    `tool_call_chunks`。
     """
 
-    def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
+    def astream(self, messages: list[BaseMessage], **kwargs: Any) -> AsyncIterator[AIMessageChunk]:
         """异步流式产出回复，每块为 `AIMessageChunk`。"""
+        ...
+
+    def bind_tools(
+        self,
+        tools: list[dict[str, Any]],
+        *,
+        tool_choice: str | None = None,
+        parallel_tool_calls: bool | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """把工具绑定到模型，返回可 `astream` 的绑定对象。"""
         ...
 
 

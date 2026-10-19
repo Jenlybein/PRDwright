@@ -163,32 +163,26 @@ def _check_budget(messages: list[BaseMessage]) -> None:
         meter.note_warning(decision.step, decision.ratio, decision.warning_message())
 
 
-async def astream_text(
+async def _astream_chunks(
     llm: StreamingChatModel,
     messages: list[BaseMessage],
-) -> AsyncIterator[str]:
-    """流式产出一次调用的纯文本增量，并检查预算、超时与截断，**并在此计量**。
+) -> AsyncIterator[AIMessageChunk]:
+    """核心：流式产出原始 `AIMessageChunk`，并检查预算、超时与截断，**并在此计量**。
 
-    各供应商的分块 `content` 有可能是结构化列表，`extract_text` 统一摊平成字符串。
+    文本产出（`astream_text`）与工具调用捕获（`iter_reply_events_with_tools`）都复用它——
+    一处覆盖全部调用点，预算/计量/重试/截断的口径不会分叉。
 
-    **这里是全项目唯一的用量累加点**：`iter_reply_events` 与 `collect_reply` 都经由本函数，
-    分章节流水线的两个包装（`_stream_text` / `_collect`）也一样——一处覆盖全部调用点，
-    新增生成入口只要走这条路就自动被计量，不会漏。事前预算同理。
-
-    **自愈也发生在这里**（ADR-016）：失败时若**还没有向调用方交付过任何增量**，就把整次调用
-    重来一遍。重来对消费者是透明的——一帧都还没出去，重开 `astream` 即可。
-    一旦交付过增量就绝不再来：那些字符已经流到了浏览器里撤不回来，重来会让前端收到
-    「半截 + 一份完整」的重复内容（T0 时代并发订阅踩过同款的坑）。
-
-    计量所需的「这是哪一次生成、第几步」来自环境值（见 `llm_meter`），因此**没有新增
-    任何函数参数**，业务层的调用方式一字未改。
+    **自愈也发生在这里**（ADR-016）：失败时若**还没有向调用方交付过任何增量**（正文文本
+    或 `tool_call_chunks`），就把整次调用重来一遍。重来对消费者是透明的——一帧都还没出去，
+    重开 `astream` 即可。一旦交付过增量就绝不再来：那些字符/工具分片已经流到了下游撤不回来，
+    重来会让消费方收到「半截 + 一份完整」的重复内容（T0 时代并发订阅踩过同款的坑）。
 
     Args:
         llm: 已构造好的流式模型。
         messages: 已组装好的 LangChain 消息。
 
     Yields:
-        非空文本增量。
+        原始 `AIMessageChunk`（含文本增量与 `tool_call_chunks`）。
 
     Raises:
         BudgetExceededError: 估算的输入超过预算，本次调用未发出。
@@ -203,22 +197,21 @@ async def astream_text(
     for attempt in range(settings.llm_max_retries + 1):
         started_at = time.monotonic()
         last_chunk: AIMessageChunk | None = None
-        text_emitted = False
+        delivered = False
         try:
             async with _total_deadline(settings.llm_total_timeout):
                 async for chunk in llm.astream(messages):
                     last_chunk = chunk
-                    text = extract_text(chunk.content)
-                    if text:
-                        text_emitted = True
-                        yield text
+                    if extract_text(chunk.content) or getattr(chunk, "tool_call_chunks", None):
+                        delivered = True
+                    yield chunk
         except Exception as exc:  # noqa: BLE001 - 要不要重来由 `_is_retryable` 判，不在这里过滤
             # 失败同样占用墙钟与一次请求，先记下来再决定要不要重来。
             # （`CancelledError` 是 BaseException，不会被这里捕获，取消任务不会误记成失败。）
             if meter is not None:
                 meter.record_failed(duration_ms=_elapsed_ms(started_at))
             if (
-                text_emitted  # 内容已经交付，撤不回来
+                delivered  # 内容已交付（文本或工具分片），撤不回来
                 or not _is_retryable(exc)
                 or attempt >= settings.llm_max_retries
             ):
@@ -239,6 +232,122 @@ async def astream_text(
         if last_chunk is not None:
             ensure_not_truncated(last_chunk)
         return
+
+
+async def astream_text(
+    llm: StreamingChatModel,
+    messages: list[BaseMessage],
+) -> AsyncIterator[str]:
+    """流式产出一次调用的纯文本增量（薄封装，行为与旧实现逐字节一致）。
+
+    各供应商的分块 `content` 有可能是结构化列表，`extract_text` 统一摊平成字符串。
+    分章节流水线的两个包装（`_stream_text` / `_collect`）与 `collect_reply` 都走这条
+    路，故文本口径不变。计量/预算/重试/截断在 `_astream_chunks` 里。
+
+    Args:
+        llm: 已构造好的流式模型。
+        messages: 已组装好的 LangChain 消息。
+
+    Yields:
+        非空文本增量。
+    """
+    async for chunk in _astream_chunks(llm, messages):
+        text = extract_text(chunk.content)
+        if text:
+            yield text
+
+
+async def astream_chunks(
+    llm: StreamingChatModel,
+    messages: list[BaseMessage],
+) -> AsyncIterator[AIMessageChunk]:
+    """流式产出原始 `AIMessageChunk`（供需要捕获 `tool_call_chunks` 的调用方用）。
+
+    与 `astream_text` 共用同一份预算/计量/重试/截断内核，只是把分块原样交出去。
+    """
+    async for chunk in _astream_chunks(llm, messages):
+        yield chunk
+
+
+def _merge_tool_calls(tool_call_chunks: list[Any]) -> list[dict[str, Any]]:
+    """把流式累积的 `ToolCallChunk` 分片合并成完整的 `tool_calls`（`[{name,args,id}]`）。
+
+    ⚠️ **必须逐片相加**（`AIMessageChunk.__add__`），不能把全部分片塞进一个 chunk 再读
+    `.tool_calls`——后者会**按分片逐个独立解析**：首片（`args=""`）解析成空对象、后续
+    残片各自解析失败，一次完整的工具调用就被拆成「一条空调用 + 若干条废调用」。
+
+    这个坑的真实代价：模型明明调了工具，题目却一个都取不到，选项卡**一张都不弹**。
+    而「一整片发完整工具调用」的假模型测不出来——只有在真实的分片流下才暴露。
+
+    逐片相加才是 LangChain 拼接流式工具调用的正道：它按 `index` 归类、**拼接 `args`
+    字符串**、并把后到的 `name` / `id` 补齐到同一条上，最后统一解析一次 JSON
+    （`default_tool_chunk_parser`）。**不自己拼 JSON**，避免与 LangChain 的口径漂移。
+    """
+    if not tool_call_chunks:
+        return []
+    merged: AIMessageChunk | None = None
+    for piece in tool_call_chunks:
+        chunk = AIMessageChunk(content="", tool_call_chunks=[piece])
+        # 逐片相加：LangChain 在这里按 index 归类并拼接 args 字符串
+        merged = chunk if merged is None else merged + chunk
+    return list(merged.tool_calls) if merged is not None else []
+
+
+async def iter_reply_events_with_tools(
+    llm: StreamingChatModel,
+    messages: list[BaseMessage],
+    *,
+    status_text: str | None = None,
+    on_finish: Callable[[str, list[dict[str, Any]]], Any] | None = None,
+    extra_data: dict[str, Any] | None = None,
+    code: ErrorCode = _DEFAULT_ERROR_CODE,
+) -> AsyncIterator[StreamEvent]:
+    """带**工具调用捕获**的流式回复流程：状态 → 逐字增量 → 收尾（正文 + tool_calls）。
+
+    与 `iter_reply_events` 的区别：除了文本增量，还累积 `tool_call_chunks`，在 `done`
+    里以 `tool_calls`（`[{name,args,id}]`）一并下发，供澄清选择题提取结构化题目。
+    `on_finish` 多收一个 `tool_calls` 参数。
+
+    Args:
+        llm: 已构造好的流式模型（通常已 `bind_tools`）。
+        messages: 已组装好的 LangChain 消息。
+        status_text: 首个状态事件的提示语；为 `None` 时不发状态事件。
+        on_finish: 成功回调，接收 `(完整回复文本, tool_calls)`。
+        extra_data: 附加到 `done` 事件的数据。
+        code: 出错时 `error` 事件携带的错误码。
+
+    Yields:
+        `StreamEvent`，依次为 `status` / 若干 `chunk` / `done`（`done.data` 含 `reply`
+        与 `tool_calls`）；出错时为 `error`，且**之后不再发 `done`**。
+    """
+    if status_text:
+        yield StreamEvent(type="status", content=status_text)
+
+    chunks: list[str] = []
+    tool_call_chunks: list[Any] = []
+    try:
+        async for chunk in astream_chunks(llm, messages):
+            text = extract_text(chunk.content)
+            if text:
+                chunks.append(text)
+                yield StreamEvent(type="chunk", content=text)
+            tool_call_chunks.extend(getattr(chunk, "tool_call_chunks", None) or [])
+    except Exception as exc:  # noqa: BLE001 - 流式接口需要把异常转成事件而不是抛出
+        yield error_event(exc, code)
+        return
+
+    reply = "".join(chunks).strip()
+    tool_calls = _merge_tool_calls(tool_call_chunks)
+    if on_finish is not None:
+        on_finish(reply, tool_calls)
+
+    # done 事件带上完整回复与工具调用，便于前端在断流或丢包时做一次对齐
+    data: dict[str, Any] = {
+        **(extra_data or {}),
+        "reply": reply,
+        "tool_calls": tool_calls,
+    }
+    yield StreamEvent(type="done", content="", data=data)
 
 
 def error_event(

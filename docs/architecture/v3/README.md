@@ -164,18 +164,18 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 排序改在哪 | Repository 的列表查询改 `ORDER BY content_updated_at DESC, id DESC`，并建 `(user_id, content_updated_at DESC)` 复合索引。排序落在 SQL 里，因此刷新、换机器都成立，不再依赖前端的原位刷新 | `repositories/solution_repo.py::list_by_owner` |
 | 显示回落 | 侧栏那行时间取 `content_updated_at`，**为空串时回落到 `updated_at`**——「新前端配旧后端」这种混布下至少还显示得出时间 | `components/SolutionSidebar.vue` |
 
-## 澄清提问的结构化选择题落地点（2026-10-16）
+## 澄清提问的结构化选择题落地点（2026-10-16 落地，2026-10-19 提问机制改为原生工具调用）
 
 AI 澄清提问过去是一段 Markdown 自由文本，用户只能打字回答；而提问规则早就要求「先给一个可判断的
 参照」——参照给了，却没法点。这一批把参照变成可点的选项卡（ADR-033）：
 
 | 议题 | 落定做法 | 位置 |
 | --- | --- | --- |
-| 结构化数据从哪来 | 正文照常写（问题 + 背景 + **逐条解释每个选项**），末尾另附 HTML 注释哨兵块；后端剥离后随 SSE 的 `done` 下发，键名 `clarification_asks` | `services/clarification_ask.py` + `services/conversation_service.py` |
-| 为什么用哨兵块 | 与待确认清单同范式：**即便抑制逻辑有漏，Markdown 渲染里也不可见**，不会把半截 JSON 当成正文 | `services/pending_items.py` 的范式 |
-| 抑制器为什么复用而不是新写 | 那段状态机的全部难度在「哨兵被切在 chunk 边界」；只把哨兵参数化（默认值不变），既有用例逐字节仍绿。⚠️ 类名里的 `Pending` 只是出身，它与块内是什么无关 | `PendingBlockSuppressor(begin, end)` |
-| 校验与降级 | 坏项**逐条丢弃**（没题干、选项不足 2 个、选项没正文），选项超过 6 个截断；**绝不让这一轮失败**——退化成纯文本提问。「不产块」是常态 | `clarification_ask._parse_asks` / `extract_asks` |
-| 谁分配标号与 id | **后端**（`"ABCDEF"[i]` 与 `{prefix}-{n}`），不信任模型给的值——让模型自己编号迟早重号或跳号 | `clarification_ask.extract_asks` |
+| 结构化数据从哪来 | 正文照常写（问题 + 背景 + **逐条解释每个选项**），题目走**原生工具调用** `ask_clarification_questions`（独立通道 + schema 强约束）；后端从 `tool_calls` 里取题、校验、分配 id/label，随 SSE 的 `done` 下发，键名 `clarification_asks` | `services/clarification_ask.py` + `conversation_service._stream_with_asks` |
+| 为什么从哨兵块改成工具调用 | 长对话里模型会模仿自己历史中「只写 A/B/C 文字、不附块」的写法而把块丢掉，选项卡**静默不弹**——这正是线上那个 bug 的根因。工具调用走独立通道，不再依赖模型「记得在自由文本里附标记」，从根上消除这类退化。对齐 Claude Code `AskUserQuestion` / Codex `request_user_input` | `clarification_ask.py` 的模块说明 |
+| 待确认清单为什么还走哨兵 | 两者生命周期不同：清单跟着**生成的文档**落库、进快照、按 P0~P6 排序，是文档产物的第一类元数据；选项卡只是一次提问的展示规格、只随 `done` 下发。清单那条通道**本次完全没动**（`PendingBlockSuppressor` 的哨兵参数化仍保留给它） | `services/pending_items.py` |
+| 校验与降级 | 坏项**逐条丢弃**（没题干、选项不足 2 个、选项没正文），选项超过 6 个截断；**绝不让这一轮失败**——退化成纯文本提问。「没调工具」是常态，不是异常 | `clarification_ask._validate_records` / `asks_from_tool_calls` |
+| 谁分配标号与 id | **后端**（`"ABCDEF"[i]` 与 `{prefix}-{n}`），不信任模型给的值——让模型自己编号迟早重号或跳号。⚠️ 工具调用的 `id` 是**上游给的**，原样透传给前端作答用；题目 id 才是后端分配的 | `clarification_ask.asks_from_tool_calls` |
 | 数据挂在哪 | 挂在**消息**上（`ChatMessage.asks`），**不加顶层快照字段**：消息经 `parseSessionSnapshot` 是整对象展开，未知字段天然保留；顶层字段要同步四处还要改契约测试的键清单 | `types/index.ts` |
 | ⚠️ 「没有选项时不写这个字段」 | 只在非空时才带 `asks`。恒带 `asks: []` 会撞破既有用例对消息对象的**精确形状断言**，而那种红会让人误以为「不带也行」 | `composables/useClarificationChat.ts` |
 | 谁可以点 | **当前线程的最后一条消息**。判据刻意不是「最后一条 assistant 消息」——用户一作答推入的就是 user 消息，用后者卡片会一直可点。这也顺带解决了流式期间的可点性（流式气泡挂在末尾） | `components/MessageList.vue` |
@@ -184,6 +184,12 @@ AI 澄清提问过去是一段 Markdown 自由文本，用户只能打字回答�
 | 选项与自由作答的关系 | **两条并行的路，不互斥也不分优先级**：点选项走「提交回答」，想自己写走底部输入框。卡片只管前者，因此**不需要任何互斥清理逻辑**（同日曾短暂做过「与选项同款的自填卡片 + 互斥判据」，用户看过效果后移除） | 同上 |
 | 多选答案的顺序 | 按**选项显示顺序**（A/B/C）拼，**不按点选先后**——同一组选中项必须产出同一条消息：顺序若跟着手指走，同样的答案会因为点击次序不同而长得不一样，而这条文本还会进模型上下文。⚠️ 曾有用例名声称「按行内顺序拼起来」却只覆盖了正序点击，把这个性质蒙了过去 | `answerOf()` |
 | 提交走哪条路 | 复用既有的 `sendMessage`——它就是一封普通用户消息（带 `stage`、进本线程历史、`chatStreaming` 期间禁止再发）。**没有动 `ChatInput.vue`**：提交不是「把文本填进输入框」 | `AppV2.vue` 的 `@answer` |
-| ⚠️ 历史里存什么 | **剥离后的干净正文**。带块的原文一旦回流，下一轮会被当作 assistant 消息喂回模型，模型会学着继续吐块 | `conversation_service._stream_with_asks` |
-| 规格文本谁写 | `render_ask_spec()` 生成、提示词**引用**它（不是两边各写一遍）——提示词与解析器是同一条契约的两端 | `services/prompts.py` 的导入注释 |
+| 作答怎么回到模型 | 点「提交回答」时**额外**给一份结构化载荷：`tool_result = { tool_call_id, answers: [{ask_id, labels, question, texts}] }`，后端把它作为**工具结果**回给当初提问的那次调用（对齐 Claude Code 的做法）。`content` 仍照旧传，它是气泡里的展示文本 | `components/ClarificationAskList.vue` → `api.ts::continueConversationStream` |
+| ⚠️ 作答轮不重复投喂人话 | 带上 `tool_result` 时后端**不再**追加一条用户消息，答案只走工具结果。同一份作答在上下文里出现两次，会让模型以为用户强调了两遍 | `conversation_service._build_lc_messages` |
+| ⚠️ 工具应答必须成对相邻 | `ToolMessage` 要紧跟发起调用的那条 assistant。格式重申那条系统消息就排在悬空调用之后，所以按**下标插入**、不能追加到列表尾 | 同上 |
+| 没点卡片、直接打字 | 那段自由文本会被**包成工具应答**补上空缺。否则历史里留下「调了工具却没人应答」的结构，**上游 API 直接报错**——这不是风格问题，是能不能跑的问题 | 同上 |
+| `tool_call_id` 缺失怎么办 | 一律**降级**：前端不发 `tool_result`，后端按纯文本处理。绝不发一条配不上调用的工具应答 | 同上 |
+| ark 怎么接工具调用 | `VolcanoArkChatModel` 从自写包装类改成 **`BaseChatModel` 子类**（实现 `_generate` / `_astream` / `bind_tools`），仍走官方 arkruntime SDK；`delta.tool_calls` 映射成 `AIMessageChunk.tool_call_chunks`，**分片拼装交给 LangChain**，不自己拼 JSON | `services/ark_llm.py` |
+| ⚠️ 历史里存什么 | 正文天然干净（工具参数走独立通道，本就不在正文里）。⚠️ **工具调用本身要落库**：assistant 条目带 `tool_calls`，作答轮把 `tool` 条目插在它之后——下一轮作答要靠 `tool_call_id` 配对那次调用 | `conversation_service._persist`（start / continue 两处） |
+| 规格文本谁写 | `render_ask_tool_instruction()` 生成（schema 与用法在同一段）、提示词**引用**它（不是两边各写一遍）——提示词与解析器是同一条契约的两端 | `services/prompts.py` 的导入注释 |
 | ⚠️ 落点为什么在共享规则里 | 写进 `CLARIFICATION_QUESTION_RULE`（`system_prompt` **每轮都在**），而不是某个 `opening`（只在首轮）。放错地方的表现很隐蔽：首轮有卡片、之后每轮退回纯文本 | `test_conversation_prompt.py` 的两个新用例一正一反地钉住 |

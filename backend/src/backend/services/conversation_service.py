@@ -18,17 +18,19 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterable, Literal, TypedDict
+from typing import Any, AsyncIterator, Callable, Iterable, Literal, NotRequired, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from backend.core.contracts import QuestionsConfig, StreamEvent
 from backend.core.errors import AppError, ErrorCode
-from backend.services.clarification_ask import (
-    ASK_BEGIN_SENTINEL,
-    extract_asks,
-    make_ask_suppressor,
-)
+from backend.services.clarification_ask import asks_from_tool_calls, build_ask_tool
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.prompts import (
     CLARIFICATION_ASK_REMINDER,
@@ -37,7 +39,7 @@ from backend.services.prompts import (
     ConversationProfile,
     resolve_profile,
 )
-from backend.services.stream_reply import iter_reply_events
+from backend.services.stream_reply import iter_reply_events, iter_reply_events_with_tools
 
 logger = logging.getLogger(__name__)
 
@@ -48,20 +50,29 @@ QUESTION_CONFIG_PATH = Path(__file__).resolve().parents[1] / "core" / "question_
 # 前端消息格式
 # ----------------------------------------------------------------------------
 
-# 角色取值，与前端聊天列表保持一致
-MessageRole = Literal["system", "user", "assistant"]
+# 角色取值，与前端聊天列表保持一致。`tool` 是工具调用链的一环：助手提问走
+# `tool_calls`，用户作答回灌走 `tool` 角色（对齐 Claude Code / Codex）。
+MessageRole = Literal["system", "user", "assistant", "tool"]
 
 
 class FrontendMessage(TypedDict):
     """前端聊天消息结构。
 
     Attributes:
-        role: 消息角色，`system` / `user` / `assistant`。
+        role: 消息角色，`system` / `user` / `assistant` / `tool`。
         content: 消息正文。
+        tool_calls: assistant 消息发起的工具调用（`[{id, name, args}]`），作答回灌时
+            模型要看到「先调用、后应答」的成对结构。
+        tool_call_id: `tool` 消息应答的工具调用 id。
+        tool_result: `tool` 消息携带的结构化答案（`{tool_call_id, answers}`），
+            有它时模型侧正文由它重新组装，`content` 只作展示文本。
     """
 
     role: MessageRole
     content: str
+    tool_calls: NotRequired[list[dict[str, Any]]]
+    tool_call_id: NotRequired[str]
+    tool_result: NotRequired[dict[str, Any]]
 
 
 # 常见角色别名 → 标准角色，兼容前端或模型侧的不同写法
@@ -74,6 +85,8 @@ _ROLE_ALIASES: dict[str, MessageRole] = {
     "ai": "assistant",
     "model": "assistant",
     "bot": "assistant",
+    "tool": "tool",
+    "function": "tool",
 }
 
 # 首轮开场白与系统人设已上收到 `services/prompts.py` 的「对话档案」，
@@ -192,10 +205,31 @@ def format_form_data(
     return "\n".join(lines) if lines else "（用户尚未填写任何需求信息）"
 
 
+def _tool_result_content(tool_result: dict[str, Any] | None, fallback: str = "") -> str:
+    """把结构化作答渲染成工具结果正文。
+
+    每条答案都带 `question` / `texts`（自解释冗余），模型不必回头翻自己的工具调用
+    参数就能看懂选了什么——对齐 Claude Code `AskUserQuestion` 的结果形状。
+    没有结构化答案时退化成展示文本，再没有就给一句占位，绝不输出空正文。
+
+    Args:
+        tool_result: 结构化作答（`{tool_call_id, answers}`）。
+        fallback: 没有可渲染答案时的兜底文本（通常是给人看的展示文本）。
+
+    Returns:
+        `ToolMessage` 的正文。
+    """
+    answers = (tool_result or {}).get("answers")
+    if isinstance(answers, list) and answers:
+        return json.dumps(answers, ensure_ascii=False)
+    return fallback or "（用户未选择任何选项）"
+
+
 def _build_lc_messages(
     system_prompt: str,
     history: Iterable[FrontendMessage | dict[str, Any]] | None = None,
     user_message: str | None = None,
+    tool_result: dict[str, Any] | None = None,
 ) -> list[BaseMessage]:
     """把系统提示词、历史消息与本轮输入组装成 LangChain 消息列表。
 
@@ -203,31 +237,112 @@ def _build_lc_messages(
     `HumanMessage`、`assistant` 转 `AIMessage`，以此保证 user / assistant
     严格交替——Anthropic 对消息顺序有硬性要求。
 
+    工具调用链（对齐 Claude Code / Codex）：带 `tool_calls` 的 assistant 消息原样
+    保留，`tool` 角色的消息转 `ToolMessage` 应答之；**本轮带 `tool_result` 时不再
+    投喂 `HumanMessage`**，答案只走工具结果回去。用户没点卡片、直接用自由文本作答时，
+    那段文本会被包成 `ToolMessage` 回灌给悬空的工具调用——否则历史里留下「调了工具
+    却没人应答」的结构，上游 API 直接报错。
+
     Args:
         system_prompt: 系统提示词，由调用方从对话档案里取出（没有默认值，
             避免「忘记传」时静默用上另一个人设）。
         history: 历史消息，元素为 `FrontendMessage` 或等价字典。
         user_message: 本轮用户输入；为空则不追加。
+        tool_result: 本轮的结构化作答（`{tool_call_id, answers}`）；带上时按
+            工具结果回灌，与 `user_message` 互斥使用（展示文本走 `user_message`
+            仅作兜底渲染）。
 
     Returns:
         LangChain 消息列表，首条固定为 `SystemMessage`。
     """
     messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
+    # 悬空的工具调用 → 工具应答应插入的下标（紧贴发起调用的 assistant 之后）。
+    # 记下标而不是追加到末尾：格式重申等系统消息可能已经排在后面，而上游要求
+    # ToolMessage 与发起调用的 assistant 相邻成对。
+    pending: dict[str, int] = {}
+
+    def _answer(call_id: str, body: str) -> None:
+        """把 `body` 作为 `call_id` 的工具应答插进消息列表，并维护剩余下标。"""
+        at = pending.pop(call_id, len(messages))
+        messages.insert(at, ToolMessage(content=body, tool_call_id=call_id))
+        for cid in list(pending):
+            if pending[cid] >= at:
+                pending[cid] += 1
 
     for item in history or []:
         role = _normalize_role(item.get("role"))
-        content = str(item.get("content", ""))
+        content = str(item.get("content", "") or "")
+        tool_calls = [c for c in (item.get("tool_calls") or []) if isinstance(c, dict)]
+        tool_call_id = str(item.get("tool_call_id") or "")
+        tool_result_item = item.get("tool_result")
+
+        if role == "assistant":
+            # 有工具调用时正文可以为空——整条消息照样要发出去，否则应答配不上对
+            if tool_calls:
+                messages.append(AIMessage(content=content, tool_calls=tool_calls))
+                for call in tool_calls:
+                    call_id = str(call.get("id") or "")
+                    if call_id:
+                        pending[call_id] = len(messages)
+            elif content:
+                messages.append(AIMessage(content=content))
+            continue
+
+        if role == "tool":
+            body = _tool_result_content(
+                tool_result_item if isinstance(tool_result_item, dict) else None,
+                content,
+            )
+            if tool_call_id in pending:
+                _answer(tool_call_id, body)
+            elif body:
+                # 配不上的工具应答（重复应答 / 坏 id）：降级成普通用户文本保住内容，
+                # 绝不发一条没有对应 tool_call 的 ToolMessage
+                messages.append(HumanMessage(content=body))
+            continue
+
         if not content:
             continue
-        if role == "user":
-            messages.append(HumanMessage(content=content))
-        elif role == "assistant":
-            messages.append(AIMessage(content=content))
-        else:
-            messages.append(SystemMessage(content=content))
 
-    # 历史末尾与本轮输入完全相同时不重复追加，避免同句话连发两次
+        if role == "user":
+            if pending:
+                # 自由文本落在有待应答工具调用的位置上：它就是对那些问题的回答
+                # （用户没点卡片、直接在输入框里写的），包成工具结果回灌。
+                # 不这么做的下场是历史里留下「调了工具却没人应答」的结构，
+                # 上游 API 直接报错——这不是风格问题，是能不能跑的问题。
+                for cid in list(pending):
+                    _answer(cid, content)
+            else:
+                messages.append(HumanMessage(content=content))
+            continue
+
+        # system 等其余角色原样保留，**不**参与工具应答的配对
+        messages.append(SystemMessage(content=content))
+
+    # 本轮输入：带结构化作答就按工具结果回灌（不再重复投喂人话）；
+    # 配不上任何悬空调用时（旧快照没存 tool_calls 等）降级成普通用户消息，保住展示文本。
+    if tool_result is not None:
+        body = _tool_result_content(tool_result, user_message or "")
+        call_id = str(tool_result.get("tool_call_id") or "")
+        matched = call_id in pending
+        if matched:
+            _answer(call_id, body)
+        # 并行调用留下的其余悬空调用：用展示文本作答（结构化正文只归它自己的 call_id）
+        for cid in list(pending):
+            _answer(cid, user_message or body)
+        if not matched:
+            text = user_message or body
+            last = messages[-1] if len(messages) > 1 else None
+            if not (isinstance(last, HumanMessage) and last.content == text):
+                messages.append(HumanMessage(content=text))
+        return messages
+
     if user_message:
+        if pending:
+            # 自由文本作答悬空的工具调用（与历史分支同一规则）
+            for cid in list(pending):
+                _answer(cid, user_message)
+            return messages
         last = messages[-1] if len(messages) > 1 else None
         if not (isinstance(last, HumanMessage) and last.content == user_message):
             messages.append(HumanMessage(content=user_message))
@@ -423,69 +538,72 @@ class ConversationService:
         *,
         status_text: str | None = None,
         extra_data: dict[str, Any] | None = None,
-        on_persist: Callable[[str], None] | None = None,
+        on_persist: Callable[[str, list[dict[str, Any]]], None] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """流式产出回复，并把结构化选择题块**抑制掉、解析进 `done`**。
+        """流式产出回复，并把工具调用里的结构化选择题解析进 `done`。
 
-        与三条生成线（`document_service`）同款的两段式：实时增量先过抑制器（块被切在
-        chunk 边界时只漏出安全前缀），收尾时再对完整回复 `extract` 一次。两层都要有——
-        抑制器保证用户「看到」的正文干净，`extract` 保证拿到的是完整、可解析的那份。
+        提问走**原生工具调用**：绑定 `ask_clarification_questions` 工具，模型用工具调用
+        输出结构化题目（正文天然干净、不藏哨兵）。收尾时从累积的 `tool_calls` 里取出题目、
+        校验、分配 id/label，随 `done` 下发。
 
-        ⚠️ `on_persist` 收到的是**剥离后的干净正文**，不是模型原始输出。这一点不能省：
-        带标记块的原文一旦写进会话历史，下一轮会被当作 assistant 消息喂回模型——
-        既污染上下文，又会让它学着继续吐块。
+        ⚠️ `on_persist` 收到的是 `(干净正文, tool_calls)`。正文不含任何标记块；`tool_calls`
+        需要一并落库（下一轮作答回灌要用 `tool_call_id` 对回这次调用），但**只在作答侧
+        （Step 2）**才真正进会话历史——本阶段先把它交出去，暂存与否由调用方决定。
 
         Args:
             messages: 已组装好的 LangChain 消息。
             status_text: 首个状态事件的提示语；为 `None` 时不发（调用方已发过）。
             extra_data: 附加到 `done` 事件的数据（如会话 ID）。
-            on_persist: 生成成功后的回调，接收**干净正文**。
+            on_persist: 生成成功后的回调，接收 `(干净正文, tool_calls)`。
         """
-        suppressor = make_ask_suppressor()
-        async for event in iter_reply_events(
-            self.llm,
+        bound = self.llm.bind_tools(
+            [build_ask_tool()], tool_choice="auto", parallel_tool_calls=False
+        )
+        async for event in iter_reply_events_with_tools(
+            bound,
             messages,
             status_text=status_text,
             extra_data=extra_data,
         ):
-            if event.type == "chunk":
-                clean = suppressor.feed(event.content)
-                if clean:
-                    yield StreamEvent(type="chunk", content=clean, data=event.data)
-            elif event.type == "done":
-                trailing = suppressor.flush()
-                if trailing:
-                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
+            if event.type == "done":
                 reply = str(event.data.get("reply", ""))
-                clean_reply, asks = extract_asks(reply)
-                # 每轮必打的汇总信号：无论哪类失败，都能从这一行看出「块在不在、出了几题」。
-                # `block_present=false` + `asks_count=0` 即「模型没产块」（配合 ask.no_block）；
-                # `block_present=true` + `asks_count=0` 即「块在但全被丢弃」（配合 ask.missing / unclosed / too_few_options）。
+                tool_calls = list(event.data.get("tool_calls", []) or [])
+                asks = asks_from_tool_calls(tool_calls)
+                # 每轮必打的汇总信号：无论哪类失败，都能从这一行看出「调没调工具、出了几题」。
+                # `tool_called=false` + `asks_count=0` 即「模型没调工具」（配合 ask.no_tool_call）；
+                # `tool_called=true` + `asks_count=0` 即「调了但参数全被丢弃」（配合 ask.bad_args / too_few_options）。
                 logger.info(
                     "澄清选择题解析结果",
                     extra={
                         "event": "ask.result",
-                        "block_present": ASK_BEGIN_SENTINEL in reply,
+                        "tool_called": bool(tool_calls),
                         "asks_count": len(asks),
                     },
                 )
-                # 需要看模型到底写了什么时，把输出级别调到 DEBUG 即可拿到块体尾部（块在末尾）。
                 logger.debug(
-                    "澄清回复原文尾部（含选择题块）",
-                    extra={"event": "ask.raw_reply", "tail": reply[-800:]},
+                    "澄清回复工具调用",
+                    extra={"event": "ask.raw_reply", "tool_calls": tool_calls},
                 )
                 if on_persist is not None:
-                    on_persist(clean_reply)
+                    on_persist(reply, tool_calls)
+                done_data: dict[str, Any] = {
+                    **(event.data or {}),
+                    "reply": reply,
+                    # 结构化选择题：前端据此把选项渲染成可点的卡片。
+                    # 没有工具调用时是空数组——「没调工具」是常态，不是异常。
+                    "clarification_asks": asks,
+                }
+                # 顶层 tool_call_id：供作答回灌定位「答案该回给哪次调用」。
+                # parallel_tool_calls=False 下一轮至多一次调用；真出现多次时取第一个带 id 的。
+                # 拿不到 id 就不带这个键（前端据此降级成纯文本作答），不下发空串。
+                for call in tool_calls:
+                    if isinstance(call, dict) and call.get("id"):
+                        done_data["tool_call_id"] = str(call["id"])
+                        break
                 yield StreamEvent(
                     type="done",
                     content="",
-                    data={
-                        **(event.data or {}),
-                        "reply": clean_reply,
-                        # 结构化选择题：前端据此把选项渲染成可点的卡片。
-                        # 没有块时是空数组——「没产块」是常态，不是异常。
-                        "clarification_asks": asks,
-                    },
+                    data=done_data,
                 )
             else:
                 # status / error 原样透传。注意出错时上游**不发 done**，
@@ -542,13 +660,20 @@ class ConversationService:
             user_message=first_message,
         )
 
-        def _persist(reply: str) -> None:
-            """把首轮问答写进历史，供后续接续对话使用。"""
+        def _persist(reply: str, tool_calls: list[dict[str, Any]] | None = None) -> None:
+            """把首轮问答写进历史，供后续接续对话使用。
+
+            `tool_calls` 一并落库：作答轮要把答案作为 ToolMessage 对回这次调用，
+            历史里必须留着调用本身（`tool_call_id` 的锚点）。
+            """
             record.messages.append({"role": "user", "content": first_message})
-            record.messages.append({"role": "assistant", "content": reply})
+            assistant: dict[str, Any] = {"role": "assistant", "content": reply}
+            if tool_calls:
+                assistant["tool_calls"] = tool_calls
+            record.messages.append(assistant)
             record.updated_at = datetime.now()
 
-        # `_persist` 收到的是剥离掉选择题块之后的干净正文（见 `_stream_with_asks`）
+        # `_persist` 收到的是干净正文 + 本轮 tool_calls（见 `_stream_with_asks`）
         async for event in self._stream_with_asks(
             messages,
             extra_data={"conversation_id": record.id},
@@ -562,6 +687,7 @@ class ConversationService:
         conversation_id: str | None = None,
         history: list[FrontendMessage] | None = None,
         profile_key: str = "",
+        tool_result: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """接续对话，流式返回模型对本轮输入的回复。
 
@@ -576,11 +702,14 @@ class ConversationService:
         「提示词全在后端」——否则服务重启后「文档澄清」会悄悄变回「需求澄清」。
 
         Args:
-            user_message: 本轮用户输入。
+            user_message: 本轮用户输入。带 `tool_result` 时它退化为展示文本
+                （答案本体走工具结果，不重复投喂人话）。
             conversation_id: 会话 ID；给出时优先使用服务内的历史，并在生成
                 结束后把本轮问答写回该会话。
             history: 前端传入的历史消息；传入时优先于服务端历史。
             profile_key: 会话记录缺失时用于解析人设的档案标识。
+            tool_result: 本轮的结构化作答（`{tool_call_id, answers}`）；带上时
+                按 ToolMessage 回灌给发起提问的那次工具调用。
 
         Yields:
             `StreamEvent`。`done` 事件的 `data` 带 `conversation_id` 与完整
@@ -615,17 +744,57 @@ class ConversationService:
             system_prompt=profile.system_prompt,
             history=_reminded_history(base_history, profile),
             user_message=user_message,
+            tool_result=tool_result,
         )
 
-        def _persist(reply: str) -> None:
-            """把本轮问答写回会话历史。"""
-            if record is not None:
-                record.messages.append({"role": "user", "content": user_message})
-                record.messages.append({"role": "assistant", "content": reply})
-                record.updated_at = datetime.now()
+        def _persist(reply: str, tool_calls: list[dict[str, Any]] | None = None) -> None:
+            """把本轮问答写回会话历史。
+
+            带 `tool_result` 的作答轮：把工具应答插到发起调用的 assistant 之后
+            （成对相邻），**不再另记一条 user 消息**——答案只走 ToolMessage，避免
+            同一份作答在历史里出现两次。纯文本轮照旧记 user + assistant。
+            """
+            target: list[Any] = record.messages if record is not None else base_history
+            if tool_result is not None:
+                call_id = str(tool_result.get("tool_call_id") or "")
+                body = _tool_result_content(tool_result, user_message)
+                entry: dict[str, Any] = {
+                    "role": "tool",
+                    "content": user_message or body,
+                    "tool_result": dict(tool_result),
+                }
+                if call_id:
+                    entry["tool_call_id"] = call_id
+                # 从后往前找发起这次调用的 assistant，把应答插到它后面；
+                # 对不上（历史里没有这次调用）就退化成普通用户消息，绝不留
+                # 「有 ToolMessage 却没有对应 tool_call」的非法结构。
+                insert_at = -1
+                if call_id:
+                    for index in range(len(target) - 1, -1, -1):
+                        item = target[index]
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("role") != "assistant":
+                            continue
+                        calls = item.get("tool_calls") or []
+                        if any(
+                            isinstance(call, dict) and call.get("id") == call_id
+                            for call in calls
+                        ):
+                            insert_at = index + 1
+                            break
+                if insert_at >= 0:
+                    target.insert(insert_at, entry)
+                else:
+                    target.append({"role": "user", "content": user_message or body})
             else:
-                base_history.append({"role": "user", "content": user_message})
-                base_history.append({"role": "assistant", "content": reply})
+                target.append({"role": "user", "content": user_message})
+            assistant: dict[str, Any] = {"role": "assistant", "content": reply}
+            if tool_calls:
+                assistant["tool_calls"] = tool_calls
+            target.append(assistant)
+            if record is not None:
+                record.updated_at = datetime.now()
 
         async for event in self._stream_with_asks(
             messages,
@@ -694,6 +863,7 @@ async def continue_stream(
     conversation_id: str | None = None,
     history: list[FrontendMessage] | None = None,
     profile_key: str = "",
+    tool_result: dict[str, Any] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """接续对话，以事件流形式产出模型对本轮输入的回复。
 
@@ -702,6 +872,8 @@ async def continue_stream(
         conversation_id: 会话 ID；为 `None` 时走无状态模式。
         history: 前端回传的历史消息；传入时优先于服务端保存的历史。
         profile_key: 会话记录缺失时用于解析人设的档案标识。
+        tool_result: 本轮的结构化作答（`{tool_call_id, answers}`）；带上时
+            按 ToolMessage 回灌，不重复投喂普通用户消息。
 
     Yields:
         `StreamEvent`，`done` 事件的 `data` 带 `conversation_id` 与完整 `reply`。
@@ -711,5 +883,6 @@ async def continue_stream(
         conversation_id=conversation_id,
         history=history,
         profile_key=profile_key,
+        tool_result=tool_result,
     ):
         yield event

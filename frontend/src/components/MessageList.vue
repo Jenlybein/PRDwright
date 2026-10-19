@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
-import ClarificationAskList from '@/components/ClarificationAskList.vue'
+import ClarificationAskList, { type AnswerPayload } from '@/components/ClarificationAskList.vue'
 import { renderMarkdown } from '@/utils/markdown'
-import type { ChatMessage } from '@/types'
+import type { ChatMessage, ClarificationAnswerItem } from '@/types'
 
 /**
  * 聊天消息列表。
@@ -13,6 +13,10 @@ import type { ChatMessage } from '@/types'
  *
  * 助手消息若带结构化选择题（`asks`），在 Markdown 之后接一组可点选项卡；卡片的**选择
  * 状态留在卡片自己身上**，本组件只负责判断「这组还该不该可点」并把答案往上传。
+ *
+ * **用户消息分两叉**：带 `answers` 的是「点选项卡选出来的」——渲染成一行轻回执
+ * （只列选中标号），因为 `content` 里那段拼出来的文本是给后端的，不该再原样念给
+ * 用户听；不带 `answers` 的就是普通消息，照旧渲染成气泡。
  */
 const props = defineProps<{
   /** 完整消息列表；role 为 system 的消息不会渲染 */
@@ -20,8 +24,13 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** 用户在选项卡上提交了回答；载荷是组织好的一条消息文本 */
-  answer: [text: string]
+  /**
+   * 用户在选项卡上提交了回答。
+   *
+   * 原样透传选项卡的载荷（展示文本 + 可选的结构化作答），本组件不拆也不改——
+   * 拆了就得在这里重新拼，中间多一处口径分叉。
+   */
+  answer: [payload: AnswerPayload]
 }>()
 
 /** 滚动容器，自动滚动到底部时使用 */
@@ -32,6 +41,22 @@ const stickToBottom = ref(true)
 
 /** 贴近底部的判定阈值（px），留出一点余量以容忍滚动惯性 */
 const NEAR_BOTTOM_THRESHOLD = 80
+
+/**
+ * 作答回执的读屏文案；顺便也就是这一行要说的那句话。
+ *
+ * 只有标号、没有题干与选项文本——「选了什么」才是用户要回看的信息，
+ * 具体内容他在选项卡片与正文里刚读过。
+ */
+function answersLabel(answers: ClarificationAnswerItem[]): string {
+  const numbered = answers.length > 1
+  return answers
+    .map((item, index) => {
+      const picked = `你选了 ${item.labels.join('、')}`
+      return numbered ? `第 ${index + 1} 题 ${picked}` : picked
+    })
+    .join('，')
+}
 
 /** 过滤掉系统消息后的可见消息 */
 const visibleMessages = computed(() =>
@@ -162,8 +187,42 @@ defineExpose({ scrollToBottom })
 
         <!-- 气泡 -->
         <div class="min-w-0 max-w-[78%]">
+          <!--
+            选项卡的作答回执：刻意**不是**一条气泡。
+
+            `content` 里那段拼出来的文本（「1. 题干 / 答：A. xxx」）既要发给后端，
+            读起来又啰嗦、还像模型在说话。带 `answers` 的消息改用一行轻回执——
+            弱化文字 + 若干个标号小圆片，**不重复题干、不显示选项文本**，
+            让它像一条回执而不是又一条聊天消息。
+          -->
           <div
-            v-if="message.role === 'user'"
+            v-if="message.answers?.length"
+            class="flex flex-col items-end gap-1"
+            :aria-label="answersLabel(message.answers)"
+          >
+            <div
+              v-for="(item, itemIndex) in message.answers"
+              :key="item.ask_id"
+              class="flex flex-wrap items-center justify-end gap-1.5"
+            >
+              <span v-if="message.answers.length > 1" class="text-xs text-subtle">
+                第 {{ itemIndex + 1 }} 题
+              </span>
+              <span class="text-xs text-subtle">你选了</span>
+              <span class="flex items-center gap-1">
+                <span
+                  v-for="label in item.labels"
+                  :key="label"
+                  class="flex h-5 min-w-5 items-center justify-center rounded-full bg-surface px-1.5 text-[11px] font-semibold text-body ring-1 ring-line"
+                >
+                  {{ label }}
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <div
+            v-else-if="message.role === 'user'"
             class="rounded-2xl rounded-tr-sm bg-primary-500 px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words text-white shadow-sm"
           >
             {{ message.content }}

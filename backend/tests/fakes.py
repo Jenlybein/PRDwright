@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator
 
-from langchain_core.messages import AIMessageChunk, BaseMessage
+from langchain_core.messages import AIMessageChunk, BaseMessage, ToolCallChunk
 
 # 断流模拟统一用的异常类型
 STREAM_ERROR = ConnectionError("上游连接中断")
@@ -30,6 +30,9 @@ class ScriptedLLM:
         raise_at: 在第 `raise_at` 块**之前**抛出 `ConnectionError`（`0` 表示一进流就抛）。
             为 `None` 表示正常流完。
         usage_metadata: 末块附带的用量元数据（T1 计量预留）。
+        tool_call_chunks: 末尾追加的工具调用分片（模拟「写完正文后调用工具」）；
+            为 `None` 表示本轮不调工具。`bind_tools` 直接返回自己（脚本模型不在乎
+            绑了什么工具）。
     """
 
     def __init__(
@@ -38,12 +41,18 @@ class ScriptedLLM:
         *,
         raise_at: int | None = None,
         usage_metadata: dict[str, Any] | None = None,
+        tool_call_chunks: list[ToolCallChunk] | None = None,
     ) -> None:
         self._pieces = list(pieces or [])
         self._raise_at = raise_at
         self._usage = usage_metadata
+        self._tool_call_chunks = list(tool_call_chunks or [])
         # 每次调用收到的消息（供「提示词里到底注入了什么」这类断言使用）
         self.calls: list[list[BaseMessage]] = []
+
+    def bind_tools(self, tools, *, tool_choice=None, parallel_tool_calls=None, **kwargs):  # noqa: ANN001, ANN003
+        """工具绑定对脚本模型是空操作：绑了什么不影响预设输出。"""
+        return self
 
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
         """异步流式产出；按 `raise_at` 在指定位置中断。"""
@@ -60,3 +69,6 @@ class ScriptedLLM:
             if self._usage is not None and index == last:
                 extra["usage_metadata"] = self._usage
             yield AIMessageChunk(content=piece, **extra)
+        if self._tool_call_chunks:
+            await asyncio.sleep(0)
+            yield AIMessageChunk(content="", tool_call_chunks=self._tool_call_chunks)

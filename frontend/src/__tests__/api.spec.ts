@@ -2,6 +2,7 @@ import axios, { type AxiosResponse, type InternalAxiosRequestConfig } from 'axio
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import http, {
+  continueConversationStream,
   createJob,
   fetchActiveJobs,
   generatePrdFromSummaryStream,
@@ -11,11 +12,13 @@ import http, {
 } from '../services/api'
 import { ApiError } from '../services/errors'
 import type {
+  ChatMessage,
   JobSnapshot,
   RunSummary,
   StreamDocumentPart,
   StreamStageEvent,
   RequirementsSummary,
+  ToolResultPayload,
 } from '../types'
 
 /**
@@ -731,5 +734,164 @@ describe('结构化选择题的解析（done 事件的 clarification_asks）', (
     expect(result.asks[0]?.options.map((option) => option.label)).toEqual(['A', 'B'])
     // 字符串形式的 "true" 不能把单选题渲染成多选
     expect(result.asks[0]?.multiple).toBe(false)
+  })
+
+  it('done 带 tool_call_id / tool_calls 时被原样读出来', async () => {
+    const result = await readDone({
+      reply: '正文',
+      tool_call_id: 'call-1',
+      tool_calls: [
+        { id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } },
+      ],
+    })
+
+    expect(result.toolCallId).toBe('call-1')
+    expect(result.toolCalls).toEqual([
+      { id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } },
+    ])
+  })
+
+  it('题目上的 tool_call_id 只在非空字符串时才挂（空串 / 缺失一律不带这个键）', async () => {
+    const result = await readDone({
+      reply: '正文',
+      clarification_asks: [
+        { question: '有 id', options: [{ text: '甲' }, { text: '乙' }], tool_call_id: 'call-9' },
+        { question: '空串 id', options: [{ text: '甲' }, { text: '乙' }], tool_call_id: '' },
+        { question: '缺 id', options: [{ text: '甲' }, { text: '乙' }] },
+      ],
+    })
+
+    expect(result.asks[0]).toHaveProperty('tool_call_id', 'call-9')
+    expect(result.asks[1]).not.toHaveProperty('tool_call_id')
+    expect(result.asks[2]).not.toHaveProperty('tool_call_id')
+  })
+
+  it('没有工具链时结果上**不挂**这两个键（区分「没有」与「空」）', async () => {
+    const result = await readDone({ reply: '正文' })
+
+    expect(result).not.toHaveProperty('toolCallId')
+    expect(result).not.toHaveProperty('toolCalls')
+  })
+
+  it('tool_calls 逐项校验：缺 id / 缺 name 的丢弃，args 非法退化为空对象', async () => {
+    const result = await readDone({
+      reply: '正文',
+      tool_calls: [
+        '不是对象',
+        { name: '缺 id' },
+        { id: '', name: '空 id' },
+        { id: 'call-1' },
+        { id: 'call-2', name: 'args 是字符串', args: '{"a":1}' },
+        { id: 'call-3', name: '好', args: { questions: [1] } },
+      ],
+    })
+
+    expect(result.toolCalls).toEqual([
+      { id: 'call-2', name: 'args 是字符串', args: {} },
+      { id: 'call-3', name: '好', args: { questions: [1] } },
+    ])
+  })
+})
+
+// ============================================================================
+// 结构化作答回灌（continue-stream 的 tool_result）
+//
+// 后端把答案作为工具结果回给当初提问的那次工具调用，不再重复投喂这段人话。
+// 这里钉住三件事：`tool_result` 只在有值时带键；history **不能**裁掉助手消息上的
+// `tool_calls`（裁了后端就只剩悬空的 tool_call，上游 API 直接报错）；history 里
+// **不出现** `tool_call_id` / `tool_result`——工具应答由后端自己落，前端不产生。
+// ============================================================================
+
+describe('结构化作答回灌（continue-stream）', () => {
+  const TOOL_RESULT: ToolResultPayload = {
+    tool_call_id: 'call-1',
+    answers: [
+      {
+        ask_id: 'ask-1',
+        labels: ['A', 'C'],
+        question: '首发要支持哪些端？',
+        texts: ['网页版', '桌面客户端'],
+      },
+    ],
+  }
+
+  /** 跑一次接续对话并把实际发出的请求体交回来 */
+  async function continueWith(
+    payload: Parameters<typeof continueConversationStream>[0],
+  ): Promise<Record<string, unknown>> {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      void init
+      return streamResponse([sseFrame('done', { type: 'done', content: '', data: { reply: 'ok' } })])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await continueConversationStream(payload)
+    const [, init] = fetchMock.mock.calls[0] ?? []
+    return JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+  }
+
+  it('带 toolResult 时把它放进请求体的 tool_result', async () => {
+    const body = await continueWith({ content: '展示文本', toolResult: TOOL_RESULT })
+
+    expect(body.tool_result).toEqual(TOOL_RESULT)
+    // content 仍要传：它是气泡里给人看的展示文本
+    expect(body.content).toBe('展示文本')
+  })
+
+  it('不带 toolResult 时请求体没有 tool_result 这个键（走普通续聊）', async () => {
+    const body = await continueWith({ content: '普通消息' })
+
+    expect(body).not.toHaveProperty('tool_result')
+    expect(body.content).toBe('普通消息')
+  })
+
+  it('history 保留 assistant 消息上的 tool_calls（后端配对工具应答的依据）', async () => {
+    const history: ChatMessage[] = [
+      { role: 'user', content: '先聊点别的' },
+   {
+        role: 'assistant',
+        content: '你更倾向哪种？',
+        tool_calls: [
+          { id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } },
+        ],
+      },
+      { role: 'assistant', content: '普通回复' },
+    ]
+
+    const body = await continueWith({ content: '继续', history })
+
+    expect(body.history).toEqual([
+      { role: 'user', content: '先聊点别的' },
+      {
+        role: 'assistant',
+        content: '你更倾向哪种？',
+        tool_calls: [
+          { id: 'call-1', name: 'ask_clarification_questions', args: { questions: [] } },
+        ],
+      },
+      // 普通消息不挂空壳：多一个空数组会让后端以为这里也有工具链
+      { role: 'assistant', content: '普通回复' },
+    ])
+  })
+
+  it('history 里不出现 tool_call_id / tool_result：前端不产生 tool 消息', async () => {
+    // `ToolMessage` 由后端拿请求体的 `tool_result` 自己落，前端只负责把 assistant 的
+    // `tool_calls` 带回去供它配对。让这两个键出现在 history 里，等于把「悬空应答」
+    // 的风险搬回前端——所以显式钉住它们**不会**出现。
+    const history: ChatMessage[] = [
+      { role: 'assistant', content: '你更倾向哪种？', stage: 'requirement' },
+      { role: 'user', content: '答：A', stage: 'requirement' },
+    ]
+
+    const body = await continueWith({ content: '继续', history })
+    const items = body.history as Record<string, unknown>[]
+
+    expect(items).toEqual([
+      { role: 'assistant', content: '你更倾向哪种？' },
+      { role: 'user', content: '答：A' },
+    ])
+    for (const item of items) {
+      expect(item).not.toHaveProperty('tool_call_id')
+      expect(item).not.toHaveProperty('tool_result')
+    }
   })
 })

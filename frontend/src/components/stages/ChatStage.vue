@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import ChatInput from '@/components/ChatInput.vue'
 import MessageList from '@/components/MessageList.vue'
+import type { AnswerPayload } from '@/components/ClarificationAskList.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import ChatThreadTabs from '@/components/ui/ChatThreadTabs.vue'
@@ -58,9 +59,10 @@ const emit = defineEmits<{
    * 用户在结构化选择题上提交了回答。
    *
    * 与 `send` 分开而不是复用：一个是「用户自己敲的」，一个是「点选项攒出来的」，
-   * 上层要分别处理（后者不该把文本回填进输入框）。载荷同样是**一条可直接发送的消息文本**。
+   * 上层要分别处理（后者不该把文本回填进输入框）。载荷是选项卡给的结构化作答
+   * （展示文本 + 可选的工具结果），本组件原样透传。
    */
-  answer: [text: string]
+  answer: [payload: AnswerPayload]
   /** 点击「生成 PRD」 */
   generatePrd: []
   /** 点击「按澄清结果改写」（三条文档线程的主操作） */

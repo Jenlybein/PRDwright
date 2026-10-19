@@ -65,9 +65,9 @@ export interface ClarificationAskOption {
 /**
  * 澄清对话里「一次提问」的结构化形式。
  *
- * 模型按提示词的约定在回复末尾附一个标记块，后端把它剥出来、随 SSE 的 `done` 下发
- * （见 `services/clarification_ask.py`）。有它就把选项渲染成可点的卡片；
- * **没有它就是普通文本提问——没产块是常态，不是异常**。
+ * 模型通过**调用 `ask_clarification_questions` 工具**输出题目，后端从工具调用参数里取出、
+ * 校验并分配 id/label，随 SSE 的 `done` 下发（见 `services/clarification_ask.py`）。
+ * 有它就把选项渲染成可点的卡片；**没有它就是普通文本提问——不调工具是常态，不是异常**。
  */
 export interface ClarificationAsk {
   /** 由后端分配的 id，渲染 key 用 */
@@ -79,10 +79,55 @@ export interface ClarificationAsk {
   /** 是否多选 */
   multiple: boolean
   options: ClarificationAskOption[]
+  /**
+   * 产出这道题的那次工具调用 id；**缺失时整个键不下发**（绝不给空串）。
+   *
+   * 作答回灌靠它把答案对回当初提问的那次工具调用。上游没给调用 id 时后端不下发这个键，
+   * 前端据此**降级为纯文本作答**（不带 `tool_result`）——绝不发一个配不上的 id。
+   */
+  tool_call_id?: string
+}
+
+/** 作答回灌里「一道题的答案」 */
+export interface ClarificationAnswerItem {
+  /** 题目 id（后端分配，与 `ClarificationAsk.id` 同源） */
+  ask_id: string
+  /** 选中的选项标号；**按选项展示顺序**，不按点选顺序 */
+  labels: string[]
+  /** 题干；模型要能把它对回自己问的那道题 */
+  question: string
+  /** 选中选项的文本；与 `labels` 同序、逐项对应 */
+  texts: string[]
+}
+
+/**
+ * 作答回灌的结构化载荷：一次「回答选择题」对应一条工具结果。
+ *
+ * 随 `continue-stream` 的 `tool_result` 下发；不带它时就是普通续聊。
+ */
+export interface ToolResultPayload {
+  /** 要回答的工具调用 id（随 `done` 下发） */
+  tool_call_id: string
+  /** 逐题作答；允许只答一部分 */
+  answers: ClarificationAnswerItem[]
+}
+
+/** assistant 消息携带的一次工具调用，形如 `[{id, name, args}]` */
+export interface ToolCallRef {
+  id: string
+  name: string
+  args: Record<string, unknown>
 }
 
 export interface ChatMessage {
-  /** 消息角色；`system` 消息不展示在聊天界面里 */
+  /**
+   * 消息角色；`system` 消息不展示在聊天界面里。
+   *
+   * ⚠️ 这里**没有** `tool`：工具应答（`ToolMessage`）是后端拿请求体里的 `tool_result`
+   * 自己落的，前端不产生、也不需要回传这类消息。放进来只会造成「类型说可以、
+   * 快照恢复时却被 `isChatMessage` 的白名单整条丢掉」的不一致——那种不一致不报错，
+   * 表现为刷新一次消息就没了。
+   */
   role: 'system' | 'user' | 'assistant'
   /** 消息正文；assistant 的消息为 Markdown 源码 */
   content: string
@@ -103,6 +148,27 @@ export interface ChatMessage {
    * 消息对象，多一个 `asks: []` 就会把它们弄红——而那种红会让人误以为「不带选项也行」。
    */
   asks?: ClarificationAsk[]
+  /**
+   * 这条助手消息发起的**工具调用**；没有就**不带这个字段**。
+   *
+   * 与 `asks` 同源（题目就是 `ask_clarification_questions` 这次调用的参数），
+   * 原样带回是后端配对工具应答的**唯一依据**：有了它，后端才能把随后的用户文本
+   * 包成工具应答、插到发起调用的那条 assistant 消息之后；裁掉它，历史里就只剩
+   * 「调了工具却没人应答」的悬空调用，上游 API 直接报错。
+   */
+  tool_calls?: ToolCallRef[]
+  /**
+   * 这条**用户消息**是对哪一轮选项卡的作答；自由文本作答**不带这个字段**。
+   *
+   * 它与 `content` 是同一件事的两种写法：`content` 是发给后端的展示文本
+   * （降级时模型读到的也是它），`answers` 只服务于**界面呈现**——气泡里那段
+   * 「1. 题干 / 答：A. xxx」既啰嗦又像模型在说话，所以带了这个字段的消息
+   * 改用一行轻回执，只显示选中的**标号**。
+   *
+   * ⚠️ 只在真有值时挂键（空数组会让既有的 `toEqual({role, content, stage})`
+   * 精确形状断言变红）；它不进请求体，纯前端渲染用。
+   */
+  answers?: ClarificationAnswerItem[]
 }
 
 /**
