@@ -43,6 +43,8 @@ function makeRecord(
     runSummary,
     pendingItems,
     updatedAt: '2026-10-13T00:00:00',
+    stale: false,
+    derivedFrom: null,
   }
 }
 

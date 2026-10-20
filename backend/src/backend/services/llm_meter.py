@@ -73,8 +73,12 @@ class RunMeter:
         """推导当前步骤名：有阶段就用 `类型:阶段`，否则用任务类型本身。
 
         例：`prd:writing` / `prd:reviewing` / `api_docs` / `prompts`。
+
+        `phase` 是**任务级**字段，串行生成时够用；并行车道下多路会互相覆盖，
+        因此车道内改用 `use_step()` 把本步名字挂到上下文里，优先于共享的 `phase`。
         """
-        return f"{self.kind}:{self.phase}" if self.phase else self.kind
+        phase = _step_override.get() or self.phase
+        return f"{self.kind}:{phase}" if phase else self.kind
 
     def note_warning(self, step: str, ratio: float, message: str) -> None:
         """记一条事前预算的告警；同一步只保留**最严重**（比值最大）的那条。
@@ -185,6 +189,11 @@ class RunMeter:
 # 当前任务环境的计量器；无任务上下文时为 None（计量自动变为无操作）
 _current_meter: ContextVar[RunMeter | None] = ContextVar("run_meter", default=None)
 
+# 当前调用的**步骤名覆盖**。并行车道下 `RunMeter.phase` 会被多路交替写，
+# 靠它无法判断“这次调用属于哪一步”；车道在发起调用前用 `use_step()` 显式声明，
+# 归因就不再依赖“最后到达的那个 stage 事件”。
+_step_override: ContextVar[str | None] = ContextVar("run_meter_step", default=None)
+
 
 @contextmanager
 def use_meter(meter: RunMeter) -> Iterator[None]:
@@ -203,3 +212,18 @@ def use_meter(meter: RunMeter) -> Iterator[None]:
 def current_meter() -> RunMeter | None:
     """取当前上下文的计量器；没有任务在跑时返回 `None`。"""
     return _current_meter.get()
+
+
+@contextmanager
+def use_step(step: str) -> Iterator[None]:
+    """把「本次调用属于哪一步」挂到当前上下文，退出时还原。
+
+    只在并行车道内部使用：串行路径继续靠 `set_phase` + `current_step()` 推导，
+    不需要逐调用点声明。并行时若不声明，多路调用的 step 会按最后到达的
+    `stage` 事件乱记，`run_summary.steps` 的归因就失真了。
+    """
+    token = _step_override.set(step)
+    try:
+        yield
+    finally:
+        _step_override.reset(token)

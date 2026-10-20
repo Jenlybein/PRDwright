@@ -56,8 +56,8 @@ describe('ProgressSteps：把「AI 对话」摘到最左边', () => {
   it('对话那一段排在四个里程碑之前，且不占序号', () => {
     const wrapper = mountSteps()
 
-    // 五步一个不少（数量不变，只是排布变了）
-    expect(wrapper.findAll('nav li')).toHaveLength(5)
+    // 六步一个不少（数量不变，只是排布变了）
+    expect(wrapper.findAll('nav li')).toHaveLength(6)
     // 画面顺序：对话在最左，其余保持执行顺序
     expect(wrapper.findAll('nav li').map((li) => li.text().split('\n')[0]?.trim())).toEqual([
       'AI 对话',
@@ -65,14 +65,15 @@ describe('ProgressSteps：把「AI 对话」摘到最左边', () => {
       '2PRD',
       '3接口文档',
       '4提示词',
+      '5交付',
     ])
   })
 
-  it('序号按画面顺序重数（1~4），对话那一段没有数字', () => {
+  it('序号按画面顺序重数（1~5），对话那一段没有数字', () => {
     const wrapper = mountSteps()
 
     // 空串 = 那一步的徽章里只有图标、没有序号
-    expect(badgeTexts(wrapper)).toEqual(['', '1', '2', '3', '4'])
+    expect(badgeTexts(wrapper)).toEqual(['', '1', '2', '3', '4', '5'])
   })
 
   it('对话与里程碑之间隔了一根竖线，里程碑之间没有', () => {
@@ -88,9 +89,9 @@ describe('ProgressSteps：把「AI 对话」摘到最左边', () => {
   it('对话段落与里程碑之间不画连接线（那根竖线就是分隔）', () => {
     const wrapper = mountSteps()
 
-    // 连接线只在里程碑之间：四步 → 3 条
+    // 连接线只在里程碑之间：五步 → 4 条
     const connectors = wrapper.findAll('nav ol > li > div.mx-1')
-    expect(connectors).toHaveLength(3)
+    expect(connectors).toHaveLength(4)
     // 对话那一条（第一项）里没有连接线
     expect(wrapper.findAll('nav li')[0]?.findAll('div.mx-1')).toHaveLength(0)
   })
@@ -99,14 +100,15 @@ describe('ProgressSteps：把「AI 对话」摘到最左边', () => {
     const quick = mount(ProgressSteps, {
       props: { steps: stepsForMode('prd-quick'), currentIndex: 0, reachedIndex: 0 },
     })
-    expect(badgeTexts(quick)).toEqual(['1', '2', '3'])
+    expect(badgeTexts(quick)).toEqual(['1', '2', '3', '4'])
     expect(quick.findAll('nav li')[0]?.classes()).not.toContain('border-r')
 
-    // 导入入口只有一步：整条进度条不渲染（单步没有信息量）
-    const single = mount(ProgressSteps, {
+    // 导入入口现在是「提示词 → 交付」两步：仍然渲染，但只有两个序号
+    const imported = mount(ProgressSteps, {
       props: { steps: stepsForMode('prompt-debug'), currentIndex: 0, reachedIndex: 0 },
     })
-    expect(single.find('nav').exists()).toBe(false)
+    expect(imported.find('nav').exists()).toBe(true)
+    expect(badgeTexts(imported)).toEqual(['1', '2'])
   })
 })
 

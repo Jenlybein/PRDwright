@@ -43,6 +43,11 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from backend.core.contracts import StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object
+from backend.services.document_review import (
+    review_event,
+    review_whole_document,
+    rewrite_whole_document_messages,
+)
 from backend.services.pending_items import (
     PendingBlockSuppressor,
     extract,
@@ -599,12 +604,61 @@ class DocumentService:
                     yield StreamEvent(type="chunk", content=trailing, data=event.data)
                 reply = str(event.data.get("reply", ""))
                 clean_reply, items = extract(reply)
+
+                # 整篇生成后审一次；有问题则**改写一次**，不再复审。
+                # 初稿已经以 chunk 流出去过，改写稿用 part{replace} 整段覆盖，
+                # 避免“初稿 + 改稿”在同一份预览里叠字。
+                final_reply = clean_reply
+                rewritten = False
+                yield StreamEvent(
+                    type="stage",
+                    content="正在审核接口文档…",
+                    data={"stage": "reviewing", "doc_type": "api_doc"},
+                )
+                review = await review_whole_document(
+                    self.llm,
+                    document=clean_reply,
+                    writing_rules=api_specs,
+                    requirements=prd_content,
+                )
+                if review and review.needs_revision:
+                    yield StreamEvent(
+                        type="stage",
+                        content="审核发现问题，正在改写…",
+                        data={
+                            "stage": "rewriting",
+                            "doc_type": "api_doc",
+                            "note": review.summary(),
+                            "issues": review.issues,
+                        },
+                    )
+                    try:
+                        rewritten_reply = await collect_reply(
+                            self.llm,
+                            rewrite_whole_document_messages(
+                                document=clean_reply,
+                                review=review,
+                                writing_rules=api_specs,
+                            ),
+                        )
+                        rewritten_reply = rewritten_reply.strip()
+                        if rewritten_reply:
+                            final_reply, items = extract(rewritten_reply)
+                            rewritten = True
+                            yield StreamEvent(
+                                type="part",
+                                content="",
+                                data={"text": final_reply, "replace": True},
+                            )
+                    except Exception:  # noqa: BLE001 - 改写失败保留初稿
+                        logger.warning("接口文档改写失败，保留初稿", exc_info=True)
+                yield review_event("api_docs", review, rewritten=rewritten)
                 yield StreamEvent(
                     type="done",
                     content="",
                     data={
                         **(event.data or {}),
-                        "reply": clean_reply,
+                        "reply": final_reply,
                         "pending_items": items,
                     },
                 )
@@ -667,12 +721,62 @@ class DocumentService:
                     yield StreamEvent(type="chunk", content=trailing, data=event.data)
                 reply = str(event.data.get("reply", ""))
                 clean_reply, items = extract(reply)
+
+                # 与接口文档同构：整篇生成 → 审一次 → 有问题改写一次（不复审）。
+                requirements_text = prd_content
+                if api_docs_content.strip():
+                    requirements_text = f"{prd_content}\n\n## 接口文档\n\n{api_docs_content}"
+                final_reply = clean_reply
+                rewritten = False
+                yield StreamEvent(
+                    type="stage",
+                    content="正在审核提示词套件…",
+                    data={"stage": "reviewing", "doc_type": "prompts"},
+                )
+                review = await review_whole_document(
+                    self.llm,
+                    document=clean_reply,
+                    writing_rules=guide,
+                    requirements=requirements_text,
+                )
+                if review and review.needs_revision:
+                    yield StreamEvent(
+                        type="stage",
+                        content="审核发现问题，正在改写…",
+                        data={
+                            "stage": "rewriting",
+                            "doc_type": "prompts",
+                            "note": review.summary(),
+                            "issues": review.issues,
+                        },
+                    )
+                    try:
+                        rewritten_reply = await collect_reply(
+                            self.llm,
+                            rewrite_whole_document_messages(
+                                document=clean_reply,
+                                review=review,
+                                writing_rules=guide,
+                            ),
+                        )
+                        rewritten_reply = rewritten_reply.strip()
+                        if rewritten_reply:
+                            final_reply, items = extract(rewritten_reply)
+                            rewritten = True
+                            yield StreamEvent(
+                                type="part",
+                                content="",
+                                data={"text": final_reply, "replace": True},
+                            )
+                    except Exception:  # noqa: BLE001 - 改写失败保留初稿
+                        logger.warning("提示词套件改写失败，保留初稿", exc_info=True)
+                yield review_event("prompts", review, rewritten=rewritten)
                 yield StreamEvent(
                     type="done",
                     content="",
                     data={
                         **(event.data or {}),
-                        "reply": clean_reply,
+                        "reply": final_reply,
                         "pending_items": items,
                     },
                 )

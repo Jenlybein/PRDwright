@@ -74,6 +74,7 @@ class StreamEvent(BaseModel):
         "document",
         "snapshot",
         "run_summary",
+        "review",
     ] = Field(
         description=(
             "事件类型：状态提示 status / 增量文本 chunk / 定稿正文 part / 阶段进度 stage / "
@@ -86,6 +87,8 @@ class StreamEvent(BaseModel):
             "**首发给**，`data` 含 job_id/kind/status/phase/finalized_text/live_buffer/"
             "completed_sections/solution_id/error_code/error_message/elapsed_ms，供前端补全已产出正文；"
             "后者在任务收尾时下发本次生成的用量汇总（结构见 `RunSummary`）。"
+            "`review` 是**不持久化**的审核结论：`data` 含 kind/verdict/summary/issues/"
+            "rewritten/failed_sections，仅在本次订阅内展示，刷新即失。"
         )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
@@ -178,3 +181,13 @@ class RunSummary(BaseModel):
     provider: str = Field(default="", description="最终使用的供应商")
     model: str = Field(default="", description="最终使用的模型名")
     request_id: str = Field(default="", description="该次生成所属请求的追踪 id")
+    partial: bool = Field(
+        default=False,
+        description="本次生成是否有章节失败后被占位（仅 PRD 分章节；其余任务恒为 false）。"
+        "true 表示正文可用但不完整，前端据此在审阅页给出提示。",
+    )
+    failed_sections: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="失败章节清单（section_id / title / index / reason）。"
+        "与 partial 配套：前者是结论，这里是可定位的细节。",
+    )

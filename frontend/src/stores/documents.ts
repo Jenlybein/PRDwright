@@ -24,7 +24,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { DocumentsNotFoundError, fetchDocuments, saveDocument } from '@/services/documentService'
-import type { DocumentKind, PendingItem, RunSummary } from '@/types'
+import type { DerivedFrom, DocumentKind, PendingItem, RunSummary } from '@/types'
 
 /** 手改的防抖时长：比方案快照短一些，让「保存」这件事显得更跟手 */
 export const DOCUMENT_SAVE_DEBOUNCE_MS = 800
@@ -43,6 +43,16 @@ function emptyPending(): Record<DocumentKind, PendingItem[]> {
   return { prd: [], 'api-docs': [], prompts: [] }
 }
 
+/** 三种产物「是否基于旧版上游」的空值 */
+function emptyStale(): Record<DocumentKind, boolean> {
+  return { prd: false, 'api-docs': false, prompts: false }
+}
+
+/** 三种产物上游锚点的空值 */
+function emptyDerived(): Record<DocumentKind, DerivedFrom | null> {
+  return { prd: null, 'api-docs': null, prompts: null }
+}
+
 export const useDocumentsStore = defineStore('documents', () => {
   /** 三份正文的工作副本 */
   const contents = ref<Record<DocumentKind, string>>(emptyContents())
@@ -52,6 +62,17 @@ export const useDocumentsStore = defineStore('documents', () => {
 
   /** 三份文档各自的待确认清单；随正文一起从后端取回，前端只读、不修改 */
   const pendingItems = ref<Record<DocumentKind, PendingItem[]>>(emptyPending())
+
+  /**
+   * 三份文档各自的「是否基于旧版上游」。
+   *
+   * 由后端按 `metadata.derived_from` 记录的上游内容指纹与上游**当前**指纹比较得出；
+   * 前端只负责展示黄条，不自己算——比较要用上游的 `content_sha`，那是后端才有的。
+   */
+  const stale = ref<Record<DocumentKind, boolean>>(emptyStale())
+
+  /** 三份文档的上游锚点（用于提示条上说明「基于哪一版」） */
+  const derivedFrom = ref<Record<DocumentKind, DerivedFrom | null>>(emptyDerived())
 
   /** 这批内容属于哪份方案；`null` 表示还没有归属（新建中） */
   const solutionId = ref<number | null>(null)
@@ -143,22 +164,30 @@ export const useDocumentsStore = defineStore('documents', () => {
       const nextContents = emptyContents()
       const nextSummaries = emptySummaries()
       const nextPending = emptyPending()
+      const nextStale = emptyStale()
+      const nextDerived = emptyDerived()
       for (const record of records) {
         nextContents[record.kind] = record.content
         nextSummaries[record.kind] = record.runSummary
         nextPending[record.kind] = record.pendingItems
+        nextStale[record.kind] = record.stale
+        nextDerived[record.kind] = record.derivedFrom
       }
       // 尚未落库的手改优先：它们在时间上更新于这次响应
       for (const [kind, content] of pending) nextContents[kind] = content
       contents.value = nextContents
       runSummaries.value = nextSummaries
       pendingItems.value = nextPending
+      stale.value = nextStale
+      derivedFrom.value = nextDerived
     } catch (error) {
       if (token !== loadToken) return
       if (error instanceof DocumentsNotFoundError) {
         contents.value = emptyContents()
         runSummaries.value = emptySummaries()
         pendingItems.value = emptyPending()
+        stale.value = emptyStale()
+        derivedFrom.value = emptyDerived()
       }
       saveError.value = error instanceof Error ? error.message : '无法读取文档'
     } finally {
@@ -251,6 +280,7 @@ export const useDocumentsStore = defineStore('documents', () => {
    */
   async function saveNow(): Promise<void> {
     const batch = [...pending.entries()]
+    let savedPrd = false
     for (const [kind, content] of batch) {
       const id = solutionId.value
       if (id === null) return
@@ -260,6 +290,7 @@ export const useDocumentsStore = defineStore('documents', () => {
         saveError.value = ''
         // 这一份真的写进库了——报告一次内容变更，让方案列表的时间与排序跟着走
         markContentWritten()
+        if (kind === 'prd') savedPrd = true
       } catch (error) {
         if (error instanceof DocumentsNotFoundError) {
           // 方案没了：再重试也没有意义，记下原因让用户知道
@@ -273,6 +304,9 @@ export const useDocumentsStore = defineStore('documents', () => {
     // 只要队列空了就认为「本轮改动已处理完」；失败的那几条已放回队列，
     // 由 `dirty` 保持置位（不清），留给下一次变更或 flush 重试。
     dirty = pending.size > 0
+    // PRD 正文变了 → 下游是否过期要重算。拉一次拿后端算好的 stale 标记；
+    // 不 await，避免把「保存」这个动作拖成两次往返。
+    if (savedPrd) void reload()
   }
 
   /**
@@ -301,6 +335,8 @@ export const useDocumentsStore = defineStore('documents', () => {
     contents.value = emptyContents()
     runSummaries.value = emptySummaries()
     pendingItems.value = emptyPending()
+    stale.value = emptyStale()
+    derivedFrom.value = emptyDerived()
     solutionId.value = null
     saveError.value = ''
     // 让在途的加载结果作废：它的响应属于上一份方案，落地会把空内容又填回去
@@ -324,6 +360,16 @@ export const useDocumentsStore = defineStore('documents', () => {
     return pendingItems.value[kind]
   }
 
+  /** 某份文档是否基于旧版上游（后端算好，前端只读） */
+  function staleOf(kind: DocumentKind): boolean {
+    return stale.value[kind]
+  }
+
+  /** 某份文档的上游锚点（提示条用；没有则为 null） */
+  function derivedFromOf(kind: DocumentKind): DerivedFrom | null {
+    return derivedFrom.value[kind]
+  }
+
   const hasPrd = computed(() => contents.value.prd.trim() !== '')
   const hasApiDocs = computed(() => contents.value['api-docs'].trim() !== '')
   const hasPrompts = computed(() => contents.value.prompts.trim() !== '')
@@ -336,6 +382,8 @@ export const useDocumentsStore = defineStore('documents', () => {
     contents,
     runSummaries,
     pendingItems,
+    stale,
+    derivedFrom,
     solutionId,
     loading,
     saveError,
@@ -358,5 +406,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     contentOf,
     runSummaryOf,
     pendingItemsOf,
+    staleOf,
+    derivedFromOf,
   }
 })

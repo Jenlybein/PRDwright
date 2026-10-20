@@ -491,7 +491,15 @@ function makeDocumentRecord(
   runSummary: RunSummary | null = null,
   pendingItems: DocumentRecord['pendingItems'] = [],
 ): DocumentRecord {
-  return { kind, content, runSummary, pendingItems, updatedAt: '2026-10-13T00:00:00' }
+  return {
+    kind,
+    content,
+    runSummary,
+    pendingItems,
+    updatedAt: '2026-10-13T00:00:00',
+    stale: false,
+    derivedFrom: null,
+  }
 }
 
 /**
@@ -1425,10 +1433,10 @@ describe('AppV2 入口模式', () => {
     const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
 
-    // 跳过了表单与对话：进度条只剩 PRD / 接口文档 / 提示词三步
+    // 跳过了表单与对话：进度条只剩 PRD / 接口文档 / 提示词 / 交付四步
     expect(wrapper.text()).toContain('直接生成 PRD')
     expect(wrapper.text()).not.toContain('需求澄清对话')
-    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(3)
+    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(4)
     expect(wrapper.text()).not.toContain('描述产品')
 
     await clickButton(wrapper, '生成 PRD', true)
@@ -1509,8 +1517,9 @@ describe('AppV2 入口模式', () => {
     await clickButton(wrapper, '我有 PRD')
 
     expect(wrapper.text()).toContain('从现有 PRD 生成提示词套件')
-    // 该模式的产物只有提示词，全程只有一步——单步进度条没有信息量，整体不显示
-    expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(false)
+    // 该模式的产物只有提示词，进度条现在是「提示词 → 交付」两步
+    expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(true)
+    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(2)
 
     await byId(wrapper, 'field-debug-prd').setValue(
       '# 小账本 产品需求文档（PRD）\n\n## 1. 产品概述\n家庭记账工具',
@@ -1553,8 +1562,9 @@ describe('AppV2 入口模式', () => {
     await clickButton(wrapper, '我有 PRD + 接口文档')
 
     expect(wrapper.text()).toContain('从现有 PRD 与接口文档生成提示词套件')
-    // 与「我有 PRD」同属导入组：产物只有提示词，进度条整体不显示
-    expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(false)
+    // 与「我有 PRD」同属导入组：产物只有提示词，进度条是「提示词 → 交付」两步
+    expect(wrapper.find('nav[aria-label="生成进度"]').exists()).toBe(true)
+    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(2)
 
     await byId(wrapper, 'field-pair-prd').setValue(
       '# 小账本 产品需求文档（PRD）\n\n## 1. 产品概述\n家庭记账工具',
@@ -1621,8 +1631,8 @@ describe('AppV2 入口模式', () => {
     await clickButton(wrapper, '返回入口', true)
     await clickButton(wrapper, '完整流程')
     expect(wrapper.text()).toContain('告诉我们你的产品想法')
-    // 换了入口，进度条口径也跟着换回五步
-    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(5)
+    // 换了入口，进度条口径也跟着换回六步
+    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(6)
   })
 
   it('完整流程的表单也有返回按钮，默认回到入口页', async () => {

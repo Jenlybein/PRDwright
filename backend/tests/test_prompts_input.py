@@ -34,9 +34,14 @@ async def _drain(events: AsyncIterator) -> list:
 
 
 def _user_message(llm: ScriptedLLM) -> str:
-    """取出模型实际收到的用户消息正文（假 LLM 把每次调用的消息记在 `calls` 里）。"""
+    """取出**生成那一次**调用收到的用户消息正文。
+
+    取第一次而不是最后一次：接入整篇审核后，`calls` 里会多出一次审核调用
+    （审核提示词里没有 `NO_API_DOCS_NOTE`，拿最后一次会误判成「没填说明」）。
+    生成永远是这条流里的第一次调用。
+    """
     assert llm.calls, "生成没有调用模型"
-    return str(llm.calls[-1][-1].content)
+    return str(llm.calls[0][-1].content)
 
 
 # ---------------------------------------------------------------------------

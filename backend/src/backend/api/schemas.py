@@ -398,6 +398,16 @@ class DocumentItem(BaseModel):
         ),
     )
     updated_at: str = Field(default="", description="最近更新时间（UTC ISO 8601）")
+    stale: bool = Field(
+        default=False,
+        description="这份下游文档是否基于旧版上游（按 `derived_from` 记录的指纹比较）。"
+        "只对接口文档 / 提示词有意义；PRD 没有上游，恒为 false。",
+    )
+    derived_from: dict[str, Any] | None = Field(
+        default=None,
+        description="生成这份文档时的上游锚点（`prd` / 可选 `api_docs` 的版本号 + 内容指纹）。"
+        "旧数据没有该字段时为 null。",
+    )
 
 
 class DocumentListResponse(BaseModel):

@@ -188,6 +188,22 @@ class Settings(BaseSettings):
         description="单个章节最多改写的轮数。0 表示只审核不改写；"
         "达到上限即保留当前版本，避免审核与改写互相拉扯导致无限循环。",
     )
+    prd_pipeline_concurrency: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        description="PRD 分章节生成时同时在飞的模型调用上限（撰写 / 审核 / 改写共用）。"
+        "1 表示退回串行：每章都能带上已定稿的前序章节；大于 1 时后章基于前章草稿，"
+        "跨章一致性由最终的审核结论兜底。并发越高越容易撞单供应商限流。",
+    )
+    prd_section_max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=5,
+        description="单个章节在某一阶段失败后的最多重试次数（总尝试 = 1 + 该值）。"
+        "只重试该阶段本身：撰写用尽后写占位，审核用尽后保留正文，改写用尽后保留改写前版本。"
+        "与 llm_max_retries（单次调用重试）是两层，实际调用次数是两者之积。",
+    )
 
     # --- 技能包（PRD 生成的提示词资产） --------------------------------------
     skills_strict: bool = Field(

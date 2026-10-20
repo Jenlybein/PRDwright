@@ -100,6 +100,26 @@ function toPendingItems(data: unknown): PendingItem[] {
  * 回执用 `parseRunSummary` 校验后透传：迁移进来的旧回执是另一种字段风格，
  * 结构对不上时退化为 `null`，让这一份「不显示回执」，而不是把整条文档丢掉。
  */
+/**
+ * 把后端的 `derived_from` 收敛成前端结构。
+ *
+ * 结构不合法（旧数据 / 脏数据）时返回 null，让这份文档退化为「不提示过期」，
+ * 而不是把整条记录丢掉——正文仍然可读。
+ */
+function toDerivedFrom(raw: unknown): DocumentRecord['derivedFrom'] {
+  if (typeof raw !== 'object' || raw === null) return null
+  const result: Record<string, { versionNo: number; contentSha: string }> = {}
+  for (const [kind, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null) continue
+    const item = value as Record<string, unknown>
+    result[kind] = {
+      versionNo: typeof item.version_no === 'number' ? item.version_no : 0,
+      contentSha: typeof item.content_sha === 'string' ? item.content_sha : '',
+    }
+  }
+  return Object.keys(result).length > 0 ? result : null
+}
+
 function toRecord(data: unknown): DocumentRecord | null {
   if (typeof data !== 'object' || data === null) return null
   const raw = data as Record<string, unknown>
@@ -112,6 +132,8 @@ function toRecord(data: unknown): DocumentRecord | null {
     runSummary: summary,
     pendingItems: toPendingItems(raw.pending_items),
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
+    stale: raw.stale === true,
+    derivedFrom: toDerivedFrom(raw.derived_from),
   }
 }
 
@@ -133,6 +155,27 @@ export async function fetchDocuments(solutionId: number): Promise<DocumentRecord
       throw new DocumentsNotFoundError()
     }
     throw new Error(backendMessage(error, '无法读取文档'))
+  }
+}
+
+/**
+ * 导出交付包：后端把三份产物 + README 打成一个 ZIP。
+ * 对应 `GET /api/solutions/{id}/export`。
+ *
+ * 走 `responseType: 'blob'`：响应体是二进制，交给 `utils/download` 直接落盘。
+ * 全空时后端返回 400、方案不可见返回 404，这里统一收敛成可展示的错误。
+ */
+export async function fetchDeliveryZip(solutionId: number): Promise<Blob> {
+  try {
+    const response = await http.get(`/api/solutions/${solutionId}/export`, {
+      responseType: 'blob',
+    })
+    return response.data as Blob
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      throw new DocumentsNotFoundError()
+    }
+    throw new Error(backendMessage(error, '导出交付包失败'))
   }
 }
 

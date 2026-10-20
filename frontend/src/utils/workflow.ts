@@ -145,13 +145,13 @@ export function emptyConversationIds(): Record<ChatStage, string> {
 
 /** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`） */
 const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
-  // 完整流程：五步齐全
-  structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts'],
+  // 完整流程：六步齐全（最后一步是交付）
+  structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
   // 快捷入口跳过了表单与对话，进度条不该显示一步都点不动的空壳
-  'prd-quick': ['review-prd', 'review-api-docs', 'review-prompts'],
+  'prd-quick': ['review-prd', 'review-api-docs', 'review-prompts', 'done'],
   // 两个导入入口的产物只有提示词套件
-  'prompt-debug': ['review-prompts'],
-  'prd-and-api-paste': ['review-prompts'],
+  'prompt-debug': ['review-prompts', 'done'],
+  'prd-and-api-paste': ['review-prompts', 'done'],
 }
 
 /**
@@ -366,6 +366,10 @@ export function farthestContentStepIndex(
     'review-prd': input.hasPrd,
     'review-api-docs': input.hasApiDocs,
     'review-prompts': input.hasPrompts,
+    // 「交付」不按产物解锁：文档齐备只代表“可以完成”，不代表已经进了交付页。
+    // 它由 `currentStepIndex` 在用户点「完成」后打开（`reachedStepIndex` 取两者较大者），
+    // 保持「最远里程碑」仍然描述产物流水线，而不是把“可交付”说成“已交付”。
+    done: false,
   }
 
   let reached = 0

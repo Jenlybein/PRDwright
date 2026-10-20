@@ -14,6 +14,7 @@ import type {
   QuestionsConfig,
   RequirementAnswers,
   RequirementsSummary,
+  ReviewConclusion,
   RunSummary,
   SkillRef,
   StepUsage,
@@ -122,9 +123,9 @@ export async function getQuestions(): Promise<QuestionsConfig> {
 // 流式对话（SSE）
 // ============================================================================
 
-/** 后端推送的 SSE 事件，字段与 `backend/api/schemas.py` 的 `StreamEvent` 一一对应 */
+/** 后端推送的 SSE 事件，字段与 `backend/core/contracts.py` 的 `StreamEvent` 一一对应 */
 export interface StreamEventPayload {
-  /** 事件类型：状态提示 / 增量文本 / 定稿正文 / 阶段进度 / 结束 / 错误 */
+  /** 事件类型：状态提示 / 增量文本 / 定稿正文 / 阶段进度 / 审核结论 / 结束 / 错误 */
   type:
     | 'status'
     | 'chunk'
@@ -136,6 +137,7 @@ export interface StreamEventPayload {
     | 'document'
     | 'snapshot'
     | 'run_summary'
+    | 'review'
   /** 文本内容（增量文本或提示语） */
   content: string
   /** 事件附加数据，如 conversation_id 与完整 reply */
@@ -178,6 +180,13 @@ export interface StreamHandlers {
    * 终态任务重连时后端会**补发**一份，因此刷新页面后也拿得到，无需再查一次接口。
    */
   onRunSummary?: (summary: RunSummary) => void
+  /**
+   * 收到 `review` 审核结论时触发。
+   *
+   * **不持久化**：只在本次订阅内展示；刷新后不会补发，结论随之消失。
+   * PRD 是「聚合各章审核」，接口文档 / 提示词是「整篇审一次」。
+   */
+  onReview?: (review: ReviewConclusion) => void
 }
 
 /** 一次流式对话的结果 */
@@ -381,11 +390,39 @@ function parseStageEvent(data: Record<string, unknown>): StreamStageEvent {
 function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
   return {
     text: readString(data, 'text'),
+    replace: data.replace === true,
     sectionId: readString(data, 'section_id'),
     sectionTitle: readString(data, 'section_title'),
     sectionHeading: readString(data, 'section_heading'),
     index: readNumber(data, 'index'),
     total: readNumber(data, 'total'),
+  }
+}
+
+/**
+ * 把 `review` 事件的 `data` 归一成 `ReviewConclusion`。
+ *
+ * 与其它解析器同一口径：坏字段退化为默认值，不让一条脏数据打断整条流。
+ */
+function parseReviewEvent(data: Record<string, unknown>): ReviewConclusion {
+  const issues = readObjectArray(data, 'issues').map((item) => ({
+    severity: readString(item, 'severity'),
+    sectionId: readString(item, 'section_id'),
+    sectionTitle: readString(item, 'section_title'),
+    detail: readString(item, 'detail'),
+  }))
+  const failedSections = readObjectArray(data, 'failed_sections').map((item) => ({
+    sectionId: readString(item, 'section_id'),
+    title: readString(item, 'title'),
+    reason: readString(item, 'reason'),
+  }))
+  return {
+    kind: readString(data, 'kind'),
+    verdict: readString(data, 'verdict'),
+    summary: readString(data, 'summary'),
+    issues,
+    rewritten: data.rewritten === true,
+    failedSections,
   }
 }
 
@@ -613,6 +650,9 @@ async function readStreamRequest(
       }
       case 'run_summary':
         handlers.onRunSummary?.(parseRunSummary(event.data))
+        break
+      case 'review':
+        handlers.onReview?.(parseReviewEvent(event.data))
         break
       case 'error':
         // 文案（message）照旧给人和日志看，分支判断走 code：

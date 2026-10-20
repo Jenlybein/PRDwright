@@ -415,6 +415,8 @@ const {
   docError,
   prdStatus,
   prdShowingDraft,
+  docPhase,
+  reviewConclusion,
   runSummary,
   pendingItems,
   elapsedMs,
@@ -434,6 +436,7 @@ const {
   handleEndTask,
   downloadDocument,
   onDownloadDocument,
+  downloadBundle,
   handleGeneratePrd,
   confirmSummaryDiff,
   rejectSummaryDiff,
@@ -459,6 +462,12 @@ const versionDrawerOpen = ref(false)
 
 /** 当前审阅的是哪一份产物；非审阅阶段为 null（抽屉只在审阅页可用） */
 const activeDocKind = computed(() => docKindOfState(viewState.value))
+
+/** 当前审阅的这份下游是否基于旧版上游（PRD 无上游，恒 false） */
+const documentStale = computed(() => {
+  const kind = activeDocKind.value
+  return kind ? documents.staleOf(kind) : false
+})
 
 /** 打开抽屉：先摆出当前文档的展示名，再拉一次版本列表 */
 function openVersions(): void {
@@ -907,6 +916,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :error="docError"
         :generating="isGenerating"
         :prd="prdStatus"
+        :doc-phase="docPhase"
         :draft-only="prdShowingDraft"
         :elapsed-ms="elapsedMs"
         :back-label="backLabel"
@@ -926,6 +936,8 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :has-prompts="hasPrompts"
         :run-summary="runSummary"
         :pending-items="pendingItems"
+        :stale="documentStale"
+        :review="reviewConclusion"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
         :back-label="backLabel"
@@ -950,6 +962,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :back-label="backLabel"
         @view="goTo"
         @download="downloadDocument"
+        @download-bundle="downloadBundle"
         @back="backToInput"
         @restart="handleRestart"
       />

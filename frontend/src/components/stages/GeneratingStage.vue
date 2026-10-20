@@ -2,10 +2,11 @@
 import { computed } from 'vue'
 
 import DocumentReview from '@/components/DocumentReview.vue'
+import DocPhaseProgress from '@/components/ui/DocPhaseProgress.vue'
 import PrdProgress from '@/components/stages/PrdProgress.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
-import type { PrdStageProgress } from '@/types'
+import type { DocPhase, PrdStageProgress } from '@/types'
 import { formatDuration } from '@/utils/metering'
 
 /**
@@ -28,6 +29,8 @@ const props = defineProps<{
   generating?: boolean
   /** PRD 分章节生成的阶段进度；非 PRD 时为 null */
   prd?: PrdStageProgress | null
+  /** 下游文档（接口 / 提示词）的生成阶段；idle 表示未走该链路 */
+  docPhase?: DocPhase | null
   /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
   draftOnly?: boolean
   /**
@@ -54,6 +57,11 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
   <section class="space-y-3">
     <!-- 分章节生成时先给出阶段条：让用户知道卡在哪一章、是否在改写 -->
     <PrdProgress v-if="prd" :progress="prd" />
+    <!-- 下游文档：整篇生成 → 审核 → 改写，用同一套胶囊样式展示 -->
+    <DocPhaseProgress
+      v-else-if="docPhase && docPhase !== 'idle'"
+      :phase="docPhase"
+    />
 
     <!-- 已用时：长生成时给一个「还在推进」的可感知信号，比转圈动画更有信息量。
          只在确实计过时（>0）时出现，避免刚进入生成态就闪一个「已用时 0 秒」 -->

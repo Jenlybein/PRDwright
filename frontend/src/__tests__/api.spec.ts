@@ -143,6 +143,7 @@ describe('SSE 事件解析', () => {
     // 文档头不属于任何章节：章节字段全部退化为默认值
     expect(parts[0]).toEqual({
       text: '# 标题\n\n',
+      replace: false,
       sectionId: '',
       sectionTitle: '',
       sectionHeading: '',

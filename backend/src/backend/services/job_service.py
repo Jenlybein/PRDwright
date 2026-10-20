@@ -480,6 +480,27 @@ def _document_kind(runtime: JobRuntime) -> str | None:
     return _target_product_kind(runtime.kind, runtime.request)
 
 
+def _build_derived_from(runtime: JobRuntime, kind: str) -> dict[str, Any] | None:
+    """为下游版本记录生成时的上游锚点（版本号 + 内容指纹）。
+
+    只对首次 / 整篇重生成生效；`optimize` / `clarify` 是就地改写，沿用旧锚点。
+    取不到上游（还没生成 PRD）时不写——空锚点会让后续「是否过期」的判断误报。
+    """
+    if kind not in ("api_docs", "prompts") or runtime.solution_id is None:
+        return None
+    prd = document_store.current_version_meta(runtime.owner_id, runtime.solution_id, "prd")
+    if not prd:
+        return None
+    derived: dict[str, Any] = {"prd": prd}
+    if kind == "prompts" and (runtime.request.get("api_docs_content") or "").strip():
+        api = document_store.current_version_meta(
+            runtime.owner_id, runtime.solution_id, "api_docs"
+        )
+        if api:
+            derived["api_docs"] = api
+    return {"derived_from": derived}
+
+
 def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
     """把本次任务的权威正文写进 `documents`（成功收尾的唯一落点）。
 
@@ -498,6 +519,7 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
     content = runtime.final_reply
     if not content.strip():
         return
+    append_version = _regenerates_whole_document(runtime.kind)
     try:
         written = document_store.commit_generated(
             runtime.owner_id,
@@ -506,12 +528,14 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             content,
             pending_items=runtime.pending_items,
             run_summary=summary,
-            # `append_version=True`（整篇生成）同时意味着「追加新版本 + 让下游失效」；
-            # `False`（optimize / clarify）就是就地改当前版本、不删下游。两个语义收在一个
-            # 标志上，避免「该追加却不删下游」这类两标志打架的组合（见 `_regenerates_whole_document`）
-            append_version=_regenerates_whole_document(runtime.kind),
+            # `append_version=True`（整篇生成）同时意味着「追加新版本」；
+            # `False`（optimize / clarify）就是就地改当前版本。下游不再删除，
+            # 是否过期由读取侧比较 derived_from 得出。
+            append_version=append_version,
             # 版本来源标签：整篇生成时是产物类型，就地改写时是动作类型（optimize / clarify）
             source=runtime.kind,
+            # 只有整篇生成才更新锚点；就地改写沿用当前版本原有的 metadata。
+            metadata=_build_derived_from(runtime, kind) if append_version else None,
         )
     except Exception:  # noqa: BLE001 - 落文档不该把已成功的任务判失败
         logger.warning(

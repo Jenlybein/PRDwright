@@ -30,7 +30,7 @@ _MERGED_COLUMNS = (
     "SELECT d.id AS document_id, d.solution_id, d.kind, d.created_at, d.updated_at, "
     "       d.current_version_id, "
     "       v.id AS version_id, v.version_no, v.content, v.content_sha, "
-    "       v.pending_items, v.last_run_summary, v.source "
+    "       v.pending_items, v.last_run_summary, v.source, v.metadata "
     "FROM documents d "
     "LEFT JOIN document_versions v ON v.id = d.current_version_id "
     "JOIN solutions s ON s.id = d.solution_id "

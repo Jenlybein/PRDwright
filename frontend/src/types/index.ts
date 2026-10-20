@@ -287,6 +287,20 @@ export interface PendingItem {
 }
 
 /**
+ * 一份上游文档在被下游引用时的锚点。
+ *
+ * 记的是「生成那一刻的版本号 + 内容指纹」：只比版本号抓不到手改（就地改当前版本，
+ * `version_no` 不变），所以真正用于判断过期的是 `contentSha`。
+ */
+export interface DerivedUpstream {
+  versionNo: number
+  contentSha: string
+}
+
+/** 下游文档的上游锚点表：键是上游产物（`prd` / `api_docs`） */
+export type DerivedFrom = Record<string, DerivedUpstream>
+
+/**
  * 从后端取回的一份文档（`GET /api/solutions/{id}/documents` 的一项）。
  *
  * 正文、回执都由后端产出：正文来自任务收尾时的 `done.reply`，回执来自同一次收尾的
@@ -308,6 +322,10 @@ export interface DocumentRecord {
   pendingItems: PendingItem[]
   /** 最近更新时间（UTC ISO 8601） */
   updatedAt: string
+  /** 这份下游文档是否基于旧版上游（后端按 `derivedFrom` 的指纹比较得出） */
+  stale: boolean
+  /** 生成时的上游锚点；PRD 或旧数据为 null */
+  derivedFrom: DerivedFrom | null
 }
 
 // ============================================================================
@@ -419,6 +437,7 @@ export const STEPS = [
   { id: 'review-prd', label: 'PRD' },
   { id: 'review-api-docs', label: '接口文档' },
   { id: 'review-prompts', label: '提示词' },
+  { id: 'done', label: '交付' },
 ] as const
 
 /** 步骤 id 的联合类型，取自 STEPS */
@@ -452,7 +471,7 @@ export const STEP_OF_STATE: Record<ViewState, StepId> = {
   // 两个导入入口的录入产物都是提示词套件（它们只差「带了哪些材料」）
   'prompt-debug': 'review-prompts',
   'prd-and-api-paste': 'review-prompts',
-  done: 'review-prompts',
+  done: 'done',
 }
 
 // ============================================================================
@@ -578,6 +597,44 @@ export interface PrdStageProgress {
   note: string
 }
 
+/** 一条审核问题（PRD 单章审核与下游整篇审核共用展示结构） */
+export interface ReviewIssue {
+  severity: string
+  /** 问题所在章节 id（PRD 用；下游整篇审核可能为空） */
+  sectionId?: string
+  /** 问题所在章节名（展示用） */
+  sectionTitle?: string
+  detail: string
+}
+
+/** 一次失败的章节（PRD 并行生成用；下游恒为空） */
+export interface FailedSection {
+  sectionId: string
+  title: string
+  reason: string
+}
+
+/**
+ * 一次审核结论。
+ *
+ * **不持久化**：只在本次生成订阅内展示，刷新即失。因此不进 `runSummary`、不进
+ * `documents.metadata`——那会变成第二个真源，且与“刷新后结论消失”的预期打架。
+ */
+export interface ReviewConclusion {
+  /** `prd` / `api_docs` / `prompts` */
+  kind: string
+  /** `pass` / `revise`（空串表示未审成） */
+  verdict: string
+  summary: string
+  issues: ReviewIssue[]
+  /** 本次是否真的执行了改写（下游「有问题 → 改写一次」） */
+  rewritten: boolean
+  failedSections: FailedSection[]
+}
+
+/** 下游文档（接口文档 / 提示词）生成中的阶段 */
+export type DocPhase = 'idle' | 'writing' | 'reviewing' | 'rewriting' | 'done'
+
 /**
  * 一段**已定稿正文**，由 `part` 事件下发。
  *
@@ -589,6 +646,13 @@ export interface PrdStageProgress {
 export interface StreamDocumentPart {
   /** 可直接追加到文档末尾的定稿文本（含分隔空行） */
   text: string
+  /**
+   * 是否整段替换当前预览。
+   *
+   * 下游文档「审核发现问题 → 改写一次」时，改写稿用 `replace: true` 覆盖初稿；
+   * PRD 的定稿段不带这个标记（按章节归位，见 `index`）。
+   */
+  replace?: boolean
   /** 所属章节 id；文档头等不属于任何章节的部分为空串 */
   sectionId: string
   /** 所属章节名称，如「功能需求」；非章节部分为空串 */

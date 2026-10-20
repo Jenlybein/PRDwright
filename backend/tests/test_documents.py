@@ -390,23 +390,59 @@ def test_in_place_rewrite_replaces_all_three_fields_without_new_version(client) 
     assert json.loads(versions[0]["last_run_summary"]) == {"kind": "prd", "duration_ms": 9}
 
 
-def test_regenerating_appends_version_and_drops_downstream(client) -> None:
-    """整篇重生成：追加新版本，并让下游产物（连同其版本）退场。"""
+def test_regenerating_appends_version_and_keeps_downstream(client) -> None:
+    """整篇重生成：追加新版本；下游**保留**，过期由 `stale` 标记提示。"""
     register(client, username="alice")
     solution_id = _new_solution(client)
     owner = _user_id("alice")
 
     document_store.commit_generated(owner, solution_id, "prd", "PRD v1")
-    document_store.commit_generated(owner, solution_id, "api_docs", "接口 v1")
-    document_store.commit_generated(owner, solution_id, "prompts", "提示词 v1")
+    prd_meta = document_store.current_version_meta(owner, solution_id, "prd")
+    document_store.commit_generated(
+        owner,
+        solution_id,
+        "api_docs",
+        "接口 v1",
+        metadata={"derived_from": {"prd": prd_meta}},
+    )
+    document_store.commit_generated(
+        owner,
+        solution_id,
+        "prompts",
+        "提示词 v1",
+        metadata={"derived_from": {"prd": prd_meta}},
+    )
 
     document_store.commit_generated(owner, solution_id, "prd", "PRD v2")
 
-    assert set(_documents(solution_id)) == {"prd"}
+    docs = {doc["kind"]: doc for doc in document_store.list_documents(owner, solution_id)}
+    assert set(docs) == {"prd", "api_docs", "prompts"}
     assert [v["version_no"] for v in _versions(solution_id, "prd")] == [2, 1]
-    # 下游文档被删，其版本随 CASCADE 一起消失
-    assert _versions(solution_id, "api_docs") == []
-    assert _versions(solution_id, "prompts") == []
+    # 下游不再删除；上游换版后按内容指纹标成「可能已过期」
+    assert docs["api_docs"]["stale"] is True
+    assert docs["prompts"]["stale"] is True
+
+
+def test_downstream_goes_stale_after_upstream_hand_edit(client) -> None:
+    """手改上游不升版本号，但内容指纹变了 → 下游同样应被标记过期。"""
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+
+    document_store.commit_generated(owner, solution_id, "prd", "PRD v1")
+    prd_meta = document_store.current_version_meta(owner, solution_id, "prd")
+    document_store.commit_generated(
+        owner,
+        solution_id,
+        "api_docs",
+        "接口 v1",
+        metadata={"derived_from": {"prd": prd_meta}},
+    )
+    assert document_store.get_document(owner, solution_id, "api_docs")["stale"] is False
+
+    document_store.save_document(owner, solution_id, "prd", "PRD v1（手改一句）")
+
+    assert document_store.get_document(owner, solution_id, "api_docs")["stale"] is True
 
 
 def test_checkpoint_appends_version_and_inherits_meta(client) -> None:
@@ -526,6 +562,8 @@ def test_document_outward_shape_is_unchanged(client) -> None:
         "pending_items",
         "last_run_summary",
         "updated_at",
+        "stale",
+        "derived_from",
     }
 
 

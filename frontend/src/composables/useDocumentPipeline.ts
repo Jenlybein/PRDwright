@@ -7,25 +7,34 @@ import {
   type StreamHandlers,
 } from '@/services/api'
 import { useJob, type JobStartInput } from '@/composables/useJob'
+import { fetchDeliveryZip } from '@/services/documentService'
 import { useDocumentsStore } from '@/stores/documents'
 import { useWorkflowStore } from '@/stores/workflow'
 import type {
   ChatMessage,
   ChatStage,
   DocKind,
+  DocPhase,
   DocumentKind,
   JobSnapshot,
   PendingItem,
   PrdGenerationStage,
   PrdStageProgress,
   RequirementsSummary,
+  ReviewConclusion,
   RunSummary,
   StreamDocumentPart,
   StreamStageEvent,
   SummaryChange,
   ViewState,
 } from '@/types'
-import { buildDocFilename, downloadFile, type DocType } from '@/utils/download'
+import {
+  buildBundleFilename,
+  buildDocFilename,
+  downloadBlob,
+  downloadFile,
+  type DocType,
+} from '@/utils/download'
 import { formatPendingItemsForChat } from '@/utils/pendingItems'
 import { diffSummaries } from '@/utils/requirements'
 import {
@@ -133,6 +142,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 分章节生成的进度快照；null 表示未走该链路（整篇生成或其它文档） */
   const prdProgress = ref<PrdStageProgress | null>(null)
+
+  /** 下游文档（接口 / 提示词）当前的生成阶段；idle 表示未走该链路 */
+  const docPhase = ref<DocPhase>('idle')
+
+  /**
+   * 本次生成的审核结论。
+   *
+   * **只在内存里**：后端不发 `run_summary` 之外的第二份、也不落库；刷新后不会补发，
+   * 结论随之消失。这样「结论不持久化」不需要任何清理逻辑，只靠不存储即可。
+   */
+  const reviewConclusion = ref<ReviewConclusion | null>(null)
 
   /**
    * 分章节生成：**已定稿**部分的累积文本（文档头 + 各章定稿正文）。
@@ -364,10 +384,37 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /** 任务生命周期：创建 / 重连 / 退订 */
   const job = useJob()
 
+  /** 清掉一次生成的临时展示态（正文缓冲 / 错误 / 下游阶段 / 审核结论）。 */
+  function resetDocTransient(): void {
+    docStreamingContent.value = ''
+    docError.value = ''
+    docPhase.value = 'idle'
+    reviewConclusion.value = null
+  }
+
+  /** 审核结论：只存内存，供审阅页展示；刷新后自然消失。 */
+  function handleReview(review: ReviewConclusion): void {
+    reviewConclusion.value = review
+  }
+
+  /** 下游文档的阶段事件（生成 / 审核 / 改写 / 完成） */
+  function handleDocStage(event: StreamStageEvent): void {
+    const stage = event.stage
+    if (stage === 'writing' || stage === 'reviewing' || stage === 'rewriting' || stage === 'done') {
+      docPhase.value = stage
+    }
+  }
+
+  /** 下游改写稿整段覆盖初稿（`replace: true`） */
+  function handleDocPart(part: StreamDocumentPart): void {
+    if (part.replace) docStreamingContent.value = part.text
+  }
+
   /**
    * 按文档种类给出事件 handlers，把任务事件映射到本文件的预览状态。
    *
-   * PRD 走三段预览（已定稿 + 当前缓冲 + 上一版草稿）；其余文档只有一段流式缓冲。
+   * PRD 走三段预览（已定稿 + 当前缓冲 + 上一版草稿）；其余文档只有一段流式缓冲，
+   * 外加「生成 → 审核 → 改写」阶段与整段覆盖。
    * 快照回调对两者都接——刷新重连时用它补全断线前已产出的正文。
    */
   function handlersForKind(kind: DocKind): StreamHandlers {
@@ -389,6 +436,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
         onPart: handlePrdPart,
         onStage: handlePrdStage,
         onSnapshot: applyJobSnapshot,
+        onReview: handleReview,
         onRunSummary,
       }
     }
@@ -396,7 +444,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       onChunk: (chunk) => {
         docStreamingContent.value += chunk
       },
+      // 改写稿整段覆盖初稿；没有审查/改写时这两个回调都不会触发
+      onPart: handleDocPart,
+      onStage: handleDocStage,
       onSnapshot: applyJobSnapshot,
+      onReview: handleReview,
       onRunSummary,
     }
   }
@@ -484,14 +536,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 就会把针对旧文档的结论写进新文档——一次静默的错写，而且看起来还挺合理。
    * 只在生成**成功**后作废：失败时后端不覆写正文（下游也会被重新拉回来），线程该留着。
    */
+  /**
+   * 生成成功后就地作废**这一份文档自己**的澄清线程。
+   *
+   * ⚠️ 下游不再删除：上游换版只会在下游留下 `stale` 标记，正文与它的澄清线程都还在。
+   * 因此这里只丢弃 `kind` 自己的线程——旧线程聊的是上一版待确认项，留着会让用户
+   * 把针对旧文档的结论写进新文档；下游线程讨论的仍是现存的那份文档，继续有效。
+   */
   function dropThreadsFor(kind: DocumentKind): void {
-    const affected: DocumentKind[] =
-      kind === 'prd'
-        ? ['prd', 'api-docs', 'prompts']
-        : kind === 'api-docs'
-          ? ['api-docs', 'prompts']
-          : ['prompts']
-    for (const item of affected) store.dropChatThread(chatStageForDocument(item))
+    store.dropChatThread(chatStageForDocument(kind))
   }
 
   /** 生成结束后清掉任务指针：任务已终态，刷新无需再重连 */
@@ -553,8 +606,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function reconnectAndSettle(jobId: number): Promise<void> {
     const kind = store.activeJobKind ?? 'prd'
     const target = docKeyForJob(kind)
-    docStreamingContent.value = ''
-    docError.value = ''
+    resetDocTransient()
     if (kind === 'prd') {
       beginPrdStages()
     } else {
@@ -605,13 +657,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function generatePrd(): Promise<void> {
     const payload = buildPrdPayload()
     if (!payload) return
-    // 重新生成 PRD 会让基于它的后续文档失效。**后端在收尾落稿时会一并删掉下游**
-    // （见 `document_store.DOWNSTREAM_KINDS`），这里同步清掉本地工作副本，
-    // 进度条才会立刻退回 PRD 那一步，而不是等收尾回来才动。
-    documents.setLocal('api-docs', '')
-    documents.setLocal('prompts', '')
-    docStreamingContent.value = ''
-    docError.value = ''
+    // 重新生成 PRD **不再删除下游**：旧的接口文档 / 提示词会留着，并在收尾后由后端
+    // 按 `derived_from` 的指纹比较标成「可能已过期」。因此这里不清本地副本，
+    // 交给收尾的 `documents.reload()` 把 stale 标记拉回来。
+    resetDocTransient()
     beginPrdStages()
     const { reply, ok } = await job.start('prd', prdJobInput(payload), handlersForKind('prd'))
     if (!ok) {
@@ -622,17 +671,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       return
     }
     finishDoc('prd', reply, 'prd')
-    // 新一版 PRD = 三份文档的旧澄清线程全部作废（下游正文后端已删）
+    // 只作废 PRD 自己的澄清线程；下游正文还在，它们的线程继续有效
     dropThreadsFor('prd')
     clearActiveJob()
   }
 
   /** 生成接口文档：以 PRD 正文为输入，团队接口规范由技能包全量注入，无需前端检索确认 */
   async function generateApiDocs(): Promise<void> {
-    // 重新生成接口文档会让基于它的提示词失效（后端收尾时同样会删掉下游）
-    documents.setLocal('prompts', '')
-    docStreamingContent.value = ''
-    docError.value = ''
+    // 提示词不再删除：重新生成接口文档后，它只会被标成 stale（见 generatePrd 的说明）
+    resetDocTransient()
     prdProgress.value = null
     const { reply, ok } = await job.start(
       'api-docs',
@@ -645,7 +692,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       return
     }
     finishDoc('api-docs', reply, 'api-docs')
-    // 新一版接口文档 = 它与提示词的旧澄清线程作废
+    // 只作废接口文档自己的线程；提示词还在，它的线程继续有效
     dropThreadsFor('api-docs')
     clearActiveJob()
   }
@@ -657,8 +704,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 因此由调用方把正文传进来，而不是在这里猜该读哪份状态。
    */
   async function generatePrompts(prdText: string, apiDocsText = ''): Promise<void> {
-    docStreamingContent.value = ''
-    docError.value = ''
+    resetDocTransient()
     prdProgress.value = null
     const { reply, ok } = await job.start(
       'prompts',
@@ -696,8 +742,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const target = docKindOfState(viewState.value)
     if (!target) return
 
-    docStreamingContent.value = ''
-    docError.value = ''
+    resetDocTransient()
     const { reply, ok } = await job.start(
       'optimize',
       { document: content, instruction, docKind: target },
@@ -1002,6 +1047,24 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     downloadDocument(kind, content)
   }
 
+  /**
+   * 交付页「下载交付包」：由后端把三份产物 + README 打成 ZIP。
+   *
+   * 为什么不在前端拼：正文真源在后端（`document_versions`），前端只有工作副本；
+   * 而且交付包要按**落库版本**打，不是眼前这份草稿。
+   */
+  async function downloadBundle(): Promise<void> {
+    const id = documents.solutionId
+    if (id === null) return
+    try {
+      const blob = await fetchDeliveryZip(id)
+      const productName = summary.value?.product_name ?? quickInput.value.productName
+      downloadBlob(blob, buildBundleFilename(productName))
+    } catch (error) {
+      docError.value = error instanceof Error ? error.message : '导出交付包失败'
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 确认闸门 1：摘要回填 Diff
   // -------------------------------------------------------------------------
@@ -1100,6 +1163,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // 用量观测：运行摘要（生成后展示，按当前审阅文档取对应桶）+ 已用时（生成中展示）
   runSummary,
   pendingItems,
+  docPhase,
+  reviewConclusion,
   elapsedMs: job.elapsedMs,
     summaryChanges,
     summarySyncing,
@@ -1121,6 +1186,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     handleEndTask,
     downloadDocument,
     onDownloadDocument,
+    downloadBundle,
     // 文档澄清：进入对话页的某条线程 / 按澄清结果改写
     startDocumentClarification,
     applyClarification,

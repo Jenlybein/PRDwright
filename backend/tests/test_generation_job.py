@@ -656,12 +656,11 @@ def test_job_without_solution_does_not_write_document(client, monkeypatch):
     assert GenerationJobRepository.get(uid, job_id)["status"] == "completed"
 
 
-def test_regenerating_prd_invalidates_downstream_documents(client, monkeypatch):
-    """重新生成 PRD 会让接口文档与提示词失效——它们是按旧 PRD 推导出来的。
+def test_regenerating_prd_keeps_downstream_documents(client, monkeypatch):
+    """重新生成 PRD 后下游**保留**：它们是旧上游的产物，但不再被静默删除。
 
-    这条不变量在前端「整份快照」时代是靠前端清空内存实现的；文档所有权搬到后端后，
-    必须由后端在落稿时一并清掉，否则刷新页面会看到一份自相矛盾的方案
-    （进度条认为接口文档已完成，而它对应的 PRD 已经换了一版）。
+    过期与否交给读取侧的 `stale` 标记（比较 `derived_from` 记录的内容指纹），
+    用户可以自己决定重新生成还是继续用——删除会让旧内容与澄清线程一起消失。
     """
     register(client)
     uid = _alice_id()
@@ -674,11 +673,11 @@ def test_regenerating_prd_invalidates_downstream_documents(client, monkeypatch):
     _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
 
     kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
-    assert kinds == {"prd"}
+    assert kinds == {"prd", "api_docs", "prompts"}
 
 
-def test_regenerating_api_docs_invalidates_only_prompts(client, monkeypatch):
-    """重新生成接口文档只让提示词失效；PRD 是它的上游，不受影响。"""
+def test_regenerating_api_docs_keeps_all_documents(client, monkeypatch):
+    """重新生成接口文档同样不删除提示词；PRD 是它的上游，也不受影响。"""
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
@@ -690,7 +689,7 @@ def test_regenerating_api_docs_invalidates_only_prompts(client, monkeypatch):
     _run_job(uid, solution_id, "api_docs", {"prd_content": "# PRD"})
 
     kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
-    assert kinds == {"prd", "api_docs"}
+    assert kinds == {"prd", "api_docs", "prompts"}
 
 
 def test_optimize_writes_to_the_document_named_by_doc_kind(client, monkeypatch):
@@ -795,8 +794,8 @@ def test_completed_generation_appends_a_version(client, monkeypatch):
     assert versions[0]["is_current"] is True
 
 
-def test_regenerating_prd_appends_version_and_clears_downstream_versions(client, monkeypatch):
-    """重新生成 PRD：PRD 追加一条新版本，下游文档**连同它们的版本**一起退场。"""
+def test_regenerating_prd_appends_version_and_keeps_downstream_versions(client, monkeypatch):
+    """重新生成 PRD：PRD 追加一条新版本，下游文档与它们的版本都**保留**。"""
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
@@ -808,8 +807,8 @@ def test_regenerating_prd_appends_version_and_clears_downstream_versions(client,
     _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
 
     assert [v["version_no"] for v in _versions(uid, solution_id, "prd")] == [2, 1]
-    # 下游被删，其版本随 CASCADE 消失
-    assert _versions(uid, solution_id, "prompts") == []
+    # 下游保留：不再是空列表，旧版本仍在（是否过期由 stale 标记）
+    assert len(_versions(uid, solution_id, "prompts")) == 1
 
 
 def test_optimize_rewrites_current_version_without_new_entry(client, monkeypatch):

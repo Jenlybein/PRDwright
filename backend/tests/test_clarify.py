@@ -333,11 +333,11 @@ def test_optimize_does_not_invalidate_downstream(client, monkeypatch):
     assert kinds == {"prd", "api_docs", "prompts"}
 
 
-def test_regenerating_prd_still_invalidates_downstream(client, monkeypatch):
-    """反过来也要守住：**整篇重生成** PRD 依然让下游失效。
+def test_regenerating_prd_keeps_downstream(client, monkeypatch):
+    """反过来也要守住：**整篇重生成** PRD 后，下游不再被删除。
 
-    修掉「就地改写误删下游」时最容易顺手把这条也削掉——那样方案里会留下一份
-    自相矛盾的产物（PRD 换了一版，接口文档还按旧版推）。
+    旧行为是「PRD 换版 → 删下游」，但那样会把旧内容与澄清线程一起抹掉。
+    现在保留它们，由 `stale` 标记提示「基于旧版」，把选择权交给用户。
     """
     register(client)
     uid = _alice_id()
@@ -355,7 +355,7 @@ def test_regenerating_prd_still_invalidates_downstream(client, monkeypatch):
     )
 
     kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
-    assert kinds == {"prd"}
+    assert kinds == {"prd", "api_docs", "prompts"}
 
 
 # ---------------------------------------------------------------------------

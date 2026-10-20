@@ -29,10 +29,12 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** 跳到某份文档的审阅阶段 */
+  /** 查看某份文档 */
   view: [state: ViewState]
   /** 下载某份文档 */
   download: [docType: DocType]
+  /** 下载整个交付包（三份 md + README 的 ZIP） */
+  downloadBundle: []
   /** 返回对话 */
   back: []
   /** 重新开始 */
@@ -148,11 +150,9 @@ const headline = computed(() =>
     </div>
 
     <!--
-      页面级操作栏：左「重新开始」│「返回」，右侧留空——本页已交付，没有「下一步」。
-      下载入口留在各自的文档卡片上（「下载这份文档」属于文档本身的操作）。
-      审阅页（PRD / 接口文档 / 提示词）的底栏也有一个「下载」，两者是同一套视觉
-      （共用 `utils/icons.ts` 的 `DOWNLOAD_ICON`），只是出口不同：这里下载的是落库那一版，
-      审阅页下载的是**用户眼前这份草稿**（可能还在防抖窗口里，比落库版本新）。
+      页面级操作栏：左「重新开始」│「返回」，右侧主操作是「下载交付包」。
+      单份下载留在各自的文档卡片上（「下载这份文档」属于文档本身的操作）；
+      交付包是流程的最后一步产物，因此占据主操作位（最右且唯一）。
     -->
     <AppActionBar>
       <template #danger>
@@ -161,6 +161,16 @@ const headline = computed(() =>
       <template #secondary>
         <AppButton variant="secondary" size="md" @click="emit('back')">
           {{ backLabel ?? '返回对话' }}
+        </AppButton>
+      </template>
+      <template #default>
+        <AppButton
+          variant="primary"
+          size="md"
+          :disabled="cards.length === 0"
+          @click="emit('downloadBundle')"
+        >
+          下载交付包
         </AppButton>
       </template>
     </AppActionBar>

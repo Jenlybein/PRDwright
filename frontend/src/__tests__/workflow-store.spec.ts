@@ -389,27 +389,28 @@ describe('useWorkflowStore', () => {
     expect(store.chooseEntry('structured')).toBe(true)
     expect(store.entryMode).toBe('structured')
     expect(store.viewState).toBe('form')
-    expect(store.steps.map((step) => step.id)).toHaveLength(5)
+    expect(store.steps.map((step) => step.id)).toHaveLength(6)
 
     expect(store.chooseEntry('prd-quick')).toBe(true)
     expect(store.viewState).toBe('prd-quick')
-    // 快捷入口跳过表单与对话，进度条只剩三步
+    // 快捷入口跳过表单与对话，进度条只剩四步（含交付）
     expect(store.steps.map((step) => step.id)).toEqual([
       'review-prd',
       'review-api-docs',
       'review-prompts',
+      'done',
     ])
     // 「PRD」是该模式的第 1 步
     expect(store.currentStepIndex).toBe(0)
 
     expect(store.chooseEntry('prompt-debug')).toBe(true)
     expect(store.viewState).toBe('prompt-debug')
-    expect(store.steps.map((step) => step.id)).toEqual(['review-prompts'])
+    expect(store.steps.map((step) => step.id)).toEqual(['review-prompts', 'done'])
 
     // 第四条入口：落在自己的录入页，进度条口径与「我有 PRD」一致
     expect(store.chooseEntry('prd-and-api-paste')).toBe(true)
     expect(store.viewState).toBe('prd-and-api-paste')
-    expect(store.steps.map((step) => step.id)).toEqual(['review-prompts'])
+    expect(store.steps.map((step) => step.id)).toEqual(['review-prompts', 'done'])
   })
 
   it('双粘贴入口只需提示词就能完成（自带的两份材料不算产物）', () => {

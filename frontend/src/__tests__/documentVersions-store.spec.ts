@@ -70,7 +70,15 @@ function detail(versionId: number, versionNo: number, content: string): Document
 
 /** 造一条文档记录 */
 function makeRecord(kind: DocumentKind, content: string): DocumentRecord {
-  return { kind, content, runSummary: null, pendingItems: [], updatedAt: '2026-10-16T00:00:00' }
+  return {
+    kind,
+    content,
+    runSummary: null,
+    pendingItems: [],
+    updatedAt: '2026-10-16T00:00:00',
+    stale: false,
+    derivedFrom: null,
+  }
 }
 
 function setup(solutionId: number | null = 1) {

@@ -88,16 +88,24 @@ describe('入口模式对进度与完成条件的影响', () => {
       'review-prd',
       'review-api-docs',
       'review-prompts',
+      'done',
     ])
     // 快捷入口跳过表单与对话，不该显示两步点不动的空壳
     expect(stepsForMode('prd-quick').map((step) => step.id)).toEqual([
       'review-prd',
       'review-api-docs',
       'review-prompts',
+      'done',
     ])
-    expect(stepsForMode('prompt-debug').map((step) => step.id)).toEqual(['review-prompts'])
+    expect(stepsForMode('prompt-debug').map((step) => step.id)).toEqual([
+      'review-prompts',
+      'done',
+    ])
     // 双粘贴入口与它同为导入组：产物也只有提示词，进度条口径就该一样
-    expect(stepsForMode('prd-and-api-paste').map((step) => step.id)).toEqual(['review-prompts'])
+    expect(stepsForMode('prd-and-api-paste').map((step) => step.id)).toEqual([
+      'review-prompts',
+      'done',
+    ])
     // 还没选入口（或旧快照）时按完整流程展示
     expect(stepsForMode(null).map((step) => step.id)).toEqual(
       stepsForMode('structured').map((step) => step.id),
@@ -162,7 +170,7 @@ describe('进度条位置', () => {
     expect(stepIndexOf('form')).toBe(0)
     expect(stepIndexOf('chatting')).toBe(1)
     expect(stepIndexOf('summary-diff')).toBe(1)
-    expect(stepIndexOf('done')).toBe(4)
+    expect(stepIndexOf('done')).toBe(5)
   })
 
   it('已到达的最远步骤取「已生成内容」与「当前阶段」的较大者', () => {

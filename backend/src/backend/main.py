@@ -19,6 +19,7 @@ from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
 from backend.api.deps import AuthMiddleware, RequestIdMiddleware
 from backend.api.documents import router as documents_router
+from backend.api.export import router as export_router
 from backend.api.health import router as health_router
 from backend.api.jobs import router as jobs_router
 from backend.api.solutions import router as solutions_router
@@ -164,6 +165,7 @@ app.include_router(solutions_router)
 # 文档路由挂在 `/api/solutions/{solution_id}/documents`，与方案是子资源关系；
 # 单独成文件是为了让「方案快照」与「产物正文」这两件生命周期不同的事各有归处。
 app.include_router(documents_router)
+app.include_router(export_router)
 app.include_router(jobs_router)
 # 健康检查路径为 `/health`（无前缀），与认证白名单里的条目必须一致
 app.include_router(health_router)

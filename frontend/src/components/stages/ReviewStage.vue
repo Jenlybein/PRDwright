@@ -5,7 +5,9 @@ import DocumentReview from '@/components/DocumentReview.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import PendingItemsPanel from '@/components/ui/PendingItemsPanel.vue'
-import type { PendingItem, RunSummary, ViewState } from '@/types'
+import ReviewConclusionPanel from '@/components/ui/ReviewConclusionPanel.vue'
+import StaleArtifactBanner from '@/components/ui/StaleArtifactBanner.vue'
+import type { PendingItem, ReviewConclusion, RunSummary, ViewState } from '@/types'
 import { DOWNLOAD_ICON } from '@/utils/icons'
 import { formatDuration, formatTokens } from '@/utils/metering'
 
@@ -128,6 +130,18 @@ const props = defineProps<{
    * 描述 / 材料录入页（那一页不在进度条上，没有别的入口）。
    */
   keepBackButton?: boolean
+  /**
+   * 这份下游文档是否基于旧版上游。
+   *
+   * PRD 没有上游，恒为 false；接口文档 / 提示词由后端按内容指纹比较得出。
+   * 这里只负责展示黄条，不阻断编辑、下载与进入完成页。
+   */
+  stale?: boolean
+  /**
+   * 本次生成的审核结论。**不持久化**：只在本次生成后的内存里，刷新即失。
+   * 没有（直接打开旧方案、未发生本次生成）时不渲染该区块。
+   */
+  review?: ReviewConclusion | null
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -229,6 +243,9 @@ function submitOptimize(): void {
       <span>{{ error }}</span>
     </p>
 
+    <!-- 下游产物基于旧版上游：只提示，不阻断编辑与下载 -->
+    <StaleArtifactBanner v-if="stale" />
+
     <!-- 最近一次生成的只读用量回执：耗时 / token / 请求号。
          请求号是报障时「念给维护者」的那串字，用 select-all 让它可选中复制——刻意不加按钮，
          这一行不该和底栏那些「对文档做的事」抢注意力。 -->
@@ -300,6 +317,9 @@ function submitOptimize(): void {
          放在**正文之上**——它是「这份文档还差哪些问题没敲定」，先看到还差什么、再看正文本身。
          归「内容本身」而不是「对文档做的事」，所以不进底栏；面板自身默认只铺开前 3 条。 -->
     <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
+
+    <!-- 审核结论：待确认清单之下、正文之上——先看“还差什么”，再看“审出了什么” -->
+    <ReviewConclusionPanel v-if="review" :review="review" />
 
     <!-- 文档卡片：只有头部与正文，工具全部下沉到下面的底栏 -->
     <DocumentReview

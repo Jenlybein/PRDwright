@@ -32,11 +32,13 @@ from backend.repositories.document_repo import DocumentRepository
 
 logger = logging.getLogger(__name__)
 
-# 产物依赖链：下游由上游正文推导而来，上游**重新生成**后下游即失效。
-# 只对「整篇重生成」生效（首次生成 / 重新生成）；`optimize`（就地优化）与
-# `clarify`（按澄清改写）都是对**同一份**文档的局部重写，不牵动下游。
-# 「提示词由接口文档推出？还是由 PRD 推出？」——现有链路是 PRD → 接口文档 → 提示词，
-# 因此重生成 PRD 会让两份下游都失效，重生成接口文档只会让提示词失效。
+# 产物依赖链：下游由上游正文推导而来。
+#
+# ⚠️ 这张表现在**只用于说明依赖关系**：上游整篇重生成时**不再删除下游**。
+# 删除会让下游的历史与澄清线程一起消失，用户无法判断“旧的那份哪里不对”；
+# 改为在读取时比较 `metadata.derived_from` 记录的上游内容指纹，不一致就给前端
+# 一个 `stale` 标记（黄条提示），由用户决定重新生成还是继续用。
+# 「提示词由接口文档推出？还是由 PRD 推出？」——现有链路是 PRD → 接口文档 → 提示词。
 DOWNSTREAM_KINDS: dict[str, tuple[str, ...]] = {
     "prd": ("api_docs", "prompts"),
     "api_docs": ("prompts",),
@@ -56,14 +58,37 @@ DeleteVersionOutcome = Literal["ok", "missing", "is_current"]
 
 
 def list_documents(owner_id: int, solution_id: int) -> list[dict[str, Any]]:
-    """列出某方案下的全部文档；方案不存在或不属于该用户时返回空列表。"""
-    return [_to_item(row) for row in DocumentRepository.list_by_solution(owner_id, solution_id)]
+    """列出某方案下的全部文档；方案不存在或不属于该用户时返回空列表。
+
+    先取全部三份的当前 `content_sha` 建映射，再逐条算 `stale`：下游是否过期取决于
+    **上游现在的内容**，单看一行无法判断。
+    """
+    rows = DocumentRepository.list_by_solution(owner_id, solution_id)
+    sha_by_kind = {row["kind"]: (row.get("content_sha") or "") for row in rows}
+    return [_to_item(row, sha_by_kind) for row in rows]
 
 
 def get_document(owner_id: int, solution_id: int, kind: str) -> dict[str, Any] | None:
     """读取一份文档；不存在或不属于该用户时返回 None（由路由层翻成 404）。"""
+    rows = DocumentRepository.list_by_solution(owner_id, solution_id)
+    sha_by_kind = {row["kind"]: (row.get("content_sha") or "") for row in rows}
+    row = next((item for item in rows if item["kind"] == kind), None)
+    return _to_item(row, sha_by_kind) if row else None
+
+
+def current_version_meta(owner_id: int, solution_id: int, kind: str) -> dict[str, Any] | None:
+    """取某份文档当前版本的「版本号 + 内容指纹」，供下游记录 `derived_from`。
+
+    只读两个字段：调用方（生成收尾）不需要正文本身，只需要一个能在日后比较的锚点。
+    文档不存在时返回 None，调用方据此不写 `derived_from`（而不是写一个空锚点）。
+    """
     row = DocumentRepository.get(owner_id, solution_id, kind)
-    return _to_item(row) if row else None
+    if not row:
+        return None
+    return {
+        "version_no": int(row.get("version_no") or 0),
+        "content_sha": row.get("content_sha") or "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +122,7 @@ def commit_generated(
     run_summary: dict[str, Any] | None = None,
     append_version: bool = True,
     source: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """生成（或改写）收尾落稿：正文 + 待确认清单 + 用量回执一同写入。
 
@@ -111,6 +137,8 @@ def commit_generated(
             `False` 就地改写当前版本、不牵动下游（`optimize` / `clarify`）。
         source: 版本来源标签；缺省取产物类型（`prd` / `api_docs` / `prompts`）。
             就地改写时由调用方显式传动作类型（`optimize` / `clarify`）。
+        metadata: 版本附加信息（当前用于 `derived_from`）。**只在追加版本时生效**：
+            就地改写沿用当前版本原有的 metadata，不会被覆盖。
 
     Returns:
         更新后的文档；方案不可见时返回 None。
@@ -118,6 +146,7 @@ def commit_generated(
     source = source or kind
     pending_json = json.dumps(pending_items or [], ensure_ascii=False)
     summary_json = json.dumps(run_summary, ensure_ascii=False) if run_summary is not None else None
+    metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata is not None else "{}"
     content_sha = content_fingerprint(content)
 
     if append_version:
@@ -131,7 +160,9 @@ def commit_generated(
                 pending_items=pending_json,
                 last_run_summary=summary_json,
                 source=source,
-                invalidate=DOWNSTREAM_KINDS.get(kind, ()),
+                metadata=metadata_json,
+                # 下游不再删除：上游换版后下游保留，由读取侧的 `stale` 提示用户。
+                invalidate=(),
             )
             is not None
         )
@@ -268,19 +299,42 @@ def delete_version(
 # ---------------------------------------------------------------------------
 
 
-def _to_item(row: dict[str, Any]) -> dict[str, Any]:
+def _to_item(row: dict[str, Any], sha_by_kind: dict[str, str] | None = None) -> dict[str, Any]:
     """把「文档行 + 当前版本行」的合并行裁成对外结构，并把两个 JSON 文本列解成对象。
 
     解析一律容错（脏数据退化为空清单 / 空回执）：这两个列是**展示用**的附加信息，
     读不动它不该让整份文档读不出来——正文才是主角。
+    `stale` 由 `metadata.derived_from` 记录的上游指纹与上游**当前**指纹比较得出：
+    相等即同源，不等即“上游改过了”。没有记录（旧数据、PRD 本身）恒为 false。
     """
+    metadata = _load_json(row.get("metadata"), dict, {})
+    derived = metadata.get("derived_from") if isinstance(metadata, dict) else None
+    if not isinstance(derived, dict):
+        derived = None
     return {
         "kind": row["kind"],
         "content": row["content"] or "",
         "pending_items": _load_json(row["pending_items"], list, []),
         "last_run_summary": _load_json(row["last_run_summary"], dict, None),
         "updated_at": row["updated_at"],
+        "derived_from": derived,
+        "stale": _is_stale(derived, sha_by_kind or {}),
     }
+
+
+def _is_stale(derived: dict[str, Any] | None, sha_by_kind: dict[str, str]) -> bool:
+    """下游是否基于旧版上游：逐个上游比较 `content_sha`。"""
+    if not derived:
+        return False
+    for upstream_kind, ref in derived.items():
+        if not isinstance(ref, dict):
+            continue
+        recorded = str(ref.get("content_sha") or "")
+        current = sha_by_kind.get(upstream_kind) or ""
+        # 任一侧取不到指纹时不做判断：宁可少提示，也不要误报“过期”。
+        if recorded and current and recorded != current:
+            return True
+    return False
 
 
 def _to_version_item(row: dict[str, Any]) -> dict[str, Any]:
