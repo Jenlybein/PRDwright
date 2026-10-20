@@ -215,6 +215,7 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: '',
     finalizedText: '',
     liveBuffer: '',
+    stageText: '',
     completedSections: [],
     solutionId: 1,
     errorCode: '',
@@ -1126,6 +1127,44 @@ describe('AppV2 完整流程编排', () => {
     // 快照补全的正文 + live 续写一起落稿
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('断线前的半句续写')
+  })
+
+  it('恢复路径 1b：刷新时正赶上审核，阶段输出随快照接回来', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
+      expect(jobId).toBe(43)
+      // 重连**不会补发**历史 `stage_chunk`：审核意见只能靠快照的 `stageText` 带回来
+      handlers?.onSnapshot?.(
+        makeJobSnapshot({
+          jobId: 43,
+          kind: 'api_docs',
+          status: 'running',
+          phase: 'reviewing',
+          finalizedText: '',
+          liveBuffer: '# 用户接口\n\n## 1. 登录',
+          stageText: '{"verdict":"revise","issues":[]}',
+        }),
+      )
+      // 不结束：真实生成会跑很久，断言就在「还在审核」这个窗口里做
+      return new Promise<api.StreamResult>(() => {})
+    })
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-api-docs',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      activeJobId: 43,
+      activeJobKind: 'api-docs',
+    })
+
+    // 正文：`finalizedText + liveBuffer` 一起补回来，不是只看实时缓冲
+    // （预览区按 Markdown 渲染，标题标记被剥掉，断言正文本身）
+    expect(wrapper.text()).toContain('用户接口')
+    expect(wrapper.text()).toContain('1. 登录')
+    // 阶段输出：审核面板接着展示，而不是刷新后空着
+    expect(wrapper.text()).toContain('审核意见')
+    expect(wrapper.text()).toContain('{"verdict":"revise","issues":[]}')
   })
 
   it('恢复路径 2：无指针但快照落在生成中时兜底查到活跃任务，撤销降级并重连', async () => {

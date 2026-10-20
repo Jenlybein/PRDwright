@@ -19,6 +19,7 @@ import type {
   SkillRef,
   StepUsage,
   StreamDocumentPart,
+  StreamStageChunk,
   StreamStageEvent,
   ToolCallRef,
   ToolResultPayload,
@@ -138,6 +139,7 @@ export interface StreamEventPayload {
     | 'snapshot'
     | 'run_summary'
     | 'review'
+    | 'stage_chunk'
   /** 文本内容（增量文本或提示语） */
   content: string
   /** 事件附加数据，如 conversation_id 与完整 reply */
@@ -168,6 +170,14 @@ export interface StreamHandlers {
    * 改写时重置本章的实时缓冲。
    */
   onStage?: (event: StreamStageEvent) => void
+  /**
+   * 收到 `stage_chunk` 阶段内输出增量时触发。
+   *
+   * 目前由「接口文档 / 提示词」的审核与改写两步下发：它们都是整篇量级的调用，
+   * 静默期很长，把模型的原始输出流出来，用户才看得出「确实在推进」。
+   * 这些文本**不属于正文**，只用于阶段条下方的输出面板。
+   */
+  onStageChunk?: (chunk: StreamStageChunk) => void
   /**
    * 收到任务流首发的 `snapshot` 事件时触发。
    * 目前只有生成任务（`/api/jobs/{id}/stream`）会下发：刷新重连时先用它补全
@@ -381,6 +391,19 @@ function parseStageEvent(data: Record<string, unknown>): StreamStageEvent {
 }
 
 /**
+ * 把 `stage_chunk` 事件归一成 `StreamStageChunk`。
+ *
+ * 增量文本走事件自带的 `content`，`data` 只负责说明「这属于哪个阶段」。
+ * 与正文通道一样，字段缺失只退化默认值，绝不让一个坏字段打断整条流。
+ */
+function parseStageChunkEvent(event: StreamEventPayload): StreamStageChunk {
+  return {
+    stage: readString(event.data, 'stage'),
+    text: event.content,
+  }
+}
+
+/**
  * 把 `part` 事件的 `data` 归一成 `StreamDocumentPart`。
  *
  * 与 `parseStageEvent` 同样的口径：字段缺失或类型不对只把那一个字段退化为默认值，
@@ -455,6 +478,7 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     phase: readString(data, 'phase'),
     finalizedText: readString(data, 'finalized_text'),
     liveBuffer: readString(data, 'live_buffer'),
+    stageText: readString(data, 'stage_text'),
     completedSections,
     solutionId: typeof rawSolutionId === 'number' ? rawSolutionId : null,
     errorCode: readString(data, 'error_code'),
@@ -650,6 +674,9 @@ async function readStreamRequest(
         break
       case 'stage':
         handlers.onStage?.(parseStageEvent(event.data))
+        break
+      case 'stage_chunk':
+        handlers.onStageChunk?.(parseStageChunkEvent(event))
         break
       case 'done':
         conversationId = readString(event.data, 'conversation_id') || conversationId

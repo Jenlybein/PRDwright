@@ -20,6 +20,7 @@ import json
 import pytest
 from conftest import login, register
 
+from backend.core.contracts import StreamEvent
 from backend.repositories.generation_job_repo import GenerationJobRepository
 from backend.services import document_service, document_store, job_service, llm_factory, prd_section_writer
 from backend.services.job_bus import job_bus
@@ -953,6 +954,67 @@ def test_snapshot_event_carries_pending_items():
     )
     snapshot = job_service._snapshot_event(runtime)  # noqa: SLF001 - 测内部快照构造
     assert snapshot.data["pending_items"] == items
+
+
+def test_snapshot_event_carries_stage_output():
+    """内存运行时快照带上**当前阶段的原始输出**：刷新重连后审核面板不会空着。
+
+    这条守的是「刷新后要重新接回流式输出」：阶段输出从前只活在前端内存里，
+    一刷新就没了；现在它由任务运行时持有，随 `snapshot.stage_text` 一道回来。
+    """
+    runtime = job_service.JobRuntime(job_id=1, owner_id=1, solution_id=None, kind="api_docs")
+    job_service._apply_event(  # noqa: SLF001 - 测内部事件归并
+        runtime, StreamEvent(type="stage", content="", data={"stage": "reviewing"})
+    )
+    for piece in ('{"verdict"', ':"revise"}', ""):
+        job_service._apply_event(  # noqa: SLF001
+            runtime,
+            StreamEvent(type="stage_chunk", content=piece, data={"stage": "reviewing"}),
+        )
+
+    snapshot = job_service._snapshot_event(runtime)  # noqa: SLF001
+
+    assert snapshot.data["phase"] == "reviewing"
+    assert snapshot.data["stage_text"] == '{"verdict":"revise"}'
+
+
+def test_stage_change_clears_previous_stage_output():
+    """换阶段清空上一阶段的输出：审核意见不该留在改写阶段的面板里。"""
+    runtime = job_service.JobRuntime(job_id=1, owner_id=1, solution_id=None, kind="api_docs")
+    job_service._apply_event(  # noqa: SLF001
+        runtime, StreamEvent(type="stage", content="", data={"stage": "reviewing"})
+    )
+    job_service._apply_event(  # noqa: SLF001
+        runtime, StreamEvent(type="stage_chunk", content="审核意见", data={"stage": "reviewing"})
+    )
+    job_service._apply_event(  # noqa: SLF001
+        runtime, StreamEvent(type="stage", content="", data={"stage": "rewriting"})
+    )
+    assert runtime.stage_text == ""
+
+    job_service._apply_event(  # noqa: SLF001
+        runtime, StreamEvent(type="stage_chunk", content="改写稿", data={"stage": "rewriting"})
+    )
+    assert runtime.stage_text == "改写稿"
+
+
+def test_stage_chunk_never_leaks_into_draft_text():
+    """阶段输出与正文缓冲**严格分道**：审核 JSON 不能出现在会落库的正文里。"""
+    runtime = job_service.JobRuntime(job_id=1, owner_id=1, solution_id=None, kind="api_docs")
+    job_service._apply_event(  # noqa: SLF001
+        runtime, StreamEvent(type="stage_chunk", content='{"verdict":"pass"}', data={"stage": "reviewing"})
+    )
+
+    assert runtime.live_buffer == ""
+    assert job_service._draft(runtime) == ""  # noqa: SLF001 - 测内部草稿拼装
+
+
+def test_db_snapshot_event_has_empty_stage_text(alice):
+    """DB 兜底快照（进程重启后）没有阶段输出：显式给空串，不让前端拿到 `undefined`。"""
+    job_id = GenerationJobRepository.create(alice, "api_docs", None)
+    row = GenerationJobRepository.get(alice, job_id)
+    snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 测内部快照构造
+    assert snapshot.data["stage_text"] == ""
 
 
 def test_generation_flows_pending_items_into_job_and_document(client, monkeypatch):

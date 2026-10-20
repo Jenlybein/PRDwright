@@ -26,6 +26,7 @@ import type {
   ReviewConclusion,
   RunSummary,
   StreamDocumentPart,
+  StreamStageChunk,
   StreamStageEvent,
   SummaryChange,
   ViewState,
@@ -152,6 +153,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 下游文档（接口 / 提示词）当前的生成阶段；idle 表示未走该链路 */
   const docPhase = ref<DocPhase>('idle')
+
+  /**
+   * 当前阶段模型的**原始输出增量**（审核意见 / 改写稿），只用于阶段条下方的输出面板。
+   *
+   * 为什么单独一份而不是并进 `docStreamingContent`：那是**正文预览**，审核意见混进去
+   * 会污染文档。两份分开存，切换阶段时清空即可——每个阶段的输出只属于它自己，
+   * 上一阶段的文本留着会让人误以为审核还在继续。
+   */
+  const docStageText = ref('')
 
   /**
    * 本次生成的审核结论。
@@ -380,6 +390,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     docStreamingContent.value = ''
     docError.value = ''
     docPhase.value = 'idle'
+    docStageText.value = ''
     reviewConclusion.value = null
   }
 
@@ -389,12 +400,44 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (prdBoard.value) prdBoard.value.review = review
   }
 
+  /**
+   * 把后端的原始阶段名归一成下游阶段。
+   *
+   * 不认识的取值返回 `null` 而不是猜一个默认档：下游阶段条只认这四个，
+   * 猜错了会让进度条停在某个看起来合理、其实没发生的阶段上。
+   */
+  function normalizeDocPhase(raw: string): DocPhase | null {
+    if (raw === 'writing' || raw === 'reviewing' || raw === 'rewriting' || raw === 'done') {
+      return raw
+    }
+    return null
+  }
+
   /** 下游文档的阶段事件（生成 / 审核 / 改写 / 完成） */
   function handleDocStage(event: StreamStageEvent): void {
-    const stage = event.stage
-    if (stage === 'writing' || stage === 'reviewing' || stage === 'rewriting' || stage === 'done') {
+    const stage = normalizeDocPhase(event.stage)
+    if (stage) {
+      // 换阶段就清空上一阶段的输出：审核意见不该留在改写阶段的面板里
+      if (docPhase.value !== stage) docStageText.value = ''
       docPhase.value = stage
     }
+  }
+
+  /**
+   * 阶段内输出增量：只进附属面板，**绝不碰正文预览**。
+   *
+   * 增量可能来自审核也可能来自改写，归属以事件自带的 `stage` 为准；万一它跳过了
+   * 对应的 `stage` 事件（订阅晚了一步），这里顺手把阶段纠正过来，避免面板标题与
+   * 内容对不上。
+   */
+  function handleDocStageChunk(chunk: StreamStageChunk): void {
+    if (chunk.stage === 'reviewing' || chunk.stage === 'rewriting') {
+      if (docPhase.value !== chunk.stage) {
+        docStageText.value = ''
+        docPhase.value = chunk.stage
+      }
+    }
+    docStageText.value += chunk.text
   }
 
   /** 下游改写稿整段覆盖初稿（`replace: true`） */
@@ -438,6 +481,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       // 改写稿整段覆盖初稿；没有审查/改写时这两个回调都不会触发
       onPart: handleDocPart,
       onStage: handleDocStage,
+      // 审核 / 改写的原始输出：只进阶段条下方的面板，不进正文
+      onStageChunk: handleDocStageChunk,
       onSnapshot: applyJobSnapshot,
       onReview: handleReview,
       onRunSummary,
@@ -497,7 +542,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       return
     }
     // 其余文档只有一段流式缓冲：同样只在空着时用快照初始化，避免重复快照覆盖已流出的内容
-    if (!docStreamingContent.value) docStreamingContent.value = snap.liveBuffer
+    if (!docStreamingContent.value) {
+      // 正文 =「已定稿」+「实时缓冲」。改写成功后初稿已被 `part{replace}` 整段覆盖，
+      // 此时只剩 `finalizedText`、缓冲为空；生成途中的情况则相反。只看 `liveBuffer`
+      // 会让「刷新时正赶上改写完成」的那一瞬把预览清空。
+      const restored = `${snap.finalizedText}${snap.liveBuffer}`
+      if (restored) docStreamingContent.value = restored
+    }
+    // 阶段与阶段输出：重连不会补发历史 `stage` / `stage_chunk` 事件，只能从快照恢复。
+    // 两者都只在「还是空的」时回填——同一任务被订阅两次时，第二份快照不该把已经
+    // 流出去的文字覆盖回去。
+    const phase = normalizeDocPhase(snap.phase)
+    if (phase) docPhase.value = phase
+    else if (snap.status === 'running') docPhase.value = 'writing'
+    if (!docStageText.value && snap.stageText) docStageText.value = snap.stageText
   }
 
   /**
@@ -619,6 +677,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
     const result = await job.reconnect(jobId, handlersForKind(kind))
     const snap = job.snapshot.value
+    // 下游阶段与阶段输出由 `applyJobSnapshot` 在**快照那一刻**回填（那是唯一正确的时机：
+    // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
+    // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
     if (!result.ok) {
       docError.value = job.error.value || '生成失败'
       prdBoard.value = null
@@ -685,6 +746,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 提示词不再删除：重新生成接口文档后，它只会被标成 stale（见 generatePrd 的说明）
     resetDocTransient()
     prdBoard.value = null
+    // 先把阶段条点亮：整篇生成是最长的一步，等后端 `stage` 事件到达才显示的话，
+    // 用户在这段时间里只看到一片空白（后端随后会补发同一条 writing 事件，幂等）
+    docPhase.value = 'writing'
     const { reply, ok } = await job.start(
       'api-docs',
       { prdContent: documents.contentOf('prd') },
@@ -710,6 +774,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function generatePrompts(prdText: string, apiDocsText = ''): Promise<void> {
     resetDocTransient()
     prdBoard.value = null
+    // 与接口文档同理：阶段条立即亮起，别让用户在整篇生成期间盯着空白
+    docPhase.value = 'writing'
     const { reply, ok } = await job.start(
       'prompts',
       // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
@@ -1168,6 +1234,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   runSummary,
   pendingItems,
   docPhase,
+  docStageText,
   reviewConclusion,
   elapsedMs: job.elapsedMs,
     summaryChanges,

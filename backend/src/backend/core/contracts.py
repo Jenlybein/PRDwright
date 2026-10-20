@@ -75,6 +75,7 @@ class StreamEvent(BaseModel):
         "snapshot",
         "run_summary",
         "review",
+        "stage_chunk",
     ] = Field(
         description=(
             "事件类型：状态提示 status / 增量文本 chunk / 定稿正文 part / 阶段进度 stage / "
@@ -84,11 +85,16 @@ class StreamEvent(BaseModel):
             "`part` 也用于分章节生成：每段正文（文档头、每一章）一被定稿就整段下发，"
             "`data.text` 可直接追加到文档末尾，前端据此拼出与最终 `done.reply` 逐字一致的预览。"
             "`snapshot` 与 `run_summary` 用于生成任务（generation_jobs）：前者在每次订阅开始时 "
-            "**首发给**，`data` 含 job_id/kind/status/phase/finalized_text/live_buffer/"
-            "completed_sections/solution_id/error_code/error_message/elapsed_ms，供前端补全已产出正文；"
+            "**首发给**，`data` 含 job_id/kind/status/phase/finalized_text/live_buffer/stage_text/"
+            "completed_sections/solution_id/error_code/error_message/elapsed_ms，供前端补全已产出正文"
+            "与当前阶段输出；"
             "后者在任务收尾时下发本次生成的用量汇总（结构见 `RunSummary`）。"
             "`review` 是**不持久化**的审核结论：`data` 含 kind/verdict/summary/issues/"
             "rewritten/failed_sections，仅在本次订阅内展示，刷新即失。"
+            "`stage_chunk` 是**阶段内的原始输出增量**（审核意见 / 改写稿正文），"
+            "`data` 含 stage（reviewing / rewriting）与 doc_type；"
+            "它与 `chunk` 是两条独立通道——`chunk` 进文档预览，它只进阶段输出面板，"
+            "混用会把审核意见写进正文。"
         )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")

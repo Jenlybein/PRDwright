@@ -78,6 +78,10 @@ class JobRuntime:
     failed_sections: list[dict[str, Any]] = field(default_factory=list)
     # 当前段的实时缓冲（chunk 原始增量），遇到下一个 part 时清空
     live_buffer: str = ""
+    # 当前阶段模型的原始输出（审核意见 / 改写稿），只给阶段条下方的面板看。
+    # 与 `live_buffer` 分道：后者是**产物正文**，混进来会把审核 JSON 写进文档预览。
+    # 从前端内存独占这份文本，刷新就丢；改为运行时持有后，重连的 `snapshot` 能把它带回来。
+    stage_text: str = ""
     # 已定稿章节的结构化记录（供快照恢复时定位「写到第几章」）
     completed_sections: list[dict[str, Any]] = field(default_factory=list)
     # 原样保存的请求参数，供 `_build_event_stream` 重建生成
@@ -335,13 +339,25 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
     对照 `document_service` / `prd_section_writer` 的事件契约：
     - `chunk` → 追加到当前段缓冲；
     - `part` → 定稿一段：并入已定稿、清空缓冲；带 `section_id` 时登记章节；
-    - `stage` → 更新 phase（**同时同步给计量器**，计量器据此把调用归到 `类型:阶段` 这一步）；
+    - `stage` → 更新 phase（**同时同步给计量器**，计量器据此把调用归到 `类型:阶段` 这一步），
+      换阶段时清空上一阶段的输出；
+    - `stage_chunk` → 追加到当前阶段的输出（审核意见 / 改写稿），与正文缓冲互不干扰；
     - `error` → 标记失败并记下错误码 / 文案；
     - `done` → 记下权威完整正文。
     """
     event_type = event.type
     if event_type == "chunk":
         runtime.live_buffer += event.content
+    elif event_type == "stage_chunk":
+        # 阶段内输出只进 `stage_text`，绝不碰 `live_buffer`：后者会拼进正文预览。
+        # 增量自带的 stage 与当前 phase 不一致，说明对应的 `stage` 事件没被收到
+        # （订阅晚了一步），这里纠正过来——否则面板标题会与内容对不上。
+        stage = str(event.data.get("stage", ""))
+        if stage and stage != runtime.phase:
+            runtime.stage_text = ""
+            runtime.phase = stage
+            runtime.meter.set_phase(stage)
+        runtime.stage_text += event.content
     elif event_type == "part":
         text = str(event.data.get("text", ""))
         runtime.live_buffer = ""
@@ -372,7 +388,11 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
             ]
             runtime.completed_sections.append(entry)
     elif event_type == "stage":
-        runtime.phase = str(event.data.get("stage", ""))
+        stage = str(event.data.get("stage", ""))
+        # 换阶段就清空上一阶段的输出：审核意见不该留在改写阶段的面板里
+        if stage != runtime.phase:
+            runtime.stage_text = ""
+        runtime.phase = stage
         runtime.meter.set_phase(runtime.phase)
     elif event_type == "error":
         runtime.failed = True
@@ -669,6 +689,10 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "phase": runtime.phase,
             "finalized_text": _finalized_text(runtime),
             "live_buffer": runtime.live_buffer,
+            # 当前阶段模型的原始输出（审核意见 / 改写稿）：刷新重连后接着展示，
+            # 否则面板会空着，用户看不到「审核到哪一步了」。它**不落库**（见 `_db_snapshot_event`），
+            # 因为它是过程信息、且整篇量级、重复写没有收益。
+            "stage_text": runtime.stage_text,
             "completed_sections": ordered_sections,
             "solution_id": runtime.solution_id,
             "error_code": runtime.error_code,
@@ -719,6 +743,10 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "phase": row.get("phase", ""),
             "finalized_text": row.get("draft_content", "") or "",
             "live_buffer": "",
+            # 阶段输出只活在内存运行时里，DB 没有这一列：进程重启后的兜底快照拿不到它。
+            # 这里**显式给空串而不是省略**——前端解析器对缺失字段同样退化为空串，
+            # 但显式写出来能让「这份快照没有该字段」的语义出现在契约里，不至于被当成漏实现。
+            "stage_text": "",
             "completed_sections": sections,
             "solution_id": row.get("solution_id"),
             "error_code": row.get("error_code", "") or "",

@@ -416,6 +416,7 @@ const {
   prdStatus,
   prdShowingDraft,
   docPhase,
+  docStageText,
   reviewConclusion,
   runSummary,
   pendingItems,
@@ -924,6 +925,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :generating="isGenerating"
         :prd="prdStatus"
         :doc-phase="docPhase"
+        :doc-stage-text="docStageText"
         :draft-only="prdShowingDraft"
         :elapsed-ms="elapsedMs"
         :back-label="backLabel"

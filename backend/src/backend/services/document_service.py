@@ -44,9 +44,8 @@ from backend.core.contracts import StreamEvent
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object
 from backend.services.document_review import (
-    review_event,
-    review_whole_document,
-    rewrite_whole_document_messages,
+    ReviewOutcome,
+    stream_review_and_rewrite,
 )
 from backend.services.pending_items import (
     PendingBlockSuppressor,
@@ -584,6 +583,13 @@ class DocumentService:
             pending_spec=render_spec(),
         )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        # 阶段条要**立刻**出现：整篇生成是最长的一步，若等第一次模型调用之后再报阶段，
+        # 用户在最长的那段时间里看到的是一片空白（前端因此不知道在干什么）。
+        yield StreamEvent(
+            type="stage",
+            content="正在生成接口文档…",
+            data={"stage": "writing", "doc_type": "api_doc"},
+        )
         # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
         # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
         suppressor = PendingBlockSuppressor()
@@ -606,60 +612,29 @@ class DocumentService:
                 clean_reply, items = extract(reply)
 
                 # 整篇生成后审一次；有问题则**改写一次**，不再复审。
+                # 审核与改写都是整篇量级的调用，静默期很长，因此两步的原始输出
+                # 都通过 `stage_chunk` 实时推给前端（见 `stream_review_and_rewrite`）。
                 # 初稿已经以 chunk 流出去过，改写稿用 part{replace} 整段覆盖，
-                # 避免“初稿 + 改稿”在同一份预览里叠字。
-                final_reply = clean_reply
-                rewritten = False
-                yield StreamEvent(
-                    type="stage",
-                    content="正在审核接口文档…",
-                    data={"stage": "reviewing", "doc_type": "api_doc"},
-                )
-                review = await review_whole_document(
+                # 避免「初稿 + 改稿」在同一份预览里叠字。
+                outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
+                async for review_event_or_chunk in stream_review_and_rewrite(
                     self.llm,
                     document=clean_reply,
                     writing_rules=api_specs,
                     requirements=prd_content,
-                )
-                if review and review.needs_revision:
-                    yield StreamEvent(
-                        type="stage",
-                        content="审核发现问题，正在改写…",
-                        data={
-                            "stage": "rewriting",
-                            "doc_type": "api_doc",
-                            "note": review.summary(),
-                            "issues": review.issues,
-                        },
-                    )
-                    try:
-                        rewritten_reply = await collect_reply(
-                            self.llm,
-                            rewrite_whole_document_messages(
-                                document=clean_reply,
-                                review=review,
-                                writing_rules=api_specs,
-                            ),
-                        )
-                        rewritten_reply = rewritten_reply.strip()
-                        if rewritten_reply:
-                            final_reply, items = extract(rewritten_reply)
-                            rewritten = True
-                            yield StreamEvent(
-                                type="part",
-                                content="",
-                                data={"text": final_reply, "replace": True},
-                            )
-                    except Exception:  # noqa: BLE001 - 改写失败保留初稿
-                        logger.warning("接口文档改写失败，保留初稿", exc_info=True)
-                yield review_event("api_docs", review, rewritten=rewritten)
+                    doc_type="api_doc",
+                    kind="api_docs",
+                    label="接口文档",
+                    outcome=outcome,
+                ):
+                    yield review_event_or_chunk
                 yield StreamEvent(
                     type="done",
                     content="",
                     data={
                         **(event.data or {}),
-                        "reply": final_reply,
-                        "pending_items": items,
+                        "reply": outcome.final_reply,
+                        "pending_items": outcome.pending_items,
                     },
                 )
             else:
@@ -702,6 +677,12 @@ class DocumentService:
             pending_spec=render_spec(),
         )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        # 与接口文档同构：阶段条立即亮起，别让用户在最长的一步里盯着空白
+        yield StreamEvent(
+            type="stage",
+            content="正在生成提示词套件…",
+            data={"stage": "writing", "doc_type": "prompts"},
+        )
         # 实时 chunk 先过抑制器（块被切在 chunk 边界时只漏安全前缀），`done` 时
         # 对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
         suppressor = PendingBlockSuppressor()
@@ -726,58 +707,25 @@ class DocumentService:
                 requirements_text = prd_content
                 if api_docs_content.strip():
                     requirements_text = f"{prd_content}\n\n## 接口文档\n\n{api_docs_content}"
-                final_reply = clean_reply
-                rewritten = False
-                yield StreamEvent(
-                    type="stage",
-                    content="正在审核提示词套件…",
-                    data={"stage": "reviewing", "doc_type": "prompts"},
-                )
-                review = await review_whole_document(
+                outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
+                async for review_event_or_chunk in stream_review_and_rewrite(
                     self.llm,
                     document=clean_reply,
                     writing_rules=guide,
                     requirements=requirements_text,
-                )
-                if review and review.needs_revision:
-                    yield StreamEvent(
-                        type="stage",
-                        content="审核发现问题，正在改写…",
-                        data={
-                            "stage": "rewriting",
-                            "doc_type": "prompts",
-                            "note": review.summary(),
-                            "issues": review.issues,
-                        },
-                    )
-                    try:
-                        rewritten_reply = await collect_reply(
-                            self.llm,
-                            rewrite_whole_document_messages(
-                                document=clean_reply,
-                                review=review,
-                                writing_rules=guide,
-                            ),
-                        )
-                        rewritten_reply = rewritten_reply.strip()
-                        if rewritten_reply:
-                            final_reply, items = extract(rewritten_reply)
-                            rewritten = True
-                            yield StreamEvent(
-                                type="part",
-                                content="",
-                                data={"text": final_reply, "replace": True},
-                            )
-                    except Exception:  # noqa: BLE001 - 改写失败保留初稿
-                        logger.warning("提示词套件改写失败，保留初稿", exc_info=True)
-                yield review_event("prompts", review, rewritten=rewritten)
+                    doc_type="prompts",
+                    kind="prompts",
+                    label="提示词套件",
+                    outcome=outcome,
+                ):
+                    yield review_event_or_chunk
                 yield StreamEvent(
                     type="done",
                     content="",
                     data={
                         **(event.data or {}),
-                        "reply": final_reply,
-                        "pending_items": items,
+                        "reply": outcome.final_reply,
+                        "pending_items": outcome.pending_items,
                     },
                 )
             else:

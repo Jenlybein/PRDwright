@@ -684,6 +684,20 @@ export interface StreamStageEvent {
   issues: { severity: string; detail: string }[]
 }
 
+/**
+ * 阶段内的**原始输出增量**，由 `stage_chunk` 事件下发。
+ *
+ * 与正文 `chunk` 是两条通道：`chunk` 描述产物正文（会拼进文档预览），
+ * `stage_chunk` 描述当前这一步模型正在打的字（审核意见 / 改写稿），
+ * 前端只在阶段条下方的一个附属面板里滚动展示，让「正在审核」有可感知的进展。
+ */
+export interface StreamStageChunk {
+  /** 属于哪个阶段：`reviewing` / `rewriting` */
+  stage: string
+  /** 本次增量文本 */
+  text: string
+}
+
 // ============================================================================
 // 生成任务（generation_jobs）：刷新重连的状态载体
 // ============================================================================
@@ -764,6 +778,13 @@ export interface JobSnapshot {
   finalizedText: string
   /** 当前段落实时缓冲（尚未定稿的 chunk 增量） */
   liveBuffer: string
+  /**
+   * 当前阶段模型的原始输出（审核意见 / 改写稿）。
+   *
+   * 断线重连时由任务运行时补回，面板因此不会在刷新后空着。它**不落库**：
+   * 进程重启后的兜底快照里恒为空串。
+   */
+  stageText: string
   /** 已定稿章节列表 */
   completedSections: CompletedSection[]
   /** 关联方案 id；可空 */

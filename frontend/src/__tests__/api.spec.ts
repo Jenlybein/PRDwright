@@ -5,6 +5,7 @@ import http, {
   continueConversationStream,
   createJob,
   fetchActiveJobs,
+  generateApiDocsStream,
   generatePrdFromSummaryStream,
   onUnauthorized,
   readJobStream,
@@ -16,6 +17,7 @@ import type {
   JobSnapshot,
   RunSummary,
   StreamDocumentPart,
+  StreamStageChunk,
   StreamStageEvent,
   RequirementsSummary,
   ToolResultPayload,
@@ -214,6 +216,45 @@ describe('SSE 事件解析', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(generatePrdFromSummaryStream({ summary: SUMMARY })).rejects.toThrow('生成失败：被截断')
+  })
+
+  it('把 stage_chunk 映射成阶段输出增量：带上归属阶段，且不污染正文 chunk', async () => {
+    // 审核 / 改写这两步是整篇量级的静默调用，靠 stage_chunk 让用户看见进展。
+    // 它必须与正文 chunk 走两条通道——混在一起审核意见就会跑进文档预览里。
+    const fetchMock = vi.fn(async () =>
+      streamResponse([
+        sseFrame('stage', { type: 'stage', content: '正在生成', data: { stage: 'writing' } }),
+        sseFrame('chunk', { type: 'chunk', content: '# 接口文档\n', data: {} }),
+        sseFrame('stage', { type: 'stage', content: '正在审核', data: { stage: 'reviewing' } }),
+        sseFrame('stage_chunk', { type: 'stage_chunk', content: '{"verdict":', data: { stage: 'reviewing' } }),
+        sseFrame('stage_chunk', { type: 'stage_chunk', content: '"pass"}', data: { stage: 'reviewing' } }),
+        sseFrame('done', { type: 'done', content: '', data: { reply: '# 接口文档' } }),
+        'data: [DONE]\n\n',
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const body: string[] = []
+    const stageChunks: StreamStageChunk[] = []
+    const phases: string[] = []
+    const result = await generateApiDocsStream(
+      { prdContent: '# PRD' },
+      {
+        onChunk: (text) => body.push(text),
+        onStage: (event) => phases.push(event.stage),
+        onStageChunk: (chunk) => stageChunks.push(chunk),
+      },
+    )
+
+    // 阶段序列以 writing 开头：进度条要能立刻亮起
+    expect(phases).toEqual(['writing', 'reviewing'])
+    expect(stageChunks).toEqual([
+      { stage: 'reviewing', text: '{"verdict":' },
+      { stage: 'reviewing', text: '"pass"}' },
+    ])
+    // 正文通道只有文档本身，审核 JSON 没有混进去
+    expect(body.join('')).toBe('# 接口文档\n')
+    expect(result.reply).toBe('# 接口文档')
   })
 })
 
@@ -468,6 +509,8 @@ describe('生成任务接口（jobs）', () => {
         phase: 'writing',
         finalizedText: '# 产品需求文档\n\n',
         liveBuffer: '半句',
+        // 阶段输出（审核意见 / 改写稿）：PRD 快照不带，退化为空串
+        stageText: '',
         completedSections: [
           { sectionId: 'overview', heading: '## 1. 产品概述', text: '## 1. 产品概述\n\n正文\n\n' },
         ],
@@ -627,6 +670,35 @@ describe('生成任务接口（jobs）', () => {
 
     // 任务在断线期间跑完了：没有 done 也要能拿到完整正文
     expect(result.reply).toBe('# PRD\n\n半句')
+  })
+
+  it('snapshot 带上当前阶段输出，刷新后审核面板能接着展示', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          sseFrame('snapshot', {
+            type: 'snapshot',
+            content: '',
+            data: {
+              job_id: 9,
+              kind: 'api_docs',
+              status: 'running',
+              phase: 'reviewing',
+              finalized_text: '',
+              live_buffer: '# 接口文档\n\n',
+              stage_text: '{"verdict":"revise"}',
+            },
+          }),
+        ]),
+      ),
+    )
+
+    const snapshots: JobSnapshot[] = []
+    await readJobStream(9, { onSnapshot: (snap) => snapshots.push(snap) })
+
+    expect(snapshots[0]?.phase).toBe('reviewing')
+    expect(snapshots[0]?.stageText).toBe('{"verdict":"revise"}')
   })
 
   it('fetchActiveJobs 按过滤条件拼查询参数，kind 用下划线口径', async () => {

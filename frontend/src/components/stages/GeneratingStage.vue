@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import DocumentReview from '@/components/DocumentReview.vue'
 import DocPhaseProgress from '@/components/ui/DocPhaseProgress.vue'
 import PrdProgress from '@/components/stages/PrdProgress.vue'
+import StageOutputStream from '@/components/ui/StageOutputStream.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import type { DocPhase, PrdBoardState } from '@/types'
@@ -31,6 +32,13 @@ const props = defineProps<{
   prd?: PrdBoardState | null
   /** 下游文档（接口 / 提示词）的生成阶段；idle 表示未走该链路 */
   docPhase?: DocPhase | null
+  /**
+   * 下游文档当前阶段（审核 / 改写）已流出的**原始输出**。
+   *
+   * 只喂给阶段条下方的输出面板：审核意见与改写稿草稿都是过程产物，
+   * 不能混进正文预览（正文由 `streamingContent` 单独负责）。
+   */
+  docStageText?: string
   /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
   draftOnly?: boolean
   /**
@@ -64,6 +72,14 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
     <DocPhaseProgress
       v-else-if="docPhase && docPhase !== 'idle'"
       :phase="docPhase"
+    />
+
+    <!-- 阶段输出：紧贴进度条下方。审核 / 改写都是整篇量级的静默调用，
+         把模型正在写的字实时滚出来，用户才知道「它还在动」 -->
+    <StageOutputStream
+      v-if="docPhase && docPhase !== 'idle'"
+      :phase="docPhase"
+      :text="docStageText ?? ''"
     />
 
     <!-- 已用时：长生成时给一个「还在推进」的可感知信号，比转圈动画更有信息量。

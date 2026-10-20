@@ -65,6 +65,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: 'writing',
     finalizedText: '',
     liveBuffer: '',
+    stageText: '',
     completedSections: [],
     solutionId: 1,
     errorCode: '',
