@@ -19,38 +19,57 @@ import { formatDuration } from '@/utils/metering'
  * PRD 走的是分章节链路（撰写 → 审核 → 改写），额外用 `prd` 传入阶段进度；
  * 其它文档与降级路径不传，行为与拆分前完全一致。
  */
-const props = defineProps<{
-  /** 文档标题 */
-  title: string
-  /** 流式生成中的增量文本 */
-  streamingContent: string
-  /** 生成 / 优化过程中的错误原因；非空表示失败 */
-  error?: string
-  /** 是否仍在生成中；为 false 表示已失败，只展示错误与返回入口 */
-  generating?: boolean
-  /** PRD 分章节生成的管道看板；非 PRD 时为 null */
-  prd?: PrdBoardState | null
-  /** 下游文档（接口 / 提示词）的生成阶段；idle 表示未走该链路 */
-  docPhase?: DocPhase | null
-  /**
-   * 下游文档当前阶段（审核 / 改写）已流出的**原始输出**。
-   *
-   * 只喂给阶段条下方的输出面板：审核意见与改写稿草稿都是过程产物，
-   * 不能混进正文预览（正文由 `streamingContent` 单独负责）。
-   */
-  docStageText?: string
-  /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
-  draftOnly?: boolean
-  /**
-   * 本次生成已用时（毫秒），由任务运行态统一维护（见 `composables/useJob.ts`）。
-   *
-   * 组件自己**不计时**：重连时要用服务端的已用时打底，收尾后要停在权威总耗时上，
-   * 这两件事只有任务运行态做得到。
-   */
-  elapsedMs?: number
-  /** 「返回」按钮的文案（返回目标随入口模式而变，由上层决定） */
-  backLabel?: string
-}>()
+// ⚠️ 布尔 prop 在**未传**时会被 Vue 自动转成 `false`，因此凡「默认该开」的开关都要
+// 显式给默认值：`withReview` 未传必须是 true，否则完整流程的四车道会被悄悄砍成两条。
+const props = withDefaults(
+  defineProps<{
+    /** 文档标题 */
+    title: string
+    /** 流式生成中的增量文本 */
+    streamingContent: string
+    /** 生成 / 优化过程中的错误原因；非空表示失败 */
+    error?: string
+    /** 是否仍在生成中；为 false 表示已失败，只展示错误与返回入口 */
+    generating?: boolean
+    /** PRD 分章节生成的管道看板；非 PRD 时为 null */
+    prd?: PrdBoardState | null
+    /** 下游文档（接口 / 提示词）的生成阶段；idle 表示未走该链路 */
+    docPhase?: DocPhase | null
+    /**
+     * 本次生成是否带「审核 / 改写」；为 false（快捷流程）时阶段条只画「生成 → 完成」。
+     *
+     * 判据由上层按入口模式给出：那两格永远走不到，画上去等于告诉用户「还有两步没做」。
+     */
+    withReview?: boolean
+    /**
+     * 下游文档当前阶段（审核 / 改写）已流出的**原始输出**。
+     *
+     * 只喂给阶段条下方的输出面板：审核意见与改写稿草稿都是过程产物，
+     * 不能混进正文预览（正文由 `streamingContent` 单独负责）。
+     */
+    docStageText?: string
+    /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
+    draftOnly?: boolean
+    /**
+     * 本次生成已用时（毫秒），由任务运行态统一维护（见 `composables/useJob.ts`）。
+     *
+     * 组件自己**不计时**：重连时要用服务端的已用时打底，收尾后要停在权威总耗时上，
+     * 这两件事只有任务运行态做得到。
+     */
+    elapsedMs?: number
+    /** 「返回」按钮的文案（返回目标随入口模式而变，由上层决定） */
+    backLabel?: string
+    /**
+     * 是否**不显示**这条底部操作栏。
+     *
+     * 生成中这一栏原本只有「返回」一个按钮，落点就是录入页；而录入页在进度条上的入口
+     * （完整流程 / 快捷流程）点第 1 步就能回去，留一个同名按钮纯属重复。此时整条栏都不渲染
+     * ——只藏按钮会留下一条空栏，比不显示更难看。
+     */
+    hideBack?: boolean
+  }>(),
+  { withReview: true },
+)
 
 const emit = defineEmits<{
   /** 返回对话 */
@@ -67,11 +86,13 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
     <PrdProgress
       v-if="prd && (prd.total > 0 || prd.sections.length > 0)"
       :board="prd"
+      :with-review="withReview"
     />
-    <!-- 下游文档：整篇生成 → 审核 → 改写，用同一套胶囊样式展示 -->
+    <!-- 下游文档：整篇生成 →（审核 → 改写）→ 完成；不复核时就只有首尾两格 -->
     <DocPhaseProgress
       v-else-if="docPhase && docPhase !== 'idle'"
       :phase="docPhase"
+      :with-review="withReview"
     />
 
     <!-- 阶段输出：紧贴进度条下方。审核 / 改写都是整篇量级的静默调用，
@@ -115,8 +136,9 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
       :generating="true"
       :draft-only="draftOnly"
     />
-    <!-- 页面级操作栏：生成中 / 失败时只有「返回」这一条退路，主操作区留空 -->
-    <AppActionBar>
+    <!-- 页面级操作栏：生成中 / 失败时只有「返回」这一条退路，主操作区留空。
+         录入页在进度条上的入口连这条退路都是重复的，此时整条栏不渲染。 -->
+    <AppActionBar v-if="!hideBack">
       <template #secondary>
         <AppButton variant="secondary" size="md" @click="emit('back')">
           {{ backLabel ?? '返回对话' }}

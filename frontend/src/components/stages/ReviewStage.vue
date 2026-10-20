@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 import DocumentReview from '@/components/DocumentReview.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
+import AppDialog from '@/components/ui/AppDialog.vue'
 import PendingItemsPanel from '@/components/ui/PendingItemsPanel.vue'
 import ReviewConclusionPanel from '@/components/ui/ReviewConclusionPanel.vue'
 import StaleArtifactBanner from '@/components/ui/StaleArtifactBanner.vue'
@@ -73,6 +74,13 @@ const emit = defineEmits<{
    * 由上层按当前阶段决定，组件不必知道。
    */
   returnToChat: []
+  /**
+   * 让 AI 自己把剩余待确认问题逐条拍板，并直接改写这份文档。
+   *
+   * 与 `returnToChat` 是**同一件事的两种推进方式**：一个由用户出面回答、一个交给 AI
+   * 按默认值决策。两者并排出现，用户不必先聊一轮才知道还有别的选择。
+   */
+  autoClarify: []
 }>()
 
 const props = defineProps<{
@@ -131,6 +139,14 @@ const props = defineProps<{
    */
   keepBackButton?: boolean
   /**
+   * 是否**隐藏**「返回」按钮（不论有没有澄清入口）。
+   *
+   * 由上层按入口模式给出：两个从零创建的入口，录入页就是进度条第 1 步「描述产品」，
+   * 点一下就能回去，底栏再放一个同名按钮是纯重复。两个导入入口的录入页不在进度条上，
+   * 传假——否则用户改不了贴进来的材料，成了死路。
+   */
+  hideBack?: boolean
+  /**
    * 这份下游文档是否基于旧版上游。
    *
    * PRD 没有上游，恒为 false；接口文档 / 提示词由后端按内容指纹比较得出。
@@ -161,7 +177,7 @@ const skillFallback = computed(
 )
 
 /**
- * 是否展示「去对话页澄清剩余问题」入口（在底栏次操作组）。
+ * 是否展示「澄清」那一组入口（底栏次操作组）。
  *
  * 上层按阶段与入口模式给出开关（`canReturnToChat`），这里再兜一层「真有待确认项」：
  * 没有待确认项却给一个「去澄清」的入口，点进去只能闲聊。两处判据收在这一个 computed 里，
@@ -171,22 +187,20 @@ const showReturnToChat = computed(
   () => Boolean(props.canReturnToChat) && (props.pendingItems?.length ?? 0) > 0,
 )
 
-/**
- * 澄清入口的文案。
- *
- * 完整流程下它是「回到对话」——那里真有一段对话等着他；另外两条入口没有需求对话，
- * 进去是**新开**一条澄清线程，说「回到对话」会让人以为自己的东西丢了，
- * 因此换成「和 AI 确认」。
- */
-const returnToChatLabel = computed(() => {
-  const count = props.pendingItems?.length ?? 0
-  return props.keepBackButton
-    ? `和 AI 确认剩下的 ${count} 个问题`
-    : `回到对话，确认剩下的 ${count} 个问题`
-})
+/** 剩余待确认问题的条数（按钮旁的计数芯片用它） */
+const pendingCount = computed(() => props.pendingItems?.length ?? 0)
 
-/** 是否渲染「返回」按钮：澄清入口在与「返回」落点相同处会顶替它，落点不同处则两者并存 */
-const showBack = computed(() => !showReturnToChat.value || Boolean(props.keepBackButton))
+/**
+ * 是否渲染「返回」按钮。
+ *
+ * 三层判据，顺序不能换：① `hideBack`（录入页在进度条上，压根不需要它）→
+ * ② 澄清入口与它落点相同时由澄清入口顶替 → ③ 落点不同时（`keepBackButton`）两者并存。
+ */
+const showBack = computed(
+  () =>
+    !props.hideBack &&
+    (!showReturnToChat.value || Boolean(props.keepBackButton)),
+)
 
 /** 文档组件句柄：底栏工具行要读它的草稿 / 复制反馈 / 视图模式，并调它的复制与切换视图 */
 const doc = ref<InstanceType<typeof DocumentReview> | null>(null)
@@ -201,6 +215,25 @@ const viewMode = computed(() => doc.value?.viewMode ?? 'preview')
 
 /** 是否把底栏内容行切成「优化指令输入」形态 */
 const optimizing = ref(false)
+
+/**
+ * 「AI 自行澄清」的确认弹窗是否打开。
+ *
+ * 这个动作会**直接改写正文**且不可撤销（就地改当前版本，不会自动留旧稿），
+ * 一次点击就发生太轻了——先把「它会做什么、不会做什么」说清楚，再让它发生。
+ */
+const autoConfirmOpen = ref(false)
+
+/** 点「AI 自行澄清」：先开确认弹窗，不直接发任务 */
+function askAutoClarify(): void {
+  autoConfirmOpen.value = true
+}
+
+/** 弹窗里点了「开始澄清」：关窗，再把动作交给上层 */
+function confirmAutoClarify(): void {
+  autoConfirmOpen.value = false
+  emit('autoClarify')
+}
 
 /** 用户输入的优化指令 */
 const instruction = ref('')
@@ -453,23 +486,84 @@ function submitOptimize(): void {
         </div>
       </template>
 
-      <!-- 流程行：左「返回 / 去对话澄清」，右按顺序推进 / 查看其它文档 / 完成。
+      <!-- 流程行：左「返回 / 澄清组」，右按顺序推进 / 查看其它文档 / 完成。
            三段式顺序与「主操作永远最右且唯一」都不动（ADR-015），新入口进的是次操作组。 -->
       <template #secondary>
-        <!-- 澄清入口与「返回」落点相同时由它顶替「返回」——否则并排会出现两个都通向对话页、
-             名字也近似的按钮，用户不知道该点哪个。落点不同时（快捷流程 / 两个导入入口：
-             「返回」回的是录入页）两者并存，顺序是「先退后进」。 -->
+        <!-- 「返回」只在**录入页不在进度条上**时出现（`hideBack` 为假）。两个从零创建的入口
+             不走这一支：第 1 步「描述产品」就在进度条上，点一下就能回去，底栏再放一个同名按钮
+             是纯重复。两个导入入口的录入页不在进度条上，因此必须留着它。 -->
         <AppButton v-if="showBack" variant="secondary" size="md" @click="emit('back')">
           {{ backLabel ?? '返回对话' }}
         </AppButton>
-        <AppButton
+
+        <!-- 澄清组的两个按钮**上下叠成一列**，合起来仍然只占一个按钮的高度：
+             它们回答的是同一个问题「这批待确认项怎么办」，只是出面的人不同
+             （我去答 / 让 AI 拍板）。做成一个带分隔线的双行块，而不是两个按钮竖着摞——
+             后者会把底栏撑高一倍。`h-[38px]` 是 `AppButton` 的 `md` 尺寸实测高度
+             （20px 行高 + 上下各 8px 内边距 + 2px 边框），两边对齐才不会让底栏忽高忽低。 -->
+        <div
           v-if="showReturnToChat"
-          variant="secondary"
-          size="md"
-          @click="emit('returnToChat')"
+          class="flex h-[38px] flex-col divide-y divide-line overflow-hidden rounded-control border border-line-strong bg-surface"
         >
-          {{ returnToChatLabel }}
-        </AppButton>
+          <button
+            type="button"
+            class="flex flex-1 items-center justify-center gap-1.5 px-3 text-xs font-medium leading-none text-body transition hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+            @click="emit('returnToChat')"
+          >
+            <svg
+              class="h-3 w-3"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M17 9.4c0 3.3-3.13 6-7 6-.73 0-1.43-.09-2.08-.26L4 17l.92-2.66A5.6 5.6 0 0 1 3 9.4c0-3.32 3.13-6 7-6s7 2.68 7 6Z"
+              />
+              <path d="M7.4 9.4h.01M10 9.4h.01M12.6 9.4h.01" />
+            </svg>
+            前往澄清问题
+          </button>
+          <button
+            type="button"
+            class="flex flex-1 items-center justify-center gap-1.5 px-3 text-xs font-medium leading-none text-body transition hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+            title="AI 会按最保守的行业默认值逐条拍板，并直接改写这份文档（拿不准的仍会留在清单里）"
+            @click="askAutoClarify"
+          >
+            <svg
+              class="h-3 w-3"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M9 2.8l1.15 3.3a3.6 3.6 0 0 0 2.2 2.2l3.3 1.15-3.3 1.15a3.6 3.6 0 0 0-2.2 2.2L9 16.1l-1.15-3.3a3.6 3.6 0 0 0-2.2-2.2L2.35 9.45l3.3-1.15a3.6 3.6 0 0 0 2.2-2.2L9 2.8Z"
+              />
+              <path d="M15.4 13.6l.5 1.4 1.4.5-1.4.5-.5 1.4-.5-1.4-1.4-.5 1.4-.5.5-1.4Z" />
+            </svg>
+            AI 自行澄清
+          </button>
+        </div>
+      </template>
+
+      <!-- 计数芯片：贴着澄清组，说明「还剩几件事没敲定」。
+           放次操作组尾（`#hint` 槽）而不是塞进按钮文案——按钮名一旦带数字，宽度会随条数抖动，
+           而按钮本身该是**动作**，数字是**状态**，两者分开才读得清。 -->
+      <template #hint>
+        <span
+          v-if="showReturnToChat"
+          class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60"
+        >
+          <span class="h-1.5 w-1.5 rounded-full bg-primary-500 dark:bg-primary-300" aria-hidden="true" />
+          还剩 {{ pendingCount }} 个问题
+        </span>
       </template>
 
       <!-- 各阶段按顺序推进：PRD 完成 → 生成接口文档；接口文档完成 → 生成提示词套件 -->
@@ -525,5 +619,41 @@ function submitOptimize(): void {
         完成
       </AppButton>
     </AppActionBar>
+
+    <!-- 「AI 自行澄清」的确认弹窗。
+         这个动作会**直接改写正文**、且就地改当前版本（不会自动留旧稿），一次点击就发生太轻了。
+         弹窗要说清三件事：会做什么（逐条拍板并写进正文）、按什么规矩做（最保守的默认值、
+         不编造具体数字/主体/域名）、不会做什么（真需要用户提供事实的仍留在清单里）。 -->
+    <AppDialog v-model="autoConfirmOpen" title="让 AI 自行澄清？">
+      <div class="space-y-3 text-sm leading-relaxed">
+        <p class="text-body">
+          AI 会以「资深产品负责人」的身份，把这份文档里剩下的
+          <strong class="font-semibold text-fg">{{ pendingCount }}</strong>
+          个待确认问题逐条拍板，并把结论
+          <strong class="font-semibold text-fg">直接写进正文</strong>。
+        </p>
+        <ul class="list-disc space-y-1.5 pl-5 text-muted">
+          <li>优先取行业常规做法、以后能替换的方案，不追求一次到位。</li>
+          <li>
+            涉及金额、法务、合规或真实账号的，写成「按常规做法执行，上线前由负责人复核」——
+            不会编造具体数字、主体名称或域名。
+          </li>
+          <li>只有必须由你提供事实的问题（真实预算、已有系统名等）会留在清单里。</li>
+        </ul>
+        <p class="text-xs text-subtle">
+          会消耗一次模型调用。改写直接覆盖当前正文——想保留改之前的版本，先在「版本」里存一版。
+        </p>
+      </div>
+      <template #footer>
+        <div class="flex items-center justify-end gap-2">
+          <AppButton variant="secondary" size="md" @click="autoConfirmOpen = false">
+            取消
+          </AppButton>
+          <AppButton variant="primary" size="md" @click="confirmAutoClarify">
+            开始澄清
+          </AppButton>
+        </div>
+      </template>
+    </AppDialog>
   </section>
 </template>

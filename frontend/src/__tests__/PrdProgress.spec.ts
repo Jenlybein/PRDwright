@@ -80,6 +80,25 @@ describe('PrdProgress：4 列 × 2 行管道看板', () => {
     expect(text).toContain('1/6')
   })
 
+  it('不复核时只剩「生成 / 定稿」两条车道（快捷流程：不审不改）', () => {
+    const wrapper = mount(PrdProgress, {
+      props: {
+        board: board({ sections: [card(0, 'writing'), card(1, 'done')] }),
+        withReview: false,
+      },
+    })
+
+    const grid = wrapper.find('.grid')
+    expect(grid.classes()).toContain('grid-cols-2')
+    // 2 个头 + 2 个身体格 = 4
+    expect(grid.element.children).toHaveLength(4)
+    // 那两条车道不是「还没跑到」，而是这次根本不跑——画出来是假地图
+    expect(wrapper.text()).not.toContain('审核')
+    expect(wrapper.text()).not.toContain('改写')
+    expect(wrapper.text()).toContain('生成')
+    expect(wrapper.text()).toContain('定稿')
+  })
+
   it('全部定稿时定稿计数为 6/6，其余车道为空', () => {
     const wrapper = mount(PrdProgress, {
       props: {

@@ -15,8 +15,21 @@ import type { PrdBoardState, PrdSectionCard, PrdSectionPhase } from '@/types'
  * ```
  *
  * 一个章节同一时刻只在一个车道；失败的章节停在其失败的车道，序号后面加 `!`。
+ *
+ * `withReview` 为 false（快捷流程：只撰写、不审不改）时**只剩「生成 / 定稿」两条车道**。
+ * 那两条永远是 0 的列不是「还没跑到」，而是「这次根本不跑」——留着只会让人以为
+ * 生成卡在审核前面。
  */
-const props = defineProps<{ board: PrdBoardState }>()
+// ⚠️ 布尔 prop 在**未传**时会被 Vue 自动转成 `false`，因此必须显式给默认值 true：
+// 否则「没传」等于「不复核」，完整流程的四车道会被悄悄砍成两条。
+const props = withDefaults(
+  defineProps<{
+    board: PrdBoardState
+    /** 本次生成是否带「审核 / 改写」；为 false 时只剩生成与定稿两条车道 */
+    withReview?: boolean
+  }>(),
+  { withReview: true },
+)
 
 const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩']
 
@@ -36,36 +49,46 @@ const doneCount = computed(
 )
 const total = computed(() => props.board.total || props.board.sections.length)
 
-const lanes = computed(() => [
-  {
+const lanes = computed(() => {
+  const writingLane = {
     id: 'writing',
     label: '生成',
     count: String(writing.value.length),
     items: writing.value,
     tone: 'text-sky-600 dark:text-sky-300',
-  },
-  {
-    id: 'reviewing',
-    label: '审核',
-    count: String(reviewing.value.length),
-    items: reviewing.value,
-    tone: 'text-violet-600 dark:text-violet-300',
-  },
-  {
-    id: 'rewriting',
-    label: '改写',
-    count: String(rewriting.value.length),
-    items: rewriting.value,
-    tone: 'text-amber-600 dark:text-amber-300',
-  },
-  {
+  }
+  const reviewLanes = [
+    {
+      id: 'reviewing',
+      label: '审核',
+      count: String(reviewing.value.length),
+      items: reviewing.value,
+      tone: 'text-violet-600 dark:text-violet-300',
+    },
+    {
+      id: 'rewriting',
+      label: '改写',
+      count: String(rewriting.value.length),
+      items: rewriting.value,
+      tone: 'text-amber-600 dark:text-amber-300',
+    },
+  ]
+  const doneLane = {
     id: 'done',
     label: '定稿',
     count: `${doneCount.value}/${total.value}`,
     items: [] as PrdSectionCard[],
     tone: 'text-emerald-600 dark:text-emerald-300',
-  },
-])
+  }
+  // 不复核时只留首尾两条：中间两条恒为 0，画出来是假地图
+  if (props.withReview === false) return [writingLane, doneLane]
+  return [writingLane, ...reviewLanes, doneLane]
+})
+
+/** 车道数决定网格列数（Tailwind 要看到完整类名，因此不用拼接） */
+const gridClass = computed(() =>
+  lanes.value.length === 2 ? 'grid-cols-2' : 'grid-cols-4',
+)
 
 function laneAria(label: string, items: readonly PrdSectionCard[]): string {
   if (!items.length) return `${label}：无`
@@ -78,7 +101,7 @@ function laneAria(label: string, items: readonly PrdSectionCard[]): string {
     class="rounded-2xl border border-line bg-surface px-4 py-3 shadow-sm"
     aria-label="PRD 生成管道"
   >
-    <div class="grid grid-cols-4 gap-x-2 gap-y-1.5">
+    <div class="grid gap-x-2 gap-y-1.5" :class="gridClass">
       <!-- 第一行：车道名 + 计数 -->
       <div
         v-for="lane in lanes"

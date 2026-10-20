@@ -845,24 +845,27 @@ class PrdSectionWriter:
                                     "detail": str(issue.get("detail") or ""),
                                 }
                             )
-                verdict = "revise" if issues else "pass"
-                conclusion = (
-                    f"{total - len(failed_sections)} 章完成，{len(issues)} 个待处理问题"
-                )
-                await put(
-                    StreamEvent(
-                        type="review",
-                        content=conclusion,
-                        data={
-                            "kind": "prd",
-                            "verdict": verdict,
-                            "summary": conclusion,
-                            "issues": issues,
-                            "rewritten": False,
-                            "failed_sections": failed_sections,
-                        },
+                # 没开审核就不发结论：这一轮没有任何章节被核对过，报一句
+                # 「0 个待处理问题」会被读成「审过了、没问题」，那是假的。
+                if self._review_enabled:
+                    verdict = "revise" if issues else "pass"
+                    conclusion = (
+                        f"{total - len(failed_sections)} 章完成，{len(issues)} 个待处理问题"
                     )
-                )
+                    await put(
+                        StreamEvent(
+                            type="review",
+                            content=conclusion,
+                            data={
+                                "kind": "prd",
+                                "verdict": verdict,
+                                "summary": conclusion,
+                                "issues": issues,
+                                "rewritten": False,
+                                "failed_sections": failed_sections,
+                            },
+                        )
+                    )
 
                 pending_items = [item for st in states for item in st.pending_items]
                 reply = (

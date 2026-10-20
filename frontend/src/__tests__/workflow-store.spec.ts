@@ -393,14 +393,17 @@ describe('useWorkflowStore', () => {
 
     expect(store.chooseEntry('prd-quick')).toBe(true)
     expect(store.viewState).toBe('prd-quick')
-    // 快捷入口跳过表单与对话，进度条只剩四步（含交付）
+    // 快捷流程与完整流程同一条流水线，步数都一样：它没有**需求澄清**那条线程，
+    // 但「AI 对话」这一格留给文档澄清，省掉会让对话页里的进度条高亮错位
     expect(store.steps.map((step) => step.id)).toEqual([
+      'form',
+      'chatting',
       'review-prd',
       'review-api-docs',
       'review-prompts',
       'done',
     ])
-    // 「PRD」是该模式的第 1 步
+    // 录入页落在「描述产品」那一步
     expect(store.currentStepIndex).toBe(0)
 
     expect(store.chooseEntry('prompt-debug')).toBe(true)
@@ -438,12 +441,17 @@ describe('useWorkflowStore', () => {
     store.entryMode = 'prd-quick'
     setDocuments({ prd: '# PRD' })
     await nextTick()
-    // 快捷入口只要 PRD 就能完成
-    expect(store.canFinish).toBe(true)
+    // 快捷流程与完整流程口径一致：三份齐备才算完成
+    expect(store.canFinish).toBe(false)
 
     store.entryMode = 'structured'
     await nextTick()
     expect(store.canFinish).toBe(false)
+
+    store.entryMode = 'prd-quick'
+    setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
+    await nextTick()
+    expect(store.canFinish).toBe(true)
 
     store.entryMode = 'prompt-debug'
     // 换成调试入口后，只有 PRD 反而不能完成
@@ -520,10 +528,15 @@ describe('对话页的线程可用性与作废', () => {
     ])
   })
 
-  it('另外两条入口没有需求对话，那条线程永远不可用', async () => {
+  it('只有完整流程有需求对话，其余三条入口都没有', async () => {
     const store = useWorkflowStore()
-    store.chooseEntry('prd-quick')
+    store.chooseEntry('structured')
     setDocuments({ prd: '# PRD' })
+    await nextTick()
+    expect(store.availableChatTabs).toEqual(['requirement', 'prd-clarify'])
+
+    // 快捷流程：一段话直接进生成，没有需求可聊；文档澄清照旧
+    store.chooseEntry('prd-quick')
     await nextTick()
     expect(store.availableChatTabs).toEqual(['prd-clarify'])
 

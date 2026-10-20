@@ -51,6 +51,13 @@ const props = defineProps<{
    * 由上层按 `activeTab` 选好再传，组件不自己猜是哪一份。
    */
   pendingItems?: PendingItem[]
+  /**
+   * 「改需求」按钮的文案。
+   *
+   * 完整流程回结构化表单、快捷流程回极简描述页——同一个按钮落在两种页面上，
+   * 文案由上层给（它才知道这次入口是哪个），组件不猜。
+   */
+  editRequirementsLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -231,7 +238,7 @@ watch(
       </template>
       <template #secondary>
         <AppButton v-if="onRequirement" variant="secondary" size="md" @click="emit('editRequirements')">
-          改需求
+          {{ editRequirementsLabel ?? '改需求' }}
         </AppButton>
       </template>
 

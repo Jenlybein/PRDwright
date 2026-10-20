@@ -29,7 +29,7 @@ const emit = defineEmits<{
  'update:productName': [value: string]
   /** 需求文本变化 */
  'update:requirements': [value: string]
-  /** 直接生成 PRD */
+  /** 提交极简需求并直接生成 PRD */
   generate: []
   /** 返回入口选择页 */
   back: []
@@ -73,8 +73,8 @@ function clearAll(): void {
     <header>
       <h1 class="text-lg font-bold text-fg ">直接生成 PRD</h1>
       <p class="mt-1 text-sm text-subtle">
-        用一段话把想法说清楚就行，不需要按字段填。生成时会逐章撰写并逐章审核，
-        没提到的信息会标注「待确认」而不是替你编。
+        用一段话把想法说清楚就行，不需要按字段填、也不会再追问一轮。
+        提交后直接逐章撰写，没提到的信息会标注「待确认」而不是替你编。
       </p>
     </header>
 

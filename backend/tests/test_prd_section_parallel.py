@@ -173,3 +173,19 @@ def test_concurrency_cap_is_respected() -> None:
     _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
 
     assert llm.max_in_flight <= 3
+
+
+def test_review_disabled_emits_no_review_event() -> None:
+    """关掉逐章审核时**不发** `review` 结论事件，但正文照样齐备。
+
+    摘要里那句「共 0 个待处理问题」在没审的情况下是假的——会被读成「审过了、没问题」。
+    因此省掉审核车道就得连结论一起省掉。快捷流程用的就是这条路径。
+    """
+    events = _collect(PrdSectionWriter(llm=RoutingLLM(), review_enabled=False))
+
+    assert not [event for event in events if event.type == "review"]
+    done = next(event for event in events if event.type == "done")
+    # 少的是审核，不是撰写：每章正文都在
+    for section in PRD_SECTIONS:
+        assert section.heading in done.data["reply"]
+    assert done.data["partial"] is False

@@ -37,6 +37,10 @@ import type { DocKind, JobSnapshot, RunSummary, ViewState } from '@/types'
  *
  * `optimize` 与 `clarify` 都是**就地**动某一篇已有文档：不切阶段，用户留在原来的界面上
  * （优化留在审阅页、澄清留在澄清页），由那一页自己表现「正在干活」。因此为 null。
+ *
+ * `auto-clarify` 也返回 null，但**调用方会自己先切到 `generating-<kind>`**：
+ * 它要跑几十秒且输出整篇正文，留在审阅页只能干等，因此复用生成态的流式预览
+ * （见 `useDocumentPipeline.autoClarify`）。切阶段放在调用方，是因为它知道目标产物是谁。
  */
 const GENERATING_STATE: Record<DocKind, ViewState | null> = {
   prd: 'generating-prd',
@@ -44,6 +48,7 @@ const GENERATING_STATE: Record<DocKind, ViewState | null> = {
   prompts: 'generating-prompts',
   optimize: null,
   clarify: null,
+  'auto-clarify': null,
 }
 
 /** `start` 的输入：任务种类 + 各类型各自的字段（`solutionId` 由本 composable 补） */

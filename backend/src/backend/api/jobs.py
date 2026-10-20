@@ -69,6 +69,15 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
             raise AppError(ErrorCode.INVALID_REQUEST, "clarify 必须指定 doc_kind")
         if not payload.history:
             raise AppError(ErrorCode.INVALID_REQUEST, "clarify 需要提供澄清对话记录（history）")
+    elif payload.kind == "auto_clarify":
+        if not payload.document.strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "document 不能为空")
+        # 与 clarify 同理：缺 `doc_kind` 就不知道规范从哪来、结果写回哪一份
+        if payload.doc_kind is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "auto_clarify 必须指定 doc_kind")
+        # 没有清单就没有可拍板的东西，跑一次只会把正文原样吐回来（还烧一次 token）
+        if not payload.pending_items:
+            raise AppError(ErrorCode.INVALID_REQUEST, "auto_clarify 需要提供待确认清单（pending_items）")
 
 
 def _requirements_text(payload: schemas.JobCreateRequest) -> str:
@@ -94,6 +103,10 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
         "instruction": payload.instruction,
         # 落库用：`optimize` 靠它知道把结果写进哪一份产物
         "doc_kind": payload.doc_kind,
+        # 仅 auto_clarify：交给后端拼提示词的**结构化数据**，不是前端拼好的文本
+        "pending_items": payload.pending_items,
+        # 仅 prd：`None` 时由服务层取配置，显式 `false` 才关掉逐章审核
+        "review_enabled": payload.review_enabled,
     }
 
 

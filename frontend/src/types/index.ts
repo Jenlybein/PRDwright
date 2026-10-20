@@ -230,15 +230,16 @@ export type EntryMode =
  *
  * - `prd` / `api-docs` / `prompts`：三份文档的**整篇生成**；
  * - `optimize`：按用户指令对某一份已有文档的就地优化；
- * - `clarify`：按澄清对话对某一份已有文档的就地改写。
+ * - `clarify`：按澄清对话对某一份已有文档的就地改写；
+ * - `auto-clarify`：AI 自行拍板待确认问题后就地改写（用户不出面）。
  *
- * 后两者是「对已有文档做的一件事」，因此**必须**额外带 `docKind` 说明作用在哪一份上——
+ * 后三者是「对已有文档做的一件事」，因此**必须**额外带 `docKind` 说明作用在哪一份上——
  * 少了它后端不会猜默认值，而是拒绝落库。
  *
- * 注意命名口径：后端用下划线（`api_docs`），前端用连字符（`api-docs`），
+ * 注意命名口径：后端用下划线（`api_docs` / `auto_clarify`），前端用连字符，
  * 转换收口在 `services/api.ts`。
  */
-export type DocKind = 'prd' | 'api-docs' | 'prompts' | 'optimize' | 'clarify'
+export type DocKind = 'prd' | 'api-docs' | 'prompts' | 'optimize' | 'clarify' | 'auto-clarify'
 
 /**
  * **产物**种类：三份文档各自的身份，与 `DocKind` 的差别在于它不含 `optimize`。
@@ -451,7 +452,7 @@ export type Step = (typeof STEPS)[number]
  *
  * 注意：这里给的是**全局**步骤归属，进度条实际展示哪几步由
  * `utils/workflow.ts` 的 `stepsForMode()` 按入口模式裁剪——
- * 例如 快捷流程入口没有「描述产品 / AI 对话」两步，我有 PRD入口只有「提示词」一步。
+ * 例如 我有 PRD入口只有「提示词」这一步（它自带 PRD，不需要「描述产品 / AI 对话」）。
  */
 export const STEP_OF_STATE: Record<ViewState, StepId> = {
   // 入口页还没选模式，先按完整流程展示，避免进度条出现空档
@@ -466,8 +467,9 @@ export const STEP_OF_STATE: Record<ViewState, StepId> = {
   'review-api-docs': 'review-api-docs',
   'generating-prompts': 'review-prompts',
   'review-prompts': 'review-prompts',
-  // 快捷入口的录入产物就是 PRD
-  'prd-quick': 'review-prd',
+  // 快捷入口和完整流程的起点是同一件事——「录入需求」，只是录入的形态不同
+  // （极简一段话 / 结构化表单）。它因此同样落在进度条第一步。
+  'prd-quick': 'form',
   // 两个导入入口的录入产物都是提示词套件（它们只差「带了哪些材料」）
   'prompt-debug': 'review-prompts',
   'prd-and-api-paste': 'review-prompts',

@@ -26,6 +26,13 @@ const props = defineProps<{
   promptsContent: string
   /** 「返回」按钮的文案（返回目标随入口模式而变，由上层决定） */
   backLabel?: string
+  /**
+   * 是否**不显示**「返回」按钮。
+   *
+   * 落点是录入页，而录入页在进度条上能直接点回去（完整流程 / 快捷流程）；
+   * 两个导入入口的录入页不在进度条上，必须留着。「重新开始」不受影响。
+   */
+  hideBack?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -159,7 +166,7 @@ const headline = computed(() =>
         <AppButton variant="danger" size="md" @click="emit('restart')">重新开始</AppButton>
       </template>
       <template #secondary>
-        <AppButton variant="secondary" size="md" @click="emit('back')">
+        <AppButton v-if="!hideBack" variant="secondary" size="md" @click="emit('back')">
           {{ backLabel ?? '返回对话' }}
         </AppButton>
       </template>

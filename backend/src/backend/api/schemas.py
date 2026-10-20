@@ -511,9 +511,10 @@ class DocumentVersionDeleteResponse(BaseModel):
 # ============================================================================
 
 # 任务类型。前三种是「整篇生成」，与前端 `DocumentKind` 一一对应；
-# `optimize`（按用户指令就地优化）与 `clarify`（按澄清对话就地改写）是**对某一份已有文档
-# 的动作**，因此它们必须额外带 `doc_kind` 才能落库。
-JobKind = Literal["prd", "api_docs", "prompts", "optimize", "clarify"]
+# `optimize`（按用户指令就地优化）、`clarify`（按澄清对话就地改写）与
+# `auto_clarify`（AI 自行拍板待确认项后就地改写）都是**对某一份已有文档的动作**，
+# 因此它们必须额外带 `doc_kind` 才能落库。
+JobKind = Literal["prd", "api_docs", "prompts", "optimize", "clarify", "auto_clarify"]
 
 
 class JobCreateRequest(BaseModel):
@@ -523,7 +524,9 @@ class JobCreateRequest(BaseModel):
     因此不同 `kind` 只用到各自相关的字段，其余留默认值即可。
     """
 
-    kind: JobKind = Field(description="任务类型：prd / api_docs / prompts / optimize / clarify")
+    kind: JobKind = Field(
+        description="任务类型：prd / api_docs / prompts / optimize / clarify / auto_clarify"
+    )
     solution_id: int | None = Field(
         default=None,
         description="关联方案 id；快捷入口等场景可为空（逃生口）",
@@ -559,6 +562,24 @@ class JobCreateRequest(BaseModel):
     # --- optimize / clarify ---
     document: str = Field(default="", description="待优化的原文档正文")
     instruction: str = Field(default="", description="用户的优化要求（仅 optimize）")
+    # --- auto_clarify ---
+    pending_items: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "要由 AI 自行拍板的待确认清单（仅 `auto_clarify`）。传结构化项而不是拼好的文本："
+            "提示词由后端持有，前端只能给数据。"
+        ),
+    )
+    # --- prd / api_docs / prompts ---
+    review_enabled: bool | None = Field(
+        default=None,
+        description=(
+            "本次生成是否带复核（仅 `prd` / `api_docs` / `prompts` 三种整篇生成）："
+            "`prd` 是逐章审核 + 改写，`api_docs` / `prompts` 是整篇审一次 + 必要时改写一次。"
+            "`null`（默认）取服务配置（后两者默认为开）；快捷流程传 `false`——输入只有一段话，"
+            "复核的边际收益低，而「只撰写、不审不改」能省下约一半调用。"
+        ),
+    )
 
 
 class JobCreated(BaseModel):

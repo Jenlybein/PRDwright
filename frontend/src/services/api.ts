@@ -868,6 +868,12 @@ export interface GeneratePrdFromSummaryPayload {
   productName?: string
   /** 补充对话记录；为空则按无对话处理 */
   history?: ChatMessage[]
+  /**
+   * 是否逐章审核 + 改写。不传取服务端配置；快捷流程传 `false`（只撰写、不审不改）。
+   *
+   * 它是**行为开关**而不是提示词：前端只说「这次要不要复核」，复核怎么做由后端决定。
+   */
+  reviewEnabled?: boolean
 }
 
 /** 文档流式生成的结果：仅关心完整正文，会话 ID 恒为空串 */
@@ -997,7 +1003,9 @@ async function readStream(
 
 /** 后端 `kind` 用下划线，前端 `DocKind` 用连字符——这里是唯一的转换点 */
 function toBackendKind(kind: DocKind): string {
-  return kind === 'api-docs' ? 'api_docs' : kind
+  // 前端用连字符、后端用下划线（`api-docs` → `api_docs`、`auto-clarify` → `auto_clarify`）。
+  // 转换只在这一处，别在调用点各转一次。
+  return kind.replace(/-/g, '_')
 }
 
 /** 创建任务响应 */
@@ -1072,6 +1080,19 @@ export interface CreateJobPayload {
   apiDocsContent?: string
   document?: string
   instruction?: string
+  /**
+   * 要由 AI 自行拍板的待确认清单；只有 `auto-clarify` 用得上。
+   *
+   * 传**结构化项**而不是拼好的文字：提示词归后端所有，前端只提供数据。
+   */
+  pendingItems?: PendingItem[]
+  /**
+   * 本次生成是否带复核；`prd` / `api-docs` / `prompts` 三种整篇生成都认它。
+   *
+   * 不传（`undefined`）= 取服务端配置。快捷流程传 `false`：输入只有一段话，
+   * 复核的边际收益低，省掉约一半调用（三份产物都一样——快捷流程不审不改）。
+   */
+  reviewEnabled?: boolean
 }
 
 /**
@@ -1092,6 +1113,10 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     api_docs_content: payload.apiDocsContent ?? '',
     document: payload.document ?? '',
     instruction: payload.instruction ?? '',
+    // 结构化清单原样透传：提示词在后端，前端不拼任何一句话
+    pending_items: payload.pendingItems ?? [],
+    // 只有 `false` 是「明确关掉」；不传就让后端取配置，不在这里替它挑默认值
+    review_enabled: payload.reviewEnabled ?? null,
   })
   return {
     jobId: typeof data?.job_id === 'number' ? data.job_id : 0,

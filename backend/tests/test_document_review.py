@@ -293,3 +293,67 @@ def test_api_docs_stream_announces_writing_first_and_streams_review() -> None:
     # ④ 改写稿整段覆盖，落进 done
     done = next(event for event in events if event.type == "done")
     assert "改写后的正文" in str(done.data["reply"])
+
+
+def test_api_docs_stream_is_one_pass_when_review_disabled() -> None:
+    """快捷流程（`review_enabled=False`）：接口文档一遍过，不审也不改。
+
+    顺带守住**不发 `review` 事件**：只跳调用、照样发一条「通过」的结论，会被读成
+    「审过了、没问题」——那是假信号，比不报更糟（与 PRD 侧同口径）。
+    """
+    llm = TwoStageLLM(
+        document_pieces=["# 接口文档\n", "\n初稿正文"],
+        review_pieces=['{"verdict":"revise","issues":[{"severity":"high","detail":"缺鉴权"}]}'],
+        rewrite_pieces=["不该被改写"],
+    )
+    service = DocumentService(llm=llm)
+
+    events = _drain_events(
+        service.generate_api_docs_stream(prd_content="# PRD", review_enabled=False)
+    )
+
+    # ① 只调了一次模型（撰写）；审核与改写一次都没发生
+    assert len(llm.calls) == 1
+    # ② 没有审核 / 改写的阶段与增量，也没有 review 结论
+    assert not [event for event in events if event.type == "stage_chunk"]
+    assert not [event for event in events if event.type == "review"]
+    assert [event.data["stage"] for event in events if event.type == "stage"] == ["writing"]
+    # ③ 正文与落稿都是初稿
+    body = "".join(event.content for event in events if event.type == "chunk")
+    assert "初稿正文" in body
+    done = next(event for event in events if event.type == "done")
+    assert "初稿正文" in str(done.data["reply"])
+    assert "改写" not in str(done.data["reply"])
+
+
+def test_prompts_stream_is_one_pass_when_review_disabled() -> None:
+    """与接口文档同口径：提示词套件在快捷流程里也是一遍过。"""
+    llm = TwoStageLLM(
+        document_pieces=["# 提示词\n", "\n初稿正文"],
+        review_pieces=['{"verdict":"revise","issues":[{"severity":"high","detail":"缺约束"}]}'],
+        rewrite_pieces=["不该被改写"],
+    )
+    service = DocumentService(llm=llm)
+
+    events = _drain_events(
+        service.generate_prompts_stream(prd_content="# PRD", review_enabled=False)
+    )
+
+    assert len(llm.calls) == 1
+    assert not [event for event in events if event.type == "review"]
+    done = next(event for event in events if event.type == "done")
+    assert "初稿正文" in str(done.data["reply"])
+
+
+def test_whole_document_review_defaults_to_enabled() -> None:
+    """不传 `review_enabled` 时默认**仍审**：漏传字段不能悄悄改变产出的质量口径。"""
+    llm = TwoStageLLM(
+        document_pieces=["# 接口文档\n", "\n初稿正文"],
+        review_pieces=['{"verdict":"pass"}'],
+    )
+    service = DocumentService(llm=llm)
+
+    events = _drain_events(service.generate_api_docs_stream(prd_content="# PRD"))
+
+    assert len(llm.calls) == 2
+    assert [event.type for event in events].count("review") == 1

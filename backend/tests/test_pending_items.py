@@ -21,6 +21,7 @@ from backend.services.pending_items import (
     END_SENTINEL,
     PendingBlockSuppressor,
     extract,
+    format_pending_items,
     render_spec,
 )
 
@@ -474,3 +475,58 @@ def test_line_without_block_yields_empty_list() -> None:
     done = next(event for event in events if event.type == "done")
     assert done.data["reply"].strip() == "# 接口文档\n\n接口正文"
     assert done.data["pending_items"] == []
+
+# ---------------------------------------------------------------------------
+# format_pending_items：把**已有**清单渲染进提示词
+#
+# 与 `render_spec` 是一对：那个教模型「怎么产出」清单，这个把「已有的」念给它听。
+# 只有「AI 自行澄清」用得上——它要照单逐条拍板，少一条就漏一条。
+# ---------------------------------------------------------------------------
+
+
+def test_format_pending_items_numbers_and_tags_every_item() -> None:
+    """序号、等级、影响章节、原定拍板人都要出现：这些是模型判断该不该拍板的依据。"""
+    text = format_pending_items(
+        [
+            {
+                "id": "p-1",
+                "question": "分页上限取多少？",
+                "sections": ["4.3"],
+                "decider": "产品负责人",
+                "importance": "P0",
+            },
+            {
+                "id": "p-2",
+                "question": "要不要支持导出？",
+                "sections": [],
+                "decider": "",
+                "importance": "P2",
+            },
+        ]
+    )
+
+    lines = text.split("\n")
+    assert lines[0] == "1. [P0] 分页上限取多少？（影响章节：4.3）（原定拍板人：产品负责人）"
+    # 空 `sections` / 空 `decider` 不留半截空括号
+    assert lines[1] == "2. [P2] 要不要支持导出？"
+
+
+def test_format_pending_items_says_so_when_empty() -> None:
+    """空清单也要给一句话：直接留白会让提示词里出现一个没有下文的章节标题。"""
+    assert format_pending_items([]) == "（本次没有待确认问题）"
+
+
+def test_format_pending_items_tolerates_missing_fields() -> None:
+    """模型/旧数据里缺字段是常态，渲染不能抛：缺什么就退化成可读占位。"""
+    text = format_pending_items([{"id": "p-1"}])
+
+    assert text == "1. [未标注] （未描述）"
+
+
+def test_format_pending_items_joins_multiple_sections() -> None:
+    """多个影响章节用「、」连起来，不是一个列表字面量。"""
+    text = format_pending_items(
+        [{"question": "容量按多少规划？", "sections": ["4.3", "5.1"], "importance": "P1"}]
+    )
+
+    assert "（影响章节：4.3、5.1）" in text

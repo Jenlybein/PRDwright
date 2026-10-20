@@ -38,6 +38,7 @@ import {
   emptyConversationIds,
   farthestContentStepIndex,
   hasRequiredDocuments,
+  hasRequirementChat,
   isDocReviewPhase,
   isGeneratingPhase,
   normalizeChatStage,
@@ -314,7 +315,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 对话页子标签栏里**可用**的那些线程。
    *
    * 判据是「这条线程要澄清的东西准备好了没有」：
-   * - 需求澄清只存在于完整流程——另外两条入口压根没有那条对话；
+   * - 需求澄清存在于**所有从零创建**的入口（完整流程与快捷流程）——两者的起点都是
+   *   「把需求交给 AI 追问」，只是录入形态不同；两个导入入口自带需求，压根没有那条对话；
    * - 三条文档线程看对应产物有没有正文（没正文就没什么可澄清的）。
    *
    * 不可用的线程**照样渲染**（置灰、不可点）：标签常驻，用户才知道后面还有哪些可以聊。
@@ -322,7 +324,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const availableChatTabs = computed<ChatStage[]>(() =>
     CHAT_STAGES.filter((stage) => {
       const kind = documentKindOfChatStage(stage)
-      if (!kind) return (entryMode.value ?? 'structured') === 'structured'
+      if (!kind) return hasRequirementChat(entryMode.value)
       if (kind === 'prd') return documents.hasPrd
       if (kind === 'api-docs') return documents.hasApiDocs
       return documents.hasPrompts

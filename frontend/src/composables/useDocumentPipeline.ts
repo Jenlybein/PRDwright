@@ -622,6 +622,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       requirements: payload.requirements ?? '',
       productName: payload.productName ?? '',
       history: payload.history ?? [],
+      // 只有显式 `false`（快捷流程）才关掉审核；`undefined` 让后端取配置
+      reviewEnabled: payload.reviewEnabled,
     }
   }
 
@@ -694,18 +696,35 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 本次生成要不要复核（后端 `review_enabled`）。
+   *
+   * 快捷流程一律 `false`：**不审不改**是它当初的定义（ADR-034），这一点对三份产物
+   * 同样成立——接口文档与提示词在快捷流程里也是一遍过，否则「快捷」只剩 PRD 那一半。
+   * 其余入口返回 `undefined`：要不要复核由后端配置决定，前端不替它挑默认值。
+   */
+  function reviewEnabledForJob(): boolean | undefined {
+    return entryMode.value === 'prd-quick' ? false : undefined
+  }
+
+  /**
    * 按当前入口模式组装「生成 PRD」的请求体。
    *
    * 两条入口只是需求来源不同，因此这里返回同一个请求结构，交给后端汇合到
    * 同一条链路；返回 `null` 表示当前模式还没有可用的输入（如快捷入口还没写需求），
    * 调用方据此直接放弃，不要发出一个注定失败的请求。
+   *
+   * 两处差异都是**入口形态**造成的，不涉及「怎么写 PRD」：
+   * - 快捷流程的需求是那段自由文本，结构化摘要为空；
+   * - 快捷流程不跑逐章审核/改写（`reviewEnabled: false`）——输入只有一段话，
+   *   逐章复核的边际收益低，省下的调用直接体现在等待时间上。
    */
   function buildPrdPayload(): GeneratePrdFromSummaryPayload | null {
     if (entryMode.value === 'prd-quick') {
       const { productName, requirements } = quickInput.value
       if (!requirements.trim()) return null
-      // 快捷入口没有对话环节，历史恒为空
-      return { requirements, productName, history: [] }
+      // 快捷流程没有需求澄清对话（一段话直接进生成），`history` 正常是空数组；
+      // 仍照传是为了让**旧快照**里残留的需求对话结论不白丢（那时确实聊过）。
+      return { requirements, productName, history: conversationHistory(), reviewEnabled: false }
     }
 
     const current = summary.value
@@ -751,7 +770,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     docPhase.value = 'writing'
     const { reply, ok } = await job.start(
       'api-docs',
-      { prdContent: documents.contentOf('prd') },
+      // 快捷流程一遍过：整篇生成完就收，不审也不改（见 `reviewEnabledForJob`）
+      { prdContent: documents.contentOf('prd'), reviewEnabled: reviewEnabledForJob() },
       handlersForKind('api-docs'),
     )
     if (!ok) {
@@ -779,7 +799,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const { reply, ok } = await job.start(
       'prompts',
       // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
-      { prdContent: prdText, apiDocsContent: apiDocsText },
+      { prdContent: prdText, apiDocsContent: apiDocsText, reviewEnabled: reviewEnabledForJob() },
       handlersForKind('prompts'),
     )
     if (!ok) {
@@ -964,16 +984,38 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 快捷流程入口：直接生成 PRD，不经过摘要 Diff 闸门。
+   * 审阅页「AI 自行澄清」：让 AI 替用户把剩余待确认问题逐条拍板，并直接改写正文。
    *
-   * 那道闸门的作用是把「对话里补充的信息」回填进结构化摘要，而快捷入口压根没有
-   * 表单与对话——用户写的那段话本身就是唯一输入，没有任何东西需要回填与确认。
+   * 与「按澄清结果改写」的区别只有**谁作答**：那条要求用户先聊出结论，这条由模型按
+   * 最保守的行业默认值自行决策（提示词见后端 `AUTO_CLARIFY_PROMPT`，前端只递清单数据）。
+   *
+   * 为什么先切到 `generating-<kind>` 再发任务：它要跑几十秒且输出整篇正文，留在审阅页
+   * 只能干等。复用生成态那条流式预览，用户至少能看到字在往下走。
+   * ⚠️ `goTo` 必须在 `job.start` **之前**——`docGenerating` 置位后 busy 守卫会拦掉跳转。
    */
-  async function handleGenerateQuickPrd(): Promise<void> {
-    if (entryMode.value !== 'prd-quick') return
-    if (!buildPrdPayload()) return
-    goTo('generating-prd')
-    await generatePrd()
+  async function autoClarify(): Promise<void> {
+    const target = docKindOfState(viewState.value)
+    if (!target) return
+    const content = documents.contentOf(target)
+    const items = documents.pendingItemsOf(target)
+    if (!content.trim() || items.length === 0) return
+    const generating = generatingStateFor(target)
+    if (!generating) return
+
+    resetDocTransient()
+    goTo(generating)
+    const { reply, ok } = await job.start(
+      'auto-clarify',
+      { document: content, pendingItems: items, docKind: target },
+      handlersForKind('auto-clarify'),
+    )
+    if (!ok) {
+      docError.value = job.error.value || 'AI 自行澄清失败'
+      clearActiveJob()
+      return
+    }
+    finishDoc('auto-clarify', reply, target)
+    clearActiveJob()
   }
 
   /**
@@ -1007,6 +1049,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 回到本次入口的录入页，并清空文档生成相关的错误与流式残留。
    * 返回目标随入口模式而变：完整流程回对话，快捷入口回描述，调试入口回 PRD。
+   *
+   * ⚠️ 两个从零创建的入口（完整流程 / 快捷流程）**不再渲染**这个按钮——它们的录入页
+   * 就在进度条上，点第 1 步即可（见 `inputPageOnBar`）。这里仍保留正确的落点，
+   * 因为「回到我的录入页」是一个独立于按钮是否存在的动作。
    */
   function backToInput(): void {
     if (entryMode.value === 'prd-quick') {
@@ -1024,9 +1070,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     goTo('chatting')
   }
 
-  /** 「返回」按钮的文案；与 `backToInput` 的落点保持一一对应 */
+  /**
+   * 「返回」按钮的文案；与 `backToInput` 的落点保持一一对应。
+   *
+   * 只为两个**导入**入口而存在：它们的录入页不在进度条上，审阅页 / 交付页必须留一个
+   * 出口。两个从零创建的入口不渲染这个按钮（`hideBack`），因此这里也不再给它们文案。
+   */
   const backLabel = computed(() => {
-    if (entryMode.value === 'prd-quick') return '返回描述'
     if (entryMode.value === 'prompt-debug') return '返回 PRD'
     if (entryMode.value === 'prd-and-api-paste') return '返回素材'
     return '返回对话'
@@ -1144,7 +1194,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 生成完成后 `generatePrd` 内部会把状态推进到 review-prd。
    */
   async function handleGeneratePrd(): Promise<void> {
+    // 快捷流程既没有结构化摘要（闸门①无处可写），也没有需求对话（「至少一轮 AI 回复」
+    // 这个前提不存在）。它的校验只有一条：那段话写了没有。校验通过就直接进生成。
+    if (entryMode.value === 'prd-quick') {
+      if (!quickInput.value.requirements.trim()) return
+      // ⚠️ `goTo` 必须在 `generatePrd` 之前：生成态置位后 busy 守卫会拦下重复发起
+      goTo('generating-prd')
+      await generatePrd()
+      return
+    }
     if (!canGeneratePrd.value) return
+    // 完整流程保留这道闸门：那边真有一份可以回填的摘要。
     goTo('summary-diff')
     await runSummarySync()
   }
@@ -1249,7 +1309,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     onAiOptimize,
     handleGenerateApiDocs,
     handleGeneratePrompts,
-    handleGenerateQuickPrd,
+    autoClarify,
     handleGeneratePromptsFromDebugPrd,
     handleGeneratePromptsFromPair,
     backToInput,

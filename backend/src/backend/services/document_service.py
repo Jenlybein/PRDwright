@@ -50,6 +50,7 @@ from backend.services.document_review import (
 from backend.services.pending_items import (
     PendingBlockSuppressor,
     extract,
+    format_pending_items,
     render_spec,
 )
 from backend.services.prd_section_writer import PrdSectionWriter, is_available as prd_sections_available
@@ -62,6 +63,7 @@ from backend.services.prd_skill import (
 )
 from backend.services.prompts import (
     API_DOCS_GENERATION_PROMPT,
+    AUTO_CLARIFY_PROMPT,
     CLARIFICATION_REWRITE_PROMPT,
     NO_API_DOCS_NOTE,
     OPTIMIZE_DOCUMENT_PROMPT_TEMPLATE,
@@ -245,6 +247,19 @@ _SKILL_KEY_LABELS: dict[str, str] = {
 }
 
 
+def review_enabled_for_whole_document(value: bool | None) -> bool:
+    """整篇类产物（接口文档 / 提示词套件）本次是否跑「审一次 → 必要时改写一次」。
+
+    与 PRD 的逐章审核共用一个请求字段 `review_enabled`，但**默认口径不同**：
+    `None` 在这里视为**开启**——这两份产物没有独立的配置开关，历史行为就是审，
+    只有快捷流程会在请求体里显式传 `False`（ADR-034：快捷流程不审不改）。
+
+    写成「只有 `False` 才是关」而不是「只有 `True` 才是开」：未知/缺省值一律保持
+    原有行为，别因为一个前端漏传字段就悄悄改变产出的质量口径。
+    """
+    return value is not False
+
+
 def format_rewrite_reference(kind: str) -> str:
     """按目标产物取「改写时要对齐的规范」文本（整段注入，见 ADR-020）。
 
@@ -303,15 +318,23 @@ class DocumentService:
             self._llm = get_llm()
         return self._llm
 
-    def _get_section_writer(self) -> PrdSectionWriter:
+    def _get_section_writer(self, review_enabled: bool | None = None) -> PrdSectionWriter:
         """获取 PRD 分章节生成器（惰性创建，与本源共用同一个 LLM 实例）。
+
+        Args:
+            review_enabled: 本次是否启用逐章审核/改写。**不传（`None`）返回共享实例**，
+                行为完全等于从前；显式传入时**每次新建一个**——生成器把该开关存在实例上，
+                复用一个共享实例就等于「后一个请求悄悄改掉前一个请求的配置」。
+                新建时仍复用同一个 LLM 实例（`self.llm`），不会多开客户端。
 
         Returns:
             `PrdSectionWriter` 实例。
         """
-        if self._section_writer is None:
-            self._section_writer = PrdSectionWriter(llm=self.llm)
-        return self._section_writer
+        if review_enabled is None:
+            if self._section_writer is None:
+                self._section_writer = PrdSectionWriter(llm=self.llm)
+            return self._section_writer
+        return PrdSectionWriter(llm=self.llm, review_enabled=review_enabled)
 
     # ------------------------------------------------------------------
     # 模板加载与 Prompt 拼接
@@ -499,6 +522,7 @@ class DocumentService:
         requirements: str = "",
         product_name: str = "",
         history: list[dict[str, Any]] | None = None,
+        review_enabled: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """根据**结构化需求摘要**或**自由文本需求**生成 PRD。
 
@@ -518,6 +542,9 @@ class DocumentService:
             requirements: 自由文本需求；仅在 `summary` 为空时使用。
             product_name: 产品名称，仅用于 PRD 文档头；摘要里已有名称时以摘要为准。
             history: 补充对话记录（`{role, content}` 列表），可为空。
+            review_enabled: 本次是否启用**逐章审核 + 改写**。`None`（默认）取配置口径；
+                快捷流程显式传 `False`——它的输入只有一段话，逐章复核的边际收益很低，
+                而「只撰写、不审不改」能省下约一半调用。
 
         Yields:
             `StreamEvent`：分章节路径下为 `status` / `chunk` / 若干 `stage` / `done`；
@@ -530,7 +557,7 @@ class DocumentService:
             raise ValueError("summary 与 requirements 至少需要提供一个")
 
         if prd_sections_available():
-            writer = self._get_section_writer()
+            writer = self._get_section_writer(review_enabled)
             async for event in writer.stream(
                 summary=summary,
                 requirements=requirements,
@@ -555,6 +582,7 @@ class DocumentService:
     async def generate_api_docs_stream(
         self,
         prd_content: str,
+        review_enabled: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """根据 PRD 正文生成接口文档。
 
@@ -565,6 +593,8 @@ class DocumentService:
 
         Args:
             prd_content: PRD 正文（Markdown）。
+            review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」。`None`（默认）
+                视为开启；快捷流程显式传 `False`，一遍过（ADR-034）。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（接口文档正文）。
@@ -616,18 +646,23 @@ class DocumentService:
                 # 都通过 `stage_chunk` 实时推给前端（见 `stream_review_and_rewrite`）。
                 # 初稿已经以 chunk 流出去过，改写稿用 part{replace} 整段覆盖，
                 # 避免「初稿 + 改稿」在同一份预览里叠字。
+                #
+                # 快捷流程（`review_enabled=False`）**整段跳过**：连 `review` 结论事件
+                # 一起不发。只跳调用、照样发一条「通过」的结论，会被读成「审过了、没问题」，
+                # 那是假信号（与 PRD 侧同口径）。
                 outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
-                async for review_event_or_chunk in stream_review_and_rewrite(
-                    self.llm,
-                    document=clean_reply,
-                    writing_rules=api_specs,
-                    requirements=prd_content,
-                    doc_type="api_doc",
-                    kind="api_docs",
-                    label="接口文档",
-                    outcome=outcome,
-                ):
-                    yield review_event_or_chunk
+                if review_enabled_for_whole_document(review_enabled):
+                    async for review_event_or_chunk in stream_review_and_rewrite(
+                        self.llm,
+                        document=clean_reply,
+                        writing_rules=api_specs,
+                        requirements=prd_content,
+                        doc_type="api_doc",
+                        kind="api_docs",
+                        label="接口文档",
+                        outcome=outcome,
+                    ):
+                        yield review_event_or_chunk
                 yield StreamEvent(
                     type="done",
                     content="",
@@ -644,6 +679,7 @@ class DocumentService:
         self,
         prd_content: str,
         api_docs_content: str = "",
+        review_enabled: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """根据 PRD 正文（可附带接口文档正文）生成提示词套件。
 
@@ -657,6 +693,8 @@ class DocumentService:
                 两份材料都在手上时，提示词可以同时参考。留空（默认）表示没有这份材料，
                 此时模板里那一节填 `NO_API_DOCS_NOTE`——写成「本次未提供」而不是留空，
                 免得模型把「空的一节」理解成「漏读了」，转头自己编一份接口契约出来。
+            review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」。`None`（默认）
+                视为开启；快捷流程显式传 `False`，一遍过（ADR-034）。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（提示词套件正文）。
@@ -704,21 +742,23 @@ class DocumentService:
                 clean_reply, items = extract(reply)
 
                 # 与接口文档同构：整篇生成 → 审一次 → 有问题改写一次（不复审）。
+                # 快捷流程（`review_enabled=False`）与接口文档一样整段跳过，不发 `review`。
                 requirements_text = prd_content
                 if api_docs_content.strip():
                     requirements_text = f"{prd_content}\n\n## 接口文档\n\n{api_docs_content}"
                 outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
-                async for review_event_or_chunk in stream_review_and_rewrite(
-                    self.llm,
-                    document=clean_reply,
-                    writing_rules=guide,
-                    requirements=requirements_text,
-                    doc_type="prompts",
-                    kind="prompts",
-                    label="提示词套件",
-                    outcome=outcome,
-                ):
-                    yield review_event_or_chunk
+                if review_enabled_for_whole_document(review_enabled):
+                    async for review_event_or_chunk in stream_review_and_rewrite(
+                        self.llm,
+                        document=clean_reply,
+                        writing_rules=guide,
+                        requirements=requirements_text,
+                        doc_type="prompts",
+                        kind="prompts",
+                        label="提示词套件",
+                        outcome=outcome,
+                    ):
+                        yield review_event_or_chunk
                 yield StreamEvent(
                     type="done",
                     content="",
@@ -796,13 +836,72 @@ class DocumentService:
             skill_context=format_rewrite_reference(doc_kind),
             pending_spec=render_spec(),
         )
+        async for event in self._rewrite_stream(
+            user_content,
+            status_text="正在按澄清结果改写文档…",
+            doc_type="clarify",
+        ):
+            yield event
+
+    async def auto_clarify_stream(
+        self,
+        document: str,
+        pending_items: list[dict[str, Any]],
+        doc_kind: str = "prd",
+    ) -> AsyncIterator[StreamEvent]:
+        """让 AI **自己拍板**待确认问题并改写文档（用户不参与）。
+
+        「按澄清对话改写」要求模型**不许编造**（见 `CLARIFICATION_REWRITE_PROMPT` 第四条），
+        因为它只能复述用户说过的话；这条链路正相反——用户选择不出面，模型必须**替用户拍板**，
+        所以用的是另一套提示词（`AUTO_CLARIFY_PROMPT`）：取最保守的行业默认值，
+        拿不准的才留在清单里。
+
+        两条链路共用同一段「剥离标记块 + 重算清单」的收尾（`_rewrite_stream`）：
+        改写后的清单可能少几条（拍板掉的），也可能仍有几条（真需要用户提供事实），
+        由模型自己决定，前端照单展示。
+
+        Args:
+            document: 原文档正文（Markdown）。
+            pending_items: 待拍板的清单（后端结构，不是前端拼好的文本）。
+            doc_kind: 目标产物类型，决定注入哪一套产出规范。
+
+        Yields:
+            `StreamEvent`；`done` 的 `data` 带完整 `reply` 与重算后的 `pending_items`。
+        """
+        user_content = AUTO_CLARIFY_PROMPT.format(
+            document=document,
+            pending_items=format_pending_items(pending_items),
+            skill_context=format_rewrite_reference(doc_kind),
+            pending_spec=render_spec(),
+        )
+        async for event in self._rewrite_stream(
+            user_content,
+            status_text="正在逐条拍板待确认问题…",
+            doc_type="auto_clarify",
+        ):
+            yield event
+
+    async def _rewrite_stream(
+        self,
+        user_content: str,
+        *,
+        status_text: str,
+        doc_type: str,
+    ) -> AsyncIterator[StreamEvent]:
+        """「改写一份既有文档」的公共收尾：流式输出 + 剥离标记块 + 重算清单。
+
+        澄清改写与 AI 自行澄清只差**提示词**（一个复述用户结论、一个替用户拍板），
+        收尾动作完全一样，因此收在这一处：实时 `chunk` 先过抑制器（标记块可能被切在
+        分片边界），`done` 时对完整 reply 再 `extract` 一次，得到干净正文与清单。
+        两条链路各写一遍的话，「换了正文却忘了重算清单」就有了落脚点。
+        """
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
         suppressor = PendingBlockSuppressor()
         async for event in iter_reply_events(
             self.llm,
             messages,
-            status_text="正在按澄清结果改写文档…",
-            extra_data={"doc_type": "clarify"},
+            status_text=status_text,
+            extra_data={"doc_type": doc_type},
         ):
             if event.type == "chunk":
                 clean = suppressor.feed(event.content)
@@ -859,6 +958,7 @@ async def generate_prd_from_summary_stream(
     requirements: str = "",
     product_name: str = "",
     history: list[dict[str, Any]] | None = None,
+    review_enabled: bool | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """根据结构化摘要（或自由文本需求）生成 PRD 的流式入口。"""
     async for event in get_service().generate_prd_from_summary_stream(
@@ -866,15 +966,20 @@ async def generate_prd_from_summary_stream(
         requirements=requirements,
         product_name=product_name,
         history=history,
+        review_enabled=review_enabled,
     ):
         yield event
 
 
 async def generate_api_docs_stream(
     prd_content: str,
+    review_enabled: bool | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """生成接口文档的流式入口。"""
-    async for event in get_service().generate_api_docs_stream(prd_content=prd_content):
+    async for event in get_service().generate_api_docs_stream(
+        prd_content=prd_content,
+        review_enabled=review_enabled,
+    ):
         yield event
 
 
@@ -892,6 +997,7 @@ async def sync_summary_from_conversation(
 async def generate_prompts_stream(
     prd_content: str,
     api_docs_content: str = "",
+    review_enabled: bool | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """生成提示词套件的流式入口。
 
@@ -900,6 +1006,7 @@ async def generate_prompts_stream(
     async for event in get_service().generate_prompts_stream(
         prd_content=prd_content,
         api_docs_content=api_docs_content,
+        review_enabled=review_enabled,
     ):
         yield event
 
@@ -931,6 +1038,20 @@ async def apply_clarification_stream(
     async for event in get_service().apply_clarification_stream(
         document=document,
         history=history,
+        doc_kind=doc_kind,
+    ):
+        yield event
+
+
+async def auto_clarify_stream(
+    document: str,
+    pending_items: list[dict[str, Any]],
+    doc_kind: str = "prd",
+) -> AsyncIterator[StreamEvent]:
+    """AI 自行拍板待确认问题并改写文档的流式入口（`auto_clarify` 任务走这里）。"""
+    async for event in get_service().auto_clarify_stream(
+        document=document,
+        pending_items=pending_items,
         doc_kind=doc_kind,
     ):
         yield event

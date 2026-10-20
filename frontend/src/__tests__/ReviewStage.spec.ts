@@ -1,6 +1,6 @@
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import DocumentReview from '../components/DocumentReview.vue'
 import GeneratingStage from '../components/stages/GeneratingStage.vue'
@@ -403,7 +403,7 @@ describe('ReviewStage 的待确认清单', () => {
     expect(bar.text()).not.toContain('分页上限取多少？')
     // 也没有因为清单多出任何按钮（澄清入口只有待确认项与开关同时具备时才有）
     const texts = wrapper.findAll('button').map((item) => item.text())
-    expect(texts.filter((text) => text.includes('确认剩下的'))).toHaveLength(0)
+    expect(texts.filter((text) => text.includes('前往澄清问题'))).toHaveLength(0)
   })
 })
 
@@ -423,6 +423,11 @@ describe('ReviewStage 的澄清入口', () => {
     { id: 'p-1', question: '分页上限取多少？', sections: [], decider: '', importance: 'P0' },
   ]
 
+  // 弹窗 Teleport 到 body：每例之前清干净，免得上一条用例弹窗残留的文案骗过断言
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
   function mountEntry(props: Record<string, unknown> = {}): VueWrapper {
     return mount(ReviewStage, {
       props: {
@@ -440,33 +445,120 @@ describe('ReviewStage 的澄清入口', () => {
     })
   }
 
-  it('三种审阅页给的是同一个入口（不再区分「回到对话」与「逐条澄清」）', () => {
+  it('三种审阅页给的是同一组入口：用户出面 / AI 自行拍板', () => {
     for (const viewState of ['review-prd', 'review-api-docs', 'review-prompts'] as const) {
       const wrapper = mountEntry({ viewState })
-      expect(wrapper.text(), viewState).toContain('回到对话，确认剩下的 1 个问题')
-      expect(wrapper.text(), viewState).not.toContain('逐条澄清')
+      expect(wrapper.text(), viewState).toContain('前往澄清问题')
+      expect(wrapper.text(), viewState).toContain('AI 自行澄清')
     }
   })
 
-  it('点它发出 returnToChat 事件（去哪条线程由上层决定）', async () => {
+  it('剩余条数不进按钮文案，而是单独的计数芯片（按钮宽度不随条数抖动）', () => {
     const wrapper = mountEntry()
-    const entry = wrapper
-      .findAll('button')
-      .find((button) => button.text().includes('回到对话，确认剩下的'))
+    const bar = wrapper.find('.shell-action-bar')
+
+    expect(wrapper.text()).toContain('还剩 1 个问题')
+    // 按钮名是**动作**，不该带数字
+    const buttonTexts = bar.findAll('button').map((item) => item.text())
+    expect(buttonTexts).toContain('前往澄清问题')
+    expect(buttonTexts.some((text) => text.includes('1 个问题'))).toBe(false)
+  })
+
+  it('点「前往澄清问题」发出 returnToChat 事件（去哪条线程由上层决定）', async () => {
+    const wrapper = mountEntry()
+    const entry = wrapper.findAll('button').find((button) => button.text() === '前往澄清问题')
     expect(entry).toBeTruthy()
     await entry?.trigger('click')
 
     expect(wrapper.emitted('returnToChat')).toHaveLength(1)
   })
 
+  it('两个澄清按钮上下叠成一列，且合起来只占一个按钮的高度', () => {
+    const wrapper = mountEntry()
+    const ask = wrapper.findAll('button').find((button) => button.text() === '前往澄清问题')
+    const auto = wrapper.findAll('button').find((button) => button.text() === 'AI 自行澄清')
+
+    // 同一个父容器、且容器是竖向排列：它们并列回答同一个问题，只是出面的人不同
+    expect(ask?.element.parentElement).toBe(auto?.element.parentElement)
+    const group = ask?.element.parentElement
+    expect(group?.className).toContain('flex-col')
+    // 顺序固定：「我去答」在上，「让 AI 拍板」在下
+    expect(ask?.element.nextElementSibling).toBe(auto?.element)
+
+    // 高度锁死在一个 `md` 按钮上（38px），否则底栏会被两行按钮撑高一倍
+    expect(group?.className).toContain('h-[38px]')
+    // 分隔线用 `divide-y` 加在子元素上，不额外插一个 div（否则上下两行高度不等）
+    expect(group?.className).toContain('divide-y')
+  })
+
+  it('点「AI 自行澄清」先弹确认窗，确认后才发出 autoClarify', async () => {
+    const wrapper = mountEntry()
+    const entry = wrapper.findAll('button').find((button) => button.text() === 'AI 自行澄清')
+    expect(entry).toBeTruthy()
+    // 按钮上先给一句说明
+    expect(entry?.attributes('title')).toContain('默认值')
+
+    await entry?.trigger('click')
+    await nextTick()
+
+    // 一次点击不直接改写正文：先把「它会做什么」说清楚
+    expect(wrapper.emitted('autoClarify')).toBeUndefined()
+    const dialog = document.body.textContent ?? ''
+    expect(dialog).toContain('让 AI 自行澄清？')
+    expect(dialog).toContain('逐条拍板')
+    expect(dialog).toContain('直接写进正文')
+    // 不会编造事实这一点必须写明，否则用户没法判断敢不敢点
+    expect(dialog).toContain('不会编造具体数字')
+
+    const confirm = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === '开始澄清',
+    )
+    expect(confirm).toBeTruthy()
+    confirm?.click()
+    await nextTick()
+
+    expect(wrapper.emitted('autoClarify')).toHaveLength(1)
+    // 确认后弹窗关闭
+    expect(document.body.textContent).not.toContain('让 AI 自行澄清？')
+  })
+
+  it('点弹窗里的「取消」什么都不发生', async () => {
+    const wrapper = mountEntry()
+    const entry = wrapper.findAll('button').find((button) => button.text() === 'AI 自行澄清')
+    await entry?.trigger('click')
+    await nextTick()
+
+    const cancel = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === '取消',
+    )
+    cancel?.click()
+    await nextTick()
+
+    expect(wrapper.emitted('autoClarify')).toBeUndefined()
+    expect(document.body.textContent).not.toContain('让 AI 自行澄清？')
+  })
+
+  it('hideBack 时不渲染「返回」——录入页就在进度条第 1 步上，点一下就回去', () => {
+    const wrapper = mountEntry({ hideBack: true, keepBackButton: true, backLabel: '返回描述' })
+    const bar = wrapper.find('.shell-action-bar')
+
+    expect(bar.text()).not.toContain('返回描述')
+    // 澄清入口照旧在
+    expect(bar.text()).toContain('前往澄清问题')
+
+    // 没有待确认项时也一样（否则会出现一个纯重复的「返回」）
+    const noItems = mountEntry({ hideBack: true, pendingItems: [] })
+    expect(noItems.find('.shell-action-bar').text()).not.toContain('返回对话')
+  })
+
   it('入口落在底栏次操作组，并顶替「返回」（不并排两个都通向对话页的按钮）', () => {
     const wrapper = mountEntry()
     const bar = wrapper.find('.shell-action-bar')
 
-    expect(bar.text()).toContain('回到对话，确认剩下的 1 个问题')
+    expect(bar.text()).toContain('前往澄清问题')
     expect(bar.text()).not.toContain('返回对话')
     // 全页只有底栏这一处入口
-    const entries = wrapper.findAll('button').filter((item) => item.text().includes('回到对话'))
+    const entries = wrapper.findAll('button').filter((item) => item.text() === '前往澄清问题')
     expect(entries).toHaveLength(1)
   })
 
@@ -475,15 +567,13 @@ describe('ReviewStage 的澄清入口', () => {
     const bar = wrapper.find('.shell-action-bar')
     const texts = bar.findAll('button').map((item) => item.text())
 
-    // 落点不同，所以两个都要在
+    // 落点不同，所以都要在
     expect(texts).toContain('返回描述')
-    // 快捷 / 调试入口没有需求对话，说的是「和 AI 确认」而不是「回到对话」
-    expect(wrapper.text()).toContain('和 AI 确认剩下的 1 个问题')
-    expect(wrapper.text()).not.toContain('回到对话')
-    // 顺序：返回在前，澄清入口在后，两者紧挨着（同属次操作组）
-    expect(texts.indexOf('返回描述')).toBeLessThan(
-      texts.findIndex((text) => text.includes('和 AI 确认剩下的')),
-    )
+    expect(texts).toContain('前往澄清问题')
+    expect(texts).toContain('AI 自行澄清')
+    // 顺序：返回在最前，两个澄清按钮紧随其后
+    expect(texts.indexOf('返回描述')).toBeLessThan(texts.indexOf('前往澄清问题'))
+    expect(texts.indexOf('前往澄清问题')).toBeLessThan(texts.indexOf('AI 自行澄清'))
   })
 
   it('没有该入口时底栏保留「返回」按钮（开关为 false，或压根没有待确认项）', () => {
@@ -501,14 +591,15 @@ describe('ReviewStage 的澄清入口', () => {
       props: { ...baseProps, pendingItems: items, canReturnToChat: false },
     })
     expect(noSwitch.find('.shell-action-bar').text()).toContain('返回对话')
-    expect(noSwitch.text()).not.toContain('确认剩下的')
+    expect(noSwitch.text()).not.toContain('前往澄清问题')
 
     // 开关开了却没有待确认项：仍然不给入口——点进去只能和 AI 闲聊
     const noItems = mount(ReviewStage, {
       props: { ...baseProps, pendingItems: [], canReturnToChat: true },
     })
     expect(noItems.find('.shell-action-bar').text()).toContain('返回对话')
-    expect(noItems.text()).not.toContain('确认剩下的')
+    expect(noItems.text()).not.toContain('前往澄清问题')
+    expect(noItems.text()).not.toContain('还剩')
   })
 })
 

@@ -9,7 +9,9 @@ import {
   documentKindOfChatStage,
   emptyConversationIds,
   generatingStateFor,
+  hasDocumentReview,
   hasRequiredDocuments,
+  hasRequirementChat,
   isChatStage,
   isDocKind,
   isDocumentKind,
@@ -73,6 +75,26 @@ describe('阶段判定', () => {
 })
 
 describe('入口模式对进度与完成条件的影响', () => {
+  it('只有完整流程有需求澄清对话', () => {
+    expect(hasRequirementChat('structured')).toBe(true)
+    // 快捷流程一段话直接进生成，不问问题；两个导入入口自带的 PRD 就是答案
+    expect(hasRequirementChat('prd-quick')).toBe(false)
+    expect(hasRequirementChat('prompt-debug')).toBe(false)
+    expect(hasRequirementChat('prd-and-api-paste')).toBe(false)
+    // 还没选入口（或旧快照）时按完整流程处理，与 `MODE_STEP_IDS` 的兜底口径一致
+    expect(hasRequirementChat(null)).toBe(true)
+  })
+
+  it('只有快捷流程不带审核/改写', () => {
+    expect(hasDocumentReview('structured')).toBe(true)
+    // 快捷流程的定义就是「不审不改」：调用要跳，界面上那两格也不能画
+    expect(hasDocumentReview('prd-quick')).toBe(false)
+    expect(hasDocumentReview('prompt-debug')).toBe(true)
+    expect(hasDocumentReview('prd-and-api-paste')).toBe(true)
+    // 还没选入口（或旧快照）时按完整流程处理：默认带上复核，漏配只是多等一会儿
+    expect(hasDocumentReview(null)).toBe(true)
+  })
+
   it('只承认已定义的入口模式', () => {
     expect(isEntryMode('structured')).toBe(true)
     expect(isEntryMode('prd-quick')).toBe(true)
@@ -90,8 +112,12 @@ describe('入口模式对进度与完成条件的影响', () => {
       'review-prompts',
       'done',
     ])
-    // 快捷入口跳过表单与对话，不该显示两步点不动的空壳
+    // 快捷流程与完整流程同一条流水线，步数都一样：只差第一步的形态（极简输入）。
+    // 「AI 对话」这一格保留——快捷流程没有需求澄清，但它承载**文档澄清**那三条线程；
+    // 少这一格会让停在对话页时下标归零，进度条去高亮「描述产品」。
     expect(stepsForMode('prd-quick').map((step) => step.id)).toEqual([
+      'form',
+      'chatting',
       'review-prd',
       'review-api-docs',
       'review-prompts',
@@ -113,9 +139,13 @@ describe('入口模式对进度与完成条件的影响', () => {
   })
 
   it('步骤下标按模式口径计算', () => {
-    // 快捷入口的「PRD」是它的第 1 步，而不是全局的第 3 步
+    // 快捷流程的录入页落在第 1 步（「描述产品」），与完整流程的表单同位
     expect(stepIndexOf('prd-quick', 'prd-quick')).toBe(0)
-    expect(stepIndexOf('review-api-docs', 'prd-quick')).toBe(1)
+    // 「AI 对话」在快捷流程里照样占一格（文档澄清走的就是这个对话页）
+    expect(stepIndexOf('chatting', 'prd-quick')).toBe(1)
+    expect(stepIndexOf('review-prd', 'prd-quick')).toBe(2)
+    expect(stepIndexOf('review-api-docs', 'prd-quick')).toBe(3)
+    expect(stepIndexOf('review-prompts', 'prd-quick')).toBe(4)
     expect(stepIndexOf('review-prompts', 'prompt-debug')).toBe(0)
     expect(stepIndexOf('entry', null)).toBe(0)
     // 完整流程口径与全局一致
@@ -137,10 +167,10 @@ describe('入口模式对进度与完成条件的影响', () => {
         currentStepIndex: 0,
       }),
     ).toBe(0)
-    // 快捷入口：有 PRD 是第 1 步，再加接口文档才是第 2 步
+    // 快捷流程与完整流程步数一致：有 PRD 就停在「PRD」那一步（下标 2）
     expect(
       reachedStepIndex({ ...base, mode: 'prd-quick', hasPrd: true, currentStepIndex: 0 }),
-    ).toBe(0)
+    ).toBe(2)
     expect(
       reachedStepIndex({
         ...base,
@@ -149,13 +179,18 @@ describe('入口模式对进度与完成条件的影响', () => {
         hasApiDocs: true,
         currentStepIndex: 0,
       }),
+    ).toBe(3)
+    // 文档澄清聊过之后，「AI 对话」那一格就解锁了
+    expect(
+      reachedStepIndex({ ...base, mode: 'prd-quick', hasMessages: true, currentStepIndex: 0 }),
     ).toBe(1)
   })
 
   it('完成条件按各入口模式的交付物判断', () => {
     const onlyPrd = { prd: 'a', apiDocs: '', prompts: '' }
     expect(hasRequiredDocuments('structured', onlyPrd)).toBe(false)
-    expect(hasRequiredDocuments('prd-quick', onlyPrd)).toBe(true)
+    // 快捷流程复用同一条进度条，交付判据也一并对齐：只有 PRD 不算完成
+    expect(hasRequiredDocuments('prd-quick', onlyPrd)).toBe(false)
     expect(hasRequiredDocuments('prompt-debug', onlyPrd)).toBe(false)
     expect(
       hasRequiredDocuments('prompt-debug', { prd: '', apiDocs: '', prompts: 'c' }),

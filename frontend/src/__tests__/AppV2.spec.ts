@@ -273,11 +273,33 @@ async function clickButton(
   await button.trigger('click')
 }
 
+/**
+ * 审阅页的澄清入口按钮文案。
+ *
+ * 四种入口下都是这一个（旁边并列的「AI 自行澄清」是另一个动作：让 AI 自己拍板），
+ * 点击统一落到当前那份文档的澄清线程上。
+ */
+const CLARIFY_ENTRY_TEXT = '前往澄清问题'
+
 /** 点击进度条上的某个步骤（步骤是带 @click 的 div，不是 button） */
 async function clickStep(wrapper: VueWrapper, label: string): Promise<void> {
   const item = wrapper.findAll('nav li').find((li) => li.text().includes(label))
   if (!item) throw new Error(`未找到进度步骤：${label}`)
   await item.find('div').trigger('click')
+}
+
+/**
+ * 点击弹窗（Teleport 到 `document.body`）里文案完全等于 `text` 的按钮。
+ *
+ * 弹窗不在 `wrapper.element` 之内，`wrapper.find` 搜不到，只能直接查 DOM。
+ */
+async function clickButtonInDialog(text: string): Promise<void> {
+  const button = Array.from(document.body.querySelectorAll('button')).find(
+    (item) => item.textContent?.trim() === text,
+  )
+  if (!button) throw new Error(`弹窗里未找到按钮：${text}`)
+  button.click()
+  await flushPromises()
 }
 
 /** 构造一份可用于提交的完整摘要 */
@@ -914,6 +936,8 @@ describe('AppV2 完整流程编排', () => {
     // 不再经过检索确认闸门：直接进入生成、任务已创建
     expect(jobCount('api-docs')).toBe(1)
     expect(wrapper.text()).toContain('接口文档')
+    // 完整流程不关复核：`reviewEnabled` 连同字段一起缺省，由后端按配置决定
+    expect(jobPayload('api-docs')?.reviewEnabled).toBeUndefined()
   })
 
   it('用量回执按文档各自留存：切到哪份文档就显示哪份的回执', async () => {
@@ -1461,8 +1485,9 @@ describe('AppV2 的文档手改自动落库与下载', () => {
  *
  * 四条入口共用「生成 → 审阅 → 下载」链路，差异只有三处：需求从哪来、进度条显示哪几步、
  * 完成需要哪几份文档。因此这里重点钉住这三处，外加一条硬约束——
- * **快捷入口不能经过摘要确认闸门**（那道闸门是给「对话补充信息回填」用的，
- * 快捷入口根本没有对话）。
+ * **快捷入口与完整流程共用同一条链路**（同一个进度条、同样的三份齐备才算交付），
+ * 但它**一路不问问题**：一段话提交后直接进生成，既没有需求澄清对话，也不经过摘要确认闸门
+ * （那道闸门要把对话里的补充信息回填进结构化摘要，而快捷入口根本没有摘要可回填）。
  */
 describe('AppV2 入口模式', () => {
   /** 进入 快捷流程入口并填好一段话 */
@@ -1472,34 +1497,58 @@ describe('AppV2 入口模式', () => {
     await byId(wrapper, 'field-quick-requirements').setValue('做一个记账 App，支持多人共享账本。')
   }
 
-  it('快捷流程：一段话直接生成 PRD，不经过摘要确认闸门', async () => {
+  /** 提交极简输入，等 PRD 生成落地 */
+  async function submitQuickPrd(wrapper: VueWrapper): Promise<void> {
+    await fillQuickPrd(wrapper)
+    await clickButton(wrapper, '生成 PRD', true)
+    await flushPromises()
+  }
+
+  it('快捷流程：一段话直接生成 PRD，不问问题也不经过摘要确认闸门', async () => {
     const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
 
-    // 跳过了表单与对话：进度条只剩 PRD / 接口文档 / 提示词 / 交付四步
+    // 录入页是「描述产品」那一步的极简形态；进度条与完整流程同一套，六步齐全——
+    // 「AI 对话」那一格留给文档澄清（需求澄清那条线程没有，但对话页本身要用）
     expect(wrapper.text()).toContain('直接生成 PRD')
-    expect(wrapper.text()).not.toContain('需求澄清对话')
-    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(4)
-    expect(wrapper.text()).not.toContain('描述产品')
+    expect(wrapper.text()).toContain('描述产品')
+    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(6)
 
     await clickButton(wrapper, '生成 PRD', true)
     await flushPromises()
 
-    // 关键：一次摘要回填都没发生，也就没有弹过确认面板
+    // 关键：一步对话都没发生，一次摘要回填也没发生
+    expect(api.startConversationStream).not.toHaveBeenCalled()
     expect(api.syncSummaryFromConversation).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('需求澄清对话')
     expect(wrapper.text()).not.toContain('需求摘要更新确认')
     expect(jobCount('prd')).toBe(1)
 
     const payload = jobPayload('prd')
     expect(payload?.requirements).toBe('做一个记账 App，支持多人共享账本。')
     expect(payload?.productName).toBe('小账本')
-    // 没有结构化摘要，也没有对话历史
+    // 没有结构化摘要，也没有对话历史（这条路根本不聊）
     expect(payload?.summary ?? null).toBeNull()
-    expect(payload?.history).toEqual([])
+    expect(payload?.history ?? []).toEqual([])
+    // 输入只有一段话，逐章复核的边际收益低：生成时只撰写、不审不改
+    expect(payload?.reviewEnabled).toBe(false)
 
-    expect(api.startConversationStream).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('项目背景')
+  })
+
+  it('快捷流程：接口文档与提示词同样一遍过（不审不改）', async () => {
+    const wrapper = await mountEntry()
+    await submitQuickPrd(wrapper)
+
+    // 「快捷」不能只在 PRD 那一站生效：后面两份也审一次、改一轮，省下的时间又还回去了
+    await clickButton(wrapper, '生成接口文档', true)
+    await flushPromises()
+    expect(jobPayload('api-docs')?.reviewEnabled).toBe(false)
+
+    await clickButton(wrapper, '生成提示词套件', true)
+    await flushPromises()
+    expect(jobPayload('prompts')?.reviewEnabled).toBe(false)
   })
 
   it('快捷流程：未填需求时不能提交', async () => {
@@ -1514,17 +1563,18 @@ describe('AppV2 入口模式', () => {
     expect(wrapper.text()).toContain('请至少写一句需求描述')
   })
 
-  it('快捷流程：「返回描述」回到录入页且内容还在，返回按钮文案随模式变化', async () => {
+  it('快捷流程：点进度条第 1 步就回到录入页，底栏不再有重复的「返回描述」', async () => {
     const wrapper = await mountEntry()
-    await fillQuickPrd(wrapper)
-    await clickButton(wrapper, '生成 PRD', true)
-    await flushPromises()
+    await submitQuickPrd(wrapper)
 
-    // 返回目标不是对话页，文案也不能写「返回对话」
-    expect(wrapper.text()).toContain('返回描述')
+    // 录入页就是进度条上的「描述产品」，底栏再放一个同名按钮是纯重复
+    expect(wrapper.text()).not.toContain('返回描述')
     expect(wrapper.text()).not.toContain('返回对话')
 
-    await clickButton(wrapper, '返回描述', true)
+    await clickStep(wrapper, '描述产品')
+    await flushPromises()
+
+    expect(storeOf(wrapper).viewState).toBe('prd-quick')
     expect(wrapper.text()).toContain('直接生成 PRD')
     // 录入内容由 store 持有，来回切换不丢
     expect((byId(wrapper, 'field-quick-requirements').element as HTMLTextAreaElement).value).toBe(
@@ -1532,27 +1582,14 @@ describe('AppV2 入口模式', () => {
     )
   })
 
-  it('快捷流程：只要 PRD 就能完成，完成页不留空文档卡片', async () => {
+  it('快捷流程：交付条件与完整流程一致，只生成 PRD 时「完成」仍不可用', async () => {
     const wrapper = await mountEntry()
-    await fillQuickPrd(wrapper)
-    await clickButton(wrapper, '生成 PRD', true)
-    await flushPromises()
+    await submitQuickPrd(wrapper)
 
-    // 只有 PRD 时「完成」应该可用（完整流程下同样条件是不可用的）
+    // 两条流程都要求三份齐备才算交付完成，快捷流程不降低门槛
     const finish = wrapper.findAll('button').find((item) => item.text().trim() === '完成')
-    expect((finish?.element as HTMLButtonElement).disabled).toBe(false)
-
-    await clickButton(wrapper, '完成', true)
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('文档已生成完毕')
-    // 只有 PRD 一张卡片：没生成过的文档不该留一个点进去是空的卡片
-    // （文本断言会被顶部导航的步骤名与常驻表单污染，因此数卡片元素）
-    const doneCards = wrapper.findAll('article')
-    expect(doneCards).toHaveLength(1)
-    expect(doneCards[0]?.text()).toContain('PRD 文档')
-    expect(doneCards[0]?.text()).not.toContain('接口文档')
-    expect(doneCards[0]?.text()).not.toContain('提示词套件')
+    expect(finish).toBeDefined()
+    expect((finish?.element as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('我有 PRD：贴入 PRD 直接生成提示词套件，且不出现「查看 PRD」', async () => {
@@ -1954,12 +1991,9 @@ describe('AppV2 文档澄清', () => {
     },
   ]
 
-  /** 澄清入口的文案在完整流程下是「回到对话…」，另外两条入口是「和 AI 确认…」——按中间那截匹配即可 */
-  const ENTRY_TEXT = '确认剩下的'
-
   /** 从审阅页点进澄清，等首轮追问落地 */
   async function openClarification(wrapper: VueWrapper): Promise<void> {
-    await clickButton(wrapper, ENTRY_TEXT)
+    await clickButton(wrapper, CLARIFY_ENTRY_TEXT)
     await flushPromises()
   }
 
@@ -1998,7 +2032,8 @@ describe('AppV2 文档澄清', () => {
   it('审阅 PRD 页给出澄清入口，并把正文与清单交给后端（场景点名，不递提示词）', async () => {
     const wrapper = await mountReviewWithPending()
 
-    expect(wrapper.text()).toContain('回到对话，确认剩下的 1 个问题')
+    expect(wrapper.text()).toContain('前往澄清问题')
+    expect(wrapper.text()).toContain('还剩 1 个问题')
     await openClarification(wrapper)
 
     // 回到的是**对话页**（标题切到 PRD 澄清），不是另开一个澄清页
@@ -2016,7 +2051,8 @@ describe('AppV2 文档澄清', () => {
   it('接口文档的审阅页给的是同一个入口（三种审阅页不再各走一条路）', async () => {
     const wrapper = await mountApiDocsReview()
 
-    expect(wrapper.text()).toContain('回到对话，确认剩下的 1 个问题')
+    expect(wrapper.text()).toContain('前往澄清问题')
+    expect(wrapper.text()).toContain('还剩 1 个问题')
     await openClarification(wrapper)
 
     // 进的是对话页的**接口澄清**那条线程
@@ -2024,7 +2060,7 @@ describe('AppV2 文档澄清', () => {
     expect(storeOf(wrapper).chatTab).toBe('api-docs-clarify')
   })
 
-  it('「快捷流程」的审阅页也给入口，且与「返回描述」并存（两者落点不同）', async () => {
+  it('「快捷流程」的审阅页也给同一组入口，且不再重复给「返回描述」', async () => {
     mockOpeningByDocument()
     const wrapper = await mountExistingSolution(
       { ...reviewSnapshot('review-prd'), entryMode: 'prd-quick' },
@@ -2033,10 +2069,13 @@ describe('AppV2 文档澄清', () => {
     )
     await flushPromises()
 
-    // 四条入口都开放澄清；快捷入口没有需求对话，所以文案是「和 AI 确认」而不是「回到对话」
-    expect(wrapper.text()).toContain('和 AI 确认剩下的 1 个问题')
-    // 「返回描述」是回到录入页的唯一入口（也不在进度条上），不能被顶掉
-    expect(wrapper.text()).toContain('返回描述')
+    // 四条入口的澄清入口完全一致
+    expect(wrapper.text()).toContain('前往澄清问题')
+    expect(wrapper.text()).toContain('AI 自行澄清')
+    // 剩余条数放在按钮旁的芯片里，不进按钮文案
+    expect(wrapper.text()).toContain('还剩 1 个问题')
+    // 录入页在进度条第 1 步上，底栏不再有「返回描述」
+    expect(wrapper.text()).not.toContain('返回描述')
 
     await openClarification(wrapper)
     expect(storeOf(wrapper).chatTab).toBe('prd-clarify')
@@ -2090,6 +2129,50 @@ describe('AppV2 文档澄清', () => {
     expect(documentsOf(wrapper).contentOf('prd')).toBe('# 产品需求文档')
   })
 
+  it('「AI 自行澄清」不开对话，直接把正文与清单交给后端拍板，完成后回到审阅页', async () => {
+    mockJobStream({
+      'auto-clarify': async (handlers) => {
+        handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
+        return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条', asks: [] }
+      },
+    })
+
+    const wrapper = await mountReviewWithPending()
+    // 它和「前往澄清问题」是两条路：这条不需要用户回答任何问题
+    expect(api.startConversationStream).not.toHaveBeenCalled()
+
+    await clickButton(wrapper, 'AI 自行澄清')
+    // 它会直接改写正文，因此先过一次确认弹窗
+    await clickButtonInDialog('开始澄清')
+
+    const payload = jobPayload('auto-clarify')
+    // 三样都要带：正文是改写对象，清单是拍板范围，docKind 决定写回哪一份
+    expect(payload?.document).toContain('分页上限：待确认')
+    expect(payload?.pendingItems).toHaveLength(1)
+    expect(payload?.pendingItems?.[0]?.question).toBe('分页上限取多少？')
+    expect(payload?.docKind).toBe('prd')
+
+    // 落到 PRD 的审阅页，正文已经是 AI 拍板后的版本
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(documentsOf(wrapper).contentOf('prd')).toContain('分页上限：50 条')
+  })
+
+  it('「AI 自行澄清」失败时停在生成视图并给出错误，不悄悄退回审阅页', async () => {
+    // 后端拒绝落库（如 doc_kind 对不上）时不会有正文，前端不能让用户以为改好了
+    vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
+      const kind = jobHarness.kinds.get(jobId) ?? 'prd'
+      if (kind === 'auto-clarify') throw new Error('模型调用失败')
+      return defaultJobStream(kind, handlers ?? {})
+    })
+
+    const wrapper = await mountReviewWithPending()
+    await clickButton(wrapper, 'AI 自行澄清')
+    await clickButtonInDialog('开始澄清')
+
+    expect(storeOf(wrapper).viewState).toBe('generating-prd')
+    expect(wrapper.text()).toContain('模型调用失败')
+  })
+
   it('点「按澄清结果改写」立刻进入对应的生成视图展示流式改写，完成后回到审阅页', async () => {
     // 用挂起的 deferred 流制造「可观测的中间态」：改写会一直进行到 release() 被调用
     let release!: () => void
@@ -2130,7 +2213,7 @@ describe('AppV2 文档澄清', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('PRD 文档')
-    expect(wrapper.text()).not.toContain(ENTRY_TEXT)
+    expect(wrapper.text()).not.toContain(CLARIFY_ENTRY_TEXT)
     expect(api.startConversationStream).not.toHaveBeenCalled()
   })
 
@@ -2245,12 +2328,12 @@ describe('AppV2 对话页的子标签栏', () => {
     await flushPromises()
 
     // 先在 PRD 那条线程上聊一轮
-    await clickButton(wrapper, '确认剩下的')
+    await clickButton(wrapper, CLARIFY_ENTRY_TEXT)
     await flushPromises()
     // 再去接口文档那条线程聊一轮
     await clickStep(wrapper, '接口文档')
     await flushPromises()
-    await clickButton(wrapper, '确认剩下的')
+    await clickButton(wrapper, CLARIFY_ENTRY_TEXT)
     await flushPromises()
     return wrapper
   }
@@ -2260,7 +2343,7 @@ describe('AppV2 对话页的子标签栏', () => {
       makeDocumentRecord('prd', '# 产品需求文档\n\n分页上限：待确认', null, PENDING),
     ])
     await flushPromises()
-    await clickButton(wrapper, '确认剩下的')
+    await clickButton(wrapper, CLARIFY_ENTRY_TEXT)
     await flushPromises()
 
     const tabs = wrapper.findAll('[role="tab"]')
@@ -2275,6 +2358,23 @@ describe('AppV2 对话页的子标签栏', () => {
     expect((byLabel('PRD 澄清')?.element as HTMLButtonElement).disabled).toBe(false)
     expect((byLabel('接口澄清')?.element as HTMLButtonElement).disabled).toBe(true)
     expect((byLabel('提示词澄清')?.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('快捷流程不显示「需求澄清」那一格：这条路没有需求可聊', async () => {
+    mockOpeningByDocument()
+    const wrapper = await mountExistingSolution(
+      { ...reviewSnapshot('review-prd'), entryMode: 'prd-quick' },
+      1,
+      [makeDocumentRecord('prd', '# 产品需求文档\n\n分页上限：待确认', null, PENDING)],
+    )
+    await flushPromises()
+    await clickButton(wrapper, CLARIFY_ENTRY_TEXT)
+    await flushPromises()
+
+    // 只剩三条文档线程。给一格永远点不亮的「需求澄清」，比不显示更让人困惑
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((item) => item.text())).toEqual(['PRD 澄清', '接口澄清', '提示词澄清'])
+    expect(storeOf(wrapper).chatTab).toBe('prd-clarify')
   })
 
   it('对话区只显示当前标签那条线程，点标签即换对话', async () => {

@@ -132,14 +132,14 @@ def _target_product_kind(kind: str, request: dict[str, Any]) -> str | None:
     """任务要**产出/改写**的是哪一份产物；无法确定时返回 `None`。
 
     - `prd` / `api_docs` / `prompts`：整篇生成，种类本身就是产物类型。
-    - `optimize` / `clarify`：对某一份**已有**文档的动作，产物类型来自请求体的 `doc_kind`。
+    - `optimize` / `clarify` / `auto_clarify`：对某一份**已有**文档的动作，产物类型来自请求体的 `doc_kind`。
 
     返回 `None` 表示取不到（如 `optimize` 漏传 `doc_kind`）。调用方据此**既不注入技能资源
     也不在回执里报技能包身份**——报一个跟实际注入不符的包，比不报更糟。
     """
     if kind in DOCUMENT_KINDS:
         return kind
-    if kind in ("optimize", "clarify"):
+    if kind in ("optimize", "clarify", "auto_clarify"):
         doc_kind = request.get("doc_kind")
         return doc_kind if doc_kind in DOCUMENT_KINDS else None
     return None
@@ -778,16 +778,22 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
             requirements=request.get("requirements", "") or "",
             product_name=request.get("product_name", "") or "",
             history=request.get("history") or None,
+            # 快捷流程显式传 False（只撰写、不审不改）；`None` 时由服务层取配置
+            review_enabled=request.get("review_enabled"),
         )
     if kind == "api_docs":
         return document_service.generate_api_docs_stream(
             prd_content=request.get("prd_content", "") or "",
+            # 快捷流程显式传 False：整篇一遍过，不审也不改（ADR-034）
+            review_enabled=request.get("review_enabled"),
         )
     if kind == "prompts":
         return document_service.generate_prompts_stream(
             prd_content=request.get("prd_content", "") or "",
             # 可选：来自「我有 PRD + 接口文档」入口。留空时生成口径与从前完全一致
             api_docs_content=request.get("api_docs_content", "") or "",
+            # 与接口文档同口径：快捷流程一遍过
+            review_enabled=request.get("review_enabled"),
         )
     if kind == "optimize":
         return document_service.optimize_document_stream(
@@ -800,6 +806,13 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
         return document_service.apply_clarification_stream(
             document=request.get("document", "") or "",
             history=request.get("history") or None,
+            doc_kind=_target_product_kind(kind, request) or "",
+        )
+    if kind == "auto_clarify":
+        return document_service.auto_clarify_stream(
+            document=request.get("document", "") or "",
+            # 清单是**结构化数据**：提示词怎么用它由后端决定，前端不参与措辞
+            pending_items=request.get("pending_items") or [],
             doc_kind=_target_product_kind(kind, request) or "",
         )
     raise ValueError(f"未知的生成任务类型：{kind}")

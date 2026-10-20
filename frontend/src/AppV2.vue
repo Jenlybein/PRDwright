@@ -32,6 +32,9 @@ import {
   docKindOfState,
   documentKindOfChatStage,
   generatingStateFor,
+  hasDocumentReview,
+  hasRequirementChat,
+  inputPageOnBar,
   normalizeChatStage,
 } from '@/utils/workflow'
 import {
@@ -429,7 +432,7 @@ const {
   onAiOptimize,
   handleGenerateApiDocs,
   handleGeneratePrompts,
-  handleGenerateQuickPrd,
+  autoClarify,
   handleGeneratePromptsFromDebugPrd,
   handleGeneratePromptsFromPair,
   backToInput,
@@ -631,9 +634,9 @@ const canReturnToChat = computed(
 /**
  * 澄清入口出现时是否**保留**「返回」按钮。
  *
- * 澄清入口与「返回」落点相同时（完整流程：两者都回对话页）由它顶替「返回」；
- * 落点不同时（快捷流程 / 我有 PRD / 我有 PRD + 接口文档：「返回」回的是录入页，
- * 那一页不在进度条上、没有别的入口）必须保留，否则用户再也回不去。
+ * 澄清入口与「返回」落点相同时由它顶替「返回」；落点不同时必须保留，否则用户再也回不去。
+ * 现在只有两个**导入**入口会走到「落点不同」这一支——它们的录入页不在进度条上
+ * （两个从零创建的入口由 `hideBack` 直接不给这个按钮，靠进度条第 1 步回去）。
  */
 const keepBackButton = computed(() => store.entryMode !== 'structured')
 
@@ -691,6 +694,38 @@ async function handleStartConversation(value: RequirementsSummary): Promise<void
 }
 
 /**
+ * 对话页「改需求」的落点随入口模式而变：完整流程回结构化表单，快捷流程回极简描述页。
+ *
+ * 两处的按钮文案也一并对齐（`editRequirementsLabel`）——同一个「返回」按钮把用户送到
+ * 一个完全不同的页面，却还写着「改需求」，会让人以为表单被弄丢了。
+ *
+ * ⚠️ 快捷流程现在**没有**需求澄清线程（见 `chatTabs`），所以这个分支正常情况下走不到；
+ * 留着是为了**旧快照**：在这次改动之前存的快捷流程方案里可能有需求对话，恢复后那条线程
+ * 仍会渲染，此时「改需求」必须回到极简录入页而不是结构化表单。
+ */
+function handleEditRequirements(): void {
+  goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+}
+
+/** 「改需求」按钮的文案；与 `handleEditRequirements` 的落点一一对应 */
+const editRequirementsLabel = computed(() =>
+  store.entryMode === 'prd-quick' ? '改描述' : '改需求',
+)
+
+/**
+ * 对话页展示哪几条线程。
+ *
+ * 需求澄清那一格只对**完整流程**有意义：快捷入口没有需求对话（一段话写完直接进生成），
+ * 两个导入入口自带的 PRD 本身就是答案。给它留一格永远点不亮的灰标签，只会让人以为
+ * 「是不是少了什么」——所以这里直接不渲染它，而不是渲染成禁用态。
+ */
+const chatTabs = computed(() =>
+  hasRequirementChat(store.entryMode)
+    ? [...CHAT_STAGES]
+    : CHAT_STAGES.filter((stage) => stage !== 'requirement'),
+)
+
+/**
  * 选择入口：未登录时拦下，登录后才真正进入。
  *
  * 创建任务会调用模型，属于必须登录的操作，因此这里**停在入口页**而不是先放行再报错。
@@ -730,9 +765,17 @@ function handleRestart(): void {
 
 /**
  * 点击进度条中已到达的步骤，跳回对应阶段查看之前的内容。
- * 五个步骤 id 与同名的阶段一一对应（`StepId` 是 `ViewState` 的子集），因此无需映射表。
+ *
+ * 步骤 id 与同名阶段一一对应（`StepId` 是 `ViewState` 的子集），**只有第 1 步例外**：
+ * 「描述产品」是两个从零创建入口共用的一格，实际录入页由入口模式决定
+ * （结构化表单 / 或一段话）。不映射的话，快捷流程点它会被送到结构化表单——
+ * 而这一格正是「删掉『返回描述』按钮」的替代品，送错地方就等于没给退路。
  */
 function handleStepClick(stepId: StepId): void {
+  if (stepId === 'form') {
+    goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+    return
+  }
   goTo(stepId)
 }
 
@@ -859,7 +902,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         v-else-if="viewState === 'prd-quick'"
         v-model:product-name="quickInput.productName"
         v-model:requirements="quickInput.requirements"
-        @generate="handleGenerateQuickPrd"
+        @generate="handleGeneratePrd"
         @back="goTo('entry')"
       />
 
@@ -897,7 +940,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
       <ChatStage
         v-else-if="viewState === 'chatting'"
         :messages="activeChat.displayMessages"
-        :tabs="CHAT_STAGES"
+        :tabs="chatTabs"
         :active-tab="activeChatTab"
         :available-tabs="availableChatTabs"
         :loading="activeChat.streaming"
@@ -908,7 +951,8 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :busy="store.busy"
         :pending-items="chatPendingItems"
         @select-tab="chatTab = $event"
-        @edit-requirements="goTo('form')"
+        :edit-requirements-label="editRequirementsLabel"
+        @edit-requirements="handleEditRequirements"
         @restart="handleRestart"
         @send="activeChat.sendMessage"
         @answer="handleClarificationAnswer"
@@ -926,9 +970,11 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :prd="prdStatus"
         :doc-phase="docPhase"
         :doc-stage-text="docStageText"
+        :with-review="hasDocumentReview(store.entryMode)"
         :draft-only="prdShowingDraft"
         :elapsed-ms="elapsedMs"
         :back-label="backLabel"
+        :hide-back="inputPageOnBar(store.entryMode)"
         @back="backToInput"
       />
 
@@ -949,6 +995,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :review="reviewConclusion"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
+        :hide-back="inputPageOnBar(store.entryMode)"
         :back-label="backLabel"
         @draft-change="onSaveDocument"
         @download="onDownloadDocument"
@@ -960,6 +1007,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @navigate="goTo"
         @finish="handleEndTask"
         @return-to-chat="handleReturnToChat"
+        @auto-clarify="autoClarify"
       />
 
       <!-- 全部完成 -->
@@ -969,6 +1017,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :api-docs-content="documentContents['api-docs']"
         :prompts-content="documentContents.prompts"
         :back-label="backLabel"
+        :hide-back="inputPageOnBar(store.entryMode)"
         @view="goTo"
         @download="downloadDocument"
         @download-bundle="downloadBundle"

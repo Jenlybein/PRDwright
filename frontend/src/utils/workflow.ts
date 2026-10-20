@@ -77,7 +77,8 @@ export function isDocKind(value: unknown): value is DocKind {
     value === 'api-docs' ||
     value === 'prompts' ||
     value === 'optimize' ||
-    value === 'clarify'
+    value === 'clarify' ||
+    value === 'auto-clarify'
   )
 }
 
@@ -147,11 +148,56 @@ export function emptyConversationIds(): Record<ChatStage, string> {
 const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
   // 完整流程：六步齐全（最后一步是交付）
   structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
-  // 快捷入口跳过了表单与对话，进度条不该显示一步都点不动的空壳
-  'prd-quick': ['review-prd', 'review-api-docs', 'review-prompts', 'done'],
+  // 快捷流程与完整流程**同一条流水线**，连步数都一样：只差第一步长什么样（极简输入而不是
+  // 结构化表单），以及它**没有需求澄清对话**（ADR-034 修订）——「AI 对话」这一格在快捷
+  // 流程里对应的是**文档澄清**那三条线程（它们就在同一个对话页上）。
+  //
+  // ⚠️ 这一格**不能省**：省掉之后 `stepIndexOf('chatting', 'prd-quick')` 会算出 -1 并归零，
+  // 用户在文档澄清页里聊天时，进度条高亮的是第 1 步「描述产品」——一个明显错位的状态。
+  'prd-quick': ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
   // 两个导入入口的产物只有提示词套件
   'prompt-debug': ['review-prompts', 'done'],
   'prd-and-api-paste': ['review-prompts', 'done'],
+}
+
+/**
+ * 这个入口有没有「需求澄清」那条对话。
+ *
+ * 只有**完整流程**有：它的起点是「先把需求交给 AI 逐题追问」。快捷流程刻意不要这一环——
+ * 用户选它就是因为不想多聊几轮，一段话写完直接进生成；两个导入入口自带的 PRD 已经是答案。
+ *
+ * 写成白名单而不是「不等于某些入口」：将来加新入口时，默认「没有需求对话」比默认「有」安全
+ * 得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
+ */
+export function hasRequirementChat(mode: EntryMode | null): boolean {
+  return (mode ?? 'structured') === 'structured'
+}
+
+/**
+ * 这个入口的产物是否带「审核 / 改写」环节。
+ *
+ * 只有**快捷流程**不要：它的定义就是「不审不改」（ADR-034），三份产物都一样。
+ * 除了跳过调用，界面上也不能留这两个阶段——进度条上画两格永远走不到的路，
+ * 用户会读成「还没审到」而不是「这次压根不审」。
+ *
+ * 写成黑名单（`prd-quick` 是例外）而不是白名单：将来加新入口默认**带上复核**，
+ * 漏配的代价只是多等一会儿；反过来则悄悄把产出质量降了一档。
+ */
+export function hasDocumentReview(mode: EntryMode | null): boolean {
+  return (mode ?? 'structured') !== 'prd-quick'
+}
+
+/**
+ * 这个入口的「录入页」是不是就在进度条上（点第 1 步就能回去）。
+ *
+ * 两个从零创建的入口是：`structured` 与 `prd-quick` 的第 1 步都是「描述产品」，只是
+ * 录入页长什么样由模式决定（结构化表单 / 一段话）。
+ *
+ * 两个**导入**入口不是——它们的录入页（贴 PRD / 贴两份材料）根本不在进度条上，
+ * 因此审阅页必须保留一个「返回」按钮，否则用户改不了贴进来的材料，直接成了死路。
+ */
+export function inputPageOnBar(mode: EntryMode | null): boolean {
+  return (mode ?? 'structured') === 'structured' || mode === 'prd-quick'
 }
 
 /**
@@ -166,8 +212,8 @@ export function stepsForMode(mode: EntryMode | null): readonly Step[] {
 /** 各入口模式下「完成」所需的最低文档集合 */
 export const REQUIRED_DOCS: Record<EntryMode, readonly DocType[]> = {
   structured: ['prd', 'api-docs', 'prompts'],
-  // 快捷入口的交付物就是 PRD；后续接口文档 / 提示词属可选加成
-  'prd-quick': ['prd'],
+  // 快捷流程复用完整流程的进度条，交付判据也一并对齐：三份齐备才算完成
+  'prd-quick': ['prd', 'api-docs', 'prompts'],
   // 两个导入入口的交付物都只有提示词套件（自带的那两份材料不算本工具的产物）
   'prompt-debug': ['prompts'],
   'prd-and-api-paste': ['prompts'],
@@ -350,7 +396,7 @@ export interface ReachedStepInput {
 /**
  * 由**产物内容**推出的「最远里程碑」下标——**不含**「此刻在看哪一步」。
  *
- * 判断口径按模式裁剪后的步骤来数（而不是写死 1/2/3/4）：快捷入口的「PRD」是它的
+ * 判断口径按模式裁剪后的步骤来数（而不是写死 1/2/3/4）：两个导入入口的「提示词」是它的
  * 第 1 步，用全局下标会算出越界的位置。
  *
  * 单独拆出来是因为它有第二个用处：方案列表要显示「这份做到哪了」——那个语义**只该看
@@ -398,10 +444,10 @@ export function canGeneratePrdFrom(messages: readonly ChatMessage[], busy: boole
 /**
  * 当前入口模式下「完成」所需的最低文档是否齐备。
  *
- * 三种模式的交付物不同：完整流程要三份齐全，快捷入口只要 PRD，调试入口只要提示词。
+ * 各模式的交付物不同：完整流程与快捷流程都要三份齐全，两个导入入口只要提示词。
  * 用统一的口径判断，可以避免「只想拿一份文档的人被另外两份挡住」。
  *
- * 完整流程（`structured`）的判定与旧版的「三份齐备」完全等价，
+ * 完整流程 / 快捷流程的判定与旧版完全等价，
  * 因此这里只保留这一个函数，不再另开一个只服务单一口径的封装。
  */
 export function hasRequiredDocuments(

@@ -96,12 +96,22 @@ describe('ProgressSteps：把「AI 对话」摘到最左边', () => {
     expect(wrapper.findAll('nav li')[0]?.findAll('div.mx-1')).toHaveLength(0)
   })
 
-  it('两种非完整流程的入口不受影响：没有对话段，序号照旧从 1 数', () => {
+  it('快捷流程也有「AI 对话」那一格（它承载文档澄清），步数与完整流程一致', () => {
     const quick = mount(ProgressSteps, {
       props: { steps: stepsForMode('prd-quick'), currentIndex: 0, reachedIndex: 0 },
     })
-    expect(badgeTexts(quick)).toEqual(['1', '2', '3', '4'])
-    expect(quick.findAll('nav li')[0]?.classes()).not.toContain('border-r')
+    // 六步齐全：对话段在最左（不占序号），里程碑 1~5
+    expect(badgeTexts(quick)).toEqual(['', '1', '2', '3', '4', '5'])
+    expect(quick.findAll('nav li').map((li) => li.text().split('\n')[0]?.trim())).toEqual([
+      'AI 对话',
+      '1描述产品',
+      '2PRD',
+      '3接口文档',
+      '4提示词',
+      '5交付',
+    ])
+    // 有对话段就有那条分隔线（分隔线挂在对话段右侧）
+    expect(quick.findAll('nav li')[0]?.classes()).toContain('border-r')
 
     // 导入入口现在是「提示词 → 交付」两步：仍然渲染，但只有两个序号
     const imported = mount(ProgressSteps, {

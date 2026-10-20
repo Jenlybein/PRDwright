@@ -74,6 +74,39 @@ def render_spec() -> str:
     )
 
 
+def format_pending_items(items: list[dict[str, Any]]) -> str:
+    """把清单渲染成给人/给模型看的编号列表（供「AI 自行澄清」的提示词引用）。
+
+    与 `render_spec()`（教模型**怎么产出**清单）方向相反：这里是把**已有**的清单
+    摊平成文本，让模型逐条拍板。
+
+    等级与受影响章节都带上：等级决定「拿不准时先保住哪一条」，章节号决定结论该写去哪。
+    空清单给一句明确的「没有」，而不是留白——留白会让模型以为漏读了材料。
+
+    Args:
+        items: 后端结构的清单项（`question` / `sections` / `decider` / `importance`）。
+
+    Returns:
+        编号列表文本；无待确认项时返回一句说明。
+    """
+    if not items:
+        return "（本次没有待确认问题）"
+    lines: list[str] = []
+    for index, item in enumerate(items, start=1):
+        question = str(item.get("question") or "").strip() or "（未描述）"
+        importance = str(item.get("importance") or "").strip() or "未标注"
+        sections = item.get("sections")
+        section_text = "、".join(str(part) for part in sections) if isinstance(sections, list) else ""
+        parts = [f"{index}. [{importance}] {question}"]
+        if section_text:
+            parts.append(f"（影响章节：{section_text}）")
+        decider = str(item.get("decider") or "").strip()
+        if decider:
+            parts.append(f"（原定拍板人：{decider}）")
+        lines.append("".join(parts))
+    return "\n".join(lines)
+
+
 def _normalize_importance(raw: Any) -> str | None:
     """把模型给的 importance 规范成 `P0` ~ `P6`；缺失或不认识的值返回 `None`。
 
