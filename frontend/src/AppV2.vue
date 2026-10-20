@@ -469,6 +469,12 @@ const documentStale = computed(() => {
   return kind ? documents.staleOf(kind) : false
 })
 
+/** 当前文档线程对应的待确认清单；需求澄清线程没有文档，返回空 */
+const chatPendingItems = computed(() => {
+  const kind = documentKindOfChatStage(activeChatTab.value)
+  return kind ? documents.pendingItemsOf(kind) : []
+})
+
 /** 打开抽屉：先摆出当前文档的展示名，再拉一次版本列表 */
 function openVersions(): void {
   const kind = activeDocKind.value
@@ -899,6 +905,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :can-rewrite="canRewrite"
         :rewriting="isGenerating"
         :busy="store.busy"
+        :pending-items="chatPendingItems"
         @select-tab="chatTab = $event"
         @edit-requirements="goTo('form')"
         @restart="handleRestart"

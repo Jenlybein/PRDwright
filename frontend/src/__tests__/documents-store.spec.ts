@@ -61,6 +61,8 @@ function makeRunSummary(requestId: string): RunSummary {
     steps: [],
     injectedSkills: [],
     warnings: [],
+    partial: false,
+    failedSections: [],
     provider: 'ark',
     model: 'doubao',
     requestId,

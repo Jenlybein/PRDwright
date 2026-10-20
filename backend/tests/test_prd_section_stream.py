@@ -12,14 +12,29 @@ import asyncio
 import json
 from typing import Any, AsyncIterator
 
+import pytest
 from conftest import register
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
 from backend.api.schemas import StreamEvent
+from backend.core.config import get_settings
 from backend.services.prd_section_writer import PRD_SECTIONS, PrdSectionWriter
 
 # 审核人设提示词里的特征词：用它区分「审核调用」与「撰写调用」
 REVIEW_MARKER = "产品文档评审员"
+
+
+@pytest.fixture(autouse=True)
+def _serial_pipeline(monkeypatch):
+    """本文件守的是**串行**链路的契约。
+
+    并行链路有自己的一组用例（`test_prd_section_parallel.py`）。这里显式把并发度设为 1，
+    否则默认值 3 会让这些「按调用顺序编排假 LLM」的用例变成不确定行为。
+    """
+    monkeypatch.setenv("PRD_PIPELINE_CONCURRENCY", "1")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 class FakeLLM:

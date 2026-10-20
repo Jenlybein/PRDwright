@@ -7,7 +7,7 @@ import type { AnswerPayload } from '@/components/ClarificationAskList.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import ChatThreadTabs from '@/components/ui/ChatThreadTabs.vue'
-import type { ChatMessage, ChatStage } from '@/types'
+import type { ChatMessage, ChatStage, PendingItem } from '@/types'
 
 /**
  * 对话阶段视图。
@@ -44,6 +44,13 @@ const props = defineProps<{
   rewriting?: boolean
   /** 有请求在跑；此时子标签栏全部禁用 */
   busy?: boolean
+  /**
+   * 当前文档线程对应的待确认清单（只读）。
+   *
+   * 需求澄清线程不用它——那时还没有文档；文档线程用它显示「还剩 N 条」。
+   * 由上层按 `activeTab` 选好再传，组件不自己猜是哪一份。
+   */
+  pendingItems?: PendingItem[]
 }>()
 
 const emit = defineEmits<{
@@ -106,6 +113,37 @@ const subheading = computed(() =>
 /** 改写按钮的禁用态：这一轮还没聊出结论、或正在改写中，都点不动 */
 const rewriteDisabled = computed(() => !props.canRewrite || Boolean(props.rewriting))
 
+/**
+ * 需求澄清是否「还有问题没答完」。
+ *
+ * 判据是**当前线程最后一条消息**：助手仍在等作答（带 `asks`）就是没收口；用户一旦作答，
+ * 会追加一条 user 消息，这个判断自然变假。不数「还剩几问」——需求澄清是一条一条问的，
+ * 后面的问题还没被提出，数量本来就不可知。
+ */
+const unansweredAsk = computed(() => {
+  if (!onRequirement.value || props.loading) return false
+  const last = props.messages[props.messages.length - 1]
+  return Boolean(last && last.role === 'assistant' && (last.asks?.length ?? 0) > 0)
+})
+
+/** 文档线程剩余待确认条数（需求线程恒为 0） */
+const pendingCount = computed(() =>
+  onRequirement.value ? 0 : (props.pendingItems?.length ?? 0),
+)
+
+/**
+ * 「生成 PRD」前的提醒：还有未答问题时先确认一次。
+ *
+ * 只提醒、不硬拦——用户可能就是想先出一版看看。确认框的文案不复述提示词里的数值。
+ */
+function onGeneratePrd(): void {
+  if (unansweredAsk.value) {
+    const ok = window.confirm('AI 还有信息没确认，仍要生成 PRD 吗？')
+    if (!ok) return
+  }
+  emit('generatePrd')
+}
+
 /** 输入框实例，用于在一轮回复结束后把焦点交还给用户 */
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null)
 
@@ -140,6 +178,23 @@ watch(
         <h2 class="text-sm font-semibold text-fg">{{ heading }}</h2>
         <p class="mt-0.5 text-xs text-subtle">{{ subheading }}</p>
       </div>
+
+      <!-- 澄清收口提醒：需求线程看「还有没有未答的提问」，文档线程看「还剩几条待确认」。
+           只提醒、不阻断：用户可以直接生成 / 改写。 -->
+      <p
+        v-if="unansweredAsk"
+        class="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-relaxed text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-300 sm:px-6"
+        role="status"
+      >
+        AI 还有信息没确认。答完再生成会更准，也可以直接生成。
+      </p>
+      <p
+        v-else-if="pendingCount > 0"
+        class="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-relaxed text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-300 sm:px-6"
+        role="status"
+      >
+        还剩 {{ pendingCount }} 条待确认。答完再改写会更准，也可以直接改写。
+      </p>
 
       <!-- 出错时把原因贴在会话区顶部，不打断已有消息 -->
       <p
@@ -185,7 +240,7 @@ watch(
         v-if="onRequirement && canGeneratePrd"
         variant="primary"
         size="md"
-        @click="emit('generatePrd')"
+        @click="onGeneratePrd"
       >
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path

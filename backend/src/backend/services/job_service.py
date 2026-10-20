@@ -70,6 +70,12 @@ class JobRuntime:
     phase: str = ""
     # 已定稿段落（文档头 + 各章 part.text），按序拼接即「已产出正文」
     finalized_parts: list[str] = field(default_factory=list)
+    # 并行分章节：按 index 存放的定稿段（各章 0..n）。与 finalized_parts 分工：
+    # 文档头仍进 finalized_parts（它没有 index），章节进这里，`_draft` 按 index 排序装配。
+    parts_by_index: dict[int, str] = field(default_factory=dict)
+    # 是否有章节失败后被占位（仅 PRD 并行链路）
+    partial: bool = False
+    failed_sections: list[dict[str, Any]] = field(default_factory=list)
     # 当前段的实时缓冲（chunk 原始增量），遇到下一个 part 时清空
     live_buffer: str = ""
     # 已定稿章节的结构化记录（供快照恢复时定位「写到第几章」）
@@ -338,17 +344,33 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         runtime.live_buffer += event.content
     elif event_type == "part":
         text = str(event.data.get("text", ""))
-        runtime.finalized_parts.append(text)
         runtime.live_buffer = ""
+        if event.data.get("replace") is True:
+            # 下游改写稿整段覆盖初稿（审核发现问题后的那一次改写）
+            runtime.finalized_parts = [text]
+            runtime.parts_by_index.clear()
+            return
+        index = event.data.get("index")
+        if isinstance(index, int):
+            runtime.parts_by_index[index] = text
+        else:
+            runtime.finalized_parts.append(text)
         section_id = event.data.get("section_id")
         if section_id:
-            runtime.completed_sections.append(
-                {
-                    "section_id": section_id,
-                    "heading": str(event.data.get("section_heading", "")),
-                    "text": text,
-                }
-            )
+            entry = {
+                "section_id": section_id,
+                "heading": str(event.data.get("section_heading", "")),
+                "text": text,
+                "index": index if isinstance(index, int) else None,
+                "failed": bool(event.data.get("failed")),
+            }
+            # 同一章节以最后一次为准：重试 / 重复订阅都不该留下两条
+            runtime.completed_sections = [
+                item
+                for item in runtime.completed_sections
+                if item.get("section_id") != section_id
+            ]
+            runtime.completed_sections.append(entry)
     elif event_type == "stage":
         runtime.phase = str(event.data.get("stage", ""))
         runtime.meter.set_phase(runtime.phase)
@@ -358,15 +380,28 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         runtime.error_message = event.content
     elif event_type == "done":
         runtime.final_reply = str(event.data.get("reply", ""))
+        runtime.partial = bool(event.data.get("partial"))
+        failed = event.data.get("failed_sections")
+        runtime.failed_sections = failed if isinstance(failed, list) else []
         # 待确认清单随 `done` 一道抵达：生成器已在定稿正文里剥离标记块并算好。
         # 用 `or []` 兜底，生成器漏带该字段时不至于把整型 / None 写进 DB。
         pending = event.data.get("pending_items")
         runtime.pending_items = pending if isinstance(pending, list) else []
 
 
+def _finalized_text(runtime: JobRuntime) -> str:
+    """已定稿正文（不含实时缓冲）：文档头 + 按 index 排序的章节。"""
+    if runtime.parts_by_index:
+        header = "".join(runtime.finalized_parts)
+        return header + "".join(
+            runtime.parts_by_index[i] for i in sorted(runtime.parts_by_index)
+        )
+    return "".join(runtime.finalized_parts)
+
+
 def _draft(runtime: JobRuntime) -> str:
     """尽力还原的完整正文：已定稿部分 + 当前缓冲（**不用原始 chunk 拼**）。"""
-    return "".join(runtime.finalized_parts) + runtime.live_buffer
+    return _finalized_text(runtime) + runtime.live_buffer
 
 
 def _maybe_flush(runtime: JobRuntime) -> None:
@@ -404,6 +439,9 @@ def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
         # 放在展开之后覆盖：`usage()` 里的 `injected_skills` 恒为空（计量器不知道技能包的事），
         # 技能身份由编排层在任务开始时定格，生成中途改模板也不会让回执前后不一致。
         "injected_skills": runtime.skill_refs,
+        # 部分完成：正文可用但不完整。随 usage 落库，刷新后 `JobStatus.partial` 仍读得到。
+        "partial": runtime.partial,
+        "failed_sections": runtime.failed_sections,
     }
 
 
@@ -617,6 +655,10 @@ def _elapsed_ms_from_row(row: dict[str, Any]) -> int:
 
 def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
     """由内存运行时构造 `snapshot` 事件（补全已产出正文）。"""
+    ordered_sections = sorted(
+        runtime.completed_sections,
+        key=lambda item: (item.get("index") is None, item.get("index") or 0),
+    )
     return StreamEvent(
         type="snapshot",
         content="",
@@ -625,14 +667,17 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "kind": runtime.kind,
             "status": runtime.status,
             "phase": runtime.phase,
-            "finalized_text": "".join(runtime.finalized_parts),
+            "finalized_text": _finalized_text(runtime),
             "live_buffer": runtime.live_buffer,
-            "completed_sections": runtime.completed_sections,
+            "completed_sections": ordered_sections,
             "solution_id": runtime.solution_id,
             "error_code": runtime.error_code,
             "error_message": runtime.error_message,
             # 待确认清单：刷新重连时一并恢复，前端无需另发一次请求就能展示。
             "pending_items": runtime.pending_items,
+            # 部分完成：刷新后仍能看到「哪几章失败了」
+            "partial": runtime.partial,
+            "failed_sections": runtime.failed_sections,
             # 服务端算的已用时：刷新重连后前端接着它继续走，客户端计时器归零也不影响
             "elapsed_ms": int(max(0.0, time.monotonic() - runtime.started_at) * 1000),
         },
@@ -647,7 +692,23 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
         sections = []
     if not isinstance(sections, list):
         sections = []
+    sections = sorted(
+        sections,
+        key=lambda item: (
+            item.get("index") is None if isinstance(item, dict) else True,
+            item.get("index") or 0 if isinstance(item, dict) else 0,
+        ),
+    )
     pending_items = _load_pending_items(row.get("pending_items"))
+    try:
+        usage = json.loads(row.get("usage") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        usage = {}
+    if not isinstance(usage, dict):
+        usage = {}
+    failed_sections = usage.get("failed_sections")
+    if not isinstance(failed_sections, list):
+        failed_sections = []
     return StreamEvent(
         type="snapshot",
         content="",
@@ -664,6 +725,8 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "error_message": row.get("error_message", "") or "",
             # 待确认清单：DB 兜底快照同样携带，刷新重连后前端直接展示。
             "pending_items": pending_items,
+            "partial": bool(usage.get("partial")),
+            "failed_sections": failed_sections,
             "elapsed_ms": _elapsed_ms_from_row(row),
         },
     )

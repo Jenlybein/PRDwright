@@ -18,7 +18,9 @@ import type {
   DocumentKind,
   JobSnapshot,
   PendingItem,
+  PrdBoardState,
   PrdGenerationStage,
+  PrdSectionCard,
   PrdStageProgress,
   RequirementsSummary,
   ReviewConclusion,
@@ -137,11 +139,16 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const docError = ref('')
 
   // -------------------------------------------------------------------------
-  // PRD 分章节生成的阶段进度
+  // PRD 分章节生成的阶段进度（三车道并行：管道看板）
   // -------------------------------------------------------------------------
 
-  /** 分章节生成的进度快照；null 表示未走该链路（整篇生成或其它文档） */
-  const prdProgress = ref<PrdStageProgress | null>(null)
+  /**
+   * PRD 管道看板：每章一个卡片，4 列只呈现阶段。
+   *
+   * 并行后章节可能乱序到达，因此**不能**再用「一个字符串不断追加」的预览模型；
+   * 这里按 `sectionId` 存卡片、按 `index` 排序渲染，`part` 到达即覆盖该章。
+   */
+  const prdBoard = ref<PrdBoardState | null>(null)
 
   /** 下游文档（接口 / 提示词）当前的生成阶段；idle 表示未走该链路 */
   const docPhase = ref<DocPhase>('idle')
@@ -155,159 +162,143 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const reviewConclusion = ref<ReviewConclusion | null>(null)
 
   /**
-   * 分章节生成：**已定稿**部分的累积文本（文档头 + 各章定稿正文）。
-   *
-   * 内容全部来自后端的 `part` 事件——也就是最终会写进 `done.reply` 的那份文本。
-   * 不用 `chunk` 自己拼的原因：`chunk` 是模型原始输出，还差「补标题行」
-   * 「补章间空行」两道加工，前端看不到它们（曾表现为标题消失、与上一段粘成一行）。
-   */
-  const prdFinalizedText = ref('')
-
-  /** 当前章节的实时缓冲：本章 `chunk` 的原始增量，定稿时被 `part` 整段替换 */
-  const prdLiveBuffer = ref('')
-
-  /**
-   * 改写期间留着的上一版草稿。
-   *
-   * 改写要重新流一整章，中间隔着一次完整的模型往返（十几秒甚至更久）。若此时直接
-   * 清空缓冲，用户看到的就是「这一章突然没了」——按设计它只是想表达「正在重写」。
-   * 这里把旧文本留下（审阅区会降透明度并标注），新内容一流出就顶替它。
-   */
-  const prdRewriteGhost = ref('')
-
-  /**
-   * 已并入预览的章节 id 集合（文档头单独用一个标记）。
-   *
-   * 预览是**累积**出来的（`prdFinalizedText += part.text`），所以必须能识别重复投递：
-   * 同一章（或文档头）的 `part` 只认第一次，重复到达直接丢弃。
-   *
-   * 没有这道防线时，任何让「同一个任务被订阅两次」的路径都会把两路事件交错写进
-   * 同一份缓冲——表现为文档里出现两遍「1. 产品概述」，表格单元格成对重复
-   * （`| 编号 | 编号 | 功能模块 | 功能模块 |`）。这两个标记只做守卫、不参与渲染，
-   * 因此用普通变量而不是 `ref`，避免给每次增量都挂上无谓的响应式开销。
-   */
-  let deliveredSectionIds = new Set<string>()
-  let headerDelivered = false
-
-  /**
-   * 分章节生成的阶段进度；不是 PRD 生成态时恒为 `null`。
+   * 分章节生成的看板；不是 PRD 生成态时恒为 `null`。
    *
    * 判据用**阶段**而不是「当前正在处理哪一份」：PRD 生成必然处在 `generating-prd`，
-   * 而按澄清结果改写 PRD 也走这个阶段（那时 `prdProgress` 已被显式清空，同样得 `null`）。
+   * 而按澄清结果改写 PRD 也走这个阶段（那时看板已被显式清空，同样得 `null`）。
    */
-  const prdStatus = computed<PrdStageProgress | null>(() =>
-    viewState.value === 'generating-prd' ? prdProgress.value : null,
+  const prdStatus = computed<PrdBoardState | null>(() =>
+    viewState.value === 'generating-prd' ? prdBoard.value : null,
   )
 
-  /** 预览当前显示的是否是「上一版草稿」（供审阅区降透明度提示） */
+  /** 预览当前是否有章节在改写（供审阅区降透明度提示） */
   const prdShowingDraft = computed(
-    () => !prdLiveBuffer.value && prdRewriteGhost.value.trim().length > 0,
+    () => prdBoard.value?.sections.some((section) => section.phase === 'rewriting') ?? false,
   )
+
+  /** 取（或创建）某章的卡片；新卡片按 index 插到正确位置。 */
+  function sectionCard(
+    board: PrdBoardState,
+    sectionId: string,
+    index: number,
+  ): PrdSectionCard {
+    let card = board.sections.find((item) => item.sectionId === sectionId)
+    if (!card) {
+      card = {
+        sectionId,
+        sectionTitle: '',
+        sectionHeading: '',
+        index,
+        phase: 'pending',
+        failed: false,
+        text: '',
+        note: '',
+        issues: [],
+      }
+      board.sections.push(card)
+      board.sections.sort((a, b) => a.index - b.index)
+    }
+    return card
+  }
 
   /**
-   * 把「已定稿部分 + 当前缓冲」拼成预览，写进 `docStreamingContent`。
+   * 把看板里的定稿正文拼成预览，写进 `docStreamingContent`。
    *
-   * 三段状态都在本文件内变更，因此由变更处主动同步，而不是派生成 computed：
-   * `docStreamingContent` 同时被接口文档 / 提示词 / AI 优化直接追加使用，
-   * 保持它作为「预览的唯一出口」可以不动那些路径。
+   * 文档头单独存（`headerText`），章节按 `index` 排序——`part` 可以乱序到达，
+   * 但用户看到的文档必须始终是章节顺序。
    */
   function syncPrdPreview(): void {
+    const board = prdBoard.value
+    if (!board) {
+      docStreamingContent.value = ''
+      return
+    }
+    const ordered = [...board.sections].sort((a, b) => a.index - b.index)
     docStreamingContent.value =
-      prdFinalizedText.value + (prdLiveBuffer.value || prdRewriteGhost.value)
+      board.headerText + ordered.map((section) => section.text).join('')
   }
 
-  /** 清空分章节预览的三段缓冲，并复位「已定稿」守卫 */
+  /** 清空 PRD 看板 */
   function clearPrdPreview(): void {
-    prdFinalizedText.value = ''
-    prdLiveBuffer.value = ''
-    prdRewriteGhost.value = ''
-    deliveredSectionIds = new Set<string>()
-    headerDelivered = false
+    prdBoard.value = null
   }
 
-  /** 进入 PRD 生成前的复位：先按「撰写中」占位，等后端 stage 事件再细化 */
+  /** 进入 PRD 生成前的复位：先建一张空看板，等后端 stage 事件再细化 */
   function beginPrdStages(): void {
-    clearPrdPreview()
-    prdProgress.value = {
-      stage: 'writing',
-      sectionId: '',
-      sectionTitle: '',
-      sectionHeading: '',
-      index: 0,
+    prdBoard.value = {
       total: 0,
-      note: '',
+      headerReady: false,
+      headerText: '',
+      sections: [],
+      review: null,
+      partial: false,
+      failedSections: [],
     }
   }
 
   /**
-   * 一段正文已定稿：以权威文本整段并入「已定稿部分」。
+   * 一段正文已定稿：以权威文本覆盖该章（或文档头）。
    *
-   * 同时丢掉实时缓冲——它装的是这一段的原始 `chunk`，此刻已被加工后的版本取代。
-   * 这样预览与最终 `reply` 逐字一致，「标题凭空消失」「与上一段粘连」这类偏差
-   * 从结构上不可能再出现，而不是靠两边各自拼得一样。
-   *
-   * **幂等**：章节按 `sectionId`、文档头按「是否已收到」去重。重复投递的 `part`
-   * 被直接丢弃——这是「同一任务被订阅两次」也污染不了预览的结构性保证。
+   * 并行后 `part` 可能乱序、也可能同一章因重试再次到达，因此语义是**覆盖**而不是
+   * 「只认第一次」。重复订阅仍然幂等——文本相同，覆盖不会产生第二份。
    */
   function handlePrdPart(part: StreamDocumentPart): void {
     if (!part.text) return
-    if (part.sectionId) {
-      if (deliveredSectionIds.has(part.sectionId)) return
-      deliveredSectionIds.add(part.sectionId)
-    } else {
+    const board = prdBoard.value
+    if (!board) return
+    if (!part.sectionId) {
       // 没有 sectionId 的 `part` 只可能是文档头（后端在正文最前一次性下发）
-      if (headerDelivered) return
-      headerDelivered = true
-    }
-    prdFinalizedText.value += part.text
-    prdLiveBuffer.value = ''
-    prdRewriteGhost.value = ''
-    syncPrdPreview()
-  }
-
-  /** PRD 正文的增量追加：只进「当前章节缓冲」，本章定稿时由 `part` 整段替换 */
-  function appendPrdChunk(chunk: string): void {
-    prdLiveBuffer.value += chunk
-    syncPrdPreview()
-  }
-
-  /** 把后端下发的阶段名归一成前端联合类型（未知取值按「撰写中」处理） */
-  function toPrdStage(stage: string): PrdGenerationStage {
-    const known: PrdGenerationStage[] = ['writing', 'reviewing', 'rewriting', 'done']
-    return (known as string[]).includes(stage) ? (stage as PrdGenerationStage) : 'writing'
-  }
-
-  /**
-   * 处理 `stage` 阶段事件。
-   *
-   * 前端只维护「已定稿部分 + 当前章缓冲」，所以这里**不需要按字符数猜截断点**：
-   * - `writing`：新的一章开始，丢掉上一章的缓冲（它要么已 `part` 定稿，
-   *   要么是被放弃的草稿）；
-   * - `rewriting`：把当前缓冲留作「上一版草稿」，避免中间十几秒的空白期。
-   */
-  function handlePrdStage(event: StreamStageEvent): void {
-    const stage = toPrdStage(event.stage)
-    prdProgress.value = {
-      stage,
-      sectionId: event.sectionId,
-      sectionTitle: event.sectionTitle,
-      sectionHeading: event.sectionHeading,
-      index: event.index,
-      total: event.total,
-      note: event.note,
-    }
-
-    if (stage === 'writing') {
-      prdLiveBuffer.value = ''
-      prdRewriteGhost.value = ''
+      board.headerReady = true
+      board.headerText = part.text
       syncPrdPreview()
       return
     }
+    const card = sectionCard(board, part.sectionId, part.index)
+    card.text = part.text
+    if (part.failed) {
+      // 失败占位：停在此前失败的车道（生成），不到「定稿」
+      card.failed = true
+    } else {
+      card.failed = false
+      card.phase = 'done'
+    }
+    syncPrdPreview()
+  }
 
-    if (stage === 'rewriting') {
-      prdRewriteGhost.value = prdLiveBuffer.value
-      prdLiveBuffer.value = ''
-      syncPrdPreview()
+  /** 并行链路不再逐字流；保留函数仅为旧后端 / 降级路径的接线兼容。 */
+  function appendPrdChunk(_chunk: string): void {
+    // 故意为空：多章 chunk 会串字，也会让整章重试不安全
+  }
+
+  /**
+   * 处理 `stage` 阶段事件：只更新对应章节的卡片，**不清任何别的章节**。
+   *
+   * 并行下车道事件是交错的（第 3 章在写、第 2 章在审、第 1 章在改），
+   * 「换章就清缓冲」的旧逻辑在这里会误伤别的章。
+   */
+  function handlePrdStage(event: StreamStageEvent): void {
+    const board = prdBoard.value
+    if (!board) return
+    if (event.total) board.total = event.total
+    if (!event.sectionId) return
+
+    const card = sectionCard(board, event.sectionId, event.index)
+    card.sectionTitle = event.sectionTitle || card.sectionTitle
+    card.sectionHeading = event.sectionHeading || card.sectionHeading
+    card.note = event.note
+    card.issues = event.issues
+
+    if (event.stage === 'failed') {
+      // 生成失败：停在「生成」车道，红色标记；占位正文由随后的 part 带过来
+      card.phase = 'writing'
+      card.failed = true
+      return
+    }
+    if (event.stage === 'done') return
+    if (event.stage === 'writing' || event.stage === 'reviewing' || event.stage === 'rewriting') {
+      card.phase = event.stage
+      // 进入审核/改写说明正文已产出；失败标记以随后的 part 为准
+      if (event.stage !== 'writing') card.failed = false
     }
   }
 
@@ -395,6 +386,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /** 审核结论：只存内存，供审阅页展示；刷新后自然消失。 */
   function handleReview(review: ReviewConclusion): void {
     reviewConclusion.value = review
+    if (prdBoard.value) prdBoard.value.review = review
   }
 
   /** 下游文档的阶段事件（生成 / 审核 / 改写 / 完成） */
@@ -432,7 +424,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
     if (kind === 'prd') {
       return {
-        onChunk: appendPrdChunk,
         onPart: handlePrdPart,
         onStage: handlePrdStage,
         onSnapshot: applyJobSnapshot,
@@ -465,31 +456,44 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    */
   function applyJobSnapshot(snap: JobSnapshot): void {
     if (snap.kind === 'prd') {
-      const untouched =
-        !prdFinalizedText.value && !prdLiveBuffer.value && deliveredSectionIds.size === 0 && !headerDelivered
-      if (untouched) {
-        prdFinalizedText.value = snap.finalizedText
-        prdLiveBuffer.value = snap.liveBuffer
-        prdRewriteGhost.value = ''
-        // 重建「已定稿」守卫：快照里的章节不该被随后的 live `part` 再拼一遍
-        headerDelivered = snap.finalizedText.length > 0
-        deliveredSectionIds = new Set(
-          snap.completedSections.map((section) => section.sectionId).filter((id) => id !== ''),
-        )
-      }
-      if (snap.phase) {
-        const last = snap.completedSections[snap.completedSections.length - 1]
-        prdProgress.value = {
-          stage: toPrdStage(snap.phase),
-          sectionId: last?.sectionId ?? '',
-          sectionTitle: '',
-          sectionHeading: last?.heading ?? '',
-          index: snap.completedSections.length,
-          total: 0,
-          note: '',
+      // 只在看板还空着时用快照重建：重复快照不该把已流出的内容倒退回去
+      if (!prdBoard.value && snap.completedSections.length > 0) {
+        const board: PrdBoardState = {
+          total: snap.completedSections.length,
+          headerReady: false,
+          headerText: '',
+          sections: [],
+          review: null,
+          partial: snap.partial,
+          failedSections: snap.failedSections,
         }
+        for (const [position, section] of snap.completedSections.entries()) {
+          board.sections.push({
+            sectionId: section.sectionId,
+            sectionTitle: '',
+            sectionHeading: section.heading,
+            index: typeof section.index === 'number' ? section.index : position,
+            phase: section.failed ? 'writing' : 'done',
+            failed: section.failed === true,
+            text: section.text,
+            note: '',
+            issues: [],
+          })
+        }
+        board.sections.sort((a, b) => a.index - b.index)
+        // 快照的 finalizedText 是「文档头 + 已定稿章节」；把章节部分减掉即文档头。
+        // 旧快照缺 index 时按数组序兜底，拿不准就留空——落稿以 done.reply 为准。
+        const sectionsText = board.sections.map((section) => section.text).join('')
+        if (sectionsText && snap.finalizedText.endsWith(sectionsText)) {
+          board.headerText = snap.finalizedText.slice(
+            0,
+            snap.finalizedText.length - sectionsText.length,
+          )
+          board.headerReady = board.headerText.length > 0
+        }
+        prdBoard.value = board
+        syncPrdPreview()
       }
-      syncPrdPreview()
       return
     }
     // 其余文档只有一段流式缓冲：同样只在空着时用快照初始化，避免重复快照覆盖已流出的内容
@@ -610,17 +614,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (kind === 'prd') {
       beginPrdStages()
     } else {
-      prdProgress.value = null
+      prdBoard.value = null
     }
 
     const result = await job.reconnect(jobId, handlersForKind(kind))
     const snap = job.snapshot.value
     if (!result.ok) {
       docError.value = job.error.value || '生成失败'
-      prdProgress.value = null
+      prdBoard.value = null
     } else if (snap?.status === 'failed') {
       docError.value = snap.errorMessage || '生成失败'
-      prdProgress.value = null
+      prdBoard.value = null
     } else {
       // 落点由 `finishDoc` 自己决定：优化留在原审阅页，生成 / 澄清都回到那份文档的审阅页
       finishDoc(kind, result.reply, target)
@@ -666,7 +670,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (!ok) {
       docError.value = job.error.value || 'PRD 生成失败'
       // 失败时收掉阶段条：原因由错误提示说明，留着一个「进行中」的指示反而误导
-      prdProgress.value = null
+      prdBoard.value = null
       clearActiveJob()
       return
     }
@@ -680,7 +684,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function generateApiDocs(): Promise<void> {
     // 提示词不再删除：重新生成接口文档后，它只会被标成 stale（见 generatePrd 的说明）
     resetDocTransient()
-    prdProgress.value = null
+    prdBoard.value = null
     const { reply, ok } = await job.start(
       'api-docs',
       { prdContent: documents.contentOf('prd') },
@@ -705,7 +709,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    */
   async function generatePrompts(prdText: string, apiDocsText = ''): Promise<void> {
     resetDocTransient()
-    prdProgress.value = null
+    prdBoard.value = null
     const { reply, ok } = await job.start(
       'prompts',
       // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
@@ -832,8 +836,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (history.length === 0) return
 
     // 就地改写、不是分章节链路：清掉可能残留的阶段进度，否则生成页会顶出一条与本次无关的
-    // 章节条（`goTo` 内部的 `clearTransient` 不碰 `prdProgress`）
-    prdProgress.value = null
+    // 章节条（`goTo` 内部的 `clearTransient` 不碰 `prdBoard`）
+    prdBoard.value = null
     // 阶段先于任务切（理由见上）；`goTo` 顺带清空上一轮的流式缓冲 / 错误 / PRD 三段预览
     goTo(generatingStateFor(target) ?? 'generating-prd')
 
@@ -1139,7 +1143,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /** 清空文档流水线相关的全部临时状态（重新开始时用） */
   function reset(): void {
     clearTransient()
-    prdProgress.value = null
+    prdBoard.value = null
     pendingSummary.value = null
     summaryChanges.value = []
     summarySyncing.value = false

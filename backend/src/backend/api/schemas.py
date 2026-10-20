@@ -583,6 +583,11 @@ class JobStatus(BaseModel):
     error_message: str = Field(default="", description="失败时的中文说明")
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
+    partial: bool = Field(
+        default=False,
+        description="本次生成是否有章节失败后被占位（仅 PRD 并行链路）。"
+        "true 表示正文可用但不完整，前端据此在审阅页提示。",
+    )
     usage: RunSummary | None = Field(
         default=None,
         description=(

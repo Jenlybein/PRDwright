@@ -653,6 +653,8 @@ export interface StreamDocumentPart {
    * PRD 的定稿段不带这个标记（按章节归位，见 `index`）。
    */
   replace?: boolean
+  /** 是否为失败占位（并行链路）；前端据此停在失败车道并标红 */
+  failed?: boolean
   /** 所属章节 id；文档头等不属于任何章节的部分为空串 */
   sectionId: string
   /** 所属章节名称，如「功能需求」；非章节部分为空串 */
@@ -686,6 +688,49 @@ export interface StreamStageEvent {
 // 生成任务（generation_jobs）：刷新重连的状态载体
 // ============================================================================
 
+/** 一章在并行流水线里的阶段（4 列看板只按它分组） */
+export type PrdSectionPhase =
+  | 'pending'
+  | 'writing'
+  | 'reviewing'
+  | 'rewriting'
+  | 'done'
+  | 'failed'
+
+/** 管道看板里的一张章节卡片（按 index 排序渲染） */
+export interface PrdSectionCard {
+  sectionId: string
+  sectionTitle: string
+  sectionHeading: string
+  /** 章节下标；文档头为 -1 */
+  index: number
+  phase: PrdSectionPhase
+  /** 是否为失败占位（仍停在失败时的车道） */
+  failed: boolean
+  /** 定稿正文；未定稿为空串 */
+  text: string
+  /** 改写原因 / 失败原因 */
+  note: string
+  issues: { severity: string; detail: string }[]
+}
+
+/** PRD 生成的管道看板状态（并行与串行共用） */
+export interface PrdBoardState {
+  /** 章节总数；未知为 0 */
+  total: number
+  /** 文档头是否已下发 */
+  headerReady: boolean
+  /** 文档头正文（不属于任何章节） */
+  headerText: string
+  /** 章节卡片，恒按 index 升序 */
+  sections: PrdSectionCard[]
+  /** 本次审核结论；不持久化 */
+  review: ReviewConclusion | null
+  /** 是否有章节失败后被占位 */
+  partial: boolean
+  failedSections: FailedSection[]
+}
+
 /** 已定稿章节的结构化记录（后端 `snapshot` 的 `completed_sections` 项） */
 export interface CompletedSection {
   /** 章节 id，如 `overview` */
@@ -694,6 +739,10 @@ export interface CompletedSection {
   heading: string
   /** 该章的定稿正文（可直接追加） */
   text: string
+  /** 章节下标；旧快照可能缺失，前端按数组序兜底 */
+  index?: number
+  /** 该章是否为失败占位 */
+  failed?: boolean
 }
 
 /**
@@ -729,6 +778,10 @@ export interface JobSnapshot {
    * 刷新重连时从任务记录（`generation_jobs.pending_items`）一并恢复，前端无需另发一次请求。
    */
   pendingItems: PendingItem[]
+  /** 是否有章节失败后被占位（仅 PRD 并行链路） */
+  partial: boolean
+  /** 失败章节清单 */
+  failedSections: FailedSection[]
   /**
    * 服务端算的任务已用时（毫秒）。
    *
@@ -815,6 +868,10 @@ export interface RunSummary {
    * 真正的拦截发生在超顶时，那时请求根本没发出，会直接转成 `error` 事件。
    */
   warnings: string[]
+  /** 是否有章节失败后被占位（仅 PRD 并行链路） */
+  partial: boolean
+  /** 失败章节清单 */
+  failedSections: FailedSection[]
   /** 实际使用的供应商 */
   provider: string
   /** 实际使用的模型名 */

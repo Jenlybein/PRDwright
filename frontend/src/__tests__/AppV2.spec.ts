@@ -221,6 +221,8 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     errorMessage: '',
     elapsedMs: 0,
     pendingItems: [],
+    partial: false,
+    failedSections: [],
     ...overrides,
   }
 }
@@ -238,6 +240,8 @@ function makeRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     steps: [],
     injectedSkills: [],
     warnings: [],
+    partial: false,
+    failedSections: [],
     provider: 'ark',
     model: 'doubao',
     requestId: 'req-default',
@@ -1747,55 +1751,51 @@ describe('AppV2 分章节生成的阶段展示', () => {
     await nextTick()
   }
 
-  it('按 stage 事件展示阶段与章节计数', async () => {
+  it('按 stage 事件展示车道的章节号（并行看板）', async () => {
     const wrapper = await mountApp()
     const stream = await startControlledPrdGeneration(wrapper)
 
-    // 进入生成态：阶段条先给出「撰写中」，但还没有章节信息
-    expect(wrapper.text()).toContain('正在撰写章节')
-    expect(wrapper.text()).not.toContain('第 1 / 7 章')
-
-    await pushStage(stream, 'writing')
-    stream.handlers?.onChunk?.('## 1. 产品概述\n\n第一版内容\n')
+    await pushStage(stream, 'writing', { total: 7 })
     await nextTick()
-    expect(wrapper.text()).toContain('正在撰写 产品概述')
-    expect(wrapper.text()).toContain('第 1 / 7 章')
-    expect(wrapper.text()).toContain('第一版内容')
+    // 有章节信息后看板才出现：四个车道 + 第 1 章在「生成」
+    expect(wrapper.text()).toContain('生成')
+    expect(wrapper.text()).toContain('审核')
+    expect(wrapper.text()).toContain('改写')
+    expect(wrapper.text()).toContain('定稿')
+    expect(wrapper.text()).toContain('①')
+    expect(wrapper.text()).toContain('0/7')
 
-    // 换到第 2 章：计数跟着走
+    // 第 2 章进入审核：两章分别落在不同车道（并行）
     await pushStage(stream, 'reviewing', {
       sectionId: 'features',
       sectionTitle: '功能需求',
       sectionHeading: '## 2. 功能需求',
       index: 1,
     })
-    expect(wrapper.text()).toContain('正在审核 功能需求')
-    expect(wrapper.text()).toContain('第 2 / 7 章')
+    expect(wrapper.text()).toContain('②')
 
     await stream.finish('# 产品需求文档\n\n## 1. 产品概述\n\n第一版内容')
     expect(wrapper.text()).toContain('PRD 文档')
   })
 
-  it('用 part 事件的定稿文本替换本章缓冲：模型漏写的标题由后端补上', async () => {
+  it('part 定稿后章节进入「定稿」车道，并按 index 归位', async () => {
     const wrapper = await mountApp()
     const stream = await startControlledPrdGeneration(wrapper)
 
-    await pushStage(stream, 'writing')
-    // 这一版的模型输出漏了标题行：原始增量里根本没有标题
-    stream.handlers?.onChunk?.('需求里没写标题\n')
-    await nextTick()
-    expect(wrapper.text()).toContain('需求里没写标题')
-    expect(wrapper.text()).not.toContain('1. 产品概述')
-
-    // 定稿事件带来补好标题的权威文本，预览直接换用它
+    await pushStage(stream, 'writing', { total: 7 })
     await pushPart(stream, '## 1. 产品概述\n\n需求里没写标题\n\n', {
       sectionId: 'overview',
       sectionTitle: '产品概述',
       sectionHeading: '## 1. 产品概述',
+      index: 0,
       total: 7,
     })
+
+    // 预览用 part 的权威文本（含后端补上的标题）
     expect(wrapper.text()).toContain('1. 产品概述')
     expect(wrapper.text()).toContain('需求里没写标题')
+    // 看板：第 1 章已定稿
+    expect(wrapper.text()).toContain('1/7')
 
     await stream.finish('# 产品需求文档\n\n## 1. 产品概述\n\n需求里没写标题')
     expect(wrapper.text()).toContain('PRD 文档')
@@ -1828,32 +1828,43 @@ describe('AppV2 分章节生成的阶段展示', () => {
     expect(text.split('正文内容').length - 1).toBe(1)
   })
 
-  it('改写时保留上一版草稿（不出现空白期），新内容流出后原地替换', async () => {
+  it('改写时旧稿留在预览里（不出现空白期），新稿到达后替换', async () => {
     const wrapper = await mountApp()
     const stream = await startControlledPrdGeneration(wrapper)
 
-    await pushStage(stream, 'writing')
-    stream.handlers?.onChunk?.('## 1. 产品概述\n\n第一版内容（编造了指标）\n')
-    await nextTick()
+    await pushStage(stream, 'writing', { total: 7 })
+    await pushPart(stream, '## 1. 产品概述\n\n第一版内容（编造了指标）\n\n', {
+      sectionId: 'overview',
+      sectionTitle: '产品概述',
+      sectionHeading: '## 1. 产品概述',
+      index: 0,
+      total: 7,
+    })
     expect(wrapper.text()).toContain('第一版内容（编造了指标）')
 
-    await pushStage(stream, 'reviewing')
+    await pushStage(stream, 'reviewing', { sectionId: 'overview', index: 0 })
     await pushStage(stream, 'rewriting', {
+      sectionId: 'overview',
+      index: 0,
       note: '出现了输入中没有的性能指标',
       issues: [{ severity: 'high', detail: '出现了输入中没有的性能指标' }],
     })
 
-    // 旧草稿不撤下：直接清空会让用户看到「这一章突然没了」，而它只是想表达「正在重写」
+    // 旧稿不撤下：直接清空会让用户看到「这一章突然没了」，而它只是想表达「正在重写」
     expect(wrapper.text()).toContain('第一版内容（编造了指标）')
-    expect(wrapper.text()).toContain('以下为上一版草稿，正在按审核意见重写')
-    expect(wrapper.text()).toContain('出现了输入中没有的性能指标')
+    // 看板：第 1 章在「改写」车道
+    expect(wrapper.text()).toContain('①')
 
-    // 重写内容一流出就顶替旧草稿，不会与新文本并存
-    stream.handlers?.onChunk?.('## 1. 产品概述\n\n重写后的内容\n')
-    await nextTick()
+    // 重写内容一流出就顶替旧稿，不会与新文本并存
+    await pushPart(stream, '## 1. 产品概述\n\n重写后的内容\n\n', {
+      sectionId: 'overview',
+      sectionTitle: '产品概述',
+      sectionHeading: '## 1. 产品概述',
+      index: 0,
+      total: 7,
+    })
     expect(wrapper.text()).toContain('重写后的内容')
     expect(wrapper.text()).not.toContain('编造了指标')
-    expect(wrapper.text()).not.toContain('以下为上一版草稿')
 
     await stream.finish('# 产品需求文档\n\n## 1. 产品概述\n\n重写后的内容')
     expect(wrapper.text()).toContain('PRD 文档')

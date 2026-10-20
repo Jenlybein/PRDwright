@@ -150,8 +150,9 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(alice, monk
     # 文档头 1 段 + 每章 1 段
     assert len(parts) == len(PRD_SECTIONS) + 1
     done = next(event for event in events if event.type == "done")
-    # 契约：part 拼接 == 最终正文
-    assert "".join(part.data["text"] for part in parts).strip() == done.data["reply"]
+    # 契约：按 index 排序后拼接 == 最终正文（并行时 part 可以乱序到达）
+    ordered = sorted(parts, key=lambda part: part.data.get("index", -1))
+    assert "".join(part.data["text"] for part in ordered).strip() == done.data["reply"]
 
     # 收尾：run_summary 的完整契约（用量汇总与任务状态并作一份）
     summary = events[-1]

@@ -6,7 +6,7 @@ import DocPhaseProgress from '@/components/ui/DocPhaseProgress.vue'
 import PrdProgress from '@/components/stages/PrdProgress.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
-import type { DocPhase, PrdStageProgress } from '@/types'
+import type { DocPhase, PrdBoardState } from '@/types'
 import { formatDuration } from '@/utils/metering'
 
 /**
@@ -27,8 +27,8 @@ const props = defineProps<{
   error?: string
   /** 是否仍在生成中；为 false 表示已失败，只展示错误与返回入口 */
   generating?: boolean
-  /** PRD 分章节生成的阶段进度；非 PRD 时为 null */
-  prd?: PrdStageProgress | null
+  /** PRD 分章节生成的管道看板；非 PRD 时为 null */
+  prd?: PrdBoardState | null
   /** 下游文档（接口 / 提示词）的生成阶段；idle 表示未走该链路 */
   docPhase?: DocPhase | null
   /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
@@ -56,7 +56,10 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
 <template>
   <section class="space-y-3">
     <!-- 分章节生成时先给出阶段条：让用户知道卡在哪一章、是否在改写 -->
-    <PrdProgress v-if="prd" :progress="prd" />
+    <PrdProgress
+      v-if="prd && (prd.total > 0 || prd.sections.length > 0)"
+      :board="prd"
+    />
     <!-- 下游文档：整篇生成 → 审核 → 改写，用同一套胶囊样式展示 -->
     <DocPhaseProgress
       v-else-if="docPhase && docPhase !== 'idle'"

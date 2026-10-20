@@ -55,6 +55,8 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     // PRD 生成本就带技能包身份，放在默认里才贴近真实回执
     injectedSkills: [{ name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' }],
     warnings: [],
+    partial: false,
+    failedSections: [],
     provider: 'ark',
     model: 'doubao-seed',
     requestId: 'req-abc123',

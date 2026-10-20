@@ -434,11 +434,17 @@ function parseReviewEvent(data: Record<string, unknown>): ReviewConclusion {
  */
 function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
   const completedSections: CompletedSection[] = readObjectArray(data, 'completed_sections').map(
-    (item) => ({
-      sectionId: readString(item, 'section_id'),
-      heading: readString(item, 'heading'),
-      text: readString(item, 'text'),
-    }),
+    (item) => {
+      const section: CompletedSection = {
+        sectionId: readString(item, 'section_id'),
+        heading: readString(item, 'heading'),
+        text: readString(item, 'text'),
+      }
+      // 旧快照没有这两个字段：缺省就不写，保持既有形状（并行链路才带 index/failed）
+      if (typeof item.index === 'number') section.index = item.index
+      if (item.failed === true) section.failed = true
+      return section
+    },
   )
 
   const rawSolutionId = data.solution_id
@@ -454,6 +460,12 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     errorCode: readString(data, 'error_code'),
     errorMessage: readString(data, 'error_message'),
     pendingItems: parsePendingItems(data),
+    partial: data.partial === true,
+    failedSections: readObjectArray(data, 'failed_sections').map((item) => ({
+      sectionId: readString(item, 'section_id'),
+      title: readString(item, 'title'),
+      reason: readString(item, 'reason'),
+    })),
     elapsedMs: readNumber(data, 'elapsed_ms'),
   }
 }
@@ -498,6 +510,12 @@ function parseRunSummary(data: Record<string, unknown>): RunSummary {
     steps: parseSteps(data),
     injectedSkills: parseSkills(data),
     warnings: readStringArray(data, 'warnings'),
+    partial: data.partial === true,
+    failedSections: readObjectArray(data, 'failed_sections').map((item) => ({
+      sectionId: readString(item, 'section_id'),
+      title: readString(item, 'title'),
+      reason: readString(item, 'reason'),
+    })),
     provider: readString(data, 'provider'),
     model: readString(data, 'model'),
     requestId: readString(data, 'request_id'),

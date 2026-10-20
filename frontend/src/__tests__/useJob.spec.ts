@@ -71,6 +71,8 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     errorMessage: '',
     elapsedMs: 0,
     pendingItems: [],
+    partial: false,
+    failedSections: [],
     ...overrides,
   }
 }
@@ -88,6 +90,8 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     steps: [],
     injectedSkills: [],
     warnings: [],
+    partial: false,
+    failedSections: [],
     provider: 'ark',
     model: 'doubao-seed',
     requestId: 'req-1',

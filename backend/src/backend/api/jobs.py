@@ -111,6 +111,7 @@ def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
         created_at=str(row.get("created_at", "")),
         updated_at=str(row.get("updated_at", "")),
         usage=usage,
+        partial=bool(usage.get("partial")) if isinstance(usage, dict) else False,
     )
 
 
