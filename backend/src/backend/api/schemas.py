@@ -279,6 +279,18 @@ class LogoutResponse(BaseModel):
     ok: bool = Field(default=True, description="是否成功登出")
 
 
+class AdminMeResponse(BaseModel):
+    """管理员身份自检的返回。
+
+    刻意**只回自己**的信息：它要回答的是「我有没有进后台的资格」，
+    而不是一份用户名单。
+    """
+
+    id: int = Field(description="用户 ID")
+    username: str = Field(description="用户名")
+    is_admin: bool = Field(description="是否管理员；本接口恒为 true，保留字段以便前端统一处理")
+
+
 # ============================================================================
 # 方案（solutions）：整份会话快照的持久化
 # ============================================================================

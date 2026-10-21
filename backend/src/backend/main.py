@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.api.admin import router as admin_router
 from backend.api.auth import router as auth_router
 from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
@@ -158,6 +159,8 @@ register_error_handlers(app)
 
 
 # 注册业务路由（各自在 Router 上声明了完整 prefix）
+# 管理员路由：整组由 `require_admin` 依赖守卫，未登录另有中间件拦成 401
+app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(config_router)

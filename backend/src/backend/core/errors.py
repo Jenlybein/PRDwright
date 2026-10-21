@@ -30,7 +30,7 @@ class ErrorCode(str, Enum):
     `BACKEND_ERROR_CODES` 与之严格一致；改名或增删都要两侧同步，否则前端的类型
     守卫会静默失配。
 
-    成员数量刻意保持在 8 个：只覆盖前端真正需要**区分对待**的分支，
+    成员数量刻意保持在 9 个：只覆盖前端真正需要**区分对待**的分支，
     其余一律归入 `INTERNAL_ERROR`，避免错误码膨胀成第二套异常体系。
     """
 
@@ -39,6 +39,11 @@ class ErrorCode(str, Enum):
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     # 未登录或登录态过期。HTTP 401。
     UNAUTHORIZED = "UNAUTHORIZED"
+    # 已登录但权限不足（典型：非管理员访问 `/api/admin/**`）。HTTP 403。
+    # 与 `UNAUTHORIZED` 分开的理由是前端对两者的处理**完全不同**：401 要跳登录，
+    # 403 是「登录了也不行」，只能停在无权限页。合成一个码的话前端只能给同一句
+    # 文案，用户会反复被踢去登录却永远登不进去。
+    FORBIDDEN = "FORBIDDEN"
     # 注册 / 登录失败的全部分支：用户名或密码不合规、缺邀请码、用户名已注册、
     # 邀请码无效、注册失败、密码错误、账号停用。HTTP 400（注册）/ 401（登录）。
     AUTH_FAILED = "AUTH_FAILED"
@@ -63,6 +68,7 @@ class ErrorCode(str, Enum):
 # `SESSION_NOT_FOUND` 不在其中，它只出现在 HTTP 200 的 SSE 流内，没有对应的状态码。
 DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.UNAUTHORIZED: 401,
+    ErrorCode.FORBIDDEN: 403,
     ErrorCode.AUTH_FAILED: 401,
     ErrorCode.SOLUTION_NOT_FOUND: 404,
     ErrorCode.INVALID_REQUEST: 400,

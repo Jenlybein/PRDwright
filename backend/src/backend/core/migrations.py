@@ -701,6 +701,29 @@ def _add_chat_stage_to_jobs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_is_admin_to_users(conn: sqlite3.Connection) -> None:
+    """v12：给 `users` 加 `is_admin`——这个人是不是**平台管理员**。
+
+    为什么需要它
+    ------------
+    v4 管理员后台的地基，是让后端能**自己**区分普通用户与管理员，从而在每个
+    管理员接口前独立校验。在此之前用户表只有「是否启用」，没有任何权限维度：
+    `INIT_ADMIN_*` 建出来的首个账号与普通账号在数据上完全等价，于是
+    「他是不是管理员」只能靠前端藏入口——而那等于把锁装在门面上（ADR-039）。
+
+    **默认值 0 的语义很重要**：存量账号一律不是管理员。宁可让运维显式任命
+    （`scripts/auth_cli.py promote`），也不能让一次升级把现有用户集体提权——
+    后者是「悄悄扩大了权限面」，而且没有任何报错。
+
+    与 v11 同样先查列再决定加不加：已经手工补过列的库不该因为「列已存在」
+    而启动失败，幂等靠事实判断而不是版本号猜。
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    if "is_admin" in columns:
+        return
+    conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -719,6 +742,7 @@ MIGRATIONS: list[Migration] = [
     Migration(version=9, name="solutions_state_and_chat_tables", apply=_create_chat_tables),
     Migration(version=10, name="backfill_solution_state", apply=_backfill_solution_state),
     Migration(version=11, name="jobs_chat_stage", apply=_add_chat_stage_to_jobs),
+    Migration(version=12, name="users_is_admin", apply=_add_is_admin_to_users),
 ]
 
 

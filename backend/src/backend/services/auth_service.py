@@ -57,6 +57,9 @@ class User:
     username: str
     is_active: bool
     created_at: str = ""
+    # 是否平台管理员。默认 False 让「取不到这一列」的旧代码路径表现为**无权限**
+    # 而不是有权限——权限判断出错时，安全的方向是拒绝。
+    is_admin: bool = False
 
 
 class AuthError(Exception):
@@ -216,6 +219,7 @@ def _to_user(row: dict[str, object]) -> User:
         username=str(row["username"]),
         is_active=bool(row["is_active"]),
         created_at=str(row.get("created_at", "")),
+        is_admin=bool(row.get("is_admin", 0)),
     )
 
 
@@ -317,6 +321,31 @@ def reset_password(username: str, password: str) -> None:
     UserRepository.update_password(int(row["id"]), password_hash, salt)
 
 
+def set_admin(username: str, is_admin: bool) -> User:
+    """任命 / 撤销管理员。
+
+    业务规则只有一条，但很关键：**不能撤销最后一位管理员**。
+    否则系统里再没有一个人进得了后台，而这个状态**无法自助恢复**——
+    任命管理员本身需要管理员权限，只能靠运维直接改库。
+    宁可拒绝这次操作并把原因说清楚。
+
+    Raises:
+        AuthError: 用户不存在，或这是最后一位管理员。
+    """
+    row = UserRepository.get_by_username(username.strip())
+    if row is None:
+        raise AuthError("该用户不存在")
+
+    user_id = int(row["id"])
+    # 只有「本来是管理员 + 要撤销 + 撤完就没了」这才拦；任命与重复任命都不受影响
+    if not is_admin and bool(row.get("is_admin")) and UserRepository.count_admins() <= 1:
+        raise AuthError("这是最后一位管理员，不能撤销——至少保留一位，否则无人能进后台")
+
+    UserRepository.set_is_admin(user_id, is_admin)
+    updated = UserRepository.get_by_id(user_id)
+    return _to_user(updated) if updated else _to_user(row)
+
+
 def login(username: str, password: str) -> tuple[User, str, datetime]:
     """校验账号密码并签发会话。
 
@@ -392,7 +421,9 @@ def ensure_bootstrap() -> None:
 
     if UserRepository.count() == 0 and settings.init_admin_user and settings.init_admin_password:
         password_hash, salt = hash_password(settings.init_admin_password)
-        UserRepository.create(settings.init_admin_user, password_hash, salt)
+        # 自举出来的首个账号**直接是管理员**：否则全新部署后没有任何人能进后台，
+        # 而任命管理员本身又需要管理员权限——那是个死锁。
+        UserRepository.create(settings.init_admin_user, password_hash, salt, is_admin=True)
 
 
 def ensure_dev_user() -> User:

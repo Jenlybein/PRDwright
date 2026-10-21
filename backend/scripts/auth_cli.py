@@ -6,6 +6,8 @@
     uv run python scripts/auth_cli.py user alice
     uv run python scripts/auth_cli.py reset-password alice
     uv run python scripts/auth_cli.py delete-user alice
+    uv run python scripts/auth_cli.py promote alice
+    uv run python scripts/auth_cli.py demote alice
     uv run python scripts/auth_cli.py invite WELCOME --max-uses 5 --expires 2026-12-31
 
 为什么需要它：邀请码会在首次启动时自动播种一条（见 `INVITE_CODE`），
@@ -14,6 +16,13 @@
 
 它读写的是服务运行时那个 SQLite 库（`DB_PATH`，缺省 `backend/prdwright.db`），
 因此**后端不需要重启**，改动即时生效。
+
+为什么需要一个「任命管理员」的入口
+----------------------------------
+`INIT_ADMIN_*` 只在**用户表为空**时才创建首个账号（见 `auth_service.ensure_bootstrap`），
+所以它对全新部署有效，对「已经有人注册过的库」完全不触发。而任命管理员本身
+又需要管理员权限——这是个死锁，只能由运维在库这一层直接打破。`promote` 就是
+那把钥匙：**它是唯一不需要已有管理员就能产生管理员的路径**，因此不该被删掉。
 
 本脚本只做参数解析与结果打印，全部业务规则都在 `services/auth_service` 里，
 不在这里另写一套校验，也不直接碰 SQL。
@@ -27,6 +36,7 @@ from datetime import datetime
 
 from backend.core.config import get_settings
 from backend.core.db import init_schema
+from backend.core.migrations import run_migrations
 from backend.repositories.auth_repo import InviteCodeRepository
 from backend.services import auth_service
 
@@ -46,7 +56,8 @@ def _cmd_list(_: argparse.Namespace) -> int:
         print("  （暂无用户）")
     for user in users:
         state = "启用" if user["is_active"] else "停用"
-        print(f"  #{user['id']}  {user['username']}  [{state}]  创建于 {user['created_at']}")
+        role = "管理员" if user.get("is_admin") else "普通用户"
+        print(f"  #{user['id']}  {user['username']}  [{state}/{role}]  创建于 {user['created_at']}")
 
     codes = InviteCodeRepository.list_all()
     print("\n邀请码：")
@@ -103,6 +114,32 @@ def _cmd_delete_user(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_promote(args: argparse.Namespace) -> int:
+    """把用户提升为管理员。"""
+    try:
+        user = auth_service.set_admin(args.username, True)
+    except auth_service.AuthError as exc:
+        print(f"失败：{exc.message}")
+        return 1
+    print(f"已将 {user.username} 提升为管理员")
+    return 0
+
+
+def _cmd_demote(args: argparse.Namespace) -> int:
+    """撤销管理员身份。
+
+    最后一位管理员不会被撤销（服务层会拒绝）——否则系统里再没有人能进后台，
+    而那时连「再任命一个」都做不了，只能手工改库。
+    """
+    try:
+        user = auth_service.set_admin(args.username, False)
+    except auth_service.AuthError as exc:
+        print(f"失败：{exc.message}")
+        return 1
+    print(f"已撤销 {user.username} 的管理员身份")
+    return 0
+
+
 def _cmd_invite(args: argparse.Namespace) -> int:
     """发放一个邀请码。"""
     if InviteCodeRepository.get(args.code) is not None:
@@ -155,6 +192,14 @@ def build_parser() -> argparse.ArgumentParser:
     delete.add_argument("--yes", action="store_true", help="跳过二次确认，用于脚本化调用")
     delete.set_defaults(func=_cmd_delete_user)
 
+    promote = sub.add_parser("promote", help="把用户提升为管理员")
+    promote.add_argument("username")
+    promote.set_defaults(func=_cmd_promote)
+
+    demote = sub.add_parser("demote", help="撤销管理员身份（最后一位管理员不会被撤销）")
+    demote.add_argument("username")
+    demote.set_defaults(func=_cmd_demote)
+
     invite = sub.add_parser("invite", help="发放邀请码")
     invite.add_argument("code")
     invite.add_argument("--max-uses", type=int, default=0, help="最多可用次数，0 表示不限（默认）")
@@ -166,8 +211,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """入口。建表（幂等）后分发子命令。"""
+    """入口。建表（幂等）**并补齐迁移**后分发子命令。
+
+    必须跑迁移：`init_schema` 只建基线表，对已存在的表是空操作，
+    而 `is_admin` 这类后来加的列全靠迁移补。少了这一步，`promote` 在旧库上
+    会直接报 `no such column: is_admin`——报错点离原因很远。
+    """
     init_schema()
+    run_migrations()
     args = build_parser().parse_args()
     return int(args.func(args))
 

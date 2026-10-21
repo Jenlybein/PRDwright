@@ -199,12 +199,16 @@ def test_reset_password_enforces_policy():
 
 
 def test_list_users_exposes_no_credentials():
-    """用户列表不能带出哈希或 salt，否则运维工具就成了泄露面。"""
+    """用户列表不能带出哈希或 salt，否则运维工具就成了泄露面。
+
+    键集合是**精确断言**：多返回一个字段（哪怕是 `is_admin` 这种无害的）也要
+    在这里显式确认过，避免「顺手把某个敏感列也查出来」混在改动里溜过去。
+    """
     auth_service.create_user_direct("alice", "password123")
 
     rows = auth_service.list_users()
     assert len(rows) == 1
-    assert set(rows[0]) == {"id", "username", "created_at", "is_active"}
+    assert set(rows[0]) == {"id", "username", "created_at", "is_active", "is_admin"}
 
 
 def test_delete_user_removes_the_account():

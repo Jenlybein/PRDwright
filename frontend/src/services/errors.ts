@@ -18,6 +18,9 @@ export const BACKEND_ERROR_CODES = {
   SESSION_NOT_FOUND: 'SESSION_NOT_FOUND',
   /** 未登录或登录态过期（HTTP 401） */
   UNAUTHORIZED: 'UNAUTHORIZED',
+  /** 已登录但权限不足，如非管理员访问管理员接口（HTTP 403）。
+   *  与 UNAUTHORIZED 分开：401 跳登录，403 停在无权限页，前端要能分辨 */
+  FORBIDDEN: 'FORBIDDEN',
   /** 注册 / 登录失败的全部分支（HTTP 400 / 401） */
   AUTH_FAILED: 'AUTH_FAILED',
   /** 方案不存在或不属于当前用户（HTTP 404） */

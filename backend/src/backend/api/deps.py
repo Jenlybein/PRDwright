@@ -17,7 +17,7 @@ import time
 from http.cookies import SimpleCookie
 from uuid import uuid4
 
-from fastapi import Request, status
+from fastapi import Depends, Request, status
 from starlette.datastructures import MutableHeaders
 
 from backend.core.config import get_settings
@@ -49,6 +49,10 @@ _PUBLIC_PREFIXES: tuple[str, ...] = ("/api/auth",)
 # 未登录时的统一提示。注意**不区分**「未登录」与「会话过期」，
 # 避免泄露额外信息。
 _UNAUTHORIZED_DETAIL = "请先登录后再使用该功能"
+
+# 已登录但非管理员的统一提示。刻意只说「权限不够」——
+# 不复述「你是普通用户」「管理员名单里有谁」这类可用于勾勒后台结构的信息。
+_FORBIDDEN_DETAIL = "需要管理员权限才能使用该功能"
 
 
 def is_public_path(path: str) -> bool:
@@ -262,6 +266,22 @@ def get_current_user(request: Request) -> User:
     user = get_current_user_optional(request)
     if user is None:
         raise AppError(ErrorCode.UNAUTHORIZED, _UNAUTHORIZED_DETAIL)
+    return user
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """取当前用户**且**要求是管理员；不是管理员抛 403（带 `FORBIDDEN` 错误码）。
+
+    这是所有 `/api/admin/**` 路由的**唯一入口依赖**。刻意做成依赖，而不是让各路由
+    自己写 `if not user.is_admin`：漏写一次判断就是一次越权，且它在代码里长得跟
+    正常分支没什么两样；而依赖**漏挂**会直接体现为「这个函数签名里没有它」，
+    评审时一眼能看到。
+
+    注意它只管「权限」，不管「登录」——后者由 `AuthMiddleware` 统一拦
+    （`/api/admin` 不在白名单里），所以走到这里时用户必然已登录。
+    """
+    if not user.is_admin:
+        raise AppError(ErrorCode.FORBIDDEN, _FORBIDDEN_DETAIL)
     return user
 
 

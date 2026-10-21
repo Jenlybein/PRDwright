@@ -16,13 +16,21 @@ class UserRepository:
     """`users` 表的读写。"""
 
     @staticmethod
-    def create(username: str, password_hash: str, salt: bytes) -> int:
-        """新增用户，返回其 id。用户名重复会抛 `sqlite3.IntegrityError`。"""
+    def create(
+        username: str, password_hash: str, salt: bytes, is_admin: bool = False
+    ) -> int:
+        """新增用户，返回其 id。用户名重复会抛 `sqlite3.IntegrityError`。
+
+        Args:
+            is_admin: 是否建为管理员。**默认 False**——新建账号不带任何权限，
+                管理员身份只能来自初始账号的自举或运维显式任命，
+                避免「建号」这个动作变成顺手提权的通道。
+        """
         with connect() as conn:
             cur = conn.execute(
-                "INSERT INTO users (username, password_hash, salt, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (username, password_hash, salt, utc_now_text()),
+                "INSERT INTO users (username, password_hash, salt, created_at, is_admin) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (username, password_hash, salt, utc_now_text(), int(is_admin)),
             )
             conn.commit()
             return int(cur.lastrowid or 0)
@@ -55,9 +63,30 @@ class UserRepository:
         """列出全部用户（不含密码哈希与 salt），供运维查看。"""
         with connect() as conn:
             rows = conn.execute(
-                "SELECT id, username, created_at, is_active FROM users ORDER BY id"
+                "SELECT id, username, created_at, is_active, is_admin FROM users ORDER BY id"
             ).fetchall()
             return [dict(row) for row in rows]
+
+    @staticmethod
+    def set_is_admin(user_id: int, is_admin: bool) -> None:
+        """设置管理员标记（任命 / 撤销管理员的落点）。
+
+        只改这一列、不碰其它字段：撤销管理员**不等于**停用账号，
+        那个人照样能正常登录使用产品，只是进不了后台。
+        """
+        with connect() as conn:
+            conn.execute(
+                "UPDATE users SET is_admin = ? WHERE id = ?",
+                (int(is_admin), user_id),
+            )
+            conn.commit()
+
+    @staticmethod
+    def count_admins() -> int:
+        """管理员人数，用于守住「系统至少留一位管理员」这条不变式。"""
+        with connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM users WHERE is_admin = 1").fetchone()
+            return int(row["n"]) if row else 0
 
     @staticmethod
     def update_password(user_id: int, password_hash: str, salt: bytes) -> None:

@@ -22,6 +22,11 @@ from pathlib import Path
 from backend.core.config import get_settings
 
 # 建表语句。全部带 IF NOT EXISTS，重复启动不会破坏已有数据。
+#
+# ⚠️ 这里定义的是**新库**的最终形状；**已存在的库**不会因为这里加了列而跟着变
+# （`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作）。因此每加一个列都要配一步
+# 迁移（见 `core/migrations.py`）：新库走这里，旧库走迁移，两条路缺一不可。
+# 只改这里 → 旧库永远少这一列；只加迁移 → 只跑 `init_schema` 的测试与脚本少这一列。
 SCHEMA_SQL = """
 -- 用户：密码只存 scrypt 哈希与独立 salt，绝不存明文
 CREATE TABLE IF NOT EXISTS users (
@@ -30,7 +35,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT    NOT NULL,
     salt          BLOB    NOT NULL,
     created_at    TEXT    NOT NULL,
-    is_active     INTEGER NOT NULL DEFAULT 1
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    is_admin      INTEGER NOT NULL DEFAULT 0
 );
 
 -- 登录会话：只存 token 的哈希，数据库泄露也无法直接拿去冒用
