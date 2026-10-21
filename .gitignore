@@ -155,6 +155,9 @@ __screenshots__/
 *.sqlite
 *.db
 *.db-journal
+# SQLite WAL 模式的两个边车文件（跑测试就会生成，和 *.db 一样不该入库）
+*.db-shm
+*.db-wal
 data/**
 !data/.gitkeep
 uploads/**

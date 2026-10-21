@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import AsyncIterator
 
 import pytest
@@ -41,10 +42,17 @@ class RoutingLLM:
         *,
         fail_headings: set[str] | None = None,
         review_delays: dict[str, float] | None = None,
+        revise_headings: set[str] | None = None,
+        revise_severity: str = "high",
     ) -> None:
         self._fail = set(fail_headings or set())
         self._review_delays = review_delays or {}
+        # 这些章节的审核返回 `revise`（带 `where`），从而把改写路径走起来
+        self._revise = set(revise_headings or set())
+        # 触发改写时报告的严重度：用来验证「只有 high 才改」
+        self._severity = revise_severity
         self.calls: list[str] = []
+        self.rewrite_calls: list[str] = []
         self.max_in_flight = 0
         self._in_flight = 0
 
@@ -70,7 +78,31 @@ class RoutingLLM:
                 delay = self._review_delays.get(heading, 0.0)
                 if delay:
                     await asyncio.sleep(delay)
-                yield AIMessageChunk(content='{"verdict": "pass"}')
+                if heading in self._revise:
+                    yield AIMessageChunk(
+                        content=json.dumps(
+                            {
+                                "verdict": "revise",
+                                "issues": [
+                                    {
+                                        "where": heading,
+                                        "severity": self._severity,
+                                        "detail": "缺少关键内容",
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    yield AIMessageChunk(content='{"verdict": "pass"}')
+                return
+
+            # 改写调用与撰写调用的人设相同，只能靠用户消息区分
+            if "审核发现的问题" in user:
+                self.rewrite_calls.append(heading)
+                await asyncio.sleep(0.01)
+                yield AIMessageChunk(content=f"\n\n改后-{heading}\n\n")
                 return
 
             self.calls.append(heading)
@@ -189,3 +221,40 @@ def test_review_disabled_emits_no_review_event() -> None:
     for section in PRD_SECTIONS:
         assert section.heading in done.data["reply"]
     assert done.data["partial"] is False
+
+
+def test_parallel_rewrite_replaces_only_the_hit_section() -> None:
+    """并行的改写路径：只重写被点名的那一章，其余章逐字保留。
+
+    这条路径此前**零覆盖**——假模型的审核分支恒返回 `pass`，从不进改写，
+    于是「并行链路的改写」从未被任何用例走通过。
+    """
+    target = PRD_SECTIONS[1]
+    llm = RoutingLLM(revise_headings={target.heading})
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert "rewriting" in [event.data["stage"] for event in events if event.type == "stage"]
+    # 只改写被点名的那一章，且只改一次
+    assert llm.rewrite_calls == [target.heading]
+
+    parts = {
+        event.data["section_id"]: event.data["text"]
+        for event in events
+        if event.type == "part" and event.data.get("section_id")
+    }
+    assert f"改后-{target.heading}" in parts[target.id]
+
+    # 未被点名的章照旧，没被顺手动过
+    other = PRD_SECTIONS[2]
+    assert f"正文-{other.heading}" in parts[other.id]
+    assert "改后-" not in parts[other.id]
+
+
+def test_parallel_medium_severity_does_not_rewrite() -> None:
+    """并行链路同样遵守改写门槛：medium 只报不改。"""
+    target = PRD_SECTIONS[1]
+    llm = RoutingLLM(revise_headings={target.heading}, revise_severity="medium")
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert "rewriting" not in [event.data["stage"] for event in events if event.type == "stage"]
+    assert llm.rewrite_calls == []

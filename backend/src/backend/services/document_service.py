@@ -40,7 +40,9 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
+from backend.services.doc_skeleton import extract_headings, skeletonize
 from backend.services.llm_factory import StreamingChatModel, get_llm
 from backend.services.llm_utils import extract_json_object
 from backend.services.document_review import (
@@ -304,8 +306,14 @@ class DocumentService:
             llm: 自定义 LLM 实例；不传则在首次使用时通过 `get_llm()` 惰性创建。
         """
         self._llm = llm
+        # 显式注入的实例必须**原样复用**：测试靠注入假模型来数调用次数、按系统提示词
+        # 分流（如 `TwoStageLLM`），若在它之外再偷偷建一个「审核专用」实例，
+        # 那些断言会全部落空。
+        self._llm_injected = llm is not None
         # 分章节生成器。惰性创建：它自己也会惰性获取 LLM，且只有在技能包可用时才会用到。
         self._section_writer: PrdSectionWriter | None = None
+        # 审核专用的小输出窗口实例（惰性，见 `review_llm`）
+        self._review_llm: StreamingChatModel | None = None
 
     # ------------------------------------------------------------------
     # LLM 惰性获取
@@ -317,6 +325,31 @@ class DocumentService:
         if self._llm is None:
             self._llm = get_llm()
         return self._llm
+
+    @property
+    def review_llm(self) -> StreamingChatModel:
+        """审核专用的**小输出窗口**实例。
+
+        审核只是「判定 + 批注」，输出量与正文不在一个量级，却默认占着生成用的那个
+        巨大上限（`ARK_MAX_TOKENS` 实测是 131072）。给它一个远小的窗口既省时间也
+        省 token——顺带堵住「模型在审核输出里复述一大段正文」这条浪费路径。
+
+        ⚠️ 为什么只能是另一个实例而不是调用参数：`VolcanoArkChatModel._astream` 读的
+        是 `self.max_tokens`，`astream(..., max_tokens=...)` 不报错也不生效。
+
+        ⚠️ 为什么注入了 `llm` 就直接复用它：见 `__init__` 里的说明。
+
+        不需要全局缓存：该封装每次调用都现建现关客户端，实例不持有连接池，
+        多一个实例的代价可忽略；这里缓存的粒度是「每个 service 实例」，
+        一份文档的两三次审核共用同一个。
+        """
+        if self._review_llm is None:
+            self._review_llm = (
+                self.llm
+                if self._llm_injected
+                else get_llm(max_tokens=get_settings().doc_review_max_tokens)
+            )
+        return self._review_llm
 
     def _get_section_writer(self, review_enabled: bool | None = None) -> PrdSectionWriter:
         """获取 PRD 分章节生成器（惰性创建，与本源共用同一个 LLM 实例）。
@@ -332,9 +365,13 @@ class DocumentService:
         """
         if review_enabled is None:
             if self._section_writer is None:
-                self._section_writer = PrdSectionWriter(llm=self.llm)
+                self._section_writer = PrdSectionWriter(
+                    llm=self.llm, review_llm=self.review_llm
+                )
             return self._section_writer
-        return PrdSectionWriter(llm=self.llm, review_enabled=review_enabled)
+        return PrdSectionWriter(
+            llm=self.llm, review_llm=self.review_llm, review_enabled=review_enabled
+        )
 
     # ------------------------------------------------------------------
     # 模板加载与 Prompt 拼接
@@ -656,11 +693,15 @@ class DocumentService:
                         self.llm,
                         document=clean_reply,
                         writing_rules=api_specs,
-                        requirements=prd_content,
+                        # 上游材料骨架化：审核要核对的是「有没有编造 / 漏掉」，
+                        # 需要的是事实索引而不是整篇散文
+                        requirements=skeletonize(prd_content),
                         doc_type="api_doc",
                         kind="api_docs",
                         label="接口文档",
                         outcome=outcome,
+                        review_llm=self.review_llm,
+                        section_titles="\n".join(extract_headings(clean_reply)),
                     ):
                         yield review_event_or_chunk
                 yield StreamEvent(
@@ -743,9 +784,13 @@ class DocumentService:
 
                 # 与接口文档同构：整篇生成 → 审一次 → 有问题改写一次（不复审）。
                 # 快捷流程（`review_enabled=False`）与接口文档一样整段跳过，不发 `review`。
-                requirements_text = prd_content
+                # 与接口文档同口径：审核只看骨架，不看整篇
+                requirements_text = skeletonize(prd_content)
                 if api_docs_content.strip():
-                    requirements_text = f"{prd_content}\n\n## 接口文档\n\n{api_docs_content}"
+                    requirements_text = (
+                        f"{requirements_text}\n\n## 接口文档\n\n"
+                        f"{skeletonize(api_docs_content)}"
+                    )
                 outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
                 if review_enabled_for_whole_document(review_enabled):
                     async for review_event_or_chunk in stream_review_and_rewrite(
@@ -757,6 +802,8 @@ class DocumentService:
                         kind="prompts",
                         label="提示词套件",
                         outcome=outcome,
+                        review_llm=self.review_llm,
+                        section_titles="\n".join(extract_headings(clean_reply)),
                     ):
                         yield review_event_or_chunk
                 yield StreamEvent(

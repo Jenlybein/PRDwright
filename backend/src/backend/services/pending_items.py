@@ -187,10 +187,42 @@ def extract(
             collected.extend(parsed)
         out.append(tail)
 
-    # 等级校验：缺失或非法 → **丢弃该项**（绝不兜底），再按重要性从高到低稳定排序。
-    # 同级保持模型原本的书写顺序，避免同一等级内顺序跳来跳去。
+    items = finalize_items(collected, id_prefix=id_prefix)
+
+    clean = "".join(out)
+    # 移除块体后可能留下成片空行：压缩到连续两个换行以内并裁掉首尾空白，
+    # 让落库正文与 `part` 预览视觉一致（不影响语义）。
+    clean = "\n".join(line for line in re.split(r"\n{3,}", clean.strip()) if line.strip() or True)
+    clean = collapse_blank_lines(clean)
+    return clean, items
+
+
+def finalize_items(
+    records: list[dict[str, Any]], *, id_prefix: str = "p"
+) -> list[dict[str, Any]]:
+    """把一批**原始**清单项校验、排序并分配 id——这条链路的唯一落点。
+
+    为什么要单独拎出来：分节改写只会重写其中几节，改完要把「改写节的新清单」与
+    「未改写节的旧清单」合并后**重新排一次序、重新分配一遍 id**。若各写一份
+    「校验 + 排序 + 分配」的循环，两边迟早在「等级怎么兜底」「id 从几开始」上漂移。
+
+    处理顺序（与 `extract` 内的口径完全一致）：
+
+    1. **等级校验**：缺失或非法 → **丢弃该项**（绝不兜底），记 warning；
+    2. 按 `importance` 从高到低（P0 → P6）**稳定排序**——同级保持模型原本的书写顺序，
+       避免同一等级内顺序跳来跳去；
+    3. 按排好的顺序**重新分配 id** 为 ``{id_prefix}-{n}``，不信任模型给的 `id`。
+       于是「id 序号」天然等于「提问顺序」：越重要的排在越前面、越先被问到。
+
+    Args:
+        records: 原始清单项（可以来自 `extract` 的收集、也可以来自一次合并）。
+        id_prefix: id 前缀；分章节生成传 `section.id`，保证跨章节不重号。
+
+    Returns:
+        已排好序且带 id 的清单项。
+    """
     validated: list[dict[str, Any]] = []
-    for record in collected:
+    for record in records:
         level = _normalize_importance(record.get("importance"))
         if level is None:
             logger.warning(
@@ -205,17 +237,10 @@ def extract(
         validated.append({**record, "importance": level})
 
     validated.sort(key=_importance_rank)
-    items = [
+    return [
         {**record, "id": f"{id_prefix}-{index}"}
         for index, record in enumerate(validated, start=1)
     ]
-
-    clean = "".join(out)
-    # 移除块体后可能留下成片空行：压缩到连续两个换行以内并裁掉首尾空白，
-    # 让落库正文与 `part` 预览视觉一致（不影响语义）。
-    clean = "\n".join(line for line in re.split(r"\n{3,}", clean.strip()) if line.strip() or True)
-    clean = collapse_blank_lines(clean)
-    return clean, items
 
 
 def _parse_items(raw: str) -> list[dict[str, Any]] | None:

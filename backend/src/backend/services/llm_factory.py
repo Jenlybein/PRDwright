@@ -86,12 +86,22 @@ def get_llm(
         # 火山方舟走官方 SDK，而不是 OpenAI 兼容伪装
         from backend.services.ark_llm import VolcanoArkChatModel
 
+        # 与 anthropic / openai 两个分支同口径：调用方显式给的 `max_tokens` 优先于配置值。
+        # 这里曾经完全忽略 `extra`，于是 `get_llm(max_tokens=...)` 在方舟下被静默丢弃——
+        # 而方舟是本项目的默认供应商，等于「按调用调小输出窗口」这条路一直是死的。
+        #
+        # ⚠️ 只能靠实例生效：`VolcanoArkChatModel._astream` 读的是 `self.max_tokens`，
+        # `astream(..., max_tokens=...)` 不报错也不生效。需要更小窗口的调用方
+        # （如审核）必须拿一个**独立的实例**，不能指望调用参数。
+        ark_max_tokens = extra.pop("max_tokens", None)
         return VolcanoArkChatModel(
             api_key=api_key,
             model=model,
             base_url=settings.ark_base_url or None,
             temperature=temperature,
-            max_tokens=settings.ark_max_tokens,
+            max_tokens=int(ark_max_tokens)
+            if ark_max_tokens
+            else settings.ark_max_tokens,
             thinking_enabled=settings.ark_thinking_enabled,
             timeout=timeout,
         )

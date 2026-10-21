@@ -332,3 +332,25 @@ def test_timeout_zero_falls_back_to_sdk_default(monkeypatch) -> None:
     get_settings.cache_clear()
 
     assert get_llm().timeout is None
+
+
+def test_max_tokens_override_reaches_the_ark_adapter(monkeypatch) -> None:
+    """`get_llm(max_tokens=...)` 在方舟下必须真的生效。
+
+    方舟分支曾经把 `**kwargs` 整个丢掉、硬写 `settings.ark_max_tokens`，于是
+    「按调用调小输出窗口」在本项目**默认供应商**上是条死路——不报错、不警告，
+    只是悄悄用了配置值。审核要设小窗口就指着这条路。
+
+    ⚠️ 只能靠**独立实例**生效：`VolcanoArkChatModel._astream` 读的是
+    `self.max_tokens`，`astream(..., max_tokens=...)` 不报错也不生效。
+    """
+    from backend.services.llm_factory import get_llm
+
+    monkeypatch.setenv("ARK_API_KEY", "test-ark-key")
+    monkeypatch.setenv("ARK_MAX_TOKENS", "131072")
+    get_settings.cache_clear()
+
+    assert get_llm().max_tokens == 131072
+    assert get_llm(max_tokens=2048).max_tokens == 2048
+    # 不传时仍取配置值，别把默认路径一起改掉
+    assert get_llm().max_tokens == 131072

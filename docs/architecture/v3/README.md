@@ -87,6 +87,8 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 写正文的入口 | **唯一**：job 成功收尾，正文 / 清单 / 回执**同批写入一版**（整篇生成追加新版本，`optimize` / `clarify` 就地改当前版本）；失败不写 | `job_service._write_document` → `document_store.commit_generated` |
 | 前端通道 | 只剩两条：`GET /api/solutions/{id}/documents`（读）、`PUT .../documents/{kind}`（手改，**不碰**清单与回执） | `services/documentService.ts` + `stores/documents.ts` |
 | 快照里的正文 | `SessionDataV2` 退役三个 `*Content` 与三个 `*RunSummary`；旧快照残留**被忽略**（不做兼容读） | `types/index.ts` + `utils/workflow.ts::normalizeSessionSnapshot` |
+| 审核怎么省钱 | 审核只写**批注**（`where` 锚点 + 禁止摘录原文 + `detail` 限长），并各自用**小输出窗口实例**（整篇 2048 / 单章 1024）；只有 `high` 触发改写，改写后**不复审**；上游材料与前序章节**骨架化**（纯字符串，零额外调用）——撰写侧的需求输入不动。见 ADR-035 | `services/document_review.py` + `services/prd_section_writer.py` + `services/doc_skeleton.py` |
+| 整篇怎么改写 | **分节改写**：只重写 `where` 命中的节、按标题拼回，`part{replace}` 仍发**完整正文**；`where` 一条都定位不到、或拼回后明显变短 → 退回整篇重写（`DOC_SECTION_REWRITE_ENABLED` 可一键回退）。未被改写章节的待确认项**合并保留** | `document_review.py::stream_review_and_rewrite` |
 | 加表 / 加列 | **有序幂等迁移**（`PRAGMA user_version`，每步独立事务、只跑增量）；`init_schema` 只建基线表 | `core/migrations.py` |
 | 待确认清单怎么来 | 模型在正文末尾附 **HTML 注释标记块**（渲染里不可见），收尾剥离解析、`id` 由后端按「章节 + 序号」分配 | `services/pending_items.py` |
 | 清单怎么分级 | 每项带 `importance`（**P0~P6** 七档，判据是「不问就没法开工」）；`extract` **先按等级稳定排序、再分配 id**，故 `p-1` 恒为最要紧那条。**等级没有兜底**——缺失或非法（如 `P7`）的条目**直接丢弃**并记 `pending.bad_importance` 告警，前端两处入口同口径 | `services/pending_items.py` + `services/api.ts` / `services/documentService.ts` |

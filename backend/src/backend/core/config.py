@@ -205,6 +205,36 @@ class Settings(BaseSettings):
         "与 llm_max_retries（单次调用重试）是两层，实际调用次数是两者之积。",
     )
 
+    # --- 文档审核（整篇 / 分章节共用） ----------------------------------------
+    # 审核只是「判定 + 批注」，输出量与正文不在一个量级。给它一个远小于生成的上限，
+    # 既省时间也省 token；万一被截断，按「审核失败 → 通过」处理（审核是锦上添花，
+    # 不能反向拖垮已经生成好的正文）。
+    #
+    # ⚠️ 这个上限只能靠**换一个模型实例**生效：`VolcanoArkChatModel._astream` 只读
+    # `self.max_tokens`，`astream()` 传 kwargs 不生效（见 `services/llm_factory.py`）。
+    doc_review_max_tokens: int = Field(
+        default=2048,
+        ge=256,
+        description="整篇文档（接口文档 / 提示词套件）审核这次调用的 max_tokens。",
+    )
+    prd_section_review_max_tokens: int = Field(
+        default=1024,
+        ge=256,
+        description="PRD 单章节审核这次调用的 max_tokens（只审一章，比整篇更小）。",
+    )
+    review_rewrite_min_severity: Literal["high", "medium", "low"] = Field(
+        default="high",
+        description="触发改写的最低严重度，两条链路共用。"
+        "默认 `high`：medium 里有「空泛表述」「结构不符」这类几乎必然命中的口径，"
+        "按它改写会把「审一次 → 改一次」变成常态，时延翻倍而收益极小。"
+        "审核结论里的 issues 不受此影响——medium 照样报给用户，只是不自动改。",
+    )
+    doc_section_rewrite_enabled: bool = Field(
+        default=True,
+        description="整篇文档改写是否走「分节改写」（只重写受影响的章节）。"
+        "关掉即退回整篇重写——这是分节改写出问题时的一键回退开关。",
+    )
+
     # --- 技能包（PRD 生成的提示词资产） --------------------------------------
     skills_strict: bool = Field(
         default=False,

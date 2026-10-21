@@ -507,13 +507,44 @@ PRD_SECTION_GENERATION_PROMPT = """你正在撰写一篇 PRD 中的**某一个�
 
 {pending_spec}"""
 
-# 占位符：issues（审核发现的问题，已逐条编号）、instruction（审核给出的修改指令）
-# 说明：审核判定为 revise 时，把本片段追加到 PRD_SECTION_GENERATION_PROMPT 之后。
-PRD_SECTION_REWRITE_APPENDIX = """
+# 占位符：writing_rules、requirements、prior_sections、section_heading、section_title、
+#          section_text、issues、instruction、pending_spec
+#
+# 说明：**改写专用**，不再复用 `PRD_SECTION_GENERATION_PROMPT`。
+# 从前改写是把完整撰写提示词（含 6000 字符的字段契约、带 `{{字段名}}` 占位符的模板、
+# 对话记录）整份重发一遍再追加一段附录——改写一次的输入比初次撰写还大。
+# 而且模板里的占位符会诱导模型「重新渲染一遍骨架」，反而破坏原文
+# （`document_service.format_rewrite_reference` 的白名单早就写明改写不需要模板与字段契约，
+# 这里只是把分章节链路拉到同一个口径）。
+#
+# 保留 `requirements`：它是事实来源。改成「待确认」还是改成别的值，要看需求里有没有。
+PRD_SECTION_REWRITE_PROMPT = """你正在**改写**一篇 PRD 里某一个章节的现有正文，不是从零撰写。
 
-## 八、上一版未通过审核，请重写本章节
+## 一、写作规范（改写时必须继续遵守）
 
-审核发现的问题：
+{writing_rules}
+
+## 二、需求输入（唯一的事实来源）
+
+{requirements}
+
+## 三、已定稿的上游章节（骨架，供核对产品名、功能编号与范围口径）
+
+{prior_sections}
+
+## 四、本次要改写的章节
+
+章节标题（输出的第一行必须与它完全一致）：
+
+{section_heading}
+
+章节名称：{section_title}
+
+## 五、本章当前正文
+
+{section_text}
+
+## 六、审核发现的问题
 
 {issues}
 
@@ -521,10 +552,19 @@ PRD_SECTION_REWRITE_APPENDIX = """
 
 {instruction}
 
-重写要求：
+## 七、重写要求
+
 - 逐条修正上面的问题；与问题无关的内容保持稳定，不要顺带改写。
 - 输出**完整**的本章节正文（含章节标题行），不要只输出修改片段。
-- 直接输出 Markdown，不要解释你改了什么。"""
+- 输入中没有的信息不要编造：按写作规范的「缺失信息处理」标注「待确认」或「不适用」。
+- 直接输出 Markdown 正文，不要解释你改了什么。
+
+## 八、待确认问题（清单式，非章节正文）
+
+本章节里所有「待确认」「不适用」或「需用户拍板」的点，除了在正文里就地标注，还要按下面的
+方式汇总成机器可读的清单，附在**本章节正文末尾**（不要写进任何章节标题里）：
+
+{pending_spec}"""
 
 # 审核 Agent 的人设。只做判定、不改写，输出严格 JSON。
 PRD_SECTION_REVIEW_SYSTEM_PROMPT = """你是一位严格的产品文档评审员，负责在 PRD 定稿前做**单章节**质量把关。
@@ -534,7 +574,8 @@ PRD_SECTION_REVIEW_SYSTEM_PROMPT = """你是一位严格的产品文档评审员
 
 输出必须是**一个 JSON 对象**：不要输出 Markdown 代码块围栏，不要输出任何解释文字。"""
 
-# 占位符：writing_rules、requirements、prior_sections、section_heading、section_text
+# 占位符：writing_rules、requirements、prior_sections、section_heading、section_text、
+#          section_titles
 PRD_SECTION_REVIEW_PROMPT = """## 一、写作规范（评审依据，逐条核对）
 
 {writing_rules}
@@ -551,7 +592,11 @@ PRD_SECTION_REVIEW_PROMPT = """## 一、写作规范（评审依据，逐条核�
 
 {section_text}
 
-## 五、评审口径
+## 五、本章的小节标题清单（`where` 只能取自这里）
+
+{section_titles}
+
+## 六、评审口径
 
 逐条核对，任一条不通过就记为对应严重度的问题：
 
@@ -565,15 +610,21 @@ PRD_SECTION_REVIEW_PROMPT = """## 一、写作规范（评审依据，逐条核�
 
 判定口径：存在 high 或 medium 问题时 `verdict` 为 `revise`；只有 low 或无问题时为 `pass`。
 
-## 六、输出格式
+## 七、输出格式
 
 只输出一个 JSON 对象，形如：
 
-{{"verdict": "pass", "issues": [{{"severity": "high", "detail": "……"}}], "instruction": "……"}}
+{{"verdict": "pass", "issues": [{{"where": "### 2.1 MVP 功能", "severity": "high", "detail": "……"}}], "instruction": "……"}}
 
 字段说明：
 - `verdict`：`pass` 或 `revise`。
-- `issues`：问题列表，逐条写清「哪一处、什么问题」；没有问题时为空数组。
+- `issues`：问题列表，逐条写清「哪一处、什么问题」；没有问题时为空数组。每条含三个字段：
+  - `where`：问题所在的小节标题，**必须逐字取自上面第五节的清单**；
+    整章性或无法定位的问题写空串。
+  - `severity`：`high` / `medium` / `low`。
+  - `detail`：不超过 40 字，只写「什么问题」。
+    **严禁摘录、复述或引用章节正文原文**——那些字你已经读过了，再抄一遍
+    不会让判定更准，只会让这一步慢一倍。
 - `instruction`：给撰写者的修改指令，要具体到可直接执行；`verdict` 为 `pass` 时留空串。"""
 
 
@@ -589,6 +640,10 @@ DOC_REVIEW_SYSTEM_PROMPT = """你是一位严格的技术文档评审员，负�
 你的判断依据只有两份：给定的产出规范，以及给定的上游材料（事实来源）。
 不要提出规范之外的个人偏好，不要润色文字，不要重写文档——你只做判定。
 
+你写的是**批注，不是复述**：指出「第几节的什么问题」就够了。
+严禁摘录、复述或引用正文原文——哪怕只是一句。复述会把审核输出拖到与正文同一
+量级，那是纯粹的浪费：那些字你已经读过了，再抄一遍不会让判定更准。
+
 输出必须是**一个 JSON 对象**：不要输出 Markdown 代码块围栏，不要输出任何解释文字。"""
 
 # 占位符：writing_rules、requirements、document
@@ -600,11 +655,15 @@ DOC_REVIEW_PROMPT = """## 一、产出规范（评审依据，逐条核对）
 
 {requirements}
 
-## 三、待审文档
+## 三、待审文档的章节标题清单（`where` 只能取自这里）
+
+{section_titles}
+
+## 四、待审文档
 
 {document}
 
-## 四、评审口径
+## 五、评审口径
 
 逐条核对，任一条不通过就记为对应严重度的问题：
 
@@ -616,15 +675,21 @@ DOC_REVIEW_PROMPT = """## 一、产出规范（评审依据，逐条核对）
 
 判定口径：存在 high 或 medium 问题时 `verdict` 为 `revise`；只有 low 或无问题时为 `pass`。
 
-## 五、输出格式
+## 六、输出格式
 
 只输出一个 JSON 对象，形如：
 
-{{"verdict": "pass", "issues": [{{"severity": "high", "detail": "……"}}], "instruction": "……"}}
+{{"verdict": "pass", "issues": [{{"where": "## 2. 接口列表", "severity": "high", "detail": "……"}}], "instruction": "……"}}
 
 字段说明：
 - `verdict`：`pass` 或 `revise`。
-- `issues`：问题列表，逐条写清「哪一处、什么问题」；没有问题时为空数组。
+- `issues`：问题列表，逐条写清「哪一处、什么问题」；没有问题时为空数组。每条含三个字段：
+  - `where`：问题所在的章节标题，**必须逐字取自上面第三节的清单**。
+    这是后续「只重写受影响章节」的定位依据，写错就等于改错了地方。
+    跨章节或无法定位的问题写空串。
+  - `severity`：`high` / `medium` / `low`。
+  - `detail`：不超过 40 字，只写「什么问题」。
+    **严禁摘录、复述或引用正文原文**。
 - `instruction`：给撰写者的修改指令，要具体到可直接执行；`verdict` 为 `pass` 时留空串。"""
 
 # 占位符：issues、instruction、writing_rules、document
@@ -650,6 +715,46 @@ DOC_REWRITE_PROMPT = """## 上一版未通过审核，请重写全文
 ## 上一版全文
 
 {document}"""
+
+# 占位符：issues、instruction、writing_rules、section_heading、section_text、pending_spec
+# 说明：**分节改写**专用——只重写受影响的那一节，输出量从「整篇」降到「一节」。
+# 与 `DOC_REWRITE_PROMPT` 的区别就是这一条：后者要求输出完整全文，只在
+# 「定位不到该改哪一节」时兜底使用。
+DOC_SECTION_REWRITE_PROMPT = """## 上一版未通过审核，请重写下面这一节
+
+审核发现的问题（只列与本节有关的）：
+
+{issues}
+
+修改指令：
+
+{instruction}
+
+## 本节标题（输出的第一行必须与它完全一致）
+
+{section_heading}
+
+## 本节当前正文
+
+{section_text}
+
+## 重写要求
+
+- 逐条修正上面的问题；与问题无关的内容保持稳定，不要顺带改写。
+- **只输出这一节的正文**（含上面给出的标题行），不要输出其它章节、不要输出
+  文档标题、不要输出任何解释或前后缀。
+- 直接输出 Markdown。
+
+## 产出规范（重写时必须继续遵守）
+
+{writing_rules}
+
+## 待确认问题（清单式，非章节正文）
+
+本节里所有「待确认」「不适用」或「需用户拍板」的点，除了在正文里就地标注，还要按下面的
+方式汇总成机器可读的清单，附在**本节正文末尾**；本节没有待确认点时不要附这个块：
+
+{pending_spec}"""
 
 
 # ============================================================================

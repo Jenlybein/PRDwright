@@ -11,7 +11,8 @@ import type { DocPhase } from '@/types'
  * 原样展示，等待就有了可感知的证据。
  *
  * 它与正文预览是**两个区域**：这里的文本是过程产物（审核意见 / 改写稿草稿），
- * 正文预览里的才是交付物。改写成功后由 `part{replace}` 整段覆盖正文预览。
+ * 正文预览里的才是交付物。改写成功后由 `part{replace}` **整段覆盖**正文预览——
+ * 即使只重写了几节，发过来的也必须是拼好的完整全文（否则预览会只剩片段）。
  */
 const props = defineProps<{
   /** 当前阶段 */
@@ -29,7 +30,7 @@ const title = computed(() => (props.phase === 'rewriting' ? '改写稿' : '审�
 
 const hint = computed(() =>
   props.phase === 'rewriting'
-    ? '正在按审核问题重写全文，完成后会整段替换右侧预览'
+    ? '正在重写受影响的章节，完成后会整段刷新右侧预览'
     : '正在逐条核对正文，下面是模型正在写出的内容',
 )
 

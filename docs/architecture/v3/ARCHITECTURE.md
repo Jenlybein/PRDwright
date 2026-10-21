@@ -321,7 +321,8 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | --- | --- |
 | 生成前 | 澄清收口状态可见：需求线程用结构化 `asks` 判断「还有未答」，文档线程显示 `pending_items` 剩余条数；只提醒、不硬拦（需求线程点「生成 PRD」时多一次确认）。 |
 | 生成后 | 不做 `quality_gate`（代码型质量报告整条不做）。接口文档 / 提示词整篇生成后各审一次；有问题改写一次，**不再复审**。⚠️ 快捷流程三份产物**一律跳过**（`review_enabled=false`，连 `review` 事件都不发） |
-| 门禁力度 | PRD 分章节 Writer → Review → 最多 Rewrite；并行链路下审核 / 改写按章节并发，受 `PRD_PIPELINE_CONCURRENCY`（默认 3）约束；单章每阶段失败按 `PRD_SECTION_MAX_RETRIES`（默认 3）重试。 |
+| 门禁力度 | PRD 分章节 Writer → Review →（**只有 high 才** Rewrite，且**改写后不复审**）；并行链路下审核 / 改写按章节并发，受 `PRD_PIPELINE_CONCURRENCY`（默认 3）约束；单章每阶段失败按 `PRD_SECTION_MAX_RETRIES`（默认 3）重试。改写门槛由 `REVIEW_REWRITE_MIN_SEVERITY`（默认 `high`）控制。 |
+| 省时口径 | ① 审核改「批注式」：`where` 锚点 + 禁止摘录原文 + `detail` 限长，审核调用各自设小输出窗口（整篇 2048 / 单章 1024）；② 整篇链路改**分节改写**：只重写 `where` 命中的章节，拼回后仍以 `part{replace}` 发**完整正文**（不匹配任何章节、或拼回后明显变短 → 退回整篇重写）；③ 上游材料与 `prior_sections` **骨架化**（标题树 + 表格整行 + 条目 + 含数字行），纯字符串处理、不额外调模型——撰写侧的需求输入**不动**，那是事实来源。 |
 | 失败降级 | 单章撰写用尽重试 → 写占位继续，任务仍 `completed` 且 `partial=true`；审核用尽 → 保留正文；改写用尽 → 保留改写前版本；全部章节失败才 `failed`。 |
 | 追溯 | 下游版本写 `derived_from`（上游版本号 + 内容指纹）；上游正文变化（含手改，按 `content_sha` 比较）后下游 `stale=true`，审阅页显示黄条。**下游不再删除**。 |
 | 交付 | `GET /api/solutions/{id}/export` 返回 ZIP：三份 md + `README.md`（**不做 manifest**）；进度条第 6 步「交付」，交付包在该页下载。 |

@@ -87,11 +87,13 @@ from backend.services.prd_skill import (
     format_summary_as_requirements,
     load_prd_skill_artifacts,
 )
+from backend.services.doc_skeleton import extract_headings, skeletonize
+from backend.services.document_review import reaches_severity
 from backend.services.prompts import (
     PRD_SECTION_GENERATION_PROMPT,
     PRD_SECTION_REVIEW_PROMPT,
     PRD_SECTION_REVIEW_SYSTEM_PROMPT,
-    PRD_SECTION_REWRITE_APPENDIX,
+    PRD_SECTION_REWRITE_PROMPT,
 )
 from backend.services.stream_reply import astream_text, collect_reply, error_event
 
@@ -272,18 +274,48 @@ class SectionReview:
 
     @property
     def needs_revision(self) -> bool:
-        """是否需要改写：判定为 revise 且至少给出了问题或修改指令。"""
+        """审核层面是否需要调整：判定为 revise 且至少给出了问题或修改指令。
+
+        注意它**不是**「要不要动笔改写」的判据——那是 `triggers_rewrite`。
+        `needs_revision` 还被用在收尾时汇总问题给用户看，那一处不能被改写门槛过滤掉，
+        否则用户看到的结论会少一半。
+        """
         return self.verdict == "revise" and bool(self.issues or self.instruction.strip())
 
+    def triggers_rewrite(self, min_severity: str = "high") -> bool:
+        """是否真的要动笔改写这一章：有问题，且**严重度达到门槛**。
+
+        为什么与 `needs_revision` 分开：medium 里的第 5 条口径是「空泛表述
+        （出现『用户管理』『数据看板』这类无法直接开工的描述）」，几乎必然命中。
+        按它改写等于每章都要整章重吐一遍，时延翻倍而收益极小。
+
+        Args:
+            min_severity: 门槛，取配置 `REVIEW_REWRITE_MIN_SEVERITY`（默认 `high`）。
+
+        Returns:
+            是否触发改写。
+        """
+        if not self.needs_revision:
+            return False
+        if not self.issues:
+            # 只给了指令、没有逐条问题：无从按等级筛选，按原口径放行
+            return True
+        return any(
+            reaches_severity(str(issue.get("severity") or ""), min_severity)
+            for issue in self.issues
+        )
+
     def issues_text(self) -> str:
-        """把问题列表渲染成提示词里的编号清单。"""
+        """把问题列表渲染成提示词里的编号清单（带上 `where` 定位）。"""
         if not self.issues:
             return "（审核未给出具体问题）"
         lines: list[str] = []
         for index, issue in enumerate(self.issues, start=1):
             severity = str(issue.get("severity", "")).strip() or "medium"
             detail = str(issue.get("detail", "")).strip() or "未说明"
-            lines.append(f"{index}. [{severity}] {detail}")
+            where = str(issue.get("where") or "").strip()
+            prefix = f"[{severity}] {where}" if where else f"[{severity}]"
+            lines.append(f"{index}. {prefix}：{detail}")
         return "\n".join(lines)
 
     def summary(self) -> str:
@@ -339,6 +371,7 @@ class PrdSectionWriter:
         *,
         review_enabled: bool | None = None,
         max_rewrites: int | None = None,
+        review_llm: StreamingChatModel | None = None,
     ) -> None:
         """初始化生成器。
 
@@ -346,8 +379,13 @@ class PrdSectionWriter:
             llm: 自定义 LLM 实例；不传则首次使用时惰性创建。
             review_enabled: 是否启用审核环节；不传则取配置 `PRD_SECTION_REVIEW_ENABLED`。
             max_rewrites: 每章最多改写轮数；不传则取配置 `PRD_SECTION_MAX_REWRITES`。
+            review_llm: 审核专用的小输出窗口实例；不传则惰性创建一个。
         """
         self._llm = llm
+        # 显式注入的实例必须**原样复用**：测试靠注入假模型数调用次数、按提示词分流，
+        # 若在它之外再偷偷建一个「审核专用」实例，那些断言会全部落空。
+        self._llm_injected = llm is not None
+        self._review_llm = review_llm
         settings = get_settings()
         self._review_enabled = (
             settings.prd_section_review_enabled if review_enabled is None else review_enabled
@@ -355,6 +393,7 @@ class PrdSectionWriter:
         self._max_rewrites = (
             settings.prd_section_max_rewrites if max_rewrites is None else max_rewrites
         )
+        self._rewrite_min_severity = settings.review_rewrite_min_severity
         # 并发度与章节重试次数：只在并行链路生效；串行链路保持原行为。
         self._concurrency = max(1, settings.prd_pipeline_concurrency)
         self._max_retries = max(0, settings.prd_section_max_retries)
@@ -365,6 +404,24 @@ class PrdSectionWriter:
         if self._llm is None:
             self._llm = get_llm()
         return self._llm
+
+    @property
+    def review_llm(self) -> StreamingChatModel:
+        """审核专用的**小输出窗口**实例。
+
+        审核只吐一个 JSON 批注，用不着撰写级的上限；给它一个远小的窗口，
+        一章省一点、六章就是可观的量。
+
+        ⚠️ 只能是另一个实例：方舟封装读的是 `self.max_tokens`，`astream()` 传
+        `max_tokens` 不生效（见 `services/llm_factory.py`）。注入了 `llm` 时直接复用它。
+        """
+        if self._review_llm is None:
+            self._review_llm = (
+                self.llm
+                if self._llm_injected
+                else get_llm(max_tokens=get_settings().prd_section_review_max_tokens)
+            )
+        return self._review_llm
 
     # ------------------------------------------------------------------
     # 主流程
@@ -449,6 +506,10 @@ class PrdSectionWriter:
         system_prompt = build_prd_system_prompt(writing_rules)
         conversation = format_conversation(history or [])
         template_sections = split_template_by_section(artifacts["prd_template"])
+        # 审核用的需求输入走**骨架**：审核只核对「有没有编造 / 漏掉」，需要的是事实
+        # 索引而不是整篇散文。撰写侧仍用完整的 `requirements_text`——那是事实来源，
+        # 压缩它会让章节内容失去依据。
+        review_requirements = skeletonize(requirements_text)
 
         total = len(PRD_SECTIONS)
         yield StreamEvent(
@@ -507,28 +568,23 @@ class PrdSectionWriter:
             section_text = "".join(buffer).strip()
 
             # ---------------- 2. 审核 + 3. 改写 ----------------
+            # 改写后**不再复审**：与整篇链路（审一次 → 有问题改一次，不复审）同口径。
+            # 复审的边际价值很低（改完大概率过），代价却是每章多发一次调用。
             if self._review_enabled and section_text:
-                rewrites_done = 0
-                while True:
-                    yield _section_stage_event("reviewing", section, index, total)
-                    review = await self._safe_review(
-                        section=section,
-                        section_text=section_text,
-                        writing_rules=writing_rules,
-                        requirements=requirements_text,
-                        prior_sections=_join_prior(written),
-                    )
-                    if review is None or not review.needs_revision:
-                        break
-                    if rewrites_done >= self._max_rewrites:
-                        logger.info(
-                            "章节 %s 已达改写上限（%d 轮），保留当前版本",
-                            section.id,
-                            self._max_rewrites,
-                        )
-                        break
-
-                    rewrites_done += 1
+                yield _section_stage_event("reviewing", section, index, total)
+                review = await self._safe_review(
+                    section=section,
+                    section_text=section_text,
+                    writing_rules=writing_rules,
+                    requirements=review_requirements,
+                    prior_sections=_join_prior(written),
+                )
+                # `max_rewrites` 为 0 时仍是「只审不改」的有效开关；> 0 时最多改一次
+                if (
+                    review is not None
+                    and self._max_rewrites >= 1
+                    and review.triggers_rewrite(self._rewrite_min_severity)
+                ):
                     yield _section_stage_event(
                         "rewriting",
                         section,
@@ -542,11 +598,10 @@ class PrdSectionWriter:
                         async for delta in self._stream_text(
                             self._rewrite_messages(
                                 section=section,
-                                section_template=section_template,
+                                section_text=section_text,
                                 system_prompt=system_prompt,
+                                writing_rules=writing_rules,
                                 requirements=requirements_text,
-                                conversation=conversation,
-                                field_schema=artifacts["field_schema"],
                                 prior_sections=_join_prior(written),
                                 review=review,
                             )
@@ -629,6 +684,10 @@ class PrdSectionWriter:
         system_prompt = build_prd_system_prompt(writing_rules)
         conversation = format_conversation(history or [])
         template_sections = split_template_by_section(artifacts["prd_template"])
+        # 审核用的需求输入走**骨架**：审核只核对「有没有编造 / 漏掉」，需要的是事实
+        # 索引而不是整篇散文。撰写侧仍用完整的 `requirements_text`——那是事实来源，
+        # 压缩它会让章节内容失去依据。
+        review_requirements = skeletonize(requirements_text)
 
         total = len(PRD_SECTIONS)
         yield StreamEvent(
@@ -667,7 +726,7 @@ class PrdSectionWriter:
                                 section=section,
                                 section_text=section_text,
                                 writing_rules=writing_rules,
-                                requirements=requirements_text,
+                                requirements=review_requirements,
                                 prior_sections=prior_sections,
                             )
                 except AppError:
@@ -684,20 +743,20 @@ class PrdSectionWriter:
             return None
 
         async def section_task(idx: int, draft: str, prior: str) -> None:
+            # 与串行链路同口径：审一次 → 至多改一次，**改写后不再复审**。
             st = states[idx]
             review: SectionReview | None = None
-            rewrites = 0
             if self._review_enabled:
-                while True:
-                    st.status = "reviewing"
-                    await put(_section_stage_event("reviewing", st.section, idx, total))
-                    review = await review_with_retry(st.section, draft, prior)
-                    st.review = review
-                    if review is None or not review.needs_revision:
-                        break
-                    if rewrites >= self._max_rewrites:
-                        break
-                    rewrites += 1
+                st.status = "reviewing"
+                await put(_section_stage_event("reviewing", st.section, idx, total))
+                review = await review_with_retry(st.section, draft, prior)
+                st.review = review
+                # `max_rewrites` 为 0 时仍是「只审不改」的有效开关；> 0 时最多改一次
+                if (
+                    review is not None
+                    and self._max_rewrites >= 1
+                    and review.triggers_rewrite(self._rewrite_min_severity)
+                ):
                     st.status = "rewriting"
                     await put(
                         _section_stage_event(
@@ -713,11 +772,10 @@ class PrdSectionWriter:
                         new_draft = await call_text(
                             self._rewrite_messages(
                                 section=st.section,
-                                section_template=template_sections.get(st.section.heading, ""),
+                                section_text=draft,
                                 system_prompt=system_prompt,
+                                writing_rules=writing_rules,
                                 requirements=requirements_text,
-                                conversation=conversation,
-                                field_schema=artifacts["field_schema"],
                                 prior_sections=prior,
                                 review=review,
                             ),
@@ -729,8 +787,8 @@ class PrdSectionWriter:
                         logger.warning(
                             "章节 %s 改写失败，保留改写前版本", st.section.id, exc_info=True
                         )
-                        break
-                    if new_draft.strip():
+                        new_draft = ""
+                    if new_draft and new_draft.strip():
                         draft = new_draft
 
             text = _ensure_heading(draft, st.section.heading)
@@ -944,29 +1002,40 @@ class PrdSectionWriter:
         self,
         *,
         section: PrdSection,
-        section_template: str,
+        section_text: str,
         system_prompt: str,
+        writing_rules: str,
         requirements: str,
-        conversation: str,
-        field_schema: str,
         prior_sections: str,
         review: SectionReview,
     ) -> list[BaseMessage]:
-        """组装「按审核意见重写某一章」的消息：撰写提示词 + 改写附录。"""
-        user_content = PRD_SECTION_GENERATION_PROMPT.format(
+        """组装「按审核意见重写某一章」的消息。
+
+        这里**不再复用** `PRD_SECTION_GENERATION_PROMPT`。那份提示词是给「从零撰写」
+        用的，里面塞着三样改写用不到的东西：
+
+        - `field_schema`：6000 字符的输入字段契约，改写不需要它；
+        - `prd_template`：带 `{{字段名}}` 占位符的骨架，塞进「改写既有正文」的提示词
+          只会诱导模型重新渲染一遍占位符，反而破坏原文；
+        - `conversation`：需求澄清对话，改写时问题清单已经把要改的说清楚了。
+
+        从前改写一次的输入**比初次撰写还大**（多一段附录），现在只带「规范 + 需求 +
+        前序骨架 + 本章正文 + 问题」，通常能小一个量级。
+
+        `document_service.format_rewrite_reference` 的白名单早就写明「改写不需要模板
+        与字段契约」，这里只是把分章节链路拉到同一个口径。
+        """
+        user_content = PRD_SECTION_REWRITE_PROMPT.format(
+            writing_rules=writing_rules,
             requirements=requirements,
-            conversation=conversation,
-            field_schema=field_schema,
-            prd_template=section_template,
             prior_sections=prior_sections,
             section_heading=section.heading,
             section_title=section.title,
-            section_focus=section.focus,
-            pending_spec=render_spec(),
-        )
-        user_content += PRD_SECTION_REWRITE_APPENDIX.format(
+            section_text=section_text,
             issues=review.issues_text(),
-            instruction=review.instruction.strip() or "（未给出具体指令，请按上述问题自行修正）",
+            instruction=review.instruction.strip()
+            or "（未给出具体指令，请按上述问题自行修正）",
+            pending_spec=render_spec(),
         )
         return _build_messages(system_prompt, user_content)
 
@@ -981,9 +1050,16 @@ class PrdSectionWriter:
         """
         return astream_text(self.llm, messages)
 
-    async def _collect(self, messages: list[BaseMessage]) -> str:
-        """把流式回复收拢成完整文本（审核需要整体 JSON 才能解析）。"""
-        return await collect_reply(self.llm, messages)
+    async def _collect(
+        self, messages: list[BaseMessage], *, llm: StreamingChatModel | None = None
+    ) -> str:
+        """把流式回复收拢成完整文本（审核需要整体 JSON 才能解析）。
+
+        Args:
+            messages: 待发送的消息。
+            llm: 用哪个实例；不传则用撰写用的那个（大窗口）。
+        """
+        return await collect_reply(llm or self.llm, messages)
 
     async def _safe_review(
         self,
@@ -1019,16 +1095,26 @@ class PrdSectionWriter:
         requirements: str,
         prior_sections: str,
     ) -> SectionReview:
-        """调用审核 Agent，解析出结构化结论。"""
+        """调用审核 Agent，解析出结构化结论。
+
+        审核走**小输出窗口**的实例（`review_llm`）：它只吐一个 JSON 批注，
+        用不着撰写级的上限。
+        """
+        # 本章的小节标题清单，作为 `where` 的取值域——让模型从里挑，
+        # 而不是自由发挥写一个文档里不存在的章节名
+        section_titles = "\n".join(
+            [section.heading] + extract_headings(section_text, level=3)
+        )
         user_content = PRD_SECTION_REVIEW_PROMPT.format(
             writing_rules=writing_rules,
             requirements=requirements,
             prior_sections=prior_sections,
             section_heading=section.heading,
             section_text=section_text,
+            section_titles=section_titles,
         )
         messages = _build_messages(PRD_SECTION_REVIEW_SYSTEM_PROMPT, user_content)
-        raw = await self._collect(messages)
+        raw = await self._collect(messages, llm=self.review_llm)
 
         parsed = extract_json_object(raw)
         if parsed is None:
@@ -1063,10 +1149,19 @@ def _build_messages(system_prompt: str, user_content: str) -> list[BaseMessage]:
 
 
 def _join_prior(written: list[str]) -> str:
-    """把已定稿章节拼成上下文文本；首章时给出明确说明而不是空串。"""
+    """把前序章节压成**骨架**再拼成上下文；首章时给出明确说明而不是空串。
+
+    从前是原样拼接全文，于是第 k 章的输入含前 k−1 章全文——整篇是 O(N²)，
+    章数越多越慢。骨架化后每章只带「标题树 + 表格行 + 编号条目 + 含数字的行」，
+    而跨章一致性真正要核对的东西（产品名、功能编号 F-01、范围口径）
+    恰好都在这几类里，丢不掉。
+
+    改这一处就覆盖了全部 4 个调用点（串行撰写 / 串行审核 / 串行改写 / 并行撰写），
+    不存在漏改。
+    """
     if not written:
         return "（本章是第一章，暂无上游章节）"
-    return "\n\n".join(written)
+    return "\n\n".join(skeletonize(text) for text in written)
 
 
 def _ensure_heading(section_text: str, heading: str) -> str:

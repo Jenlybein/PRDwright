@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.ai import AIMessageChunk
@@ -67,7 +68,14 @@ class TwoStageLLM:
             yield AIMessageChunk(content=piece)
 
 
-def _drain(llm, *, document: str = "# 文档", outcome: ReviewOutcome | None = None):
+def _drain(
+    llm,
+    *,
+    document: str = "# 文档",
+    outcome: ReviewOutcome | None = None,
+    review_llm=None,
+    section_titles: str = "",
+):
     """跑完一次「审核 + 改写」，返回（事件列表, 回填后的 outcome）。"""
 
     async def go():
@@ -83,6 +91,8 @@ def _drain(llm, *, document: str = "# 文档", outcome: ReviewOutcome | None = N
                 kind="api_docs",
                 label="接口文档",
                 outcome=holder,
+                review_llm=review_llm,
+                section_titles=section_titles,
             )
         ]
         return events, holder
@@ -357,3 +367,166 @@ def test_whole_document_review_defaults_to_enabled() -> None:
 
     assert len(llm.calls) == 2
     assert [event.type for event in events].count("review") == 1
+
+
+def test_review_uses_the_smaller_window_instance() -> None:
+    """审核走 `review_llm`（小输出窗口），改写仍走撰写用的那个实例。
+
+    审核只吐一个 JSON 批注，用不着撰写级的上限；给它更小的窗口既省时间也顺带
+    堵住「模型在审核输出里复述正文」这条浪费路径。
+    """
+    main = TwoStageLLM(
+        review_pieces=[],  # 审核不归它管，一个字都不该从它这儿过
+        document_pieces=["# 文档"],
+        rewrite_pieces=["## 全文重写\n"],
+    )
+    auditor = TwoStageLLM(review_pieces=['{"verdict":"pass"}'])
+
+    _drain(main, review_llm=auditor)
+
+    assert len(auditor.calls) == 1
+    assert len(main.calls) == 0
+
+
+def test_section_rewrite_only_replaces_the_hit_section() -> None:
+    """分节改写：只重写 `where` 命中的那一节，其余逐字保留，拼回的仍是整篇。"""
+    document = "# 头\n\n## A\n\n旧A\n\n## B\n\n旧B\n"
+    revise = json.dumps(
+        {
+            "verdict": "revise",
+            "issues": [{"where": "## A", "severity": "high", "detail": "缺少鉴权说明"}],
+        },
+        ensure_ascii=False,
+    )
+    llm = TwoStageLLM(review_pieces=[revise], rewrite_pieces=["## A\n\n新A\n"])
+
+    events, outcome = _drain(llm, document=document, section_titles="## A\n## B")
+
+    assert outcome.rewritten is True
+    assert "新A" in outcome.final_reply
+    assert "旧A" not in outcome.final_reply
+    # 未被点名的 B 节逐字保留——改写不该顺手动它
+    assert "旧B" in outcome.final_reply
+    # 没丢章、也没把标题重复一遍
+    assert outcome.final_reply.count("## ") == 2
+    # H1 与前言在第一个标题之前，拼回时不能丢
+    assert outcome.final_reply.startswith("# 头")
+
+    # 预览是整段覆盖的：`part.text` 必须是完整正文，不能只发被改写的那一节
+    part = next(event for event in events if event.type == "part")
+    assert part.data["replace"] is True
+    assert part.data["text"] == outcome.final_reply
+
+
+def test_section_rewrite_falls_back_to_whole_document_when_where_unmatched() -> None:
+    """`where` 定位不到任何章节 → 退回整篇重写。
+
+    宁可多花一次调用，也不要因为定位不上就干脆不改——界面上会显示「发现 N 个问题」
+    却什么都没动，那比慢更难解释。
+    """
+    document = "## A\n\n旧A\n\n## B\n\n旧B\n"
+    revise = json.dumps(
+        {
+            "verdict": "revise",
+            "issues": [{"where": "## 不存在的章节", "severity": "high", "detail": "缺鉴权"}],
+        },
+        ensure_ascii=False,
+    )
+    llm = TwoStageLLM(review_pieces=[revise], rewrite_pieces=["## 全文重写\n"])
+
+    _, outcome = _drain(llm, document=document)
+
+    assert outcome.rewritten is True
+    assert outcome.final_reply.strip() == "## 全文重写"
+
+
+def test_section_rewrite_keeps_untouched_pending_items() -> None:
+    """只重写 N 节时，未改写章节的待确认项不能被覆盖掉。
+
+    改一节却让清单少一半问题，是最难解释的一类 bug。
+    """
+    document = "## A\n\n旧A\n\n## B\n\n旧B"
+    revise = json.dumps(
+        {
+            "verdict": "revise",
+            "issues": [{"where": "## A", "severity": "high", "detail": "缺鉴权"}],
+        },
+        ensure_ascii=False,
+    )
+    new_block = (
+        "<!-- PENDING:BEGIN -->\n"
+        '[{"question":"新问题","sections":["A"],"decider":"产品负责人","importance":"P0"}]\n'
+        "<!-- PENDING:END -->"
+    )
+    llm = TwoStageLLM(review_pieces=[revise], rewrite_pieces=[f"## A\n\n新A\n\n{new_block}"])
+    outcome = ReviewOutcome(
+        final_reply=document,
+        pending_items=[
+            {
+                "question": "旧问题",
+                "sections": ["B"],
+                "decider": "产品负责人",
+                "importance": "P1",
+                "id": "p-1",
+            }
+        ],
+    )
+
+    _, outcome = _drain(llm, document=document, outcome=outcome)
+
+    # B 节没动，它的待确认项必须还在；按重要性 P0 在前重新排序
+    assert [item["question"] for item in outcome.pending_items] == ["新问题", "旧问题"]
+    # id 重新分配后连续不重号
+    assert [item["id"] for item in outcome.pending_items] == ["p-1", "p-2"]
+
+
+def test_medium_severity_does_not_trigger_rewrite() -> None:
+    """只有未达门槛的 medium 问题时：结论照给，但不自动改写。
+
+    medium 里的「结构不符」「空泛表述」几乎必然命中，按它改写会把
+    「审一次 → 改一次」变成常态，时延翻倍而收益极小。
+    """
+    revise = json.dumps(
+        {
+            "verdict": "revise",
+            "issues": [{"where": "## A", "severity": "medium", "detail": "结构不符"}],
+        },
+        ensure_ascii=False,
+    )
+    llm = TwoStageLLM(review_pieces=[revise], rewrite_pieces=["## 全文重写\n"])
+
+    events, outcome = _drain(llm, document="## A\n\n旧A\n")
+
+    assert outcome.rewritten is False
+    assert [event.type for event in events if event.type == "part"] == []
+    # 结论照样给，且问题一条不少——只是不自动改
+    conclusion = next(event for event in events if event.type == "review")
+    assert conclusion.data["verdict"] == "revise"
+    assert len(conclusion.data["issues"]) == 1
+
+
+def test_review_input_is_skeletonized_but_generation_sees_full_prd() -> None:
+    """审核看骨架、撰写看全文：压缩只发生在**审核侧**。
+
+    审核要核对的是「有没有编造 / 有没有漏」，需要的是事实清单而不是散文。而撰写必须
+    拿全文——那是唯一的事实来源，压掉了就会照着骨架编内容。
+    """
+    verbose = "这是一段没有任何数字的叙述性文字，用来验证骨架化确实把它压掉了。" * 15
+    prd = f"# 演示产品\n\n## 1. 功能需求\n\n{verbose}\n\n- F-01 创建订单\n"
+    llm = TwoStageLLM(
+        document_pieces=["# 接口文档\n", "\n初稿正文"],
+        review_pieces=['{"verdict":"pass"}'],
+    )
+    service = DocumentService(llm=llm)
+
+    _drain_events(service.generate_api_docs_stream(prd_content=prd))
+
+    generate_msg = str(llm.calls[0][-1].content)
+    review_msg = str(llm.calls[1][-1].content)
+
+    # 撰写拿全文：需求里的长句一字不少
+    assert verbose in generate_msg
+    # 审核拿骨架：长句被压掉，但标题与编号锚点都还在
+    assert verbose not in review_msg
+    assert "## 1. 功能需求" in review_msg
+    assert "F-01 创建订单" in review_msg

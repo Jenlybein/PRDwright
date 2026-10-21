@@ -26,13 +26,14 @@ describe('StageOutputStream：阶段输出面板', () => {
     expect(wrapper.text()).toContain('{"verdict":"pass"}')
   })
 
-  it('改写阶段换成改写稿标题，并说明会整段替换预览', () => {
+  it('改写阶段换成改写稿标题，并说明会整段刷新预览', () => {
     const wrapper = mount(StageOutputStream, {
       props: { phase: 'rewriting', text: '# 改写后的正文' },
     })
 
     expect(wrapper.text()).toContain('改写稿')
-    expect(wrapper.text()).toContain('整段替换')
+    // 只重写受影响的章节，但发过来的是拼好的全文，所以预览仍是一次整段刷新
+    expect(wrapper.text()).toContain('整段刷新')
     expect(wrapper.text()).toContain('# 改写后的正文')
   })
 
