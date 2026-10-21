@@ -27,8 +27,8 @@ const SINGLE: ClarificationAsk = {
   background: '你提到用户常在弱网环境使用。',
   multiple: false,
   options: [
-    { label: 'A', text: '第一版就做离线同步' },
-    { label: 'B', text: '第一版只做在线' },
+    { label: 'A', text: '第一版就做离线同步', description: '弱网也能用，但要先做本地存储与冲突合并' },
+    { label: 'B', text: '第一版只做在线', description: '能更快交付，弱网下要等网络恢复' },
   ],
 }
 
@@ -152,10 +152,9 @@ describe('ClarificationAskList', () => {
     expect(wrapper.find('textarea').exists()).toBe(false)
   })
 
-  it('一轮问了多道题：题干才显示，且一次提交把它们合成一条消息', async () => {
+  it('一轮问了多道题：每题各自显示题干，且一次提交把它们合成一条消息', async () => {
     const wrapper = mountAsks([SINGLE, MULTI])
 
-    // 只问一道题时正文里刚写过同一个问题，不重复渲染
     expect(wrapper.text()).toContain(SINGLE.question)
     expect(wrapper.text()).toContain(MULTI.question)
 
@@ -183,11 +182,32 @@ describe('ClarificationAskList', () => {
     expect(lastText(wrapper)).toBe('1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步')
   })
 
-  it('只问一道题时不显示题干（正文里刚写过，重复一遍是噪声）', () => {
+  it('只问一道题时题干也由卡片显示', () => {
     const wrapper = mountAsks([SINGLE])
 
-    // 选项文字里有「离线同步」，题干整句不该出现
-    expect(wrapper.find('p').exists()).toBe(false)
+    // 曾经的写法是「只问一道就不印题干，正文里刚写过」——实测模型常常只写一句
+    // 「P0 级还有一个关键流程点需要确认：」就调工具，卡片上于是只剩几个短语。
+    expect(wrapper.text()).toContain(SINGLE.question)
+    // 背景（为什么问）一并显示，用户才知道这件事为什么现在要定
+    expect(wrapper.text()).toContain(SINGLE.background)
+  })
+
+  it('每个选项都显示自己那句说明（只给标题等于没得选）', () => {
+    const wrapper = mountAsks([SINGLE])
+
+    for (const option of SINGLE.options) {
+      expect(wrapper.text()).toContain(option.text)
+      expect(wrapper.text()).toContain(option.description as string)
+    }
+  })
+
+  it('选项没有说明时不渲染空行（历史数据与模型漏写都要能看）', () => {
+    const wrapper = mountAsks([MULTI])
+
+    // 一个选项按钮里固定三层：标号、文字容器、标题本身。有说明时才会多出第四层，
+    // 缺说明时不渲染那个节点——否则每个选项下方都会多一条空行。
+    expect(wrapper.findAll('button')[0]?.findAll('span')).toHaveLength(3)
+    expect(wrapper.findAll('button')[0]?.text()).toContain('网页版')
   })
 
   it('提交时 emit 结构化载荷：展示文本 + 逐题的 labels/question/texts（按选项顺序）', async () => {

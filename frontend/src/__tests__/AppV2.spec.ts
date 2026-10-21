@@ -763,11 +763,14 @@ describe('AppV2 完整流程编排', () => {
     // 展示文本照旧发给后端：它是降级时模型唯一能读到的东西
     expect(payload?.content).toBe('1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步')
 
-    // 但界面上不再念这段话：改用一行轻回执，只列选中的标号
-    const receipt = wrapper.find('[aria-label="你选了 A"]')
+    // 但界面上不再念那段拼装文本：「1. 题干 / 答：A. xxx」换成轻回执卡——
+    // 题干摘要 + 选中项的标号与标题（回看时要能认得出选了什么）
+    const receipt = wrapper.find('[aria-label*="你选了 A 第一版就做离线同步"]')
     expect(receipt.exists()).toBe(true)
-    expect(receipt.text()).not.toContain('第一版就做离线同步')
-    expect(receipt.text()).not.toContain('第一版要不要做离线同步？')
+    expect(receipt.text()).toContain('第一版要不要做离线同步？')
+    expect(receipt.text()).toContain('第一版就做离线同步')
+    // 拼装格式（给后端看的）不该出现在界面上
+    expect(receipt.text()).not.toContain('答：')
   })
 
   it('对话完成后可生成 PRD，并在生成完成时进入待确认阶段', async () => {

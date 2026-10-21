@@ -8,7 +8,7 @@ import type { ClarificationAnswerItem, ToolResultPayload } from '@/types'
  *
  * - `text`：发给后端的**正文**。降级（拿不到 `tool_call_id`）时它就是模型唯一能
  *   读到的东西，所以照旧保留那段完整的「题干 + 选项文本」，不为了界面好看而改短；
- * - `answers`：**界面回执**用（选了哪几个标号）。只要是点选项卡提交就一定有，
+ * - `answers`：**界面回执**用（题干 + 选中的标号与标题）。只要是点选项卡提交就一定有，
  *   与能不能结构化回灌无关——用户看不到模型收到了什么，他只看得到自己的界面；
  * - `toolResult`：**给模型的结构化回灌**（多一个 `tool_call_id` 要配对）。
  *   缺 id 时干脆不發，后端按纯文本处理。
@@ -135,8 +135,9 @@ function compose(): string {
 /**
  * 本轮**已作答题**的逐题作答，按题目在选项卡里的顺序。
  *
- * 它**只服务界面**：回执上只列选中的标号，不重复题干、不显示选项文本——
- * 那些内容用户在卡片与正文里刚读过。
+ * 两路共用同一份数据：`labels` / `texts` 给**界面回执**（`MessageList` 里那张
+ * 轻回执卡：题干 + 选中的标号与标题），`question` 既给模型对回题目、也给回执
+ * 补上下文——卡片一作答就整块消失，只留标号的话回看时没人认得「A」是什么。
  *
  * ⚠️ 与「能不能结构化回灌」无关：即便本轮拿不到 `tool_call_id` 只能降级成
  * 纯文本发给模型，界面也照样用回执形式。人看不到模型收到了什么。
@@ -194,19 +195,26 @@ function submit(): void {
 <template>
   <!-- 不可交互（已在历史里，或不是最后一条）时整块消失，而不是退成只读样式 -->
   <div v-if="interactive" class="mt-3 space-y-3">
-    <div v-for="ask in asks" :key="ask.id">
+    <div
+      v-for="ask in asks"
+      :key="ask.id"
+      class="rounded-xl border border-line bg-surface-2 px-3 py-2.5"
+    >
       <!--
-        只有一轮问了多道题时才显示题干：只问一道时正文里刚写过同一个问题，
-        再印一遍是纯噪声。
+        题干与背景**总是**由卡片自己显示，不指望模型在正文里再复述一遍。
+        曾经的写法是「只问一道题时不印题干，正文里刚写过」——实测模型常常只写一句
+        「P0 级还有一个关键流程点需要确认：」就调工具，于是卡片上只剩几个短语，
+        用户根本不知道自己在答什么。载荷里本来就有题干，没有理由不用它。
       -->
-      <p v-if="asks.length > 1 && ask.question" class="mb-1.5 text-sm font-medium text-fg">
-        {{ ask.question }}
+      <p v-if="ask.question" class="text-sm font-medium text-fg">{{ ask.question }}</p>
+      <p v-if="ask.background" class="mt-1 text-xs leading-relaxed text-muted">
+        {{ ask.background }}
       </p>
 
       <div
         :role="ask.multiple ? 'group' : 'radiogroup'"
         :aria-label="ask.question"
-        class="space-y-1.5"
+        class="mt-2 space-y-1.5"
       >
         <button
           v-for="option in ask.options"
@@ -235,7 +243,19 @@ function submit(): void {
           >
             {{ option.label }}
           </span>
-          <span class="min-w-0 flex-1 break-words text-body">{{ option.text }}</span>
+          <span class="min-w-0 flex-1">
+            <span class="block break-words text-body">{{ option.text }}</span>
+            <!--
+              说明是用户区分选项的**主要依据**（只给标题等于没得选）。历史数据可能没有
+              这个字段，按空处理——`v-if` 保证缺说明时不留空行。
+            -->
+            <span
+              v-if="option.description"
+              class="mt-0.5 block break-words text-xs leading-relaxed text-muted"
+            >
+              {{ option.description }}
+            </span>
+          </span>
         </button>
       </div>
     </div>

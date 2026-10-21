@@ -11,12 +11,14 @@ from backend.services.clarification_ask import (
     ASK_TOOL_NAME,
     MAX_ASK_OPTIONS,
     MAX_ASK_QUESTIONS,
+    MAX_OPTION_DESC_CHARS,
     MAX_OPTION_TITLE_CHARS,
     MIN_ASK_OPTIONS,
     asks_from_tool_calls,
     build_ask_tool,
     render_ask_tool_instruction,
 )
+from backend.services.prompts import CLARIFICATION_ASK_REMINDER
 
 
 def _call(questions: object, *, name: str = ASK_TOOL_NAME, as_json: bool = False) -> dict[str, object]:
@@ -66,7 +68,7 @@ def test_tool_schema_declares_the_limits() -> None:
     assert questions["maxItems"] == MAX_ASK_QUESTIONS
     assert options["minItems"] == MIN_ASK_OPTIONS
     assert options["maxItems"] == MAX_ASK_OPTIONS
-    assert options["items"]["required"] == ["text"]
+    assert options["items"]["required"] == ["text", "description"]
 
 
 def test_tool_schema_item_requires_question_and_options() -> None:
@@ -99,17 +101,86 @@ def test_instruction_states_the_hard_limits() -> None:
     assert f"保留前 {MAX_ASK_OPTIONS} 个" in spec
 
 
-def test_instruction_tells_the_model_to_explain_options_in_the_body() -> None:
-    """正文逐条解释、卡片只放选项名——这是界面不重复显示同一段话的前提。"""
+def test_instruction_moves_the_option_explanation_onto_the_card() -> None:
+    """说明归卡片、正文只写过渡——这是「用户看不清选项差别」那条反馈的落点。
+
+    旧口径让正文逐条解释、卡片只放名字。实测模型正文往往只写一句过渡话就调工具，
+    于是题干与说明两头落空：卡片上只剩「A 填完点按钮一次性生成」这类短语。
+    """
     spec = render_ask_tool_instruction()
 
-    assert "逐条简要解释每个选项" in spec
-    assert f"不超过 {MAX_OPTION_TITLE_CHARS} 个字" in spec
-    assert "不要写冒号" in spec
+    # 说明必须写进 description，且点明它是用户做决定的唯一依据
+    assert "description" in spec
+    assert "不许省" in spec
+    assert "唯一依据" in spec
+    assert f"不超过 {MAX_OPTION_DESC_CHARS} 个字" in spec
 
-    # 「只讲原则」不够：模型照样会写成「名字：一句解释」，必须给出正例与反例
+    # 正文不再逐条列 A/B/C，题干也由卡片承载
+    assert "题干、背景、每个选项的说明都由卡片承载" in spec
+    assert "不要再逐条列" in spec
+
+    # 「只讲原则」不够：模型照样会把说明塞进标题，必须给出正例与反例
     assert "正例" in spec and "反例" in spec
     assert "想法快速录入：" in spec  # 反例就是真实世界里它写出来的那种
+
+
+def test_instruction_forces_coverage_for_scale_titles() -> None:
+    """档位类标题（轻量版 / 标准版 / 详尽版）必须写清覆盖范围。
+
+    实测这一类的说明最容易被省掉：模型觉得「标准版」这个名字已经说明了一切，
+    于是 `description` 空着或写成「适合大多数项目」——用户仍然看不出三档差在哪。
+    """
+    spec = render_ask_tool_instruction()
+
+    assert "档位" in spec
+    for title in ("轻量版", "标准版", "详尽版"):
+        assert title in spec
+    # 判据要具体到「含什么、不含什么」，而不是「说清楚代价」这种形容词
+    assert "覆盖范围" in spec
+    assert "不含" in spec
+    # 反例必须点出「适合大多数项目」这种正确但没信息量的写法
+    assert "适合大多数项目" in spec
+    # 抽象规则不够：档位题要给一整组可模仿的示例（模型模仿整组示例比照规则写稳）
+    assert "第一版 PRD 的完整度" in spec
+    assert "含全量字段契约" in spec
+
+
+def test_instruction_asks_for_a_self_check_before_calling() -> None:
+    """调用工具前要自查每个选项是否都有说明；定义不出来的选项宁可删掉。"""
+    spec = render_ask_tool_instruction()
+
+    assert "自查" in spec
+    assert "删掉" in spec
+
+
+def test_instruction_keeps_the_body_out_of_ui_wording() -> None:
+    """正文不描述界面形态：「我列了几个选项」「请点选」这类话不该由正文说。
+
+    卡片是照着工具参数渲染的，正文一旦承诺「下面有选项」，两者就对不上了。
+    """
+    spec = render_ask_tool_instruction()
+
+    assert "不要描述界面形态" in spec
+    assert "请点选" in spec
+
+
+def test_option_description_field_mentions_scale_titles() -> None:
+    """字段说明也要点破档位词：模型写这个字段时看的就是这段。"""
+    options = build_ask_tool()["function"]["parameters"]["properties"]["questions"]["items"]["properties"]["options"]
+    field = options["items"]["properties"]["description"]["description"]
+
+    assert "档位" in field
+    assert "含什么" in field
+
+
+def test_reminder_repeats_the_scale_rule() -> None:
+    """续聊轮次的格式重申也要带上档位规则——长对话里最先退化的就是这一句。"""
+    assert "档位" in CLARIFICATION_ASK_REMINDER
+
+
+def test_instruction_warns_against_non_exclusive_options() -> None:
+    """选项要互斥：否则用户点哪个都一样，等于没得选。"""
+    assert "互斥" in render_ask_tool_instruction()
 
 
 def test_instruction_allows_a_turn_without_questions() -> None:
@@ -305,10 +376,55 @@ def test_extract_carries_source_call_id_per_item() -> None:
     assert asks[1]["tool_call_id"] == "call-2"
 
 
-def test_option_title_is_trimmed_at_the_colon() -> None:
-    """卡片上只留「名字」：「名字：一句解释」里冒号后面那半段是正文该写的。
+def test_option_description_is_carried_through() -> None:
+    """每个选项自带一句说明：卡片靠它让用户看出差别，后端不许吞掉。"""
+    asks = asks_from_tool_calls(
+        [
+            _call(
+                [
+                    _ask(
+                        options=[
+                            {"text": "想法快速录入", "description": "几句话就能开头"},
+                            {"text": "结构化引导填空", "description": "按 PRD 框架分步填"},
+                        ]
+                    )
+                ]
+            )
+        ]
+    )
 
-    这是用户明确反馈过的毛病——卡片与正文重复啰嗦。模型不听话时由后端兜住。
+    assert [(option["label"], option["text"], option["description"]) for option in asks[0]["options"]] == [
+        ("A", "想法快速录入", "几句话就能开头"),
+        ("B", "结构化引导填空", "按 PRD 框架分步填"),
+    ]
+
+
+def test_option_without_description_degrades_to_empty_string() -> None:
+    """模型漏了说明也不让这一轮失败：说明位留空串，选项照常可点。"""
+    asks = asks_from_tool_calls(
+        [_call([_ask(options=[{"text": "第一版就做离线同步"}, {"text": "第一版只做在线"}])])]
+    )
+
+    assert [option["description"] for option in asks[0]["options"]] == ["", ""]
+
+
+def test_overlong_option_description_is_clipped() -> None:
+    """说明超长截断：一句话说不完，说明本来就没想清楚。"""
+    long = "选这个的话要先做数据模型设计、再逐字段对齐、最后补校验规则，第一版很可能拖很久才能交付"
+    asks = asks_from_tool_calls(
+        [_call([_ask(options=[{"text": "结构化引导填空", "description": long}, {"text": "想法快速录入"}])])]
+    )
+
+    clipped = asks[0]["options"][0]["description"]
+    assert clipped.endswith("…")
+    assert len(clipped) <= MAX_OPTION_DESC_CHARS + 1
+
+
+def test_option_title_is_trimmed_at_the_colon_but_the_tail_becomes_description() -> None:
+    """「名字：一句解释」里的后半段**挪进说明位**，不是丢掉。
+
+    这是用户反馈「看不到选项差别」的直接成因：从前这里把冒号后面整段删掉，
+    而它的前提「解释归正文」未必成立——模型常常不写，于是说明两头落空。
     """
     asks = asks_from_tool_calls(
         [
@@ -329,6 +445,21 @@ def test_option_title_is_trimmed_at_the_colon() -> None:
         "想法快速录入",
         "结构化引导填空",
     ]
+    assert [option["description"] for option in asks[0]["options"]] == [
+        "几句话/要点输入，自动识别关键字段",
+        "按 PRD 框架分步填写，带提示示例",
+    ]
+
+
+def test_explicit_description_wins_over_the_colon_tail() -> None:
+    """两个字段都给时以 `description` 为准，标题里那截尾巴只当重复去掉。"""
+    asks = asks_from_tool_calls(
+        [_call([_ask(options=[{"text": "想法快速录入：旧的说明", "description": "新的说明"}, {"text": "另一个"}])])]
+    )
+
+    option = asks[0]["options"][0]
+    assert option["text"] == "想法快速录入"
+    assert option["description"] == "新的说明"
 
 
 def test_overlong_option_title_is_truncated() -> None:

@@ -14,9 +14,9 @@ import type { ChatMessage, ClarificationAnswerItem } from '@/types'
  * 助手消息若带结构化选择题（`asks`），在 Markdown 之后接一组可点选项卡；卡片的**选择
  * 状态留在卡片自己身上**，本组件只负责判断「这组还该不该可点」并把答案往上传。
  *
- * **用户消息分两叉**：带 `answers` 的是「点选项卡选出来的」——渲染成一行轻回执
- * （只列选中标号），因为 `content` 里那段拼出来的文本是给后端的，不该再原样念给
- * 用户听；不带 `answers` 的就是普通消息，照旧渲染成气泡。
+ * **用户消息分两叉**：带 `answers` 的是「点选项卡选出来的」——渲染成一张轻回执卡
+ * （题干摘要 + 选中项），因为 `content` 里那段拼出来的文本是给后端的，不该再原样
+ * 念给用户听；不带 `answers` 的就是普通消息，照旧渲染成气泡。
  */
 const props = defineProps<{
   /** 完整消息列表；role 为 system 的消息不会渲染 */
@@ -43,19 +43,24 @@ const stickToBottom = ref(true)
 const NEAR_BOTTOM_THRESHOLD = 80
 
 /**
- * 作答回执的读屏文案；顺便也就是这一行要说的那句话。
+ * 作答回执的读屏文案。
  *
- * 只有标号、没有题干与选项文本——「选了什么」才是用户要回看的信息，
- * 具体内容他在选项卡片与正文里刚读过。
+ * 与界面同口径：题干 + 选中的「标号 + 标题」。**必须**和界面上的字一致——
+ * 这里若只读标号，读屏用户回看历史时遇到的正是视力用户刚反馈过的那个问题
+ * （「A」是什么，早就想不起来了）。
  */
 function answersLabel(answers: ClarificationAnswerItem[]): string {
   const numbered = answers.length > 1
   return answers
     .map((item, index) => {
-      const picked = `你选了 ${item.labels.join('、')}`
-      return numbered ? `第 ${index + 1} 题 ${picked}` : picked
+      const picked = item.labels
+        .map((label, i) => `${label} ${item.texts?.[i] ?? ''}`.trim())
+        .join('、')
+      const head = item.question ? `「${item.question}」` : ''
+      const line = `${head}你选了 ${picked}`
+      return numbered ? `第 ${index + 1} 题 ${line}` : line
     })
-    .join('，')
+    .join('；')
 }
 
 /** 过滤掉系统消息后的可见消息 */
@@ -191,33 +196,49 @@ defineExpose({ scrollToBottom })
             选项卡的作答回执：刻意**不是**一条气泡。
 
             `content` 里那段拼出来的文本（「1. 题干 / 答：A. xxx」）既要发给后端，
-            读起来又啰嗦、还像模型在说话。带 `answers` 的消息改用一行轻回执——
-            弱化文字 + 若干个标号小圆片，**不重复题干、不显示选项文本**，
-            让它像一条回执而不是又一条聊天消息。
+            读起来又啰嗦、还像模型在说话。带 `answers` 的消息改用一张**轻回执卡**：
+            题干压到两行 + 一行「你选了 A. 标题」。
+
+            题干与选中项标题都留着——只留标号时，回看历史的人（尤其是隔一会儿
+            换个标签页回来的自己）根本想不起「A」指的是什么；而卡片一作答就整块
+            消失，这些信息再没有第二个地方可看。
+
+            压缩靠 `line-clamp-2` 而不是截断字符串：短题干一个字都不丢，长题干
+            自动省略，也不用在前端猜「多少字算短」。
           -->
           <div
             v-if="message.answers?.length"
-            class="flex flex-col items-end gap-1"
+            class="flex w-full flex-col items-end gap-1.5"
             :aria-label="answersLabel(message.answers)"
           >
             <div
               v-for="(item, itemIndex) in message.answers"
               :key="item.ask_id"
-              class="flex flex-wrap items-center justify-end gap-1.5"
+              class="max-w-full rounded-xl bg-surface-2 px-3 py-2 text-right ring-1 ring-line"
             >
-              <span v-if="message.answers.length > 1" class="text-xs text-subtle">
-                第 {{ itemIndex + 1 }} 题
-              </span>
-              <span class="text-xs text-subtle">你选了</span>
-              <span class="flex items-center gap-1">
-                <span
-                  v-for="label in item.labels"
-                  :key="label"
-                  class="flex h-5 min-w-5 items-center justify-center rounded-full bg-surface px-1.5 text-[11px] font-semibold text-body ring-1 ring-line"
-                >
-                  {{ label }}
+              <p v-if="item.question" class="line-clamp-2 text-xs leading-relaxed text-muted">
+                <span v-if="message.answers.length > 1" class="text-subtle">
+                  第 {{ itemIndex + 1 }} 题 ·
                 </span>
-              </span>
+                {{ item.question }}
+              </p>
+              <p class="mt-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
+                <span class="text-[11px] text-subtle">你选了</span>
+                <span
+                  v-for="(label, labelIndex) in item.labels"
+                  :key="label"
+                  class="flex items-center gap-1"
+                >
+                  <span
+                    class="flex h-5 min-w-5 items-center justify-center rounded-full bg-surface px-1.5 text-[11px] font-semibold text-body ring-1 ring-line"
+                  >
+                    {{ label }}
+                  </span>
+                  <span v-if="item.texts?.[labelIndex]" class="text-xs text-body">
+                    {{ item.texts[labelIndex] }}
+                  </span>
+                </span>
+              </p>
             </div>
           </div>
 

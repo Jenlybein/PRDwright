@@ -166,14 +166,17 @@ Job 运行时（第 4.1 节）随 R1-T0 落地，观测与预算（第 4.2 节�
 | 排序改在哪 | Repository 的列表查询改 `ORDER BY content_updated_at DESC, id DESC`，并建 `(user_id, content_updated_at DESC)` 复合索引。排序落在 SQL 里，因此刷新、换机器都成立，不再依赖前端的原位刷新 | `repositories/solution_repo.py::list_by_owner` |
 | 显示回落 | 侧栏那行时间取 `content_updated_at`，**为空串时回落到 `updated_at`**——「新前端配旧后端」这种混布下至少还显示得出时间 | `components/SolutionSidebar.vue` |
 
-## 澄清提问的结构化选择题落地点（2026-10-16 落地，2026-10-19 提问机制改为原生工具调用）
+## 澄清提问的结构化选择题落地点（2026-10-16 落地，2026-10-19 提问机制改为原生工具调用，2026-10-21 题干与选项说明改由卡片承载）
 
 AI 澄清提问过去是一段 Markdown 自由文本，用户只能打字回答；而提问规则早就要求「先给一个可判断的
-参照」——参照给了，却没法点。这一批把参照变成可点的选项卡（ADR-033）：
+参照」——参照给了，却没法选。这一批把参照变成可点的选项卡（ADR-033）：
 
 | 议题 | 落定做法 | 位置 |
 | --- | --- | --- |
-| 结构化数据从哪来 | 正文照常写（问题 + 背景 + **逐条解释每个选项**），题目走**原生工具调用** `ask_clarification_questions`（独立通道 + schema 强约束）；后端从 `tool_calls` 里取题、校验、分配 id/label，随 SSE 的 `done` 下发，键名 `clarification_asks` | `services/clarification_ask.py` + `conversation_service._stream_with_asks` |
+| 结构化数据从哪来 | 题目走**原生工具调用** `ask_clarification_questions`（独立通道 + schema 强约束）；后端从 `tool_calls` 里取题、校验、分配 id/label，随 SSE 的 `done` 下发，键名 `clarification_asks` | `services/clarification_ask.py` + `conversation_service._stream_with_asks` |
+| ⚠️ 题干与选项说明由谁显示 | **卡片自己显示**（`question` + `background` + 每个选项的 `text` + `description`），**不再指望正文复述**。旧口径是「卡片只放选项名、题干与逐条解释交给正文」，实测模型正文只写一句「P0 级还有一个关键流程点需要确认：」就调工具，卡片上只剩 `A 填完点按钮一次性生成` 这类短语——用户不知道在答什么、也看不出选项差别。凡「要模型在正文里记得再写一遍」的东西都会这样退化 | `ClarificationAskList.vue` + `clarification_ask.render_ask_tool_instruction` |
+| 正文写什么 | 只写「为什么现在要问这件事」（它卡住了后续哪一步），**不再逐条列 A/B/C** ——同一段话印两遍，用户还得来回对照 | 同上 |
+| ⚠️ 选项说明被塞进标题怎么办 | 「名字：一句解释」里的后半段**挪进 `description` 位，不丢掉**。从前这里直接删尾巴，前提是「解释归正文」；前提不成立时说明就两头落空 | `clarification_ask._split_option` |
 | 为什么从哨兵块改成工具调用 | 长对话里模型会模仿自己历史中「只写 A/B/C 文字、不附块」的写法而把块丢掉，选项卡**静默不弹**——这正是线上那个 bug 的根因。工具调用走独立通道，不再依赖模型「记得在自由文本里附标记」，从根上消除这类退化。对齐 Claude Code `AskUserQuestion` / Codex `request_user_input` | `clarification_ask.py` 的模块说明 |
 | 待确认清单为什么还走哨兵 | 两者生命周期不同：清单跟着**生成的文档**落库、进快照、按 P0~P6 排序，是文档产物的第一类元数据；选项卡只是一次提问的展示规格、只随 `done` 下发。清单那条通道**本次完全没动**（`PendingBlockSuppressor` 的哨兵参数化仍保留给它） | `services/pending_items.py` |
 | 校验与降级 | 坏项**逐条丢弃**（没题干、选项不足 2 个、选项没正文），选项超过 6 个截断；**绝不让这一轮失败**——退化成纯文本提问。「没调工具」是常态，不是异常 | `clarification_ask._validate_records` / `asks_from_tool_calls` |

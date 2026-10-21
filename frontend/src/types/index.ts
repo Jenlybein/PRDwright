@@ -58,8 +58,15 @@ export const CHAT_STAGE_LABELS: Record<ChatStage, string> = {
 export interface ClarificationAskOption {
   /** 选项标号，形如 `A` */
   label: string
-  /** 选项的一句话标题（正文里另有逐条解释，卡片不重复） */
+  /** 选项的短标题（只写名字，≤16 字） */
   text: string
+  /**
+   * 一句话说明「选它意味着什么 / 代价是什么」。
+   *
+   * **卡片靠它让用户看出几个选项的差别**——只给标题时用户等于没得选。模型漏写时
+   * 后端给空串（不让这一轮失败），历史数据里也可能整个键不存在，因此渲染前按空处理。
+   */
+  description?: string
 }
 
 /**
@@ -72,9 +79,9 @@ export interface ClarificationAskOption {
 export interface ClarificationAsk {
   /** 由后端分配的 id，渲染 key 用 */
   id: string
-  /** 题干；一轮问了两个问题时用它做分组标题 */
+  /** 题干；**卡片自己显示**，不指望正文再复述一遍 */
   question: string
-  /** 一句背景（为什么问）；可为空串 */
+  /** 一句背景（为什么问）；可为空串。卡片显示在题干下方 */
   background: string
   /** 是否多选 */
   multiple: boolean
@@ -163,7 +170,11 @@ export interface ChatMessage {
    * 它与 `content` 是同一件事的两种写法：`content` 是发给后端的展示文本
    * （降级时模型读到的也是它），`answers` 只服务于**界面呈现**——气泡里那段
    * 「1. 题干 / 答：A. xxx」既啰嗦又像模型在说话，所以带了这个字段的消息
-   * 改用一行轻回执，只显示选中的**标号**。
+   * 改用一张轻回执卡：**题干压到两行 + 选中的「标号 + 标题」**。
+   *
+   * 题干与标题都要留着：卡片一作答就整块消失（见 `ClarificationAskList`），
+   * 回执是用户回看时唯一的上下文来源；只留「你选了 A」，隔一会儿就没人记得
+   * 「A」是什么了。
    *
    * ⚠️ 只在真有值时挂键（空数组会让既有的 `toEqual({role, content, stage})`
    * 精确形状断言变红）；它不进请求体，纯前端渲染用。
