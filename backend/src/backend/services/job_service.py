@@ -41,7 +41,7 @@ from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
 from backend.core.db import utc_now
 from backend.core.errors import AppError, ErrorCode
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
-from backend.services import document_service, document_store
+from backend.services import document_service, document_store, solution_service
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import RunMeter, use_meter
 from backend.services.skill_registry import describe_kind
@@ -105,6 +105,9 @@ class JobRuntime:
     # 待确认清单：由 `done` 事件带来（生成器在定稿正文里剥离标记块后产出）。
     # 与正文同源、同一次收尾落库，因此「换了正文却忘了重算清单」没有结构落脚点。
     pending_items: list[dict[str, Any]] = field(default_factory=list)
+    # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
+    # 收尾也**不写**文档——见 `cancel_for_solution` / `_finalize`。
+    cancelled: bool = False
 
 
 # ----------------------------------------------------------------------------
@@ -126,6 +129,29 @@ def create_job(
     """
     GenerationJobRepository.supersede_active(owner_id, solution_id=solution_id, kind=kind)
     return GenerationJobRepository.create(owner_id, kind, solution_id, input_fingerprint)
+
+
+def cancel_for_solution(owner_id: int, solution_id: int) -> int:
+    """取消某方案下正在跑的全部任务，返回被取消（落库）的条数。
+
+    删除方案时必须走这里：方案没了，任务再跑完也没有地方落正文，继续跑只是白烧 token，
+    并且会在收尾那一刻去写一份注定被丢弃的文档。
+
+    两件事都要做，缺一不可：
+
+    - **标记内存运行时**（`cancelled`）：`run_job` 在消费下一个事件前会看到它并跳出循环，
+      真正让在途的 LLM 调用不再往文档里写东西；
+    - **落库终态**：进程重启后运行时已丢失，库里那些 `running` 必须一并收掉，
+      否则刷新页面会看到一个永远「生成中」的任务。
+
+    返回值取落库的受影响条数：那是「有多少任务确实从 running 变成 failed」的权威口径；
+    内存标记的数量可能与之不同（运行时可能已经结束，只是行还没被读到）。
+    """
+    affected = GenerationJobRepository.cancel_running(owner_id, solution_id=solution_id)
+    for runtime in _RUNTIMES.values():
+        if runtime.owner_id == owner_id and runtime.solution_id == solution_id:
+            runtime.cancelled = True
+    return affected
 
 
 def _target_product_kind(kind: str, request: dict[str, Any]) -> str | None:
@@ -231,6 +257,11 @@ async def run_job(runtime: JobRuntime) -> None:
     try:
         with use_meter(runtime.meter):
             async for event in _build_event_stream(runtime.kind, runtime.request):
+                # 方案在生成途中被删除：下一个事件不再消费。
+                # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，
+                # 收尾时 `_finalize` 也就拿不到新的 `done`，不会把半截过程当成「已产出」。
+                if runtime.cancelled:
+                    break
                 _apply_event(runtime, event)
                 job_bus.publish(runtime.job_id, event)
                 _maybe_flush(runtime)
@@ -479,6 +510,36 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     完整文档）。这正是「文档所有权在后端」的关键收益——「谁写、什么时候写、
     写完之后长什么样」只在这一处决定，前端只负责读与提交用户变更。
     """
+    # —— 删除与收尾可能赛跑，两道防御都留着 ——
+    # 时间窗：用户点删除的那一刻，任务可能正好走到收尾。`cancel_for_solution` 先置
+    # `cancelled` 再落库，但收尾可能已经越过了「检查标记」那一行；反过来，运行时也可能
+    # 在进程重启后丢失（标记无处可置），此时只剩「方案还在不在」这一条事实可查。
+    # 两道判断覆盖的正是这两个方向，缺任何一道都会留下一条「方案已删、文档却写进去了」
+    # 的路径（正文写进一个不存在的 solution_id，前端下次打开就是幽灵文档）。
+    if status == "completed":
+        cancel_reason = ""
+        if runtime.cancelled:
+            cancel_reason = "方案已删除，任务已取消"
+        elif runtime.solution_id is not None and not solution_service.solution_exists(
+            runtime.owner_id, runtime.solution_id
+        ):
+            cancel_reason = "方案已删除，任务已取消"
+            logger.warning(
+                "生成任务收尾时方案已不存在，不再写入文档",
+                extra={
+                    "event": "job.solution_gone",
+                    "job_id": runtime.job_id,
+                    "solution_id": runtime.solution_id,
+                },
+            )
+        if cancel_reason:
+            # 语义上确实「没有成功」：复用 failed 而不是新造状态（状态值是前后端共享契约，
+            # 新增取值会让前端每一处 status 分支都要多一条分支）。
+            status = "failed"
+            runtime.failed = True
+            runtime.error_code = "CANCELLED"
+            runtime.error_message = cancel_reason
+
     runtime.status = status
     draft = _draft(runtime)
     summary = _summary_data(runtime, status)

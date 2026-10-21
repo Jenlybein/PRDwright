@@ -1991,3 +1991,105 @@ ADR-031 把入口页重排成两组四叶子之后，「快捷流程」是一条
   少报一个问题——比反过来（拿骨架当事实来源）安全得多。
 - `medium` 不再触发改写，意味着用户会看到「有 2 个中等问题」但正文没动。这是有意的：审阅页
   给了「AI 自行澄清」入口，让用户决定值不值得改。
+
+## ADR-036：删除方案时同时取消在途任务，迟到结果按「会话代次」丢弃
+
+**状态**：Accepted（2026-10-21 裁决并落地）
+
+### Context
+
+现象：生成过程中删掉整个方案，模型调用结束后，列表里冒出一份**「未命名方案」**。
+
+根子是三条各自合理的设计叠在一起：
+
+1. **任务与浏览器连接解耦**（R1-T0 的既定设计）：`detach()` 只退订 SSE，任务在后端照常跑完。
+   这是「刷新页面不中断生成」的前提。
+2. **删除方案只删 `solutions` 行**，`documents` 靠 `ON DELETE CASCADE` 一起走；
+   `generation_jobs` 刻意没有外键，任务行留着供用量审计。
+3. **前端收尾时无脑自动保存**：`run_summary` 到达 → 写 `documents` → `scheduleSave()`。
+   此时 `currentId` 已是 `null`，`saveNow` 走「新建方案」分支，用一份 `entryMode` 为 `null`
+   的脏快照建出一份新方案——界面上就是「未命名方案」。
+
+所以问题不是某个 if 写漏了，而是**「删除方案」这件事从来没有裁决过在途任务的命运**：
+删除是一个人做的动作，任务结束是另一条时间线上的事件，两者之间没有任何仲裁者。
+
+### Options
+
+| 方案 | 优点 | 代价 |
+| --- | --- | --- |
+| A. 只在前端收尾处校验「方案还在吗」 | 改动最小，一行判断 | 后端仍在白跑（可能几分钟的 LLM 用量）；校验与 `run_summary` 之间还有窗口 |
+| B. 删除时**后端取消任务**，同时前端按代次丢弃迟到结果（推荐） | 省钱 + 立即止损；两层各自独立成立，任一层单独生效都不会出现幽灵方案 | 要新写取消编排；前端要引入「会话代次」 |
+| C. 删方案时顺手删任务行 | 表里干净 | 丢掉用量审计（`generation_jobs` 是唯一的 token 账单来源），且删行不能停掉协程 |
+| D. 生成中禁止删除方案 | 不用改代码 | 与「任务与连接解耦」的初衷相悖：用户凭什么因为 AI 在跑就被锁住列表 |
+| E. 任务强绑定连接，断连即取消 | 概念简单 | 直接废掉「刷新后重连继续看」——那是被反复验证过的主流程 |
+
+### Decision
+
+**选 B，两层独立生效。**
+
+**后端：取消是「先落库、再打断」。**
+
+1. 新增 `generation_job_repo.cancel_running(owner_id, *, solution_id)`：把该方案所有
+   `status='running'` 的任务写成 `failed` + `error_code='CANCELLED'`。**不新增状态值**——
+   `status` 是前后端共享的契约，加一个值意味着所有按状态分支的地方都要跟着改；
+   `failed` + 明确的 `error_code` 已经够表达「被取消」，且前端本来就把 `failed` 当终态。
+2. `job_service.cancel_for_solution(owner_id, solution_id)`：**先**落库，**再**遍历运行时把
+   `JobRuntime.cancelled` 置真。顺序不能反——先置内存标记的话，若进程此刻退出，库里那条任务
+   会永远停在 `running`。
+3. `run_job` 的事件循环在 `_apply_event` **之前**判 `runtime.cancelled` 并 `break`：已经产出的
+   片段照旧交给前端（用户可能正看着），但后续 LLM 调用不再发生。
+4. `_finalize` 加两道防御，覆盖「取消信号来得比收尾晚」：`completed` 且 `cancelled` → 按失败处理、
+   **不写文档**；`completed` 且方案已不存在 → 同样不写，并留 `job.solution_gone` 警告日志。
+   这两道是纯兜底，正常路径由第 1~3 条负责。
+5. 编排放在 `api/` 层：DELETE 路由在 404 判断之后调 `cancel_for_solution`。放这里而不是放进
+   `solution_service`，是为了避开 `job_service ↔ solution_service` 的循环 import。
+
+**前端：代次（epoch）是「我还是不是当初那个会话」的唯一判据。**
+
+6. `stores/solutions.ts` 新增 `sessionEpoch`，在 `openSolution`（`applySnapshot` 之前）、
+   `startNew`、`remove`（仅当删的是当前方案）三处自增。**删除失败路径刻意不自增**——
+   方案没删掉，会话没变，在途任务的收尾应当继续有效。
+7. `useDocumentPipeline.ts` 用 `isExpired(epoch)` 取代早先的模块级 `jobEpoch`：
+   **代次由每条链在 `job.start` / `job.reconnect` 之前就地捕获，闭包持有、逐层下传**
+   （`guardJobHandlers(raw, epoch)` / `handlersForKind(kind, epoch)` / `finishDoc(..., epoch)`）。
+   用共享单值会串稿：A 生成中 → 删 A → 在 B 起新任务 → 共享值被覆盖成新代次 → A 的迟到事件
+   被误判「没过期」→ A 的正文写进 B。这个缺陷在实现过程中真实发生过，靠变异验证抓出来。
+8. `useClarificationChat.ts` 同构：`runStream` 开头定格 `chatEpoch`，增量 / `conversationId` 写入 /
+   `chatError` / 消息入栈全部按代次丢弃；但 `streaming` 与 `chatStreaming` 两个开关
+   **无条件归位**——它们是渲染状态，卡住就是永久 busy。
+9. `saveNow` 两道闸：新建分支遇到 `workflow.entryMode === null` 直接 `dirty=false` 返回
+   （历史快照没有这个字段，宁可这一轮不存）；更新分支 `currentId !== targetId` 直接返回，
+   不 `mergeIntoList`、不 `documents.attach`——否则迟到的 PUT 会把别人的方案插回列表。
+
+**口径备案（有意不做的事）**。
+
+| 本期不做 | 理由 |
+| --- | --- |
+| 删方案时连 `generation_jobs` 行一起删 | 那是唯一的用量账单来源；无外键正是为了让它活过方案 |
+| 生成中硬拦删除（弹窗「正在生成，确定删除？」） | 用户的删除意图是明确的，拦一下只增加摩擦；正确做法是删了就真停 |
+| 新增 `cancelled` 状态值 | 状态是共享契约，扩枚举的收益比不上改动面 |
+| 把 `_finalize` 的「查存在 → 写文档」做成事务 | 残留窗口极窄，且不产生任何可观测的幽灵数据（见下） |
+| 对话流 HTTP 请求加 `AbortSignal` | 对话没有写文档的收尾，迟到增量的危害等级低一档；要做单独排 |
+
+### Consequences
+
+- **变容易**：删了就是删了——不再出现幽灵方案，也不再为一份已经不要的结果付模型费用；
+  两层的判据都很窄（一个 `error_code`、一个整数比较），不依赖「调用方记得检查」。
+- **变困难**：任何「会改变当前会话身份」的新路径都必须自增 `sessionEpoch`（切方案、新建、
+  删当前方案），漏了不会报错，只表现为「删掉之后还是被写回来了」。同理，新增生成链必须
+  **就地捕获代次并逐层下传**，不能图省事读共享变量。
+- **中立**：任务与连接仍然解耦，刷新重连的主流程没动；`detach()` 的语义也没动。
+- **已知残留窗口（无害）**：`_finalize` 通过 `solution_exists` 之后、写文档之前，若 DELETE 恰好
+  提交，任务会落 `completed`、文档被 CASCADE 清掉。此时库里没有孤儿正文、前端也收不到可渲染的
+  结果，**无可观测幽灵数据**，因此不为此引入跨请求事务。
+- **代价与观察点**：
+  - 取消是「尽力而为」——`break` 只能在下一次事件边界生效，正在飞的那次 LLM 调用不会被掐断。
+    可观测信号：删除后日志里出现 `job.cancelled` 与随后的 `job.solution_gone`。
+  - 测试口径被这条改动重写了一次。真值断言不能只看「文档没写」——`_finalize` 的兜底会让它
+    永远成立，看起来像守卫有效。**能露馅的是两样东西**：`documents` 的内容，以及
+    `activeJobId` 这个指针（A 的迟到收尾若执行到 `clearActiveJob()`，会清掉 B 的指针，
+    用户侧表现是「B 生成到一半，刷新后找不回任务」）。
+  - 另一个测试陷阱：PRD 链路走 `onPart`，对 `prd` 链调 `onChunk` 是**空转**——把守卫整个删掉
+    也不会红。四个链路的「迟到事件」用例必须各自走自己真实注册的回调，否则是假通过。
+  - `docStreamingContent` 在 `finishDoc → goTo()` 时会清空，所以「迟到的增量有没有串进预览」
+    在收尾之后不可观测。测的是文档与任务指针，不是缓冲。

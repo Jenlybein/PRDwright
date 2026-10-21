@@ -3,6 +3,7 @@ import { storeToRefs } from 'pinia'
 
 import { continueConversationStream, startConversationStream } from '@/services/api'
 import { isApiError } from '@/services/errors'
+import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { StreamResult } from '@/services/api'
 import type {
@@ -80,9 +81,29 @@ export interface ClarificationChatOptions {
  */
 export function useClarificationChat(hooks: ChatHooks, options: ClarificationChatOptions) {
   const store = useWorkflowStore()
+  // 会话代次的持有者：迟到的回复必须按它判断「我这一轮还在不在」
+  const solutions = useSolutionsStore()
   const state = storeToRefs(store)
   const { summary, messages, chatStreaming } = state
   const { stage, profileKey } = options
+
+  /**
+   * 本次请求开始那一刻的会话代次（`solutions.sessionEpoch` 的快照）。
+   *
+   * 对话请求与生成任务一样，发出之后没法撤回。用户在流式回复途中删掉当前方案、
+   * 甚至已经重新选了入口（此时 `entryMode` 非空，`solutions.saveNow` 那道
+   * 「空壳方案」闸门拦不住），一条迟到的澄清回复就会 push 进 `messages`——
+   * `hasContent` 变真 + 入口模式非空，自动保存据此 POST 出一份「未命名方案 · MM-DD HH:mm」。
+   *
+   * 代次只在「整份会话被换掉」时变（打开别的方案 / 开新方案 / 删掉当前方案），
+   * 因此正常聊天过程里它是不变的，不会误伤正在进行的对话。
+   */
+  let chatEpoch = 0
+
+  /** 当前会话是否已经被整份换掉（删除 / 新建 / 打开别的方案） */
+  function chatExpired(): boolean {
+    return solutions.sessionEpoch !== chatEpoch
+  }
 
   /** 本线程（也是本实例）是否正在流式接收回复 */
   const streaming = ref(false)
@@ -145,8 +166,14 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     ]
   })
 
-  /** 把增量文本追加到流式缓冲，由消息列表实时渲染 */
+  /**
+   * 把增量文本追加到流式缓冲，由消息列表实时渲染。
+   *
+   * 会话已被换掉时直接丢弃：那段文本属于上一份会话，写进缓冲就会在新会话里
+   * 渲染出一条莫名其妙的「思考中」气泡。
+   */
   function handleChunk(chunk: string): void {
+    if (chatExpired()) return
     streamingContent.value += chunk
   }
 
@@ -156,9 +183,15 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
    * 增量文本先落到 `streamingContent` 实时展示，请求结束后再固化成消息列表里的一条
    * assistant 消息；中途出错时保留已经流出的内容，避免整段凭空消失。
    *
+   * **会话代次在这里定格**：`sendMessage` / `startConversation` /
+   * `startConversationWithAnswers` 三个发起入口最终都收口到本函数（见各自的实现），
+   * 因此只要在这里记一次快照，三条路径就都被覆盖了；收尾处再统一比对一次。
+   *
    * @param request 实际发起请求的函数；接续对话需要在内部做重试，因此以闭包传入。
    */
   async function runStream(request: () => Promise<StreamResult>): Promise<void> {
+    // 定格本次请求所属的会话；此后所有回调与收尾都拿它比对
+    chatEpoch = solutions.sessionEpoch
     // 两个状态各有各的读者：`streaming` 服务本线程的渲染，`chatStreaming` 是全局的
     // 「有请求在跑」，导航守卫（`store.busy`）靠它拦住跳转与切标签。
     streaming.value = true
@@ -173,21 +206,28 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     let toolCalls: ToolCallRef[] = []
     try {
       const result = await request()
-      if (result.conversationId) conversationId.value = result.conversationId
+      // 会话已被整份换掉：会话 id 也不能写——它会成为新会话里「接错线」的起点
+      if (result.conversationId && !chatExpired()) conversationId.value = result.conversationId
       reply = result.reply
       asks = result.asks
       toolCalls = result.toolCalls ?? []
     } catch (error) {
-      chatError.value = error instanceof Error ? error.message : String(error)
+      // 迟到的失败同样不该污染新会话：既不留错误提示，也不把半截内容固化下去
+      if (!chatExpired()) {
+        chatError.value = error instanceof Error ? error.message : String(error)
+      }
       // 报错时把已经流出的半截内容保留下来；半截输出里没有可靠的选题，故 `asks` 留空
       // 工具调用同理：没走完 `done` 就无从得知这次调用的 id
       reply = streamingContent.value
     } finally {
-      // 先结束流式状态再固化消息，否则列表里会短暂多出一条「思考中」气泡
+      // 先结束流式状态再固化消息，否则列表里会短暂多出一条「思考中」气泡。
+      // 这两个标志是**渲染开关**而不是会话数据：不管请求是否过期都要归位，
+      // 否则删掉方案后 `busy` 会永远为真，新会话连入口都点不动。
       streaming.value = false
       chatStreaming.value = false
       const content = reply.trim()
-      if (content) {
+      // 会话已被换掉 → 整路丢弃：不 push 消息、不带 asks / tool_calls
+      if (content && !chatExpired()) {
         messages.value.push({
           role: 'assistant',
           content,
@@ -269,6 +309,9 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
           { onChunk: handleChunk },
         )
       } catch (error) {
+        // 会话已被整份换掉：不重试——重试只会对着一个已经不存在的会话再发一次请求。
+        // 抛出后由 `runStream` 的收尾按代次整路丢弃。
+        if (chatExpired()) throw error
         if (!conversationId.value || !isApiError(error, 'SESSION_NOT_FOUND')) throw error
         // 会话已失效：丢掉旧 ID 与半截输出，退回无状态模式重试。
         // 重试时仍要带上档案标识——否则文档澄清的人设会在这里悄悄换回默认的那套。

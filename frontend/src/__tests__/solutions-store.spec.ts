@@ -445,6 +445,43 @@ describe('保存失败与并发', () => {
     expect(solutions.isPersisted).toBe(true)
     expect(solutions.items).toHaveLength(1)
   })
+
+  it('保存请求在途时删掉方案：回来的响应不会把方案插回列表', async () => {
+    // 先把方案建出来（id=1）
+    workflow.chooseEntry('structured')
+    workflow.summary = {
+      product_name: '订单系统',
+      product_goal: '收单',
+      target_users: [],
+      platform: '网页应用',
+      mvp_features: [],
+    }
+    await advanceDebounce()
+    expect(solutions.currentId).toBe(1)
+
+    // 让这次 PUT「卡住」——用户在请求在途时点了删除
+    let release: (() => void) | undefined
+    vi.mocked(solutionApi.updateSolution).mockImplementation(
+      (id, payload) =>
+        new Promise((resolve) => {
+          release = () => resolve({ ...summary(id), data: payload.data })
+        }),
+    )
+
+    workflow.quickInput.requirements = '改一句'
+    await advanceDebounce()
+    expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
+
+    await solutions.remove(1)
+    expect(solutions.currentId).toBeNull()
+
+    release?.()
+    await vi.runAllTimersAsync()
+
+    // 关键：删掉的方案不会被凭空插回列表（否则点开就是 404 的幽灵条目）
+    expect(solutions.items.some((item) => item.id === 1)).toBe(false)
+    expect(solutions.currentId).toBeNull()
+  })
 })
 
 // ============================================================================
@@ -539,6 +576,45 @@ describe('openSolution', () => {
     expect(workflow.viewState).toBe('review-prd')
     expect(documentApi.fetchDocuments).toHaveBeenCalledWith(8)
     expect(documents.contents.prd).toBe('# PRD')
+  })
+
+  it('历史快照没有 entryMode 时：照常恢复，编辑后仍走 PUT（不被空壳闸拦住）', async () => {
+    // 老版本快照没有 `entryMode` 字段，恢复出来就是 null。这是**合法状态**：
+    // 用户手上明明有一份已经存在的方案（`currentId` 非空），不能被「空壳方案」那道闸误伤。
+    // 闸门只装在创建分支上，本用例就是它的反证。
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
+      ...summary(9),
+      data: JSON.stringify({
+        viewState: 'review-prd',
+        summary: {
+          product_name: '订单系统',
+          product_goal: '收单',
+          target_users: [],
+          platform: '网页应用',
+          mvp_features: [],
+        },
+        messages: [],
+        conversationId: '',
+      }),
+    })
+
+    const opened = await solutions.openSolution(9)
+
+    expect(opened).toBe(true)
+    expect(workflow.entryMode).toBeNull()
+
+    // 编辑一下，让自动保存跑起来
+    workflow.quickInput.requirements = '改一句'
+    await advanceDebounce()
+
+    expect(solutionApi.createSolution).not.toHaveBeenCalled()
+    // 顺带钉住「进度」这一列在 `entryMode === null` 时的回落口径：直通 `viewState`。
+    // （原先由「还没选入口就落库」那条用例顺带覆盖，创建分支被闸住后只剩这条路径。）
+    expect(solutionApi.updateSolution).toHaveBeenCalledWith(
+      9,
+      expect.objectContaining({ stage: 'review-prd' }),
+    )
+    expect(solutions.currentId).toBe(9)
   })
 
   it('快照落在生成中时降级到待确认状态', async () => {
@@ -735,15 +811,19 @@ describe('列表里的进度（stage）', () => {
     expect(lastPayload()?.stage).toBe('done')
   })
 
-  it('还没选入口时直通当前阶段（保留「未开始」这类录入期说法）', async () => {
-    // 未选入口，但粘贴入口的正文已经算「有内容」，因此会落库（首次走 POST）
+  it('还没选入口时**不再**落库：那是空壳方案的形状，不该建出「未命名方案」', async () => {
+    // 未选入口却有内容，真实流程里只可能来自「reset() 之后又被迟到的回调填回内容」。
+    // 从前这里会建一份带默认标题的方案；现在它是「删除方案后冒出幽灵方案」的那个入口，
+    // 由 `saveNow` 创建分支的 `entryMode === null` 守卫挡掉（回归用例见
+    // `orphan-solution.spec.ts`）。因此 `progressStage` 的「未选入口直通 viewState」
+    // 那条分支也不再可能被保存动作走到了。
     workflow.debugPrdText = '# 别人给的 PRD'
     expect(workflow.entryMode).toBeNull()
     expect(workflow.viewState).toBe('entry')
 
     await advanceDebounce()
 
-    expect(vi.mocked(solutionApi.createSolution).mock.calls[0]?.[0].stage).toBe('entry')
+    expect(solutionApi.createSolution).not.toHaveBeenCalled()
   })
 
   it('更新已有方案时原位刷新，不会跳到列表最前', async () => {

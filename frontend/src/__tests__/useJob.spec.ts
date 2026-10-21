@@ -126,6 +126,8 @@ beforeEach(() => {
 describe('useJob.start', () => {
   it('先 flush 拿到方案 id、再创建任务，随后记下指针、切生成态并订阅', async () => {
     const workflow = useWorkflowStore()
+    // 先选入口：一份正常方案必然有入口模式（`saveNow` 的创建分支拿它当最后一道闸）
+    workflow.chooseEntry('structured')
     // 有内容，方案才会在第一次 flush 时被建出来、拿到 id
     workflow.summary = {
       product_name: '订单系统',

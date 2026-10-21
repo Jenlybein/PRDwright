@@ -88,6 +88,18 @@ export const useSolutionsStore = defineStore('solutions', () => {
   /** 当前打开的方案 id；`null` 表示「新建中」，尚无 id */
   const currentId = ref<number | null>(null)
 
+  /**
+   * 会话代次：**每次「整份会话被换掉」就自增**（打开别的方案 / 开新方案 / 删掉当前方案）。
+   *
+   * 用途只有一个：给还在飞的异步回调一个判断依据——「我还是不是当初那个会话」。
+   * 生成任务的流回调、摘要回填、文档加载都可能在用户已经切走之后才回来；它们若照常
+   * 写回 store，就会把刚清空的会话重新填满（表现为删掉方案后列表里冒出一份「未命名方案」）。
+   *
+   * 为什么用递增计数而不是 `currentId`：开新方案与「删掉后回到新建态」都会让
+   * `currentId` 变成 `null`，与「本来就是新建态」无法区分；代次每次都会变，天然可辨。
+   */
+  const sessionEpoch = ref(0)
+
   /** 列表是否已加载过（用于避免重复请求） */
   const loaded = ref(false)
 
@@ -258,6 +270,15 @@ export const useSolutionsStore = defineStore('solutions', () => {
 
     try {
       if (currentId.value === null) {
+        // 空壳方案的最后一道闸：一份**正常**方案不可能没有入口模式——用户必然先选入口
+        // 才会产生内容，而 `reset()` 一定会把 `entryMode` 清成 `null`。
+        // 因此走到这里还空着，说明这次保存来自一个已经作废的会话（最典型的是：方案被删、
+        // `reset()` 刚清完，迟到的生成回调又把 `messages` 填了回来，`hasContent` 于是为真）。
+        // 真正该做的是丢弃这次保存，而不是替它新建一份「未命名方案 · MM-DD HH:mm」。
+        if (workflow.entryMode === null) {
+          dirty = false
+          return
+        }
         const created = await createSolution(payload)
         currentId.value = created.id
         // 新建才提到最前；后续的自动保存都是「原位刷新」，不再动排序
@@ -277,6 +298,10 @@ export const useSolutionsStore = defineStore('solutions', () => {
           dirty = false
           return
         }
+        // 请求在途期间方案被删 / 被切走：这份响应属于**上一份**方案。
+        // 此时**不要**把它并回列表、也不要登记文档归属——删掉的那份会被凭空插回列表，
+        // 变成一个点开就是 404 的幽灵条目。
+        if (currentId.value !== targetId) return
         mergeIntoList(updated)
         // 幂等登记：打开方案时已经登记过，这里兜住「方案是本会话新建、后来才落库」的路径
         documents.attach(targetId)
@@ -378,6 +403,8 @@ export const useSolutionsStore = defineStore('solutions', () => {
 
       currentId.value = detail.id
       if (parsed) {
+        // 会话换人了：此刻起，上一份会话里还在飞的异步回调全部作废（见 `sessionEpoch`）
+        sessionEpoch.value += 1
         workflow.applySnapshot(parsed.session, parsed.downgrade)
       } else {
         // 快照坏掉（非法 JSON / 结构不符）时不清空当前内容，只标记错误让用户知道
@@ -424,6 +451,8 @@ export const useSolutionsStore = defineStore('solutions', () => {
     await flushPendingSave()
     await documents.flushPendingSave()
     clearTimer()
+    // 会话换人了：上一份会话里还在飞的异步回调（生成的流回调等）从此刻起全部作废
+    sessionEpoch.value += 1
     currentId.value = null
     saveError.value = ''
     // `workflow.reset()` 内部会一并清掉文档工作副本
@@ -431,13 +460,28 @@ export const useSolutionsStore = defineStore('solutions', () => {
     onOpened?.(null)
   }
 
-  /** 删除一份方案；若删的正是当前打开的，则回到新建态 */
+  /**
+   * 删除一份方案；若删的正是当前打开的，则回到新建态。
+   *
+   * 「回到新建态」不只是清空界面：**还要让在途的生成回调作废**（`sessionEpoch` 自增）。
+   * 否则调用结束后那些迟到的回调会把刚清空的 `messages` 重新填满，自动保存据此
+   * 判定「有内容」，在库里新建出一份「未命名方案 · MM-DD HH:mm」。
+   * 后端那边也有一半责任（删除时取消挂在方案上的任务），但前端不能指望它：
+   * 回调可能已经在本地队列里排着了。
+   *
+   * 至于本地的 SSE 订阅：这里**不主动摘**（`useJob.detach()` 只存在于组件的实例里，
+   * 要摘就得给 store 引入一份订阅登记表，改动面远大于收益）。订阅残留最多让这次流
+   * 多读几帧事件，而后端 `cancel_for_solution` 会在收尾时关掉总线让它自然结束；
+   * 期间到达的事件全被代次守卫丢弃，没有任何副作用。
+   */
   async function remove(id: number): Promise<void> {
     try {
       await deleteSolution(id)
       removeFromList(id)
       if (currentId.value === id) {
         clearTimer()
+        // 会话换人了：迟到的异步回调从此刻起一律丢弃
+        sessionEpoch.value += 1
         // 方案已经删了，压着的改动没有再存的意义
         dirty = false
         currentId.value = null
@@ -445,6 +489,8 @@ export const useSolutionsStore = defineStore('solutions', () => {
         onOpened?.(null)
       }
     } catch (error) {
+      // 删除失败时**不要**自增代次：方案还在、任务还在跑，界面必须继续接收流事件，
+      // 否则用户看到的是「删不掉，而且生成卡住了」。
       saveError.value = error instanceof Error ? error.message : '删除方案失败'
     }
   }
@@ -551,6 +597,7 @@ export const useSolutionsStore = defineStore('solutions', () => {
     // 状态
     items,
     currentId,
+    sessionEpoch,
     loaded,
     loading,
     saving,

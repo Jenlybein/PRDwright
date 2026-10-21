@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, status
 from backend.api import schemas
 from backend.api.deps import acting_user
 from backend.core.errors import AppError, ErrorCode
-from backend.services import solution_service
+from backend.services import job_service, solution_service
 from backend.services.auth_service import User
 
 router = APIRouter(prefix="/api/solutions", tags=["solutions"])
@@ -110,7 +110,16 @@ async def delete_solution(
 
     同样返回 404 而不是「静默成功」：否则删除别人的方案会与删除自己的返回相同结果，
     调用方无法察觉自己的归属判断写错了。
+
+    **删除成功后要取消挂在这份方案上正在跑的任务**：方案没了，任务再跑完也没地方落正文，
+    继续跑只是白烧 token，收尾时还会去写一份注定被丢弃的文档。
+
+    ⚠️ 这段编排**放在 api 层而不是 service 层**：`job_service` 已经依赖
+    `solution_service`（收尾前要确认方案还在），若让 `solution_service` 反向调用
+    `job_service`，两个服务就互相 import 成环。路由层本来就知道「删方案」这件事的
+    完整语义，放在这里既不引入环，也让两条服务各自保持单向依赖。
     """
     if not solution_service.delete_solution(user.id, solution_id):
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
+    job_service.cancel_for_solution(user.id, solution_id)
     return schemas.SolutionDeleteResponse(ok=True)

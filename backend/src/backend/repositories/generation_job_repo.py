@@ -257,6 +257,33 @@ class GenerationJobRepository:
             return int(cur.rowcount or 0)
 
     @staticmethod
+    def cancel_running(owner_id: int, *, solution_id: int) -> int:
+        """把该 owner + 方案下所有 running 任务置为 failed，返回受影响条数。
+
+        用在「方案被删除」：方案没了，挂在它上面的生成任务再跑完也没地方落正文，
+        继续跑只会白烧 token，并在收尾时写一次注定被丢弃的文档。
+
+        ⚠️ **刻意复用 `failed` 而不是新造一个 `cancelled` 状态**：任务状态是前后端共享
+        的契约（前端所有 status 分支都按 running / completed / failed 三态判），
+        多一个取值意味着每一处分支都要多一条分支，而漏掉任何一处都会让界面停在
+        「生成中」。语义上被取消确实「没有成功」，复用 `failed` 是代价最小的选择；
+        具体的取消原因放在 `error_code='CANCELLED'` / `error_message` 里，需要区分时读它们。
+
+        `solution_id` 用 `= ?` 而不是 `IS NULL`：本方法只服务于「删掉一份具体方案」，
+        没有方案的任务（快捷入口逃生口）不会被这个动作波及。
+        """
+        with connect() as conn:
+            cur = conn.execute(
+                "UPDATE generation_jobs "
+                "SET status = 'failed', error_code = 'CANCELLED', "
+                "    error_message = '方案已删除，任务已取消', updated_at = ? "
+                "WHERE owner_id = ? AND solution_id = ? AND status = 'running'",
+                (utc_now_text(), owner_id, solution_id),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    @staticmethod
     def reap_running() -> int:
         """系统级维护：把所有残留的 running 任务置为 failed，返回条数。
 

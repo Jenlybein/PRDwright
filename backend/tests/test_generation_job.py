@@ -22,7 +22,14 @@ from conftest import login, register
 
 from backend.core.contracts import StreamEvent
 from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services import document_service, document_store, job_service, llm_factory, prd_section_writer
+from backend.services import (
+    document_service,
+    document_store,
+    job_service,
+    llm_factory,
+    prd_section_writer,
+    solution_service,
+)
 from backend.services.job_bus import job_bus
 from backend.services.prd_section_writer import PRD_SECTIONS
 from fakes import ScriptedLLM
@@ -125,16 +132,18 @@ def _run_job(owner_id: int, solution_id: int | None, kind: str, request: dict) -
 # ---------------------------------------------------------------------------
 
 
-def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(alice, monkeypatch):
+def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, alice, monkeypatch):
     """端到端：首事件是 snapshot；`part` 按序拼接即 done.reply；任务落库为 completed。"""
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+    # 方案必须真实存在：收尾会校验「方案还在不在」，挂在不存在方案上的任务不再算成功
+    solution_id = _create_solution(client)
 
     async def scenario() -> tuple[int, list]:
-        job_id = job_service.create_job(owner_id=alice, solution_id=5, kind="prd")
+        job_id = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
         job_service.dispatch(
             job_id,
             owner_id=alice,
-            solution_id=5,
+            solution_id=solution_id,
             kind="prd",
             request={"requirements": "做一个演示产品", "product_name": "演示产品"},
         )
@@ -204,16 +213,19 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(alice, monk
     assert json.loads(row["usage"]) == data
 
 
-def test_reconnect_after_unsubscribe_completes_remaining(alice, monkeypatch):
+def test_reconnect_after_unsubscribe_completes_remaining(client, alice, monkeypatch):
     """中途退订后重连：先收快照（含已产出正文），再续上 live 直到 done。"""
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+    # 方案必须真实存在：收尾要确认「方案还在」，否则任务会被判成取消态
+    # （那样本用例就会在不知情的情况下走「方案已消失」那条分支）
+    solution_id = _create_solution(client)
 
     async def scenario() -> tuple[list, list]:
-        job_id = job_service.create_job(owner_id=alice, solution_id=7, kind="prd")
+        job_id = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
         job_service.dispatch(
             job_id,
             owner_id=alice,
-            solution_id=7,
+            solution_id=solution_id,
             kind="prd",
             request={"requirements": "做一个演示产品", "product_name": "演示产品"},
         )
@@ -241,7 +253,7 @@ def test_reconnect_after_unsubscribe_completes_remaining(alice, monkeypatch):
     assert done.data["reply"].startswith("# 演示产品 产品需求文档")
 
 
-def test_resubscribe_after_completion_sends_snapshot_then_summary(alice, monkeypatch):
+def test_resubscribe_after_completion_sends_snapshot_then_summary(client, alice, monkeypatch):
     """任务已完成后再订阅：发 snapshot 补全正文，**再补一份 run_summary**，随即结束。
 
     补发是必须的：收尾的 `run_summary` 在任务结束当刻广播，只在当刻连着的人收得到；
@@ -249,13 +261,15 @@ def test_resubscribe_after_completion_sends_snapshot_then_summary(alice, monkeyp
     终态任务的用量已落库，重连时按库补齐即可。
     """
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+    # 方案必须真实存在：收尾要确认「方案还在」，否则任务会被判成取消态
+    solution_id = _create_solution(client)
 
     async def scenario() -> list:
-        job_id = job_service.create_job(owner_id=alice, solution_id=9, kind="prd")
+        job_id = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
         job_service.dispatch(
             job_id,
             owner_id=alice,
-            solution_id=9,
+            solution_id=solution_id,
             kind="prd",
             request={"requirements": "做一个演示产品", "product_name": "演示产品"},
         )
@@ -1058,3 +1072,130 @@ def test_generation_flows_pending_items_into_job_and_document(client, monkeypatc
     doc = document_store.get_document(uid, solution_id, "api_docs")
     assert doc is not None
     assert doc["pending_items"] == items
+
+
+# ---------------------------------------------------------------------------
+# 删除方案 → 取消挂在它上面的任务
+#
+# 没有这一组，「生成途中删掉方案」会留下一条很隐蔽的尾巴：任务照跑、收尾照写文档，
+# 而方案已经不在了。前端那边迟到的流回调则会把刚被清空的会话重新填满，
+# 自动保存据此新建出一份「未命名方案」。
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_running_only_targets_owner_and_solution(client, alice):
+    """`cancel_running` 只动该 owner + 方案下的 running，不波及别的方案与已终态任务。"""
+    target = GenerationJobRepository.create(alice, "prd", 11)
+    other_solution = GenerationJobRepository.create(alice, "prd", 12)
+    finished = GenerationJobRepository.create(alice, "prd", 11)
+    GenerationJobRepository.finish(alice, finished, draft_content="正文", completed_sections=[])
+
+    # 另一个 owner 恰好也有一个挂在同一个 solution_id 上的任务
+    register(client, username="bob")
+    from backend.services import auth_service
+
+    bob = auth_service.UserRepository.get_by_username("bob")
+    assert bob is not None
+    bob_job = GenerationJobRepository.create(int(bob["id"]), "prd", 11)
+
+    affected = GenerationJobRepository.cancel_running(alice, solution_id=11)
+
+    assert affected == 1
+    cancelled = GenerationJobRepository.get(alice, target)
+    assert cancelled["status"] == "failed"
+    assert cancelled["error_code"] == "CANCELLED"
+    assert cancelled["error_message"] == "方案已删除，任务已取消"
+
+    # 别的方案、别的 owner、已经结束的任务都不动
+    assert GenerationJobRepository.get(alice, other_solution)["status"] == "running"
+    assert GenerationJobRepository.get(int(bob["id"]), bob_job)["status"] == "running"
+    assert GenerationJobRepository.get(alice, finished)["status"] == "completed"
+
+
+def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
+    """方案已删除时收尾**不写文档**，并把任务落成失败态。
+
+    这里刻意不置 `runtime.cancelled`：模拟「删除发生在标记生效之前」的那个时间窗——
+    运行时不在了 / 标记没赶上，只剩「方案还在不在」这一条事实可查。
+    """
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    job_id = GenerationJobRepository.create(uid, "prd", solution_id)
+    runtime = job_service.JobRuntime(
+        job_id=job_id,
+        owner_id=uid,
+        solution_id=solution_id,
+        kind="prd",
+        final_reply="# 已经生成好的正文",
+    )
+
+    assert solution_service.delete_solution(uid, solution_id) is True
+    assert runtime.cancelled is False
+
+    written: list = []
+    monkeypatch.setattr(
+        document_store, "commit_generated", lambda *a, **k: written.append((a, k))
+    )
+
+    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 直接测收尾分支
+
+    assert written == [], "方案已删除时不该再往 documents 里写"
+    assert runtime.status == "failed"
+    row = GenerationJobRepository.get(uid, job_id)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_code"] == "CANCELLED"
+    assert document_store.list_documents(uid, solution_id) == []
+
+
+def test_run_job_stops_consuming_events_after_cancel(alice, monkeypatch):
+    """运行时被标记取消后，下一个事件就不再消费（假事件流证明后续事件没被取走）。"""
+    job_id = GenerationJobRepository.create(alice, "prd", None)
+    runtime = job_service.JobRuntime(
+        job_id=job_id, owner_id=alice, solution_id=None, kind="prd"
+    )
+    produced: list[str] = []
+
+    async def stream():
+        produced.append("第一段")
+        yield StreamEvent(type="chunk", content="第一段", data={})
+        # 第一个事件处理完之后，用户删除了方案（`cancel_for_solution` 会置这一位）
+        runtime.cancelled = True
+        produced.append("第二段")
+        yield StreamEvent(type="chunk", content="第二段", data={})
+        produced.append("done")
+        yield StreamEvent(type="done", content="", data={"reply": "完整正文"})
+
+    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
+
+    _run(job_service.run_job(runtime))
+
+    # 只取走了两个事件就 break：第三个（done）从未被请求，正文不可能是「完整正文」
+    assert produced == ["第一段", "第二段"]
+    assert runtime.live_buffer == "第一段"
+    assert runtime.final_reply == ""
+
+    row = GenerationJobRepository.get(alice, job_id)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_code"] == "CANCELLED"
+    assert row["draft_content"] == "第一段"
+
+
+def test_delete_solution_endpoint_cancels_its_jobs(client):
+    """HTTP 面：删除方案会连带取消它的 running 任务（路由层的编排没漏接）。"""
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    other_id = _create_solution(client)
+    doomed = GenerationJobRepository.create(uid, "prd", solution_id)
+    untouched = GenerationJobRepository.create(uid, "api_docs", other_id)
+
+    assert client.delete(f"/api/solutions/{solution_id}").status_code == 200
+
+    row = GenerationJobRepository.get(uid, doomed)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_code"] == "CANCELLED"
+    assert GenerationJobRepository.get(uid, untouched)["status"] == "running"
