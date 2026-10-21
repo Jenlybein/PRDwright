@@ -1,0 +1,151 @@
+/* Tailwind v4：一条指令引入 base / components / utilities 三层样式 */
+@import "tailwindcss";
+
+/*
+ * ============================================================================
+ * 设计令牌：与用户端 `frontend/src/index.css` **同一套**。
+ * ----------------------------------------------------------------------------
+ * 为什么复制而不是各自写一份：两个前端是同一个产品的两面，若色板各写一套，
+ * 「亮/暗色下文字看不清」这类问题就得修两遍、还容易漏。
+ * 这里只去掉了用户端的外壳几何变量（侧栏宽度、吸底操作栏高度）——
+ * 管理员端没有那套外壳。
+ *
+ * 对比度基线沿用用户端（WCAG AA）：正文 / 次要文字 >= 4.5:1，控件描边 >= 3:1。
+ * 禁止用 slate-400 表达正文（实测 2.56:1）；文字层级统一走 --ui-muted / --ui-subtle。
+ *
+ * ⚠️ Tailwind v4 的 @theme 解析器对块内注释敏感（会报 "Invalid declaration: name"），
+ * 因此 @theme 块内部保持零注释。
+ * ============================================================================
+ */
+
+/* L1：原始色阶与视觉常量（与主题无关） */
+@theme {
+  --color-primary: #0ea5e9;
+  --color-primary-50: #f0f9ff;
+  --color-primary-100: #e0f2fe;
+  --color-primary-200: #bae6fd;
+  --color-primary-300: #7dd3fc;
+  --color-primary-400: #38bdf8;
+  --color-primary-500: #0ea5e9;
+  --color-primary-600: #0284c7;
+  --color-primary-700: #0369a1;
+  --color-primary-800: #075985;
+  --color-primary-900: #0c4a6e;
+  --color-primary-950: #082f49;
+  --radius-card: 1rem;
+  --radius-control: 0.75rem;
+  --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 4px 12px -2px rgb(15 23 42 / 0.06);
+  --shadow-pop: 0 10px 30px -6px rgb(15 23 42 / 0.18);
+  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* L2：语义令牌对外暴露为工具类（bg-surface / text-muted / border-line …） */
+@theme inline {
+  --color-bg: var(--ui-bg);
+  --color-surface: var(--ui-surface);
+  --color-surface-2: var(--ui-surface-2);
+  --color-field: var(--ui-field);
+  --color-line: var(--ui-line);
+  --color-line-strong: var(--ui-line-strong);
+  --color-fg: var(--ui-fg);
+  --color-body: var(--ui-body);
+  --color-muted: var(--ui-muted);
+  --color-subtle: var(--ui-subtle);
+  --color-on-accent: var(--ui-on-accent);
+  --color-accent: var(--ui-accent);
+  --color-accent-soft: var(--ui-accent-soft);
+  --color-accent-soft-line: var(--ui-accent-soft-line);
+  --color-danger: var(--ui-danger);
+  --color-danger-surface: var(--ui-danger-surface);
+  --color-danger-line: var(--ui-danger-line);
+  --color-danger-fg: var(--ui-danger-fg);
+  --color-warning-surface: var(--ui-warning-surface);
+  --color-warning-line: var(--ui-warning-line);
+  --color-warning-fg: var(--ui-warning-fg);
+  --color-success-surface: var(--ui-success-surface);
+  --color-success-line: var(--ui-success-line);
+  --color-success-fg: var(--ui-success-fg);
+}
+
+/* 亮色主题取值（默认）。.dark 段必须写在后面：两者权重同为 0,1,0，靠顺序决胜 */
+:root {
+  --ui-bg: #f8fafc;
+  --ui-surface: #ffffff;
+  --ui-surface-2: #f1f5f9;
+  --ui-field: #ffffff;
+  --ui-line: #e2e8f0;
+  --ui-line-strong: #94a3b8;
+  --ui-fg: #0f172a;
+  --ui-body: #334155;
+  --ui-muted: #475569;
+  --ui-subtle: #64748b;
+  --ui-on-accent: #ffffff;
+  --ui-accent: #0369a1;
+  --ui-accent-soft: #e0f2fe;
+  --ui-accent-soft-line: #7dd3fc;
+  --ui-danger: #dc2626;
+  --ui-danger-surface: #fef2f2;
+  --ui-danger-line: #fecaca;
+  --ui-danger-fg: #b91c1c;
+  --ui-warning-surface: #fffbeb;
+  --ui-warning-line: #fde68a;
+  --ui-warning-fg: #92400e;
+  --ui-success-surface: #ecfdf5;
+  --ui-success-line: #a7f3d0;
+  --ui-success-fg: #047857;
+  color-scheme: light;
+}
+
+.dark {
+  --ui-bg: #020617;
+  --ui-surface: #0f172a;
+  --ui-surface-2: #1e293b;
+  --ui-field: #1e293b;
+  --ui-line: #1e293b;
+  --ui-line-strong: #475569;
+  --ui-fg: #f8fafc;
+  --ui-body: #e2e8f0;
+  --ui-muted: #cbd5e1;
+  --ui-subtle: #94a3b8;
+  --ui-on-accent: #ffffff;
+  --ui-accent: #7dd3fc;
+  --ui-accent-soft: rgb(56 189 248 / 0.16);
+  --ui-accent-soft-line: #0284c7;
+  --ui-danger: #dc2626;
+  --ui-danger-surface: rgb(127 29 29 / 0.3);
+  --ui-danger-line: #7f1d1d;
+  --ui-danger-fg: #fca5a5;
+  --ui-warning-surface: rgb(120 53 15 / 0.3);
+  --ui-warning-line: #92400e;
+  --ui-warning-fg: #fcd34d;
+  --ui-success-surface: rgb(6 78 59 / 0.3);
+  --ui-success-line: #065f46;
+  --ui-success-fg: #6ee7b7;
+  color-scheme: dark;
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-bg text-body;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-bg;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

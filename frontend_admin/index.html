@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <link rel="icon" href="/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <!-- 刻意不暴露在标题里写「后台地址」之外的信息；页面本身由服务端守卫保护 -->
+    <title>PRDwright · 管理后台</title>
+    <script>
+      /*
+       * 首帧前定主题，避免暗色用户刷新时先闪一屏白（FOUC）。
+       * 规则与用户端 index.html 一致，共用 'theme' 键：两个前端是同一套视觉体系。
+       * 必须内联：打包产物异步加载，等 Vue 起来再切已经晚了一帧。
+       */
+      (function () {
+        try {
+          var saved = localStorage.getItem('theme')
+          var dark =
+            saved === 'dark' ||
+            (saved !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) {
+          /* localStorage 不可用（隐私模式等）时留空 */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
