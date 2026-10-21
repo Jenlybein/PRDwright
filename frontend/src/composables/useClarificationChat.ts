@@ -3,6 +3,7 @@ import { storeToRefs } from 'pinia'
 
 import { useJob } from '@/composables/useJob'
 import type { StreamHandlers } from '@/services/api'
+import { isSubscribed } from '@/services/runSubscriptions'
 import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
@@ -177,14 +178,20 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
    *
    * `onSnapshot` 是重连的关键：后端先把「已经生成到哪儿」发过来，界面立刻有半截内容，
    * 再接着收 live 增量——否则刷新后要盯着空白等到下一个字。
+   *
+   * ⚠️ **代次守卫**：预览是单槽的，会话换人（切方案 / 开新方案 / 删方案）之后，
+   * 旧订阅可能还有几个已入队的事件在飞。没有这道闸，它们会写进新会话的对话气泡里
+   * （表现为「新任务里冒出上一轮的字」）。与文档流水线 `guardJobHandlers` 同一口径：
+   * 丢弃必须静默——用户已经离开那个会话，这不是错误。
    */
-  function streamHandlers(): StreamHandlers {
+  function streamHandlers(epoch: number): StreamHandlers {
+    const live = () => solutions.sessionEpoch === epoch
     return {
       onChunk: (chunk) => {
-        runs.preview.content += chunk
+        if (live()) runs.preview.content += chunk.text
       },
       onSnapshot: (snap) => {
-        runs.preview.content = snap.finalizedText + snap.liveBuffer
+        if (live()) runs.preview.content = snap.finalizedText + snap.liveBuffer
       },
     }
   }
@@ -205,6 +212,8 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     },
   ): Promise<void> {
     runs.resetPreview()
+    // 代次在**发起之前**定格：这一轮结果只属于这一份会话
+    const epoch = solutions.sessionEpoch
     const result = await job.start(
       'chat',
       {
@@ -216,14 +225,22 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
         toolResult: (payload.toolResult ?? null) as Record<string, unknown> | null,
         profileKey,
       },
-      streamHandlers(),
+      streamHandlers(epoch),
     )
+    // 订阅期间会话已经换人（用户开了新任务）：这次结果与界面无关，一个字都不要写。
+    // 预览已被 `solutions.startNew()` 清掉，此时再补一句「生成失败」只会诬告用户
+    // 正在看的那一轮——这正是「新任务流式正常、却顶着一条红色失败」的成因。
+    if (solutions.sessionEpoch !== epoch) return
     // 先按服务端拉一遍：成功时有这一轮，失败时也可能有半截（服务端会把已产出的部分落库）
     await solutions.refreshTurns()
     if (result.ok) {
       runs.preview.content = ''
       return
     }
+    // 主动退订（切走 / 开新任务）不是失败：没有错误可报，也不抹掉已经接到的半截
+    if (result.aborted) return
+    // 同一份会话里这一支已被更晚的任务顶替：结论属于上一轮，不能写到新一轮的界面上
+    if (result.run !== null && !runs.holds(result.run.jobId)) return
     // 保留失败原因，但清掉预览正文——它已经在轮次里了，留着会与列表里的那条重复
     runs.preview.content = ''
     runs.preview.error = job.error.value || '生成失败'
@@ -309,20 +326,34 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
    * 这一步把「流式预览」换成「服务端权威的那条消息」，界面不会因为预览清空而闪空。
    */
   async function reconnect(jobId: number): Promise<void> {
+    // **幂等**：同一个任务绝不允许两路订阅并行。判据是订阅登记表（按 jobId 记），
+    // 与 `useDocumentPipeline.reconnectJob` 同一口径。
+    //
+    // 为什么必须有：`register()` 会中止同一 jobId 的旧订阅。刷新后「恢复快照」有两条
+    // 触发路径（路由解析、登录态探测），它们各自 `await` 一串请求后都可能走到这里；
+    // 没有这道闸，后一路会把前一路掐掉，前一路以 `AbortError` 收场——而它其实已经把
+    // 半截内容接回来了。用户看到的就是「内容好好的，却报『接回上一轮对话失败』」。
+    if (isSubscribed(jobId)) return
     // 有反馈才可诊断：接回是一段看不见的动作，静默失败与「没接回」在界面上长得一样
     hooks.onNotice('正在接回上一轮的回复…')
-    const result = await job.reconnect(jobId, streamHandlers())
+    // 代次同样在发起之前定格：重连可能跑很久，期间用户完全可能开新任务
+    const epoch = solutions.sessionEpoch
+    const result = await job.reconnect(jobId, streamHandlers(epoch))
+    // 会话已经换人：这一轮接回来的内容属于上一份会话，界面此刻显示的是别的东西
+    if (solutions.sessionEpoch !== epoch) return
     await solutions.refreshTurns()
     if (result.ok) {
       // 成功：预览让位给服务端那条权威轮次，避免同一句话在列表里出现两次
       runs.preview.content = ''
       return
     }
-    // 失败：**保留**预览里已经接到的半截内容。丢掉它等于把用户已经看到的字抹掉，
-    // 而 refreshTurns 又拿不到这一轮（服务端还没收尾），界面会变成一片空白。
-    if (result.run !== null) {
-      runs.preview.error = job.error.value || '接回上一轮对话失败'
-    }
+    // 主动退订（切方案 / 开新任务）不是失败：**保留**预览里已经接到的半截内容。
+    // 丢掉它等于把用户已经看到的字抹掉，而 refreshTurns 又拿不到这一轮（服务端还没收尾），
+    // 界面会变成一片空白。
+    if (result.aborted) return
+    // 只是「登记过」不够：这一支可能已经被更晚的任务顶替，结论不该写到新任务脸上
+    if (!runs.holds(jobId)) return
+    runs.preview.error = job.error.value || '接回上一轮对话失败'
   }
 
   /** 清空对话相关的临时状态（含错误提示） */

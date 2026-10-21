@@ -125,7 +125,7 @@ describe('删除方案后迟到的回调', () => {
         releaseStream = resolve
       })
       // 事件在「删除之后」才到：这些回调必须被丢弃
-      handlers?.onChunk?.('迟到的正文')
+      handlers?.onChunk?.({ text: '迟到的正文', sectionId: '', index: -1 })
       return { conversationId: '', reply: '# 迟到的 PRD', asks: [] }
     })
 
@@ -207,13 +207,13 @@ describe('删除方案后迟到的回调', () => {
     let streamingWhileLive = ''
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       // 正常流：事件应当照常落进预览缓冲（守卫不能误伤）
-      handlers?.onChunk?.('接口正文')
+      handlers?.onChunk?.({ text: '接口正文', sectionId: '', index: -1 })
       streamingWhileLive = pipeline.docStreamingContent.value
       await new Promise<void>((resolve) => {
         releaseStream = resolve
       })
       // 删除之后才到的事件：必须被丢弃
-      handlers?.onChunk?.('迟到的接口正文')
+      handlers?.onChunk?.({ text: '迟到的接口正文', sectionId: '', index: -1 })
       return { conversationId: '', reply: '# 迟到的接口文档', asks: [] }
     })
 
@@ -259,7 +259,7 @@ describe('删除方案后迟到的回调', () => {
       })
       if (index === 0) {
         // A 的迟到事件：它属于已删除的会话 A
-        handlers?.onChunk?.('A 的迟到增量')
+        handlers?.onChunk?.({ text: 'A 的迟到增量', sectionId: '', index: -1 })
         return { conversationId: '', reply: '# A 的迟到接口文档', asks: [] }
       }
       // B 正常结束但无正文，避免 B 自己的落稿干扰断言

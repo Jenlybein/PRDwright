@@ -28,6 +28,7 @@ import type {
   RequirementsSummary,
   ReviewConclusion,
   RunSummary,
+  StreamChunk,
   StreamDocumentPart,
   StreamStageChunk,
   StreamStageEvent,
@@ -48,6 +49,7 @@ import {
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
+  fromBackendJobKind,
   generatingStateFor,
   jobDocumentKind,
   normalizeChatStage,
@@ -243,6 +245,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
         phase: 'pending',
         failed: false,
         text: '',
+        draft: '',
         note: '',
         issues: [],
       }
@@ -253,10 +256,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 把看板里的定稿正文拼成预览，写进 `docStreamingContent`。
+   * 把看板拼成预览，写进 `docStreamingContent`。
    *
    * 文档头单独存（`headerText`），章节按 `index` 排序——`part` 可以乱序到达，
    * 但用户看到的文档必须始终是章节顺序。
+   *
+   * 每章取 `text || draft`：**定稿优先，没有定稿才用正在吐的字**。这样「逐字看着它
+   * 在长」与「最终正文与 `done.reply` 逐字一致」同时成立——半成品再脏也只影响过程
+   * 显示，`part` 一到就被权威文本顶掉。
    */
   function syncPrdPreview(): void {
     const board = prdBoard.value
@@ -266,7 +273,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
     const ordered = [...board.sections].sort((a, b) => a.index - b.index)
     docStreamingContent.value =
-      board.headerText + ordered.map((section) => section.text).join('')
+      board.headerText +
+      ordered.map((section) => section.text || section.draft).join('')
   }
 
   /** 清空 PRD 看板 */
@@ -306,6 +314,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
     const card = sectionCard(board, part.sectionId, part.index)
     card.text = part.text
+    // 定稿即接管：半成品到此作废，否则 `text || draft` 会看不出区别，
+    // 但刷新时若还带着 draft 就会多出一段
+    card.draft = ''
     if (part.failed) {
       // 失败占位：停在此前失败的车道（生成），不到「定稿」
       card.failed = true
@@ -316,9 +327,23 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     syncPrdPreview()
   }
 
-  /** 并行链路不再逐字流；保留函数仅为旧后端 / 降级路径的接线兼容。 */
-  function appendPrdChunk(_chunk: string): void {
-    // 故意为空：多章 chunk 会串字，也会让整章重试不安全
+  /**
+   * 一片正文增量：按归属送进那一章的卡片。
+   *
+   * 多章**同时**在长，所以每片都带 `sectionId`（见后端 `prd_section_writer`）。
+   * 没有归属的增量直接丢弃：宁可少显示几个字，也不能把它们塞进第一章——
+   * 那是「串字」，比不流式更糟。
+   */
+  function appendPrdChunk(chunk: StreamChunk): void {
+    if (!chunk.sectionId) return
+    const board = prdBoard.value
+    if (!board) return
+    const card = sectionCard(board, chunk.sectionId, chunk.index)
+    // 已经定稿的章节不该再长：重复订阅 / 迟到增量一律忽略
+    if (card.text) return
+    card.draft += chunk.text
+    if (card.phase === 'pending') card.phase = 'writing'
+    syncPrdPreview()
   }
 
   /**
@@ -326,6 +351,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * 并行下车道事件是交错的（第 3 章在写、第 2 章在审、第 1 章在改），
    * 「换章就清缓冲」的旧逻辑在这里会误伤别的章。
+   *
+   * 但**这一章自己**遇到 `writing` / `rewriting` 时必须清：前者是单章重试从头再来，
+   * 后者是初稿换改写稿，不清就会两轮的字叠着长。`reviewing` 不清——正文已经写完了。
    */
   function handlePrdStage(event: StreamStageEvent): void {
     const board = prdBoard.value
@@ -347,6 +375,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     }
     if (event.stage === 'done') return
     if (event.stage === 'writing' || event.stage === 'reviewing' || event.stage === 'rewriting') {
+      if (event.stage !== 'reviewing') {
+        // 从头重来：清掉这一章上一轮吐出的字（重试 / 初稿→改写稿）
+        card.draft = ''
+        syncPrdPreview()
+      }
       card.phase = event.stage
       // 进入审核/改写说明正文已产出；失败标记以随后的 part 为准
       if (event.stage !== 'writing') card.failed = false
@@ -551,8 +584,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       }
     }
     if (raw.onChunk) {
-      guarded.onChunk = (text) => {
-        if (!isExpired(epoch)) raw.onChunk?.(text)
+      // 参数整体转发：分章节的增量带章节归属，少传一层就只剩文本，归属被吞掉后
+      // PRD 的增量会被当成「无归属」全部丢弃（表现为又不流式了）
+      guarded.onChunk = (chunk) => {
+        if (!isExpired(epoch)) raw.onChunk?.(chunk)
       }
     }
     if (raw.onPart) {
@@ -614,6 +649,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (kind === 'prd') {
       return guardJobHandlers(
         {
+          // 逐字增量按章落卡片（`appendPrdChunk`）；`part` 到了再用权威文本覆盖
+          onChunk: appendPrdChunk,
           onPart: handlePrdPart,
           onStage: handlePrdStage,
           onSnapshot: applyJobSnapshot,
@@ -626,7 +663,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     return guardJobHandlers(
       {
         onChunk: (chunk) => {
-          docStreamingContent.value += chunk
+          // 整篇文档只有一个缓冲，归属一概不看：它们的 chunk 本来就不分章
+          docStreamingContent.value += chunk.text
         },
         // 改写稿整段覆盖初稿；没有审查/改写时这两个回调都不会触发
         onPart: handleDocPart,
@@ -644,17 +682,18 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 应用任务快照：把「断线前已产出的正文」补齐到预览（刷新重连的落点）。
    *
-   * PRD 还原三段状态与阶段进度；其余文档直接用快照的实时缓冲。
+   * PRD 还原看板（已定稿章节 + 正在写的半成品）；其余文档直接用快照的实时缓冲。
    *
-   * **只在预览还空着时用它初始化**：快照是「订阅开始时的一次补全」，理应发生在任何
-   * live 事件之前；若同一任务被订阅两次，第二份快照会在正文已经流出一段之后到达，
-   * 此时无条件覆盖会把已产出的内容**倒退**回去。守卫住这一点，重复快照就退化成
-   * 一次无害的 no-op，最多让阶段指示器刷新一下。
+   * **守卫按「有没有内容」判，不按「看板在不在」判**：重连链路会先 `beginPrdStages()`
+   * 建一张**空**看板再订阅，若用「看板为 null」作守卫，PRD 的快照永远进不去——
+   * 表现为「刷新后已定稿的章节也一片空白」。同理，同一任务被订阅两次时第二份快照
+   * 会晚于 live 事件到达，此时看板已有卡片，守卫让这次补全退化成无害的 no-op。
    */
   function applyJobSnapshot(snap: JobSnapshot): void {
     if (snap.kind === 'prd') {
-      // 只在看板还空着时用快照重建：重复快照不该把已流出的内容倒退回去
-      if (!prdBoard.value && snap.completedSections.length > 0) {
+      const current = prdBoard.value
+      const hasCards = (current?.sections.length ?? 0) > 0
+      if (!hasCards) {
         const board: PrdBoardState = {
           total: snap.completedSections.length,
           headerReady: false,
@@ -673,6 +712,24 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
             phase: section.failed ? 'writing' : 'done',
             failed: section.failed === true,
             text: section.text,
+            draft: '',
+            note: '',
+            issues: [],
+          })
+        }
+        // 正在写的几章：按章摆回各自的卡片，`text` 留空、`draft` 带着已吐出的字，
+        // 于是刷新后「半截内容还在」并接着往下长（定稿章节由上面的循环铺好）
+        for (const live of snap.liveBySection) {
+          if (board.sections.some((item) => item.sectionId === live.sectionId)) continue
+          board.sections.push({
+            sectionId: live.sectionId,
+            sectionTitle: '',
+            sectionHeading: '',
+            index: live.index,
+            phase: 'writing',
+            failed: false,
+            text: '',
+            draft: live.text,
             note: '',
             issues: [],
           })
@@ -691,6 +748,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
         prdBoard.value = board
         syncPrdPreview()
       }
+      return
+    }
+    if (snap.kind === 'chat') {
+      // 对话的正文归 `runs.preview.content`（见 `useClarificationChat`）。走到这里说明
+      // 分流又错了——宁可什么都不做，也绝不把聊天正文写进文档预览与工作副本。
       return
     }
     // 其余文档只有一段流式缓冲：同样只在空着时用快照初始化，避免重复快照覆盖已流出的内容
@@ -833,18 +895,34 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     return docKindOfGeneratingState(viewState.value) ?? 'prd'
   }
 
+  /**
+   * 按当前阶段反推「这一支任务是什么种类」——**只在指针与快照都没给出来时兜底**。
+   *
+   * 停在对话页时它必然是对话任务：对话是就地生成、不切阶段（见 `useJob` 的
+   * `GENERATING_STATE.chat = null`），所以「人在对话页 + 有任务在跑」只能是它。
+   *
+   * ⚠️ 从前这里写死 `?? 'prd'`：一旦快照把 `activeJobKind` 丢成 null（`isDocKind`
+   * 曾经不认 `chat`），对话就被当成 PRD 塞进文档流水线——流式全丢、收尾还把聊天
+   * 正文写进 PRD 预览。宁可按阶段推，也不猜 `prd`。
+   */
+  function kindFromViewState(): DocKind | null {
+    if (viewState.value === 'chatting') return 'chat'
+    const docKind = docKindOfGeneratingState(viewState.value)
+    return fromBackendJobKind(docKind) ?? null
+  }
+
   /** `reconnectJob` 的实际动作（与幂等守卫分离，便于阅读与测试） */
   async function reconnectAndSettle(jobId: number): Promise<void> {
     // 重连不改阶段（阶段已由快照恢复保留），因此产物种类必须**先**确定下来：
     // 有指针就听指针的（`doc_kind` 是后端权威，`optimize`/`clarify` 也能答），
     // 没有才退回按 `viewState` 反推。
     const pointer = runs.pointer
-    const kind = pointer?.jobKind ?? store.activeJobKind ?? 'prd'
+    const kind = pointer?.jobKind ?? store.activeJobKind ?? kindFromViewState()
     // 对话**不该**走到这里：它有自己的重连路径（把增量写进 `runs.preview`、
     // 收尾重新拉轮次，见 `useClarificationChat.reconnect`）。真走到了说明调用方
     // 分流错了——直接放弃，绝不把对话事件写进文档预览（那会表现为「刷新后流式全丢」，
     // 因为内容全都写进了一个看不见的地方）。
-    if (kind === 'chat') return
+    if (kind === null || kind === 'chat') return
     const target = pointer?.docKind ?? docKeyForJob(kind)
     // 别的任务已经占着这一支运行态：本次要重连的任务属于更早的一轮，直接放弃。
     // （同一标签页里同时跟两支任务是本期明确不做的事，见计划「不做与风险」——
@@ -871,10 +949,18 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
     // 重连也是一次独立订阅：代次必须在发起之前定格，并沿这条链一路带着走
     const epochAtStart = solutions.sessionEpoch
-    const { ok, reply, run } = await job.reconnect(jobId, handlersForKind(kind, epochAtStart))
-    // 重连期间会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写错误、不落稿
-    if (isStaleRun(run) || isExpired(epochAtStart)) return
+    const { ok, aborted, reply, run } = await job.reconnect(jobId, handlersForKind(kind, epochAtStart))
+    // 重连期间会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写错误、不落稿。
+    // `aborted` 是**本地主动退订**（切方案 / 开新方案 / 删方案）：同样没有错误可报，
+    // 只判 `ok` 会把「用户自己走开」渲染成「生成失败」。
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     const snap = job.snapshot.value
+    // 闸门二：**以服务端权威的快照再核一次种类**。走到这里说明上面按指针/阶段推出的是
+    // 一份文档，但服务端说这其实是别的任务（快照的 `kind` 是任务行的原始值）。此时必须
+    // 停手：继续往下就是 `finishDoc`，会把「不是这份产物」的正文写进工作副本，并把
+    // 「已生成完毕」的提示打到用户脸上——不报错，只是内容错了。
+    const serverKind = snap === null ? null : fromBackendJobKind(snap.kind)
+    if (serverKind !== null && serverKind !== kind) return
     // 下游阶段与阶段输出由 `applyJobSnapshot` 在**快照那一刻**回填（那是唯一正确的时机：
     // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
     // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
@@ -944,13 +1030,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     beginPrdStages()
     // 代次在**发起之前**定格：这条链的 handlers、await 之后的判断与 `finishDoc` 全都用它
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok, run } = await job.start(
+    const { reply, ok, aborted, run } = await job.start(
       'prd',
       prdJobInput(payload),
       handlersForKind('prd', epochAtStart),
     )
-    // 订阅期间会话被换掉、或这一支已被别的任务顶替：成功 / 失败都不要再写回本文件的状态
-    if (isStaleRun(run) || isExpired(epochAtStart)) return
+    // 订阅期间会话被换掉、或这一支已被别的任务顶替：成功 / 失败都不要再写回本文件的状态。
+    // `aborted` 见 `reconnectAndSettle` 的同名判断：主动退订不是失败，不该弹红字。
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
       docError.value = job.error.value || 'PRD 生成失败'
       // 失败时收掉阶段条：原因由错误提示说明，留着一个「进行中」的指示反而误导
@@ -973,13 +1060,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     docPhase.value = 'writing'
     // 同 `generatePrd`：代次在发起之前定格，供本次订阅的回调与收尾使用
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok, run } = await job.start(
+    const { reply, ok, aborted, run } = await job.start(
       'api-docs',
       // 快捷流程一遍过：整篇生成完就收，不审也不改（见 `reviewEnabledForJob`）
       { prdContent: documents.contentOf('prd'), reviewEnabled: reviewEnabledForJob() },
       handlersForKind('api-docs', epochAtStart),
     )
-    if (isStaleRun(run) || isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
       docError.value = job.error.value || '接口文档生成失败'
       return
@@ -1002,13 +1089,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 与接口文档同理：阶段条立即亮起，别让用户在整篇生成期间盯着空白
     docPhase.value = 'writing'
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok, run } = await job.start(
+    const { reply, ok, aborted, run } = await job.start(
       'prompts',
       // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
       { prdContent: prdText, apiDocsContent: apiDocsText, reviewEnabled: reviewEnabledForJob() },
       handlersForKind('prompts', epochAtStart),
     )
-    if (isStaleRun(run) || isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
       docError.value = job.error.value || '提示词生成失败'
       return
@@ -1040,12 +1127,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
     resetDocTransient()
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok, run } = await job.start(
+    const { reply, ok, aborted, run } = await job.start(
       'optimize',
       { document: content, instruction, docKind: target },
       handlersForKind('optimize', epochAtStart),
     )
-    if (isStaleRun(run) || isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
       // 优化失败：保留原文档，错误已写入 docError
       docError.value = job.error.value || '优化失败'
@@ -1135,13 +1222,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     goTo(generatingStateFor(target) ?? 'generating-prd')
 
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok, run } = await job.start(
+    const { reply, ok, aborted, run } = await job.start(
       'clarify',
       // 只回传 role / content：后端按同一形状读历史（与 `optimize` 的入参口径一致）
       { document, history, docKind: target },
       handlersForKind('clarify', epochAtStart),
     )
-    if (isStaleRun(run) || isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
       // 改写失败：留在生成视图，由 `GeneratingStage` 的错误区展示原因（后端失败不覆写正文）
       docError.value = job.error.value || '按澄清结果改写失败'
@@ -1213,12 +1300,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     resetDocTransient()
     goTo(generating)
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok, run } = await job.start(
+    const { reply, ok, aborted, run } = await job.start(
       'auto-clarify',
       { document: content, pendingItems: items, docKind: target },
       handlersForKind('auto-clarify', epochAtStart),
     )
-    if (isStaleRun(run) || isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
       docError.value = job.error.value || 'AI 自行澄清失败'
       return

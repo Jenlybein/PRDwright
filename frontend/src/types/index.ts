@@ -740,6 +740,24 @@ export interface StreamStageChunk {
   text: string
 }
 
+/**
+ * 一片正文增量（`chunk` 事件）。
+ *
+ * 分章节链路里**必须**带归属：多章同时吐字，`sectionId` 决定这一片进哪张卡片。
+ * 不分章的场景（整篇文档、对话）`sectionId` 为空串、`index` 为 -1。
+ *
+ * ⚠️ 它是模型的**原始输出**（可能缺标题、章间没空行），只用于「过程中的显示」；
+ * 权威正文以 `part` 为准，到了就整段覆盖。
+ */
+export interface StreamChunk {
+  /** 本次增量文本 */
+  text: string
+  /** 所属章节 id；不分章时为空串 */
+  sectionId: string
+  /** 章节下标；不分章时为 -1（**不能**用 0 兜底，那是合法的第一章） */
+  index: number
+}
+
 // ============================================================================
 // 生成任务（generation_jobs）：刷新重连的状态载体
 // ============================================================================
@@ -765,6 +783,16 @@ export interface PrdSectionCard {
   failed: boolean
   /** 定稿正文；未定稿为空串 */
   text: string
+  /**
+   * 本章**还没定稿**的逐字缓冲。
+   *
+   * 与 `text` 分开存：`text` 是权威定稿（后端 `part` 下发后的文本），`draft` 是
+   * 模型正在吐的原始字。渲染取 `text || draft`，`part` 一到就清 `draft`——
+   * 于是「逐字看着它在长」与「最终正文与 done.reply 逐字一致」同时成立。
+   *
+   * `rewriting` / 重试会把它清零（信号是 `stage`，不是字符数回退）。
+   */
+  draft: string
   /** 改写原因 / 失败原因 */
   note: string
   issues: { severity: string; detail: string }[]
@@ -801,6 +829,18 @@ export interface CompletedSection {
   failed?: boolean
 }
 
+/** 某一章「正在写」的半成品（后端 `snapshot` 的 `live_by_section` 项） */
+export interface SectionDraft {
+  /** 章节 id，如 `overview` */
+  sectionId: string
+  /** 章节下标（内容里有它就一定要用：并行时章节不按到达顺序） */
+  index: number
+  /** 这一章已经吐出的原始字（未过定稿加工） */
+  text: string
+  /** 该章当前所处阶段：writing / reviewing / rewriting */
+  phase: string
+}
+
 /**
  * 一次生成任务在订阅开始时的**快照**（后端 `snapshot` 事件的 `data`）。
  *
@@ -828,6 +868,16 @@ export interface JobSnapshot {
   finalizedText: string
   /** 当前段落实时缓冲（尚未定稿的 chunk 增量） */
   liveBuffer: string
+  /**
+   * **按章**的未定稿半成品（分章节链路专有）。
+   *
+   * 并行时好几章同时在写，`liveBuffer` 一格装不下（混在一起就分不开）。刷新重连时
+   * 靠它把「正在写的几章」摆回各自卡片并接着往下长；只含**还没定稿**的章——
+   * 定稿的在 `completedSections` 里，两处都发会让同一段正文出现两次。
+   *
+   * 与 `stageText` 同口径：不落库，进程重启后的兜底快照里恒为空数组。
+   */
+  liveBySection: SectionDraft[]
   /**
    * 当前阶段模型的原始输出（审核意见 / 改写稿）。
    *

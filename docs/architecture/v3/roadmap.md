@@ -96,7 +96,7 @@
 | P0-T4 删死接口 | ✅ | OpenAPI 路径已收敛，无 `NotImplementedError` 路由 |
 | P1 方案持久化 | ✅ | `repositories/solution_repo.py` + `services/solution_service.py` + `api/solutions.py` + 前端 `stores/solutions.ts` + 左侧栏 + `vue-router` 两条页面级路由 |
 | P2 前端解耦 | ✅ | `App.vue` 已物理删除；`AppV2.vue` 只做分派；`stages/` `form/` `ui/` 组件库；`stores/workflow.ts` 状态机纯函数；`composables/` |
-| P3-T1 分章节生成 | ✅ | `services/prd_section_writer.py`：`PRD_SECTIONS` + 逐节流式 + 前向上下文 `prior_sections` |
+| P3-T1 分章节生成 | ✅ | `services/prd_section_writer.py`：`PRD_SECTIONS` + 逐节流式 + 前向上下文 `prior_sections`。并行链路同样逐字流：`chunk` 带 `section_id` / `index` 供前端按章归位，`part` 仍是权威正文 |
 | P3-T3 max_tokens 分档 | ✅ | `services/llm_factory.py` 按文档类型配置 |
 | P4 登录 | ✅ | `api/auth.py` + `auth_service` + `auth_repo` + 纯 ASGI 默认拒绝中间件 + 前端 `AuthDialog`/`UserMenu` + `scripts/auth_cli.py` |
 | **R0-T1 CI** | ✅ 2026-10-14 | `.github/workflows/ci.yml`：backend（uv + pytest）/ frontend（npm ci + vitest `--run` + build）双 job 并行，云端已跑绿 |
@@ -136,7 +136,7 @@
 
 - **`llm_factory` 的三供应商抽象**：ark / anthropic / openai 统一 `astream`，业务层无感——R1-T4 的超时与重试统一挂在 `stream_reply` 这一个出口上，正是靠这层抽象才不必每个供应商各写一遍。
 - **路由层 / service 层 / repository 层分离**：`api` 只解析封装，`schemas.py` 集中契约，`repositories/` 是全项目唯一写 SQL 的地方（review 红线）。
-- **SSE 事件协议**：`status / chunk / part / stage / done / error` + 末尾 `[DONE]`，两层异常兜底；PRD 正文以 `part` 事件为准（预览与最终同源，见 8ea4896）。
+- **SSE 事件协议**：`status / chunk / part / stage / done / error` + 末尾 `[DONE]`，两层异常兜底；PRD 正文以 `part` 事件为准（预览与最终同源，见 8ea4896）。逐字增量 `chunk` 在分章节链路里**必须**带 `section_id` / `index`（否则多章并行会串字，前端只能整批丢弃）；快照的 `live_by_section` 让刷新后「正在写的几章」接着长。
 - **技能包驱动 + 自动降级**：`skills/prd-generator` 缺失时退回内置提示词，服务不中断（R2 只把「静默降级」改成「显式告警 + 可选 fail-fast」）。
 - **默认拒绝中间件**（纯 ASGI，避开 `BaseHTTPMiddleware` 对 SSE 的响应体重包）+ 遍历 OpenAPI 路径的不变量测试。
 - **快照范式 + owner 强制过滤**（ADR-009）：单表全量 JSON、`Repository` 不接受 `owner_id=None`。

@@ -134,9 +134,11 @@ v3 要解决的是「**敢不敢真的用它干活**」，拆成四条可以分�
 | --- | --- |
 | 落库 | 新增 `generation_jobs` 表：`id / owner_id / solution_id / kind / status / phase / draft_content / completed_sections / usage / error_code / created_at / updated_at` |
 | 执行 | 同进程 `asyncio.create_task`，复用现有 `document_service` 的 generator，**不改 LLM pipeline** |
-| 广播 | 内存事件总线 `job_bus`：chunk / phase 推给当前订阅者；连接断开只 unsubscribe，**不 cancel 任务** |
+| 广播 | 内存事件总线 `job_bus`：chunk / phase 推给当前订阅者；连接断开只 unsubscribe，**不 cancel 任务**。总线**不重放**——断线期间的事件靠重连时的 `snapshot` 补 |
 | 订阅 | `GET /api/jobs/{id}/stream`；事件沿用现有 SSE 词汇（`status` / `chunk` / `part` / `stage` / `done` / `error`），对新订阅者先发一条 `snapshot` 补全已有内容。SSE 帧的拼装统一在 `api/sse.py`（`event:` + `data:` 两行同写，与旧通道同一口径） |
-| 重连 | 前端重连带同一 `jobId`；`running` → 整段显示已有内容 + 新字打字机；`completed` → 静态全文；`failed` → 保留 partial + 错误码 |
+| 逐字流式的归属 | 分章节链路（PRD）多章**并行**，`chunk` 必须带 `data.section_id` + `data.index`，前端按它把字送进对应章卡片；不带归属的增量一律丢弃（宁可少显示，也不串到第一章）。运行时按章分缓冲（`live_by_index`），重连快照用 `live_by_section` 把「正在写的几章」摆回去。**两条轨**：`chunk` 是过程字（模型原始输出，可能缺标题），`part` 才是权威正文——`part` 一到整段覆盖该章 |
+| 重连 | 前端重连带同一 `jobId`；`running` → 整段显示已有内容 + 新字打字机；`completed` → 静态全文；`failed` → 保留 partial + 错误码。**同一 `jobId` 的订阅幂等**（登记表 `isSubscribed`）：刷新后有多条触发路径，后到的一路直接复用，绝不把前一路掐掉重来 |
+| 断开的两种含义 | **主动退订 ≠ 失败**：切方案 / 开新方案 / 删方案只 abort 本地 SSE，服务端任务照跑。`JobResult.aborted` 把它与真失败分开，调用方只对真失败写错误。错误写入还必须带归属——**会话代次变了**（`sessionEpoch`）、或**这一支已被更晚的任务顶替**（`runs.holds`）时，旧任务的结论一律不落界面 |
 | 归属 | 强制 `owner_id`，越权返回 404（与 `solutions` 一致） |
 
 **Job 粒度按「用户点的一次按钮」划分**，不按 pipeline 每一步拆：生成 PRD 是 1 个 Job（内含 writing / reviewing / rewriting），

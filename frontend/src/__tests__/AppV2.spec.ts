@@ -176,11 +176,11 @@ async function defaultJobStream(
   handlers: api.StreamHandlers,
 ): Promise<api.StreamResult> {
   if (kind === 'prompts') {
-    handlers.onChunk?.('# 提示词套件\n')
+    handlers.onChunk?.({ text: '# 提示词套件\n', sectionId: '', index: -1 })
     return { conversationId: '', reply: '# 提示词套件\n\n## 一、角色设定\n内容', asks: [] }
   }
   if (kind === 'api-docs') {
-    handlers.onChunk?.('# 接口文档\n')
+    handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
     return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构', asks: [] }
   }
   if (kind === 'optimize') {
@@ -188,12 +188,12 @@ async function defaultJobStream(
   }
   if (kind === 'chat') {
     const reply = '我先复述一下理解：你想做一个周报工具。'
-    handlers.onChunk?.(reply)
+    handlers.onChunk?.({ text: reply, sectionId: '', index: -1 })
     // 服务端在收尾时把这一轮写成轮次——前端随后靠 `fetchTurns` 读到它
     turnHarness.items.push({ id: 2, role: 'assistant', content: reply, stage: 'requirement' })
     return { conversationId: '', reply, asks: [] }
   }
-  handlers.onChunk?.('# 产品需求文档\n')
+  handlers.onChunk?.({ text: '# 产品需求文档\n', sectionId: '', index: -1 })
   return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容', asks: [] }
 }
 
@@ -237,6 +237,7 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: '',
     finalizedText: '',
     liveBuffer: '',
+    liveBySection: [],
     stageText: '',
     completedSections: [],
     solutionId: 1,
@@ -684,7 +685,7 @@ describe('AppV2 完整流程编排', () => {
 
   it('澄清提问带结构化选项时渲染成选项卡，提交后作为一条用户消息发出、卡片随之消失', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('你更倾向哪种做法？')
+      handlers?.onChunk?.({ text: '你更倾向哪种做法？', sectionId: '', index: -1 })
       return {
         conversationId: 'conv-1',
         reply: '你更倾向哪种做法？',
@@ -731,7 +732,7 @@ describe('AppV2 完整流程编排', () => {
 
   it('选项卡的作答沿 emit 链原样透传到接口的结构化 tool_result', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('你更倾向哪种做法？')
+      handlers?.onChunk?.({ text: '你更倾向哪种做法？', sectionId: '', index: -1 })
       return {
         conversationId: 'conv-1',
         reply: '你更倾向哪种做法？',
@@ -792,7 +793,7 @@ describe('AppV2 完整流程编排', () => {
 
   it('对话完成后可生成 PRD，并在生成完成时进入待确认阶段', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('已理解需求。')
+      handlers?.onChunk?.({ text: '已理解需求。', sectionId: '', index: -1 })
       return { conversationId: 'conv-1', reply: '已理解需求。', asks: [] }
     })
 
@@ -943,7 +944,7 @@ describe('AppV2 完整流程编排', () => {
     }))
     mockJobStream({
       'api-docs': async (handlers) => {
-        handlers.onChunk?.('# 接口文档\n')
+        handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
         return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n统一响应结构', asks: [] }
       },
     })
@@ -1149,7 +1150,7 @@ describe('AppV2 完整流程编排', () => {
           liveBuffer: '断线前的半句',
         }),
       )
-      handlers?.onChunk?.('续写')
+      handlers?.onChunk?.({ text: '续写', sectionId: '', index: -1 })
       return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n断线前的半句续写', asks: [] }
     })
 
@@ -1173,17 +1174,111 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('断线前的半句续写')
   })
 
+  it('恢复路径 1：PRD 已定稿的章节刷新后要回填到看板（不能只剩空白）', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
+      expect(jobId).toBe(44)
+      handlers?.onSnapshot?.(
+        makeJobSnapshot({
+          jobId: 44,
+          kind: 'prd',
+          status: 'running',
+          phase: 'writing',
+          finalizedText: '# 产品需求文档\n\n## 1. 产品概述\n\n已定稿的第一章\n\n',
+          liveBuffer: '',
+          completedSections: [
+            {
+              sectionId: 'overview',
+              heading: '## 1. 产品概述',
+              text: '## 1. 产品概述\n\n已定稿的第一章\n\n',
+              index: 0,
+            },
+          ],
+        }),
+      )
+      // 不结束：断言就在「还在生成」这个窗口里做
+      return new Promise<api.StreamResult>(() => {})
+    })
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      activeJobId: 44,
+      activeJobKind: 'prd',
+    })
+
+    await flushPromises()
+    // 重连链路会先 `beginPrdStages()` 建一张**空**看板再订阅。若「快照回填」的守卫
+    // 按「看板存不存在」判，快照就永远进不来——表现为已定稿章节一片空白，
+    // 直到后续 `part` 才补上（而它可能早就在断线前发过了，永远等不到）。
+    expect(wrapper.text()).toContain('已定稿的第一章')
+  })
+
+  it('恢复路径 1：刷新时正在写的几章，半成品要按章摆回去并接着长', async () => {
+    let streamHandlers: api.StreamHandlers | undefined
+    let release: () => void = () => {}
+    vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
+      expect(jobId).toBe(45)
+      streamHandlers = handlers
+      handlers?.onSnapshot?.(
+        makeJobSnapshot({
+          jobId: 45,
+          kind: 'prd',
+          status: 'running',
+          phase: 'writing',
+          finalizedText: '# 产品需求文档\n\n',
+          completedSections: [],
+          liveBySection: [
+            { sectionId: 'overview', index: 0, text: '第一章写到一半', phase: 'writing' },
+            { sectionId: 'features', index: 1, text: '第二章写到一半', phase: 'writing' },
+          ],
+        }),
+      )
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return { conversationId: '', reply: '', asks: [] }
+    })
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'generating-prd',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      activeJobId: 45,
+      activeJobKind: 'prd',
+    })
+
+    await flushPromises()
+    // 两章的半截都在：这正是「刷新之后要继续显示成流式的」
+    expect(wrapper.text()).toContain('第一章写到一半')
+    expect(wrapper.text()).toContain('第二章写到一半')
+
+    // 接着往下长：增量按归属续进那一章，不从头重来
+    streamHandlers?.onChunk?.({ text: '，接着长', sectionId: 'features', index: 1 })
+    await nextTick()
+    expect(wrapper.text()).toContain('第二章写到一半，接着长')
+
+    release()
+    await flushPromises()
+  })
+
   it('恢复路径：对话任务走对话自己的重连，刷新后流式内容仍然看得见', async () => {
     let release: () => void = () => {}
     vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
       expect(jobId).toBe(77)
       handlers?.onSnapshot?.(makeJobSnapshot({ jobId: 77, kind: 'chat', status: 'running' }))
-      handlers?.onChunk?.('断线前已经说出的一半')
+      handlers?.onChunk?.({ text: '断线前已经说出的一半', sectionId: '', index: -1 })
       await new Promise<void>((resolve) => {
         release = resolve
       })
       return { conversationId: '', reply: '断线前已经说出的一半', asks: [] }
     })
+    // ⚠️ 这个 mock 会**一直生效到后面的用例**（vitest 不自动 reset），所以不能返回空：
+    // 后面那些「提交表单 → 对话页出现『生成 PRD』」的用例要靠它拿到消息。
     vi.mocked(solutionApi.fetchTurns).mockResolvedValue([
       { id: 9, role: 'assistant', content: '断线前已经说出的一半', stage: 'requirement' },
     ])
@@ -1200,13 +1295,13 @@ describe('AppV2 完整流程编排', () => {
     // 重连既有任务，而不是新建一个
     expect(jobCount('chat')).toBe(0)
     expect(api.readJobStream).toHaveBeenCalledWith(77, expect.anything(), expect.anything())
-    // 关键：内容出现在**对话区**。若被塞进文档流水线，这里会是空的
-    // （那正是「刷新后流式全丢、过一会儿才整段出现」的成因）。
     await flushPromises()
     const shown = wrapper.findComponent(ChatStage).props('messages') as ChatMessage[]
-    // 内容必须出现在**对话区**。若被塞进文档流水线，这里会是空的
-    // （那正是「刷新后流式全丢、过一会儿才整段出现」的成因）。
+    // 关键：`streaming: true` 的那一条来自**预览气泡**，而服务端拉回来的轮次没有这个标志。
+    // 所以这条断言不会被「收尾后 fetchTurns 拿到的权威轮次」蒙混过去——若对话被塞进
+    // 文档流水线，预览写进了看不见的地方，这里就只剩那条没有 streaming 的轮次。
     expect(shown.map((m) => m.content).join('')).toContain('断线前已经说出的一半')
+    expect(shown[shown.length - 1]?.streaming).toBe(true)
 
     release()
     await flushPromises()
@@ -1263,7 +1358,7 @@ describe('AppV2 完整流程编排', () => {
     let release!: () => void
     mockJobStream({
       prd: async (handlers) => {
-        handlers.onChunk?.('# 产品需求文档\n')
+        handlers.onChunk?.({ text: '# 产品需求文档\n', sectionId: '', index: -1 })
         // 卡住：断言就在「还在生成」这个窗口里做
         await new Promise<void>((resolve) => {
           release = resolve
@@ -1832,7 +1927,7 @@ describe('AppV2 入口模式', () => {
 
   it('从对话页「改需求」回到表单时，返回按钮改为回到对话', async () => {
     vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('已理解需求。')
+      handlers?.onChunk?.({ text: '已理解需求。', sectionId: '', index: -1 })
       return { conversationId: 'conv-1', reply: '已理解需求。', asks: [] }
     })
 
@@ -1934,6 +2029,17 @@ describe('AppV2 分章节生成的阶段展示', () => {
     await nextTick()
   }
 
+  /** 推送一片逐字增量（带章节归属，多章同时吐字） */
+  async function pushChunk(
+    stream: ControlledStream,
+    text: string,
+    sectionId: string,
+    index: number,
+  ): Promise<void> {
+    stream.handlers?.onChunk?.({ text, sectionId, index })
+    await nextTick()
+  }
+
   it('按 stage 事件展示车道的章节号（并行看板）', async () => {
     const wrapper = await mountApp()
     const stream = await startControlledPrdGeneration(wrapper)
@@ -1993,7 +2099,7 @@ describe('AppV2 分章节生成的阶段展示', () => {
     await pushPart(stream, '# 产品需求文档\n\n')
 
     await pushStage(stream, 'writing')
-    stream.handlers?.onChunk?.('## 1. 产品概述\n\n正文内容\n')
+    stream.handlers?.onChunk?.({ text: '## 1. 产品概述\n\n正文内容\n', sectionId: '', index: -1 })
     await nextTick()
 
     const overview: Partial<StreamDocumentPart> = {
@@ -2009,6 +2115,76 @@ describe('AppV2 分章节生成的阶段展示', () => {
     // 重复的 part 被守卫丢弃：文档头与本章正文都只出现一次
     expect(text.split('产品需求文档').length - 1).toBe(1)
     expect(text.split('正文内容').length - 1).toBe(1)
+  })
+
+  it('多章的增量各进各的章节，绝不串字', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledPrdGeneration(wrapper)
+
+    await pushStage(stream, 'writing', { total: 7 })
+    await pushStage(stream, 'writing', {
+      sectionId: 'features',
+      sectionTitle: '功能需求',
+      sectionHeading: '## 2. 功能需求',
+      index: 1,
+    })
+
+    // 两章同时吐字（并行链路的真实形态）
+    await pushChunk(stream, '第一章写到一半', 'overview', 0)
+    await pushChunk(stream, '第二章写到一半', 'features', 1)
+    await pushChunk(stream, '继续写第一章', 'overview', 0)
+
+    const text = wrapper.text()
+    // 各章的半截都在，且按章节顺序排列——没有归属时这些字会被整批丢弃
+    expect(text).toContain('第一章写到一半继续写第一章')
+    expect(text).toContain('第二章写到一半')
+    expect(text.indexOf('第一章写到一半')).toBeLessThan(text.indexOf('第二章写到一半'))
+
+    await stream.finish('# 产品需求文档')
+    expect(wrapper.text()).toContain('PRD 文档')
+  })
+
+  it('改写开始时清掉该章半成品，初稿与改写稿不叠着长', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledPrdGeneration(wrapper)
+
+    await pushStage(stream, 'writing', { total: 7 })
+    await pushChunk(stream, '初稿的正文', 'overview', 0)
+    expect(wrapper.text()).toContain('初稿的正文')
+
+    // 改写是「这一章从头重来」：不清缓冲就会两轮的字叠在一起
+    await pushStage(stream, 'rewriting', { sectionId: 'overview', index: 0 })
+    expect(wrapper.text()).not.toContain('初稿的正文')
+
+    await pushChunk(stream, '改写后的正文', 'overview', 0)
+    expect(wrapper.text()).toContain('改写后的正文')
+    expect(wrapper.text()).not.toContain('初稿的正文')
+
+    await stream.finish('# 产品需求文档')
+    expect(wrapper.text()).toContain('PRD 文档')
+  })
+
+  it('某章定稿后迟到的增量不再追加（重复订阅也长不出第二份）', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledPrdGeneration(wrapper)
+
+    await pushStage(stream, 'writing', { total: 7 })
+    await pushPart(stream, '## 1. 产品概述\n\n定稿正文\n\n', {
+      sectionId: 'overview',
+      sectionTitle: '产品概述',
+      sectionHeading: '## 1. 产品概述',
+      index: 0,
+      total: 7,
+    })
+
+    // 迟到 / 重复的增量：定稿已接管，它不该再往这一章上堆字
+    await pushChunk(stream, '迟到的增量', 'overview', 0)
+
+    expect(wrapper.text()).toContain('定稿正文')
+    expect(wrapper.text()).not.toContain('迟到的增量')
+
+    await stream.finish('# 产品需求文档')
+    expect(wrapper.text()).toContain('PRD 文档')
   })
 
   it('改写时旧稿留在预览里（不出现空白期），新稿到达后替换', async () => {
@@ -2061,7 +2237,7 @@ describe('AppV2 分章节生成的阶段展示', () => {
     })
     mockJobStream({
       prd: async (handlers) => {
-        handlers.onChunk?.('# 产品需求文档\n\n## 1. 项目背景\n内容')
+        handlers.onChunk?.({ text: '# 产品需求文档\n\n## 1. 项目背景\n内容', sectionId: '', index: -1 })
         return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容', asks: [] }
       },
     })
@@ -2110,7 +2286,7 @@ describe('AppV2 文档澄清', () => {
       const reply = String(payload.answers.document ?? '').startsWith('# 接口文档')
         ? '接口那边先确认分页'
         : '先问最关键的一个：分页上限取多少？'
-      handlers?.onChunk?.(reply)
+      handlers?.onChunk?.({ text: reply, sectionId: '', index: -1 })
       return { conversationId: `conv-${reply.slice(0, 2)}`, reply, asks: [] }
     })
   }
@@ -2191,7 +2367,7 @@ describe('AppV2 文档澄清', () => {
   it('点「按澄清结果改写」发起 clarify 任务，带 docKind 与这一轮对话，完成后回到审阅页', async () => {
     mockJobStream({
       clarify: async (handlers) => {
-        handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
+        handlers.onChunk?.({ text: '# 产品需求文档\n\n分页上限：50 条', sectionId: '', index: -1 })
         return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条', asks: [] }
       },
     })
@@ -2239,7 +2415,7 @@ describe('AppV2 文档澄清', () => {
   it('「AI 自行澄清」不开对话，直接把正文与清单交给后端拍板，完成后回到审阅页', async () => {
     mockJobStream({
       'auto-clarify': async (handlers) => {
-        handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
+        handlers.onChunk?.({ text: '# 产品需求文档\n\n分页上限：50 条', sectionId: '', index: -1 })
         return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条', asks: [] }
       },
     })
@@ -2288,7 +2464,7 @@ describe('AppV2 文档澄清', () => {
     })
     mockJobStream({
       clarify: async (handlers) => {
-        handlers.onChunk?.('# 产品需求文档\n\n分页上限：50 条')
+        handlers.onChunk?.({ text: '# 产品需求文档\n\n分页上限：50 条', sectionId: '', index: -1 })
         await gate
         return { conversationId: '', reply: '# 产品需求文档\n\n分页上限：50 条', asks: [] }
       },
@@ -2421,7 +2597,7 @@ describe('AppV2 对话页的子标签栏', () => {
       const reply = String(payload.answers.document ?? '').startsWith('# 接口文档')
         ? '接口那边先确认分页'
         : 'PRD 那边先确认分页'
-      handlers?.onChunk?.(reply)
+      handlers?.onChunk?.({ text: reply, sectionId: '', index: -1 })
       return { conversationId: `conv-${reply.slice(0, 2)}`, reply, asks: [] }
     })
   }

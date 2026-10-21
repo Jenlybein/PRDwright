@@ -14,6 +14,7 @@ import {
   hasRequiredDocuments,
   hasRequirementChat,
   isChatStage,
+  fromBackendJobKind,
   isDocKind,
   isDocumentKind,
   isEntryMode,
@@ -415,14 +416,34 @@ describe('带任务指针的快照恢复', () => {
     expect(parsed?.session.activeJobKind).toBeNull()
   })
 
-  it('isDocKind 只承认五种文档种类', () => {
+  it('isDocKind 承认全部七种任务种类——包括 chat', () => {
     expect(isDocKind('prd')).toBe(true)
     expect(isDocKind('api-docs')).toBe(true)
     expect(isDocKind('prompts')).toBe(true)
     expect(isDocKind('optimize')).toBe(true)
     expect(isDocKind('clarify')).toBe(true)
+    expect(isDocKind('auto-clarify')).toBe(true)
+    // 漏掉 chat 的后果极隐蔽：快照恢复时 `activeJobKind` 被判非法、丢成 null，
+    // 于是 applySnapshot 退化成 'prd'，刷新后的对话被当成 PRD 生成塞进文档流水线
+    expect(isDocKind('chat')).toBe(true)
     expect(isDocKind('bogus')).toBe(false)
     expect(isDocKind(null)).toBe(false)
+  })
+
+  it('对话任务的种类能原样往返快照（刷新后不被降级成 prd）', () => {
+    const parsed = parseSessionSnapshot(
+      JSON.stringify({ ...withJob, activeJobKind: 'chat', chatTab: 'prd-clarify' }),
+    )
+    expect(parsed?.session.activeJobKind).toBe('chat')
+    // 线程也跟着保住：任务发起时用户必然停在那条线程上
+    expect(parsed?.session.activeChatStage).toBe('prd-clarify')
+  })
+
+  it('fromBackendJobKind 认对话，但 fromBackendKind 不认（对话是动作，不是产物）', () => {
+    expect(fromBackendJobKind('chat')).toBe('chat')
+    // 「这是哪一份产物」不能答 chat：答了前端就会去 documents 里找一份叫 chat 的文档
+    expect(fromBackendKind('chat')).toBeNull()
+    expect(fromBackendJobKind('auto_clarify')).toBe('auto-clarify')
   })
 
   it('isDocumentKind 排除两个「动作」，只管「东西」', () => {

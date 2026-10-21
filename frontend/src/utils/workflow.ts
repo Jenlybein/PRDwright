@@ -89,7 +89,14 @@ export function fromBackendKind(kind: unknown): DocumentKind | null {
   return null
 }
 
-/** 判断任意值是否为合法文档种类（生成任务的 kind） */
+/**
+ * 判断任意值是否为合法文档种类（生成任务的 kind）。
+ *
+ * ⚠️ **必须包含 `'chat'`**：`DocKind` 里有它（对话也是走同一条任务通道的一种 kind）。
+ * 曾经漏掉它，后果很隐蔽——快照恢复时 `activeJobKind: 'chat'` 被这条校验判成非法、
+ * 丢成 `null`，`applySnapshot` 于是退化成 `'prd'`，刷新后的对话被当成 PRD 生成塞进
+ * 文档流水线：流式全丢，收尾还把聊天正文写进了 PRD 预览。不报任何错。
+ */
 export function isDocKind(value: unknown): value is DocKind {
   return (
     value === 'prd' ||
@@ -97,7 +104,8 @@ export function isDocKind(value: unknown): value is DocKind {
     value === 'prompts' ||
     value === 'optimize' ||
     value === 'clarify' ||
-    value === 'auto-clarify'
+    value === 'auto-clarify' ||
+    value === 'chat'
   )
 }
 
@@ -112,6 +120,9 @@ export function fromBackendJobKind(kind: unknown): DocKind | null {
   if (kind === 'optimize') return 'optimize'
   if (kind === 'clarify') return 'clarify'
   if (kind === 'auto_clarify' || kind === 'auto-clarify') return 'auto-clarify'
+  // 对话是**动作**（不产出文档），因此只能在这里认，不能放进 `fromBackendKind`
+  // ——那个函数只回答「这是哪一份产物」，让它认 chat 会破坏「东西 / 动作」的分界。
+  if (kind === 'chat') return 'chat'
   return fromBackendKind(kind)
 }
 

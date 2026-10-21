@@ -13,6 +13,7 @@ function card(index: number, phase: PrdSectionPhase, failed = false): PrdSection
     phase,
     failed,
     text: '',
+    draft: '',
     note: '',
     issues: [],
   }

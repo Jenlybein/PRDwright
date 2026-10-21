@@ -158,6 +158,24 @@ def test_part_is_emitted_only_after_rewriting_finishes() -> None:
     assert "初稿内容" in chunk_text
 
 
+def test_serial_chunks_also_carry_the_section_tag() -> None:
+    """串行链路也必须带章节归属：两条链路共用一套事件契约。
+
+    「带上归属」不是为了并行才需要的——前端只有一份按章渲染的逻辑。
+    串行链路若不带，切到并发 1 的部署（`PRD_PIPELINE_CONCURRENCY=1` 是回滚路径）
+    就会立刻退化成「没有过程字」。两条链路必须同形。
+    """
+    events = _collect(
+        PrdSectionWriter(llm=FakeLLM(section_replies=["正文内容"]), review_enabled=False)
+    )
+
+    chunks = [event for event in events if event.type == "chunk"]
+    assert chunks
+    for chunk in chunks:
+        assert chunk.data.get("section_id")
+        assert isinstance(chunk.data.get("index"), int)
+
+
 def test_rewriting_stage_carries_the_review_reason() -> None:
     """改写事件要带原因，否则前端只能显示「正在重写」，用户不知道为什么要重写。"""
     revise = json.dumps(

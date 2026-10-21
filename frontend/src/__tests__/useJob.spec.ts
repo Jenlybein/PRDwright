@@ -67,6 +67,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: 'writing',
     finalizedText: '',
     liveBuffer: '',
+    liveBySection: [],
     stageText: '',
     completedSections: [],
     solutionId: 1,
@@ -160,21 +161,26 @@ describe('useJob.start', () => {
     expect(workflow.activeJobId).toBeNull()
     expect(workflow.hasActiveRun).toBe(false)
     expect(workflow.viewState).toBe('generating-prd')
-    expect(result).toEqual({ reply: '', ok: true, run: expect.objectContaining({ jobId: 12 }) })
+    expect(result).toEqual({
+      reply: '',
+      ok: true,
+      aborted: false,
+      run: expect.objectContaining({ jobId: 12 }),
+    })
   })
 
   it('把 snapshot / run_summary 记录到运行态，并原样透传给调用方的 handlers', async () => {
     const snap = snapshot({ phase: 'reviewing', finalizedText: '# 正文\n' })
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       handlers?.onSnapshot?.(snap)
-      handlers?.onChunk?.('增量')
+      handlers?.onChunk?.({ text: '增量', sectionId: '', index: -1 })
       handlers?.onRunSummary?.(runSummary())
       return { conversationId: '', reply: '# 正文\n增量', asks: [] }
     })
 
     const seen: string[] = []
     const handlers: StreamHandlers = {
-      onChunk: (text) => seen.push(`chunk:${text}`),
+      onChunk: (chunk) => seen.push(`chunk:${chunk.text}`),
       onSnapshot: (value) => seen.push(`snapshot:${value.finalizedText}`),
     }
 
@@ -190,6 +196,7 @@ describe('useJob.start', () => {
     expect(result).toEqual({
       reply: '# 正文\n增量',
       ok: true,
+      aborted: false,
       run: expect.objectContaining({ jobId: 12 }),
     })
   })
@@ -314,6 +321,7 @@ describe('useJob.reconnect', () => {
     expect(result).toEqual({
       reply: '半句续写',
       ok: true,
+      aborted: false,
       run: expect.objectContaining({ jobId: 5 }),
     })
   })
@@ -342,6 +350,8 @@ describe('useJob.detach', () => {
     const result = await pending
     // 中止只影响这次订阅：返回 ok:false，但不算错误
     expect(result.ok).toBe(false)
+    // 但必须能分辨「中止」与「失败」：调用方靠它决定要不要弹错误提示
+    expect(result.aborted).toBe(true)
     expect(job.error.value).toBe('')
     expect(job.running.value).toBe(false)
     // 退订之后连运行态一起清：此后还在道上飞的事件写不进任何地方

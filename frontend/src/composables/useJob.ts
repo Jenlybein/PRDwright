@@ -85,6 +85,15 @@ export interface JobResult {
   reply: string
   /** 是否成功（未被中止、未收到 error 事件） */
   ok: boolean
+  /**
+   * 这次订阅是**本地主动中止**的（切方案 / 开新方案 / 删方案退订）。
+   *
+   * ⚠️ 它与「失败」必须分开：中止时 `ok` 仍是 `false`（确实没读完），但**没有任何
+   * 错误可报**——用户自己走开的，服务端任务还在跑。调用方若只判 `ok`，就会在
+   * 「切到新任务继续用」的时候弹一句「生成失败」，而界面上的内容明明一切正常。
+   * 文案与提示的取舍交给调用方，判据由这里给出。
+   */
+  aborted: boolean
   /** 失败时的机器可读错误码 */
   errorCode?: string
   /**
@@ -283,7 +292,7 @@ export function useJob() {
           wrapHandlers(created.jobId, handlers),
           controller.signal,
         )
-        return { reply: result.reply, ok: true, run }
+        return { reply: result.reply, ok: true, aborted: false, run }
       } finally {
         releaseSubscription(created.jobId, controller)
         // 正常收尾时运行摘要已把耗时定死；中止 / 失败则停在当前值，不让计时器空转
@@ -321,7 +330,7 @@ export function useJob() {
       startTimer(jobId)
       try {
         const result = await readJobStream(jobId, wrapHandlers(jobId, handlers), controller.signal)
-        return { reply: result.reply, ok: true, run }
+        return { reply: result.reply, ok: true, aborted: false, run }
       } finally {
         releaseSubscription(jobId, controller)
         // 已用时由快照 / 收尾摘要锚定过；没锚到就停在当前值，不让表空转
@@ -350,14 +359,25 @@ export function useJob() {
     runs.detach()
   }
 
-  /** 统一处理订阅失败：中止不算错误，其余记入 `error` 并取回错误码 */
+  /**
+   * 统一处理订阅失败：中止不算错误，其余记入 `error` 并取回错误码。
+   *
+   * 「中止」按 `name === 'AbortError'` 判，不写成 `instanceof Error`：
+   * 浏览器里 `fetch` 中止抛的是 `DOMException`，各环境对它的继承关系并不一致；
+   * 反过来 `name` 在真正的 `Error` 与 `DOMException` 上都稳定存在。
+   */
   function fail(caught: unknown): JobResult {
-    if (caught instanceof Error && caught.name === 'AbortError') {
-      return { reply: '', ok: false, run: null }
+    if (
+      typeof caught === 'object' &&
+      caught !== null &&
+      (caught as { name?: unknown }).name === 'AbortError'
+    ) {
+      // 主动中止：不记错误（`lastError` 保持空串），只标记 `aborted`
+      return { reply: '', ok: false, aborted: true, run: null }
     }
     lastError.value = caught instanceof Error ? caught.message : String(caught)
     const errorCode = caught instanceof ApiError ? caught.code : undefined
-    return { reply: '', ok: false, errorCode, run: null }
+    return { reply: '', ok: false, aborted: false, errorCode, run: null }
   }
 
   return {

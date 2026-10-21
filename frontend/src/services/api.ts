@@ -21,7 +21,9 @@ import type {
   SkillRef,
   StepUsage,
   StreamDocumentPart,
+  StreamChunk,
   StreamStageChunk,
+  SectionDraft,
   StreamStageEvent,
   ToolCallRef,
   ToolResultPayload,
@@ -159,8 +161,14 @@ export interface StreamEventPayload {
 export interface StreamHandlers {
   /** 收到 status 提示语时触发 */
   onStatus?: (text: string) => void
-  /** 收到增量文本时触发 */
-  onChunk?: (text: string) => void
+  /**
+   * 收到增量文本时触发。
+   *
+   * 参数是**对象**而不是裸字符串：分章节链路里多章同时在吐字，必须带上 `sectionId`
+   * 才知道这一片属于哪一章（否则只能丢弃——那正是「PRD 不流式」的历史成因）。
+   * 不分章的场景（整篇文档、对话）`sectionId` 为空串、`index` 为 -1。
+   */
+  onChunk?: (chunk: StreamChunk) => void
   /**
    * 收到 `part` 定稿正文事件时触发。
    * 目前只有「分章节生成 PRD」会下发：文档头一次、每一章一次。
@@ -406,6 +414,24 @@ function parseStageChunkEvent(event: StreamEventPayload): StreamStageChunk {
 }
 
 /**
+ * 把 `chunk` 事件归一成 `StreamChunk`。
+ *
+ * 增量文本走事件自带的 `content`，`data` 只负责说明「这属于哪一章」。
+ * 与 `parseStageChunkEvent` 完全同构（那一路就是这么拿到 `stage` 的）：
+ * 分章节链路靠 `section_id` 把字送进对的卡片，缺了就退化空串由调用方丢弃。
+ */
+function parseChunkEvent(event: StreamEventPayload): StreamChunk {
+  const rawIndex = event.data.index
+  return {
+    text: event.content,
+    sectionId: readString(event.data, 'section_id'),
+    // 缺失退化成 -1 而不是 0：0 是**合法的第一章**，用它兜底会把无归属的增量
+    // 悄悄塞进第一章。
+    index: typeof rawIndex === 'number' && Number.isFinite(rawIndex) ? rawIndex : -1,
+  }
+}
+
+/**
  * 把 `part` 事件的 `data` 归一成 `StreamDocumentPart`。
  *
  * 与 `parseStageEvent` 同样的口径：字段缺失或类型不对只把那一个字段退化为默认值，
@@ -473,6 +499,19 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
   )
 
   const rawSolutionId = data.solution_id
+  // 按章半成品：只认带 sectionId 且有字的项。缺 index 时用数组序兜底
+  // （与 `completedSections` 同口径：旧后端 / 坏数据不该让整段快照失效）。
+  const liveBySection: SectionDraft[] = readObjectArray(data, 'live_by_section')
+    .map((item, position): SectionDraft => {
+      const rawIndex = item.index
+      return {
+        sectionId: readString(item, 'section_id'),
+        index: typeof rawIndex === 'number' ? rawIndex : position,
+        text: readString(item, 'text'),
+        phase: readString(item, 'phase') || 'writing',
+      }
+    })
+    .filter((item) => item.sectionId !== '' && item.text !== '')
   return {
     jobId: readNumber(data, 'job_id'),
     kind: readString(data, 'kind'),
@@ -483,6 +522,7 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     phase: readString(data, 'phase'),
     finalizedText: readString(data, 'finalized_text'),
     liveBuffer: readString(data, 'live_buffer'),
+    liveBySection,
     stageText: readString(data, 'stage_text'),
     completedSections,
     solutionId: typeof rawSolutionId === 'number' ? rawSolutionId : null,
@@ -672,7 +712,7 @@ async function readStreamRequest(
         conversationId = readString(event.data, 'conversation_id') || conversationId
         break
       case 'chunk':
-        handlers.onChunk?.(event.content)
+        handlers.onChunk?.(parseChunkEvent(event))
         break
       case 'part':
         handlers.onPart?.(parsePartEvent(event.data))

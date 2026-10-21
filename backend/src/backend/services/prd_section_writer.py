@@ -22,26 +22,33 @@
 
 事件契约
 --------
-两类事件共同驱动前端的实时预览：
+三类事件共同驱动前端的实时预览：
 
 - `stage`：上报「写到第几章、当前在写还是审」，与前端 `prdGenerationStage`
   （idle / writing / reviewing / rewriting / done）五态一一对应；
+- `chunk`：**逐字增量，必须带 `section_id` + `index`**。并行链路里多章同时在吐字，
+  没有归属就只能丢弃（这正是「PRD 不流式」的历史成因）；
 - `part`：**一段正文一被定稿就整段下发**（文档头一次、每章一次），
   `data.text` 是可直接追加到文档末尾的字符串。
 
-为什么正文要「定稿后再整段下发」
---------------------------------
+两条轨：过程字与权威段
+----------------------
 `chunk` 是模型的**原始输出**，而最终正文还要过两道加工：`_ensure_heading()`
 补标题行（模型偶尔漏写，尤其改写时）、以及章与章之间补 `\n\n` 分隔。前端若只
 按 `chunk` 逐字拼接，这两道加工它就看不到，表现为「某一章的标题凭空消失」
 「标题与上一段的文字粘在同一行」（粘住后 markdown 不再认它是标题）。
 
-所以这里让后端做正文的唯一来源：前端维护「已定稿部分 + 当前章实时缓冲」，
-`part` 一到就用权威文本覆盖该段、清空缓冲。于是「预览与最终 `done.reply`
-逐字一致」成为**结构性保证**，而不是靠前后端各自拼得一样。
+所以正文的**唯一来源仍是 `part`**，`chunk` 只负责「让用户现在就看见它在长」：
 
-`stage: rewriting` 时该章还没有 `part`，前端只需丢弃自己的实时缓冲即可，
+- 前端按「已定稿章节 + 各章实时半成品」渲染（有定稿就用定稿，否则用半成品）；
+- `part` 一到就用权威文本覆盖该章、清掉该章半成品；
+- 于是「预览与最终 `done.reply` 逐字一致」仍是**结构性保证**，而不是靠前后端
+  各自拼得一样；半成品再脏也只影响过程显示，不会进正文。
+
+`stage: rewriting` 时该章还没有 `part`，前端只需丢弃**该章**的实时缓冲即可，
 **不需要按字符数回退**——按累加长度猜截断点非常脆，任何计数漂移都会切偏。
+`chunk` 带 `section_id` 只解决「字归哪一章」，不解决「这一章要不要重来」：
+重来的信号是 `stage`，两者缺一不可。
 
 文档头由代码生成，不交给模型：产品名取自结构化摘要、日期取服务器当天，都是确定的事实
 （模板明确要求「无法确定当天日期时写『待确认』，禁止编造日期」，交给模型反而容易编）。
@@ -558,13 +565,13 @@ class PrdSectionWriter:
                     buffer.append(delta)
                     clean = suppressor.feed(delta)
                     if clean:
-                        yield StreamEvent(type="chunk", content=clean)
+                        yield _section_chunk_event(clean, section, index)
             except Exception as exc:  # noqa: BLE001 - 流式接口需把异常转成事件
                 yield error_event(exc)
                 return
             trailing = suppressor.flush()
             if trailing:
-                yield StreamEvent(type="chunk", content=trailing)
+                yield _section_chunk_event(trailing, section, index)
             section_text = "".join(buffer).strip()
 
             # ---------------- 2. 审核 + 3. 改写 ----------------
@@ -609,13 +616,13 @@ class PrdSectionWriter:
                             buffer.append(delta)
                             clean = suppressor.feed(delta)
                             if clean:
-                                yield StreamEvent(type="chunk", content=clean)
+                                yield _section_chunk_event(clean, section, index)
                     except Exception as exc:  # noqa: BLE001
                         yield error_event(exc)
                         return
                     trailing = suppressor.flush()
                     if trailing:
-                        yield StreamEvent(type="chunk", content=trailing)
+                        yield _section_chunk_event(trailing, section, index)
                     section_text = "".join(buffer).strip()
 
             # 定稿后剥离标记块：正文落 `part` / `done.reply` / `documents.content` 三处
@@ -659,8 +666,9 @@ class PrdSectionWriter:
 
         与串行版的关键差异：
 
-        - **关闭 `chunk`**：多章同时流式会串字，也会让「整章重试」变得不安全
-          （已交付的增量撤不回来）。前端只消费 `part` 定稿段与 `stage` 阶段。
+        - **`chunk` 必须带章节归属**：多章同时吐字，没有 `section_id` 的增量前端
+          只能整批丢弃（那就是「PRD 不流式」的成因）。带标签后各章各长各的，不串字。
+          重试会重吐本章，因此每次尝试都**重报一次 `writing`**，前端据此清该章缓冲。
         - **`part` 可乱序到达**：每段带 `index`，`done.reply` 由本方法按 index 装配；
           前端按 same index 归位，因此顺序不因到达先后而错乱。
         - **单章失败不终止全篇**：写占位继续，最后用 `partial` + `failed_sections` 标记。
@@ -709,11 +717,32 @@ class PrdSectionWriter:
         async def put(event: StreamEvent) -> None:
             await queue.put(event)
 
-        async def call_text(messages: list[BaseMessage], step: str) -> str:
+        async def stream_section_text(
+            messages: list[BaseMessage], step: str, section: PrdSection, index: int
+        ) -> str:
+            """流式产出某一章：边吐字边打章节标签，返回整章原文。
+
+            与串行链路用同一套抑制器（`PendingBlockSuppressor`）：待确认块一旦
+            开始，后面的字就要先扣住，否则用户会看见它一闪一闪地跳。
+
+            吐出去的是**模型原始输出**，不是定稿正文——补标题、补章间空行都
+            发生在定稿时。所以前端只把它当「过程中的显示」，`part` 一到就覆盖。
+            """
+            buffer: list[str] = []
+            suppressor = PendingBlockSuppressor()
             # ⚠️ 信号量只包一次模型调用：持有它再等别的章节任务会死锁。
+            # 循环里唯一的 await 是 `queue.put`（无界队列，永不阻塞），所以安全。
             async with sem:
                 with use_step(step):
-                    return "".join([delta async for delta in self._stream_text(messages)])
+                    async for delta in self._stream_text(messages):
+                        buffer.append(delta)
+                        clean = suppressor.feed(delta)
+                        if clean:
+                            await put(_section_chunk_event(clean, section, index))
+                    trailing = suppressor.flush()
+                    if trailing:
+                        await put(_section_chunk_event(trailing, section, index))
+            return "".join(buffer)
 
         async def review_with_retry(
             section: PrdSection, section_text: str, prior_sections: str
@@ -769,7 +798,7 @@ class PrdSectionWriter:
                         )
                     )
                     try:
-                        new_draft = await call_text(
+                        new_draft = await stream_section_text(
                             self._rewrite_messages(
                                 section=st.section,
                                 section_text=draft,
@@ -780,6 +809,8 @@ class PrdSectionWriter:
                                 review=review,
                             ),
                             "rewriting",
+                            st.section,
+                            idx,
                         )
                     except AppError:
                         raise
@@ -818,14 +849,17 @@ class PrdSectionWriter:
                 for idx, section in enumerate(PRD_SECTIONS):
                     st = states[idx]
                     st.status = "writing"
-                    await put(_section_stage_event("writing", section, idx, total))
                     prior = _join_prior([draft for draft in drafts[:idx] if draft])
 
                     draft = ""
                     last_exc: Exception | None = None
                     for attempt in range(self._max_retries + 1):
+                        # ⚠️ `writing` 每次尝试都要重报，不能只在循环外报一次：
+                        # 重试会从头把本章重吐一遍，前端**收到 `writing` 才清掉**
+                        # 上一轮已吐出的半截。少报一次，两轮的字就在卡片里叠着。
+                        await put(_section_stage_event("writing", section, idx, total))
                         try:
-                            draft = await call_text(
+                            draft = await stream_section_text(
                                 self._section_messages(
                                     section=section,
                                     section_template=template_sections.get(section.heading, ""),
@@ -836,6 +870,8 @@ class PrdSectionWriter:
                                     prior_sections=prior,
                                 ),
                                 "writing",
+                                section,
+                                idx,
                             )
                             break
                         except AppError:
@@ -1219,6 +1255,31 @@ def _part_event(
     if failed:
         data["failed"] = True
     return StreamEvent(type="part", content="", data=data)
+
+
+def _section_chunk_event(text: str, section: PrdSection, index: int) -> StreamEvent:
+    """构造章节级的 `chunk` 事件（逐字增量）。
+
+    归属**必须**带上，否则并行链路没法把字送进对的章节：多章同时吐字时，
+    没有 `section_id` 的增量只能整批丢弃——那正是「PRD 不流式、只能等整章
+    定稿才蹦出来」的成因。
+
+    别忘了它只是**过程字**：模型原始输出，可能缺标题、章间没空行。定稿时
+    `_part_event` 的权威文本会整段覆盖它（见模块 docstring「两条轨」）。
+
+    Args:
+        text: 这一片增量（已过 `PendingBlockSuppressor`，可直接显示）。
+        section: 所属章节。
+        index: 章节下标（从 0 开始）。
+
+    Returns:
+        形如 `{"section_id": "features", "index": 3}` 的 `chunk` 事件。
+    """
+    return StreamEvent(
+        type="chunk",
+        content=text,
+        data={"section_id": section.id, "index": index},
+    )
 
 
 def _section_stage_event(

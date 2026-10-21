@@ -133,8 +133,13 @@ def test_parallel_parts_are_indexed_and_reply_is_assembled_in_order() -> None:
 
     parts = [event for event in events if event.type == "part"]
     assert len(parts) == len(PRD_SECTIONS) + 1
-    # 并行链路刻意不逐字流：多章 chunk 会串字，也让整章重试不安全
-    assert not [event for event in events if event.type == "chunk"]
+    # 并行链路逐字流，但每一片都必须带章节归属：多章同时吐字，丢了 section_id
+    # 前端就只能整批丢弃（那正是「PRD 不流式、只能等整章蹦出来」的历史成因）
+    chunks = [event for event in events if event.type == "chunk"]
+    assert chunks
+    for chunk in chunks:
+        assert chunk.data.get("section_id")
+        assert isinstance(chunk.data.get("index"), int)
 
     reply = next(event for event in events if event.type == "done").data["reply"]
     ordered = sorted(parts, key=lambda part: part.data.get("index", -1))
@@ -258,3 +263,109 @@ def test_parallel_medium_severity_does_not_rewrite() -> None:
 
     assert "rewriting" not in [event.data["stage"] for event in events if event.type == "stage"]
     assert llm.rewrite_calls == []
+
+
+def test_chunks_are_tagged_so_parallel_sections_do_not_mix() -> None:
+    """每片增量都带章节归属：并行时各章各长各的，绝不串到第一章上。
+
+    这条守的是「PRD 也要流式」的核心前提。归属一旦丢了，前端只能整批丢弃增量
+    （那正是历史行为），用户看到的就是「等一整章才蹦出来」。
+    """
+    events = _collect(PrdSectionWriter(llm=RoutingLLM(), review_enabled=False))
+
+    grouped: dict[str, str] = {}
+    for event in events:
+        if event.type != "chunk":
+            continue
+        section_id = event.data["section_id"]
+        grouped[section_id] = grouped.get(section_id, "") + event.content
+
+    # 六章都在流，而不是只有第一章有字
+    assert len(grouped) == len(PRD_SECTIONS)
+    for section in PRD_SECTIONS:
+        assert grouped[section.id] == f"\n\n正文-{section.heading}\n\n"
+
+
+def test_rewrite_streams_under_the_same_section_tag() -> None:
+    """改写稿同样逐字下发，且仍落在该章名下（前端靠 `rewriting` 清旧缓冲）。"""
+    target = PRD_SECTIONS[1]
+    events = _collect(
+        PrdSectionWriter(
+            llm=RoutingLLM(revise_headings={target.heading}),
+            review_enabled=True,
+            max_rewrites=1,
+        )
+    )
+
+    rewriting = [
+        event
+        for event in events
+        if event.type == "stage" and event.data.get("stage") == "rewriting"
+    ]
+    assert [event.data["section_id"] for event in rewriting] == [target.id]
+
+    streamed = "".join(
+        event.content
+        for event in events
+        if event.type == "chunk" and event.data.get("section_id") == target.id
+    )
+    # 初稿与改写稿都在这一章名下；「哪一份作数」由随后的 part 定，不由流决定
+    assert f"正文-{target.heading}" in streamed
+    assert f"改后-{target.heading}" in streamed
+
+
+class FailOnceLLM(RoutingLLM):
+    """指定章节第一次撰写失败、第二次成功——用来覆盖「重试」路径。"""
+
+    def __init__(self, heading: str) -> None:
+        super().__init__()
+        self._once = heading
+        self._failed = False
+
+    async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
+        system = str(messages[0].content)
+        user = str(messages[-1].content)
+        if (
+            REVIEW_MARKER not in system
+            and self._heading(user) == self._once
+            and not self._failed
+        ):
+            self._failed = True
+            raise ConnectionError("第一次撰写失败")
+        async for chunk in super().astream(messages):
+            yield chunk
+
+
+def test_retry_reannounces_writing_so_the_half_written_text_is_dropped(monkeypatch) -> None:
+    """单章重试必须重报 `writing`：前端收到它才清掉上一轮已吐出的半截。
+
+    少了这一次重报，两轮的字会在同一张卡片里叠着长（重试越多次叠得越厚），
+    而且不报任何错——那种 bug 只能靠肉眼在页面上发现。
+
+    ⚠️ 必须关掉传输层的自动重试（`LLM_MAX_RETRIES=0`）：`astream_text` 自己会
+    把可重试的失败吞掉重来一次，章节层根本看不到失败，也就没有「重报」可言。
+    """
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    get_settings.cache_clear()
+
+    target = PRD_SECTIONS[2]
+    events = _collect(PrdSectionWriter(llm=FailOnceLLM(target.heading), review_enabled=False))
+
+    writing = [
+        event
+        for event in events
+        if event.type == "stage"
+        and event.data.get("stage") == "writing"
+        and event.data.get("section_id") == target.id
+    ]
+    assert len(writing) == 2
+
+    # 其余章节各只报一次：别把「重试重报」做成「每章都重报」
+    others = [
+        event
+        for event in events
+        if event.type == "stage"
+        and event.data.get("stage") == "writing"
+        and event.data.get("section_id") != target.id
+    ]
+    assert len(others) == len(PRD_SECTIONS) - 1

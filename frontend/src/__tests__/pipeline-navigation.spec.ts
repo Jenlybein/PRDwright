@@ -154,7 +154,7 @@ describe('收尾落点：不抢方向盘（D1）', () => {
 
     let release!: () => void
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
-      handlers?.onChunk?.('# 接口文档\n')
+      handlers?.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
       await new Promise<void>((resolve) => {
         release = resolve
       })
@@ -240,7 +240,7 @@ describe('跳转不清预览', () => {
 
     let release!: () => void
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
-      handlers?.onChunk?.('# 接口文档\n')
+      handlers?.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
       await new Promise<void>((resolve) => {
         release = resolve
       })

@@ -7,6 +7,10 @@ import { useRunsStore } from '../stores/runs'
 import { useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import * as solutionApi from '../services/solutionService'
+import {
+  detachAll as detachAllSubscriptions,
+  resetForTests as resetSubscriptions,
+} from '../services/runSubscriptions'
 import type { ChatMessage, ChatStage, RequirementsSummary } from '../types'
 
 /**
@@ -101,6 +105,8 @@ function seedTurns(messages: ChatMessage[]): void {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  // 订阅登记表是模块级的：不清会让「重连幂等」的用例被上一个用例的残留挡住
+  resetSubscriptions()
   vi.mocked(api.createJob).mockResolvedValue({ jobId: 42, status: 'running' })
   vi.mocked(api.readJobStream).mockResolvedValue({
     conversationId: '',
@@ -269,11 +275,11 @@ describe('流式可见性', () => {
     let runAtSubscribe: unknown = 'unset'
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       runAtSubscribe = useRunsStore().activeRun
-      handlers?.onChunk?.('第一段')
+      handlers?.onChunk?.({ text: '第一段', sectionId: '', index: -1 })
       await new Promise<void>((resolve) => {
         release = resolve
       })
-      handlers?.onChunk?.('第二段')
+      handlers?.onChunk?.({ text: '第二段', sectionId: '', index: -1 })
       return { conversationId: '', reply: '第一段第二段', asks: [] }
     })
 
@@ -297,15 +303,161 @@ describe('流式可见性', () => {
   })
 })
 
+describe('中断与串会话', () => {
+  /** 造一个 `AbortError`：浏览器里 `fetch` 被 abort 时抛的就是它 */
+  function abortError(): Error {
+    const error = new Error('已中止订阅')
+    error.name = 'AbortError'
+    return error
+  }
+
+  /**
+   * 这一组盯的是**「用户走开」与「任务失败」被混为一谈**的两种表现：
+   *
+   * 1. 主动退订以 `AbortError` 结束——它不是失败；
+   * 2. 旧任务的收尾比新任务开始得晚，它写下的结论会落到新任务的界面上。
+   *
+   * 症状都是「内容其实好好的，却顶着一条红字」。
+   */
+  it('订阅被主动中止时，不报「生成失败」', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async () => {
+      // 用户走开：本地订阅被掐（服务端任务照跑，会话代次并没有变）
+      detachAllSubscriptions()
+      throw abortError()
+    })
+    const { chat } = makeChat()
+
+    await chat.sendMessage('你好')
+
+    expect(useRunsStore().preview.error).toBe('')
+  })
+
+  it('这一支已被新任务顶替时，旧任务的失败不写到新任务脸上', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async () => {
+      // 旧任务收尾之前，用户又发了一轮：运行态已经换成新任务
+      useRunsStore().begin({
+        jobId: 99,
+        solutionId,
+        jobKind: 'chat',
+        docKind: null,
+        chatStage: 'requirement',
+      })
+      throw new Error('上游连接中断')
+    })
+    const { chat } = makeChat()
+
+    await chat.sendMessage('你好')
+
+    expect(useRunsStore().preview.error).toBe('')
+  })
+
+  it('会话已经换人时，旧任务的收尾不重拉轮次、也不写错误', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async () => {
+      useSolutionsStore().sessionEpoch += 1
+      throw new Error('上游连接中断')
+    })
+    const { chat } = makeChat()
+
+    await chat.sendMessage('你好')
+
+    expect(useRunsStore().preview.error).toBe('')
+    // 换人之后拉的是**新方案**的轮次，那与本轮收尾无关
+    expect(solutionApi.fetchTurns).not.toHaveBeenCalled()
+  })
+
+  it('重连途中被中止不报「接回上一轮对话失败」，并保留已接到的内容', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
+      // 半截内容先摆上来（这正是用户说的「已经接回来了」）
+      handlers?.onChunk?.({ text: '已经接回来的一半', sectionId: '', index: -1 })
+      detachAllSubscriptions()
+      throw abortError()
+    })
+    useRunsStore().restore({
+      jobId: 99,
+      solutionId,
+      jobKind: 'chat',
+      docKind: null,
+      chatStage: 'requirement',
+    })
+    const { chat } = makeChat()
+
+    await chat.reconnect(99)
+
+    expect(useRunsStore().preview.error).toBe('')
+    expect(useRunsStore().preview.content).toBe('已经接回来的一半')
+  })
+
+  it('重连期间这一支被顶替时，失败结论不写到新任务上', async () => {
+    vi.mocked(api.readJobStream).mockImplementation(async () => {
+      useRunsStore().begin({
+        jobId: 100,
+        solutionId,
+        jobKind: 'chat',
+        docKind: null,
+        chatStage: 'requirement',
+      })
+      throw new Error('网络中断')
+    })
+    useRunsStore().restore({
+      jobId: 99,
+      solutionId,
+      jobKind: 'chat',
+      docKind: null,
+      chatStage: 'requirement',
+    })
+    const { chat } = makeChat()
+
+    await chat.reconnect(99)
+
+    expect(useRunsStore().preview.error).toBe('')
+  })
+
+  it('同一任务已有订阅在途时，重连不再订阅第二次', async () => {
+    let release: () => void = () => {}
+    vi.mocked(api.readJobStream).mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return { conversationId: '', reply: '', asks: [] }
+    })
+    useRunsStore().restore({
+      jobId: 99,
+      solutionId,
+      jobKind: 'chat',
+      docKind: null,
+      chatStage: 'requirement',
+    })
+    const { chat } = makeChat()
+
+    const first = chat.reconnect(99)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // 第二条触发路径到得晚一步：它必须直接复用，而不是把前一路掐掉重来
+    await chat.reconnect(99)
+
+    expect(api.readJobStream).toHaveBeenCalledTimes(1)
+    release()
+    await first
+  })
+
+  it('真的失败（不是中止、也没被顶替）照旧给出原因', async () => {
+    vi.mocked(api.readJobStream).mockRejectedValue(new Error('上游连接中断'))
+    const { chat } = makeChat()
+
+    await chat.sendMessage('你好')
+
+    expect(useRunsStore().preview.error).toContain('上游连接中断')
+  })
+})
+
 describe('刷新接回', () => {
   it('重连时增量写进对话预览，收尾后从服务端拉齐轮次', async () => {
     let release: () => void = () => {}
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
-      handlers?.onChunk?.('断线前已经说出的一半')
+      handlers?.onChunk?.({ text: '断线前已经说出的一半', sectionId: '', index: -1 })
       await new Promise<void>((resolve) => {
         release = resolve
       })
-      handlers?.onChunk?.('，以及后半句')
+      handlers?.onChunk?.({ text: '，以及后半句', sectionId: '', index: -1 })
       return { conversationId: '', reply: '断线前已经说出的一半，以及后半句', asks: [] }
     })
     // 服务端此时已经有完整轮次

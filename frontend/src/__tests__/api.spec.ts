@@ -16,6 +16,7 @@ import type {
   ChatMessage,
   JobSnapshot,
   RunSummary,
+  StreamChunk,
   StreamDocumentPart,
   StreamStageChunk,
   StreamStageEvent,
@@ -86,7 +87,7 @@ describe('SSE 事件解析', () => {
     const stages: StreamStageEvent[] = []
     const result = await generatePrdFromSummaryStream(
       { summary: SUMMARY, history: [] },
-      { onChunk: (text) => chunks.push(text), onStage: (event) => stages.push(event) },
+      { onChunk: (chunk) => chunks.push(chunk.text), onStage: (event) => stages.push(event) },
     )
 
     expect(chunks.join('')).toBe('# 标题\n\n## 2. 功能需求\n\n正文')
@@ -240,7 +241,7 @@ describe('SSE 事件解析', () => {
     const result = await generateApiDocsStream(
       { prdContent: '# PRD' },
       {
-        onChunk: (text) => body.push(text),
+        onChunk: (chunk) => body.push(chunk.text),
         onStage: (event) => phases.push(event.stage),
         onStageChunk: (chunk) => stageChunks.push(chunk),
       },
@@ -512,6 +513,8 @@ describe('生成任务接口（jobs）', () => {
         phase: 'writing',
         finalizedText: '# 产品需求文档\n\n',
         liveBuffer: '半句',
+        // 按章半成品：这份快照没带该字段（旧后端 / 纯内存外的情况），退化为空数组
+        liveBySection: [],
         // 阶段输出（审核意见 / 改写稿）：PRD 快照不带，退化为空串
         stageText: '',
         completedSections: [
@@ -702,6 +705,79 @@ describe('生成任务接口（jobs）', () => {
 
     expect(snapshots[0]?.phase).toBe('reviewing')
     expect(snapshots[0]?.stageText).toBe('{"verdict":"revise"}')
+  })
+
+  it('chunk 帧带章节归属：并行时前端才知道这一片属于哪一章', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          sseFrame('chunk', {
+            type: 'chunk',
+            content: '半句',
+            data: { section_id: 'overview', index: 0 },
+          }),
+        ]),
+      ),
+    )
+
+    const chunks: StreamChunk[] = []
+    await readJobStream(11, { onChunk: (chunk) => chunks.push(chunk) })
+
+    expect(chunks).toEqual([{ text: '半句', sectionId: 'overview', index: 0 }])
+  })
+
+  it('chunk 帧没有归属时退化成空 sectionId 与 -1（不能被当成第一章）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          // 整篇文档 / 对话的增量本来就不分章；`index` 若退化成 0 会把字塞进第一章
+          sseFrame('chunk', { type: 'chunk', content: '正文', data: {} }),
+        ]),
+      ),
+    )
+
+    const chunks: StreamChunk[] = []
+    await readJobStream(12, { onChunk: (chunk) => chunks.push(chunk) })
+
+    expect(chunks).toEqual([{ text: '正文', sectionId: '', index: -1 }])
+  })
+
+  it('snapshot 解析按章半成品，坏项丢弃', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          sseFrame('snapshot', {
+            type: 'snapshot',
+            content: '',
+            data: {
+              job_id: 13,
+              kind: 'prd',
+              status: 'running',
+              phase: 'writing',
+              finalized_text: '',
+              live_buffer: '',
+              live_by_section: [
+                { section_id: 'overview', index: 0, text: '第一章半截', phase: 'writing' },
+                // 没有正文的项：没有可显示的东西，丢弃
+                { section_id: 'features', index: 1, text: '', phase: 'writing' },
+                // 没有 section_id 的项：归属不明，丢弃
+                { index: 2, text: '无主正文', phase: 'writing' },
+              ],
+            },
+          }),
+        ]),
+      ),
+    )
+
+    const snapshots: JobSnapshot[] = []
+    await readJobStream(13, { onSnapshot: (snap) => snapshots.push(snap) })
+
+    expect(snapshots[0]?.liveBySection).toEqual([
+      { sectionId: 'overview', index: 0, text: '第一章半截', phase: 'writing' },
+    ])
   })
 
   it('fetchActiveJobs 按过滤条件拼查询参数，kind 用下划线口径', async () => {

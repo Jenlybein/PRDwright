@@ -1296,3 +1296,154 @@ def test_delete_solution_endpoint_cancels_its_jobs(client):
     assert row["status"] == "failed"
     assert row["error_code"] == "CANCELLED"
     assert GenerationJobRepository.get(uid, untouched)["status"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# 分章节的按章缓冲：多章同时逐字流，但各存各的
+# ---------------------------------------------------------------------------
+
+
+def _runtime_with_sections() -> job_service.JobRuntime:
+    """一支 PRD 运行时（不需要真建任务：这一组测的是事件到运行时的映射）。"""
+    runtime = job_service.JobRuntime(
+        job_id=1, owner_id=1, solution_id=1, kind="prd"
+    )
+    runtime.started_at = 0.0
+    return runtime
+
+
+def _header_part(text: str) -> StreamEvent:
+    """文档头：没有 `index`、也没有 `section_id`（它不属于任何一章）。"""
+    return StreamEvent(type="part", content="", data={"text": text})
+
+
+def _chunk(text: str, section_id: str, index: int) -> StreamEvent:
+    return StreamEvent(
+        type="chunk", content=text, data={"section_id": section_id, "index": index}
+    )
+
+
+def _part(text: str, section_id: str, index: int) -> StreamEvent:
+    return StreamEvent(
+        type="part", content="", data={"text": text, "section_id": section_id, "index": index}
+    )
+
+
+def _stage(name: str, section_id: str, index: int) -> StreamEvent:
+    return StreamEvent(
+        type="stage",
+        content="",
+        data={"stage": name, "section_id": section_id, "index": index},
+    )
+
+
+def test_section_chunks_are_buffered_per_section():
+    """每章的增量各进各的格子。
+
+    混在一个 `live_buffer` 里就再也分不开了——前端只能整批丢弃，
+    那正是「PRD 只能等整章定稿才蹦出来」的成因。
+    """
+    runtime = _runtime_with_sections()
+
+    job_service._apply_event(runtime, _chunk("第一章", "overview", 0))
+    job_service._apply_event(runtime, _chunk("第二章", "features", 1))
+    job_service._apply_event(runtime, _chunk("续写", "overview", 0))
+
+    assert runtime.live_by_index[0].section_id == "overview"
+    assert runtime.live_by_index[0].text == "第一章续写"
+    assert runtime.live_by_index[1].text == "第二章"
+    # 无归属的整篇缓冲保持干净：它只服务「不分章」的链路（文档 / 对话）
+    assert runtime.live_buffer == ""
+
+
+def test_part_clears_only_its_own_section():
+    """一章定稿只清这一章：并行时别的章还在写，清全场会把它们的字一起抹掉。"""
+    runtime = _runtime_with_sections()
+    job_service._apply_event(runtime, _chunk("甲", "overview", 0))
+    job_service._apply_event(runtime, _chunk("乙", "features", 1))
+
+    job_service._apply_event(runtime, _part("## 1. 甲\n\n", "overview", 0))
+
+    assert 0 not in runtime.live_by_index, "定稿的章半成品该被清掉"
+    assert runtime.live_by_index[1].text == "乙", "别的章一个字都不能丢"
+    assert runtime.parts_by_index[0] == "## 1. 甲\n\n"
+
+
+def test_rewriting_clears_the_section_so_draft_and_rewrite_do_not_stack():
+    """改写必须清掉该章半成品：否则初稿与改写稿会在同一张卡片里叠着长。"""
+    runtime = _runtime_with_sections()
+    job_service._apply_event(runtime, _chunk("初稿", "overview", 0))
+
+    job_service._apply_event(runtime, _stage("rewriting", "overview", 0))
+    job_service._apply_event(runtime, _chunk("改后", "overview", 0))
+
+    assert runtime.live_by_index[0].text == "改后"
+    assert runtime.live_by_index[0].phase == "rewriting"
+
+
+def test_retry_reannounced_writing_resets_the_section():
+    """单章重试会重报 `writing`：那是「从头重来」的信号，必须清该章。"""
+    runtime = _runtime_with_sections()
+    job_service._apply_event(runtime, _chunk("第一轮的一半", "overview", 0))
+
+    job_service._apply_event(runtime, _stage("writing", "overview", 0))
+    assert runtime.live_by_index[0].text == ""
+
+    job_service._apply_event(runtime, _chunk("第二轮", "overview", 0))
+    assert runtime.live_by_index[0].text == "第二轮"
+
+
+def test_draft_interleaves_finalized_and_live_by_index():
+    """`_draft` 必须按 index 交错归并，不能「先定稿、后半成品」。
+
+    并行时第 1 章可能还在写、第 2 章已经定稿；简单拼接会把正文排成 2、3、1，
+    而 `_draft` 是**进度落库**与「重连兜底」的正文来源——顺序错了刷新后就是错版。
+    """
+    runtime = _runtime_with_sections()
+    job_service._apply_event(runtime, _header_part("# 文档头\n\n"))
+    job_service._apply_event(runtime, _chunk("第1章写到一半", "overview", 0))
+    job_service._apply_event(runtime, _part("第2章定稿\n\n", "features", 1))
+
+    assert job_service._draft(runtime) == "# 文档头\n\n第1章写到一半第2章定稿\n\n"
+
+
+def test_snapshot_carries_live_by_section_but_not_the_finalized_ones():
+    """快照要带上「正在写的几章」，且不能与已定稿章节重复。
+
+    重复的后果是刷新后同一段正文出现两次；只发定稿章节的后果则是
+    「正在写的那几章刷新后一片空白，直到定稿才整段出现」。
+    """
+    runtime = _runtime_with_sections()
+    job_service._apply_event(runtime, _chunk("甲半截", "overview", 0))
+    job_service._apply_event(runtime, _part("乙定稿\n\n", "features", 1))
+    job_service._apply_event(runtime, _chunk("丙半截", "pages", 2))
+
+    snapshot = job_service._snapshot_event(runtime)  # noqa: SLF001 - 待测行为
+    live = snapshot.data["live_by_section"]
+
+    assert [item["section_id"] for item in live] == ["overview", "pages"]
+    assert [item["index"] for item in live] == [0, 2]
+    assert live[0]["text"] == "甲半截"
+    assert all(item["section_id"] != "features" for item in live)
+    # 定稿章节照旧在 `completed_sections` 里，各走各的字段
+    assert [item["section_id"] for item in snapshot.data["completed_sections"]] == ["features"]
+
+
+def test_db_snapshot_has_no_live_by_section():
+    """DB 兜底快照显式给空数组：过程字不落库（同 `stage_text`）。
+
+    进程重启后拿到的就是这份快照——它只有已定稿章节，前端据此重建看板即可。
+    """
+    row = {
+        "id": 1,
+        "kind": "prd",
+        "doc_kind": "prd",
+        "status": "running",
+        "phase": "writing",
+        "draft_content": "# 文档头\n\n",
+        "completed_sections": "[]",
+        "solution_id": 1,
+    }
+    snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 待测行为
+
+    assert snapshot.data["live_by_section"] == []

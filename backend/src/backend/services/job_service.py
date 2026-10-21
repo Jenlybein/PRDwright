@@ -62,6 +62,21 @@ _TASKS: set[asyncio.Task] = set()
 
 
 @dataclass
+class _SectionLive:
+    """某一章「正在写」的实时缓冲（未定稿的原始增量）。
+
+    只在分章节链路里出现：多章同时吐字，必须各存各的——混在一起就再也分不开，
+    前端也就没法按章渲染（只能等整章定稿）。定稿（`part`）到达时整格丢弃，
+    权威文本由 `parts_by_index` 接管。
+    """
+
+    section_id: str = ""
+    text: str = ""
+    # 该章当前所处阶段（writing / reviewing / rewriting）：快照用它还原卡片车道
+    phase: str = "writing"
+
+
+@dataclass
 class JobRuntime:
     """一次生成任务在内存里的运行态（权威正文就在这里）。"""
 
@@ -79,8 +94,18 @@ class JobRuntime:
     # 是否有章节失败后被占位（仅 PRD 并行链路）
     partial: bool = False
     failed_sections: list[dict[str, Any]] = field(default_factory=list)
-    # 当前段的实时缓冲（chunk 原始增量），遇到下一个 part 时清空
+    # 当前段的实时缓冲（chunk 原始增量），遇到下一个 part 时清空。
+    # 无章节归属的增量（整篇生成的文档、对话）落这里。
     live_buffer: str = ""
+    # 分章节并行时的**按章**实时缓冲：`index -> 该章已吐出的原始增量`。
+    #
+    # 为什么要按章分：PRD 是多章同时生成的，几章的字混在一个 `live_buffer` 里
+    # 就再也分不开了——那正是「PRD 只能等整章定稿才蹦出来」的历史成因。
+    # 有了这一格，前端刷新重连时能按章把半成品摆回去、并接着往下长。
+    #
+    # 与 `live_buffer` 的分工：带 `section_id` 的 chunk 进这里，其余进 `live_buffer`。
+    # 它**不落库**（过程信息，同 `stage_text`）：F5 不会重启后端进程，内存快照够用。
+    live_by_index: dict[int, "_SectionLive"] = field(default_factory=dict)
     # 当前阶段模型的原始输出（审核意见 / 改写稿），只给阶段条下方的面板看。
     # 与 `live_buffer` 分道：后者是**产物正文**，混进来会把审核 JSON 写进文档预览。
     # 从前端内存独占这份文本，刷新就丢；改为运行时持有后，重连的 `snapshot` 能把它带回来。
@@ -552,17 +577,27 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
     """把一个事件应用到内存运行时（同步、无 await）。
 
     对照 `document_service` / `prd_section_writer` 的事件契约：
-    - `chunk` → 追加到当前段缓冲；
-    - `part` → 定稿一段：并入已定稿、清空缓冲；带 `section_id` 时登记章节；
+    - `chunk` → 追加到缓冲；**带 `section_id` + `index` 时进该章自己的格子**
+      （分章节链路多章并行，混在一起就分不开了）；
+    - `part` → 定稿一段：并入已定稿、清掉**该章**的半成品；带 `section_id` 时登记章节；
     - `stage` → 更新 phase（**同时同步给计量器**，计量器据此把调用归到 `类型:阶段` 这一步），
-      换阶段时清空上一阶段的输出；
+      换阶段时清空上一阶段的输出；章节级 `writing` / `rewriting` 清掉该章半成品；
     - `stage_chunk` → 追加到当前阶段的输出（审核意见 / 改写稿），与正文缓冲互不干扰；
     - `error` → 标记失败并记下错误码 / 文案；
     - `done` → 记下权威完整正文。
     """
     event_type = event.type
     if event_type == "chunk":
-        runtime.live_buffer += event.content
+        section_id = str(event.data.get("section_id") or "")
+        index = event.data.get("index")
+        if section_id and isinstance(index, int):
+            # 分章节的增量：按章存。多章同时在吐字，混到一个缓冲里就再也分不开，
+            # 前端只能整批丢弃（「PRD 不流式」的历史成因）。
+            slot = runtime.live_by_index.setdefault(index, _SectionLive())
+            slot.section_id = section_id
+            slot.text += event.content
+        else:
+            runtime.live_buffer += event.content
     elif event_type == "stage_chunk":
         # 阶段内输出只进 `stage_text`，绝不碰 `live_buffer`：后者会拼进正文预览。
         # 增量自带的 stage 与当前 phase 不一致，说明对应的 `stage` 事件没被收到
@@ -575,17 +610,23 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         runtime.stage_text += event.content
     elif event_type == "part":
         text = str(event.data.get("text", ""))
-        runtime.live_buffer = ""
+        index = event.data.get("index")
         if event.data.get("replace") is True:
             # 下游改写稿整段覆盖初稿（审核发现问题后的那一次改写）
             runtime.finalized_parts = [text]
             runtime.parts_by_index.clear()
+            # 覆盖是**整篇**语义：所有章节的半成品一并作废，否则它们会浮在权威正文之上
+            runtime.live_by_index.clear()
+            runtime.live_buffer = ""
             return
-        index = event.data.get("index")
         if isinstance(index, int):
             runtime.parts_by_index[index] = text
+            # ⚠️ 只清**这一章**：并行时别的章还在写，清全场会把它们的字一起抹掉
+            runtime.live_by_index.pop(index, None)
         else:
             runtime.finalized_parts.append(text)
+            # 文档头（没有 index）：整篇缓冲到此定稿
+            runtime.live_buffer = ""
         section_id = event.data.get("section_id")
         if section_id:
             entry = {
@@ -609,6 +650,16 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
             runtime.stage_text = ""
         runtime.phase = stage
         runtime.meter.set_phase(runtime.phase)
+        # 分章节的阶段事件带归属：`writing` 是一个「从头重来」的信号（首次撰写、
+        # 单章重试），必须把该章半成品清掉，否则两轮的字会叠着长；`rewriting`
+        # 同理（初稿 + 改写稿叠一起）。`reviewing` 不清——那一章的正文已经写完了。
+        index = event.data.get("index")
+        section_id = str(event.data.get("section_id") or "")
+        if section_id and isinstance(index, int) and stage in ("writing", "rewriting"):
+            slot = runtime.live_by_index.setdefault(index, _SectionLive())
+            slot.section_id = section_id
+            slot.text = ""
+            slot.phase = stage
     elif event_type == "error":
         runtime.failed = True
         runtime.error_code = event.code or ErrorCode.INTERNAL_ERROR.value
@@ -648,14 +699,45 @@ def _finalized_text(runtime: JobRuntime) -> str:
 
 
 def _draft(runtime: JobRuntime) -> str:
-    """尽力还原的完整正文：已定稿部分 + 当前缓冲（**不用原始 chunk 拼**）。"""
-    return _finalized_text(runtime) + runtime.live_buffer
+    """尽力还原的完整正文：已定稿部分 + 各章半成品（**不用原始 chunk 拼**）。
+
+    ⚠️ 必须**按 index 交错归并**，不能「先所有定稿段、再所有半成品」：并行时第 1 章
+    可能还在写、第 2 章已经定稿，简单拼接会把正文排成 2、3、1。同一 index 上定稿优先
+    （定稿那一刻该章半成品已被清掉，这里再判一次是防御：重复 `part` 也不该出两份）。
+    """
+    header = "".join(runtime.finalized_parts)
+    if not runtime.parts_by_index and not runtime.live_by_index:
+        return header + runtime.live_buffer
+
+    merged: list[str] = []
+    for index in sorted(set(runtime.parts_by_index) | set(runtime.live_by_index)):
+        finalized = runtime.parts_by_index.get(index)
+        if finalized is not None:
+            merged.append(finalized)
+            continue
+        slot = runtime.live_by_index.get(index)
+        if slot is not None and slot.text:
+            merged.append(slot.text)
+    # `live_buffer` 在分章节链路里恒为空（那里无归属的增量不会出现），
+    # 保留这一项是为了「整篇文档 + 章节」混用时不丢最后一段。
+    return header + "".join(merged) + runtime.live_buffer
+
+
+def _live_len(runtime: JobRuntime) -> int:
+    """「还在变的部分」有多长：整篇缓冲 + 各章半成品。
+
+    合并写靠它判断「增量是否 >4KB」。并行链路里 `live_buffer` 恒为空，若还按它算，
+    进度落库就只剩 300ms 的定时器在兜——长章节会多丢一截，刷新后接回来的字变少。
+    """
+    return len(runtime.live_buffer) + sum(
+        len(slot.text) for slot in runtime.live_by_index.values()
+    )
 
 
 def _maybe_flush(runtime: JobRuntime) -> None:
     """按「≤300ms 或增量 >4KB」的节奏合并写一次进度。"""
     now = time.monotonic()
-    grew = len(runtime.live_buffer) - runtime.flushed_len
+    grew = _live_len(runtime) - runtime.flushed_len
     if grew >= _FLUSH_BYTES or (now - runtime.last_flush_at) >= _FLUSH_INTERVAL_SECONDS:
         GenerationJobRepository.persist_progress(
             runtime.owner_id,
@@ -666,7 +748,7 @@ def _maybe_flush(runtime: JobRuntime) -> None:
             pending_items=runtime.pending_items,
         )
         runtime.last_flush_at = now
-        runtime.flushed_len = len(runtime.live_buffer)
+        runtime.flushed_len = _live_len(runtime)
 
 
 def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
@@ -1028,6 +1110,19 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "phase": runtime.phase,
             "finalized_text": _finalized_text(runtime),
             "live_buffer": runtime.live_buffer,
+            # 分章节的**按章半成品**：刷新重连时前端据此把「正在写的几章」摆回去，
+            # 并接着往下长。只含还没定稿的章——定稿的已在 `completed_sections` 里，
+            # 两边都发会让同一段正文出现两次。
+            "live_by_section": [
+                {
+                    "section_id": slot.section_id,
+                    "index": index,
+                    "text": slot.text,
+                    "phase": slot.phase,
+                }
+                for index, slot in sorted(runtime.live_by_index.items())
+                if slot.text
+            ],
             # 当前阶段模型的原始输出（审核意见 / 改写稿）：刷新重连后接着展示，
             # 否则面板会空着，用户看不到「审核到哪一步了」。它**不落库**（见 `_db_snapshot_event`），
             # 因为它是过程信息、且整篇量级、重复写没有收益。
@@ -1084,6 +1179,9 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "phase": row.get("phase", ""),
             "finalized_text": row.get("draft_content", "") or "",
             "live_buffer": "",
+            # 按章半成品同样只活在内存运行时里（不落库，见 `JobRuntime.live_by_index`）：
+            # DB 兜底快照拿不到它，显式给空数组，语义与 `stage_text` 一致。
+            "live_by_section": [],
             # 阶段输出只活在内存运行时里，DB 没有这一列：进程重启后的兜底快照拿不到它。
             # 这里**显式给空串而不是省略**——前端解析器对缺失字段同样退化为空串，
             # 但显式写出来能让「这份快照没有该字段」的语义出现在契约里，不至于被当成漏实现。
