@@ -11,6 +11,8 @@
    这是本路线图最反直觉、也最关键的一条（ADR-040）。
 3. **每阶段都能单独交付**：阶段之间只靠「后端已就绪的地基」衔接，不出现半成品互相等待。
 4. **schema 变更一律追加新版本号**（v12 起），不回改已应用步骤。
+   编号按**实际落地顺序**分配（迁移清单要求版本号严格连续），不代表需求优先级；
+   因此下表里的编号会随实际推进与初稿不同，**以代码里的 `MIGRATIONS` 为准**。
 
 ---
 
@@ -37,9 +39,9 @@
 | 2 | `User` / `current_user` 带出 `is_admin` | `services/auth_service.py` | 登录与 `/me` 能读到该字段 |
 | 3 | `require_admin` 依赖 | `api/deps.py` | 非管理员调任意 `/api/admin/**` 得 403；未登录得 401 |
 | 4 | 首个管理员的产出自举 | `ensure_bootstrap` | `INIT_ADMIN_USER/PASSWORD` 建的首个账号 `is_admin=1` |
-| 5 | 审计表 `admin_audit_log`（迁移 **v14**） | `repositories/`、`services/` | 后续每次管理员写操作都落一行 |
-| 6 | `generation_jobs` 加 Token 列（迁移 **v13**） | finalize 时写入 | 「按用户 / 按日 Token」可直接 SQL 聚合 |
-| 7 | **日志采集**：`LogStoreHandler` + 轮转文件 + `app_logs` 表（迁移 **v15**） | `core/logging_setup.py` + `repositories/` | 业务代码零改动；重启后历史仍在；关库开关后仍写文件 |
+| 5 | 审计表 `admin_audit_log`（迁移 **v15**） | `repositories/`、`services/` | 后续每次管理员写操作都落一行 |
+| 6 | `generation_jobs` 加 Token 列（迁移 **v14**） | finalize 时写入 | 「按用户 / 按日 Token」可直接 SQL 聚合 |
+| 7 | **日志采集**：`LogStoreHandler` + 轮转文件 + `app_logs` 表（迁移 **v13**） | `core/logging_setup.py` + `repositories/` | 业务代码零改动；重启后历史仍在；关库开关后仍写文件 |
 | 8 | 日志保留策略 | 启动 + 懒裁剪 | 超 `log_retention_days` / `log_max_rows` 自动淘汰 |
 | 9 | CORS 放开管理员源 | `core/config.py::cors_origins` | 管理员 dev 源与部署源都能登录 |
 | 10 | `frontend_admin/` 脚手架 | 根目录新工程 | 端口 5174、`/api` 代理 8000、`npm run build` 通过 |

@@ -257,6 +257,64 @@ class Settings(BaseSettings):
         "所以切换格式不会丢信息——尤其是每条日志里的 `request_id`。",
     )
 
+    # --- 日志持久化 ----------------------------------------------------------
+    # 没有这一组，日志就只活在 stdout 里：进程一停历史全没，管理员后台也就无从查起。
+    # 采集分两路双写：文件永远开（兜底「不丢」），落库可关（检索用，见 `log_db_enabled`）。
+    log_dir: str = Field(
+        default="",
+        description="日志轮转文件所在目录；留空则使用后端项目根目录下的 logs/。",
+    )
+    log_file_max_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=1024,
+        description="单个日志文件的大小上限（字节），超过即轮转到下一个文件。",
+    )
+    log_file_backups: int = Field(
+        default=5,
+        ge=0,
+        description="保留的轮转文件份数。超出后最旧的那个被删除。",
+    )
+    log_db_enabled: bool = Field(
+        default=True,
+        description="是否把日志额外写进 `app_logs` 表。关掉后仍然写文件——"
+        "**落库是可被牺牲的那一半，文件不是**。后台的日志检索依赖它，"
+        "默认开启是因为「想看的时候才发现没存」是不可挽回的。",
+    )
+    log_db_min_level: str = Field(
+        default="INFO",
+        description="落库的最低级别。默认 `INFO`：DEBUG 的量级不可控，"
+        "只在调试期临时下调，日常开会把库迅速撑大。",
+    )
+    log_retention_days: int = Field(
+        default=7,
+        ge=1,
+        description="日志保留天数，超期的行会被裁剪掉。",
+    )
+    log_max_rows: int = Field(
+        default=50_000,
+        ge=1000,
+        description="`app_logs` 表的行数上限，超出后按时间淘汰最旧的部分。"
+        "它与 `log_retention_days` 是两个独立的闸门，谁先触发谁生效。",
+    )
+    log_db_batch_size: int = Field(
+        default=100,
+        ge=1,
+        description="攒够多少条日志就写一次库。批量插入是为了不让每条日志都开一次事务。",
+    )
+    log_db_flush_interval: float = Field(
+        default=1.0,
+        ge=0.1,
+        description="距上次写库超过多少秒就强制写一次（秒）。"
+        "它与 `log_db_batch_size` 一起决定落库的延迟上限，"
+        "保证低流量时日志也不会长时间攒在内存里。",
+    )
+    log_db_queue_size: int = Field(
+        default=5000,
+        ge=100,
+        description="待落库队列的容量。**满了就丢弃新日志**（并降级告警），"
+        "绝不让日志写不动反过来拖垮生成主链路。",
+    )
+
     # --- 认证（登录 / 注册） --------------------------------------------------
     auth_enabled: bool = Field(
         default=True,
@@ -301,8 +359,9 @@ class Settings(BaseSettings):
 
     # --- 服务配置 ------------------------------------------------------------
     cors_origins: str = Field(
-        default="http://localhost:5173",
-        description="允许跨域访问的来源，多个用英文逗号分隔。",
+        default="http://localhost:5173,http://localhost:5174",
+        description="允许跨域访问的来源，多个用英文逗号分隔。"
+        "默认含 5173（用户端）与 5174（管理员端 `frontend_admin`）两个开发源。",
     )
     host: str = Field(
         default="0.0.0.0",
@@ -356,6 +415,16 @@ class Settings(BaseSettings):
         if self.db_path:
             return Path(self.db_path).expanduser().resolve()
         return BACKEND_ROOT / "prdwright.db"
+
+    @property
+    def log_dir_path(self) -> Path:
+        """日志轮转文件所在目录的绝对路径。
+
+        与 `db_file` 同样的规则：显式配置优先，否则落在后端项目根目录下的 `logs/`。
+        """
+        if self.log_dir:
+            return Path(self.log_dir).expanduser().resolve()
+        return BACKEND_ROOT / "logs"
 
     def api_key_env_var(self) -> str:
         """当前所选供应商对应的 API 密钥环境变量名；供应商未知时为空串。

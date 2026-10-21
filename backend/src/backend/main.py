@@ -28,7 +28,11 @@ from backend.core.config import get_settings
 from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
 from backend.core.migrations import run_migrations
-from backend.core.logging_setup import configure_logging
+from backend.core.logging_setup import (
+    configure_logging,
+    install_log_persistence,
+    shutdown_log_persistence,
+)
 from backend.services import auth_service, job_service
 from backend.services.skill_registry import ensure_skills
 
@@ -54,6 +58,11 @@ async def lifespan(_: FastAPI):
     # 对已存在的表是空操作），新增的表与列一律由迁移补上。顺序不能颠倒——迁移可能
     # 依赖基线表（例如把旧快照回填进新表）。
     run_migrations()
+    # 日志持久化必须在建表与迁移**之后**挂上：`app_logs` 表若还不存在，
+    # 启动这批日志会全部写库失败并降级，而「启动日志恰好没有」正是最影响排障、
+    # 又最不容易被察觉的一种丢数据。放在这里还有个附带好处——后面每一步
+    # （孤儿回收、技能自检、启动完成）的日志都被留下来。
+    install_log_persistence()
     auth_service.ensure_bootstrap()
     # 开发模式下预先备好内置用户，业务数据落归属时才有恒非空的 user_id
     if not settings.auth_enabled:
@@ -88,6 +97,10 @@ async def lifespan(_: FastAPI):
         },
     )
     yield
+
+    # 退出前 flush：最后一批日志还可能在内存队列里，而它们往往正好是
+    # 「服务为什么退出」的那几行。
+    shutdown_log_persistence()
 
 
 app = FastAPI(

@@ -110,6 +110,30 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
 CREATE INDEX IF NOT EXISTS idx_generation_jobs_owner   ON generation_jobs(owner_id, created_at DESC);
 -- 兜底找回：按「运行态 + owner + 种类」定位可恢复的任务
 CREATE INDEX IF NOT EXISTS idx_generation_jobs_recover ON generation_jobs(status, owner_id, kind);
+
+-- 应用日志：管理员后台「日志查看」的数据来源。
+-- 与 stdout **同时写**（双写）：文件负责「永不丢、可脱机排查」，本表负责「可过滤分页」。
+-- 只写这里不写文件 → 日志写不动时连兜底都没有；只写文件 → 后台要现解析文本才能检索。
+-- 本表可随时清空重建，属**可丢弃的派生数据**，不参与任何业务约束（故无外键）。
+CREATE TABLE IF NOT EXISTS app_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         TEXT    NOT NULL,              -- UTC ISO8601（毫秒），与日志格式化器一致
+    level      TEXT    NOT NULL,              -- DEBUG / INFO / WARNING / ERROR
+    logger     TEXT    NOT NULL,              -- 来源，如 backend.services.job_service
+    msg        TEXT    NOT NULL,
+    request_id TEXT,                          -- 可空：启动日志本就不属于任何请求
+    user_id    INTEGER,                       -- 尽力带出：extra 里没有就留空
+    event      TEXT,                          -- 从 extra.event 提升成列，是分类检索的主维度
+    extra_json TEXT    NOT NULL DEFAULT '',   -- 其余 extra 业务字段原样存 JSON
+    exc        TEXT                           -- traceback，仅 exc_info 存在时
+);
+
+-- 默认视图是「按时间倒序翻页」，这个索引覆盖排序与范围过滤
+CREATE INDEX IF NOT EXISTS idx_app_logs_ts     ON app_logs(ts);
+-- 「某级别最近 N 条」是排障最高频的查询
+CREATE INDEX IF NOT EXISTS idx_app_logs_level  ON app_logs(level, ts);
+-- 按请求号反查一次请求的全过程，是排障的主路径
+CREATE INDEX IF NOT EXISTS idx_app_logs_request ON app_logs(request_id);
 """
 
 # 时间戳统一用 UTC 的 ISO 8601，避免本地时区带来的歧义
@@ -128,6 +152,27 @@ def utc_now_text() -> str:
     （例如 `WHERE expires_at > ?`），不必把时间取回 Python 再判断。
     """
     return utc_now().isoformat()
+
+
+def utc_ms_text(moment: datetime) -> str:
+    """把时间转成**毫秒精度、带 `Z` 后缀**的 UTC ISO 8601 字符串。
+
+    这是 `app_logs.ts` 与日志格式化器**共用**的格式。统一它不为好看：
+    日志裁剪要用字符串比较时间（`WHERE ts < ?`），一旦一边带 `Z`、另一边不带，
+    字典序就会悄悄错位（`'4' < 'Z'`），表现为「该删的没删」且**不报错**。
+
+    带时区的入参会先折算成 UTC 再去掉时区标记：`isoformat()` 对有时区的
+    datetime 输出的是 `+00:00` 而不是 `Z`，直接拼一个 `Z` 上去会得到
+    `...+00:00Z` 这种两头不靠的格式——正是本函数要防的那种漂移。
+    """
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+    return moment.isoformat(timespec="milliseconds") + "Z"
+
+
+def utc_now_ms_text() -> str:
+    """当前 UTC 时间的毫秒精度字符串（`utc_ms_text(utc_now())` 的简写）。"""
+    return utc_ms_text(utc_now())
 
 
 def db_file_path() -> Path:

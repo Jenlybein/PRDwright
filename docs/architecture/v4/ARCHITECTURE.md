@@ -90,8 +90,8 @@ graph TB
 | F1 | 管理员身份 | `users.is_admin` 列（**迁移 v12**）→ `User` 与 `current_user` 带出 | ⚠️ 结构变更一律**追加新版本号**，不得回改已应用的迁移步骤（按 `user_version` 跳过的步骤改了等于没改） |
 | F2 | 服务端守卫 | `api/deps.py` 新增 `require_admin` 依赖 | 校验 `is_admin`，否则 403。**所有** `/api/admin/**` 强制套；前端路由守卫只是体验，不是防线 |
 | F3 | 运行时配置层 | `system_config` 表 + `core/runtime_config.py` | 见第 5 节 |
-| F4 | Token 用量持久化 | `generation_jobs` 加 `prompt_tokens` / `completion_tokens`（迁移 v13） | 当前用量只存在于 `run_summary` 的 JSON 里，聚合要解析文本；加两列后「每用户用量 / 平台总量」才是 SQL 能算的 |
-| F5 | 审计日志 | `admin_audit_log` 表（迁移 v14） | `actor_id / action / target / before / after / request_id / ts`。管理员每一次写操作都记 |
+| F4 | Token 用量持久化 | `generation_jobs` 加 `prompt_tokens` / `completion_tokens`（迁移 v14） | 当前用量只存在于 `run_summary` 的 JSON 里，聚合要解析文本；加两列后「每用户用量 / 平台总量」才是 SQL 能算的 |
+| F5 | 审计日志 | `admin_audit_log` 表（迁移 v15） | `actor_id / action / target / before / after / request_id / ts`。管理员每一次写操作都记 |
 | F6 | 跨域与来源 | `cors_origins` 增加管理员源 | 开发态加 `:5174`；部署态加管理员域名。写成逗号列表即可，不新增配置项 |
 
 分层纪律照旧：`api/` → `services/` → `repositories/`（**只有仓储层写 SQL**）；
@@ -131,7 +131,7 @@ Handler 同时做两件事（**双写**）：
 纯 DB → 每次 `logger.info` 都写库，日志放大 DB 写压力且丢文件这个兜底。
 两者成本都很低，合起来才同时满足「不丢」与「可查」。
 
-### 4.3 存储：`app_logs` 表（迁移 v15）
+### 4.3 存储：`app_logs` 表（迁移 v13）
 
 | 列 | 说明 |
 | --- | --- |
@@ -174,6 +174,9 @@ UI 四件事：
 - **必须 `require_admin`**：日志里可能有用户名、方案 id、请求号，属高权限数据。
 - **写入要克制**：`log_db_min_level` 默认 `INFO`；`DEBUG` 级别的库内写入默认不建议开
   （调试期临时开，量级不可控）。
+- **停止信号要能被快速响应**：后台线程等队列时必须把等待切成小段（≤50ms），
+  不能一次等到 `interval` 结束——否则关服务最坏要干等一整个间隔，
+  而那段时间正是「最后一批日志还没落库」的窗口（实现踩过一次，见 `_collect`）。
 
 ---
 

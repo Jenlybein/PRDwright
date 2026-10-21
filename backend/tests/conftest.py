@@ -32,6 +32,9 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("INVITE_CODE", "test-invite")
     monkeypatch.setenv("INIT_ADMIN_USER", "")
     monkeypatch.setenv("INIT_ADMIN_PASSWORD", "")
+    # 日志目录也要隔离：v4 起 lifespan 会把日志写进轮转文件，若不指到临时目录，
+    # 每跑一次用例就会往仓库的 backend/logs/ 里塞一份，且用例之间互相覆盖。
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     _reset_runtime_state()
 
     # 建表（幂等）。放在这里而不是客户端夹具里，纯服务层测试也能直接用数据库。

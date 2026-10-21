@@ -724,6 +724,46 @@ def _add_is_admin_to_users(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
 
 
+def _create_app_logs_table(conn: sqlite3.Connection) -> None:
+    """v13：建 `app_logs`——让日志第一次被**留下来**。
+
+    为什么需要它
+    ------------
+    在此之前日志只装了一个 `StreamHandler(sys.stdout)`：**进程一停，历史全没**。
+    管理员后台要「查看日志」，前提是先有一条采集链路，所以它属于地基，
+    而且必须**尽早**挂上——日志是「从现在开始攒」的数据，等到做 UI 时才采，
+    上线那天看到的就是空列表（ADR-040）。
+
+    ⚠️ 关于版本号：`docs/architecture/v4/roadmap.md` 初稿里把它排成了 v15，
+    但迁移清单要求版本号严格连续，而它实际是 v12 之后**第一个**落地的新结构，
+    故正式编号为 v13（原 v13 Token 列、v14 审计表顺延为 v14、v15）。
+    文档已同步。**编号只用于排序，不是需求优先级**。
+
+    这里只建表不建数据：表里的内容由 `core/logging_setup.py` 挂的 `LogStoreHandler`
+    实时写入。这是个**可随时清空重建**的派生表，不参与业务约束，故不加外键——
+    业务表删了不应牵连日志，日志也不该拦住任何业务删除。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_logs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         TEXT    NOT NULL,
+            level      TEXT    NOT NULL,
+            logger     TEXT    NOT NULL,
+            msg        TEXT    NOT NULL,
+            request_id TEXT,
+            user_id    INTEGER,
+            event      TEXT,
+            extra_json TEXT    NOT NULL DEFAULT '',
+            exc        TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_app_logs_ts      ON app_logs(ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_app_logs_level   ON app_logs(level, ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_app_logs_request ON app_logs(request_id)")
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -743,6 +783,7 @@ MIGRATIONS: list[Migration] = [
     Migration(version=10, name="backfill_solution_state", apply=_backfill_solution_state),
     Migration(version=11, name="jobs_chat_stage", apply=_add_chat_stage_to_jobs),
     Migration(version=12, name="users_is_admin", apply=_add_is_admin_to_users),
+    Migration(version=13, name="app_logs_table", apply=_create_app_logs_table),
 ]
 
 
