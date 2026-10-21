@@ -204,7 +204,10 @@ def parse_review_text(raw: str) -> DocumentReviewResult:
     """
     parsed = extract_json_object(raw)
     if parsed is None:
-        logger.warning("整篇文档审核返回的不是合法 JSON，按通过处理")
+        logger.warning(
+            "整篇文档审核返回的不是合法 JSON，按通过处理",
+            extra={"event": "doc.review_invalid_json"},
+        )
         return DocumentReviewResult(verdict="pass")
 
     issues = parsed.get("issues")
@@ -246,7 +249,11 @@ async def review_whole_document(
     try:
         raw = await collect_reply(llm, messages)
     except Exception:  # noqa: BLE001 - 审核失败按通过处理
-        logger.warning("整篇文档审核失败，按通过处理", exc_info=True)
+        logger.warning(
+            "整篇文档审核失败，按通过处理",
+            exc_info=True,
+            extra={"event": "doc.review_degraded"},
+        )
         return None
     return parse_review_text(raw)
 
@@ -485,7 +492,9 @@ async def _stream_whole_rewrite(
                 data={"text": final_reply, "replace": True},
             )
     except Exception:  # noqa: BLE001 - 改写失败保留初稿
-        logger.warning("%s改写失败，保留初稿", label, exc_info=True)
+        logger.warning(
+            "%s改写失败，保留初稿", label, exc_info=True, extra={"event": "doc.rewrite_failed"}
+        )
 
 
 async def _stream_section_rewrites(
@@ -541,7 +550,12 @@ async def _stream_section_rewrites(
             if trailing:
                 yield stage_chunk_event("rewriting", trailing, doc_type)
         except Exception:  # noqa: BLE001 - 单节失败不影响其它节
-            logger.warning("章节 %s 改写失败，保留原稿", target.heading, exc_info=True)
+            logger.warning(
+                "章节 %s 改写失败，保留原稿",
+                target.heading,
+                exc_info=True,
+                extra={"event": "doc.section_rewrite_failed"},
+            )
             continue
 
         # 模型常把标题行再输出一遍，`join_sections` 也会加一次——去掉，否则标题重复
@@ -559,7 +573,11 @@ async def _stream_section_rewrites(
         rewritten_headings.append(target.heading)
 
     if not rewritten_headings:
-        logger.warning("%s 分节改写没有产出任何内容，退回整篇重写", label)
+        logger.warning(
+            "%s 分节改写没有产出任何内容，退回整篇重写",
+            label,
+            extra={"event": "doc.section_rewrite_empty"},
+        )
         async for event in _stream_whole_rewrite(
             llm,
             document=document,
@@ -580,6 +598,7 @@ async def _stream_section_rewrites(
             label,
             len(document),
             len(merged_text),
+            extra={"event": "doc.section_rewrite_shrunk"},
         )
         async for event in _stream_whole_rewrite(
             llm,
@@ -676,7 +695,11 @@ async def stream_review_and_rewrite(
             raw_chunks.append(delta)
             yield stage_chunk_event("reviewing", delta, doc_type)
     except Exception:  # noqa: BLE001 - 审核失败按通过处理
-        logger.warning("整篇文档审核失败，按通过处理", exc_info=True)
+        logger.warning(
+            "整篇文档审核失败，按通过处理",
+            exc_info=True,
+            extra={"event": "doc.review_degraded"},
+        )
         yield review_event(kind, None)
         return
 

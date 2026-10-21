@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
@@ -31,9 +32,12 @@ from langchain_core.messages import AIMessageChunk, BaseMessage
 from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
+from backend.core.request_context import current_request_id
 from backend.services.llm_factory import StreamingChatModel
 from backend.services.llm_meter import current_meter
 from backend.services.llm_utils import extract_text
+
+logger = logging.getLogger(__name__)
 from backend.services.stream_guard import OutputTruncatedError, ensure_not_truncated
 from backend.services.token_budget import enforce
 
@@ -215,7 +219,32 @@ async def _astream_chunks(
                 or not _is_retryable(exc)
                 or attempt >= settings.llm_max_retries
             ):
+                # 彻底失败前留一条 WARNING：这是排障时「这次生成为什么挂了」的唯一直达路径。
+                # 重试静默是 T4a 之前的历史现状——失败只体现在 run_summary 的 failed_calls 里，
+                # 但「哪一次调用、什么原因」完全无迹可循。
+                logger.warning(
+                    "模型调用失败（不再重试）：%s",
+                    exc,
+                    exc_info=True,
+                    extra={
+                        "event": "llm.call_failed",
+                        "attempt": attempt + 1,
+                        "step": meter.current_step() if meter is not None else "",
+                        "request_id": current_request_id(),
+                    },
+                )
                 raise
+            # 中间失败：重试前留一条 INFO，把「第几次重试、什么原因」从静默变成可查。
+            logger.info(
+                "模型调用失败，将重试（第 %d 次）",
+                attempt + 1,
+                extra={
+                    "event": "llm.call_retry",
+                    "attempt": attempt + 1,
+                    "step": meter.current_step() if meter is not None else "",
+                    "request_id": current_request_id(),
+                },
+            )
             if settings.llm_retry_delay > 0:
                 await asyncio.sleep(settings.llm_retry_delay)
             continue

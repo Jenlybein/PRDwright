@@ -790,8 +790,16 @@ class PrdSectionWriter:
                             "章节 %s 审核连续失败，保留正文不判失败",
                             section.id,
                             exc_info=True,
+                            extra={"event": "prd.review_exhausted"},
                         )
                         return None
+                    # 审核中间失败此前静默：补一条，让「哪一章审了几次才放弃」可查。
+                    logger.warning(
+                        "章节 %s 审核失败，将重试（第 %d 次）",
+                        section.id,
+                        attempt + 1,
+                        extra={"event": "prd.review_retry"},
+                    )
             return None
 
         async def section_task(idx: int, draft: str, prior: str) -> None:
@@ -839,7 +847,10 @@ class PrdSectionWriter:
                         raise
                     except Exception:  # noqa: BLE001 - 改写失败保留改写前版本
                         logger.warning(
-                            "章节 %s 改写失败，保留改写前版本", st.section.id, exc_info=True
+                            "章节 %s 改写失败，保留改写前版本",
+                            st.section.id,
+                            exc_info=True,
+                            extra={"event": "prd.rewrite_failed"},
                         )
                         new_draft = ""
                     if new_draft and new_draft.strip():
@@ -903,6 +914,14 @@ class PrdSectionWriter:
                             last_exc = exc
                             if attempt >= self._max_retries:
                                 break
+                            # 中间失败此前完全静默：重试发生在模型调用层（stream_reply 已记），
+                            # 但「哪一章、第几次」的归属只有这里知道，补一条补上这条链。
+                            logger.warning(
+                                "章节 %s 撰写失败，将重试（第 %d 次）",
+                                section.id,
+                                attempt + 1,
+                                extra={"event": "prd.section_write_retry"},
+                            )
 
                     if not draft.strip():
                         st.status = "failed"
@@ -1141,7 +1160,12 @@ class PrdSectionWriter:
                 prior_sections=prior_sections,
             )
         except Exception:  # noqa: BLE001 - 审核失败不阻断主流程
-            logger.warning("章节 %s 审核调用失败，本次按通过处理", section.id, exc_info=True)
+            logger.warning(
+                "章节 %s 审核调用失败，本次按通过处理",
+                section.id,
+                exc_info=True,
+                extra={"event": "prd.review_degraded"},
+            )
             return None
 
     async def _review(
@@ -1177,7 +1201,10 @@ class PrdSectionWriter:
         parsed = extract_json_object(raw)
         if parsed is None:
             logger.warning(
-                "章节 %s 审核未返回合法 JSON，按通过处理。原始输出：%s", section.id, raw[:500]
+                "章节 %s 审核未返回合法 JSON，按通过处理。原始输出：%s",
+                section.id,
+                raw[:500],
+                extra={"event": "prd.review_invalid_json"},
             )
             return SectionReview(verdict="pass")
 

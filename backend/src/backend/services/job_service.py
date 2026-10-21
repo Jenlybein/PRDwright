@@ -41,6 +41,7 @@ from backend.core.config import get_settings
 from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
 from backend.core.db import utc_now
 from backend.core.errors import AppError, ErrorCode
+from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
@@ -452,6 +453,20 @@ def dispatch(
     _RUNTIMES[job_id] = runtime
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
+    # 任务起点的 INFO 日志：让日志页能按 job_id 串起「这一次生成」的完整生命线。
+    # request_id 在此显式带上——`create_task` 复制了 ContextVar，但落库线程读不到它
+    # （见 logging_setup._row 的说明），只有 `extra=` 里显式传的才会进 `app_logs`。
+    logger.info(
+        "生成任务已派发",
+        extra={
+            "event": "job.started",
+            "job_id": job_id,
+            "user_id": owner_id,
+            "solution_id": solution_id,
+            "kind": kind,
+            "request_id": current_request_id(),
+        },
+    )
 
 
 async def run_job(runtime: JobRuntime) -> None:
@@ -485,6 +500,20 @@ async def run_job(runtime: JobRuntime) -> None:
         else:
             runtime.error_code = ErrorCode.LLM_UPSTREAM_ERROR.value
             runtime.error_message = f"生成失败：{exc}"
+        # 兜底异常单独留一条 ERROR（带 traceback）：`_finalize` 的终态日志是「收尾了」，
+        # 这一条才是「为什么收尾」——它俩缺一，排障时都得猜另一半。
+        logger.error(
+            "生成任务异常终止",
+            exc_info=True,
+            extra={
+                "event": "job.crashed",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "kind": runtime.kind,
+                "error_code": runtime.error_code,
+                "request_id": current_request_id(),
+            },
+        )
         _finalize(runtime, "failed")
     finally:
         # 先关总线（给订阅者放哨兵）再摘运行时：已订阅者仍能读到 run_summary 与结束标记；
@@ -643,6 +672,23 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
                 if item.get("section_id") != section_id
             ]
             runtime.completed_sections.append(entry)
+            # 章节定稿是「这一章写完了」的可观测信号。分章节链路里多章并行，
+            # 没有它，日志页只能看到一连串 stage，看不出到底写成了几章、哪章失败。
+            logger.info(
+                "章节定稿：%s",
+                section_id,
+                extra={
+                    "event": "job.section_done",
+                    "job_id": runtime.job_id,
+                    "user_id": runtime.owner_id,
+                    "kind": runtime.kind,
+                    "section_id": section_id,
+                    "index": index if isinstance(index, int) else None,
+                    "failed": bool(event.data.get("failed")),
+                    "chars": len(text),
+                    "request_id": current_request_id(),
+                },
+            )
     elif event_type == "stage":
         stage = str(event.data.get("stage", ""))
         # 换阶段就清空上一阶段的输出：审核意见不该留在改写阶段的面板里
@@ -650,9 +696,8 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
             runtime.stage_text = ""
         runtime.phase = stage
         runtime.meter.set_phase(runtime.phase)
-        # 分章节的阶段事件带归属：`writing` 是一个「从头重来」的信号（首次撰写、
-        # 单章重试），必须把该章半成品清掉，否则两轮的字会叠着长；`rewriting`
-        # 同理（初稿 + 改写稿叠一起）。`reviewing` 不清——那一章的正文已经写完了。
+        # 阶段推进是生成生命线的骨架：记一条 INFO，让日志页能看出「走到哪一步」。
+        # `chunk`/`stage_chunk` 是高频增量不打日志（会刷屏），边界事件才值得留。
         index = event.data.get("index")
         section_id = str(event.data.get("section_id") or "")
         if section_id and isinstance(index, int) and stage in ("writing", "rewriting"):
@@ -660,10 +705,38 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
             slot.section_id = section_id
             slot.text = ""
             slot.phase = stage
+        if stage in ("writing", "reviewing", "rewriting", "done"):
+            logger.info(
+                "生成阶段推进：%s",
+                stage,
+                extra={
+                    "event": "job.stage",
+                    "job_id": runtime.job_id,
+                    "user_id": runtime.owner_id,
+                    "kind": runtime.kind,
+                    "stage": stage,
+                    "section_id": section_id or None,
+                    "index": index if isinstance(index, int) else None,
+                    "request_id": current_request_id(),
+                },
+            )
     elif event_type == "error":
         runtime.failed = True
         runtime.error_code = event.code or ErrorCode.INTERNAL_ERROR.value
         runtime.error_message = event.content
+        # 生成链路内部主动产出的 error 事件（不是 `run_job` 的兜底异常），
+        # 单独留一条：它与 `job.crashed` 的区别在于「这是可预期的失败，不是崩了」。
+        logger.warning(
+            "生成链路报错",
+            extra={
+                "event": "job.error",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "kind": runtime.kind,
+                "error_code": runtime.error_code,
+                "request_id": current_request_id(),
+            },
+        )
     elif event_type == "done":
         runtime.final_reply = str(event.data.get("reply", ""))
         runtime.partial = bool(event.data.get("partial"))
@@ -837,6 +910,26 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     draft = _draft(runtime)
     summary = _summary_data(runtime, status)
     usage = json.dumps(summary, ensure_ascii=False)
+    # 终态日志：无论成功、失败、被取消还是被顶替，都从这里落一条，
+    # 让日志页能把「这一次生成」的结局与 `job.started` 首尾对齐。
+    # 归属字段带全，`request_id` 显式传（落库线程读不到 ContextVar）。
+    logger.info(
+        "生成任务收尾：%s",
+        status,
+        extra={
+            "event": f"job.{status}",
+            "job_id": runtime.job_id,
+            "user_id": runtime.owner_id,
+            "solution_id": runtime.solution_id,
+            "kind": runtime.kind,
+            "duration_ms": summary.get("duration_ms"),
+            "total_calls": summary.get("total_calls"),
+            "prompt_tokens": summary.get("prompt_tokens"),
+            "completion_tokens": summary.get("completion_tokens"),
+            "error_code": runtime.error_code,
+            "request_id": current_request_id(),
+        },
+    )
     # 从汇总里取出两列副本：管理员后台按用户 / 按日统计消耗时用 SQL 求和，
     # 不用把每行 JSON 取回解析。取不到就当 0——宁可少算，不猜数字。
     prompt_tokens = int(summary.get("prompt_tokens") or 0)
