@@ -76,10 +76,10 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError
-from backend.services.llm_factory import StreamingChatModel, get_llm
+from backend.core.runtime_config import get_runtime_config
+from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
 from backend.services.llm_meter import use_step
 from backend.services.llm_utils import extract_json_object
 from backend.services.pending_items import (
@@ -401,24 +401,64 @@ class PrdSectionWriter:
         # 显式注入的实例必须**原样复用**：测试靠注入假模型数调用次数、按提示词分流，
         # 若在它之外再偷偷建一个「审核专用」实例，那些断言会全部落空。
         self._llm_injected = llm is not None
+        self._illm_key: tuple[str, str, str, int] | None = None
         self._review_llm = review_llm
-        settings = get_settings()
-        self._review_enabled = (
-            settings.prd_section_review_enabled if review_enabled is None else review_enabled
-        )
-        self._max_rewrites = (
-            settings.prd_section_max_rewrites if max_rewrites is None else max_rewrites
-        )
-        self._rewrite_min_severity = settings.review_rewrite_min_severity
+        self._review_llm_injected = review_llm is not None
+        self._review_llm_key: tuple[str, str, str, int] | None = None
+
+        # 调用方显式传入的覆盖值（快捷流程会传 `review_enabled=False`）。
+        # `None` = 跟随配置——**不在这里拷贝配置值**：拷了就等于把「后台改了开关、
+        # 下一次生成仍用旧值」写进代码，而它看起来完全正常，只是改了没反应。
+        self._review_enabled_override = review_enabled
+        self._max_rewrites_override = max_rewrites
+
+    # ------------------------------------------------------------------
+    # 生效配置（每次读，不缓存——缓存由上层按指纹做）
+    # ------------------------------------------------------------------
+    #
+    # 这五个曾经是构造期快照。改成只读属性后，全部 12 处使用点**一行都不用改**，
+    # 但行为从「创建时定格」变成「每次用的时候取当前值」。
+    # `document_service` 会复用同一个 writer 实例，所以这是「改配置下一次生成生效」
+    # 真正成立的地方（而不是只改 API 返回值）。
+
+    @property
+    def _review_enabled(self) -> bool:
+        if self._review_enabled_override is not None:
+            return bool(self._review_enabled_override)
+        return bool(get_runtime_config().settings.prd_section_review_enabled)
+
+    @property
+    def _max_rewrites(self) -> int:
+        if self._max_rewrites_override is not None:
+            return int(self._max_rewrites_override)
+        return int(get_runtime_config().settings.prd_section_max_rewrites)
+
+    @property
+    def _rewrite_min_severity(self) -> str:
+        return str(get_runtime_config().settings.review_rewrite_min_severity)
+
+    @property
+    def _concurrency(self) -> int:
         # 并发度与章节重试次数：只在并行链路生效；串行链路保持原行为。
-        self._concurrency = max(1, settings.prd_pipeline_concurrency)
-        self._max_retries = max(0, settings.prd_section_max_retries)
+        return max(1, int(get_runtime_config().settings.prd_pipeline_concurrency))
+
+    @property
+    def _max_retries(self) -> int:
+        return max(0, int(get_runtime_config().settings.prd_section_max_retries))
 
     @property
     def llm(self) -> StreamingChatModel:
-        """LLM 实例，首次访问时才创建（避免服务初始化阶段就要求密钥）。"""
-        if self._llm is None:
+        """LLM 实例；按配置指纹惰性创建。
+
+        指纹变了就重建——这是「后台换了供应商/模型，下一次生成真的换了」的落点。
+        注入的实例不参与指纹（测试与显式注入永远用给定的那个）。
+        """
+        if self._llm_injected:
+            return self._llm  # type: ignore[return-value]
+        key = config_fingerprint()
+        if self._llm is None or self._illm_key != key:
             self._llm = get_llm()
+            self._illm_key = key
         return self._llm
 
     @property
@@ -430,13 +470,19 @@ class PrdSectionWriter:
 
         ⚠️ 只能是另一个实例：方舟封装读的是 `self.max_tokens`，`astream()` 传
         `max_tokens` 不生效（见 `services/llm_factory.py`）。注入了 `llm` 时直接复用它。
+
+        ⚠️ 这个上限是**可配的**（`prd_section_review_max_tokens`），所以实例也要按
+        指纹重建：只改上限、不改配置其余部分时，`revision` 会变，指纹跟着变。
         """
-        if self._review_llm is None:
-            self._review_llm = (
-                self.llm
-                if self._llm_injected
-                else get_llm(max_tokens=get_settings().prd_section_review_max_tokens)
-            )
+        if self._review_llm_injected:
+            return self._review_llm  # type: ignore[return-value]
+        if self._llm_injected:
+            return self.llm
+        max_tokens = int(get_runtime_config().settings.prd_section_review_max_tokens)
+        key = config_fingerprint(max_tokens)
+        if self._review_llm is None or self._review_llm_key != key:
+            self._review_llm = get_llm(max_tokens=max_tokens)
+            self._review_llm_key = key
         return self._review_llm
 
     # ------------------------------------------------------------------

@@ -31,7 +31,7 @@ from langchain_core.messages import (
 from backend.core.contracts import QuestionsConfig, StreamEvent
 from backend.core.errors import AppError, ErrorCode
 from backend.services.clarification_ask import asks_from_tool_calls, build_ask_tool
-from backend.services.llm_factory import StreamingChatModel, get_llm
+from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
 from backend.services.prompts import (
     CLARIFICATION_ASK_REMINDER,
     DEFAULT_CONVERSATION_PROFILE,
@@ -420,6 +420,9 @@ class ConversationService:
         resolve_profile(profile_key)
         self.profile_key = profile_key
         self._llm = llm
+        # 注入的实例（测试）永远原样复用；未注入的按配置指纹重建。
+        self._llm_injected = llm is not None
+        self._llm_key: tuple[str, str, str, int] | None = None
         self._conversations: dict[str, _ConversationRecord] = {}
 
     # ------------------------------------------------------------------
@@ -428,9 +431,18 @@ class ConversationService:
 
     @property
     def llm(self) -> StreamingChatModel:
-        """LLM 实例，首次访问时才创建（避免在服务初始化阶段就要求密钥）。"""
-        if self._llm is None:
+        """LLM 实例；按配置指纹惰性创建。
+
+        ⚠️ 这个属性以前是**永久缓存**的，而 `get_service()` 又是模块级单例——
+        两者叠加的后果是「后台换了供应商，对话链路永远用旧的那家」：
+        线程里的历史消息照样能发出去，只是发给了上一家的地址。按指纹重建即可。
+        """
+        if self._llm_injected:
+            return self._llm  # type: ignore[return-value]
+        key = config_fingerprint()
+        if self._llm is None or self._llm_key != key:
             self._llm = get_llm()
+            self._llm_key = key
         return self._llm
 
     # ------------------------------------------------------------------

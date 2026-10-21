@@ -1,4 +1,4 @@
-"""火山方舟流式封装的用量映射（`services/ark_llm.py`）测试。
+"""火山方舟流式封装的用量映射（现已并入 `services/llm_factory.py`）测试。
 
 方舟的用量有一个**只在真机上才会暴露**的陷阱：开启 `include_usage` 后，token 计数
 被放在「最后一个流式分块」的顶层 `usage` 上，而**那一帧的 `choices` 是空的**。
@@ -20,8 +20,8 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-from backend.services import ark_llm
-from backend.services.ark_llm import VolcanoArkChatModel, _usage_metadata
+from backend.services import llm_factory
+from backend.services.llm_factory import VolcanoArkChatModel, _ark_usage_metadata
 
 
 def _chunk(
@@ -73,7 +73,7 @@ def _patch_ark(monkeypatch, chunks: list[Any]) -> dict:
         async def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(ark_llm, "AsyncArk", _Client)
+    monkeypatch.setattr(llm_factory, "AsyncArk", _Client)
     return captured
 
 
@@ -201,13 +201,13 @@ def test_text_chunks_are_emitted_in_order(monkeypatch) -> None:
 
 def test_usage_metadata_maps_field_names() -> None:
     """方舟字段映射到 LangChain 统一键名；缺字段按零补。"""
-    assert _usage_metadata(_usage(5, 6)) == {
+    assert _ark_usage_metadata(_usage(5, 6)) == {
         "input_tokens": 5,
         "output_tokens": 6,
         "total_tokens": 11,
     }
     # 只给了 prompt_tokens 时，其余按零补，total 退化为已有部分之和
-    assert _usage_metadata(SimpleNamespace(prompt_tokens=5)) == {
+    assert _ark_usage_metadata(SimpleNamespace(prompt_tokens=5)) == {
         "input_tokens": 5,
         "output_tokens": 0,
         "total_tokens": 5,
@@ -216,5 +216,5 @@ def test_usage_metadata_maps_field_names() -> None:
 
 def test_usage_metadata_returns_none_when_absent() -> None:
     """完全没有用量信息时返回 `None`：『没给用量』与『用量为零』是两回事。"""
-    assert _usage_metadata(None) is None
-    assert _usage_metadata(SimpleNamespace()) is None
+    assert _ark_usage_metadata(None) is None
+    assert _ark_usage_metadata(SimpleNamespace()) is None

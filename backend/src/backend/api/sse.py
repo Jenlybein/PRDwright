@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.api import schemas
 from backend.core.errors import ErrorCode
+from backend.core.runtime_config import get_runtime_config, use_config
 
 # SSE 结束标记，前端收到后主动关闭连接
 SSE_DONE = "[DONE]"
@@ -61,18 +62,27 @@ def make_sse_generator(events: AsyncIterator[schemas.StreamEvent]) -> AsyncItera
 
     # 事件流的转码在生成器内部完成，避免路由层掺入序列化逻辑
     async def generator() -> AsyncIterator[str]:
-        try:
-            async for event in events:
-                yield format_sse_block(event)
-        except Exception as exc:  # noqa: BLE001 - SSE 流里必须把异常转成事件
-            yield format_sse_block(
-                schemas.StreamEvent(
-                    type="error",
-                    content=f"生成失败：{exc}",
-                    data={"error_type": type(exc).__name__},
-                    code=ErrorCode.INTERNAL_ERROR.value,
+        # 配置冻结放在**生成器内部**而不是 `sse_response()` 里：
+        # 事件流是在 `StreamingResponse` 返回**之后**才被消费的，此时路由函数体
+        # 早已 return、`with` 也早已退出。放在这里才能真正覆盖整个流的生命周期。
+        #
+        # 为什么需要冻：`/api/conversation/*-stream` 这几条路由是**直连**的
+        # （不经过 `job_service`），一次 PRD 生成会取撰写/审核/改写多个 LLM 实例。
+        # 不冻的话，跑到第 20 分钟时配置缓存的 TTL 到点，后面的章节就可能换一套
+        # 参数——症状是章节乱序或正文重复，且极难归因。
+        with use_config(get_runtime_config()):
+            try:
+                async for event in events:
+                    yield format_sse_block(event)
+            except Exception as exc:  # noqa: BLE001 - SSE 流里必须把异常转成事件
+                yield format_sse_block(
+                    schemas.StreamEvent(
+                        type="error",
+                        content=f"生成失败：{exc}",
+                        data={"error_type": type(exc).__name__},
+                        code=ErrorCode.INTERNAL_ERROR.value,
+                    )
                 )
-            )
         yield f"data: {SSE_DONE}\n\n"
 
     return generator()

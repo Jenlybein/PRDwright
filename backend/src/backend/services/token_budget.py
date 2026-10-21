@@ -34,7 +34,8 @@ from typing import Sequence
 
 from langchain_core.messages import BaseMessage
 
-from backend.core.config import Settings, get_settings
+from backend.core.config import Settings
+from backend.core.runtime_config import get_runtime_config, resolve_model_limits
 from backend.core.errors import AppError, ErrorCode
 from backend.core.model_registry import input_ceiling
 from backend.services.llm_utils import extract_text
@@ -109,7 +110,7 @@ def step_cap(step: str, settings: Settings | None = None) -> int:
     Returns:
         该 step 的业务顶（token）。
     """
-    settings = settings or get_settings()
+    settings = settings or get_runtime_config().settings
     caps = settings.budget_step_caps
     if step in caps:
         return caps[step]
@@ -193,6 +194,26 @@ class BudgetExceededError(AppError):
 # ============================================================================
 
 
+def _physical_ceiling(provider: str, model: str, settings: Settings) -> int:
+    """本次调用的物理输入上限（窗口 − 预留输出）。
+
+    分两种情况：
+    - **当前激活的供应商**：走 `runtime_config`，它会优先取后台填的
+      `context_window`。自定义供应商（OpenAI 兼容 + 自己的模型名）在
+      `model_registry` 里查不到，不这么做就会落到 32k 兜底——症状是
+      「换了个 128k 的模型，却老是报输入超顶」。
+    - **其它供应商**（调用方显式传了 provider）：退回注册表，因为后台只登记了
+      激活那一家，别家的窗口无处可查。
+    """
+    config = get_runtime_config()
+    spec = config.active_provider
+    if spec is not None and spec.protocol == provider:
+        limits = resolve_model_limits()
+        window = settings.llm_context_window or limits.context_window
+        return max(window - limits.max_output, 1_000)
+    return input_ceiling(provider, model, override=settings.llm_context_window)
+
+
 def evaluate(
     messages: Sequence[BaseMessage],
     *,
@@ -211,10 +232,13 @@ def evaluate(
     Returns:
         `BudgetDecision`。
     """
-    settings = get_settings()
+    settings = get_runtime_config().settings
     provider = provider or settings.default_llm_provider
     model = model or settings.default_llm_model
-    physical = input_ceiling(provider, model, override=settings.llm_context_window)
+    # 物理顶走 `runtime_config`：它会先看该供应商在后台填的 `context_window`，
+    # 再退回 `model_registry`。自定义供应商在注册表里查不到，不这么做就会落到
+    # 32k 兜底，把正常的长文请求误判成「超顶」。
+    physical = _physical_ceiling(provider, model, settings)
     business = step_cap(step, settings)
     budget = max(min(physical, business), 1)
     return BudgetDecision(

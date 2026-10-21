@@ -19,6 +19,13 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 供应商 → 密钥环境变量名的映射已移进 `core/providers.py`（那里还管着六个协议
+# 与「新增供应商」的预设模板，是同一件事）。这里**反向再导出**，
+# 让 `from backend.core.config import API_KEY_ENV_VARS` 这个既有写法、
+# 以及 `Settings.api_key_env_var()` 的签名都不变。
+# 依赖方向是单向的：`providers` 不 import `config`，不存在循环。
+from backend.core.providers import API_KEY_ENV_VARS as API_KEY_ENV_VARS
+
 # config.py -> core/ -> backend/(包) -> src/ -> backend/(项目根目录)
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILE = BACKEND_ROOT / ".env"
@@ -26,11 +33,9 @@ ENV_FILE = BACKEND_ROOT / ".env"
 # 供应商 → 密钥所在的环境变量名。
 # 错误文案（`require_api_key`）与健康检查的自检（`api/health.py`）共用这一份，
 # 避免两处各写一遍之后悄悄漂移——那会变成「报错说缺 A、体检说缺 B」的经典故障。
-API_KEY_ENV_VARS: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "ark": "ARK_API_KEY",
-    "openai": "OPENAI_API_KEY",
-}
+#
+# 真实定义在 `core/providers.py`（模块顶部已再导出），本行只是把「它属于这里」
+# 这件事留在原处，方便按老路径读代码的人找到。
 
 
 class Settings(BaseSettings):
@@ -218,9 +223,12 @@ class Settings(BaseSettings):
         description="整篇文档（接口文档 / 提示词套件）审核这次调用的 max_tokens。",
     )
     prd_section_review_max_tokens: int = Field(
-        default=1024,
+        default=2048,
         ge=256,
-        description="PRD 单章节审核这次调用的 max_tokens（只审一章，比整篇更小）。",
+        description="PRD 单章节审核这次调用的 max_tokens。"
+        "默认值与整篇审核（2048）对齐：此前这里是 1024，但章节审核实际复用了整篇的"
+        " `review_llm`（2048），于是这个配置一直是**死配置**——改了没有任何效果。"
+        "把默认值对齐到 2048 并让章节审核真正用自己的实例，才不会一改就改变现有行为。",
     )
     review_rewrite_min_severity: Literal["high", "medium", "low"] = Field(
         default="high",

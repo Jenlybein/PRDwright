@@ -50,7 +50,7 @@ _INVITE_MAX = 32
 # ----------------------------------------------------------------------
 
 
-def _audit(actor: User, action: str, target: str = "", detail: str = "") -> None:
+def record_audit(actor: User, action: str, target: str = "", detail: str = "") -> None:
     """记一条管理员操作。
 
     `detail` 里**绝不写密码**：审计表是给人翻的，不是保险箱。
@@ -70,6 +70,11 @@ def _audit(actor: User, action: str, target: str = "", detail: str = "") -> None
             extra={"event": "admin.audit_failed", "action": action, "target": target},
             exc_info=True,
         )
+
+
+# 内部沿用旧名：本文件有 7 处调用都写作 `_audit(...)`，改名会引入无谓的 diff。
+# 新模块（如 `admin_config_service`）请直接用 `record_audit`。
+_audit = record_audit
 
 
 def list_audit(limit: int = 100) -> list[dict[str, Any]]:

@@ -37,10 +37,10 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
-from backend.core.config import get_settings
 from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
 from backend.core.db import utc_now
 from backend.core.errors import AppError, ErrorCode
+from backend.core.runtime_config import get_runtime_config, use_config
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
@@ -115,6 +115,10 @@ class JobRuntime:
     completed_sections: list[dict[str, Any]] = field(default_factory=list)
     # 原样保存的请求参数，供 `_build_event_stream` 重建生成
     request: dict[str, Any] = field(default_factory=dict)
+    # 本任务的**配置快照**（派发那一刻取的）。`run_job` 用 `use_config` 把它冻进上下文，
+    # 于是整条链路（含并行子任务）读到的是同一份：既满足「改了下次生成生效」，
+    # 又保证「跑到一半不会参数漂移」——后者会让章节乱序、正文重复，且极难归因。
+    config: Any = None
     task: asyncio.Task | None = None
     failed: bool = False
     error_code: str = ""
@@ -426,7 +430,11 @@ def dispatch(
     另：`create_task` 会**复制当前上下文**，因此请求中间件写入的 `request_id`
     自动随任务带走，`run_summary` 里能直接读到，无需任何显式传参。
     """
-    settings = get_settings()
+    config = get_runtime_config()
+    # 这一笔 meter 记的是「这次任务**实际**用了哪家、哪个模型」——所以取激活供应商，
+    # 而不是 `DEFAULT_LLM_PROVIDER`：后台切过供应商之后，后者可能与实际发出的请求不符，
+    # 回执与账单就对不上了。
+    spec = config.active_provider
     runtime = JobRuntime(
         job_id=job_id,
         owner_id=owner_id,
@@ -440,9 +448,10 @@ def dispatch(
         last_flush_at=time.monotonic(),
         meter=RunMeter(
             kind=kind,
-            provider=settings.default_llm_provider,
-            model=settings.default_llm_model,
+            provider=spec.protocol if spec is not None else "",
+            model=spec.model if spec is not None else "",
         ),
+        config=config,
     )
     runtime.skill_refs = _resolve_skill_refs(kind, runtime.request)
 
@@ -476,7 +485,9 @@ async def run_job(runtime: JobRuntime) -> None:
     `stream_reply.astream_text` 靠它把自己记到这次任务上（见 `llm_meter`）。
     """
     try:
-        with use_meter(runtime.meter):
+        # `use_config` 把派发那一刻的配置冻进上下文：整条生成链路（含并行子任务）
+        # 读到的是同一份。任务跑到一半有人改配置，也不会让同一次生成前后参数不一致。
+        with use_meter(runtime.meter), use_config(runtime.config):
             async for event in _build_event_stream(runtime.kind, runtime.request):
                 # 方案在生成途中被删除：下一个事件不再消费。
                 # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，

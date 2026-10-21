@@ -16,8 +16,11 @@
   追加到列表末尾，**不要修改历史步骤**（改了会让已升级的库与新建的库再次分叉）。
 - 每步执行成功后**立即**写回 `user_version` 并提交，因此中途失败只会停在上一档，
   重跑从断点继续——重启天然幂等。
-- **新表不进 `init_schema` 的 `SCHEMA_SQL`**：否则「新库靠 init_schema、老库靠迁移」
-  会在两处各建一次同一张表，迟早对不上。新库也从版本 0 起步，逐条跑迁移。
+- **新表既要进迁移、也要进 `init_schema` 的 `SCHEMA_SQL`**（两边写同一份 DDL）。
+  只加迁移 → 只跑 `init_schema` 的测试与脚本会少表（`tests/conftest.py` 的
+  `isolated_db` 就只调 `init_schema()`）；只改基线 → 旧库永远没有这张表。
+  这条约定曾经反过来写过（「新表不进 SCHEMA_SQL」），v13 起被实际做法取代，
+  与 `core/db.py` 的模块注释对齐。
 
 失败处理的分野
 --------------
@@ -829,6 +832,164 @@ def _create_admin_audit_log_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _create_runtime_config_tables(conn: sqlite3.Connection) -> None:
+    """v16：建 `model_providers` 与 `system_config`，并播种六家内置供应商。
+
+    为什么需要它们
+    --------------
+    在此之前所有配置只在 `.env` 里：改一个值要改文件、重启服务。后台因此无法
+    「调参数」，供应商也无法切换（切换要改代码里的 Literal 与分支）。
+
+    两张表分工
+    ----------
+    - `system_config`：**只存覆盖项**。没有某一行 = 用 env 或代码默认值。
+      这是「升级后行为零变化」的结构保证——迁移不写任何覆盖行，所以所有键
+      仍然取 env 的现有值；「恢复默认」= 删掉那一行。
+    - `model_providers`：供应商登记。密钥**只存环境变量名**（ADR-042），
+      不落明文；激活真源是 `system_config.active_provider_id`，**不在本表加
+      `is_active` 列**（否则可能出现两行都为 1 的矛盾状态）。
+
+    为什么 `protocol` 而不是厂商名
+    ------------------------------
+    LangChain 的 chat 集成有二十来家，但按协议只有六类（见 `core/providers.py`）。
+    按协议建模，加一家 OpenAI 兼容的新厂商只需填 `base_url` + 密钥变量名，
+    **不改代码、不加依赖**；只有换协议才需要加适配分支。
+
+    为什么播种「六家」而不是「当前那一家」
+    ------------------------------------
+    后台的供应商页一进去就该看到全部可选协议，而不是从空列表开始猜要填什么。
+    播种只插内置行、不激活任何一家：没配 `active_provider_id` 时跟随
+    `DEFAULT_LLM_PROVIDER`，所以升级后的实际行为与升级前完全一致。
+
+    `INSERT OR IGNORE` 的用意
+    -------------------------
+    迁移可能被重跑（旧库补升、或在已升过的库上再跑一次）。用 `OR IGNORE`
+    保证「已存在的 id 一律不覆盖」——管理员改过的地址、密钥变量名、模型名
+    不会被一次迁移重置回默认值。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_providers (
+            id                TEXT PRIMARY KEY,
+            name              TEXT    NOT NULL DEFAULT '',
+            protocol          TEXT    NOT NULL DEFAULT 'openai_compatible',
+            base_url          TEXT    NOT NULL DEFAULT '',
+            api_key_env_var   TEXT    NOT NULL DEFAULT '',
+            default_model     TEXT    NOT NULL DEFAULT '',
+            max_tokens        INTEGER NOT NULL DEFAULT 4096,
+            context_window    INTEGER NOT NULL DEFAULT 0,
+            max_output        INTEGER NOT NULL DEFAULT 0,
+            thinking_enabled  INTEGER NOT NULL DEFAULT 0,
+            extra_json        TEXT    NOT NULL DEFAULT '{}',
+            builtin           INTEGER NOT NULL DEFAULT 0,
+            enabled           INTEGER NOT NULL DEFAULT 1,
+            sort_order        INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT    NOT NULL,
+            updated_at        TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_config (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by INTEGER
+        )
+        """
+    )
+
+    # 延迟导入：`core/config` 在模块级不依赖本模块，放函数内避免任何循环可能
+    from backend.core.config import get_settings
+
+    settings = get_settings()
+    current = (settings.default_llm_provider or "").strip().lower()
+    now = utc_now_text()
+
+    # 前三家的地址/窗口沿用现有配置——升级后「默认行为零变化」的落点。
+    # 后三家是新协议：只给密钥变量名与保守窗口，**模型名留空**让管理员填。
+    # 写死型号会过时；而「猜一个型号」比「空着并提示」更容易误导。
+    seeds: list[tuple[str, str, str, str, str, str, int, int]] = [
+        (
+            "ark",
+            "火山方舟",
+            "ark",
+            settings.ark_base_url or "",
+            "ARK_API_KEY",
+            settings.default_llm_model if current == "ark" else "",
+            int(settings.ark_max_tokens),
+            1 if settings.ark_thinking_enabled else 0,
+        ),
+        (
+            "anthropic",
+            "Anthropic Claude",
+            "anthropic",
+            settings.anthropic_api_url or "",
+            "ANTHROPIC_API_KEY",
+            settings.default_llm_model if current == "anthropic" else "",
+            int(settings.anthropic_max_tokens),
+            0,
+        ),
+        (
+            "openai",
+            "OpenAI",
+            "openai_compatible",
+            settings.openai_api_url or "",
+            "OPENAI_API_KEY",
+            settings.default_llm_model if current == "openai" else "",
+            int(settings.openai_max_tokens),
+            0,
+        ),
+        # 以下三家没有对应的 Settings 字段（它们不是既有供应商），
+        # 地址取各家公开端点，窗口留 0 = 交给 `model_registry` 兜底。
+        ("gemini", "Google Gemini", "google_genai", "", "GOOGLE_API_KEY", "", 8192, 0),
+        (
+            "nvidia",
+            "NVIDIA NIM",
+            "nvidia",
+            "https://integrate.api.nvidia.com/v1",
+            "NVIDIA_API_KEY",
+            "",
+            4096,
+            0,
+        ),
+        ("huggingface", "Hugging Face", "huggingface", "", "HUGGINGFACEHUB_API_TOKEN", "", 4096, 0),
+    ]
+
+    conn.executemany(
+        "INSERT OR IGNORE INTO model_providers "
+        "(id, name, protocol, base_url, api_key_env_var, default_model, max_tokens, "
+        " thinking_enabled, extra_json, builtin, enabled, sort_order, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', 1, 1, ?, ?, ?)",
+        [
+            (
+                pid,
+                name,
+                protocol,
+                base_url,
+                key_var,
+                model,
+                max_tokens,
+                thinking,
+                index,
+                now,
+                now,
+            )
+            for index, (
+                pid,
+                name,
+                protocol,
+                base_url,
+                key_var,
+                model,
+                max_tokens,
+                thinking,
+            ) in enumerate(seeds)
+        ],
+    )
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -851,6 +1012,7 @@ MIGRATIONS: list[Migration] = [
     Migration(version=13, name="app_logs_table", apply=_create_app_logs_table),
     Migration(version=14, name="jobs_token_columns", apply=_add_token_columns_to_jobs),
     Migration(version=15, name="admin_audit_log_table", apply=_create_admin_audit_log_table),
+    Migration(version=16, name="runtime_config_tables", apply=_create_runtime_config_tables),
 ]
 
 

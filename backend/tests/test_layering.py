@@ -35,13 +35,22 @@ _FORBIDDEN_IMPORT_RE = re.compile(
 
 # 具体供应商 SDK。业务代码只认 `llm_factory.get_llm()` 与统一的 `StreamingChatModel`
 # 协议，绝不直接 import 任何一家的 SDK。
+#
+# 六个协议各自的 SDK 都要扫到：少扫一个，那一家就可能在任意 service 里被直连，
+# 而「换供应商只改工厂」的承诺就破了。
 _VENDOR_SDK_RE = re.compile(
-    r"^\s*(?:from|import)\s+(arkruntime|langchain_openai|langchain_anthropic)\b",
+    r"^\s*(?:from|import)\s+"
+    r"(arkruntime|langchain_openai|langchain_anthropic|"
+    r"langchain_google_genai|langchain_nvidia_ai_endpoints|langchain_huggingface)\b",
     re.MULTILINE,
 )
 
-# 唯一允许直连供应商 SDK 的两处：工厂（按配置选供应商）与方舟适配器（含用量映射）。
-_VENDOR_SDK_ALLOWED = frozenset({"llm_factory.py", "ark_llm.py"})
+# 唯一允许直连供应商 SDK 的文件。
+#
+# ⚠️ 这里从两个文件（`llm_factory.py` + `ark_llm.py`）收敛成一个：方舟适配器已并入
+# `llm_factory.py`。白名单每多一个文件，就多一处「新加适配器时忘了登记」的机会；
+# 收敛之后规则只剩一句：**只有工厂能碰供应商 SDK**。
+_VENDOR_SDK_ALLOWED = frozenset({"llm_factory.py"})
 
 
 def _scan_for_backward_imports(directory: Path) -> list[str]:
@@ -99,17 +108,23 @@ def test_vendor_sdk_detector_is_not_vacuous():
     assert _VENDOR_SDK_RE.search("from arkruntime import AsyncArk")
     assert _VENDOR_SDK_RE.search("import langchain_openai")
     assert _VENDOR_SDK_RE.search("from langchain_anthropic import ChatAnthropic")
-    # 抽象层与自家的适配器不该被误报
+    # 新加的三个协议包也要真的被扫到（少扫一个，那家就能被直连）
+    assert _VENDOR_SDK_RE.search("from langchain_google_genai import ChatGoogleGenerativeAI")
+    assert _VENDOR_SDK_RE.search(
+        "from langchain_nvidia_ai_endpoints import ChatNVIDIA"
+    )
+    assert _VENDOR_SDK_RE.search("from langchain_huggingface import ChatHuggingFace")
+    # 抽象层与自家的工厂不该被误报
     assert not _VENDOR_SDK_RE.search("from langchain_core.messages import AIMessageChunk")
     assert not _VENDOR_SDK_RE.search(
-        "from backend.services.ark_llm import VolcanoArkChatModel"
+        "from backend.services.llm_factory import VolcanoArkChatModel"
     )
 
 
 def test_only_adapters_import_vendor_sdk():
     """业务层不得直接 import 供应商 SDK（方舟 / OpenAI / Anthropic）。
 
-    换供应商时要改的只有工厂（`llm_factory`）与各自的适配器（如 `ark_llm`）。
+    换供应商时要改的只有工厂（`llm_factory`，六家适配器都在里面）。
     若某个 service 直接 import `arkruntime` / `langchain_openai`，换供应商就成了
     全仓大改；用量映射这类适配逻辑也会被复制到各处，迟早走形。
     """

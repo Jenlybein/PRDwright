@@ -25,8 +25,8 @@ import logging
 
 from fastapi import APIRouter
 
-from backend.core.config import get_settings
 from backend.core.db import connect
+from backend.core.runtime_config import get_runtime_config, provider_key_present
 from backend.services.skill_registry import audit_skills, describe_manifest, skills_root
 
 router = APIRouter(tags=["system"])
@@ -55,20 +55,34 @@ def _check_database() -> dict:
 
 
 def _check_llm() -> dict:
-    """探测大模型供应商：**只校验配置就位，不发真实调用**（见模块文档）。"""
-    settings = get_settings()
-    provider = settings.default_llm_provider
-    model = settings.default_llm_model
+    """探测大模型供应商：**只校验配置就位，不发真实调用**（见模块文档）。
 
-    try:
-        settings.require_api_key()
-    except RuntimeError:
-        # 不用异常自带的消息：那句里带 `.env` 的绝对路径，而本接口是公开的
+    读的是**运行时配置**而不是 env：后台切过供应商之后，体检必须反映「实际生效的
+    那一家」。否则会出现「体检说 ark 正常、实际生成却在用另一家」的假绿。
+    """
+    config = get_runtime_config()
+    spec = config.active_provider
+    if spec is None:
         return {
             "ok": False,
-            "detail": f"未配置 {settings.api_key_env_var()}",
+            "detail": "没有可用的模型供应商，请在后台激活一家",
+            "provider": "",
+            "model": "",
+            "config_source": config.source,
+        }
+
+    provider = spec.protocol
+    model = spec.model
+
+    if not provider_key_present(spec):
+        # 不用异常自带的消息：那句里带 `.env` 的绝对路径，而本接口是公开的。
+        # 变量名本身可以给——它不含密钥值，只是「去哪个环境变量取」。
+        return {
+            "ok": False,
+            "detail": f"未配置 {spec.api_key_env_var or '密钥'}",
             "provider": provider,
             "model": model,
+            "config_source": config.source,
         }
 
     return {

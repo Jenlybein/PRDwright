@@ -389,3 +389,201 @@ export function messageOf(error: unknown): string {
   if (error instanceof ApiError) return error.message
   return '操作失败，请稍后重试'
 }
+
+// ---------------------------------------------------------------------------
+// 系统配置与模型供应商（v4 T3）
+// ---------------------------------------------------------------------------
+
+/** 一个可调配置项 */
+export interface ConfigItem {
+  key: string
+  /** 当前生效值 */
+  value: unknown
+  /** env / 代码默认值 */
+  default: unknown
+  /** `db` = 后台覆盖过；`env` = 用默认值 */
+  source: string
+  /** 控件类型：bool / number / enum / text */
+  type: string
+  label: string
+  help: string
+  /** 「改错了不明显但影响大」的项，前端要二次确认 */
+  danger: boolean
+  options: string[] | null
+  min: number | null
+  max: number | null
+  min_exclusive: number | null
+}
+
+export interface ConfigGroup {
+  key: string
+  label: string
+  help: string
+  items: ConfigItem[]
+}
+
+/** 当前激活供应商的只读视图（不含密钥） */
+export interface ActiveProviderView {
+  id: string
+  name: string
+  protocol: string
+  protocol_label: string
+  base_url: string
+  default_model: string
+  max_tokens: number
+  context_window: number
+  max_output: number
+  thinking_enabled: boolean
+}
+
+/** 配置页的全量数据 */
+export interface SystemConfig {
+  groups: ConfigGroup[]
+  active_provider_id: string
+  active_provider: ActiveProviderView | null
+  /** db / env / degraded */
+  config_source: string
+  /** 配置指纹：保存后应变化，未变说明没生效 */
+  revision: string
+  /** 激活供应商缺密钥时的提示 */
+  missing_key: string
+}
+
+/** 一家供应商（⚠️ 不含任何密钥值） */
+export interface Provider {
+  id: string
+  name: string
+  protocol: string
+  protocol_label: string
+  base_url: string
+  api_key_env_var: string
+  /** 该变量当前是否有值（只回布尔） */
+  key_present: boolean
+  default_model: string
+  max_tokens: number
+  context_window: number
+  max_output: number
+  thinking_enabled: boolean
+  builtin: boolean
+  enabled: boolean
+  sort_order: number
+  active: boolean
+  extra: Record<string, unknown>
+}
+
+export interface ProviderPreset {
+  id: string
+  name: string
+  protocol: string
+  base_url: string
+  api_key_env_var: string
+  default_model: string
+}
+
+export interface ProviderList {
+  providers: Provider[]
+  active_provider_id: string
+  presets: ProviderPreset[]
+  protocols: { value: string; label: string }[]
+  /** 激活成功但有风险时的提示（如缺密钥） */
+  warning: string
+}
+
+export interface ProviderTestResult {
+  ok: boolean
+  detail: string
+  latency_ms: number
+}
+
+/** 读取可调配置。对应 `GET /api/admin/config`。 */
+export async function fetchConfig(): Promise<SystemConfig> {
+  const { data } = await http.get<SystemConfig>('/api/admin/config')
+  return data
+}
+
+/**
+ * 修改配置。对应 `PATCH /api/admin/config`。
+ *
+ * 后端**先全量校验再写**：有一项非法则整批不落库，返回 400 带具体原因。
+ */
+export async function updateConfig(updates: Record<string, unknown>): Promise<SystemConfig> {
+  const { data } = await http.patch<SystemConfig>('/api/admin/config', { updates })
+  return data
+}
+
+/** 恢复默认（删掉覆盖项）。对应 `POST /api/admin/config/reset`。 */
+export async function resetConfig(keys?: string[]): Promise<SystemConfig> {
+  const { data } = await http.post<SystemConfig>('/api/admin/config/reset', {
+    keys: keys ?? null,
+  })
+  return data
+}
+
+/** 供应商列表 + 预设 + 协议。对应 `GET /api/admin/providers`。 */
+export async function fetchProviders(): Promise<ProviderList> {
+  const { data } = await http.get<ProviderList>('/api/admin/providers')
+  return {
+    providers: data.providers ?? [],
+    active_provider_id: data.active_provider_id ?? '',
+    presets: data.presets ?? [],
+    protocols: data.protocols ?? [],
+    warning: data.warning ?? '',
+  }
+}
+
+/** 新增供应商。对应 `POST /api/admin/providers`。 */
+export async function createProvider(payload: {
+  id: string
+  name?: string
+  protocol: string
+  base_url?: string
+  api_key_env_var?: string
+  default_model?: string
+  max_tokens?: number
+  context_window?: number
+  max_output?: number
+}): Promise<ProviderList> {
+  const { data } = await http.post<ProviderList>('/api/admin/providers', payload)
+  return data
+}
+
+/** 编辑供应商。对应 `PATCH /api/admin/providers/{id}`。 */
+export async function updateProvider(
+  providerId: string,
+  payload: Record<string, unknown>,
+): Promise<ProviderList> {
+  const { data } = await http.patch<ProviderList>(
+    `/api/admin/providers/${encodeURIComponent(providerId)}`,
+    payload,
+  )
+  return data
+}
+
+/** 删除供应商。对应 `DELETE /api/admin/providers/{id}`。 */
+export async function deleteProvider(providerId: string): Promise<ProviderList> {
+  const { data } = await http.delete<ProviderList>(
+    `/api/admin/providers/${encodeURIComponent(providerId)}`,
+  )
+  return data
+}
+
+/** 激活供应商。对应 `POST /api/admin/providers/{id}/activate`。 */
+export async function activateProvider(providerId: string): Promise<ProviderList> {
+  const { data } = await http.post<ProviderList>(
+    `/api/admin/providers/${encodeURIComponent(providerId)}/activate`,
+  )
+  return data
+}
+
+/**
+ * 测试供应商连通性。对应 `POST /api/admin/providers/{id}/test`。
+ *
+ * 它会**真的发一次最小调用**（后端限制 max_tokens=16、15 秒超时），
+ * 所以可能比其它接口慢，也可能因为网络问题失败——这正是它存在的意义。
+ */
+export async function testProvider(providerId: string): Promise<ProviderTestResult> {
+  const { data } = await http.post<ProviderTestResult>(
+    `/api/admin/providers/${encodeURIComponent(providerId)}/test`,
+  )
+  return data
+}

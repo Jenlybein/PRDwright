@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import StreamEvent
-from backend.core.config import get_settings
+from backend.core.runtime_config import get_runtime_config
 from backend.services.doc_skeleton import (
     DocSection,
     join_sections,
@@ -670,7 +670,7 @@ async def stream_review_and_rewrite(
     审核失败按「通过」处理、改写失败保留初稿——这两步是锦上添花，不能因为它们挂掉
     就把已经生成好的正文丢掉（与 `review_whole_document` 同口径）。
     """
-    settings = get_settings()
+    settings = get_runtime_config().settings
     auditor = review_llm or llm
 
     messages = review_messages(

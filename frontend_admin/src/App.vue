@@ -19,6 +19,7 @@ const navItems = [
   { name: 'users', label: '用户' },
   { name: 'invites', label: '邀请码' },
   { name: 'logs', label: '系统日志' },
+  { name: 'config', label: '配置' },
   { name: 'audit', label: '操作记录' },
 ]
 
@@ -40,12 +41,12 @@ async function onLogout() {
           <span class="text-xs text-subtle">管理后台</span>
         </div>
         <div v-if="session.isLoggedIn" class="flex items-center gap-3">
-          <nav class="flex items-center gap-1">
+          <nav class="flex flex-wrap items-center gap-1 gap-y-0.5">
             <RouterLink
               v-for="item in navItems"
               :key="item.name"
               :to="{ name: item.name }"
-              class="rounded-control px-2.5 py-1 text-sm text-body hover:bg-surface-2"
+              class="whitespace-nowrap rounded-control px-2.5 py-1 text-sm text-body hover:bg-surface-2"
               active-class="bg-surface-2 font-medium text-fg"
             >
               {{ item.label }}

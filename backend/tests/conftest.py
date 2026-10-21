@@ -23,6 +23,14 @@ def _reset_runtime_state() -> None:
 
     auth_service._issuer = None  # noqa: SLF001 - 测试里刻意重置模块级单例
 
+    # 运行时配置有进程内快照（TTL 5 秒）与 `.env` 快照缓存。不清的话，
+    # 「上一个用例往 system_config 写了覆盖项」会带进下一个用例——
+    # 而 `DB_PATH` 每次都换，缓存里那份却指向旧库，症状是「查到的配置对不上」。
+    from backend.core import runtime_config, secrets
+
+    runtime_config.invalidate()
+    secrets.reset_cache()
+
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):

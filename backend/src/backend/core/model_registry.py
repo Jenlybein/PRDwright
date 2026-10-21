@@ -48,11 +48,20 @@ _KNOWN_MODELS: dict[tuple[str, str], ModelLimits] = {
     ),
 }
 
-# 供应商级默认值：该供应商下未单独登记的型号一律按此计算
+# 供应商级默认值：该供应商下未单独登记的型号一律按此计算。
+# 键是**协议名**（`core/providers.py` 的取值域），不是厂商名——一个协议下的
+# 厂商共用一组保守下界即可，因为真正精确的值应该由供应商行里的
+# `context_window` / `max_output` 填（见 `runtime_config.resolve_model_limits`）。
 _PROVIDER_DEFAULTS: dict[str, ModelLimits] = {
     "ark": ModelLimits(context_window=128_000, max_output=4_096),
     "anthropic": ModelLimits(context_window=200_000, max_output=8_192),
+    # 旧的厂商名保留一份：有些历史调用点仍按 `openai` 取值，
+    # 删掉它会让那些地方静默落到 32k 兜底（预算突然变得很紧）。
     "openai": ModelLimits(context_window=128_000, max_output=16_384),
+    "openai_compatible": ModelLimits(context_window=128_000, max_output=16_384),
+    "google_genai": ModelLimits(context_window=1_000_000, max_output=65_536),
+    "nvidia": ModelLimits(context_window=128_000, max_output=4_096),
+    "huggingface": ModelLimits(context_window=64_000, max_output=4_096),
 }
 
 # 全局兜底：provider 也没登记时（如将来新增的供应商）用的保守值

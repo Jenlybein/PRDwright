@@ -25,6 +25,7 @@ from backend.api.health import router as health_router
 from backend.api.jobs import router as jobs_router
 from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
+from backend.core.runtime_config import get_runtime_config, invalidate
 from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
 from backend.core.migrations import run_migrations
@@ -58,6 +59,11 @@ async def lifespan(_: FastAPI):
     # 对已存在的表是空操作），新增的表与列一律由迁移补上。顺序不能颠倒——迁移可能
     # 依赖基线表（例如把旧快照回填进新表）。
     run_migrations()
+    # 迁移可能刚建好 `system_config` / `model_providers`，也可能刚播种了内置供应商。
+    # 配置层的缓存若在迁移之前被建过（导入期、或某个模块级初始化），它会记住
+    # 「表不存在 → 降级」那一份，并在恢复 TTL 内继续用降级值。这里主动失效一次，
+    # 让第一条业务请求读到的是真实的配置。
+    invalidate()
     # 日志持久化必须在建表与迁移**之后**挂上：`app_logs` 表若还不存在，
     # 启动这批日志会全部写库失败并降级，而「启动日志恰好没有」正是最影响排障、
     # 又最不容易被察觉的一种丢数据。放在这里还有个附带好处——后面每一步
@@ -87,7 +93,11 @@ async def lifespan(_: FastAPI):
         extra={
             "event": "service.started",
             "log_format": current.log_format,
-            "llm": f"{current.default_llm_provider}/{current.default_llm_model}",
+            # 记**实际生效**的供应商与来源：`source` 是 db / env / degraded 之一，
+            # 一眼就能看出「后台改的配置到底有没有被读到」。排查「改了没生效」时
+            # 这是第一眼要看的信息。
+            "llm": _startup_llm_label(get_runtime_config()),
+            "config_source": get_runtime_config().source,
             "skills": "、".join(
                 f"{manifest.name} v{manifest.version}"
                 f"（{'/'.join(manifest.applies_to) or '未声明产物'}）"
@@ -101,6 +111,19 @@ async def lifespan(_: FastAPI):
     # 退出前 flush：最后一批日志还可能在内存队列里，而它们往往正好是
     # 「服务为什么退出」的那几行。
     shutdown_log_persistence()
+
+
+def _startup_llm_label(config) -> str:
+    """启动日志里那截 `协议/模型` 文本。
+
+    取**运行时生效**的供应商而不是 `DEFAULT_LLM_PROVIDER`：后台切过供应商之后，
+    启动日志若还印着 env 里那家，读日志的人会以为配置没生效——而实际上生效了，
+    只是这一行没跟上。
+    """
+    spec = config.active_provider
+    if spec is None:
+        return "（无可用供应商）"
+    return f"{spec.protocol}/{spec.model or '（未填模型）'}"
 
 
 app = FastAPI(

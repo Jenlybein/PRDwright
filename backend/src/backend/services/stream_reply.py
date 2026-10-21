@@ -29,9 +29,9 @@ from typing import Any, AsyncIterator, Callable
 
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
-from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
+from backend.core.runtime_config import get_runtime_config
 from backend.core.request_context import current_request_id
 from backend.services.llm_factory import StreamingChatModel
 from backend.services.llm_meter import current_meter
@@ -153,7 +153,7 @@ def _check_budget(messages: list[BaseMessage]) -> None:
         BudgetExceededError: 估算值超过有效预算。
     """
     meter = current_meter()
-    settings = get_settings()
+    settings = get_runtime_config().settings
     if not settings.llm_budget_enabled:
         return
 
@@ -196,7 +196,7 @@ async def _astream_chunks(
     """
     _check_budget(messages)
     meter = current_meter()
-    settings = get_settings()
+    settings = get_runtime_config().settings
 
     for attempt in range(settings.llm_max_retries + 1):
         started_at = time.monotonic()

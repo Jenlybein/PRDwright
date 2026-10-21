@@ -159,6 +159,38 @@ CREATE TABLE IF NOT EXISTS admin_audit_log (
 CREATE INDEX IF NOT EXISTS idx_admin_audit_ts    ON admin_audit_log(ts);
 -- 「这个人最近做过什么」是事后追责最高频的问法
 CREATE INDEX IF NOT EXISTS idx_admin_audit_actor ON admin_audit_log(actor_id, ts);
+
+-- 供应商登记（迁移 v16）。密钥**只存环境变量名**，不落明文（ADR-042）。
+-- `protocol` 是「协议」而不是厂商：加一家 OpenAI 兼容的新厂商只需填 base_url，
+-- 不改代码、不加依赖。激活真源在 system_config.active_provider_id，
+-- 本表刻意**不加 is_active 列**——否则可能出现两行都为 1 的矛盾状态。
+CREATE TABLE IF NOT EXISTS model_providers (
+    id                TEXT PRIMARY KEY,
+    name              TEXT    NOT NULL DEFAULT '',
+    protocol          TEXT    NOT NULL DEFAULT 'openai_compatible',
+    base_url          TEXT    NOT NULL DEFAULT '',
+    api_key_env_var   TEXT    NOT NULL DEFAULT '',
+    default_model     TEXT    NOT NULL DEFAULT '',
+    max_tokens        INTEGER NOT NULL DEFAULT 4096,
+    context_window    INTEGER NOT NULL DEFAULT 0,   -- 0 = 交给 model_registry
+    max_output        INTEGER NOT NULL DEFAULT 0,
+    thinking_enabled  INTEGER NOT NULL DEFAULT 0,   -- 仅 ark 有语义
+    extra_json        TEXT    NOT NULL DEFAULT '{}',
+    builtin           INTEGER NOT NULL DEFAULT 0,   -- 1 = 内置，不可删
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    sort_order        INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL
+);
+
+-- 运行时配置的**覆盖项**（迁移 v16）。没有某一行 = 用 env 或代码默认值，
+-- 这是「升级后行为零变化」的结构保证：「恢复默认」就是删掉那一行。
+CREATE TABLE IF NOT EXISTS system_config (
+    key        TEXT PRIMARY KEY,   -- 白名单键，或 active_provider_id
+    value      TEXT NOT NULL,      -- JSON 编码的标量
+    updated_at TEXT NOT NULL,
+    updated_by INTEGER             -- 管理员 id；删号后置空，故不加外键
+);
 """
 
 # 时间戳统一用 UTC 的 ISO 8601，避免本地时区带来的歧义

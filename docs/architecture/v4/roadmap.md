@@ -145,6 +145,40 @@ v15 `admin_audit_log`）；日志采集已挂上并在攒数据；`frontend_admi
 **风险（最高的一项）**：第 3 项会碰生成主链路。
 缓解：白名单外的项一律不动；改动以「默认行为零变化」为验收底线。
 
+**进度：T3 全部落地。**
+
+- 迁移 **v16**：`system_config`（只存覆盖项）+ `model_providers`，并播种六家内置
+  供应商（`INSERT OR IGNORE`，重跑不覆盖管理员改过的值）。
+- `core/runtime_config.py`：白名单 17 项 + `active_provider_id`，解析顺序
+  **DB > env > 默认**；5 秒 TTL + 写后 `invalidate()`；表不可用时降级到 env 且不抛。
+- `core/providers.py`：**按协议**建模（`openai_compatible` / `anthropic` / `ark` /
+  `google_genai` / `nvidia` / `huggingface`），加新厂商只需填 `base_url`，不改代码。
+- `core/secrets.py`：按键名取密钥（先 `os.environ`、再 `.env` 快照）——补上
+  「pydantic-settings 读 `.env` 但不写 `os.environ`」这个坑。
+- 主链路 9 个文件改为读运行时配置；**构造期快照全部拆除**（`PrdSectionWriter`
+  的 5 个属性改成只读属性、三处 LLM 缓存改按配置指纹重建）。
+- `ark_llm.py` **并入 `llm_factory.py`**；分层白名单从两个文件收敛成一个。
+- 接口 11 条 + 前端 `/config` 页（含「测试连接」真调）。
+- 用例：`test_config_tables`(10) / `test_runtime_config`(22) / `test_config_effect`(9) /
+  `test_admin_config_api`(30) + 前端 `config.spec.ts`(13)。
+
+> 实现时定下四个口径，都写进了用例：
+> 1. **一次生成 = 冻结一份配置快照**（`use_config`，与 `use_meter` 同一套 ContextVar）。
+>    它同时满足「改了下次生成生效」与「跑到一半不漂移」——后者会让章节乱序、正文重复，
+>    且极难归因。直连 SSE 的路由在 `make_sse_generator` 里统一冻结（那才是消费时机）。
+> 2. **启动类配置完全不进白名单**（日志级别/落库开关/db 路径等）。它们改了必须重启，
+>    放进来只会制造「显示已保存、实际没变」。`db_path` 尤其不能进——配置层若参与
+>    「连哪个库」就会与 `connect()` 形成递归。
+> 3. **`prd_section_review_max_tokens` 的死配置被修好**：它此前被 `doc_review_max_tokens`
+>    顶掉（`_get_section_writer` 传了整篇审核的实例），改它没有任何效果。现在章节审核
+>    用自己的实例；**默认值同时对齐到 2048**，所以默认行为零变化。
+> 4. **失败率/配置校验复用同一份定义**：约束从 `Settings.model_fields` 反射而来，
+>    不另写一套；删内置行、删激活项两条规则只在服务层写一次（UI 与脚本共用）。
+
+> 顺带修掉 `backend/.env.example` 的一处死配置：`ARK_API_BASE_URL` 应为 `ARK_BASE_URL`
+> （字段名 `ark_base_url`，pydantic 按字段名大写匹配）。原写法被 `extra="ignore"`
+> 静默忽略，自定义地址从未生效过。
+
 ---
 
 ## T4 · 日志查看 UI（v4.4）

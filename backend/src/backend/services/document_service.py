@@ -40,10 +40,10 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
+from backend.core.runtime_config import get_runtime_config
 from backend.services.doc_skeleton import extract_headings, skeletonize
-from backend.services.llm_factory import StreamingChatModel, get_llm
+from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
 from backend.services.llm_utils import extract_json_object
 from backend.services.document_review import (
     ReviewOutcome,
@@ -310,10 +310,19 @@ class DocumentService:
         # 分流（如 `TwoStageLLM`），若在它之外再偷偷建一个「审核专用」实例，
         # 那些断言会全部落空。
         self._llm_injected = llm is not None
+        # 三个 LLM 实例各自的**配置指纹**：指纹变了就重建。没有它，后台换了供应商/
+        # 模型/输出上限之后，已创建的服务实例会一直用旧实例——而接口返回 200、
+        # 页面显示已保存，看不出任何异常。
+        self._llm_key: tuple[str, str, str, int] | None = None
+        self._review_llm_key: tuple[str, str, str, int] | None = None
+        self._section_review_llm_key: tuple[str, str, str, int] | None = None
         # 分章节生成器。惰性创建：它自己也会惰性获取 LLM，且只有在技能包可用时才会用到。
         self._section_writer: PrdSectionWriter | None = None
-        # 审核专用的小输出窗口实例（惰性，见 `review_llm`）
+        # 审核专用的小输出窗口实例（惰性，见 `review_llm` / `section_review_llm`）
         self._review_llm: StreamingChatModel | None = None
+        # 构造时是否显式注入了 review_llm（测试用）。注入的一律原样复用。
+        self._review_llm_injected = False
+        self._section_review_llm: StreamingChatModel | None = None
 
     # ------------------------------------------------------------------
     # LLM 惰性获取
@@ -321,14 +330,18 @@ class DocumentService:
 
     @property
     def llm(self) -> StreamingChatModel:
-        """LLM 实例，首次访问时才创建（避免服务初始化阶段就要求密钥）。"""
-        if self._llm is None:
+        """LLM 实例；按配置指纹惰性创建（后台换供应商后下一次调用即换）。"""
+        if self._llm_injected:
+            return self._llm  # type: ignore[return-value]
+        key = config_fingerprint()
+        if self._llm is None or self._llm_key != key:
             self._llm = get_llm()
+            self._llm_key = key
         return self._llm
 
     @property
     def review_llm(self) -> StreamingChatModel:
-        """审核专用的**小输出窗口**实例。
+        """**整篇**审核专用的小输出窗口实例（`doc_review_max_tokens`）。
 
         审核只是「判定 + 批注」，输出量与正文不在一个量级，却默认占着生成用的那个
         巨大上限（`ARK_MAX_TOKENS` 实测是 131072）。给它一个远小的窗口既省时间也
@@ -338,39 +351,66 @@ class DocumentService:
         是 `self.max_tokens`，`astream(..., max_tokens=...)` 不报错也不生效。
 
         ⚠️ 为什么注入了 `llm` 就直接复用它：见 `__init__` 里的说明。
-
-        不需要全局缓存：该封装每次调用都现建现关客户端，实例不持有连接池，
-        多一个实例的代价可忽略；这里缓存的粒度是「每个 service 实例」，
-        一份文档的两三次审核共用同一个。
         """
-        if self._review_llm is None:
-            self._review_llm = (
-                self.llm
-                if self._llm_injected
-                else get_llm(max_tokens=get_settings().doc_review_max_tokens)
-            )
+        if self._review_llm_injected:
+            return self._review_llm  # type: ignore[return-value]
+        if self._llm_injected:
+            return self.llm
+        max_tokens = int(get_runtime_config().settings.doc_review_max_tokens)
+        key = config_fingerprint(max_tokens)
+        if self._review_llm is None or self._review_llm_key != key:
+            self._review_llm = get_llm(max_tokens=max_tokens)
+            self._review_llm_key = key
         return self._review_llm
+
+    @property
+    def section_review_llm(self) -> StreamingChatModel:
+        """**分章节**审核专用实例（`prd_section_review_max_tokens`）。
+
+        为什么要跟 `review_llm` 分开
+        ----------------------------
+        这两个配置项一直是分开定义的（整篇审核 2048、单章审核 1024），但章节链路此前
+        直接把 `review_llm` 传给了 `PrdSectionWriter`——于是 `prd_section_review_max_tokens`
+        成了**死配置**：改它没有任何效果，因为它从未被读取过。
+
+        这里给它一个真正独立的实例：两个配置各管一处，改哪一处都是真生效。
+        默认值已对齐（都是 2048），所以**默认行为完全不变**。
+        """
+        if self._llm_injected:
+            return self.llm
+        max_tokens = int(get_runtime_config().settings.prd_section_review_max_tokens)
+        key = config_fingerprint(max_tokens)
+        if self._section_review_llm is None or self._section_review_llm_key != key:
+            self._section_review_llm = get_llm(max_tokens=max_tokens)
+            self._section_review_llm_key = key
+        return self._section_review_llm
 
     def _get_section_writer(self, review_enabled: bool | None = None) -> PrdSectionWriter:
         """获取 PRD 分章节生成器（惰性创建，与本源共用同一个 LLM 实例）。
 
         Args:
             review_enabled: 本次是否启用逐章审核/改写。**不传（`None`）返回共享实例**，
-                行为完全等于从前；显式传入时**每次新建一个**——生成器把该开关存在实例上，
-                复用一个共享实例就等于「后一个请求悄悄改掉前一个请求的配置」。
+                行为完全等于从前；显式传入时**每次新建一个**——生成器把该开关存成
+                属性，复用一个共享实例就等于「后一个请求悄悄改掉前一个请求的配置」。
                 新建时仍复用同一个 LLM 实例（`self.llm`），不会多开客户端。
 
         Returns:
             `PrdSectionWriter` 实例。
+
+        ⚠️ 传给 writer 的 `review_llm` 是 **`section_review_llm`**，不是 `review_llm`。
+        用错这个就是前面说的死配置：`prd_section_review_max_tokens` 被
+        `doc_review_max_tokens` 顶掉，改它完全没反应。
         """
         if review_enabled is None:
             if self._section_writer is None:
                 self._section_writer = PrdSectionWriter(
-                    llm=self.llm, review_llm=self.review_llm
+                    llm=self.llm, review_llm=self.section_review_llm
                 )
             return self._section_writer
         return PrdSectionWriter(
-            llm=self.llm, review_llm=self.review_llm, review_enabled=review_enabled
+            llm=self.llm,
+            review_llm=self.section_review_llm,
+            review_enabled=review_enabled,
         )
 
     # ------------------------------------------------------------------

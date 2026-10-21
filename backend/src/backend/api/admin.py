@@ -30,7 +30,8 @@ from fastapi import APIRouter, Depends, status
 from backend.api import schemas
 from backend.api.deps import require_admin
 from backend.core.errors import AppError
-from backend.services import admin_service
+from backend.core.providers import PRESETS
+from backend.services import admin_config_service, admin_service
 from backend.services.auth_service import AuthError, User
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -377,4 +378,216 @@ async def list_logs(
         total=data["total"],
         page=data["page"],
         page_size=data["page_size"],
+    )
+
+
+# ----------------------------------------------------------------------
+# 系统配置（v4 T3）
+# ----------------------------------------------------------------------
+
+
+@router.get("/config", response_model=schemas.AdminConfigResponse, summary="读取可调配置")
+async def get_config(user: User = Depends(require_admin)) -> schemas.AdminConfigResponse:
+    """分组返回全部可调项 + 当前激活供应商 + 配置指纹。
+
+    每个配置项都带 `value`（生效值）与 `default`（env/代码默认值）。两者不同说明
+    后台覆盖过，`source` 会标 `db` —— 这正是排查「改了没生效」时要看的第一列。
+
+    **启动类配置不在响应里**（日志级别、落库开关、db 路径等）：它们改了必须重启，
+    放进来只会制造「显示已保存、实际没变」的困惑。这是刻意的省略，不是遗漏。
+    """
+    del user
+    return schemas.AdminConfigResponse(**admin_config_service.get_config())
+
+
+@router.patch("/config", response_model=schemas.AdminConfigResponse, summary="修改配置")
+async def update_config(
+    payload: schemas.AdminUpdateConfigRequest,
+    user: User = Depends(require_admin),
+) -> schemas.AdminConfigResponse:
+    """批量修改配置项，**下一次生成即生效**。
+
+    先全量校验再写：只要有一项非法，整批都不落库。配置是一组语义，写一半会留下
+    「并发度改了、审核开关没改」这种撕裂状态，而它下次生成就真的生效了。
+
+    返回值是**改完之后重新读出来的**配置，不是「你提交的那份」：
+    前端据此比对「我提交的」与「实际生效的」，从而发现「保存成功但没生效」。
+    """
+    return schemas.AdminConfigResponse(
+        **admin_config_service.update_config(user, payload.updates)
+    )
+
+
+@router.post("/config/reset", response_model=schemas.AdminConfigResponse, summary="恢复默认")
+async def reset_config(
+    payload: schemas.AdminResetConfigRequest,
+    user: User = Depends(require_admin),
+) -> schemas.AdminConfigResponse:
+    """删除覆盖项，回到 env / 代码默认值。
+
+    「恢复默认」在数据层就是**删掉那一行**——这也是「只存覆盖项」这个设计的收益：
+    不需要另一张表记默认值，删了就是默认。
+    """
+    return schemas.AdminConfigResponse(
+        **admin_config_service.reset_config(user, payload.keys)
+    )
+
+
+@router.get(
+    "/config/effective",
+    response_model=schemas.AdminConfigResponse,
+    summary="当前生效配置（复核用）",
+)
+async def config_effective(
+    user: User = Depends(require_admin),
+) -> schemas.AdminConfigResponse:
+    """与 `GET /config` 同一份数据，但**语义不同**：它是给前端「保存后复核」用的。
+
+    为什么需要它
+    ------------
+    `PATCH` 的响应体也可能是缓存里的回声（比如多 worker 里写的那台与读的那台不是同一个
+    进程）。让前端**再独立请求一次**，两次一致才算真的生效——这是唯一能排除
+    「响应体看着对、实际没写进去」的办法。
+    """
+    del user
+    return schemas.AdminConfigResponse(**admin_config_service.get_config())
+
+
+# ----------------------------------------------------------------------
+# 模型供应商（v4 T3）
+# ----------------------------------------------------------------------
+
+
+@router.get(
+    "/providers",
+    response_model=schemas.AdminProviderListResponse,
+    summary="供应商列表",
+)
+async def list_providers(
+    user: User = Depends(require_admin),
+) -> schemas.AdminProviderListResponse:
+    """全部供应商 + 当前激活项 + 新增时的预设模板。
+
+    **响应里没有密钥**，只有 `api_key_env_var`（变量名）与 `key_present`（布尔）。
+    `key_present=false` 表示「这个变量当前没值」，界面据此提示「还没配密钥」——
+    而密钥值本身永远不出后端（ADR-042）。
+    """
+    del user
+    return schemas.AdminProviderListResponse(**admin_config_service.list_providers())
+
+
+@router.get(
+    "/providers/presets",
+    response_model=list[schemas.AdminProviderPreset],
+    summary="新增供应商的预设模板",
+)
+async def provider_presets(
+    user: User = Depends(require_admin),
+) -> list[schemas.AdminProviderPreset]:
+    """常见厂商的地址与变量名模板。
+
+    ⚠️ 路由必须注册在 `/{provider_id}` **之前**，否则 `presets` 会被当成一个
+    provider id 去查（然后 404）。
+    """
+    del user
+    return [schemas.AdminProviderPreset(**item) for item in PRESETS]
+
+
+@router.post(
+    "/providers",
+    response_model=schemas.AdminProviderListResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="新增供应商",
+)
+async def create_provider(
+    payload: schemas.AdminCreateProviderRequest,
+    user: User = Depends(require_admin),
+) -> schemas.AdminProviderListResponse:
+    """登记一家新供应商。
+
+    `id` 是身份（会进 `RunMeter.provider` 与任务回执），创建后不可改；
+    重复时给 400 而不是静默覆盖别人的行。
+
+    `api_key_env_var` 只填**变量名**（如 `DEEPSEEK_API_KEY`），不是密钥本身。
+    """
+    return schemas.AdminProviderListResponse(
+        **admin_config_service.create_provider(user, payload.model_dump())
+    )
+
+
+@router.patch(
+    "/providers/{provider_id}",
+    response_model=schemas.AdminProviderListResponse,
+    summary="编辑供应商",
+)
+async def update_provider(
+    provider_id: str,
+    payload: schemas.AdminUpdateProviderRequest,
+    user: User = Depends(require_admin),
+) -> schemas.AdminProviderListResponse:
+    """只改传入的字段。`id` 与 `builtin` 不可改（服务层会过滤掉）。"""
+    return schemas.AdminProviderListResponse(
+        **admin_config_service.update_provider(
+            user, provider_id, payload.model_dump(exclude_unset=True)
+        )
+    )
+
+
+@router.delete(
+    "/providers/{provider_id}",
+    response_model=schemas.AdminProviderListResponse,
+    summary="删除供应商",
+)
+async def delete_provider(
+    provider_id: str,
+    user: User = Depends(require_admin),
+) -> schemas.AdminProviderListResponse:
+    """删除一家供应商。
+
+    两种情形会被拒（403）：**内置行**（删了就回不到出厂状态）、
+    **当前激活的那家**（删完下次生成会全线失败，而那时管理员多半已经离开了）。
+    """
+    return schemas.AdminProviderListResponse(
+        **admin_config_service.delete_provider(user, provider_id)
+    )
+
+
+@router.post(
+    "/providers/{provider_id}/activate",
+    response_model=schemas.AdminProviderListResponse,
+    summary="激活供应商",
+)
+async def activate_provider(
+    provider_id: str,
+    user: User = Depends(require_admin),
+) -> schemas.AdminProviderListResponse:
+    """切换到这家供应商，**下一次生成即生效**（正在跑的任务不受影响）。
+
+    缺密钥时**允许激活**，但响应里的 `warning` 会说明「下一次生成会报错」。
+    拦着不让激活会让「先切过去、再去配密钥」这个正常顺序走不通。
+    """
+    return schemas.AdminProviderListResponse(
+        **admin_config_service.activate_provider(user, provider_id)
+    )
+
+
+@router.post(
+    "/providers/{provider_id}/test",
+    response_model=schemas.AdminProviderTestResponse,
+    summary="测试供应商连通性",
+)
+async def test_provider(
+    provider_id: str,
+    user: User = Depends(require_admin),
+) -> schemas.AdminProviderTestResponse:
+    """**真的发一次最小调用**（`max_tokens=16`、15 秒超时）。
+
+    为什么必须真调：「参数填对了」与「真的能生成」是两件事——`base_url` 少了
+    `/v1`、密钥是别的环境的、协议选错了，这些在保存时都看不出来。这个按钮存在的
+    全部意义就是在切换之前把它们试出来。
+
+    它是本项目唯一会花钱的管理接口，所以额度压到最低；无论成败都记审计。
+    """
+    return schemas.AdminProviderTestResponse(
+        **admin_config_service.test_provider(user, provider_id)
     )

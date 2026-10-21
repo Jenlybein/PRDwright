@@ -8,6 +8,13 @@ dependencies = [
     "fastapi[standard]>=0.142.2",
     "langchain>=1.4.3",
     "langchain-anthropic>=1.7.5",
+    # 三家「协议与 OpenAI 不同」的供应商。刻意**不做 optional-dependencies 分组**：
+    # 后台的供应商页要能列出全部可选协议，装了才显示、没装就灰掉会让「能不能用」
+    # 依赖部署命令，排查时多一个变量。代价是两个重依赖（protobuf / tokenizers），
+    # 所以装完必须立刻跑一次全量用例确认没把别的包带崩。
+    "langchain-google-genai>=2.2.0",
+    "langchain-huggingface>=1.2.0",
+    "langchain-nvidia-ai-endpoints>=1.1.0",
     "langchain-openai>=1.6.7",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.4",
