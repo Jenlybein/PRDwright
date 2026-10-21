@@ -83,6 +83,14 @@ WHITELIST: tuple[str, ...] = (
     "llm_budget_caps",
     "llm_budget_warn_ratio",
     "llm_context_window",
+    # 每日额度（v4.5 T5-2）。这五项都是「每次检查时现读」，所以改完下一次生成即生效。
+    # 注意 `quota_timezone_offset_minutes` 也在这里：它改的是「日界怎么算」，
+    # 不是「进程启动时算一次」——否则跨时区部署就没法在不重启的前提下纠正。
+    "quota_daily_task_limit",
+    "quota_daily_token_limit",
+    "quota_max_running",
+    "quota_enforce",
+    "quota_timezone_offset_minutes",
 )
 
 # 成功快照的 TTL。多 worker 部署时它决定「改了配置多久在所有进程生效」的上界。

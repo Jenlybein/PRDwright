@@ -36,7 +36,12 @@ CREATE TABLE IF NOT EXISTS users (
     salt          BLOB    NOT NULL,
     created_at    TEXT    NOT NULL,
     is_active     INTEGER NOT NULL DEFAULT 1,
-    is_admin      INTEGER NOT NULL DEFAULT 0
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    -- 每日额度覆盖（v17）。-1 = 跟随全局（system_config 的 quota_*），
+    -- 0 = 不限，N > 0 = 该用户的具体上限。默认 -1 保证升级后行为不变。
+    daily_task_limit  INTEGER NOT NULL DEFAULT -1,
+    daily_token_limit INTEGER NOT NULL DEFAULT -1,
+    max_running       INTEGER NOT NULL DEFAULT -1
 );
 
 -- 登录会话：只存 token 的哈希，数据库泄露也无法直接拿去冒用

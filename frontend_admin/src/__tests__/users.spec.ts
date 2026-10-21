@@ -26,6 +26,7 @@ vi.mock('@/services/adminService', async (importOriginal) => {
     setUserAdmin: vi.fn(),
     resetUserPassword: vi.fn(),
     deleteUser: vi.fn(),
+    setUserQuota: vi.fn(),
   }
 })
 
@@ -34,6 +35,7 @@ import {
   fetchUsers,
   setUserActive,
   setUserAdmin,
+  setUserQuota,
   type AdminUser,
 } from '@/services/adminService'
 import { ApiError } from '@/services/errors'
@@ -54,6 +56,7 @@ const usersMock = vi.mocked(fetchUsers)
 const activeMock = vi.mocked(setUserActive)
 const adminMock = vi.mocked(setUserAdmin)
 const deleteMock = vi.mocked(deleteUser)
+const quotaMock = vi.mocked(setUserQuota)
 
 function user(overrides: Partial<AdminUser> = {}): AdminUser {
   return {
@@ -65,6 +68,15 @@ function user(overrides: Partial<AdminUser> = {}): AdminUser {
     task_count: 3,
     prompt_tokens: 1200,
     completion_tokens: 300,
+    // 默认「不限」——这是未配置额度时的真实状态（users 三列默认 -1 → 全局默认 0）
+    daily_task_limit: 0,
+    daily_token_limit: 0,
+    max_running: 0,
+    daily_task_source: 'global',
+    daily_token_source: 'global',
+    max_running_source: 'global',
+    usage_tasks_today: 0,
+    usage_tokens_today: 0,
     ...overrides,
   }
 }
@@ -88,6 +100,7 @@ beforeEach(() => {
   activeMock.mockReset()
   adminMock.mockReset()
   deleteMock.mockReset()
+  quotaMock.mockReset()
 })
 
 describe('用户管理页', () => {
@@ -183,5 +196,77 @@ describe('用户管理页', () => {
     })
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('最后一位管理员')
+  })
+})
+
+describe('用户额度', () => {
+  it('未配置额度时显示「不限」，而不是 0', async () => {
+    // 0 与「不限」在数据上是同一个值，但显示成 0 会让管理员以为「今天一次都不能用」。
+    const wrapper = await render([user()])
+    expect(wrapper.text()).toContain('不限')
+  })
+
+  it('有上限时显示「已用/上限」，用满时标红', async () => {
+    const wrapper = await render([
+      user({ daily_task_limit: 10, daily_task_source: 'user', usage_tasks_today: 3 }),
+      user({ id: 2, username: 'bob', daily_task_limit: 5, daily_task_source: 'user', usage_tasks_today: 5 }),
+    ])
+    expect(wrapper.text()).toContain('3/10')
+    expect(wrapper.text()).toContain('5/5')
+    // 用满的那一行要能被一眼认出来（红字）
+    const danger = wrapper.findAll('.text-danger-fg').map((n) => n.text())
+    expect(danger).toContain('5/5')
+  })
+
+  it('编辑框回填三态：继承全局 → -1，显式不限 → 0，单独设置 → 生效值', async () => {
+    // 这三种情况生效值可能相同（都等于全局值或 0），只看数字无法区分，
+    // 所以必须靠 source 还原成提交值——否则点一次保存就把「继承」变成了「锁死」。
+    const wrapper = await render([
+      user({ id: 1, username: 'inherit', daily_task_limit: 10, daily_task_source: 'global' }),
+      user({ id: 2, username: 'no-limit', daily_task_limit: 0, daily_task_source: 'off' }),
+      user({ id: 3, username: 'own', daily_task_limit: 7, daily_task_source: 'user' }),
+    ])
+
+    const openButtons = wrapper.findAll('button').filter((b) => b.text() === '额度')
+    expect(openButtons.length).toBe(3)
+
+    for (const [index, expected] of [['-1'], ['0'], ['7']].entries()) {
+      await openButtons[index]!.trigger('click')
+      const input = wrapper.find('input[type="number"]')
+      expect((input.element as HTMLInputElement).value).toBe(String(expected))
+    }
+  })
+
+  it('保存时把三态原样提交给后端', async () => {
+    const wrapper = await render([user({ daily_task_limit: 10, daily_task_source: 'global' })])
+    quotaMock.mockResolvedValue(
+      user({ daily_task_limit: 2, daily_task_source: 'user' }),
+    )
+
+    await wrapper.findAll('button').filter((b) => b.text() === '额度')[0]!.trigger('click')
+    const input = wrapper.find('input[type="number"]')
+    await input.setValue('2')
+
+    const save = wrapper.findAll('button').find((b) => b.text() === '保存')!
+    await save.trigger('click')
+
+    await vi.waitFor(() => expect(quotaMock).toHaveBeenCalled())
+    const patch = quotaMock.mock.calls[0]![1]
+    expect(patch.daily_task_limit).toBe(2)
+    // 另外两项没动过，应当保持「跟随全局」而不是被写成 0（0 = 显式不限）
+    expect(patch.daily_token_limit).toBe(-1)
+    expect(patch.max_running).toBe(-1)
+  })
+
+  it('后端回绝时把原因原样显示', async () => {
+    const wrapper = await render([user()])
+    quotaMock.mockRejectedValue(rejectedByBackend('每日生成次数取值非法'))
+
+    await wrapper.findAll('button').filter((b) => b.text() === '额度')[0]!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === '保存')!.trigger('click')
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('每日生成次数取值非法')
+    })
   })
 })

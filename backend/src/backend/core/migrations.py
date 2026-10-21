@@ -990,6 +990,42 @@ def _create_runtime_config_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_quota_columns_to_users(conn: sqlite3.Connection) -> None:
+    """v17：给 `users` 加三个**每日额度**覆盖列。
+
+    为什么需要它
+    ------------
+    v4 之前任何人都能无限次生成：邀请码只管「谁能进来」，不管「进来后用多少」。
+    一个账号跑一百份 PRD 就能把预算烧掉一大截，而管理员在事前没有任何拦的手段
+    ——T2 的统计是事后的账单，它告诉你花了多少，但阻止不了继续花。
+
+    三列的三态语义
+    --------------
+    `-1`（默认）**跟随全局**：用 `system_config` 里的 `quota_*` 默认值。
+    `0`          **不限**：给个别可信账号开口子，或给管理员自己开。
+    `N > 0`      **该用户的具体上限**。
+
+    为什么用 `-1` 而不是 NULL 表达「跟随全局」
+    ------------------------------------------
+    `ALTER TABLE ADD COLUMN` 配 `NOT NULL DEFAULT -1` 对存量行是**零成本**的
+    （SQLite 只改元数据）；用 NULL 则要么允许 nullable（三态变成四态，读的时候
+    永远要防 None）、要么分两步重建表。而「-1 表示未设置」这个约定只活在本模块
+    与 `quota_service.resolve_limits` 两处，范围足够小。
+
+    存量数据意味着什么
+    ------------------
+    全部是 `-1`，即全部跟随全局；而全局默认是 `0`（不限）。
+    所以**升级后行为完全不变**——这一点由 `test_quota.py` 的「未配置时零变化」钉住。
+
+    与 v12 同样先查列再决定加不加：手工补过列的库不该因为「列已存在」而启动失败。
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    for name in ("daily_task_limit", "daily_token_limit", "max_running"):
+        if name in columns:
+            continue
+        conn.execute(f"ALTER TABLE users ADD COLUMN {name} INTEGER NOT NULL DEFAULT -1")
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -1013,6 +1049,7 @@ MIGRATIONS: list[Migration] = [
     Migration(version=14, name="jobs_token_columns", apply=_add_token_columns_to_jobs),
     Migration(version=15, name="admin_audit_log_table", apply=_create_admin_audit_log_table),
     Migration(version=16, name="runtime_config_tables", apply=_create_runtime_config_tables),
+    Migration(version=17, name="users_quota_columns", apply=_add_quota_columns_to_users),
 ]
 
 

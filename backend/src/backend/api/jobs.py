@@ -29,7 +29,7 @@ from backend.api.deps import acting_user
 from backend.api.sse import sse_response
 from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.errors import AppError, ErrorCode
-from backend.services import job_service
+from backend.services import job_service, quota_service
 from backend.services.auth_service import User
 from backend.services.job_fingerprint import compute_input_fingerprint
 
@@ -174,6 +174,12 @@ async def create_job(
     `/{job_id}/stream` 拿 `snapshot` + live 事件。刷新 / 断线只断订阅，不影响任务。
     """
     _validate_payload(payload)
+
+    # 额度检查必须在这里——**校验之后、建任务之前**。
+    # 放在 `create_job` 之后的话，被拒的请求会先留下一行 failed，污染失败率、
+    # 也会出现在用户的任务列表里（「我什么都没生成，却多了一条失败记录」）。
+    # `kind=chat` 不受配额管（对话是生成的前置，限了连「为什么被拒」都问不了）。
+    quota_service.check(user, payload.kind)
 
     fingerprint = None
     if payload.kind == "prd":

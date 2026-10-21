@@ -80,6 +80,37 @@ export interface AdminUser {
   task_count: number
   prompt_tokens: number
   completion_tokens: number
+  // --- 每日额度（v4.5）---
+  /** 生效的每日生成次数上限；0 表示不限 */
+  daily_task_limit: number
+  /** 生效的每日 Token 上限；0 表示不限 */
+  daily_token_limit: number
+  /** 生效的同时运行任务上限；0 表示不限 */
+  max_running: number
+  /** 次数上限来自哪里：global 继承全局 / user 单独设置 / off 显式不限 */
+  daily_task_source: QuotaSource
+  daily_token_source: QuotaSource
+  max_running_source: QuotaSource
+  /** 今天已占用的生成次数（不含失败与取消） */
+  usage_tasks_today: number
+  /** 今天已消耗的 Token（含失败任务的实际消耗） */
+  usage_tokens_today: number
+}
+
+/**
+ * 额度来源。
+ *
+ * 它是前端**编辑回填**的依据：`global` 回填 -1、`off` 回填 0、`user` 回填生效值。
+ * 只看生效数字无法区分「继承全局的 10」和「单独设成 10」——两者数字一样，
+ * 但管理员下一次改全局时，前者会跟着变、后者不会。
+ */
+export type QuotaSource = 'global' | 'user' | 'off'
+
+/** 设置用户额度的入参：-1 跟随全局，0 不限，正数为具体上限 */
+export interface UserQuotaPatch {
+  daily_task_limit: number
+  daily_token_limit: number
+  max_running: number
 }
 
 /** 邀请码列表的一行（`GET /api/admin/invites`） */
@@ -92,8 +123,16 @@ export interface AdminInvite {
   note: string | null
 }
 
-/** 一次「成功/失败」的结果：失败原因直接来自后端 `detail`，可原样展示 */
-export type ActionResult = { ok: true } | { ok: false; message: string }
+/**
+ * 一次「成功/失败」的结果：失败原因直接来自后端 `detail`，可原样展示。
+ *
+ * 成功时带上 `value`（被调函数的返回值）：有些操作需要拿它做**回读复核**
+ * ——「保存成功」与「真的生效」是两件事，只判 `ok` 会把后者漏掉。
+ * 不需要返回值的调用点照常只判 `ok`，泛型默认 `void` 不影响它们。
+ */
+export type ActionResult<T = void> =
+  | { ok: true; value: T }
+  | { ok: false; message: string }
 
 /** 把后端响应收敛成已知形状；字段缺失时给安全默认值而不是崩溃 */
 function toUser(data: unknown): AuthUser {
@@ -266,6 +305,21 @@ export async function setUserAdmin(userId: number, isAdmin: boolean): Promise<Ad
   return data
 }
 
+/**
+ * 设置某个用户的每日额度。对应 `PATCH /api/admin/users/{id}/quota`。
+ *
+ * 三个值同语义：`-1` 跟随全局、`0` 不限、正数为具体上限。
+ * 返回更新后的**完整用户行**，调用方可以直接替换列表里那一行，
+ * 并据此复核「我提交的」与「实际生效的」是否一致。
+ */
+export async function setUserQuota(
+  userId: number,
+  patch: UserQuotaPatch,
+): Promise<AdminUser> {
+  const { data } = await http.patch<AdminUser>(`/api/admin/users/${userId}/quota`, patch)
+  return data
+}
+
 /** 重置密码。对应 `POST /api/admin/users/{id}/password`。 */
 export async function resetUserPassword(userId: number, password: string): Promise<void> {
   await http.post(`/api/admin/users/${userId}/password`, { password })
@@ -375,10 +429,9 @@ export async function fetchLogs(query: LogQuery = {}): Promise<AdminLogPage> {
  * 页面拿它决定「显示后端给的原因」还是「刷新列表」——不需要每个调用点都写一遍
  * try/catch，也避免把「规则不允许」误显示成「网络故障」。
  */
-export async function toResult(task: () => Promise<unknown>): Promise<ActionResult> {
+export async function toResult<T>(task: () => Promise<T>): Promise<ActionResult<T>> {
   try {
-    await task()
-    return { ok: true }
+    return { ok: true, value: await task() }
   } catch (error) {
     return { ok: false, message: messageOf(error) }
   }

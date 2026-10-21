@@ -86,11 +86,11 @@ def test_read_endpoints_require_login(client, path):
 
 
 def test_get_config_groups_and_metadata(client):
-    """三组齐全，每项都带展示元数据与约束。"""
+    """分组齐全，每项都带展示元数据与约束。"""
     _as_admin(client)
     data = client.get("/api/admin/config").json()
 
-    assert [g["key"] for g in data["groups"]] == ["prd", "review", "llm"]
+    assert [g["key"] for g in data["groups"]] == ["prd", "review", "llm", "quota"]
     items = {item["key"]: item for g in data["groups"] for item in g["items"]}
     assert len(items) == len(rc.WHITELIST)
 
@@ -102,6 +102,9 @@ def test_get_config_groups_and_metadata(client):
     assert items["prd_section_review_enabled"]["danger"] is True
     # 枚举项带选项
     assert items["review_rewrite_min_severity"]["options"] == ["high", "medium", "low"]
+    # 额度项的边界也要从 `Settings` 反射出来（时区偏移有上下界）
+    tz = items["quota_timezone_offset_minutes"]
+    assert tz["min"] == -720 and tz["max"] == 840
 
 
 def test_patch_applies_and_changes_revision(client):

@@ -22,8 +22,11 @@ import {
   resetUserPassword,
   setUserActive,
   setUserAdmin,
+  setUserQuota,
   toResult,
   type AdminUser,
+  type QuotaSource,
+  type UserQuotaPatch,
 } from '@/services/adminService'
 import { useSessionStore } from '@/stores/session'
 
@@ -44,6 +47,83 @@ const pendingDelete = ref<AdminUser | null>(null)
 // 重置密码：按行展开一个输入框，密码不落在列表状态里
 const resettingId = ref<number | null>(null)
 const newPassword = ref('')
+
+// 额度编辑：同样按行展开。记住的是「被编辑那一行的原始覆盖值」，
+// 而不是生效值——两者不同（继承全局的 10 与单独设的 10 数字一样，含义不同）。
+const quotaEditingId = ref<number | null>(null)
+const quotaForm = ref<UserQuotaPatch>({
+  daily_task_limit: -1,
+  daily_token_limit: -1,
+  max_running: -1,
+})
+const savingQuota = ref(false)
+
+/**
+ * 生效值 → 提交值。
+ *
+ * 编辑框里必须显示「-1 / 0 / 具体值」这套三态，而不是生效数字：管理员看到
+ * 继承来的「10」时，得能选择「继续保持继承」还是「给他单独定 10」——
+ * 只看生效值，这两件事在界面上长得一模一样。
+ */
+function rawOf(value: number, source: QuotaSource): number {
+  if (source === 'global') return -1
+  if (source === 'off') return 0
+  return value
+}
+
+function openQuota(user: AdminUser) {
+  quotaEditingId.value = user.id
+  quotaForm.value = {
+    daily_task_limit: rawOf(user.daily_task_limit, user.daily_task_source),
+    daily_token_limit: rawOf(user.daily_token_limit, user.daily_token_source),
+    max_running: rawOf(user.max_running, user.max_running_source),
+  }
+}
+
+function closeQuota() {
+  quotaEditingId.value = null
+}
+
+async function onSaveQuota(user: AdminUser) {
+  if (savingQuota.value) return
+  savingQuota.value = true
+  const submitted = { ...quotaForm.value }
+  // 用 toResult 保留后端给的具体原因（取值非法时它会说清是哪一项）
+  const result = await toResult(() => setUserQuota(user.id, submitted))
+  savingQuota.value = false
+  if (!result.ok) {
+    sayFail(result.message)
+    return
+  }
+  quotaEditingId.value = null
+  await load()
+  // 复核「提交的」与「生效的」是否一致。
+  // `-1`（跟随全局）跳过——它到底等于几由全局默认决定，前端不知道那个值，
+  // 硬比会把正常的继承误报成失败。其余两种（0 / 具体值）都能精确验证。
+  const mismatched = (
+    [
+      [submitted.daily_task_limit, result.value.daily_task_limit],
+      [submitted.daily_token_limit, result.value.daily_token_limit],
+      [submitted.max_running, result.value.max_running],
+    ] as const
+  ).some(([sent, got]) => sent !== -1 && sent !== got)
+  sayOk(
+    mismatched
+      ? `${user.username} 的额度已提交，但回读值与提交值不一致，请刷新后确认`
+      : `${user.username} 的额度已生效（下一次生成起）`,
+  )
+}
+
+/** 额度文案：不限 / 已用/上限 */
+function quotaLabel(user: AdminUser): string {
+  if (user.daily_task_limit <= 0) return '不限'
+  return `${user.usage_tasks_today}/${user.daily_task_limit}`
+}
+
+/** 今日次数是否已用满（列表里标红，让管理员一眼看出谁被卡住了） */
+function quotaExhausted(user: AdminUser): boolean {
+  return user.daily_task_limit > 0 && user.usage_tasks_today >= user.daily_task_limit
+}
 
 /** 当前登录者自己：列表里给他一个「本人」标记，避免误操作 */
 const currentUserId = computed(() => session.userId)
@@ -225,6 +305,7 @@ function totalTokens(user: AdminUser): number {
             <th class="px-4 py-2 font-medium">注册时间</th>
             <th class="px-4 py-2 font-medium">任务数</th>
             <th class="px-4 py-2 font-medium">Token 合计</th>
+            <th class="px-4 py-2 font-medium">今日额度</th>
             <th class="px-4 py-2 font-medium">状态</th>
             <th class="px-4 py-2 font-medium">操作</th>
           </tr>
@@ -235,7 +316,7 @@ function totalTokens(user: AdminUser): number {
             :key="user.id"
             class="border-b border-line last:border-0"
           >
-            <td class="px-4 py-3">
+            <td class="align-top px-4 py-3">
               <div class="flex items-center gap-2">
                 <span class="font-medium text-fg">{{ user.username }}</span>
                 <span
@@ -252,10 +333,19 @@ function totalTokens(user: AdminUser): number {
                 </span>
               </div>
             </td>
-            <td class="px-4 py-3 text-muted">{{ formatDate(user.created_at) }}</td>
-            <td class="px-4 py-3 text-muted">{{ user.task_count }}</td>
-            <td class="px-4 py-3 text-muted">{{ totalTokens(user).toLocaleString() }}</td>
-            <td class="px-4 py-3">
+            <td class="align-top px-4 py-3 text-muted">{{ formatDate(user.created_at) }}</td>
+            <td class="align-top px-4 py-3 text-muted">{{ user.task_count }}</td>
+            <td class="align-top px-4 py-3 text-muted">{{ totalTokens(user).toLocaleString() }}</td>
+            <td class="align-top px-4 py-3">
+              <span
+                :class="quotaExhausted(user) ? 'text-danger-fg' : 'text-muted'"
+                class="text-xs"
+                :title="`次数 ${user.daily_task_limit || '不限'} · Token ${user.daily_token_limit || '不限'} · 并发 ${user.max_running || '不限'}`"
+              >
+                {{ quotaLabel(user) }}
+              </span>
+            </td>
+            <td class="align-top px-4 py-3">
               <span
                 :class="user.is_active ? 'text-success-fg' : 'text-warning-fg'"
                 class="text-xs"
@@ -263,7 +353,7 @@ function totalTokens(user: AdminUser): number {
                 {{ user.is_active ? '启用' : '已停用' }}
               </span>
             </td>
-            <td class="px-4 py-3">
+            <td class="align-top px-4 py-3">
               <div class="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -288,11 +378,71 @@ function totalTokens(user: AdminUser): number {
                 </button>
                 <button
                   type="button"
+                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
+                  @click="openQuota(user)"
+                >
+                  额度
+                </button>
+                <button
+                  type="button"
                   class="rounded-control border border-danger-line px-2.5 py-1 text-xs text-danger-fg"
                   @click="pendingDelete = user"
                 >
                   删除
                 </button>
+              </div>
+
+              <!-- 额度编辑：三个输入都是三态（-1 跟全局 / 0 不限 / 正数上限） -->
+              <div v-if="quotaEditingId === user.id" class="mt-2 space-y-2">
+                <p class="text-xs text-subtle">
+                  -1 跟随全局（配置页的「每日额度」）· 0 不限 · 正数为上限
+                </p>
+                <div class="flex flex-wrap items-center gap-2">
+                  <label class="flex items-center gap-1 text-xs text-muted">
+                    次数
+                    <input
+                      v-model.number="quotaForm.daily_task_limit"
+                      type="number"
+                      min="-1"
+                      class="w-20 rounded-control border border-line bg-field px-2 py-1 text-xs text-fg"
+                    />
+                  </label>
+                  <label class="flex items-center gap-1 text-xs text-muted">
+                    Token
+                    <input
+                      v-model.number="quotaForm.daily_token_limit"
+                      type="number"
+                      min="-1"
+                      step="1000"
+                      class="w-24 rounded-control border border-line bg-field px-2 py-1 text-xs text-fg"
+                    />
+                  </label>
+                  <label class="flex items-center gap-1 text-xs text-muted">
+                    并发
+                    <input
+                      v-model.number="quotaForm.max_running"
+                      type="number"
+                      min="-1"
+                      class="w-16 rounded-control border border-line bg-field px-2 py-1 text-xs text-fg"
+                    />
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    class="rounded-control bg-accent px-2.5 py-1 text-xs text-on-accent"
+                    :disabled="savingQuota"
+                    @click="onSaveQuota(user)"
+                  >
+                    保存
+                  </button>
+                  <button type="button" class="text-xs text-subtle" @click="closeQuota">
+                    取消
+                  </button>
+                  <span class="text-xs text-subtle">
+                    今日已用 {{ user.usage_tasks_today }} 次 / {{ user.usage_tokens_today.toLocaleString() }} Token
+                  </span>
+                </div>
               </div>
 
               <!-- 重置密码：就地展开 -->
@@ -322,7 +472,7 @@ function totalTokens(user: AdminUser): number {
             </td>
           </tr>
           <tr v-if="!users.length">
-            <td colspan="6" class="px-4 py-6 text-center text-sm text-subtle">
+            <td colspan="7" class="px-4 py-6 text-center text-sm text-subtle">
               还没有任何用户
             </td>
           </tr>

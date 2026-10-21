@@ -59,6 +59,10 @@ class AdminStatsRepository:
         with connect() as conn:
             rows = conn.execute(
                 "SELECT u.id, u.username, u.created_at, u.is_active, u.is_admin, "
+                # 额度覆盖值（v17）。列表要显示「生效上限」，而生效值要靠这三列
+                # 与全局默认换算——不在 SQL 里算，是因为规则（-1/0/N）只在
+                # `quota_service.resolve_from` 一处实现，SQL 里再写一遍必然漂移。
+                "       u.daily_task_limit, u.daily_token_limit, u.max_running, "
                 + _USER_USAGE_SELECT
                 + "FROM users u "
                 "LEFT JOIN generation_jobs j ON j.owner_id = u.id "

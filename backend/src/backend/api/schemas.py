@@ -317,6 +317,36 @@ class AdminUserItem(BaseModel):
     task_count: int = Field(description="生成任务总数")
     prompt_tokens: int = Field(description="输入 Token 合计")
     completion_tokens: int = Field(description="输出 Token 合计")
+    # --- 每日额度（v4.5）---
+    daily_task_limit: int = Field(description="生效的每日生成次数上限；0 表示不限")
+    daily_token_limit: int = Field(description="生效的每日 Token 上限；0 表示不限")
+    max_running: int = Field(description="生效的同时运行任务上限；0 表示不限")
+    daily_task_source: str = Field(
+        description="次数上限来自哪里：`global` 继承全局 / `user` 单独设置 / `off` 显式不限"
+    )
+    daily_token_source: str = Field(description="Token 上限来源，取值同上")
+    max_running_source: str = Field(description="并发上限来源，取值同上")
+    usage_tasks_today: int = Field(description="今天已占用的生成次数（不含失败与取消）")
+    usage_tokens_today: int = Field(description="今天已消耗的 Token（含失败任务的实际消耗）")
+
+
+class AdminSetQuotaRequest(BaseModel):
+    """设置某个用户的额度覆盖值。
+
+    三个字段的语义一致：`-1` 跟随全局默认，`0` 不限，正整数为具体上限。
+    `-1` 之所以要能显式传，是因为「恢复成跟随全局」和「设成不限」是两件事——
+    只给一个空值的话，这两种意图在数据上无法区分。
+    """
+
+    daily_task_limit: int = Field(
+        ge=-1, description="每日生成次数：-1 跟随全局，0 不限，正数为上限"
+    )
+    daily_token_limit: int = Field(
+        ge=-1, description="每日 Token 上限：-1 跟随全局，0 不限，正数为上限"
+    )
+    max_running: int = Field(
+        ge=-1, description="同时运行任务数：-1 跟随全局，0 不限，正数为上限"
+    )
 
 
 class AdminUserListResponse(BaseModel):

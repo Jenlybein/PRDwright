@@ -48,6 +48,7 @@ _GROUPS: tuple[tuple[str, str, str], ...] = (
     ("prd", "分章节生成", "控制 PRD 逐章撰写的节奏。并发越高越快，也越容易撞供应商限流。"),
     ("review", "审核与改写", "审核是锦上添花：它自己失败不会拖垮正文，但会多花 token。"),
     ("llm", "调用与预算", "单次调用的超时、重试，以及发出请求前的 token 预算检查。"),
+    ("quota", "每日额度", "每个用户每天能生成多少。默认全为不限——不配置就等于没这层限制。"),
 )
 
 _FIELD_META: dict[str, dict[str, Any]] = {
@@ -138,6 +139,36 @@ _FIELD_META: dict[str, dict[str, Any]] = {
         "group": "llm",
         "label": "覆盖上下文窗口（token）",
         "help": "0 表示用模型注册表/供应商配置的值。换表里没有的型号时用这一项，不必改代码。",
+    },
+    "quota_daily_task_limit": {
+        "group": "quota",
+        "label": "每人每日生成次数",
+        "help": "0 表示不限。只统计已收尾与在飞的任务——失败与被取消的不吃额度，"
+        "否则一次上游故障就会把所有人的额度清零。",
+    },
+    "quota_daily_token_limit": {
+        "group": "quota",
+        "label": "每人每日 Token 上限",
+        "help": "0 表示不限，统计输入 + 输出。只算任务收尾时落库的实际用量，"
+        "所以在飞任务尚未计入——它必须与并发上限一起用，单靠它拦不住同时开多个大任务。",
+        "danger": True,
+    },
+    "quota_max_running": {
+        "group": "quota",
+        "label": "每人同时运行任务数",
+        "help": "0 表示不限。这一项防的不是钱而是队列：一个人开满并发会拖慢所有人的生成。",
+    },
+    "quota_enforce": {
+        "group": "quota",
+        "label": "超限时真的拦截",
+        "help": "关闭后只记日志不拒绝（事件名 quota.exceeded），用于先观察真实用量分布。",
+        "danger": True,
+    },
+    "quota_timezone_offset_minutes": {
+        "group": "quota",
+        "label": "每日重置时区（分钟）",
+        "help": "默认 480（东八区，即北京时间 00:00 重置）。必须由服务端定，"
+        "否则用户改一下浏览器时区就能把日界挪走、绕开额度。",
     },
 }
 

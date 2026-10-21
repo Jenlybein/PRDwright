@@ -178,6 +178,37 @@ async def create_user(
 
 
 @router.patch(
+    "/users/{user_id}/quota",
+    response_model=schemas.AdminUserItem,
+    summary="设置用户的每日额度",
+)
+async def set_user_quota(
+    user_id: int,
+    payload: schemas.AdminSetQuotaRequest,
+    user: User = Depends(require_admin),
+) -> schemas.AdminUserItem:
+    """设置某个用户的额度覆盖值，**下一次生成即生效**。
+
+    三个字段同语义：`-1` 跟随全局（`/config` 的「每日额度」分组），
+    `0` 不限，正整数为具体上限。
+
+    `-1` 必须能显式传：它是「把这个人恢复成跟大家一样」，与「给他不限」
+    是两种完全不同的意图，只靠空值表达不出区别。
+
+    返回更新后的**完整用户行**（含生效值与来源），前端可以直接替换列表里那一行，
+    并据此复核「我提交的」与「实际生效的」是否一致。
+    """
+    row = admin_service.set_user_quota(
+        user,
+        user_id,
+        daily_task_limit=payload.daily_task_limit,
+        daily_token_limit=payload.daily_token_limit,
+        max_running=payload.max_running,
+    )
+    return schemas.AdminUserItem(**row)
+
+
+@router.patch(
     "/users/{user_id}/active",
     response_model=schemas.AdminUserResponse,
     summary="启停账号",

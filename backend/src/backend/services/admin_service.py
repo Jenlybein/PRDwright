@@ -30,10 +30,11 @@ from typing import Any
 
 from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
+from backend.repositories import quota_repo
 from backend.repositories.admin_repo import AdminStatsRepository, AuditRepository
 from backend.repositories.auth_repo import InviteCodeRepository, UserRepository
 from backend.repositories.log_repo import LogRepository
-from backend.services import auth_service
+from backend.services import auth_service, quota_service
 from backend.services.auth_service import User
 
 logger = logging.getLogger(__name__)
@@ -125,12 +126,112 @@ def _reject_locking_out(actor: User, row: dict[str, Any], verb: str) -> None:
 
 
 def list_users() -> list[dict[str, Any]]:
-    """用户列表，附带每个账号的任务数与 Token 合计。
+    """用户列表，附带每个账号的任务数、Token 合计与**今日额度使用情况**。
 
     统计由 SQL 一次聚合出来，不在 Python 里逐个任务累加——后者会把整张任务表
     读进内存，用户一多就拖垮后台首屏。
+
+    「今日已用」单独查一次（`usage_today_by_users`），不复用上面那条 JOIN：
+    两个聚合的维度不同（累计 vs 今日），塞进同一条 SQL 会互相放大计数
+    （多表 JOIN 后聚合相乘，是这类统计最经典的错法）。
     """
-    return AdminStatsRepository.user_usage()
+    rows = AdminStatsRepository.user_usage()
+    if not rows:
+        return []
+
+    # 当日用量：一次 GROUP BY 拿全，而不是每行一次查询
+    today = quota_repo.usage_today_by_users(
+        [int(row["id"]) for row in rows], quota_service.day_start_utc()
+    )
+
+    merged: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        # 原始覆盖值先取出来，后面要换成立生效值 + 来源
+        raw = {
+            "daily_task_limit": int(item.pop("daily_task_limit", -1)),
+            "daily_token_limit": int(item.pop("daily_token_limit", -1)),
+            "max_running": int(item.pop("max_running", -1)),
+        }
+        # 生效上限由 `quota_service` 换算：三态规则只在那一处实现，
+        # 这里若自己判 `-1` 就是在写第二份规则。
+        limits = quota_service.resolve_from(raw)
+        used = today.get(int(item["id"]), {"tasks": 0, "tokens": 0})
+        item.update(
+            {
+                "daily_task_limit": limits.daily_tasks,
+                "daily_token_limit": limits.daily_tokens,
+                "max_running": limits.max_running,
+                # 来源一并回传：前端编辑时需要区分「跟随全局」与「显式设为不限」，
+                # 这两种情况生效值可能相同（都等于全局值/0），只看数字无法回填。
+                "daily_task_source": quota_service.source_of(raw["daily_task_limit"]),
+                "daily_token_source": quota_service.source_of(raw["daily_token_limit"]),
+                "max_running_source": quota_service.source_of(raw["max_running"]),
+                "usage_tasks_today": used["tasks"],
+                "usage_tokens_today": used["tokens"],
+            }
+        )
+        merged.append(item)
+    return merged
+
+
+def set_user_quota(
+    actor: User,
+    user_id: int,
+    *,
+    daily_task_limit: int,
+    daily_token_limit: int,
+    max_running: int,
+) -> dict[str, Any]:
+    """设置某个用户的额度覆盖值，返回该用户的最新一行。
+
+    `-1` 表示跟随全局，`0` 表示不限，正数表示具体上限——三态的语义与
+    `users` 表默认值一致，由 `quota_service` 负责解释，这里只做校验与落库。
+
+    Raises:
+        AppError: 用户不存在（404）或取值非法（400）。
+    """
+    for label, value in (
+        ("每日生成次数", daily_task_limit),
+        ("每日 Token 上限", daily_token_limit),
+        ("同时运行任务数", max_running),
+    ):
+        # 下界是 -1（跟随全局），上界给一个明显不合理的量级兜底：
+        # 真正防的是「多打一个 0」，而不是业务上限。
+        if value < -1 or value > 10_000_000:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{label}取值非法：{value}。应为 -1（跟随全局）、0（不限）或正整数。",
+                status_code=400,
+            )
+
+    before = quota_service.describe(user_id)
+    if not quota_repo.set_quota(
+        user_id,
+        daily_task_limit=daily_task_limit,
+        daily_token_limit=daily_token_limit,
+        max_running=max_running,
+    ):
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "用户不存在", status_code=404)
+
+    # 审计写「改前 → 改后」，只记**有变化的**项：三项全记会让日志里塞满
+    # 「10 → 10」这种噪音，而审计的价值恰恰在于能一眼看出改了什么。
+    after = quota_service.describe(user_id)
+    changes = [
+        f"{key} {before[key]} → {after[key]}"
+        for key in ("daily_task_limit", "daily_token_limit", "max_running")
+        if before[key] != after[key]
+    ]
+    _audit(
+        actor,
+        "user.quota",
+        target=str(user_id),
+        detail="; ".join(changes) or "无变化",
+    )
+    return next(
+        (row for row in list_users() if int(row["id"]) == user_id),
+        {"id": user_id},
+    )
 
 
 def platform_stats() -> dict[str, Any]:
