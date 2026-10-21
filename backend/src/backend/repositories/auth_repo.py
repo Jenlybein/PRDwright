@@ -89,6 +89,21 @@ class UserRepository:
             return int(row["n"]) if row else 0
 
     @staticmethod
+    def set_active(user_id: int, is_active: bool) -> None:
+        """停用 / 启用账号。
+
+        停用**不等于**删号：数据全留着，只是这个人登不进来了（`login` 已判
+        `is_active`）。因此它是可逆的，而删号不可逆——后台把这两件事分开呈现，
+        管理员才不会把「暂时封禁」误操作成「永久清除」。
+        """
+        with connect() as conn:
+            conn.execute(
+                "UPDATE users SET is_active = ? WHERE id = ?",
+                (int(is_active), user_id),
+            )
+            conn.commit()
+
+    @staticmethod
     def update_password(user_id: int, password_hash: str, salt: bytes) -> None:
         """更新密码哈希与 salt（重置密码时用）。"""
         with connect() as conn:
@@ -270,3 +285,15 @@ class InviteCodeRepository:
                 "FROM invite_codes ORDER BY created_at, code"
             ).fetchall()
             return [dict(row) for row in rows]
+
+    @staticmethod
+    def delete(code: str) -> bool:
+        """删除一个邀请码，返回是否真的删掉了。
+
+        只删**码本身**，不动已经注册的用户——那些账号是靠码进来的，但进来之后
+        就与码无关了。删码影响的是「后面的人还能不能用它注册」，不是「已经注册的人」。
+        """
+        with connect() as conn:
+            cur = conn.execute("DELETE FROM invite_codes WHERE code = ?", (code,))
+            conn.commit()
+            return cur.rowcount == 1

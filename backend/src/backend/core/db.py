@@ -102,6 +102,11 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     max_provider_switches INTEGER NOT NULL DEFAULT 2,
     error_code            TEXT    NOT NULL DEFAULT '',
     error_message         TEXT    NOT NULL DEFAULT '',
+    -- Token 用量冗余成列：管理员后台要「按用户 / 按日」统计消耗，
+    -- 若只留在 usage 的 JSON 里就得把每行取回 Python 解析，量一大就跑不动。
+    -- 它们是从 usage 派生的**副本**，不与 JSON 竞争真源——聚合只查列，展示仍读 JSON。
+    prompt_tokens         INTEGER NOT NULL DEFAULT 0,
+    completion_tokens     INTEGER NOT NULL DEFAULT 0,
     created_at            TEXT    NOT NULL,
     updated_at            TEXT    NOT NULL
 );
@@ -134,6 +139,26 @@ CREATE INDEX IF NOT EXISTS idx_app_logs_ts     ON app_logs(ts);
 CREATE INDEX IF NOT EXISTS idx_app_logs_level  ON app_logs(level, ts);
 -- 按请求号反查一次请求的全过程，是排障的主路径
 CREATE INDEX IF NOT EXISTS idx_app_logs_request ON app_logs(request_id);
+
+-- 管理员操作审计：后台每一次**写操作**都留一行。
+-- 它是问责底线，不是调试日志：调试看 app_logs，追「谁改了什么」看这里。
+-- 刻意不设外键——管理员被删除后，他做过的操作仍要有据可查；
+-- 设了外键就会随删除一起消失，那恰恰是最需要保留的那些记录。
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id   INTEGER,                        -- 操作者；账号被删后置空（见上）
+    actor_name TEXT    NOT NULL DEFAULT '',    -- 冗余一份用户名：id 变空后仍看得见是谁
+    action     TEXT    NOT NULL,               -- 如 user.create / invite.delete
+    target     TEXT    NOT NULL DEFAULT '',    -- 被操作对象，如用户名或邀请码
+    detail     TEXT    NOT NULL DEFAULT '',    -- 变更内容（不写密码等敏感值）
+    request_id TEXT,                           -- 与当次请求的日志对得上
+    ts         TEXT    NOT NULL
+);
+
+-- 后台默认按时间倒序翻页
+CREATE INDEX IF NOT EXISTS idx_admin_audit_ts    ON admin_audit_log(ts);
+-- 「这个人最近做过什么」是事后追责最高频的问法
+CREATE INDEX IF NOT EXISTS idx_admin_audit_actor ON admin_audit_log(actor_id, ts);
 """
 
 # 时间戳统一用 UTC 的 ISO 8601，避免本地时区带来的歧义

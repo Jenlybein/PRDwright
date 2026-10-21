@@ -182,20 +182,28 @@ class GenerationJobRepository:
         completed_sections: list[dict[str, Any]],
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ) -> None:
-        """标记任务完成，落最终正文与章节。清空错误字段。"""
+        """标记任务完成，落最终正文与章节。清空错误字段。
+
+        `prompt_tokens` / `completion_tokens` 是 `usage` 那份 JSON 的**派生副本**：
+        管理员后台统计消耗时用 SQL 直接求和，不必把每行 JSON 取回解析（见迁移 v14）。
+        """
         with connect() as conn:
             conn.execute(
                 "UPDATE generation_jobs "
                 "SET status = 'completed', draft_content = ?, completed_sections = ?, "
                 "    usage = ?, error_code = '', error_message = '', pending_items = ?, "
-                "    updated_at = ? "
+                "    prompt_tokens = ?, completion_tokens = ?, updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     draft_content,
                     _dump_sections(completed_sections),
                     usage,
                     _dump_pending_items(pending_items),
+                    prompt_tokens,
+                    completion_tokens,
                     utc_now_text(),
                     job_id,
                     owner_id,
@@ -214,18 +222,24 @@ class GenerationJobRepository:
         completed_sections: list[dict[str, Any]],
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ) -> None:
         """标记任务失败，保留已产出的半截正文、章节与已发生的用量。
 
         `usage` 在失败路径同样要落：失败的生成**照样消耗了 token**，
         只记成功那次等于把最贵的失败藏起来。
+
+        两个 token 列同理一并写：成本统计若跳过失败任务，「这次为什么这么贵」
+        永远查不出来——失败的重试恰恰是最烧钱的部分。
         """
         with connect() as conn:
             conn.execute(
                 "UPDATE generation_jobs "
                 "SET status = 'failed', error_code = ?, error_message = ?, "
                 "    draft_content = ?, completed_sections = ?, usage = ?, "
-                "    pending_items = ?, updated_at = ? "
+                "    pending_items = ?, prompt_tokens = ?, completion_tokens = ?, "
+                "    updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     error_code,
@@ -234,6 +248,8 @@ class GenerationJobRepository:
                     _dump_sections(completed_sections),
                     usage,
                     _dump_pending_items(pending_items),
+                    prompt_tokens,
+                    completion_tokens,
                     utc_now_text(),
                     job_id,
                     owner_id,

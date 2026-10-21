@@ -764,6 +764,71 @@ def _create_app_logs_table(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_app_logs_request ON app_logs(request_id)")
 
 
+def _add_token_columns_to_jobs(conn: sqlite3.Connection) -> None:
+    """v14：给 `generation_jobs` 加 `prompt_tokens` / `completion_tokens` 两列。
+
+    为什么需要它
+    ------------
+    用量此前只存在于 `usage` 这一列 JSON 里。要回答「这个用户一共烧了多少 token」、
+    「平台今天消耗多少」，就得把**每一行**取回 Python 解析一遍——数据量一大就跑不动，
+    而且 JSON 结构一变聚合就静默失真。
+
+    加两列后，`SUM(prompt_tokens)` 是一条 SQL 的事。
+
+    它们是**派生副本**，不与 JSON 竞争真源：展示明细仍读 `usage`（含分步、耗时），
+    聚合只读这两列。副本写错不影响正确性判断，因为真源还在；而解析 JSON 出错
+    则连真源都读不出来——这个方向的选择是有意的。
+
+    存量行为 0：旧任务没有这两列可填，落到 0。宁可少算，也不猜一个数字填进去。
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
+    if "prompt_tokens" not in columns:
+        conn.execute(
+            "ALTER TABLE generation_jobs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0"
+        )
+    if "completion_tokens" not in columns:
+        conn.execute(
+            "ALTER TABLE generation_jobs ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _create_admin_audit_log_table(conn: sqlite3.Connection) -> None:
+    """v15：建 `admin_audit_log`——管理员每一次写操作留痕。
+
+    为什么需要它
+    ------------
+    管理员后台能删账号、改配置、发邀请码。这些操作的破坏力远大于普通用户动作，
+    而「谁在什么时候改了什么」如果无处可查，出事之后只能靠回忆。
+
+    与 `app_logs` 的分工
+    --------------------
+    `app_logs` 是**系统**在说什么（排障用，可随时清空）；
+    这里是**人**做了什么（问责用，不该随便清）。两者混在一张表里，
+    排障时会被大量人为操作淹没，追责时又会漏在日志风暴里。
+
+    刻意**不加外键**：管理员账号被删之后，他做过的操作仍要看得见。
+    设了外键就会随删除一起消失——而那恰恰是最需要保留的那些记录。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_id   INTEGER,
+            actor_name TEXT    NOT NULL DEFAULT '',
+            action     TEXT    NOT NULL,
+            target     TEXT    NOT NULL DEFAULT '',
+            detail     TEXT    NOT NULL DEFAULT '',
+            request_id TEXT,
+            ts         TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_ts    ON admin_audit_log(ts)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_actor ON admin_audit_log(actor_id, ts)"
+    )
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -784,6 +849,8 @@ MIGRATIONS: list[Migration] = [
     Migration(version=11, name="jobs_chat_stage", apply=_add_chat_stage_to_jobs),
     Migration(version=12, name="users_is_admin", apply=_add_is_admin_to_users),
     Migration(version=13, name="app_logs_table", apply=_create_app_logs_table),
+    Migration(version=14, name="jobs_token_columns", apply=_add_token_columns_to_jobs),
+    Migration(version=15, name="admin_audit_log_table", apply=_create_admin_audit_log_table),
 ]
 
 

@@ -283,6 +283,16 @@ def create_user_direct(username: str, password: str) -> User:
     return _to_user(row)
 
 
+def get_user(user_id: int) -> User | None:
+    """按 id 取用户；不存在返回 None。
+
+    管理员后台按 id 操作账号（列表给的也是 id），需要一个公开入口——
+    否则调用方只能自己去碰 `UserRepository` 或 `_to_user`，分层就散了。
+    """
+    row = UserRepository.get_by_id(user_id)
+    return _to_user(row) if row else None
+
+
 def list_users() -> list[dict]:
     """列出全部用户，供运维工具查看（不含任何凭据字段）。"""
     return UserRepository.list_all()

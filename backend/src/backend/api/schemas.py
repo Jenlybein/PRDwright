@@ -291,6 +291,135 @@ class AdminMeResponse(BaseModel):
     is_admin: bool = Field(description="是否管理员；本接口恒为 true，保留字段以便前端统一处理")
 
 
+class AdminStatsResponse(BaseModel):
+    """平台总量。一次请求拿全，避免前端为了凑一个总数连打好几个接口。"""
+
+    user_count: int = Field(description="注册用户数")
+    admin_count: int = Field(description="管理员人数")
+    task_count: int = Field(description="生成任务总数（含失败）")
+    completed_count: int = Field(description="成功完成的任务数")
+    prompt_tokens: int = Field(description="输入 Token 合计")
+    completion_tokens: int = Field(description="输出 Token 合计")
+
+
+class AdminUserItem(BaseModel):
+    """用户列表的一行。
+
+    用量是**聚合出来的**，不是列表页再去翻任务表：后台首屏如果为此把整张任务表
+    读进内存，用户一多就先卡死自己。
+    """
+
+    id: int = Field(description="用户 ID")
+    username: str = Field(description="用户名")
+    created_at: str = Field(description="注册时间（UTC ISO 8601）")
+    is_active: bool = Field(description="是否启用；停用后无法登录")
+    is_admin: bool = Field(description="是否管理员")
+    task_count: int = Field(description="生成任务总数")
+    prompt_tokens: int = Field(description="输入 Token 合计")
+    completion_tokens: int = Field(description="输出 Token 合计")
+
+
+class AdminUserListResponse(BaseModel):
+    """用户列表。"""
+
+    users: list[AdminUserItem] = Field(description="全部用户，按 ID 升序")
+
+
+class AdminCreateUserRequest(BaseModel):
+    """后台建号。
+
+    约束与注册保持一致（3-32 位用户名、至少 8 位密码）——后台不该是弱密码后门。
+    """
+
+    username: str = Field(min_length=3, max_length=32, description="用户名，3-32 个字符")
+    password: str = Field(min_length=8, description="密码，至少 8 位")
+    is_admin: bool = Field(default=False, description="是否直接任命为管理员")
+
+
+class AdminUserResponse(BaseModel):
+    """单个账号的当前状态。"""
+
+    id: int = Field(description="用户 ID")
+    username: str = Field(description="用户名")
+    is_active: bool = Field(description="是否启用")
+    is_admin: bool = Field(description="是否管理员")
+
+
+class AdminSetActiveRequest(BaseModel):
+    """启停账号。"""
+
+    is_active: bool = Field(description="true 启用 / false 停用")
+
+
+class AdminSetAdminRequest(BaseModel):
+    """授予 / 撤销管理员身份。"""
+
+    is_admin: bool = Field(description="true 授予管理员 / false 撤销管理员")
+
+
+class AdminResetPasswordRequest(BaseModel):
+    """重置密码。"""
+
+    password: str = Field(min_length=8, description="新密码，至少 8 位")
+
+
+class AdminInviteItem(BaseModel):
+    """邀请码列表的一行。"""
+
+    code: str = Field(description="邀请码")
+    max_uses: int = Field(description="最多可用次数；0 表示不限")
+    used_count: int = Field(description="已使用次数")
+    expires_at: str | None = Field(default=None, description="过期时间；null 表示永不过期")
+    created_at: str = Field(description="创建时间")
+    note: str | None = Field(default=None, description="备注")
+
+
+class AdminInviteListResponse(BaseModel):
+    """邀请码列表。"""
+
+    invites: list[AdminInviteItem] = Field(description="全部邀请码")
+
+
+class AdminCreateInviteRequest(BaseModel):
+    """新建邀请码。"""
+
+    code: str = Field(min_length=4, max_length=32, description="邀请码，4-32 个字符")
+    max_uses: int = Field(default=0, description="最多可用次数；0 表示不限")
+    expires_at: str | None = Field(default=None, description="过期时间，ISO 8601；留空表示永不过期")
+    note: str = Field(default="", description="备注，如「给 XX 公司」")
+
+
+class AdminInviteResponse(BaseModel):
+    """新建邀请码的结果。"""
+
+    code: str = Field(description="已创建的邀请码")
+
+
+class AdminOkResponse(BaseModel):
+    """无返回内容的操作（删除、重置密码）的统一响应。"""
+
+    ok: bool = Field(default=True, description="是否成功")
+
+
+class AdminAuditItem(BaseModel):
+    """一条管理员操作记录。"""
+
+    id: int = Field(description="记录 ID")
+    actor_id: int | None = Field(default=None, description="操作者 ID；账号已删时为 null")
+    actor_name: str = Field(description="操作者用户名（冗余保存，账号删除后仍可见）")
+    action: str = Field(description="动作，如 user.create / invite.delete")
+    target: str = Field(description="被操作对象")
+    detail: str = Field(description="变更内容；不含密码等敏感值")
+    request_id: str | None = Field(default=None, description="请求 ID，可与日志对上")
+    ts: str = Field(description="发生时间（UTC ISO 8601）")
+
+
+class AdminAuditListResponse(BaseModel):
+    """管理员操作记录。"""
+
+    items: list[AdminAuditItem] = Field(description="最近的操作，倒序")
+
+
 # ============================================================================
 # 方案（solutions）：整份会话快照的持久化
 # ============================================================================

@@ -47,6 +47,24 @@ export const router = createRouter({
       component: () => import('@/views/DashboardView.vue'),
       meta: { requiresAdmin: true },
     },
+    {
+      path: '/users',
+      name: 'users',
+      component: () => import('@/views/UsersView.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/invites',
+      name: 'invites',
+      component: () => import('@/views/InvitesView.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/audit',
+      name: 'audit',
+      component: () => import('@/views/AuditView.vue'),
+      meta: { requiresAdmin: true },
+    },
     // 未匹配的地址一律回概览，避免刷新时白屏
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],

@@ -32,6 +32,8 @@ export type SessionPhase = 'unknown' | 'anonymous' | 'user' | 'admin'
 export const useSessionStore = defineStore('admin-session', () => {
   const phase = ref<SessionPhase>('unknown')
   const username = ref('')
+  /** 当前登录者的 id。用户列表靠它标出「本人」，避免管理员误操作自己的账号 */
+  const userId = ref(0)
   /** 探测失败时的说明；为空表示一切正常（正常失败如「未登录」不算错误） */
   const error = ref('')
 
@@ -59,10 +61,12 @@ export const useSessionStore = defineStore('admin-session', () => {
       if (!user) {
         phase.value = 'anonymous'
         username.value = ''
+        userId.value = 0
         error.value = ''
         return
       }
       username.value = user.username
+      userId.value = user.id
       const admin = await fetchAdminMe()
       phase.value = admin ? 'admin' : 'user'
       error.value = ''
@@ -72,6 +76,7 @@ export const useSessionStore = defineStore('admin-session', () => {
       // 登录页会把这句话显示出来。
       phase.value = 'anonymous'
       username.value = ''
+      userId.value = 0
       error.value = describeFailure(caught)
     }
   }
@@ -101,6 +106,7 @@ export const useSessionStore = defineStore('admin-session', () => {
   async function login(payload: LoginPayload): Promise<void> {
     const user = await loginRequest(payload)
     username.value = user.username
+    userId.value = user.id
     phase.value = 'user'
     const admin = await fetchAdminMe()
     phase.value = admin ? 'admin' : 'user'
@@ -112,12 +118,14 @@ export const useSessionStore = defineStore('admin-session', () => {
     await logoutRequest()
     phase.value = 'anonymous'
     username.value = ''
+    userId.value = 0
     error.value = ''
   }
 
   return {
     phase,
     username,
+    userId,
     error,
     isLoggedIn,
     isAdmin,

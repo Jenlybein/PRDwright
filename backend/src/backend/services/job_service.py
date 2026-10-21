@@ -837,6 +837,10 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     draft = _draft(runtime)
     summary = _summary_data(runtime, status)
     usage = json.dumps(summary, ensure_ascii=False)
+    # 从汇总里取出两列副本：管理员后台按用户 / 按日统计消耗时用 SQL 求和，
+    # 不用把每行 JSON 取回解析。取不到就当 0——宁可少算，不猜数字。
+    prompt_tokens = int(summary.get("prompt_tokens") or 0)
+    completion_tokens = int(summary.get("completion_tokens") or 0)
     if status == "completed":
         GenerationJobRepository.finish(
             runtime.owner_id,
@@ -845,6 +849,8 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             completed_sections=runtime.completed_sections,
             usage=usage,
             pending_items=runtime.pending_items,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         _write_document(runtime, summary)
     else:
@@ -858,6 +864,8 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             # 失败的任务同样烧了 token，用量一并落库——不然「这次为什么这么贵」无从追溯
             usage=usage,
             pending_items=runtime.pending_items,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
     # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`
