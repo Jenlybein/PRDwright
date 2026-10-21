@@ -8,6 +8,7 @@ import * as api from '@/services/api'
 import * as documentApi from '@/services/documentService'
 import * as solutionApi from '@/services/solutionService'
 import { useDocumentsStore } from '@/stores/documents'
+import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { SolutionSummary } from '@/types'
@@ -278,9 +279,8 @@ describe('删除方案后迟到的回调', () => {
 
     // 3. 新建方案 B 并再发起一次生成——这一步会让 `handlersForKind` 被**再调用一次**，
     //    共享代次被覆盖就发生在这里。
-    //    `docGenerating` 是全局的单个标志：A 的订阅不再挡住界面，用户才点得到入口，
-    //    因此这里显式归零（与 `remove` 后 UI 可操作的状态一致）。
-    workflow.docGenerating = false
+    //    运行态已随 `remove` → `reset()` → `runs.clear()` 一起清空：A 的订阅不再挡住界面
+    //    （判据是「本方案有没有在途任务」，而不是一个与方案无关的全局布尔）。
     vi.mocked(solutionApi.createSolution).mockResolvedValue(summary(2))
     workflow.chooseEntry('structured')
     workflow.summary = FULL_SUMMARY
@@ -362,7 +362,6 @@ describe('删除方案后迟到的回调', () => {
 
     // 删除 A，再建 B 并让 B 也发起一次生成
     await solutions.remove(1)
-    workflow.docGenerating = false
     vi.mocked(solutionApi.createSolution).mockResolvedValue(summary(2))
     workflow.chooseEntry('structured')
     workflow.summary = FULL_SUMMARY
@@ -466,16 +465,15 @@ describe('删除方案后迟到的回调', () => {
     })
 
     const pipeline = useDocumentPipeline({ onNotice: () => {} })
-    // 模拟「刷新后从快照恢复出任务指针，随即重连」
-    workflow.activeJobId = 12
-    workflow.activeJobKind = 'api-docs'
+    // 模拟「刷新后从快照恢复出任务指针，随即重连」：指针已不再是一个独立字段，
+    // 而是 `stores/runs` 里那一支运行态的派生值，因此这里先登记运行态
+    useRunsStore().restore({ jobId: 12, solutionId: 1, jobKind: 'api-docs', docKind: 'api-docs' })
     const reconnecting = pipeline.reconnectJob(12)
     await flushPromises()
     expect(api.readJobStream).toHaveBeenCalledTimes(1)
 
     // 删掉方案 A，再在方案 B 里起一个新任务
     await solutions.remove(1)
-    workflow.docGenerating = false
     vi.mocked(solutionApi.createSolution).mockResolvedValue(summary(2))
     workflow.chooseEntry('structured')
     workflow.summary = FULL_SUMMARY

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as documentApi from '../services/documentService'
 import * as solutionApi from '../services/solutionService'
 import { useDocumentsStore } from '../stores/documents'
+import { useRunsStore } from '../stores/runs'
 import { SAVE_DEBOUNCE_MS, useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import type { SolutionSummary } from '../types'
@@ -67,6 +68,16 @@ function summary(id: number, overrides: Partial<SolutionSummary> = {}): Solution
 /** 推进防抖计时器并等异步保存落地 */
 async function advanceDebounce(ms = SAVE_DEBOUNCE_MS): Promise<void> {
   await vi.advanceTimersByTimeAsync(ms)
+}
+
+/**
+ * 让本方案有一支在途任务。
+ *
+ * 任务指针（`activeJobId` / `activeJobKind`）已改成 `stores/runs` 的派生值：从前那种
+ * 直接赋值的写法现在会编译不过，也不该再存在——两个字段各存一份就一定会漂移。
+ */
+function beginRun(jobId: number): void {
+  useRunsStore().begin({ jobId, solutionId: 1, jobKind: 'prd', docKind: 'prd' })
 }
 
 let workflow: ReturnType<typeof useWorkflowStore>
@@ -216,8 +227,7 @@ describe('生成期间也保存', () => {
 
     // 进入生成态并记下任务指针：这一步必须落库，否则刷新后无从重连
     workflow.viewState = 'generating-prd'
-    workflow.activeJobId = 7
-    workflow.activeJobKind = 'prd'
+    beginRun(7)
     await advanceDebounce()
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
@@ -244,8 +254,7 @@ describe('生成期间也保存', () => {
 
     // 创建任务后紧接着 flush，把 activeJobId 落库（`useJob.start` 的第二次 flush）
     workflow.viewState = 'generating-prd'
-    workflow.activeJobId = 9
-    workflow.activeJobKind = 'prd'
+    beginRun(9)
     await solutions.flushPendingSave()
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
@@ -271,8 +280,8 @@ describe('生成期间也保存', () => {
     // 生成结束：清掉任务指针并切到 review 态。产物正文此时已经拿到了，
     // 因此列表里的进度应当前进到「已出 PRD」——它算的是**产物**，不是当前页。
     documents.setLocal('prd', '# 订单系统 PRD')
-    workflow.activeJobId = null
-    workflow.activeJobKind = null
+    // 生成结束：任务收尾（指针随之失效），再切到 review 态
+    useRunsStore().clear()
     workflow.viewState = 'review-prd'
     await advanceDebounce()
 

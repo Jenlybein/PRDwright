@@ -9,8 +9,10 @@ import {
 import { useJob, type JobStartInput } from '@/composables/useJob'
 import { fetchDeliveryZip } from '@/services/documentService'
 import { useDocumentsStore } from '@/stores/documents'
+import { useRunsStore, type ActiveRun, type RunPreview } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
+import { isSubscribed } from '@/services/runSubscriptions'
 import type {
   ChatMessage,
   ChatStage,
@@ -83,6 +85,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const documents = useDocumentsStore()
   // 会话代次的持有者：本文件要靠它判断「这次任务的回调是不是已经过期」
   const solutions = useSolutionsStore()
+  // 在途任务的运行态：判据与收尾都按「哪一支任务」来，而不是一个全局布尔
+  const runs = useRunsStore()
   const {
     viewState,
     entryMode,
@@ -92,12 +96,35 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     quickInput,
     debugPrdText,
     pastePairInput,
-    docGenerating: isGenerating,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
     canFinish: canFinishTask,
     canGeneratePrd,
   } = storeToRefs(store)
+
+  /**
+   * 是否有生成任务在跑。
+   *
+   * 与从前的 `docGenerating` 同名同位，但判据换成了「本标签页有一支运行中的任务」——
+   * 它带 jobId，收尾时按 jobId 比对，迟到的收尾清不掉新任务。
+   */
+  const isGenerating = computed(() => runs.hasRunning)
+
+  /**
+   * 把 `runs.preview` 上的一个字段包成**可写 computed**。
+   *
+   * 读：直接读那一支运行态的预览；写：落到同一处。中间没有第二份副本，因此不存在
+   * 「本地 ref 还挂着上一份方案的正文」这类问题。保留可写形态只是为了让原有的
+   * 「`xxx.value = …` / `+= …`」写法继续成立，不必把几百行调用点改成 store 调用。
+   */
+  function previewField<K extends keyof RunPreview>(key: K) {
+    return computed<RunPreview[K]>({
+      get: () => runs.preview[key],
+      set: (value) => {
+        runs.preview[key] = value
+      },
+    })
+  }
 
   /**
    * 当前审阅阶段应该显示的回执。
@@ -128,6 +155,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   // -------------------------------------------------------------------------
   // 交互态
+  //
+  // 这六份状态（正文预览 / 错误 / PRD 看板 / 下游阶段 / 阶段输出 / 审核结论）
+  // **都归运行态所有**，住在 `stores/runs` 的 `preview` 里，本文件只是它的门面。
+  //
+  // 为什么必须搬走：它们从前是本 composable 的局部 ref，而 composable 是 app 级单例——
+  // 于是「谁在写这份预览」无人回答。切方案时旧任务的流照样往这里写，用户就在新方案里
+  // 看到上一份的正文（症状是「切回去，正文还是别人的」）。搬进运行态之后，`runs` 一换、
+  // 预览跟着换，`detach` 一清、迟到的写入也落空。
+  //
+  // 保留同名同形的**可写 computed**，是为了让「写预览」的几百行调用点一字不改：
+  // 读走 store、写也走 store，中间没有第二份副本。
   // -------------------------------------------------------------------------
 
   /**
@@ -137,10 +175,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * `syncPrdPreview()` 把「已定稿部分 + 当前章缓冲」拼好写进来。两条路径互不干扰，
    * 消费方（`GeneratingStage`）也只需要读这一个值。
    */
-  const docStreamingContent = ref('')
+  const docStreamingContent = previewField('content')
 
   /** 文档生成 / 优化过程中的错误提示 */
-  const docError = ref('')
+  const docError = previewField('error')
 
   // -------------------------------------------------------------------------
   // PRD 分章节生成的阶段进度（三车道并行：管道看板）
@@ -152,10 +190,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 并行后章节可能乱序到达，因此**不能**再用「一个字符串不断追加」的预览模型；
    * 这里按 `sectionId` 存卡片、按 `index` 排序渲染，`part` 到达即覆盖该章。
    */
-  const prdBoard = ref<PrdBoardState | null>(null)
+  const prdBoard = previewField('prdBoard')
 
   /** 下游文档（接口 / 提示词）当前的生成阶段；idle 表示未走该链路 */
-  const docPhase = ref<DocPhase>('idle')
+  const docPhase = previewField('docPhase')
 
   /**
    * 当前阶段模型的**原始输出增量**（审核意见 / 改写稿），只用于阶段条下方的输出面板。
@@ -164,7 +202,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 会污染文档。两份分开存，切换阶段时清空即可——每个阶段的输出只属于它自己，
    * 上一阶段的文本留着会让人误以为审核还在继续。
    */
-  const docStageText = ref('')
+  const docStageText = previewField('stageText')
 
   /**
    * 本次生成的审核结论。
@@ -172,7 +210,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * **只在内存里**：后端不发 `run_summary` 之外的第二份、也不落库；刷新后不会补发，
    * 结论随之消失。这样「结论不持久化」不需要任何清理逻辑，只靠不存储即可。
    */
-  const reviewConclusion = ref<ReviewConclusion | null>(null)
+  const reviewConclusion = previewField('review')
 
   /**
    * 分章节生成的看板；不是 PRD 生成态时恒为 `null`。
@@ -335,23 +373,39 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // 导航
   // -------------------------------------------------------------------------
 
-  /** 清掉属于「本次请求 / 本次确认」的临时错误与半截流式内容 */
-  function clearTransient(): void {
+  /** 清掉上一次动作留下的错误回显（跳转时用；正文与看板不清） */
+  function clearErrors(): void {
     docError.value = ''
-    docStreamingContent.value = ''
-    clearPrdPreview()
     summarySyncError.value = ''
+  }
+
+  /**
+   * 重入守卫：本方案已有任务在跑时，一律不再发起新的生成。
+   *
+   * 从前这件事靠 `goTo` 的 busy 拦——**顺手挡住的**，而不是设计出来的：按钮之所以点不动，
+   * 是因为整条导航都被闸掉了。闸门拆掉之后必须显式补上这一道，否则连点两次就是两个任务
+   * 同时往同一份产物里写（后端还有一层 `supersede`，但前端不该指望它兜底）。
+   *
+   * 判据用「有没有在途任务」而不是「哪一份在写」：本版只有一支运行态，同方案多任务并行
+   * 明确不做（见计划「不做与风险」）。
+   */
+  function isRunInFlight(): boolean {
+    return runs.hasRunning
   }
 
   /**
    * 统一的状态导航入口。
    *
-   * 阶段赋值收口在 store 的 `goTo`（内含「请求进行中禁止跳转」的守卫），
-   * 这里只额外清掉属于本轮交互的临时状态。
+   * 阶段赋值收口在 store 的 `goTo`（它**不再**因为「有任务在跑」而拒绝跳转——
+   * 那正是「生成中所有按钮都点不动」的根因，见 `stores/workflow.ts` 的说明）。
+   *
+   * ⚠️ 这里**只清错误回显，不清正文预览与看板**：生成途中跳出去看一眼别的页面、
+   * 再点回进度条，用户应当还能看到刚才流到哪了。清预览是「开始新一轮生成」的事，
+   * 由 `resetDocTransient()` 在各条链的入口负责。
    */
   function goTo(target: ViewState): void {
-    if (!store.goTo(target)) return
-    clearTransient()
+    store.goTo(target)
+    clearErrors()
   }
 
   /**
@@ -390,11 +444,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 清掉一次生成的临时展示态（正文缓冲 / 错误 / 下游阶段 / 审核结论）。 */
   function resetDocTransient(): void {
-    docStreamingContent.value = ''
-    docError.value = ''
-    docPhase.value = 'idle'
-    docStageText.value = ''
-    reviewConclusion.value = null
+    runs.resetPreview()
   }
 
   /** 审核结论：只存内存，供审阅页展示；刷新后自然消失。 */
@@ -464,6 +514,21 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    */
   function isExpired(epoch: number): boolean {
     return solutions.sessionEpoch !== epoch
+  }
+
+  /**
+   * 这次结果所属的那一支任务，是否已经被别的任务顶替。
+   *
+   * 与 `isExpired` 是两个正交的轴，必须**同时**判：
+   * - `isExpired` 管「整份会话被换掉」（删方案 / 切方案 / 开新方案）；
+   * - 本函数管「同一份会话里换了任务」——比如上一支刚收尾、用户又发了一次。
+   *   这时代次没变，只有 `jobId` 能分辨，光看代次会让旧任务的迟到回调写进新任务的预览。
+   *
+   * `run` 为 `null` 表示任务压根没建起来（创建请求就失败了），那时没有身份可比，
+   * 交给 `isExpired` 兜底——不能因为「没有身份」就把真正的失败原因也一起吞掉。
+   */
+  function isStaleRun(run: ActiveRun | null): boolean {
+    return run !== null && !runs.holds(run.jobId)
   }
 
   /**
@@ -650,10 +715,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * **这里不落库**——后端在任务收尾时已经把同一份正文写进 `documents` 了。本函数只做
    * 两件事：把 `done.reply` 立即放进工作副本（用户不必等一次网络往返才看到内容），
-   * 以及切到对应的待确认阶段（优化除外，它留在原地）。
+   * 以及把界面带到对应的待确认阶段（优化除外，它留在原地）。
    *
    * 与后端的对齐由 `handlersForKind` 的 `onRunSummary` 负责（那一刻后端已经写完），
    * 因此这里不必再拉一次。
+   *
+   * ## 不抢方向盘（D1）
+   *
+   * 只有用户**此刻正看着这一份的生成页**，才把他带到审阅页——他正在等这个结果，
+   * 跳过去正是他要的。
+   *
+   * 用户已经在别处（生成途中点开进度条去看 PRD、切去对话补充一句）时**不跳**：
+   * 他正在做别的事，把界面拽走等于抢方向盘，而且还可能把他正在读的那一页顶掉。
+   * 这种情况用右上角浮层说一声「生成好了」，去不去看由他决定。
+   * 正文该写还是照写（写库与界面在哪一页无关）。
    *
    * @param kind 做了什么（生成 / 优化 / 澄清）
    * @param reply 后端产出的完整正文
@@ -677,8 +752,16 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 所以这一句报的是**已经发生的事实**，不是「打算写」。方案列表的内容时间据此前进：
     // 正文不经过会话快照，`workflow` 那套计数看不到它。
     documents.markContentWritten()
-    // 优化留在原地：审阅页就在眼前，跳一下反而多余。生成与澄清都落到那份文档的审阅页。
-    if (kind !== 'optimize') goTo(reviewStateFor(target))
+    // 优化留在原地：审阅页就在眼前，跳一下反而多余
+    if (kind === 'optimize') return
+
+    const generatingState = generatingStateFor(target)
+    if (generatingState !== null && viewState.value === generatingState) {
+      goTo(reviewStateFor(target))
+      return
+    }
+    // 用户已不在这一份的生成页：只提示，不跳转（见上方「不抢方向盘」）
+    hooks.onNotice(`${titleOf(target)}已生成完毕，可在进度条上查看`)
   }
 
   /**
@@ -702,12 +785,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     store.dropChatThread(chatStageForDocument(kind))
   }
 
-  /** 生成结束后清掉任务指针：任务已终态，刷新无需再重连 */
-  function clearActiveJob(): void {
-    store.activeJobId = null
-    store.activeJobKind = null
-  }
-
   /** 把 PRD 的请求参数折成任务输入 */
   function prdJobInput(payload: GeneratePrdFromSummaryPayload): JobStartInput {
     return {
@@ -728,17 +805,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * **对同一任务幂等**：一进入就要把预览复位，若同一个任务被并发重连两次，
    * 后一次会在前一路已经流出正文之后把预览清空，两路事件随即交错写入同一份缓冲。
-   * 因此「已经开始重连该任务」时直接返回，绝不重复订阅。
+   * 因此「该任务的订阅已在途」时直接返回，绝不重复订阅。
+   *
+   * 判据是**订阅登记表**（按 jobId 记）而不是一个「最近在重连谁」的数字：
+   * 后者只能记住最近那一个，切方案后两个任务各重连一次就互相覆盖了。
    */
-  let reconnectingJobId: number | null = null
   async function reconnectJob(jobId: number): Promise<void> {
-    if (reconnectingJobId === jobId) return
-    reconnectingJobId = jobId
-    try {
-      await reconnectAndSettle(jobId)
-    } finally {
-      if (reconnectingJobId === jobId) reconnectingJobId = null
-    }
+    if (isSubscribed(jobId)) return
+    await reconnectAndSettle(jobId)
   }
 
   /**
@@ -761,8 +835,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** `reconnectJob` 的实际动作（与幂等守卫分离，便于阅读与测试） */
   async function reconnectAndSettle(jobId: number): Promise<void> {
-    const kind = store.activeJobKind ?? 'prd'
-    const target = docKeyForJob(kind)
+    // 重连不改阶段（阶段已由快照恢复保留），因此产物种类必须**先**确定下来：
+    // 有指针就听指针的（`doc_kind` 是后端权威，`optimize`/`clarify` 也能答），
+    // 没有才退回按 `viewState` 反推。
+    const pointer = runs.pointer
+    const kind = pointer?.jobKind ?? store.activeJobKind ?? 'prd'
+    const target = pointer?.docKind ?? docKeyForJob(kind)
+    // 别的任务已经占着这一支运行态：本次要重连的任务属于更早的一轮，直接放弃。
+    // （同一标签页里同时跟两支任务是本期明确不做的事，见计划「不做与风险」——
+    //  最坏是看不到旧任务，绝不把两路事件写进同一份预览。）
+    if (runs.activeRun !== null && !runs.holds(jobId)) return
+    // 登记这一支运行态：`useJob.reconnect` 凭它认领事件，`isStaleRun` 凭它判过期
+    if (!runs.holds(jobId)) {
+      runs.restore({ jobId, solutionId: solutions.currentId, jobKind: kind, docKind: target })
+    }
     resetDocTransient()
     if (kind === 'prd') {
       beginPrdStages()
@@ -772,14 +858,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
     // 重连也是一次独立订阅：代次必须在发起之前定格，并沿这条链一路带着走
     const epochAtStart = solutions.sessionEpoch
-    const result = await job.reconnect(jobId, handlersForKind(kind, epochAtStart))
-    // 重连期间会话被换掉：这次重连的结果属于上一份会话，不写错误、不落稿、不清任务指针
-    if (isExpired(epochAtStart)) return
+    const { ok, reply, run } = await job.reconnect(jobId, handlersForKind(kind, epochAtStart))
+    // 重连期间会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写错误、不落稿
+    if (isStaleRun(run) || isExpired(epochAtStart)) return
     const snap = job.snapshot.value
     // 下游阶段与阶段输出由 `applyJobSnapshot` 在**快照那一刻**回填（那是唯一正确的时机：
     // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
     // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
-    if (!result.ok) {
+    if (!ok) {
       docError.value = job.error.value || '生成失败'
       prdBoard.value = null
     } else if (snap?.status === 'failed') {
@@ -787,9 +873,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       prdBoard.value = null
     } else {
       // 落点由 `finishDoc` 自己决定：优化留在原审阅页，生成 / 澄清都回到那份文档的审阅页
-      finishDoc(kind, result.reply, target, epochAtStart)
+      finishDoc(kind, reply, target, epochAtStart)
     }
-    clearActiveJob()
   }
 
   /**
@@ -836,6 +921,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 由后端统一格式化，前端不需要知道「摘要怎么变成文本」。
    */
   async function generatePrd(): Promise<void> {
+    if (isRunInFlight()) return
     const payload = buildPrdPayload()
     if (!payload) return
     // 重新生成 PRD **不再删除下游**：旧的接口文档 / 提示词会留着，并在收尾后由后端
@@ -845,28 +931,27 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     beginPrdStages()
     // 代次在**发起之前**定格：这条链的 handlers、await 之后的判断与 `finishDoc` 全都用它
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok } = await job.start(
+    const { reply, ok, run } = await job.start(
       'prd',
       prdJobInput(payload),
       handlersForKind('prd', epochAtStart),
     )
-    // 订阅期间会话被换掉：成功 / 失败都不要再写回本文件的状态
-    if (isExpired(epochAtStart)) return
+    // 订阅期间会话被换掉、或这一支已被别的任务顶替：成功 / 失败都不要再写回本文件的状态
+    if (isStaleRun(run) || isExpired(epochAtStart)) return
     if (!ok) {
       docError.value = job.error.value || 'PRD 生成失败'
       // 失败时收掉阶段条：原因由错误提示说明，留着一个「进行中」的指示反而误导
       prdBoard.value = null
-      clearActiveJob()
       return
     }
     finishDoc('prd', reply, 'prd', epochAtStart)
     // 只作废 PRD 自己的澄清线程；下游正文还在，它们的线程继续有效
     dropThreadsFor('prd')
-    clearActiveJob()
   }
 
   /** 生成接口文档：以 PRD 正文为输入，团队接口规范由技能包全量注入，无需前端检索确认 */
   async function generateApiDocs(): Promise<void> {
+    if (isRunInFlight()) return
     // 提示词不再删除：重新生成接口文档后，它只会被标成 stale（见 generatePrd 的说明）
     resetDocTransient()
     prdBoard.value = null
@@ -875,22 +960,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     docPhase.value = 'writing'
     // 同 `generatePrd`：代次在发起之前定格，供本次订阅的回调与收尾使用
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok } = await job.start(
+    const { reply, ok, run } = await job.start(
       'api-docs',
       // 快捷流程一遍过：整篇生成完就收，不审也不改（见 `reviewEnabledForJob`）
       { prdContent: documents.contentOf('prd'), reviewEnabled: reviewEnabledForJob() },
       handlersForKind('api-docs', epochAtStart),
     )
-    if (isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart)) return
     if (!ok) {
       docError.value = job.error.value || '接口文档生成失败'
-      clearActiveJob()
       return
     }
     finishDoc('api-docs', reply, 'api-docs', epochAtStart)
     // 只作废接口文档自己的线程；提示词还在，它的线程继续有效
     dropThreadsFor('api-docs')
-    clearActiveJob()
   }
 
   /**
@@ -900,27 +983,26 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 因此由调用方把正文传进来，而不是在这里猜该读哪份状态。
    */
   async function generatePrompts(prdText: string, apiDocsText = ''): Promise<void> {
+    if (isRunInFlight()) return
     resetDocTransient()
     prdBoard.value = null
     // 与接口文档同理：阶段条立即亮起，别让用户在整篇生成期间盯着空白
     docPhase.value = 'writing'
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok } = await job.start(
+    const { reply, ok, run } = await job.start(
       'prompts',
       // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
       { prdContent: prdText, apiDocsContent: apiDocsText, reviewEnabled: reviewEnabledForJob() },
       handlersForKind('prompts', epochAtStart),
     )
-    if (isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart)) return
     if (!ok) {
       docError.value = job.error.value || '提示词生成失败'
-      clearActiveJob()
       return
     }
     finishDoc('prompts', reply, 'prompts', epochAtStart)
     // 新一版提示词 = 它自己的旧澄清线程作废
     dropThreadsFor('prompts')
-    clearActiveJob()
   }
 
   /**
@@ -938,26 +1020,25 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 初值 `'prd'`，于是接口文档的优化结果会被写进 PRD（见 ADR-028 记录的那处修复）。
    */
   async function optimizeCurrentDocument(content: string, instruction: string): Promise<void> {
+    if (isRunInFlight()) return
     if (!content.trim() || !instruction.trim()) return
     const target = docKindOfState(viewState.value)
     if (!target) return
 
     resetDocTransient()
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok } = await job.start(
+    const { reply, ok, run } = await job.start(
       'optimize',
       { document: content, instruction, docKind: target },
       handlersForKind('optimize', epochAtStart),
     )
-    if (isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart)) return
     if (!ok) {
       // 优化失败：保留原文档，错误已写入 docError
       docError.value = job.error.value || '优化失败'
-      clearActiveJob()
       return
     }
     finishDoc('optimize', reply, target, epochAtStart)
-    clearActiveJob()
   }
 
   // -------------------------------------------------------------------------
@@ -1012,7 +1093,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * **先切到 `generating-<kind>` 再发起任务**：改写要跑十几秒，全程停在对话栏用户看不到
    * 任何进展（流式正文只有 `GeneratingStage` 会渲染）。切阶段必须放在 `job.start`
-   * **之前**——它内部置位 `docGenerating` 后，`goTo` 会被 busy 守卫拦下。
+   * **之前**——它内部登记运行态，此后 `goTo` 会被「有任务在跑」拦下。
    * 失败时留在生成视图，由 `GeneratingStage` 的错误区说明原因（后端失败不覆写正文）。
    *
    * ⚠️ **必须带 `docKind`**：它既是「改写结果写回哪一份」的依据，也是「注入哪一套产出规范」
@@ -1026,6 +1107,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 在产物暂时缺席时可能指向一条点不动的线程，而屏幕上那时显示的是另一条。
    */
   async function applyClarification(): Promise<void> {
+    if (isRunInFlight()) return
     const target = documentKindOfChatStage(activeChatTab.value)
     if (!target) return
     const document = documents.contentOf(target)
@@ -1040,22 +1122,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     goTo(generatingStateFor(target) ?? 'generating-prd')
 
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok } = await job.start(
+    const { reply, ok, run } = await job.start(
       'clarify',
       // 只回传 role / content：后端按同一形状读历史（与 `optimize` 的入参口径一致）
       { document, history, docKind: target },
       handlersForKind('clarify', epochAtStart),
     )
-    if (isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart)) return
     if (!ok) {
       // 改写失败：留在生成视图，由 `GeneratingStage` 的错误区展示原因（后端失败不覆写正文）
       docError.value = job.error.value || '按澄清结果改写失败'
-      clearActiveJob()
       return
     }
     // 落点（回到那份文档的审阅页）由 `finishDoc` 负责；对话留在 `messages` 里，可再回去补充
     finishDoc('clarify', reply, target, epochAtStart)
-    clearActiveJob()
     hooks.onNotice(`已按澄清结果更新 ${titleOf(target)}`)
   }
 
@@ -1105,9 +1185,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * 为什么先切到 `generating-<kind>` 再发任务：它要跑几十秒且输出整篇正文，留在审阅页
    * 只能干等。复用生成态那条流式预览，用户至少能看到字在往下走。
-   * ⚠️ `goTo` 必须在 `job.start` **之前**——`docGenerating` 置位后 busy 守卫会拦掉跳转。
+   * ⚠️ `goTo` 必须在 `job.start` **之前**——它登记运行态之后，`goTo` 会拦掉跳转。
    */
   async function autoClarify(): Promise<void> {
+    if (isRunInFlight()) return
     const target = docKindOfState(viewState.value)
     if (!target) return
     const content = documents.contentOf(target)
@@ -1119,19 +1200,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     resetDocTransient()
     goTo(generating)
     const epochAtStart = solutions.sessionEpoch
-    const { reply, ok } = await job.start(
+    const { reply, ok, run } = await job.start(
       'auto-clarify',
       { document: content, pendingItems: items, docKind: target },
       handlersForKind('auto-clarify', epochAtStart),
     )
-    if (isExpired(epochAtStart)) return
+    if (isStaleRun(run) || isExpired(epochAtStart)) return
     if (!ok) {
       docError.value = job.error.value || 'AI 自行澄清失败'
-      clearActiveJob()
       return
     }
     finishDoc('auto-clarify', reply, target, epochAtStart)
-    clearActiveJob()
   }
 
   /**
@@ -1310,6 +1389,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 生成完成后 `generatePrd` 内部会把状态推进到 review-prd。
    */
   async function handleGeneratePrd(): Promise<void> {
+    if (isRunInFlight()) return
     // 快捷流程既没有结构化摘要（闸门①无处可写），也没有需求对话（「至少一轮 AI 回复」
     // 这个前提不存在）。它的校验只有一条：那段话写了没有。校验通过就直接进生成。
     if (entryMode.value === 'prd-quick') {
@@ -1384,8 +1464,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 清空文档流水线相关的全部临时状态（重新开始时用） */
   function reset(): void {
-    clearTransient()
-    prdBoard.value = null
+    // 「重新开始」要连预览一起归零：正文 / 看板 / 阶段 / 阶段输出 / 审核结论 / 错误
+    resetDocTransient()
     pendingSummary.value = null
     summaryChanges.value = []
     summarySyncing.value = false

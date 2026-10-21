@@ -783,6 +783,14 @@ export interface JobSnapshot {
   jobId: number
   /** 文档种类（后端原始取值，如 `api_docs`） */
   kind: string
+  /**
+   * 目标产物（前端取值，如 `api-docs`）。
+   *
+   * `kind` 只说「做了什么」：`optimize` / `clarify` 凭它定不了产物，而重连时又必须知道
+   * 「改的是哪一份」。后端把这个结论随快照一起给出；取不到时为 null——**不得猜一个默认值**
+   * （猜错等于拿 A 的结果覆盖 B）。
+   */
+  docKind: DocumentKind | null
   /** 任务状态：running / completed / failed */
   status: string
   /** 当前阶段（如 writing / reviewing / rewriting） */
@@ -1078,5 +1086,12 @@ export interface SessionDataV2 {
   activeJobId: number | null
   /** 当前进行中任务的文档种类；与 `activeJobId` 成对出现，无任务时为 null */
   activeJobKind: DocKind | null
+  /**
+   * 当前进行中任务**写哪一份产物**；取不到时为 null。
+   *
+   * 与 `activeJobKind` 分开：`optimize` / `clarify` 这类动作凭 kind 定不了产物。
+   * 可选字段——旧快照没有它，恢复时走「按 `viewState` 反推」的旧路，不因此丢整份快照。
+   */
+  activeJobDocKind?: DocumentKind | null
 }
 

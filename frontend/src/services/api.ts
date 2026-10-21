@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 import { normalizeImportance } from '@/utils/pendingItems'
+import { fromBackendKind } from '@/utils/workflow'
 import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
 import type { BackendErrorCode } from '@/services/errors'
 import type {
@@ -474,6 +475,9 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
   return {
     jobId: readNumber(data, 'job_id'),
     kind: readString(data, 'kind'),
+    // 目标产物：`kind` 是动作名，`doc_kind` 才是「写哪一份」。旧后端没有这个字段，
+    // 解析成 null 由调用方走「按阶段反推」的旧路，不在这里猜。
+    docKind: fromBackendKind(data.doc_kind),
     status: readString(data, 'status'),
     phase: readString(data, 'phase'),
     finalizedText: readString(data, 'finalized_text'),
@@ -1021,6 +1025,8 @@ export interface JobStatusSummary {
   id: number
   /** 后端原始 kind（下划线口径） */
   kind: string
+  /** 目标产物（本前端口径）；后端无法确定时为 null */
+  docKind: DocumentKind | null
   status: string
   phase: string
   solutionId: number | null
@@ -1043,6 +1049,7 @@ function toJobStatus(data: unknown): JobStatusSummary {
   return {
     id: typeof raw.id === 'number' ? raw.id : 0,
     kind: typeof raw.kind === 'string' ? raw.kind : '',
+    docKind: fromBackendKind(raw.doc_kind),
     status: typeof raw.status === 'string' ? raw.status : '',
     phase: typeof raw.phase === 'string' ? raw.phase : '',
     solutionId: typeof raw.solution_id === 'number' ? raw.solution_id : null,

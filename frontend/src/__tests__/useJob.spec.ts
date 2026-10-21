@@ -7,8 +7,9 @@ import * as api from '@/services/api'
 import type { StreamHandlers } from '@/services/api'
 import { ApiError } from '@/services/errors'
 import * as solutionApi from '@/services/solutionService'
+import { useRunsStore } from '@/stores/runs'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { JobSnapshot, RunSummary } from '@/types'
+import type { DocKind, JobSnapshot, RunSummary } from '@/types'
 
 /**
  * 生成任务生命周期编排测试。
@@ -61,6 +62,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
   return {
     jobId: 12,
     kind: 'prd',
+    docKind: 'prd',
     status: 'running',
     phase: 'writing',
     finalizedText: '',
@@ -154,12 +156,11 @@ describe('useJob.start', () => {
     expect(savedData).toContain('"activeJobId":12')
 
     expect(api.readJobStream).toHaveBeenCalledWith(12, expect.anything(), expect.anything())
-    expect(workflow.activeJobId).toBe(12)
-    expect(workflow.activeJobKind).toBe('prd')
+    // 订阅结束后这一支任务收尾：指针随之失效——「生成中」不再是那个与任务无关的全局布尔
+    expect(workflow.activeJobId).toBeNull()
+    expect(workflow.hasActiveRun).toBe(false)
     expect(workflow.viewState).toBe('generating-prd')
-    // 订阅结束后不再处于「生成中」
-    expect(workflow.docGenerating).toBe(false)
-    expect(result).toEqual({ reply: '', ok: true })
+    expect(result).toEqual({ reply: '', ok: true, run: expect.objectContaining({ jobId: 12 }) })
   })
 
   it('把 snapshot / run_summary 记录到运行态，并原样透传给调用方的 handlers', async () => {
@@ -186,7 +187,11 @@ describe('useJob.start', () => {
     expect(job.snapshot.value).toEqual(snap)
     expect(job.phase.value).toBe('reviewing')
     expect(job.runSummary.value).toEqual(runSummary())
-    expect(result).toEqual({ reply: '# 正文\n增量', ok: true })
+    expect(result).toEqual({
+      reply: '# 正文\n增量',
+      ok: true,
+      run: expect.objectContaining({ jobId: 12 }),
+    })
   })
 
   it('已用时：快照用服务端的值锚定，收尾停在权威总耗时上', async () => {
@@ -258,13 +263,22 @@ describe('useJob.start', () => {
     const workflow = useWorkflowStore()
     workflow.viewState = 'review-prd'
 
+    // 运行态在订阅期间才看得到（收尾后指针即失效），因此在流里取样
+    const seen: Array<{ kind: DocKind | null; running: boolean }> = []
+    vi.mocked(api.readJobStream).mockImplementation(async () => {
+      seen.push({ kind: workflow.activeJobKind, running: workflow.hasActiveRun })
+      return { conversationId: '', reply: '', asks: [] }
+    })
+
     const job = useJob()
     await job.start('optimize', { document: '# 原文', instruction: '更简洁' }, {})
 
     expect(workflow.viewState).toBe('review-prd')
-    expect(workflow.activeJobKind).toBe('optimize')
+    expect(seen).toEqual([{ kind: 'optimize', running: true }])
     // optimize 没有对应的「生成中」阶段，进度条不呼吸
     expect(workflow.generating).toBe(false)
+    // 收尾后不再挡住任何跳转
+    expect(workflow.hasActiveRun).toBe(false)
   })
 
   it('订阅失败时把错误与错误码记进运行态，并返回 ok:false', async () => {
@@ -290,12 +304,18 @@ describe('useJob.reconnect', () => {
     })
 
     const job = useJob()
+    // 重连的是「快照里恢复出来的那一支」：先登记运行态，`reconnect` 才认领得到事件
+    useRunsStore().restore({ jobId: 5, solutionId: 1, jobKind: 'prd', docKind: 'prd' })
     const result = await job.reconnect(5, {})
 
     expect(api.createJob).not.toHaveBeenCalled()
     expect(api.readJobStream).toHaveBeenCalledWith(5, expect.anything(), expect.anything())
     expect(job.snapshot.value).toEqual(snap)
-    expect(result).toEqual({ reply: '半句续写', ok: true })
+    expect(result).toEqual({
+      reply: '半句续写',
+      ok: true,
+      run: expect.objectContaining({ jobId: 5 }),
+    })
   })
 })
 
@@ -324,7 +344,8 @@ describe('useJob.detach', () => {
     expect(result.ok).toBe(false)
     expect(job.error.value).toBe('')
     expect(job.running.value).toBe(false)
-    expect(workflow.docGenerating).toBe(false)
+    // 退订之后连运行态一起清：此后还在道上飞的事件写不进任何地方
+    expect(workflow.hasActiveRun).toBe(false)
     // 服务端任务没有被取消——本期没有 cancel 端点，只创建了一次任务
     expect(api.createJob).toHaveBeenCalledTimes(1)
     expect(receivedSignal?.aborted).toBe(true)

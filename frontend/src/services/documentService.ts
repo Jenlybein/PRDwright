@@ -15,7 +15,7 @@
 import axios from 'axios'
 
 import http from '@/services/api'
-import { parseRunSummary } from '@/utils/workflow'
+import { fromBackendKind, parseRunSummary } from '@/utils/workflow'
 import { normalizeImportance } from '@/utils/pendingItems'
 import type {
   DocumentKind,
@@ -32,12 +32,7 @@ function toBackendKind(kind: DocumentKind): string {
 }
 
 /** 后端 `kind` → 前端 `DocumentKind`；未知取值返回 `null`（调用方据此丢弃这一条） */
-export function fromBackendKind(kind: unknown): DocumentKind | null {
-  if (kind === 'prd') return 'prd'
-  if (kind === 'api_docs' || kind === 'api-docs') return 'api-docs'
-  if (kind === 'prompts') return 'prompts'
-  return null
-}
+export { fromBackendKind }
 
 /** 从后端错误响应里取可直接展示的说明；取不到时用兜底文案 */
 function backendMessage(error: unknown, fallback: string): string {

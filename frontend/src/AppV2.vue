@@ -25,12 +25,15 @@ import { fetchActiveJobs, onUnauthorized } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useDocumentsStore } from '@/stores/documents'
 import { useDocumentVersionsStore } from '@/stores/documentVersions'
+import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import {
   chatStageForDocument,
+  docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
+  fromBackendJobKind,
   generatingStateFor,
   hasDocumentReview,
   hasRequirementChat,
@@ -120,6 +123,14 @@ const {
   canGeneratePrd,
   downgradeNotice,
 } = storeToRefs(store)
+
+/**
+ * 在途任务的运行态。
+ *
+ * 恢复路径要往里**登记**一支运行态（快照里只有 jobId / kind，运行态本身住在 store 里），
+ * 因此这里直接拿 store 而不是只取派生值。
+ */
+const runs = useRunsStore()
 
 /**
  * 三份产物正文的持有者。
@@ -257,7 +268,8 @@ solutions.setOpenedHandler((id) => {
  * 恢复快照后自动「静默重连」进行中的生成任务。
  *
  * 三条路径：
- * 1. 快照里记着 `activeJobId`：直接重连该任务（后端先发 `snapshot` 补全正文，再接 live）；
+ * 1. 快照里记着任务指针（`runs.pointer`：jobId + 任务种类 + 产物种类）：直接重连该任务
+ *    （后端先发 `snapshot` 补全正文并校正产物种类，再接 live）；
  * 2. 无指针但快照原本落在 `generating-*`（已被降级为 `review-*`）：兜底查一次活跃任务，
  *    命中则把指针写回 store、撤销降级并重连；
  * 3. 都未命中：什么都不做，保持既有「上次生成未完成」的降级提示。
@@ -265,8 +277,16 @@ solutions.setOpenedHandler((id) => {
  * 全程无需用户点击——这正是「生成与连接解耦」带来的体验。
  */
 async function resumeAfterRestore(): Promise<void> {
-  if (store.activeJobId !== null) {
-    await reconnectJob(store.activeJobId)
+  // 1. 快照里记着指针：重连**同一个**任务，身份直接读 `runs.pointer`。
+  //    不从 `store.activeJobId` 中转、也不自己另存一份：指针里的 `docKind` 决定
+  //    「写哪一份产物」，它随快照持久化，随后由服务端 `snapshot` 校正
+  //    （见 `runs.applySnapshot`）——重连链就是靠它把事件落到对的预览里。
+  const pointer = runs.pointer
+  if (pointer !== null) {
+    // 指针必须属于**当前打开的方案**。`applySnapshot` 会带上方案 id，正常不会不符；
+    // 真不符说明快照是切换过程中晚到的那一份，宁可少一次重连，也不要串到别人身上。
+    if (runs.activeRun !== null && runs.activeRun.solutionId !== solutions.currentId) return
+    await reconnectJob(pointer.jobId)
     return
   }
 
@@ -282,8 +302,15 @@ async function resumeAfterRestore(): Promise<void> {
     })
     const match = jobs[0]
     if (!match) return
-    store.activeJobId = match.id
-    store.activeJobKind = kind
+    // 登记运行态：`reconnectJob` 凭它认领事件，界面凭它判断「哪一份正在写」。
+    // `kind` 是后端原始取值（下划线口径），产物种类优先取后端给的 `doc_kind`——
+    // 它在 `optimize` / `clarify` 上比「按阶段反推」权威。
+    runs.restore({
+      jobId: match.id,
+      solutionId: solutions.currentId,
+      jobKind: fromBackendJobKind(match.kind) ?? kind,
+      docKind: match.docKind ?? kind,
+    })
     // 命中活跃任务：撤销降级、切回生成态，再重连
     store.downgrade = null
     const target = generatingStateFor(kind)
@@ -466,6 +493,26 @@ const versionDrawerOpen = ref(false)
 
 /** 当前审阅的是哪一份产物；非审阅阶段为 null（抽屉只在审阅页可用） */
 const activeDocKind = computed(() => docKindOfState(viewState.value))
+
+/**
+ * 眼前这一份产物是否正在被写。
+ *
+ * 判据是**产物**而不是「有没有任务在跑」：正在生成接口文档时，PRD 的审阅页、
+ * 版本抽屉、澄清按钮都不该跟着变灰——那件事与它无关。这正是从前 `store.busy`
+ * 一刀切带来的误伤（生成期间所有对话标签全灰）。
+ */
+const isGeneratingCurrentDoc = computed(() => {
+  // 生成态与审阅态各有一套反推：`optimize` 期间阶段不变（停在 review-*），
+  // 而「生成 / 改写」期间停在 generating-*，两者都要能答出「这是哪一份」
+  const kind = activeDocKind.value ?? docKindOfGeneratingState(viewState.value)
+  return kind !== null && runs.isRunningFor(kind)
+})
+
+/** 对话页当前线程那一份是否正在被改写（「按澄清结果改写」按钮的忙态） */
+const isRewritingCurrentDoc = computed(() => {
+  const kind = documentKindOfChatStage(activeChatTab.value)
+  return kind !== null && runs.isRunningFor(kind)
+})
 
 /** 当前审阅的这份下游是否基于旧版上游（PRD 无上游，恒 false） */
 const documentStale = computed(() => {
@@ -738,7 +785,11 @@ function handleSelectEntry(mode: EntryMode): void {
     auth.requireLogin('创建任务需要先登录，登录后回到这里重新选择入口')
     return
   }
-  store.chooseEntry(mode)
+  // 生成中拒绝换入口：换模式会改写进度条口径与完成条件，而正在跑的那份是按旧模式发起的。
+  // **要给出提示**——从前这里被 `goTo` 的 busy 静默吞掉，用户点了没反应，以为界面坏了。
+  if (!store.chooseEntry(mode)) {
+    flashSavedTip('当前方案正在生成内容，完成或停止后才能切换入口', 'danger')
+  }
 }
 
 /**
@@ -947,8 +998,8 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :error="activeChat.chatError"
         :can-generate-prd="canGeneratePrd"
         :can-rewrite="canRewrite"
-        :rewriting="isGenerating"
-        :busy="store.busy"
+        :rewriting="isRewritingCurrentDoc"
+        :busy="activeChat.streaming"
         :pending-items="chatPendingItems"
         @select-tab="chatTab = $event"
         :edit-requirements-label="editRequirementsLabel"
@@ -966,7 +1017,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :title="activeDocTitle"
         :streaming-content="docStreamingContent"
         :error="docError"
-        :generating="isGenerating"
+        :generating="isGeneratingCurrentDoc"
         :prd="prdStatus"
         :doc-phase="docPhase"
         :doc-stage-text="docStageText"
@@ -1057,7 +1108,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
       :versions="activeDocKind ? versions.versionsByKind[activeDocKind] : []"
       :loading="versions.loading"
       :error="versions.error"
-      :busy="isGenerating"
+      :busy="isGeneratingCurrentDoc"
       :preview="versions.previewDetail"
       :preview-loading="versions.previewLoading"
       :preview-error="versions.previewError"

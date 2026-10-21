@@ -70,6 +70,24 @@ export function isDocumentKind(value: unknown): value is DocumentKind {
   return value === 'prd' || value === 'api-docs' || value === 'prompts'
 }
 
+/**
+ * 后端产物名（下划线）→ 前端 `DocumentKind`（连字符）；未知取值返回 `null`。
+ *
+ * 放在这里而不是 `services/documentService.ts`：`api.ts` 需要它解析任务快照里的
+ * `doc_kind`，而 `documentService` 本身 import 了 `api` 的 axios 实例——反向 import 会成环。
+ * 纯函数下沉到 utils 后两边都能用；`documentService` 仍 re-export 旧名 `fromBackendKind`，
+ * 调用方不必改。
+ *
+ * 返回 `null` 而不是猜一个默认值：调用方据此走「按阶段反推」的旧路，而不是拿 `prd` 去
+ * 覆盖一份接口文档。
+ */
+export function fromBackendKind(kind: unknown): DocumentKind | null {
+  if (kind === 'prd') return 'prd'
+  if (kind === 'api_docs' || kind === 'api-docs') return 'api-docs'
+  if (kind === 'prompts') return 'prompts'
+  return null
+}
+
 /** 判断任意值是否为合法文档种类（生成任务的 kind） */
 export function isDocKind(value: unknown): value is DocKind {
   return (
@@ -80,6 +98,20 @@ export function isDocKind(value: unknown): value is DocKind {
     value === 'clarify' ||
     value === 'auto-clarify'
   )
+}
+
+/**
+ * 后端**任务**种类（下划线）→ 前端 `DocKind`（连字符）；未知取值返回 `null`。
+ *
+ * 与 `fromBackendKind` 只差那几个「动作」：`optimize` / `clarify` / `auto_clarify`
+ * 不是产物，但它们是任务的种类，重连时得靠它选对 handlers 与阶段。两者不能合并——
+ * 合并之后「澄清针对哪一份」就会拿到一个 `optimize`，去 documents store 里找一份不存在的产物。
+ */
+export function fromBackendJobKind(kind: unknown): DocKind | null {
+  if (kind === 'optimize') return 'optimize'
+  if (kind === 'clarify') return 'clarify'
+  if (kind === 'auto_clarify' || kind === 'auto-clarify') return 'auto-clarify'
+  return fromBackendKind(kind)
 }
 
 // ----------------------------------------------------------------------------
@@ -625,6 +657,9 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
       pastePairInput: parsePastePairInput(record.pastePairInput),
       activeJobId,
       activeJobKind: hasActiveJob && isDocKind(record.activeJobKind) ? record.activeJobKind : null,
+      // 可选字段：旧快照没有它。缺失时留 null（由使用方按阶段反推），**不要**据此丢掉整份快照。
+      activeJobDocKind:
+        hasActiveJob && isDocumentKind(record.activeJobDocKind) ? record.activeJobDocKind : null,
     },
   }
 }

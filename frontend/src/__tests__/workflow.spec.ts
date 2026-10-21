@@ -8,6 +8,7 @@ import {
   docKindOfState,
   documentKindOfChatStage,
   emptyConversationIds,
+  fromBackendKind,
   generatingStateFor,
   hasDocumentReview,
   hasRequiredDocuments,
@@ -311,6 +312,8 @@ describe('会话快照解析', () => {
       'pastePairInput',
       'activeJobId',
       'activeJobKind',
+      // 目标产物：与 activeJobKind 分开。旧快照没有它 → null，不据此丢整份快照。
+      'activeJobDocKind',
     ])
   })
 
@@ -508,8 +511,21 @@ describe('带任务指针的快照恢复', () => {
     expect(isDocumentKind('clarify')).toBe(false)
   })
 
-  it('generatingStateFor / docKindOfState 互为逆映射（两个动作都不占生成阶段）', () => {
-    expect(generatingStateFor('prd')).toBe('generating-prd')
+  it('fromBackendKind 把后端产物名转成前端口径，未知取值给 null 不猜', () => {
+    // 下划线与连字符两种写法都认：快照里的 `doc_kind` 来自后端，`api_docs` 是常态，
+    // 但历史上也有直接存前端口径的旧快照，两种都不能漏。
+    expect(fromBackendKind('prd')).toBe('prd')
+    expect(fromBackendKind('api_docs')).toBe('api-docs')
+    expect(fromBackendKind('api-docs')).toBe('api-docs')
+    expect(fromBackendKind('prompts')).toBe('prompts')
+    // 动作名、空串、undefined 都**不得**被猜成 prd：猜错等于拿 A 的结果覆盖 B。
+    expect(fromBackendKind('optimize')).toBeNull()
+    expect(fromBackendKind('auto_clarify')).toBeNull()
+    expect(fromBackendKind('')).toBeNull()
+    expect(fromBackendKind(undefined)).toBeNull()
+  })
+
+  it('generatingStateFor / docKindOfState 互为逆映射（两个动作都不占生成阶段）', () => {    expect(generatingStateFor('prd')).toBe('generating-prd')
     expect(generatingStateFor('api-docs')).toBe('generating-api-docs')
     expect(generatingStateFor('prompts')).toBe('generating-prompts')
     // 就地动某一篇：优化留在审阅页，澄清**先切到对应的生成态**（改写期间要展示流式正文），

@@ -35,7 +35,9 @@ import {
   updateSolution,
 } from '@/services/solutionService'
 import { SolutionNotFoundError } from '@/services/solutionService'
+import { detachAll as detachAllSubscriptions } from '@/services/runSubscriptions'
 import { useDocumentsStore } from '@/stores/documents'
+import { useRunsStore } from '@/stores/runs'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { EntryMode, SolutionSavePayload, SolutionSummary } from '@/types'
 import { parseSessionSnapshot } from '@/utils/workflow'
@@ -81,6 +83,17 @@ export const useSolutionsStore = defineStore('solutions', () => {
   // 产物正文的持有者。方案切走 / 换掉时，内存里那份正文也要跟着走，
   // 否则界面会继续显示上一份方案的文档。
   const documents = useDocumentsStore()
+  /**
+   * 在途任务的运行态。
+   *
+   * 本 store 是「整份会话被换掉」的发起方（打开别的方案 / 开新方案 / 删掉当前方案），
+   * 因此它必须在换人的那一刻把本地订阅与运行态一起摘掉——否则上一个方案还在跑的流
+   * 会继续把事件写进新方案的预览与文档。
+   *
+   * 只依赖 `runs`（它只依赖 types）与订阅登记表（零依赖），不 import
+   * `useDocumentPipeline`：`pipeline → solutions` 已经存在，反过来就成环。
+   */
+  const runs = useRunsStore()
 
   /** 左侧列表（只含摘要，不含快照正文） */
   const items = ref<SolutionSummary[]>([])
@@ -378,6 +391,24 @@ export const useSolutionsStore = defineStore('solutions', () => {
   // ------------------------------------------------------------------
 
   /**
+   * 摘掉本地的任务订阅并清空运行态（**不取消服务端任务**）。
+   *
+   * 三处「整份会话换掉」都要先走这一步：切方案 / 开新方案 / 删掉当前方案。
+   *
+   * 为什么必须做：运行态与预览都是**单槽**的，上一个方案的任务一旦还在订阅，
+   * 它的事件就会在切换之后照常写进预览（用户在新方案里看到上一份的正文），
+   * 收尾时还会去清别人的任务指针。而「不取消服务端任务」是刻意的——任务与连接解耦，
+   * 回到原方案时凭快照里的指针重连即可（见 `AppV2.resumeAfterRestore`）。
+   *
+   * 代次（`sessionEpoch`）管的是**回调**层面的事；这一层管的是**订阅**层面，
+   * 两者互补：代次拦住已经进队列的事件，退订让队列不再产生新事件。
+   */
+  function detachActiveRun(): void {
+    detachAllSubscriptions()
+    runs.detach()
+  }
+
+  /**
    * 打开一份已有方案：拉详情、校验快照、回填 workflow。
    *
    * 快照可能来自旧版本前端，或落在 `generating-*` 这类刷新后无法继续的中间态，
@@ -403,9 +434,12 @@ export const useSolutionsStore = defineStore('solutions', () => {
 
       currentId.value = detail.id
       if (parsed) {
-        // 会话换人了：此刻起，上一份会话里还在飞的异步回调全部作废（见 `sessionEpoch`）
+        // 会话换人了：先退订本地的流、清掉运行态与预览，再自增代次。
+        // 顺序不能反——`applySnapshot` 会据新快照重建运行态，退订若放在它后面，
+        // 就会把刚重建的那一支也摘掉（表现是「切回来以后再也不重连」）。
+        detachActiveRun()
         sessionEpoch.value += 1
-        workflow.applySnapshot(parsed.session, parsed.downgrade)
+        workflow.applySnapshot(parsed.session, parsed.downgrade, detail.id)
       } else {
         // 快照坏掉（非法 JSON / 结构不符）时不清空当前内容，只标记错误让用户知道
         saveError.value = '这份方案的记录已损坏，无法恢复'
@@ -451,7 +485,9 @@ export const useSolutionsStore = defineStore('solutions', () => {
     await flushPendingSave()
     await documents.flushPendingSave()
     clearTimer()
-    // 会话换人了：上一份会话里还在飞的异步回调（生成的流回调等）从此刻起全部作废
+    // 会话换人了：先退订本地流、清运行态与预览（服务端任务照跑，回到原方案可重连），
+    // 再自增代次让还在飞的回调作废
+    detachActiveRun()
     sessionEpoch.value += 1
     currentId.value = null
     saveError.value = ''
@@ -469,10 +505,9 @@ export const useSolutionsStore = defineStore('solutions', () => {
    * 后端那边也有一半责任（删除时取消挂在方案上的任务），但前端不能指望它：
    * 回调可能已经在本地队列里排着了。
    *
-   * 至于本地的 SSE 订阅：这里**不主动摘**（`useJob.detach()` 只存在于组件的实例里，
-   * 要摘就得给 store 引入一份订阅登记表，改动面远大于收益）。订阅残留最多让这次流
-   * 多读几帧事件，而后端 `cancel_for_solution` 会在收尾时关掉总线让它自然结束；
-   * 期间到达的事件全被代次守卫丢弃，没有任何副作用。
+   * 本地订阅同样要摘（`detachActiveRun`）：后端 `cancel_for_solution` 会在收尾时关掉
+   * 总线，但那是**异步**的，而前端这一刻已经开始渲染新方案的空会话了。留着订阅，
+   * 关总线之前那几帧事件就会写进新方案的预览。
    */
   async function remove(id: number): Promise<void> {
     try {
@@ -480,7 +515,8 @@ export const useSolutionsStore = defineStore('solutions', () => {
       removeFromList(id)
       if (currentId.value === id) {
         clearTimer()
-        // 会话换人了：迟到的异步回调从此刻起一律丢弃
+        // 先退订、再换代次：迟到的回调与在途的流都从此刻起写不进任何地方
+        detachActiveRun()
         sessionEpoch.value += 1
         // 方案已经删了，压着的改动没有再存的意义
         dirty = false

@@ -31,6 +31,7 @@ import type {
   ViewState,
 } from '@/types'
 import { useDocumentsStore } from '@/stores/documents'
+import { useRunsStore } from '@/stores/runs'
 import {
   canGeneratePrdFrom,
   documentKindOfChatStage,
@@ -66,6 +67,15 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 进度条要不要解锁某一格、完成条件是否满足，都取决于产物有没有内容。
    */
   const documents = useDocumentsStore()
+
+  /**
+   * 在途任务的运行态。
+   *
+   * 「哪个任务在跑、它写哪一份产物、跑了多久」全在这里，本 store 只**派生**出指针与忙碌判据。
+   * 从前这里放的是一个无归属的布尔 `docGenerating`，它同时兼任「渲染归属」「重入守卫」和
+   * 「导航闸门」，第三种用法把整个界面锁死了（见 `stores/runs.ts` 的说明）。
+   */
+  const runs = useRunsStore()
 
   // ------------------------------------------------------------------
   // 会话数据（写入本地快照）
@@ -129,11 +139,22 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 生成与浏览器连接解耦后，刷新 / 断线只断订阅；凭这个指针即可在页面恢复后
    * **静默重连**到同一任务，先收 `snapshot` 补全正文再接 live。
    * 它是**持久化字段**（随快照存后端）：正是跨刷新才需要它。
+   *
+   * ⚠️ 它是 `stores/runs` 里那一支运行态的**派生值**，不是独立字段：两处各存一份就一定会
+   * 漂移（典型症状是 `activeJobId` 还指着已收尾的任务，刷新后去重连一个死任务）。
    */
-  const activeJobId = ref<number | null>(null)
+  const activeJobId = computed<number | null>(() => runs.pointer?.jobId ?? null)
 
-  /** 当前进行中任务的文档种类；与 `activeJobId` 成对写入 / 清空 */
-  const activeJobKind = ref<DocKind | null>(null)
+  /** 当前进行中任务的文档种类；与 `activeJobId` 成对派生 */
+  const activeJobKind = computed<DocKind | null>(() => runs.pointer?.jobKind ?? null)
+
+  /**
+   * 当前进行中任务**写的那一份产物**。
+   *
+   * 与 `activeJobKind` 分开：`optimize` / `clarify` 这类动作凭 kind 定不了产物，
+   * 得由任务创建时记下的目标决定（后端 `doc_kind` 的同一口径）。
+   */
+  const activeJobDocKind = computed(() => runs.pointer?.docKind ?? null)
 
   // 澄清线程的历史沿革（免得下一个人重蹈覆辙）：
   // ADR-025 为了让闸门①读不到文档答疑，曾把接口文档 / 提示词的澄清做成**完全独立的一套**
@@ -150,11 +171,16 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /** 对话流式请求进行中 */
   const chatStreaming = ref(false)
 
-  /** 文档生成 / 优化进行中 */
-  const docGenerating = ref(false)
+  /**
+   * 本方案是否有生成任务正在跑。
+   *
+   * 它**只是信息性判据**（能不能再发起、界面要不要表现「忙」），不再兼任导航闸门——
+   * 那个用法见 `stores/runs.ts` 顶部的说明。真正的归属判据是 `runs.isRunningFor(kind)`。
+   */
+  const hasActiveRun = computed(() => runs.hasRunning)
 
-  /** 是否有任何请求在进行中；导航守卫据此禁止跳转 */
-  const busy = computed(() => chatStreaming.value || docGenerating.value)
+  /** 是否有任何请求在进行中 */
+  const busy = computed(() => chatStreaming.value || hasActiveRun.value)
 
   /** 刷新时发生降级的类型；供界面解释为什么不是原状态 */
   const downgrade = ref<DowngradeKind | null>(null)
@@ -220,6 +246,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       pastePairInput: pastePairInput.value,
       activeJobId: activeJobId.value,
       activeJobKind: activeJobKind.value,
+      // 目标产物：`optimize` / `clarify` 凭 kind 定不了它，重连时又要靠它知道改的是哪一份
+      activeJobDocKind: activeJobDocKind.value,
     }
   }
 
@@ -233,7 +261,11 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 产物正文不在这里恢复：快照里本就没有它们，正文由 `stores/documents.ts` 单独按
    * 方案 id 拉取。
    */
-  function applySnapshot(session: SessionDataV2, downgradeKind: DowngradeKind | null = null): void {
+  function applySnapshot(
+    session: SessionDataV2,
+    downgradeKind: DowngradeKind | null = null,
+    solutionId: number | null = null,
+  ): void {
     viewState.value = session.viewState
     entryMode.value = session.entryMode
     summary.value = session.summary
@@ -241,8 +273,20 @@ export const useWorkflowStore = defineStore('workflow', () => {
     quickInput.value = session.quickInput
     debugPrdText.value = session.debugPrdText
     pastePairInput.value = session.pastePairInput
-    activeJobId.value = session.activeJobId ?? null
-    activeJobKind.value = session.activeJobKind ?? null
+    // 任务指针属于 `stores/runs`，这里只把「快照说有一支在跑」翻译成一支运行态。
+    // 没有指针就**显式清空**：否则上一份方案的运行态会留在内存里，让新方案无端变「忙」。
+    if (session.activeJobId !== null && session.activeJobId !== undefined) {
+      runs.restore({
+        jobId: session.activeJobId,
+        solutionId,
+        // 旧快照可能只有 id 没有 kind（那时这个字段还不存在）；重连链本身就按 `'prd'` 兜底，
+        // 这里保持同一口径，免得「有指针却不重连」这种更糟的结果。
+        jobKind: session.activeJobKind ?? 'prd',
+        docKind: session.activeJobDocKind ?? null,
+      })
+    } else {
+      runs.clear()
+    }
     // 澄清线程随快照一起恢复，因此刷新后能接着聊（也就**不需要**为它们降级）。
     // `conversationIds` 是个对象，缺字段的旧快照要逐键兜底，不能整个替换。
     chatTab.value = session.chatTab ?? 'requirement'
@@ -257,8 +301,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
   /**
    * 状态变化时自增 `changeTick`。
    *
-   * 注意这里 watch 的是「快照里包含的字段」，而**不是**那三个运行态 ref
-   * （`chatStreaming` / `docGenerating` / `downgrade`）——它们不该触发保存。
+   * 注意这里 watch 的是「快照里包含的字段」，而**不是**运行态那几个
+   * （`chatStreaming` / `hasActiveRun` / `downgrade`）——它们不该触发保存。
    * 流式过程中的临时文本留在组件里，因此也不会形成高频保存。
    */
   watch(
@@ -274,6 +318,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       pastePairInput,
       activeJobId,
       activeJobKind,
+      activeJobDocKind,
     ],
     () => {
       changeTick.value += 1
@@ -285,8 +330,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * `changeTick` 的**内容子集**：只盯真正构成「作品」的那几个字段。
    *
    * 上面那个 watch 里的另外几个——`viewState`（翻页）、`entryMode`（选入口）、
-   * `chatTab`（切对话标签）、`activeJobId` / `activeJobKind`（在途任务指针）——都会变，
-   * 但作品一个字都没变，它们不该推进内容时间。
+   * `chatTab`（切对话标签）、`activeJobId` / `activeJobKind` / `activeJobDocKind`
+   * （在途任务指针）——都会变，但作品一个字都没变，它们不该推进内容时间。
    *
    * 两个 watch 并存而不是「在一个 watch 里判断是谁变了」：后者要维护一份「哪些字段算内容」
    * 的判断，而列表本身就写在这里（Vue 直接按依赖区分），漏改一个字段的代价是对不上账。
@@ -435,11 +480,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
    *
    * ⚠️ **只认需求澄清那一条线程**：`messages` 现在装着四条线程的消息，若拿整数组去数，
    * 文档澄清里随便一条 AI 回复都会把「生成 PRD」点亮——而那时用户可能压根没聊过需求。
+   *
+   * 第二个入参是「PRD 是否正在生成」：按**产物**判，不按「有没有任务在跑」判——
+   * 正在生成接口文档时，PRD 这一份并不忙，没必要把「生成 PRD」也灰掉。
    */
   const canGeneratePrd = computed(() =>
     canGeneratePrdFrom(
       messages.value.filter((message) => normalizeChatStage(message.stage) === 'requirement'),
-      busy.value,
+      runs.isRunningFor('prd'),
     ),
   )
 
@@ -458,16 +506,25 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   /**
-   * 统一的状态导航入口，收口所有阶段赋值并做流程安全校验：
-   * 请求进行中时拒绝跳转，避免请求与界面状态脱节。
+   * 统一的状态导航入口，收口所有阶段赋值。
    *
-   * @returns 是否真的发生了跳转（被守卫拦下时为 `false`）
+   * ## 为什么这里**不再**拦「有请求在跑」
+   *
+   * 从前第一行是 `if (busy) return false`，于是所有走 `goTo` 的跳转（进度条、底栏「返回」、
+   * 入口卡）在生成期间全是**死按钮**——点了没反应，也不报错。那是把「有一个任务在跑」
+   * 误当成「整个应用不能动」：用户想看别的一页、想回到对话补充一句，都不该被禁止。
+   *
+   * 真正需要护栏的是三件事，它们各自有正确的落点，都不该由导航入口兼任：
+   * - 「不能再发一次」→ 各生成链入口的重入守卫（按产物判）；
+   * - 「不能换入口模式」（换了会改掉进度条口径与完成条件）→ `chooseEntry` 里拦；
+   * - 「别把结果写进别人的界面」→ `finishDoc` 的收尾守卫 + 运行态身份比对。
+   *
+   * 跳转本身是安全的：阶段只是一个相位字段，任务事件按 `jobId` 认领，写在预览与文档上，
+   * 与当前停留在哪一页无关。
    */
-  function goTo(target: ViewState): boolean {
-    if (busy.value) return false
+  function goTo(target: ViewState): void {
     viewState.value = target
     window.scrollTo({ top: 0, behavior: 'smooth' })
-    return true
   }
 
   /**
@@ -475,16 +532,21 @@ export const useWorkflowStore = defineStore('workflow', () => {
    *
    * 模式只影响「进度条展示哪几步、需要哪几份文档才算完成」以及流水线从哪个输入取需求，
    * 生成链路本身完全共用，因此这里不需要清理任何已生成内容。
+   *
+   * **生成中拦下**（这是本版唯一保留的「忙则不许」）：换模式会改写进度条口径与完成条件，
+   * 而正在跑的那份产物是按旧模式发起的——放过去会让同一份会话里两套口径并存。
+   * 返回 `false` 由调用方给红色提示（见 `AppV2.handleSelectEntry`），不再静默吞掉点按。
    */
   function chooseEntry(mode: EntryMode): boolean {
-    if (busy.value) return false
+    if (hasActiveRun.value) return false
     entryMode.value = mode
-    return goTo(MODE_LANDING[mode])
+    goTo(MODE_LANDING[mode])
+    return true
   }
 
   /** 回到入口选择页（保留已选模式，用户点「上一步」时不至于丢掉产物） */
-  function backToEntry(): boolean {
-    return goTo('entry')
+  function backToEntry(): void {
+    goTo('entry')
   }
 
   /**
@@ -505,11 +567,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
     quickInput.value = { productName: '', requirements: '' }
     debugPrdText.value = ''
     pastePairInput.value = { prd: '', apiDocs: '' }
-    activeJobId.value = null
-    activeJobKind.value = null
     downgrade.value = null
     entryMode.value = null
     viewState.value = 'entry'
+    // 运行态与预览一起清：这是「整份会话换掉」，上一支任务哪怕还在后端跑，
+    // 它的指针与半截正文也都不属于这里了
+    runs.clear()
     documents.clear()
     // 与 `applySnapshot` 同理：这也是一次「整份换掉」，
     // 视图（尤其是只在 setup 读一次 `initial` 的表单）要据此重建，
@@ -567,9 +630,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
     pastePairInput,
     activeJobId,
     activeJobKind,
+    activeJobDocKind,
     // 运行态
     chatStreaming,
-    docGenerating,
+    hasActiveRun,
     busy,
     downgrade,
     changeTick,

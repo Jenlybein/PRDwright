@@ -211,6 +211,9 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
   return {
     jobId: 1,
     kind: 'prd',
+    // 目标产物：后端 `doc_kind` 的权威值。前端靠它知道「这次写的是哪一份」，
+    // 不再需要按当前阶段去猜（`optimize` / `clarify` 猜不出来）。
+    docKind: 'prd',
     status: 'running',
     phase: '',
     finalizedText: '',
@@ -1164,6 +1167,8 @@ describe('AppV2 完整流程编排', () => {
         makeJobSnapshot({
           jobId: 43,
           kind: 'api_docs',
+          // 后端 `doc_kind` 与 kind 必须自洽：前端以它为准决定「正在写哪一份」
+          docKind: 'api-docs',
           status: 'running',
           phase: 'reviewing',
           finalizedText: '',
@@ -1194,11 +1199,56 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('{"verdict":"revise","issues":[]}')
   })
 
+  /**
+   * D1：生成途中用户可以自由离开那一页，收尾时**不抢方向盘**。
+   *
+   * 从前的第一步就跳不动——`goTo` 首行是 `if (busy) return false`，于是生成全程里
+   * 进度条与底栏「返回」都是死按钮（点了没反应，也不报错，看起来像界面坏了）。
+   * 拆掉闸门之后要同时成立两件事：**跳得动**，且收尾**不把人拽回**审阅页。
+   */
+  it('生成中可以点进度条离开，收尾不把用户拽回审阅页（只给浮层提示）', async () => {
+    let release!: () => void
+    mockJobStream({
+      prd: async (handlers) => {
+        handlers.onChunk?.('# 产品需求文档\n')
+        // 卡住：断言就在「还在生成」这个窗口里做
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountApp()
+    await submitSampleForm(wrapper)
+    await clickButton(wrapper, '生成 PRD', true)
+    await flushPromises()
+    await confirmSummaryPanel(wrapper)
+
+    const store = storeOf(wrapper)
+    expect(store.viewState).toBe('generating-prd')
+
+    // 生成途中点进度条上的「AI 对话」——从前这一步会被静默吞掉
+    await clickStep(wrapper, 'AI 对话')
+    await flushPromises()
+    expect(store.viewState).toBe('chatting')
+
+    // 收尾：用户仍在对话页，界面不被拽走，只多一条浮层提示
+    release()
+    await flushPromises()
+    expect(store.viewState).toBe('chatting')
+    expect(wrapper.text()).toContain('PRD 文档已生成完毕')
+    // 正文照写（写库与界面停在哪一页无关）
+    expect(documentsOf(wrapper).contents.prd).toContain('项目背景')
+  })
+
   it('恢复路径 2：无指针但快照落在生成中时兜底查到活跃任务，撤销降级并重连', async () => {
     vi.mocked(api.fetchActiveJobs).mockResolvedValue([
       {
         id: 7,
         kind: 'prd',
+        // 后端在新版本里会给出目标产物；前端据此重建运行态，不再按阶段反推
+        docKind: 'prd',
         status: 'running',
         phase: 'writing',
         solutionId: 1,

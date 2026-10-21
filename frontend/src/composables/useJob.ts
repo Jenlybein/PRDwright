@@ -5,9 +5,20 @@
  * `reconnect` 在刷新后凭任务指针**静默重连**（后端先发 `snapshot` 补全已产出正文，
  * 再接 live），`detach` 只退订、**不取消服务端任务**——这正是「生成与连接解耦」的落点。
  *
- * **预览的单一出口仍是 `useDocumentPipeline`**：本 composable 只负责任务生命周期与
- * 状态记录，不直接写预览。它把 `onChunk` / `onPart` / `onStage` / `onSnapshot` 回调
- * 原样透传给调用方提供的 handlers，由流水线决定这些事件怎么落到预览上。
+ * ## 运行态不住在这里
+ *
+ * 「谁在跑、跑的是哪一份、跑了多久」全部写进 `stores/runs.ts` 里那一支带身份的
+ * `ActiveRun`，本文件只负责**发起与收尾**。这样换来两个结构性的保证：
+ *
+ * - 迟到的收尾清不掉新任务的状态（`runs.settle(jobId)` 只收同一支）；
+ * - 切方案时谁都能 `runs.detach()`（不需要摸到本 composable 的实例变量）。
+ *
+ * \`start\` / \`reconnect\` 都把**本次任务那一支运行态**随结果一起返回：调用方必须拿它去比对，
+ * 而不是读「当前那一支」——两者在后一个任务启动之后就不再是同一个了。
+ *
+ * **预览的单一出口仍是 `useDocumentPipeline`**：本 composable 只负责生命周期与运行态记账，
+ * 不直接写预览。它把 `onChunk` / `onPart` / `onStage` / `onSnapshot` 回调原样透传给
+ * 调用方提供的 handlers，由流水线决定这些事件怎么落到预览上。
  *
  * ## 已用时（`elapsedMs`）
  *
@@ -17,9 +28,12 @@
  *
  * 计时不依赖任何一次请求：**每次 `snapshot` 都用服务端算好的 `elapsedMs` 重新锚定**，
  * 因此刷新页面、换设备重连，显示的仍是任务的真实已用时，而不是「本地计时器启动后过了多久」。
+ *
+ * 计时器按 `jobId` 登记（不再是单槽）：同一页面里先后两支任务交接时，前一支的表必须
+ * 能被干净地停掉，否则它会继续往新任务的显示值里写。
  */
 
-import { getCurrentScope, onScopeDispose, ref } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, ref } from 'vue'
 
 import {
   createJob,
@@ -28,9 +42,17 @@ import {
   type StreamHandlers,
 } from '@/services/api'
 import { ApiError } from '@/services/errors'
+import {
+  isSubscribed,
+  register as registerSubscription,
+  release as releaseSubscription,
+  detachAll as detachAllSubscriptions,
+} from '@/services/runSubscriptions'
+import { useRunsStore, type ActiveRun } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { DocKind, JobSnapshot, RunSummary, ViewState } from '@/types'
+import type { DocKind, DocumentKind, JobSnapshot, RunSummary, ViewState } from '@/types'
+import { jobDocumentKind } from '@/utils/workflow'
 
 /**
  * 文档种类 → 对应的「生成中」阶段。
@@ -62,116 +84,164 @@ export interface JobResult {
   ok: boolean
   /** 失败时的机器可读错误码 */
   errorCode?: string
+  /**
+   * 本次任务对应的运行态；`null` 表示任务压根没建起来（创建请求就失败了）。
+   *
+   * 调用方**必须**用它来判断「这次结果还是不是我的」：读 store 里「当前那一支」
+   * 拿到的是后一个任务，A 的迟到结果就会以为自己没过期。
+   */
+  run: ActiveRun | null
+}
+
+/**
+ * 任务种类 → 这次要写进哪一份产物。
+ *
+ * 三种**整篇生成**的种类就是产物；`optimize` / `clarify` / `auto-clarify` 是动作，
+ * 目标由请求体里的 `docKind` 显式给出（后端 `_target_product_kind` 同口径）。
+ * 都推不出来就留 `null`——**不猜**默认值，猜错等于拿 A 的结果覆盖 B。
+ */
+function targetDocKindOf(kind: DocKind, input: JobStartInput): DocumentKind | null {
+  return jobDocumentKind(kind) ?? input.docKind ?? null
 }
 
 /**
  * 生成任务编排 composable。
  *
- * 内部持有 `running` / `error` / `phase` / `runSummary` 四个运行态 ref，
- * 以及最近一次 `snapshot`（供上层判断任务终态）。
+ * 运行态（`snapshot` / 摘要 / 已用时 / 阶段）都是**只读视图**，映射到 `runs` 里那一支任务；
+ * 错误原因与「是否有订阅在途」因为是「本实例这一路的事」而留在这里。
  */
 export function useJob() {
   const workflow = useWorkflowStore()
   const solutions = useSolutionsStore()
+  const runs = useRunsStore()
+
+  /**
+   * 在途订阅数。
+   *
+   * 用计数而不是布尔：`start` 与 `reconnect` 完全可能交叠（A 还在收尾、B 已发起），
+   * 布尔会被先结束的那一路提前归零。
+   */
+  const pendingCalls = ref(0)
 
   /** 是否有任务订阅进行中 */
-  const running = ref(false)
-  /** 最近一次失败原因；新一轮开始时清空 */
-  const error = ref('')
-  /** 最近的阶段（来自 stage 事件或 snapshot） */
-  const phase = ref('')
-  /** 任务收尾摘要（完整的用量汇总；展示由上层决定） */
-  const runSummary = ref<RunSummary | null>(null)
-  /** 最近一次收到的快照（供上层判断任务是否已终态） */
-  const snapshot = ref<JobSnapshot | null>(null)
-  /** 任务已用时（毫秒）：生成中每秒自增，重连时按服务端值锚定，收尾后停在总耗时 */
-  const elapsedMs = ref(0)
+  const running = computed(() => pendingCalls.value > 0)
 
-  /** `detach()` 用的控制器：退订而不取消服务端任务 */
-  let controller: AbortController | null = null
+  /** 最近一次失败原因；新一轮开始时清空 */
+  const lastError = ref('')
+  const error = computed(() => lastError.value)
+
+  /** 本实例这一轮实际持有的那一支运行态（用于只读派生；写入一律走 `runs`） */
+  const currentRun = computed<ActiveRun | null>(() => runs.activeRun)
+
+  /** 最近的阶段（来自 stage 事件或 snapshot） */
+  const phase = computed(() => currentRun.value?.snapshot?.phase ?? '')
+  /** 任务收尾摘要（完整的用量汇总；展示由上层决定） */
+  const runSummary = computed<RunSummary | null>(() => currentRun.value?.summary ?? null)
+  /** 最近一次收到的快照（供上层判断任务是否已终态） */
+  const snapshot = computed<JobSnapshot | null>(() => currentRun.value?.snapshot ?? null)
+  /** 任务已用时（毫秒）：生成中每秒自增，重连时按服务端值锚定，收尾后停在总耗时 */
+  const elapsedMs = computed(() => currentRun.value?.elapsedMs ?? 0)
 
   // ---- 已用时计时器 ----------------------------------------------------------
-  // `anchorMs` 是本地锚点时刻，`baseMs` 是锚定时任务已经跑过的毫秒数（来自服务端）。
-  // 显示值 = baseMs + (now - anchorMs)，因此「重新锚定」是幂等的：给同一次任务锚两次，
-  // 只是把基准换成服务端那个更准的值，不会出现跳变或翻倍。
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null
-  let elapsedBaseMs = 0
-  let elapsedAnchorMs = 0
+  // 每支任务一个：`baseMs` 是锚定时任务已经跑过的毫秒数（来自服务端），`anchorMs` 是本地
+  // 锚点时刻。显示值 = baseMs + (now - anchorMs)，因此「重新锚定」是幂等的——给同一次任务
+  // 锚两次，只是把基准换成服务端那个更准的值，不会跳变或翻倍。
+  interface ElapsedTimer {
+    handle: ReturnType<typeof setInterval>
+    baseMs: number
+    anchorMs: number
+  }
+  const timers = new Map<number, ElapsedTimer>()
 
-  /** 清掉计时器但**保留当前显示值**（收尾 / 退订后停表用） */
-  function stopElapsedTimer(): void {
-    if (elapsedTimer !== null) {
-      clearInterval(elapsedTimer)
-      elapsedTimer = null
-    }
+  /** 停掉某支任务的表，**保留它的显示值**（收尾 / 退订后停表用） */
+  function stopTimer(jobId: number): void {
+    const timer = timers.get(jobId)
+    if (!timer) return
+    clearInterval(timer.handle)
+    timers.delete(jobId)
+  }
+
+  /** 停掉全部计时器（组件卸载 / 整体退订） */
+  function stopAllTimers(): void {
+    for (const timer of timers.values()) clearInterval(timer.handle)
+    timers.clear()
   }
 
   /** 开始计时（`baseMs` 为服务端已用时打底） */
-  function startElapsedTimer(baseMs = 0): void {
-    stopElapsedTimer()
-    elapsedBaseMs = Math.max(0, baseMs)
-    elapsedAnchorMs = Date.now()
-    elapsedMs.value = elapsedBaseMs
-    elapsedTimer = setInterval(() => {
-      elapsedMs.value = elapsedBaseMs + (Date.now() - elapsedAnchorMs)
-    }, 1000)
+  function startTimer(jobId: number, baseMs = 0): void {
+    stopTimer(jobId)
+    const timer: ElapsedTimer = {
+      handle: setInterval(() => {
+        const live = timers.get(jobId)
+        if (!live) return
+        runs.setElapsed(jobId, live.baseMs + (Date.now() - live.anchorMs))
+      }, 1000),
+      baseMs: Math.max(0, baseMs),
+      anchorMs: Date.now(),
+    }
+    timers.set(jobId, timer)
+    runs.setElapsed(jobId, timer.baseMs)
   }
 
   /** 用服务端权威耗时重新锚定（每次 `snapshot` 都做，幂等） */
-  function anchorElapsed(serverMs: number): void {
-    elapsedBaseMs = Math.max(0, serverMs)
-    elapsedAnchorMs = Date.now()
-    elapsedMs.value = elapsedBaseMs
+  function anchorTimer(jobId: number, serverMs: number): void {
+    const timer = timers.get(jobId)
+    if (!timer) {
+      // 没有在跑的表（刚重连就被快照锚定 / 已经停表）：只把显示值对齐，不起表
+      runs.setElapsed(jobId, serverMs)
+      return
+    }
+    timer.baseMs = Math.max(0, serverMs)
+    timer.anchorMs = Date.now()
+    runs.setElapsed(jobId, timer.baseMs)
   }
 
   /** 收尾：停表并停在权威总耗时上（没有总耗时就停在当前值） */
-  function settleElapsed(totalMs?: number): void {
-    stopElapsedTimer()
-    if (typeof totalMs === 'number') elapsedMs.value = Math.max(0, totalMs)
+  function settleTimer(jobId: number, totalMs?: number): void {
+    stopTimer(jobId)
+    if (typeof totalMs === 'number') runs.setElapsed(jobId, totalMs)
   }
 
   // 组件卸载时停表。非组件环境（纯逻辑测试）下不注册，避免无谓告警。
-  if (getCurrentScope()) onScopeDispose(stopElapsedTimer)
+  if (getCurrentScope()) onScopeDispose(stopAllTimers)
 
-  /** 包装 handlers：在透传的同时记录 phase / runSummary / snapshot / 已用时 */
-  function wrapHandlers(handlers: StreamHandlers): StreamHandlers {
+  /** 包装 handlers：在透传的同时把 snapshot / 摘要 / 已用时记进那一支运行态 */
+  function wrapHandlers(jobId: number, handlers: StreamHandlers): StreamHandlers {
     return {
       ...handlers,
       onSnapshot: (snap) => {
-        snapshot.value = snap
-        phase.value = snap.phase
+        runs.applySnapshot(jobId, snap)
         // 快照是订阅开始时的权威进度：用它锚定已用时，客户端从零开始也不影响连续性
-        anchorElapsed(snap.elapsedMs)
+        anchorTimer(jobId, snap.elapsedMs)
         handlers.onSnapshot?.(snap)
       },
       onRunSummary: (summary) => {
-        runSummary.value = summary
+        runs.setSummary(jobId, summary)
         // 收尾摘要里的总耗时是权威值，停表并停在它上面
-        settleElapsed(summary.durationMs)
+        settleTimer(jobId, summary.durationMs)
         handlers.onRunSummary?.(summary)
       },
     }
   }
 
   /**
-   * 开一次生成任务：确保方案存在 → 创建任务 → 记下指针 + 切生成态 → 订阅。
+   * 开一次生成任务：确保方案存在 → 创建任务 → 记下运行态 + 切生成态 → 订阅。
    *
    * 两次 `flushPendingSave` 是刻意的：第一次保证「有内容的方案」先落库、拿到 id，
-   * 任务创建时才能带上 `solution_id`；第二次在写入 `activeJobId` 后强制落库，
+   * 任务创建时才能带上 `solution_id`；第二次在写入运行态后强制落库，
    * 确保任务指针进了后端快照——**刷新后能重连，全靠这一步**。
+   *
+   * 切阶段的顺序与从前一致（先 `goTo` 再登记运行态）：`goTo` 此刻仍会拦「有任务在跑」，
+   * 反过来写就会把自己拦在门外。
    */
   async function start(
     kind: DocKind,
     input: JobStartInput,
     handlers: StreamHandlers,
   ): Promise<JobResult> {
-    running.value = true
-    error.value = ''
-    phase.value = ''
-    runSummary.value = null
-    snapshot.value = null
-    startElapsedTimer()
-    controller = new AbortController()
+    pendingCalls.value += 1
+    lastError.value = ''
+    let run: ActiveRun | null = null
 
     try {
       // 1. 先落一次：把「已有内容」的方案建出来，任务才有 solution_id 可挂
@@ -180,27 +250,43 @@ export function useJob() {
       // 2. 创建任务
       const created = await createJob({ kind, solutionId: solutions.currentId, ...input })
 
-      // 3. 记下任务指针并切到生成态（goTo 在 busy 置位之前调用，才不会被守卫拦下）
-      workflow.activeJobId = created.jobId
-      workflow.activeJobKind = kind
+      // 3. 切到生成态（`goTo` 必须在登记运行态之前：登记之后界面就是「忙」的了）
       const target = GENERATING_STATE[kind]
       if (target) workflow.goTo(target)
-      workflow.docGenerating = true
 
-      // 4. 再次强制落库：把任务指针写进快照
+      // 4. 登记运行态：此后 `activeJobId` / `hasRunning` 都从这一支读
+      run = runs.begin({
+        jobId: created.jobId,
+        solutionId: solutions.currentId,
+        jobKind: kind,
+        docKind: targetDocKindOf(kind, input),
+      })
+
+      // 5. 再次强制落库：把任务指针写进快照
       await solutions.flushPendingSave()
 
-      // 5. 订阅事件流
-      const result = await readJobStream(created.jobId, wrapHandlers(handlers), controller.signal)
-      return { reply: result.reply, ok: true }
+      // 6. 订阅事件流
+      const controller = new AbortController()
+      registerSubscription(created.jobId, controller)
+      startTimer(created.jobId)
+      try {
+        const result = await readJobStream(
+          created.jobId,
+          wrapHandlers(created.jobId, handlers),
+          controller.signal,
+        )
+        return { reply: result.reply, ok: true, run }
+      } finally {
+        releaseSubscription(created.jobId, controller)
+        // 正常收尾时运行摘要已把耗时定死；中止 / 失败则停在当前值，不让计时器空转
+        settleTimer(created.jobId)
+      }
     } catch (caught) {
-      return _fail(caught)
+      return { ...fail(caught), run }
     } finally {
-      running.value = false
-      workflow.docGenerating = false
-      controller = null
-      // 正常收尾时运行摘要已把耗时定死；中止 / 失败则停在当前值，不让计时器空转
-      settleElapsed()
+      pendingCalls.value -= 1
+      // 订阅结束即这一支任务不再「在跑」：指针随之失效，界面不再被它挡住
+      if (run) runs.settle(run.jobId)
     }
   }
 
@@ -209,56 +295,65 @@ export function useJob() {
    *
    * 与 `start` 的区别是不创建任务、不改阶段（阶段已由快照恢复保留为 `generating-*`）。
    * 已用时同样从零起算、随即被快照里的服务端值锚定，所以显示的仍是任务的真实已用时。
+   *
+   * ⚠️ 调用方必须**先**把这一支运行态登记好（`runs.restore`）：重连不知道 `kind`，
+   * 而且要凭 `run` 来判断「这次结果还是不是我的」。
    */
   async function reconnect(jobId: number, handlers: StreamHandlers): Promise<JobResult> {
-    running.value = true
-    error.value = ''
-    runSummary.value = null
-    snapshot.value = null
-    startElapsedTimer()
-    controller = new AbortController()
+    pendingCalls.value += 1
+    lastError.value = ''
+    // 没有登记就退化成「纯订阅」：定时与记账全部按 jobId 守卫，写不进去也不会错。
+    // 调用方正常都会先登记（见 `useDocumentPipeline.reconnectAndSettle`）。
+    const run = runs.holds(jobId) ? runs.activeRun : null
 
     try {
-      workflow.docGenerating = true
-      const result = await readJobStream(jobId, wrapHandlers(handlers), controller.signal)
-      return { reply: result.reply, ok: true }
+      if (run) runs.resume(jobId)
+      const controller = new AbortController()
+      registerSubscription(jobId, controller)
+      startTimer(jobId)
+      try {
+        const result = await readJobStream(jobId, wrapHandlers(jobId, handlers), controller.signal)
+        return { reply: result.reply, ok: true, run }
+      } finally {
+        releaseSubscription(jobId, controller)
+        // 已用时由快照 / 收尾摘要锚定过；没锚到就停在当前值，不让表空转
+        settleTimer(jobId)
+      }
     } catch (caught) {
-      return _fail(caught)
+      return { ...fail(caught), run }
     } finally {
-      running.value = false
-      workflow.docGenerating = false
-      controller = null
-      settleElapsed()
+      pendingCalls.value -= 1
+      runs.settle(jobId)
     }
   }
 
   /**
    * 只退订：中止本地读取，**不取消服务端任务**。
    *
-   * 这是本期「生成与连接解耦」的直接体现——离开页面 / 刷新只影响这一次订阅，
-   * 后端任务照跑；下次回来 `reconnect` 即可续上。
+   * 这是「生成与连接解耦」的直接体现——离开页面 / 切换方案只影响这些订阅，
+   * 后端任务照跑；下次回来凭快照指针重连即可。
+   *
+   * 退订的范围是**这个标签页里的全部在途订阅**（登记表按 `jobId` 存的），
+   * 同时把运行态与预览清空：清完之后，还在道上飞的事件一个字节也写不进来。
    */
   function detach(): void {
-    controller?.abort()
-    controller = null
-    running.value = false
-    workflow.docGenerating = false
-    // 只断订阅不停表会让「已用时」在离开页面后继续涨，但那已经不是本次会话看到的状态了
-    settleElapsed()
+    detachAllSubscriptions()
+    stopAllTimers()
+    runs.detach()
   }
 
   /** 统一处理订阅失败：中止不算错误，其余记入 `error` 并取回错误码 */
-  function _fail(caught: unknown): JobResult {
+  function fail(caught: unknown): JobResult {
     if (caught instanceof Error && caught.name === 'AbortError') {
-      return { reply: '', ok: false }
+      return { reply: '', ok: false, run: null }
     }
-    error.value = caught instanceof Error ? caught.message : String(caught)
+    lastError.value = caught instanceof Error ? caught.message : String(caught)
     const errorCode = caught instanceof ApiError ? caught.code : undefined
-    return { reply: '', ok: false, errorCode }
+    return { reply: '', ok: false, errorCode, run: null }
   }
 
   return {
-    // 运行态
+    // 运行态（只读视图，真实数据住在 stores/runs）
     running,
     error,
     phase,
@@ -269,5 +364,7 @@ export function useJob() {
     start,
     reconnect,
     detach,
+    // 便于上层做「这次任务还是不是我的」判断
+    isSubscribed,
   }
 }

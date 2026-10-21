@@ -3,9 +3,10 @@ import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import { useDocumentsStore } from '@/stores/documents'
+import { useRunsStore } from '@/stores/runs'
 import { useWorkflowStore } from '@/stores/workflow'
 import { emptyConversationIds } from '@/utils/workflow'
-import type { DocumentKind } from '@/types'
+import type { DocKind, DocumentKind } from '@/types'
 
 /**
  * 会话流程 store 测试。
@@ -26,25 +27,41 @@ function setDocuments(values: Partial<Record<DocumentKind, string>>): void {
   }
 }
 
+/**
+ * 让本方案有一支在途任务。
+ *
+ * 运行态住在 `stores/runs`，`activeJobId` / `hasActiveRun` 都是从它**派生**出来的——
+ * 从前可以直接给 `activeJobId` / `docGenerating` 赋值，现在必须走 `begin`，
+ * 否则测的就不是真实链路了（两个字段各存一份正是这一版要消灭的东西）。
+ */
+function beginRun(jobId = 7, jobKind: DocKind = 'prd', docKind: DocumentKind | null = 'prd'): void {
+  useRunsStore().begin({ jobId, solutionId: 1, jobKind, docKind })
+}
+
 describe('useWorkflowStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
 
-  it('请求进行中禁止跳转', () => {
+  it('生成中也能跳转：导航不再被「有任务在跑」卡死', () => {
     const store = useWorkflowStore()
 
-    expect(store.goTo('chatting')).toBe(true)
+    store.goTo('chatting')
     expect(store.viewState).toBe('chatting')
 
+    // 对话流式进行中照样能跳。从前这条会返回 false 并静默吞掉——
+    // 进度条、底栏「返回」因此全是死按钮（见 `stores/runs.ts` 顶部的复盘）
     store.chatStreaming = true
-    expect(store.goTo('form')).toBe(false)
-    expect(store.viewState).toBe('chatting')
+    store.goTo('form')
+    expect(store.viewState).toBe('form')
+    // 「忙」仍是事实（界面要据此表现），只是不再兼任闸门
+    expect(store.busy).toBe(true)
 
-    // 文档生成同样算「忙」
+    // 文档生成在跑时同理
     store.chatStreaming = false
-    store.docGenerating = true
-    expect(store.goTo('form')).toBe(false)
+    beginRun()
+    store.goTo('review-prd')
+    expect(store.viewState).toBe('review-prd')
   })
 
   it('快照变化时自增 changeTick，供上层决定何时保存', async () => {
@@ -75,8 +92,7 @@ describe('useWorkflowStore', () => {
     // 这些都是「我翻到哪一页」，作品一个字都没变
     store.viewState = 'review-prd'
     store.chatTab = 'prd-clarify'
-    store.activeJobId = 7
-    store.activeJobKind = 'prd'
+    beginRun(7)
     await nextTick()
 
     // 它们照样要落库（相位也是要存的状态），但不该推进内容时间——
@@ -104,7 +120,6 @@ describe('useWorkflowStore', () => {
     const before = store.changeTick
 
     store.chatStreaming = true
-    store.docGenerating = true
     store.downgrade = 'generating'
 
     expect(store.changeTick).toBe(before)
@@ -140,6 +155,8 @@ describe('useWorkflowStore', () => {
       pastePairInput: { prd: '', apiDocs: '' },
       activeJobId: null,
       activeJobKind: null,
+      // 目标产物：`optimize` / `clarify` 凭 kind 定不了它，重连时又要靠它知道改的是哪一份
+      activeJobDocKind: null,
     })
 
     expect(store.restoreTick).toBe(before + 1)
@@ -162,6 +179,8 @@ describe('useWorkflowStore', () => {
       pastePairInput: { prd: '', apiDocs: '' },
       activeJobId: null,
       activeJobKind: null,
+      // 目标产物：`optimize` / `clarify` 凭 kind 定不了它，重连时又要靠它知道改的是哪一份
+      activeJobDocKind: null,
     })
     await nextTick()
 
@@ -204,6 +223,8 @@ describe('useWorkflowStore', () => {
       pastePairInput: { prd: '', apiDocs: '' },
       activeJobId: null,
       activeJobKind: null,
+      // 目标产物：`optimize` / `clarify` 凭 kind 定不了它，重连时又要靠它知道改的是哪一份
+      activeJobDocKind: null,
     })
     // 运行态不在快照里
     expect('chatStreaming' in snapshot).toBe(false)
@@ -430,7 +451,7 @@ describe('useWorkflowStore', () => {
 
   it('请求进行中不允许切换入口', () => {
     const store = useWorkflowStore()
-    store.docGenerating = true
+    beginRun()
     expect(store.chooseEntry('prd-quick')).toBe(false)
     expect(store.entryMode).toBeNull()
     expect(store.viewState).toBe('entry')
@@ -464,8 +485,7 @@ describe('useWorkflowStore', () => {
     const store = useWorkflowStore()
     const before = store.changeTick
 
-    store.activeJobId = 7
-    store.activeJobKind = 'prd'
+    beginRun(7)
     await nextTick()
 
     // 变化必须触发保存信号，否则「刷新后重连」所需的指针不会落库
@@ -484,8 +504,7 @@ describe('useWorkflowStore', () => {
 
   it('reset 清掉任务指针，避免刷新后重连一个已结束的任务', () => {
     const store = useWorkflowStore()
-    store.activeJobId = 9
-    store.activeJobKind = 'prd'
+    beginRun(9)
 
     store.reset()
 

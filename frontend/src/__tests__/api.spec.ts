@@ -428,6 +428,8 @@ describe('生成任务接口（jobs）', () => {
             kind: 'prd',
             status: 'running',
             phase: 'writing',
+            // 目标产物：`kind` 只说「做了什么」，写哪一份要单独报
+            doc_kind: 'prd',
             finalized_text: '# 产品需求文档\n\n',
             live_buffer: '半句',
             completed_sections: [
@@ -505,6 +507,7 @@ describe('生成任务接口（jobs）', () => {
       {
         jobId: 5,
         kind: 'prd',
+        docKind: 'prd',
         status: 'running',
         phase: 'writing',
         finalizedText: '# 产品需求文档\n\n',
