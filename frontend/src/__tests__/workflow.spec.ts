@@ -21,7 +21,7 @@ import {
   jobDocumentKind,
   normalizeChatStage,
   parseRunSummary,
-  parseSessionSnapshot,
+  normalizeSessionSnapshot,
   reachedStepIndex,
   resolveRestoredPhase,
   reviewStateFor,
@@ -36,6 +36,20 @@ import {
  * 这些判断原先散在 AppV2 的 computed 里，无法脱离组件验证；抽出来后
  * 可以逐个把边界钉住——尤其是「刷新后降级」和「快照脏数据」两类。
  */
+/**
+ * 测试内适配：这些用例原本针对「快照是一段 JSON 文本」的旧签名。
+ * 现在状态由后端结构化下发，解析器直接吃对象；这里只加一层 JSON 解析，
+ * 让「降级 / 任务指针」这些仍然有效的断言不必逐条重写。
+ */
+function parseSessionSnapshot(raw: string | null) {
+  if (!raw) return null
+  try {
+    return normalizeSessionSnapshot(JSON.parse(raw) as unknown)
+  } catch {
+    return null
+  }
+}
+
 describe('阶段判定', () => {
   it('只承认已定义的阶段', () => {
     expect(isViewState('review-prd')).toBe(true)
@@ -245,191 +259,101 @@ describe('守卫', () => {
   })
 })
 
-describe('会话快照解析', () => {
-  const full: SessionDataV2 = {
+describe('方案状态解析', () => {
+  const full = {
     viewState: 'review-prd',
     entryMode: 'structured',
-    summary: { product_name: 'X' } as unknown as RequirementsSummary,
-    messages: [{ role: 'user', content: 'hi' }],
+    summary: { product_name: 'X' },
     chatTab: 'requirement',
-    conversationIds: {
-      requirement: 'c1',
-      'prd-clarify': '',
-      'api-docs-clarify': '',
-      'prompts-clarify': '',
-    },
     quickInput: { productName: '', requirements: '' },
     debugPrdText: '',
     pastePairInput: { prd: '', apiDocs: '' },
     activeJobId: null,
     activeJobKind: null,
+    activeJobDocKind: null,
   }
 
-  it('空值与非法 JSON 一律返回 null', () => {
-    expect(parseSessionSnapshot(null)).toBeNull()
-    expect(parseSessionSnapshot('')).toBeNull()
-    expect(parseSessionSnapshot('{oops')).toBeNull()
-    expect(parseSessionSnapshot('"只是个字符串"')).toBeNull()
+  it('非对象一律返回 null', () => {
+    expect(normalizeSessionSnapshot(null)).toBeNull()
+    expect(normalizeSessionSnapshot('"只是个字符串"')).toBeNull()
+    expect(normalizeSessionSnapshot(42)).toBeNull()
   })
 
-  it('正常快照原样还原', () => {
-    const parsed = parseSessionSnapshot(JSON.stringify(full))
+  it('正常状态原样还原', () => {
+    const parsed = normalizeSessionSnapshot(full)
     expect(parsed?.session.viewState).toBe('review-prd')
     expect(parsed?.session.entryMode).toBe('structured')
-    // 消息缺 `stage` 时统一补上需求澄清（旧快照的消息都没有这个字段）
-    expect(parsed?.session.messages).toEqual([
-      { role: 'user', content: 'hi', stage: 'requirement' },
-    ])
     expect(parsed?.session.chatTab).toBe('requirement')
     expect(parsed?.downgrade).toBeNull()
   })
 
-  it('产物正文与用量回执不再是快照的一部分：旧快照里残留的它们被忽略', () => {
-    // 这一条守的是「文档所有权在后端」——正文与回执已经搬到 `documents` 表，
-    // 快照里不该再出现它们。旧快照（上个版本存下来的）里当然还有，
-    // 解析器要做的是**丢掉**而不是还原。
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        ...full,
-        prdContent: '# 旧快照里的正文',
-        apiDocsContent: '# 旧接口文档',
-        promptsContent: '# 旧提示词',
-        prdRunSummary: { kind: 'prd', durationMs: 1, requestId: 'p' },
-      }),
-    )
-    expect(parsed?.session).not.toHaveProperty('prdContent')
-    expect(parsed?.session).not.toHaveProperty('prdRunSummary')
-    // 也守「快照字段集」本身：多一个少一个都是契约变化，值得被显式看见
+  it('状态里**没有**消息与会话 id：它们归服务端', () => {
+    // 这一条守的是这次改造的核心：聊天记录住在 `chat_turns`、会话 id 住在
+    // `chat_sessions`，状态对象里再出现它们就等于又造了一个真源。
+    const parsed = normalizeSessionSnapshot({ ...full, messages: [{ role: 'user' }] })
+    expect(parsed?.session).not.toHaveProperty('messages')
+    expect(parsed?.session).not.toHaveProperty('conversationIds')
     expect(Object.keys(parsed?.session ?? {})).toEqual([
       'viewState',
       'entryMode',
       'summary',
-      'messages',
       'chatTab',
-      'conversationIds',
       'quickInput',
       'debugPrdText',
       'pastePairInput',
       'activeJobId',
       'activeJobKind',
-      // 目标产物：与 activeJobKind 分开。旧快照没有它 → null，不据此丢整份快照。
       'activeJobDocKind',
+      'activeChatStage',
     ])
   })
 
-  it('parseRunSummary 只认带关键字段的对象，脏数据一律退化', () => {
-    expect(parseRunSummary(null)).toBeNull()
-    expect(parseRunSummary('x')).toBeNull()
-    expect(parseRunSummary([])).toBeNull()
-    expect(parseRunSummary({ kind: 'prd' })).toBeNull()
-    expect(parseRunSummary({ kind: 'prd', durationMs: 1 })).toBeNull()
-    expect(parseRunSummary({ kind: 'prd', durationMs: 1, requestId: 'r' })).not.toBeNull()
+  it('旧阶段名 `clarifying` 按对话页处理', () => {
+    const parsed = normalizeSessionSnapshot({ ...full, viewState: 'clarifying' })
+    expect(parsed?.session.viewState).toBe('chatting')
   })
 
-  it('入口模式与两处录入内容随快照还原', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        ...full,
-        viewState: 'prompt-debug',
-        entryMode: 'prompt-debug',
-        debugPrdText: '# 别人的 PRD',
-        pastePairInput: { prd: '', apiDocs: '' },
-        quickInput: { productName: '小账本', requirements: '记账' },
-      }),
-    )
-    expect(parsed?.session.entryMode).toBe('prompt-debug')
-    expect(parsed?.session.debugPrdText).toBe('# 别人的 PRD')
-    expect(parsed?.session.quickInput).toEqual({ productName: '小账本', requirements: '记账' })
-  })
-
-  it('旧快照（没有入口模式字段）按完整流程处理', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        viewState: 'form',
-        summary: null,
-        messages: [],
-        conversationId: '',
-        prdContent: '',
-        apiDocsContent: '',
-        promptsContent: '',
-      }),
-    )
-    expect(parsed?.session.entryMode).toBeNull()
-    expect(parsed?.session.quickInput).toEqual({ productName: '', requirements: '' })
-    expect(parsed?.session.debugPrdText).toBe('')
-    expect(parsed?.downgrade).toBeNull()
-  })
-
-  it('生成中的快照会降级并记录原因', () => {
-    const parsed = parseSessionSnapshot(JSON.stringify({ ...full, viewState: 'generating-prd' }))
+  it('生成中的状态会降级并记录原因', () => {
+    const parsed = normalizeSessionSnapshot({ ...full, viewState: 'generating-prd' })
     expect(parsed?.session.viewState).toBe('review-prd')
     expect(parsed?.downgrade).toBe('generating')
   })
 
-  it('脏字段只丢弃自己，不让整份快照失效', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        ...full,
-        // 各线程会话 id 是个对象，整块脏掉时逐键退化为空串（那条线程接续时走无状态模式）
-        conversationIds: 42,
-        messages: [{ role: 'bogus', content: 'x' }, { role: 'user', content: 'ok' }],
-      }),
-    )
-    expect(parsed?.session.conversationIds).toEqual(emptyConversationIds())
-    expect(parsed?.session.messages).toEqual([
-      { role: 'user', content: 'ok', stage: 'requirement' },
-    ])
-    // 同一条快照里合法的字段仍然保留
-    expect(parsed?.session.viewState).toBe('review-prd')
-    expect(parsed?.session.summary).toEqual({ product_name: 'X' })
-  })
-
-  it('各线程会话 id 逐键兜底：少一个键不影响其它键', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({ ...full, conversationIds: { 'api-docs-clarify': 'conv-api' } }),
-    )
-    expect(parsed?.session.conversationIds).toEqual({
-      ...emptyConversationIds(),
-      'api-docs-clarify': 'conv-api',
+  it('脏字段只丢弃自己，不让整份状态失效', () => {
+    const parsed = normalizeSessionSnapshot({
+      ...full,
+      entryMode: 'bogus',
+      quickInput: 'not-an-object',
+      debugPrdText: 42,
+      pastePairInput: 'not-an-object',
     })
-  })
-
-  it('入口相关的脏值各退化为自己的默认值', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        ...full,
-        entryMode: 'bogus',
-        quickInput: 'not-an-object',
-        debugPrdText: 42,
-        pastePairInput: 'not-an-object',
-      }),
-    )
     expect(parsed?.session.entryMode).toBeNull()
     expect(parsed?.session.quickInput).toEqual({ productName: '', requirements: '' })
     expect(parsed?.session.debugPrdText).toBe('')
     expect(parsed?.session.pastePairInput).toEqual({ prd: '', apiDocs: '' })
+    expect(parsed?.session.viewState).toBe('review-prd')
   })
 
-  it('双粘贴入口的两份正文随快照还原，缺字段的那一份单独退化', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        ...full,
-        viewState: 'prd-and-api-paste',
-        entryMode: 'prd-and-api-paste',
-        pastePairInput: { prd: '# 我的 PRD', apiDocs: 42 },
-      }),
-    )
-
-    expect(parsed?.session.entryMode).toBe('prd-and-api-paste')
-    // 逐字段退化的意义：坏掉的那一份不该把好的那一份一起带走
+  it('双粘贴入口的两份正文逐字段退化', () => {
+    const parsed = normalizeSessionSnapshot({
+      ...full,
+      viewState: 'prd-and-api-paste',
+      pastePairInput: { prd: '# 我的 PRD', apiDocs: 42 },
+    })
     expect(parsed?.session.pastePairInput).toEqual({ prd: '# 我的 PRD', apiDocs: '' })
   })
 
-  it('录入内容字段部分缺失时逐字段退化', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({ ...full, quickInput: { productName: '小账本' } }),
-    )
-    expect(parsed?.session.quickInput).toEqual({ productName: '小账本', requirements: '' })
+  it('对话任务的线程由 activeJobKind 与 chatTab 共同推出', () => {
+    const parsed = normalizeSessionSnapshot({
+      ...full,
+      chatTab: 'prd-clarify',
+      activeJobId: 7,
+      activeJobKind: 'chat',
+    })
+    expect(parsed?.session.activeChatStage).toBe('prd-clarify')
+    // 非对话任务没有线程
+    const doc = normalizeSessionSnapshot({ ...full, activeJobId: 7, activeJobKind: 'prd' })
+    expect(doc?.session.activeChatStage).toBeNull()
   })
 })
 
@@ -577,124 +501,6 @@ describe('带任务指针的快照恢复', () => {
  * 只会表现为「打开旧方案时对话少了一半」或「接口文档的澄清结论被送进 PRD」——
  * 后者更糟：改写会写进错的文档，而且看起来很合理。因此下面逐条钉住。
  */
-describe('澄清线程的快照迁移', () => {
-  it('旧阶段 clarifying → chatting，并停到当时的澄清目标那条线程上', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        viewState: 'clarifying',
-        clarifyTarget: 'api-docs',
-        clarifyMessages: [],
-        clarifyConversationId: 'conv-api',
-        messages: [],
-      }),
-    )
-    // 独立澄清页已退役：等价于「停在对话页的接口文档线程」
-    expect(parsed?.session.viewState).toBe('chatting')
-    expect(parsed?.downgrade).toBeNull()
-    expect(parsed?.session.chatTab).toBe('api-docs-clarify')
-    expect(parsed?.session.conversationIds['api-docs-clarify']).toBe('conv-api')
-  })
-
-  it('旧消息上的 stage: document 改名为 prd-clarify', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        viewState: 'chatting',
-        prdClarifying: true,
-        messages: [
-          { role: 'user', content: '需求那边的' },
-          { role: 'user', content: 'PRD 那边的', stage: 'document' },
-        ],
-      }),
-    )
-    expect(parsed?.session.messages).toEqual([
-      { role: 'user', content: '需求那边的', stage: 'requirement' },
-      { role: 'user', content: 'PRD 那边的', stage: 'prd-clarify' },
-    ])
-    // prdClarifying 为真 → 当时停在 PRD 线程
-    expect(parsed?.session.chatTab).toBe('prd-clarify')
-  })
-
-  it('旧 clarifyMessages 按当时的 clarifyTarget 并入对应线程，一条都不丢', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        viewState: 'clarifying',
-        clarifyTarget: 'prompts',
-        clarifyMessages: [
-          { role: 'user', content: '提示词这条要改' },
-          { role: 'assistant', content: '好的' },
-        ],
-        messages: [{ role: 'user', content: '需求 A' }],
-      }),
-    )
-    expect(parsed?.session.messages).toEqual([
-      { role: 'user', content: '需求 A', stage: 'requirement' },
-      { role: 'user', content: '提示词这条要改', stage: 'prompts-clarify' },
-      { role: 'assistant', content: '好的', stage: 'prompts-clarify' },
-    ])
-  })
-
-  it('clarifyTarget 非法时不猜线程：谁都不认领那批消息，也不塞进需求线程', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        viewState: 'clarifying',
-        clarifyTarget: 'bogus',
-        clarifyMessages: [{ role: 'user', content: '不知道这条算谁的' }],
-        messages: [{ role: 'user', content: '需求 A' }],
-      }),
-    )
-    // 阶段仍换算成对话页（旧澄清页本质就是个对话页），但停不到具体某条文档线程上
-    expect(parsed?.session.viewState).toBe('chatting')
-    expect(parsed?.session.chatTab).toBe('requirement')
-    // 目标不明的那批消息**不往任何线程里塞**：塞进需求线程会让文档答疑被当成需求输入
-    // 读一遍，闸门①的 Diff 里凭空冒出条目——归错线程比丢掉几条更糟
-    expect(parsed?.session.messages).toEqual([
-      { role: 'user', content: '需求 A', stage: 'requirement' },
-    ])
-  })
-
-  it('三个旧会话 id 各归各位，互不覆盖', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        viewState: 'chatting',
-        conversationId: 'conv-req',
-        prdClarifyConversationId: 'conv-prd',
-        clarifyTarget: 'api-docs',
-        clarifyConversationId: 'conv-api',
-      }),
-    )
-    expect(parsed?.session.conversationIds).toEqual({
-      requirement: 'conv-req',
-      'prd-clarify': 'conv-prd',
-      'api-docs-clarify': 'conv-api',
-      'prompts-clarify': '',
-    })
-  })
-
-  it('新字段优先于旧字段：已是新形态的快照不做任何改写', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({
-        viewState: 'chatting',
-        chatTab: 'prompts-clarify',
-        conversationIds: { 'prompts-clarify': 'conv-new' },
-        // 同时留着旧字段，模拟「半新半旧」的脏快照
-        conversationId: 'conv-legacy',
-        prdClarifying: true,
-      }),
-    )
-    expect(parsed?.session.chatTab).toBe('prompts-clarify')
-    expect(parsed?.session.conversationIds['prompts-clarify']).toBe('conv-new')
-    // 旧的 requirement 会话 id 仍然被接上——它是被**改名**而不是被废弃的那一个
-    expect(parsed?.session.conversationIds.requirement).toBe('conv-legacy')
-  })
-
-  it('chatTab 非法时回到需求澄清，而不是留下一个不存在的标签', () => {
-    const parsed = parseSessionSnapshot(
-      JSON.stringify({ viewState: 'chatting', chatTab: 'bogus' }),
-    )
-    expect(parsed?.session.chatTab).toBe('requirement')
-  })
-})
-
 describe('澄清线程的取值与互逆映射', () => {
   it('isChatStage / normalizeChatStage：认识旧值，但不认识的值一律归需求澄清', () => {
     expect(isChatStage('prd-clarify')).toBe(true)

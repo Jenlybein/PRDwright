@@ -35,6 +35,7 @@ import { computed, reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
 
 import type {
+  ChatStage,
   DocKind,
   DocPhase,
   DocumentKind,
@@ -65,6 +66,13 @@ export interface RunPointer {
   jobId: number
   jobKind: DocKind
   docKind: DocumentKind | null
+  /**
+   * 对话任务属于哪条线程；文档任务为 null。
+   *
+   * `jobKind='chat'` 只说「这是对话」：四条线程的人设与上下文完全不同，
+   * 没有这一项，重连后就分不清「这轮回复该记到谁头上」。
+   */
+  chatStage?: ChatStage | null
 }
 
 /** 一支在途（或刚收尾）的任务 */
@@ -110,7 +118,12 @@ export const useRunsStore = defineStore('runs', () => {
   const pointer = computed<RunPointer | null>(() => {
     const run = activeRun.value
     if (!run || run.status !== 'running') return null
-    return { jobId: run.jobId, jobKind: run.jobKind, docKind: run.docKind }
+    return {
+      jobId: run.jobId,
+      jobKind: run.jobKind,
+      docKind: run.docKind,
+      chatStage: run.chatStage ?? null,
+    }
   })
 
   /** 这支 job 是否仍由本 store 持有（身份的**主判据**） */
@@ -128,6 +141,17 @@ export const useRunsStore = defineStore('runs', () => {
   function isRunningFor(kind: DocumentKind): boolean {
     const run = activeRun.value
     return run?.status === 'running' && run.docKind === kind
+  }
+
+  /**
+   * 当前跑的这支是否正在替某条**对话线程**生成回复。
+   *
+   * 对话没有产物，判据只能是「线程」：四条线程可以各跑各的，A 在生成不该把 B 的
+   * 输入框也灰掉——这正是从前那个全局布尔 `chatStreaming` 造成的毛病。
+   */
+  function isRunningForChat(stage: ChatStage): boolean {
+    const run = activeRun.value
+    return run?.status === 'running' && run.jobKind === 'chat' && run.chatStage === stage
   }
 
   /** 某一份产物的运行态（取不到为 null） */
@@ -152,9 +176,11 @@ export const useRunsStore = defineStore('runs', () => {
     solutionId: number | null
     jobKind: DocKind
     docKind: DocumentKind | null
+    chatStage?: ChatStage | null
   }): ActiveRun {
     activeRun.value = {
       ...input,
+      chatStage: input.chatStage ?? null,
       status: 'running',
       startedAt: Date.now(),
       elapsedMs: 0,
@@ -177,6 +203,7 @@ export const useRunsStore = defineStore('runs', () => {
       solutionId: pointerValue.solutionId,
       jobKind: pointerValue.jobKind,
       docKind: pointerValue.docKind,
+      chatStage: pointerValue.chatStage ?? null,
       status: 'running',
       startedAt: Date.now(),
       elapsedMs: 0,
@@ -284,6 +311,7 @@ export const useRunsStore = defineStore('runs', () => {
     holds,
     isRunning,
     isRunningFor,
+    isRunningForChat,
     runOf,
     // 动作
     begin,

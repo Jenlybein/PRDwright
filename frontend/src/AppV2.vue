@@ -276,6 +276,18 @@ solutions.setOpenedHandler((id) => {
  *
  * 全程无需用户点击——这正是「生成与连接解耦」带来的体验。
  */
+/**
+ * 对话任务的重连：按**线程**交给对应实例。
+ *
+ * 四条线程各有一个 `useClarificationChat` 实例，谁认领这一轮由 `chatStage` 决定。
+ * 交给文档流水线是错的——它把增量写进 `docStreamingContent`、收尾走 `finishDoc`，
+ * 对话的流会被写进一个看不见的预览里。
+ */
+async function reconnectChat(jobId: number, stage: string | null | undefined): Promise<void> {
+  const key = (stage && stage in chats ? stage : store.chatTab) as keyof typeof chats
+  await chats[key].reconnect(jobId)
+}
+
 async function resumeAfterRestore(): Promise<void> {
   // 1. 快照里记着指针：重连**同一个**任务，身份直接读 `runs.pointer`。
   //    不从 `store.activeJobId` 中转、也不自己另存一份：指针里的 `docKind` 决定
@@ -286,7 +298,34 @@ async function resumeAfterRestore(): Promise<void> {
     // 指针必须属于**当前打开的方案**。`applySnapshot` 会带上方案 id，正常不会不符；
     // 真不符说明快照是切换过程中晚到的那一份，宁可少一次重连，也不要串到别人身上。
     if (runs.activeRun !== null && runs.activeRun.solutionId !== solutions.currentId) return
+    // 对话有自己的重连路径（写对话预览、收尾拉轮次），不能塞进文档流水线
+    if (pointer.jobKind === 'chat') {
+      await reconnectChat(pointer.jobId, pointer.chatStage)
+      return
+    }
     await reconnectJob(pointer.jobId)
+    return
+  }
+
+  // 2. 没有指针但停在对话页：兜底找一次正在跑的对话任务。
+  //    指针要等「登记运行态之后的那次 flush」才落库，这中间有一个很短的窗口；
+  //    在窗口里刷新，指针就没了，而任务还在后端跑——不兜底的话这一轮永远接不回来。
+  if (store.viewState === 'chatting') {
+    const running = await fetchActiveJobs({
+      solutionId: solutions.currentId,
+      kind: 'chat',
+      status: 'running',
+    }).catch(() => [])
+    const match = running[0]
+    if (!match) return
+    runs.restore({
+      jobId: match.id,
+      solutionId: solutions.currentId,
+      jobKind: 'chat',
+      docKind: null,
+      chatStage: match.chatStage ?? store.chatTab,
+    })
+    await reconnectChat(match.id, match.chatStage)
     return
   }
 

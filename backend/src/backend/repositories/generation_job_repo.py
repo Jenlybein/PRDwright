@@ -44,29 +44,33 @@ class GenerationJobRepository:
         solution_id: int | None,
         input_fingerprint: str | None = None,
         doc_kind: str = "",
+        chat_stage: str = "",
     ) -> int:
         """新建一条 running 任务，返回其 id。
 
         Args:
             owner_id: 归属用户，恒非空。
-            kind: 任务类型，`prd` / `api_docs` / `prompts` / `optimize`。
+            kind: 任务类型，`prd` / `api_docs` / `prompts` / `optimize` / `chat`。
             solution_id: 关联方案；快捷入口等场景可为 `None`。
             input_fingerprint: 输入指纹（本期仅 prd 计算），可为空。
             doc_kind: 这次任务**写哪一份产物**；未知时传空串。
+            chat_stage: 对话任务属于哪条线程（仅 `chat`），其余传空串。
 
         `doc_kind` 与 `kind` 分开：`kind` 是「做了什么」，`doc_kind` 是「写到哪」。
         `optimize` / `clarify` 这类动作凭 `kind` 定不了产物，只有请求体知道；
         创建时就把结论落列，刷新 / 进程重启后仍能回答「这个任务改的是哪一份」。
+
+        `chat_stage` 同理：`kind='chat'` 定不了「哪条线程」，而并发判重与重连都要它。
         """
         now = utc_now_text()
         with connect() as conn:
             cur = conn.execute(
                 "INSERT INTO generation_jobs "
-                "(owner_id, solution_id, kind, doc_kind, status, phase, draft_content, "
-                " completed_sections, input_fingerprint, usage, max_provider_switches, "
-                " error_code, error_message, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, 'running', '', '', '[]', ?, NULL, 2, '', '', ?, ?)",
-                (owner_id, solution_id, kind, doc_kind, input_fingerprint, now, now),
+                "(owner_id, solution_id, kind, doc_kind, chat_stage, status, phase, "
+                " draft_content, completed_sections, input_fingerprint, usage, "
+                " max_provider_switches, error_code, error_message, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'running', '', '', '[]', ?, NULL, 2, '', '', ?, ?)",
+                (owner_id, solution_id, kind, doc_kind, chat_stage, input_fingerprint, now, now),
             )
             conn.commit()
             return int(cur.lastrowid or 0)
@@ -87,10 +91,11 @@ class GenerationJobRepository:
         *,
         solution_id: int | None = None,
         kind: str | None = None,
+        chat_stage: str | None = None,
     ) -> dict[str, Any] | None:
         """查该 owner 下最近的 running 任务（`updated_at DESC`）。
 
-        `solution_id` / `kind` 为 `None` 时不参与过滤。
+        `solution_id` / `kind` / `chat_stage` 为 `None` 时不参与过滤。
         """
         clauses = ["owner_id = ?", "status = 'running'"]
         params: list[Any] = [owner_id]
@@ -100,6 +105,9 @@ class GenerationJobRepository:
         if kind is not None:
             clauses.append("kind = ?")
             params.append(kind)
+        if chat_stage is not None:
+            clauses.append("chat_stage = ?")
+            params.append(chat_stage)
         with connect() as conn:
             row = conn.execute(
                 f"SELECT * FROM generation_jobs WHERE {' AND '.join(clauses)} "
@@ -262,6 +270,27 @@ class GenerationJobRepository:
             )
             conn.commit()
             return int(cur.rowcount or 0)
+
+    @staticmethod
+    def cancel_one(owner_id: int, job_id: int, *, message: str) -> bool:
+        """把某一条 running 任务置为 failed + CANCELLED，返回是否确实改到了。
+
+        与 `cancel_running`（按方案批量）分开：用户按「停止生成」针对的是**这一次**
+        任务，而同一方案下别的线程可能也在跑，批量取消会连带掐掉它们。
+
+        任务已经自然结束（`rowcount = 0`）时返回 False：调用方据此回答
+        「没取消到东西」，而不是报错——「你点的时候它刚好说完了」不是失败。
+        """
+        with connect() as conn:
+            cur = conn.execute(
+                "UPDATE generation_jobs "
+                "SET status = 'failed', error_code = 'CANCELLED', "
+                "    error_message = ?, updated_at = ? "
+                "WHERE owner_id = ? AND id = ? AND status = 'running'",
+                (message, utc_now_text(), owner_id, job_id),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0) == 1
 
     @staticmethod
     def cancel_running(owner_id: int, *, solution_id: int) -> int:

@@ -8,6 +8,7 @@ import { useRunsStore } from '../stores/runs'
 import { useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import type { JobSnapshot, SolutionSummary } from '../types'
+import { toState } from './support/solutionState'
 
 /**
  * 切方案时的运行态隔离。
@@ -146,7 +147,7 @@ describe('切方案时退订在途任务', () => {
   it('打开另一份方案：订阅被中止、运行态清空、预览不留上一份正文', async () => {
     solutions.currentId = 1
     const controller = startRun(42)
-    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({ ...summary(2), data: snapshot() })
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({ ...summary(2), state: toState(JSON.parse(snapshot())) })
 
     await solutions.openSolution(2)
 
@@ -160,7 +161,7 @@ describe('切方案时退订在途任务', () => {
   it('切走之后旧任务的事件写不进新方案（按 jobId 认领，认不到就丢）', async () => {
     solutions.currentId = 1
     startRun(42)
-    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({ ...summary(2), data: snapshot() })
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({ ...summary(2), state: toState(JSON.parse(snapshot())) })
     await solutions.openSolution(2)
 
     // 旧任务收尾前又推来一帧快照 / 一次收尾：身份已经不在，必须原样丢弃
@@ -213,12 +214,12 @@ describe('回到原方案时重建运行态', () => {
   it('快照里记着指针：同一 jobId、产物种类与生成态都还原', async () => {
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(1),
-      data: snapshot({
+      state: toState(JSON.parse(snapshot({
         viewState: 'generating-api-docs',
         activeJobId: 42,
         activeJobKind: 'api-docs',
         activeJobDocKind: 'api-docs',
-      }),
+      }))),
     })
 
     await solutions.openSolution(1)
@@ -235,7 +236,7 @@ describe('回到原方案时重建运行态', () => {
     // 旧版本前端只在快照里存了 jobId + kind，`optimize` 这类动作凭 kind 推不出写哪一份
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(1),
-      data: snapshot({ viewState: 'review-prompts', activeJobId: 42, activeJobKind: 'optimize' }),
+      state: toState(JSON.parse(snapshot({ viewState: 'review-prompts', activeJobId: 42, activeJobKind: 'optimize' }))),
     })
 
     await solutions.openSolution(1)
@@ -254,12 +255,12 @@ describe('回到原方案时重建运行态', () => {
     const previous = startRun(42)
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(1),
-      data: snapshot({
+      state: toState(JSON.parse(snapshot({
         viewState: 'generating-prd',
         activeJobId: 42,
         activeJobKind: 'prd',
         activeJobDocKind: 'prd',
-      }),
+      }))),
     })
 
     await solutions.openSolution(1)

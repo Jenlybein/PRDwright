@@ -71,6 +71,9 @@ const GENERATING_STATE: Record<DocKind, ViewState | null> = {
   optimize: null,
   clarify: null,
   'auto-clarify': null,
+  // 对话不切阶段：用户本来就停在对话页，切走反而看不到正在流的内容。
+  // 它是「就地生成」，和 optimize / clarify 同一种形态。
+  chat: null,
 }
 
 /** `start` 的输入：任务种类 + 各类型各自的字段（`solutionId` 由本 composable 补） */
@@ -260,6 +263,11 @@ export function useJob() {
         solutionId: solutions.currentId,
         jobKind: kind,
         docKind: targetDocKindOf(kind, input),
+        // 对话没有产物，身份由「哪条线程」表达。
+        // ⚠️ 这一行漏了就会出现「对话不流式」：`isRunningForChat(stage)` 恒为假，
+        // 渲染层不认为这一轮在跑，流式气泡压根不出现，用户只在收尾刷新后
+        // 整段看到回复——看起来像「流式坏了」，实际是身份没登记。
+        chatStage: input.chatStage ?? null,
       })
 
       // 5. 再次强制落库：把任务指针写进快照

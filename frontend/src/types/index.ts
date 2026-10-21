@@ -180,6 +180,19 @@ export interface ChatMessage {
    * 精确形状断言变红）；它不进请求体，纯前端渲染用。
    */
   answers?: ClarificationAnswerItem[]
+  /**
+   * 轮次在后端 `chat_turns` 里的 id；排序与去重都用它。
+   *
+   * 它由服务端给出（前端不再自己生成消息身份）：同一毫秒内可能落两条轮次，
+   * 时间戳会并列，而 `id` 不会。乐观插入的「思考中」气泡没有这个字段。
+   */
+  id?: number
+  /**
+   * 这一轮被用户中途停止了：正文保留已生成的部分，界面上给一个小标记。
+   *
+   * 与「生成失败」分开表达——失败意味着结果不可信，停止意味着「够了」。
+   */
+  interrupted?: boolean
 }
 
 /**
@@ -250,7 +263,23 @@ export type EntryMode =
  * 注意命名口径：后端用下划线（`api_docs` / `auto_clarify`），前端用连字符，
  * 转换收口在 `services/api.ts`。
  */
-export type DocKind = 'prd' | 'api-docs' | 'prompts' | 'optimize' | 'clarify' | 'auto-clarify'
+export type DocKind =
+  | 'prd'
+  | 'api-docs'
+  | 'prompts'
+  | 'optimize'
+  | 'clarify'
+  | 'auto-clarify'
+  /**
+   * 对话的一轮：不产出文档，只产出一条 `chat_turns` 轮次。
+   *
+   * 它进 `DocKind` 而不是另开一个任务类型枚举，是因为**任务通道只有一条**：
+   * 对话接进 `POST /api/jobs` 之后，「切走不断」「刷新接回」「换设备能看」
+   * 三件事全部复用既有机制，一行新机制都不用写。
+   *
+   * `docKind`（写哪一份产物）对它恒为 null——它不写文档。
+   */
+  | 'chat'
 
 /**
  * **产物**种类：三份文档各自的身份，与 `DocKind` 的差别在于它不含 `optimize`。
@@ -997,10 +1026,31 @@ export interface SolutionSummary {
   content_updated_at: string
 }
 
-/** 方案详情：摘要 + 快照正文 */
+/** 方案的相位与草稿（服务端结构化列，与 `SessionDataV2` 同形但用 snake_case 传输） */
+export interface SolutionStatePayload {
+  view_state: string
+  entry_mode: string
+  chat_tab: string
+  /** 结构化需求摘要；未提交过为 null */
+  summary: RequirementsSummary | null
+  quick_product_name: string
+  quick_requirements: string
+  draft_prd_text: string
+  paste_prd_text: string
+  paste_api_docs_text: string
+  active_job_id: number | null
+  active_job_kind: string
+  active_job_doc_kind: string
+}
+
+/**
+ * 方案详情：摘要 + 相位与草稿。
+ *
+ * **不含聊天记录**：轮次单独走 `GET /api/solutions/{id}/turns`，按线程取。
+ * 放进同一个响应会让「打开方案」变成一次大请求，也会让「只查某一轮」把草稿拖着走。
+ */
 export interface SolutionDetail extends SolutionSummary {
-  /** `SessionDataV2` 的 JSON 文本，由前端自行反序列化 */
-  data: string
+  state: SolutionStatePayload
 }
 
 /**
@@ -1013,8 +1063,8 @@ export interface SolutionSavePayload {
   title: string
   mode: string
   stage: string
-  /** `SessionDataV2` 序列化后的 JSON 文本 */
-  data: string
+  /** 相位与草稿（**不含聊天记录**：它由服务端写进 `chat_turns`，前端只读） */
+  state: SolutionStatePayload
   /**
    * 这次改动是否动了**作品内容**（而不是只切了阶段 / 翻了页）。
    *
@@ -1028,18 +1078,20 @@ export interface SolutionSavePayload {
 }
 
 /**
- * V2 完整流程的本地快照。
- * 与 V1 的 `SessionData` 分开存储，避免两套流程共用同一份缓存互相覆盖。
+ * 一份方案的**状态**（相位与草稿）。
  *
- * 「还没提交、但已经敲了字」的三处录入内容（快捷入口的一段话、我有 PRD 的正文、
- * 我有 PRD + 接口文档 的两份正文）也一并落盘：它们是用户的手工输入，
- * 刷新一次就丢干净最让人恼火。
+ * 它曾经叫「整份快照」：`solutions.data` 里一列 JSON，装下界面的一切——包括聊天记录。
+ * 那套做法的前提是**只有一个写者**（同一台前端整份覆盖）。会话被多处访问（两台设备、
+ * 切方案回切）之后前提不成立：整份覆盖意味着后写的把先写的全盖掉，而聊天记录还只增不减。
  *
- * **三份产物正文与三份用量回执不在这里。** 它们的所有权属于后端 `documents` 表
- * （见 `DocumentRecord`），随方案一起存在同一份数据库里，刷新后由
- * `stores/documents.ts` 按方案 id 取回。快照只留「走到哪一步、键盘敲了什么」这类
- * 只属于本次会话的状态——把这些和几十 KB 的正文混在一起，正是「同一份内容两个真源」
- * 的老问题。
+ * 现在拆成三层，这个类型只描述第一层：
+ * - **相位与草稿**（本类型）：整份覆盖，前端是唯一写者；
+ * - **聊天记录**：后端 `chat_turns`，**服务端单写者**，前端只读（`listTurns`）；
+ * - **后端会话 id**：后端 `chat_sessions`，前端不再持有。
+ *
+ * 因此这里**没有 `messages`、没有 `conversationIds`**：
+ * - 消息由 `stores/workflow.setTurns()` 从轮次接口灌进来，只是**只读镜像**；
+ * - 会话 id 归服务端，前端答不出「它是否还有效」，也就不该替它保管。
  */
 export interface SessionDataV2 {
   /** 当前所处阶段 */
@@ -1049,28 +1101,14 @@ export interface SessionDataV2 {
   /** 结构化需求摘要；未提交过为 null */
   summary: RequirementsSummary | null
   /**
-   * 全部澄清线程的消息。
-   *
-   * 四条线程（需求 / PRD / 接口 / 提示词）**共用这一条列表**，按 `ChatMessage.stage`
-   * 区分归属（见 `ChatStage`）。数组顺序就是发生顺序，按 `stage` 过滤后即为该线程的顺序。
-   */
-  messages: ChatMessage[]
-  /**
    * 对话页当前停留在哪条线程。
    *
    * 它决定渲染哪一段对话、底栏给哪个主操作（需求澄清给「生成 PRD」，其余给「按澄清结果改写」）。
-   * 随快照持久化：刷新回来应当仍在原来那条线程里。
+   * 随状态持久化：刷新回来应当仍在原来那条线程里。
+   *
+   * 注意它只是**用户意图**，不是「消息归谁」——那由后端轮次行上的 `stage` 决定。
    */
   chatTab: ChatStage
-  /**
-   * 各线程的后端会话 id（按 `ChatStage` 取）。
-   *
-   * 四条线程是**四个后端会话**：需求澄清与文档澄清的人设不同（`clarification` vs
-   * `doc-clarification`），三条文档线程又各自带着不同文档的开场白——共用一个会话会让
-   * 上下文串味。前端合并展示、后端分开登记，各取所需。
-   * 空串表示该线程还没开过会话，接续时退化为无状态模式。
-   */
-  conversationIds: Record<ChatStage, string>
   /** 快捷流程入口的录入内容 */
   quickInput: QuickPrdInput
   /** 我有 PRD入口（「我有 PRD」）里用户贴入的 PRD 正文 */
@@ -1078,20 +1116,27 @@ export interface SessionDataV2 {
   /** 「我有 PRD + 接口文档」入口里用户贴入的两份正文 */
   pastePairInput: PastePairInput
   /**
-   * 当前进行中的生成任务 id；`null` 表示没有任务。
+   * 当前进行中的任务 id；`null` 表示没有任务。
    *
    * 有了它，刷新后即使正文只到一半，前端也能凭这个指针**静默重连**到同一任务，
-   * 先收 `snapshot` 补全正文再接 live。
+   * 先收 `snapshot` 补全正文再接 live。对话任务同样走它。
    */
   activeJobId: number | null
-  /** 当前进行中任务的文档种类；与 `activeJobId` 成对出现，无任务时为 null */
+  /** 当前进行中任务的类型；与 `activeJobId` 成对出现，无任务时为 null */
   activeJobKind: DocKind | null
   /**
    * 当前进行中任务**写哪一份产物**；取不到时为 null。
    *
-   * 与 `activeJobKind` 分开：`optimize` / `clarify` 这类动作凭 kind 定不了产物。
-   * 可选字段——旧快照没有它，恢复时走「按 `viewState` 反推」的旧路，不因此丢整份快照。
+   * 与 `activeJobKind` 分开：`optimize` / `clarify` 这类动作凭 kind 定不了产物；
+   * `chat` 则根本不写文档，恒为 null。
    */
   activeJobDocKind?: DocumentKind | null
+  /**
+   * 对话任务停留的线程；非对话任务为 null。
+   *
+   * 重连时靠它知道「这一轮回复该记到哪条线程」——`jobKind='chat'` 只说「这是对话」，
+   * 四条线程的人设与上下文完全不同，猜错就是一问一答记到别人头上。
+   */
+  activeChatStage?: ChatStage | null
 }
 

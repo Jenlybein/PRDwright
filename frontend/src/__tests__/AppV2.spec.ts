@@ -29,6 +29,7 @@ import type {
   StreamDocumentPart,
   StreamStageEvent,
 } from '../types'
+import { toState } from './support/solutionState'
 
 /**
  * 生成任务撮合器。
@@ -38,6 +39,15 @@ import type {
  * `readJobStream` 只拿得到 `jobId`——因此这里用一张 `jobId → kind` 的表把两者接上，
  * 让每个用例只需配置「prd 这条流怎么跑」，不必关心它拿到的是哪个 id。
  */
+/**
+ * 对话轮次的登记表：`readJobStream` 产出回复时写进来，`fetchTurns` 再读出去。
+ *
+ * 为什么要这张表：消息的真源已经搬到服务端 `chat_turns`，前端不再自己 push。
+ * 因此「AI 说了一句话」在测试里要分两步表达——任务产出它、轮次接口返回它，
+ * 缺任何一步都说明链路真的断了。
+ */
+const turnHarness = vi.hoisted(() => ({ items: [] as unknown[] }))
+
 const jobHarness = vi.hoisted(() => {
   const kinds = new Map<number, string>()
   let nextId = 1
@@ -102,6 +112,8 @@ vi.mock('../services/solutionService', () => ({
     }
   },
   fetchSolutions: vi.fn(async () => []),
+  fetchTurns: vi.fn(async () => turnHarness.items),
+  clearTurns: vi.fn(async () => {}),
   fetchSolution: vi.fn(async () => {
     throw new Error('本测试不加载已有方案')
   }),
@@ -173,6 +185,13 @@ async function defaultJobStream(
   }
   if (kind === 'optimize') {
     return { conversationId: '', reply: '优化后的内容', asks: [] }
+  }
+  if (kind === 'chat') {
+    const reply = '我先复述一下理解：你想做一个周报工具。'
+    handlers.onChunk?.(reply)
+    // 服务端在收尾时把这一轮写成轮次——前端随后靠 `fetchTurns` 读到它
+    turnHarness.items.push({ id: 2, role: 'assistant', content: reply, stage: 'requirement' })
+    return { conversationId: '', reply, asks: [] }
   }
   handlers.onChunk?.('# 产品需求文档\n')
   return { conversationId: '', reply: '# 产品需求文档\n\n## 1. 项目背景\n内容', asks: [] }
@@ -395,7 +414,7 @@ beforeEach(() => {
     created_at: '2026-10-13T00:00:00',
     updated_at: '2026-10-13T00:00:00',
     content_updated_at: '2026-10-13T00:00:00',
-    data: payload.data,
+    state: payload.state,
   }))
   vi.mocked(solutionApi.deleteSolution).mockResolvedValue(undefined)
 
@@ -492,7 +511,7 @@ function makeSolutionDetail(
     created_at: '2026-10-13T00:00:00',
     updated_at: '2026-10-13T00:00:00',
     content_updated_at: '2026-10-13T00:00:00',
-    data: JSON.stringify(snapshot),
+    state: toState(snapshot),
   }
 }
 
@@ -642,30 +661,25 @@ describe('AppV2 完整流程编排', () => {
     expect(api.startConversationStream).not.toHaveBeenCalled()
   })
 
-  it('提交需求后进入对话阶段，映射后端题目字段且载荷不携带任何提示词', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.('我先复述一下理解：这是一个给独立开发者用的 PRD 生成器。')
-      return { conversationId: 'conv-1', reply: '我先复述一下理解：这是一个给独立开发者用的 PRD 生成器。', asks: [] }
-    })
-
+  it('提交需求后进入对话阶段：对话走任务通道，回复来自服务端轮次', async () => {
     const wrapper = await mountApp()
     await submitSampleForm(wrapper)
 
+    // 进得了对话页
     expect(wrapper.text()).toContain('需求澄清对话')
+    // 关键：AI 的第一句话能看到。它来自 `fetchTurns`（服务端轮次），
+    // 前端不再自己把增量拼成消息——这一条同时守住「消息不再有第二个写者」
     expect(wrapper.text()).toContain('我先复述一下理解')
-    expect(api.startConversationStream).toHaveBeenCalledTimes(1)
 
-    // 载荷：结构化字段映射到后端已有题目的字段名
-    const payload = vi.mocked(api.startConversationStream).mock.calls[0]?.[0]
-    expect(payload?.answers.product_name).toBe('PRDwright')
-    expect(payload?.answers.problem_to_solve).toBe('把模糊想法整理成可开工的 PRD')
-    expect(payload?.answers.platform_type).toBe('网页应用')
-    expect(payload?.answers.core_features).toEqual(['问卷填写 —— 收集产品信息'])
+    // 对话是一个任务，而不是一条裸的流式请求
+    expect(jobCount('chat')).toBe(1)
+    const payload = jobPayload('chat')
+    expect(payload?.chatStage).toBe('requirement')
+    expect(payload?.chatMode).toBe('start')
+    expect(solutionApi.fetchTurns).toHaveBeenCalled()
 
-    // 提示词归后端独占（后端按对话档案解析人设与开场白），前端只提交问卷内容
-    expect(payload).not.toHaveProperty('systemPrompt')
-    expect(payload).not.toHaveProperty('system_prompt_override')
-    expect(JSON.stringify(payload)).not.toContain('资深产品经理')
+    // 提示词归后端独占：前端只提交问卷答案，不带任何人设文案
+    expect(JSON.stringify(payload?.formData ?? {})).not.toContain('资深产品经理')
   })
 
   it('澄清提问带结构化选项时渲染成选项卡，提交后作为一条用户消息发出、卡片随之消失', async () => {
@@ -1159,6 +1173,45 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('断线前的半句续写')
   })
 
+  it('恢复路径：对话任务走对话自己的重连，刷新后流式内容仍然看得见', async () => {
+    let release: () => void = () => {}
+    vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
+      expect(jobId).toBe(77)
+      handlers?.onSnapshot?.(makeJobSnapshot({ jobId: 77, kind: 'chat', status: 'running' }))
+      handlers?.onChunk?.('断线前已经说出的一半')
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return { conversationId: '', reply: '断线前已经说出的一半', asks: [] }
+    })
+    vi.mocked(solutionApi.fetchTurns).mockResolvedValue([
+      { id: 9, role: 'assistant', content: '断线前已经说出的一半', stage: 'requirement' },
+    ])
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'chatting',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      chatTab: 'requirement',
+      activeJobId: 77,
+      activeJobKind: 'chat',
+    })
+
+    // 重连既有任务，而不是新建一个
+    expect(jobCount('chat')).toBe(0)
+    expect(api.readJobStream).toHaveBeenCalledWith(77, expect.anything(), expect.anything())
+    // 关键：内容出现在**对话区**。若被塞进文档流水线，这里会是空的
+    // （那正是「刷新后流式全丢、过一会儿才整段出现」的成因）。
+    await flushPromises()
+    const shown = wrapper.findComponent(ChatStage).props('messages') as ChatMessage[]
+    // 内容必须出现在**对话区**。若被塞进文档流水线，这里会是空的
+    // （那正是「刷新后流式全丢、过一会儿才整段出现」的成因）。
+    expect(shown.map((m) => m.content).join('')).toContain('断线前已经说出的一半')
+
+    release()
+    await flushPromises()
+  })
+
   it('恢复路径 1b：刷新时正赶上审核，阶段输出随快照接回来', async () => {
     vi.mocked(api.readJobStream).mockImplementation(async (jobId, handlers) => {
       expect(jobId).toBe(43)
@@ -1249,6 +1302,7 @@ describe('AppV2 完整流程编排', () => {
         kind: 'prd',
         // 后端在新版本里会给出目标产物；前端据此重建运行态，不再按阶段反推
         docKind: 'prd',
+      chatStage: null,
         status: 'running',
         phase: 'writing',
         solutionId: 1,
@@ -2507,9 +2561,8 @@ describe('AppV2 对话页的子标签栏', () => {
     ])
     await flushPromises()
 
-    // 标签与各线程会话 id 都随快照回来了：刷新后接着聊，而不是被丢回需求澄清
+    // 标签随状态回来（会话 id 已归服务端，不再由前端保管）：刷新后接着聊，而不是被丢回需求澄清
     expect(storeOf(wrapper).chatTab).toBe('api-docs-clarify')
-    expect(storeOf(wrapper).conversationIds['api-docs-clarify']).toBe('conv-api')
     expect(chatMessages(wrapper).map((message) => message.content)).toEqual(['接口这边聊的'])
   })
 })

@@ -10,6 +10,7 @@ import { useDocumentsStore } from '@/stores/documents'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import type { SolutionSummary } from '@/types'
+import { toState } from './support/solutionState'
 
 /**
  * 导航与生成的交互边界。
@@ -101,7 +102,7 @@ beforeEach(() => {
     title: payload.title,
     stage: payload.stage,
     // 详情比摘要多一个 `data`（会话快照）；这里只关心 id，给个空对象即可
-    data: '',
+    state: toState({}),
   }))
 })
 

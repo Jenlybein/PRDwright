@@ -36,7 +36,6 @@ import {
   canGeneratePrdFrom,
   documentKindOfChatStage,
   DOWNGRADE_NOTICE,
-  emptyConversationIds,
   farthestContentStepIndex,
   hasRequiredDocuments,
   hasRequirementChat,
@@ -91,11 +90,16 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const summary = ref<RequirementsSummary | null>(null)
 
   /**
-   * 全部澄清线程的消息；正在流式生成的那条不在其中。
+   * 全部澄清线程的消息——**服务端轮次的只读镜像**，正在流式生成的那条不在其中。
    *
-   * 四条线程（需求 / PRD / 接口 / 提示词）**共用这一个数组**，按 `ChatMessage.stage`
-   * 区分归属（见 `ChatStage`）。对话页只渲染当前标签那一条，摘要回填只读 `requirement`
-   * 那一条——两处过滤都由 `stage` 这一道标记兜住。
+   * 它不是真源：真源是后端 `chat_turns`（写者只有服务端一个）。本 store 只持有它的
+   * 一份展示副本，由 `setTurns()` 整体灌入、由 `dropChatThread()` 局部清掉。
+   *
+   * 为什么要镜像而不是「每次渲染现拉」：消息要参与「能不能生成 PRD」「进度到哪一格」
+   * 这些**同步**判断，而 Vue 的渲染路径不能等一次网络往返。镜像坏了最多显示旧内容，
+   * 不会写错东西——因为没有一条写入路径从这里出发。
+   *
+   * 四条线程共用这一个数组，按 `ChatMessage.stage` 区分归属（见 `ChatStage`）。
    */
   const messages = ref<ChatMessage[]>([])
 
@@ -106,17 +110,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 随快照持久化：刷新回来应当仍在原来那条线程里，而不是莫名其妙地又能再生成一次 PRD。
    */
   const chatTab = ref<ChatStage>('requirement')
-
-  /**
-   * 各线程的后端会话 id（按 `ChatStage` 取）。
-   *
-   * 四条线程是**四个后端会话**：需求澄清与文档澄清的人设不同（`clarification` vs
-   * `doc-clarification`），三条文档线程又各自带着不同文档的开场白——共用一个会话会让
-   * 上下文串味。前端合并展示、后端分开登记，各取所需。
-   *
-   * 收成一个表而不是四个字段：刷快照要同步的字段少一个，就少一次「改了这个忘了存那个」。
-   */
-  const conversationIds = ref<Record<ChatStage, string>>(emptyConversationIds())
 
   /** 快捷流程入口的录入内容（产品名 + 一段话描述） */
   const quickInput = ref<QuickPrdInput>({ productName: '', requirements: '' })
@@ -156,6 +149,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
    */
   const activeJobDocKind = computed(() => runs.pointer?.docKind ?? null)
 
+  /**
+   * 对话任务停留的线程；非对话任务为 null。
+   *
+   * 它是**运行态**的一部分（随指针存、随重连读），不是「用户在翻哪一页」——
+   * 后者是 `chatTab`，两者刻意分开：用户可以在 A 线程生成时翻到 B 线程去看历史。
+   */
+  const activeChatStage = computed<ChatStage | null>(() => runs.pointer?.chatStage ?? null)
+
   // 澄清线程的历史沿革（免得下一个人重蹈覆辙）：
   // ADR-025 为了让闸门①读不到文档答疑，曾把接口文档 / 提示词的澄清做成**完全独立的一套**
   // 字段（`clarifyMessages` / `clarifyConversationId` / `clarifyTarget`）并配一个独立页面；
@@ -168,9 +169,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
   // 运行态（不写入快照）
   // ------------------------------------------------------------------
 
-  /** 对话流式请求进行中 */
-  const chatStreaming = ref(false)
-
   /**
    * 本方案是否有生成任务正在跑。
    *
@@ -180,7 +178,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const hasActiveRun = computed(() => runs.hasRunning)
 
   /** 是否有任何请求在进行中 */
-  const busy = computed(() => chatStreaming.value || hasActiveRun.value)
+  const busy = computed(() => hasActiveRun.value)
 
   /** 刷新时发生降级的类型；供界面解释为什么不是原状态 */
   const downgrade = ref<DowngradeKind | null>(null)
@@ -238,9 +236,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       viewState: viewState.value,
       entryMode: entryMode.value,
       summary: summary.value,
-      messages: messages.value,
       chatTab: chatTab.value,
-      conversationIds: conversationIds.value,
       quickInput: quickInput.value,
       debugPrdText: debugPrdText.value,
       pastePairInput: pastePairInput.value,
@@ -248,6 +244,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
       activeJobKind: activeJobKind.value,
       // 目标产物：`optimize` / `clarify` 凭 kind 定不了它，重连时又要靠它知道改的是哪一份
       activeJobDocKind: activeJobDocKind.value,
+      // 对话任务：重连时靠它知道这轮回复该记到哪条线程
+      activeChatStage: activeChatStage.value,
     }
   }
 
@@ -269,7 +267,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
     viewState.value = session.viewState
     entryMode.value = session.entryMode
     summary.value = session.summary
-    messages.value = session.messages
+    // 消息不随状态一起来：它住在后端 `chat_turns`，由调用方随后用 `setTurns()` 灌入。
+    // 这里先清空，避免上一份方案的对话在新方案里短暂出现（视觉上是「串稿」）。
+    messages.value = []
     quickInput.value = session.quickInput
     debugPrdText.value = session.debugPrdText
     pastePairInput.value = session.pastePairInput
@@ -283,14 +283,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
         // 这里保持同一口径，免得「有指针却不重连」这种更糟的结果。
         jobKind: session.activeJobKind ?? 'prd',
         docKind: session.activeJobDocKind ?? null,
+        chatStage: session.activeChatStage ?? null,
       })
     } else {
       runs.clear()
     }
-    // 澄清线程随快照一起恢复，因此刷新后能接着聊（也就**不需要**为它们降级）。
-    // `conversationIds` 是个对象，缺字段的旧快照要逐键兜底，不能整个替换。
+    // 停留的线程要恢复（它在状态里，属于「用户翻到哪一页」）；
+    // 但**消息与会话 id 都不恢复**：它们归服务端，随后按方案 id 拉取。
     chatTab.value = session.chatTab ?? 'requirement'
-    conversationIds.value = { ...emptyConversationIds(), ...(session.conversationIds ?? {}) }
     downgrade.value = downgradeKind
     // 通知视图「这是整份换上的新内容」，而不是用户的一次输入。
     // 结构化表单只在 setup 阶段读一次 `initial`，因此需要据此重建，
@@ -302,7 +302,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 状态变化时自增 `changeTick`。
    *
    * 注意这里 watch 的是「快照里包含的字段」，而**不是**运行态那几个
-   * （`chatStreaming` / `hasActiveRun` / `downgrade`）——它们不该触发保存。
+   * （`hasActiveRun` / `downgrade`）——它们不该触发保存。
    * 流式过程中的临时文本留在组件里，因此也不会形成高频保存。
    */
   watch(
@@ -310,15 +310,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
       viewState,
       entryMode,
       summary,
-      messages,
       chatTab,
-      conversationIds,
       quickInput,
       debugPrdText,
       pastePairInput,
       activeJobId,
       activeJobKind,
       activeJobDocKind,
+      activeChatStage,
     ],
     () => {
       changeTick.value += 1
@@ -337,7 +336,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 的判断，而列表本身就写在这里（Vue 直接按依赖区分），漏改一个字段的代价是对不上账。
    */
   watch(
-    [summary, messages, conversationIds, quickInput, debugPrdText, pastePairInput],
+    [summary, quickInput, debugPrdText, pastePairInput],
     () => {
       contentTick.value += 1
     },
@@ -410,6 +409,15 @@ export const useWorkflowStore = defineStore('workflow', () => {
   })
 
   /**
+   * 是否已经「聊过」——进度条第二格的解锁依据。
+   *
+   * 判据是「有轮次」**或**「已提交需求摘要」：消息现在从服务端异步取回，
+   * 刚提交完表单、第一轮回复还在路上时 `messages` 仍是空的，而用户显然已经过了
+   * 第一格。只看消息会让进度条在正确的位置上退回去一格。
+   */
+  const hasChat = computed(() => messages.value.length > 0 || summary.value !== null)
+
+  /**
    * 已到达的最远步骤下标（进度条可点击范围），解锁依据是**产物有没有内容**。
    *
    * `hasMessages` 的语义是「**任意**线程聊过」——从前只有需求澄清一条线程时它与
@@ -419,7 +427,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const reachedStepIndex = computed(() =>
     computeReachedStepIndex({
       mode: entryMode.value,
-      hasMessages: messages.value.length > 0,
+      hasMessages: hasChat.value,
       hasPrd: documents.hasPrd,
       hasApiDocs: documents.hasApiDocs,
       hasPrompts: documents.hasPrompts,
@@ -445,7 +453,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     const modeSteps = stepsForMode(entryMode.value)
     const index = farthestContentStepIndex({
       mode: entryMode.value,
-      hasMessages: messages.value.length > 0,
+      hasMessages: hasChat.value,
       hasPrd: documents.hasPrd,
       hasApiDocs: documents.hasApiDocs,
       hasPrompts: documents.hasPrompts,
@@ -562,7 +570,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function reset(): void {
     messages.value = []
     chatTab.value = 'requirement'
-    conversationIds.value = emptyConversationIds()
     summary.value = null
     quickInput.value = { productName: '', requirements: '' }
     debugPrdText.value = ''
@@ -581,6 +588,17 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   /**
+   * 用服务端的轮次整体替换本地镜像。
+   *
+   * 调用方是 `stores/solutions.ts`（打开方案、任务收尾后各拉一次）。**只接受整体**
+   * 而不是增删单条：服务端是唯一写者，前端任何「局部改一下」都会在没有对应写事务的
+   * 情况下与它漂移，而漂移的表现是「刷新后某条消息回来了」这种最难解释的现象。
+   */
+  function setTurns(turns: ChatMessage[]): void {
+    messages.value = turns
+  }
+
+  /**
    * 作废一条澄清线程：清掉它的消息与后端会话 id。
    *
    * 触发点是**整篇重新生成**那份产物（见 `useDocumentPipeline.handlersForKind`）。为什么必须
@@ -590,16 +608,17 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 只动被点名的那条线程，其余线程原样保留。
    */
   function dropChatThread(stage: ChatStage): void {
+    // 只清本地镜像；服务端那一份由调用方（`stores/solutions.clearChatThread`）删，
+    // 否则刷新一次旧对话又回来了——「删了但没删掉」比不删更难解释。
     messages.value = messages.value.filter(
       (message) => normalizeChatStage(message.stage) !== stage,
     )
-    conversationIds.value = { ...conversationIds.value, [stage]: '' }
   }
 
   /**
    * 快照里是否存在「值得保存」的内容。
    *
-   * 只看内容字段，**不看 `viewState` / `entryMode` / `chatTab` / `conversationIds`**——
+   * 只看内容字段（摘要 / 两段粘贴稿），**不看 `viewState` / `entryMode` / `chatTab`**——
    * 它们描述的是「走到哪一步」而不是「有什么」；用户只是点进入口看一眼就又退回，
    * 不该因此留下一份空方案。
    *
@@ -608,7 +627,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
    */
   const hasContent = computed(
     () =>
-      messages.value.length > 0 ||
       summary.value !== null ||
       quickInput.value.productName.trim() !== '' ||
       quickInput.value.requirements.trim() !== '' ||
@@ -624,15 +642,14 @@ export const useWorkflowStore = defineStore('workflow', () => {
     summary,
     messages,
     chatTab,
-    conversationIds,
     quickInput,
     debugPrdText,
     pastePairInput,
     activeJobId,
     activeJobKind,
     activeJobDocKind,
+    activeChatStage,
     // 运行态
-    chatStreaming,
     hasActiveRun,
     busy,
     downgrade,
@@ -658,6 +675,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     clearDowngrade,
     chooseEntry,
     backToEntry,
+    setTurns,
     dropChatThread,
     reset,
     snapshot,

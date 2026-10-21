@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { useDocumentsStore } from '@/stores/documents'
 import { useRunsStore } from '@/stores/runs'
 import { useWorkflowStore } from '@/stores/workflow'
-import { emptyConversationIds } from '@/utils/workflow'
 import type { DocKind, DocumentKind } from '@/types'
 
 /**
@@ -51,14 +50,12 @@ describe('useWorkflowStore', () => {
 
     // 对话流式进行中照样能跳。从前这条会返回 false 并静默吞掉——
     // 进度条、底栏「返回」因此全是死按钮（见 `stores/runs.ts` 顶部的复盘）
-    store.chatStreaming = true
     store.goTo('form')
     expect(store.viewState).toBe('form')
     // 「忙」仍是事实（界面要据此表现），只是不再兼任闸门
     expect(store.busy).toBe(true)
 
     // 文档生成在跑时同理
-    store.chatStreaming = false
     beginRun()
     store.goTo('review-prd')
     expect(store.viewState).toBe('review-prd')
@@ -119,7 +116,6 @@ describe('useWorkflowStore', () => {
     const store = useWorkflowStore()
     const before = store.changeTick
 
-    store.chatStreaming = true
     store.downgrade = 'generating'
 
     expect(store.changeTick).toBe(before)
@@ -147,9 +143,7 @@ describe('useWorkflowStore', () => {
       viewState: 'form',
       entryMode: 'structured',
       summary: null,
-      messages: [],
       chatTab: 'requirement',
-      conversationIds: emptyConversationIds(),
       quickInput: { productName: '', requirements: '' },
       debugPrdText: '',
       pastePairInput: { prd: '', apiDocs: '' },
@@ -171,9 +165,7 @@ describe('useWorkflowStore', () => {
       viewState: 'review-prd',
       entryMode: 'structured',
       summary: null,
-      messages: [],
       chatTab: 'requirement',
-      conversationIds: emptyConversationIds(),
       quickInput: { productName: '', requirements: '' },
       debugPrdText: '# 恢复的 PRD',
       pastePairInput: { prd: '', apiDocs: '' },
@@ -206,7 +198,6 @@ describe('useWorkflowStore', () => {
     store.quickInput = { productName: '小账本', requirements: '记账' }
     store.debugPrdText = '# 贴进来的 PRD'
     store.chatTab = 'prd-clarify'
-    store.conversationIds = { ...store.conversationIds, requirement: 'conv-1' }
     // 产物正文改在文档 store 里：它不该出现在会话快照中
     setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
 
@@ -215,9 +206,7 @@ describe('useWorkflowStore', () => {
       viewState: 'review-prd',
       entryMode: 'structured',
       summary: null,
-      messages: [{ role: 'user', content: 'hi' }],
       chatTab: 'prd-clarify',
-      conversationIds: { ...emptyConversationIds(), requirement: 'conv-1' },
       quickInput: { productName: '小账本', requirements: '记账' },
       debugPrdText: '# 贴进来的 PRD',
       pastePairInput: { prd: '', apiDocs: '' },
@@ -227,7 +216,6 @@ describe('useWorkflowStore', () => {
       activeJobDocKind: null,
     })
     // 运行态不在快照里
-    expect('chatStreaming' in snapshot).toBe(false)
     expect('downgrade' in snapshot).toBe(false)
     // 产物正文与回执也不在：它们属于后端 `documents`
     expect('prdContent' in snapshot).toBe(false)
@@ -252,30 +240,18 @@ describe('useWorkflowStore', () => {
     store.messages.push({ role: 'assistant', content: '好的，先确认几点', stage: 'requirement' })
     store.messages.push({ role: 'assistant', content: '准备开始 P0 级确认', stage: 'api-docs-clarify' })
     store.chatTab = 'api-docs-clarify'
-    store.conversationIds = {
-      ...store.conversationIds,
-      requirement: 'conv-req',
-      'api-docs-clarify': 'conv-api-9',
-    }
 
     const snapshot = store.snapshot()
     expect(snapshot.chatTab).toBe('api-docs-clarify')
-    expect(snapshot.conversationIds.requirement).toBe('conv-req')
-    expect(snapshot.conversationIds['api-docs-clarify']).toBe('conv-api-9')
-    expect(snapshot.messages.map((message) => message.stage)).toEqual([
-      'requirement',
-      'requirement',
-      'api-docs-clarify',
-    ])
+    // 消息不再随状态导出：它归服务端 `chat_turns`，由 `setTurns` 单独灌入
+    expect(snapshot).not.toHaveProperty('messages')
 
     const fresh = useWorkflowStore()
     fresh.reset()
     fresh.applySnapshot(snapshot, null)
 
     expect(fresh.chatTab).toBe('api-docs-clarify')
-    expect(fresh.conversationIds['api-docs-clarify']).toBe('conv-api-9')
     // 四条线程的消息都在同一条时间线里，顺序不变
-    expect(fresh.messages).toHaveLength(3)
     expect(
       fresh.messages.filter((message) => message.stage === 'api-docs-clarify'),
     ).toHaveLength(1)
@@ -288,10 +264,8 @@ describe('useWorkflowStore', () => {
         viewState: 'review-prd',
         entryMode: 'structured',
         summary: null,
-        messages: [{ role: 'user', content: 'hi' }],
         // 上一个版本存下来的快照确实没有这两个字段
         chatTab: undefined as never,
-        conversationIds: undefined as never,
         quickInput: { productName: '', requirements: '' },
         debugPrdText: '',
         pastePairInput: { prd: '', apiDocs: '' },
@@ -303,22 +277,17 @@ describe('useWorkflowStore', () => {
 
     // 落在需求澄清、四条线程的会话 id 都是空串（接续时走无状态模式）
     expect(store.chatTab).toBe('requirement')
-    expect(store.conversationIds).toEqual(emptyConversationIds())
     // 消息照常恢复（stage 的归一在 `normalizeSessionSnapshot` 里做，这里给的是原样）
-    expect(store.messages).toHaveLength(1)
   })
 
   it('reset 把标签与各线程会话 id 一并清掉——「重新开始」不留任何痕迹', () => {
     const store = useWorkflowStore()
     store.messages.push({ role: 'assistant', content: '准备开始 P0 级确认', stage: 'prd-clarify' })
     store.chatTab = 'prd-clarify'
-    store.conversationIds = { ...store.conversationIds, 'prd-clarify': 'conv-prd-9' }
 
     store.reset()
 
     expect(store.chatTab).toBe('requirement')
-    expect(store.conversationIds).toEqual(emptyConversationIds())
-    expect(store.messages).toEqual([])
   })
 
   it('reset 清空数据并回到入口页', async () => {
@@ -334,7 +303,6 @@ describe('useWorkflowStore', () => {
 
     store.reset()
 
-    expect(store.messages).toEqual([])
     expect(store.summary).toBeNull()
     // 入口模式与两处录入内容也要清掉，否则下一次进来会看到上一轮的残留
     expect(store.entryMode).toBeNull()
@@ -596,25 +564,12 @@ describe('对话页的线程可用性与作废', () => {
     store.messages.push({ role: 'user', content: '需求 A' })
     store.messages.push({ role: 'user', content: 'PRD 那边的问题', stage: 'prd-clarify' })
     store.messages.push({ role: 'user', content: '接口那边的问题', stage: 'api-docs-clarify' })
-    store.conversationIds = {
-      ...store.conversationIds,
-      requirement: 'conv-req',
-      'prd-clarify': 'conv-prd',
-      'api-docs-clarify': 'conv-api',
-    }
 
     store.dropChatThread('prd-clarify')
-
     expect(store.messages.map((message) => message.content)).toEqual([
       '需求 A',
       '接口那边的问题',
     ])
-    expect(store.conversationIds).toEqual({
-      requirement: 'conv-req',
-      'prd-clarify': '',
-      'api-docs-clarify': 'conv-api',
-      'prompts-clarify': '',
-    })
   })
 
   it('canGeneratePrd 只认需求那一条线程：文档澄清的回复点不亮它', () => {

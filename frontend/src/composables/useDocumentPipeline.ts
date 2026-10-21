@@ -840,6 +840,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 没有才退回按 `viewState` 反推。
     const pointer = runs.pointer
     const kind = pointer?.jobKind ?? store.activeJobKind ?? 'prd'
+    // 对话**不该**走到这里：它有自己的重连路径（把增量写进 `runs.preview`、
+    // 收尾重新拉轮次，见 `useClarificationChat.reconnect`）。真走到了说明调用方
+    // 分流错了——直接放弃，绝不把对话事件写进文档预览（那会表现为「刷新后流式全丢」，
+    // 因为内容全都写进了一个看不见的地方）。
+    if (kind === 'chat') return
     const target = pointer?.docKind ?? docKeyForJob(kind)
     // 别的任务已经占着这一支运行态：本次要重连的任务属于更早的一轮，直接放弃。
     // （同一标签页里同时跟两支任务是本期明确不做的事，见计划「不做与风险」——
@@ -847,7 +852,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (runs.activeRun !== null && !runs.holds(jobId)) return
     // 登记这一支运行态：`useJob.reconnect` 凭它认领事件，`isStaleRun` 凭它判过期
     if (!runs.holds(jobId)) {
-      runs.restore({ jobId, solutionId: solutions.currentId, jobKind: kind, docKind: target })
+      runs.restore({
+        jobId,
+        solutionId: solutions.currentId,
+        jobKind: kind,
+        docKind: target,
+        // 对话任务的身份还有线程这一维；这里恒为 null（上面已经挡掉 chat），
+        // 但显式写出来，免得「漏传」在将来又被当成一个可选参数忽略掉。
+        chatStage: null,
+      })
     }
     resetDocTransient()
     if (kind === 'prd') {

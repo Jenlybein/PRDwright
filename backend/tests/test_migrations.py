@@ -14,7 +14,12 @@ import sqlite3
 import pytest
 
 from backend.core.db import connect, utc_now_text
-from backend.core.migrations import Migration, current_version, run_migrations
+from backend.core.migrations import (
+    MIGRATIONS,
+    Migration,
+    current_version,
+    run_migrations,
+)
 
 
 def _table_exists(name: str) -> bool:
@@ -232,7 +237,7 @@ def test_v3_migration_adds_pending_items_column_to_jobs() -> None:
     assert "pending_items" not in {row["name"] for row in _table_info("generation_jobs")}
 
     # 跑真实迁移清单（含 v3），最终版本应为 7（v4~v7 与本步无关）
-    assert run_migrations() == 8
+    assert run_migrations() == len(MIGRATIONS)
 
     cols = {row["name"]: row for row in _table_info("generation_jobs")}
     assert "pending_items" in cols
@@ -314,7 +319,7 @@ def test_v4_v6_build_version_chain_and_backfill(monkeypatch) -> None:
 
     # 再跑完整清单：v4（建表 + 加指针）、v5（回填）、v6（删列）
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 8
+    assert run_migrations() == len(MIGRATIONS)
 
     assert _table_exists("document_versions")
     cols = _columns("documents")
@@ -347,8 +352,8 @@ def test_v4_v6_is_idempotent(monkeypatch) -> None:
     solution_id = _seed_solution_with_document()
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 8
-    assert run_migrations() == 8
+    assert run_migrations() == len(MIGRATIONS)
+    assert run_migrations() == len(MIGRATIONS)
 
     with connect() as conn:
         count = conn.execute(
@@ -430,7 +435,7 @@ def test_v7_adds_content_updated_at_and_backfills(monkeypatch) -> None:
     newer = _seed_legacy_solution("legacy-new", "2026-02-02T00:00:00+00:00")
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 8
+    assert run_migrations() == len(MIGRATIONS)
 
     cols = {row["name"]: row for row in _table_info("solutions")}
     assert "content_updated_at" in cols
@@ -454,8 +459,8 @@ def test_v7_is_idempotent(monkeypatch) -> None:
     from backend.core.migrations import MIGRATIONS
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 8
-    assert run_migrations() == 8
+    assert run_migrations() == len(MIGRATIONS)
+    assert run_migrations() == len(MIGRATIONS)
 
 
 def test_v8_adds_doc_kind_to_jobs(monkeypatch) -> None:
@@ -471,7 +476,7 @@ def test_v8_adds_doc_kind_to_jobs(monkeypatch) -> None:
     assert "doc_kind" not in _columns("generation_jobs")
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 8
+    assert run_migrations() == len(MIGRATIONS)
 
     cols = {row["name"]: row for row in _table_info("generation_jobs")}
     assert "doc_kind" in cols
@@ -493,3 +498,84 @@ def test_v8_adds_doc_kind_to_jobs(monkeypatch) -> None:
         conn.commit()
         row = conn.execute("SELECT doc_kind FROM generation_jobs").fetchone()
     assert row["doc_kind"] == ""
+
+
+def test_v9_v10_split_state_and_backfill_chat(monkeypatch) -> None:
+    """v9/v10：方案状态拆成列、聊天搬进 `chat_turns`、会话 id 搬进 `chat_sessions`。
+
+    这条用例守的是「旧库升级后数据还在」：拆表最大的风险不是新代码写不出来，
+    而是老方案打开后聊天记录凭空消失——那种事不会报错，只会让用户以为数据丢了。
+    """
+    from backend.core.migrations import MIGRATIONS
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS[:8])
+    assert run_migrations() == 8
+
+    snapshot = {
+        "viewState": "chatting",
+        "entryMode": "structured",
+        "chatTab": "prd-clarify",
+        "summary": {"product_name": "老方案"},
+        "messages": [
+            {"role": "assistant", "content": "先问一句", "stage": "requirement"},
+            {"role": "user", "content": "我的回答", "stage": "requirement", "answers": [{"a": 1}]},
+        ],
+        "conversationIds": {"requirement": "conv-1", "prd-clarify": "conv-2"},
+        "quickInput": {"productName": "周报", "requirements": "一段话"},
+        "debugPrdText": "# 贴进来的 PRD",
+        "pastePairInput": {"prd": "# 甲", "apiDocs": "# 乙"},
+        "activeJobId": 7,
+        "activeJobKind": "prd",
+        "activeJobDocKind": "prd",
+    }
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, salt, created_at) "
+            "VALUES ('old', 'x', X'00', ?)",
+            (utc_now_text(),),
+        )
+        conn.execute(
+            "INSERT INTO solutions (user_id, title, mode, stage, data, created_at, "
+            "updated_at, content_updated_at) VALUES (1, '老方案', 'structured', 'chatting', "
+            "?, ?, ?, ?)",
+            (
+                __import__("json").dumps(snapshot, ensure_ascii=False),
+                utc_now_text(),
+                utc_now_text(),
+                utc_now_text(),
+            ),
+        )
+        conn.commit()
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    assert run_migrations() == len(MIGRATIONS)
+
+    assert "view_state" in _columns("solutions")
+    assert _table_exists("chat_turns")
+    assert _table_exists("chat_sessions")
+
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM solutions WHERE id = 1").fetchone()
+        turns = conn.execute("SELECT * FROM chat_turns ORDER BY id").fetchall()
+        sessions = conn.execute("SELECT * FROM chat_sessions ORDER BY stage").fetchall()
+
+    # 相位与草稿逐项搬到位，`data` 原样保留（历史备份），运行期不再读它
+    assert row["view_state"] == "chatting"
+    assert row["entry_mode"] == "structured"
+    assert row["chat_tab"] == "prd-clarify"
+    assert row["quick_product_name"] == "周报"
+    assert row["draft_prd_text"] == "# 贴进来的 PRD"
+    assert row["paste_api_docs_text"] == "# 乙"
+    assert row["active_job_id"] == 7
+    assert "老方案" in row["data"]
+
+    assert [turn["role"] for turn in turns] == ["assistant", "user"]
+    assert turns[0]["stage"] == "requirement"
+    # 迁移来的轮次不属于任何一次任务：编一个 job_id 会让唯一约束在将来撞车
+    assert turns[0]["job_id"] is None
+    assert "我的回答" in turns[1]["content"]
+
+    assert [(item["stage"], item["conversation_id"]) for item in sessions] == [
+        ("prd-clarify", "conv-2"),
+        ("requirement", "conv-1"),
+    ]

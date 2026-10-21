@@ -615,6 +615,7 @@ class ConversationService:
         form_data: dict[str, Any],
         title: str = "",
         profile_key: str = "",
+        on_opening: Callable[[str], None] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """提交表单/文档后开启会话，流式返回模型的第一轮回复。
 
@@ -630,6 +631,14 @@ class ConversationService:
                 （待确认清单文本）。
             title: 会话标题，留空则自动推断。
             profile_key: 对话档案标识；留空取服务默认。
+            on_opening: 拿到**渲染后的开场白**时回调一次（同步、在首个事件之前）。
+
+                为什么要这个钩子：开场白（表单答案 / 文档正文 + 待确认清单）是
+                **喂给模型却不展示给用户**的那部分上下文。调用方把它存成一条
+                `system` 轮次之后，后续轮次就能从库里重放出完整上下文，
+                而不必依赖服务内存里的会话记录——进程一重启，记录就没了。
+                放在这里回调而不是让调用方自己渲染：开场白的模板由档案持有，
+                在外面再拼一次等于把同一套措辞维护两份。
 
         Yields:
             `StreamEvent`。首个 `status` 事件的 `data` 里带 `conversation_id`，
@@ -655,6 +664,10 @@ class ConversationService:
 
         # 首轮的用户消息：按档案声明的占位符填充（需求文本 / 文档正文 + 待确认清单）
         first_message = profile.opening.format(**self._opening_context(profile, record))
+        if on_opening is not None:
+            # 在首个事件之前回调：调用方要把它写进轮次表，而轮次的顺序由 id 决定，
+            # 晚于 assistant 落库就会排到它后面，下一轮拼历史时上下文顺序就错了。
+            on_opening(first_message)
         messages = _build_lc_messages(
             system_prompt=profile.system_prompt,
             user_message=first_message,

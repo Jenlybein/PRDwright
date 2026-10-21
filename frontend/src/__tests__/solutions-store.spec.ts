@@ -8,6 +8,7 @@ import { useRunsStore } from '../stores/runs'
 import { SAVE_DEBOUNCE_MS, useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import type { SolutionSummary } from '../types'
+import { toState } from './support/solutionState'
 
 /**
  * 方案 store 测试。
@@ -97,7 +98,7 @@ beforeEach(() => {
   vi.mocked(solutionApi.createSolution).mockResolvedValue(summary(1))
   vi.mocked(solutionApi.updateSolution).mockImplementation(async (id, payload) => ({
     ...summary(id, { title: payload.title, mode: payload.mode, stage: payload.stage }),
-    data: payload.data,
+    state: payload.state,
   }))
   vi.mocked(solutionApi.deleteSolution).mockResolvedValue(undefined)
   // 默认「这份方案还没有任何文档」
@@ -236,8 +237,8 @@ describe('生成期间也保存', () => {
     // 若这里又变回 `generating-prd`，说明退回成「跟着当前页走」了（回看旧文档就会倒退）。
     expect(payload?.stage).toBe('form')
     // 任务指针随快照一起持久化——这正是「刷新后能静默重连」的落点
-    expect(payload?.data).toContain('"activeJobId":7')
-    expect(payload?.data).toContain('"activeJobKind":"prd"')
+    expect(payload?.state.active_job_id).toBe(7)
+    expect(payload?.state.active_job_kind).toBe('prd')
   })
 
   it('生成态 flushPendingSave 立即把任务指针落库而不等防抖窗口', async () => {
@@ -259,7 +260,7 @@ describe('生成期间也保存', () => {
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
-    expect(payload?.data).toContain('"activeJobId":9')
+    expect(JSON.stringify(payload?.state ?? {})).toContain('"activeJobId":9')
   })
 
   it('生成结束进入 review 态时补上这次保存', async () => {
@@ -289,9 +290,7 @@ describe('生成期间也保存', () => {
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
     expect(payload?.stage).toBe('review-prd')
     // 任务已终态，指针不再留在快照里
-    expect(payload?.data).toContain('"activeJobId":null')
-    // 正文已不在快照里：它由后端 `documents` 表持有，前端只在需要时按方案 id 取回
-    expect(payload?.data).not.toContain('prdContent')
+    expect(JSON.stringify(payload?.state ?? {})).toContain('"activeJobId":null')
   })
 })
 
@@ -473,7 +472,7 @@ describe('保存失败与并发', () => {
     vi.mocked(solutionApi.updateSolution).mockImplementation(
       (id, payload) =>
         new Promise((resolve) => {
-          release = () => resolve({ ...summary(id), data: payload.data })
+          release = () => resolve({ ...summary(id), state: payload.state })
         }),
     )
 
@@ -551,7 +550,7 @@ describe('openSolution', () => {
   it('拉详情、校验快照并回填 workflow，同时按方案 id 拉回产物正文', async () => {
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(8),
-      data: JSON.stringify({
+      state: toState({
         viewState: 'review-prd',
         entryMode: 'structured',
         summary: {
@@ -593,7 +592,7 @@ describe('openSolution', () => {
     // 闸门只装在创建分支上，本用例就是它的反证。
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(9),
-      data: JSON.stringify({
+      state: toState({
         viewState: 'review-prd',
         summary: {
           product_name: '订单系统',
@@ -629,7 +628,7 @@ describe('openSolution', () => {
   it('快照落在生成中时降级到待确认状态', async () => {
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(8),
-      data: JSON.stringify({
+      state: toState({
         viewState: 'generating-prd',
         entryMode: 'structured',
         summary: null,
@@ -657,7 +656,7 @@ describe('openSolution', () => {
   })
 
   it('快照内容损坏时不清空当前状态，只标记错误', async () => {
-    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({ ...summary(8), data: '不是 JSON' })
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({ ...summary(8), state: toState({}) })
 
     const opened = await solutions.openSolution(8)
 
@@ -679,7 +678,7 @@ describe('openSolution', () => {
     // 紧接着打开另一份方案——不先 flush 的话这笔改动会被 applySnapshot 抹掉
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(8),
-      data: JSON.stringify({
+      state: toState({
         viewState: 'form',
         entryMode: 'structured',
         summary: null,
@@ -697,7 +696,7 @@ describe('openSolution', () => {
   it('打开方案本身不触发保存——刚读回来的内容原样存回去纯属白跑', async () => {
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(8),
-      data: JSON.stringify({
+      state: toState({
         viewState: 'form',
         entryMode: 'structured',
         summary: {
@@ -840,7 +839,7 @@ describe('列表里的进度（stage）', () => {
     await solutions.loadList()
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(1),
-      data: JSON.stringify({
+      state: toState({
         viewState: 'form',
         entryMode: 'structured',
         summary: {
@@ -960,7 +959,7 @@ describe('内容变更判定（content_changed）', () => {
     await persistOnce()
     vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
       ...summary(1),
-      data: JSON.stringify({
+      state: toState({
         viewState: 'review-prd',
         entryMode: 'structured',
         summary: {

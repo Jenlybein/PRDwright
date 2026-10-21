@@ -35,6 +35,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from backend.core.chat_kinds import is_valid_role, is_valid_stage, normalize_stage
 from backend.core.db import connect, utc_now_text
 from backend.core.digest import content_fingerprint
 
@@ -422,6 +423,284 @@ def _add_doc_kind_to_jobs(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE generation_jobs ADD COLUMN doc_kind TEXT NOT NULL DEFAULT ''")
 
 
+# 方案状态从 `data` 拆出来的列。
+#
+# 为什么拆
+# --------
+# `data` 是一整份 `SessionDataV2` 的 JSON。它里面同时住着三类东西：
+# **相位**（翻到哪一页、指着哪个任务）、**草稿**（还没提交的录入内容）、
+# **记录**（聊天）。前两类只有前端一个写者，放进一个 JSON 是好选择——一次
+# `UPSERT` 原子生效，加字段也不必写迁移。
+#
+# 但「一个写者」这个前提在会话被多处访问之后不成立了：两台设备、切方案回切，
+# 都在整份覆盖这一列，**后写的把先写的整份盖掉**。而 `messages` 更是只增不减，
+# 想按线程查、想按线程拼历史，都不能靠解析一个不透明字符串。
+#
+# 于是拆成三层，各自按自己的读写模式落地：
+# - 相位与草稿 → 拆成本表里的标量列（本步）；
+# - 聊天 → `chat_turns`（一句话一行，只追加）；
+# - 后端会话 id → `chat_sessions`（按方案 + 线程唯一）。
+#
+# `summary` 刻意**不拆成列**而留一列 JSON：它是张问卷，加一个问题就加一个字段，
+# 拆成列等于每次改问卷都要写迁移。演进快的结构放 JSON，演进慢的建列。
+_SOLUTION_STATE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("view_state", "TEXT NOT NULL DEFAULT ''"),
+    ("entry_mode", "TEXT NOT NULL DEFAULT ''"),
+    ("chat_tab", "TEXT NOT NULL DEFAULT ''"),
+    ("summary_json", "TEXT NOT NULL DEFAULT ''"),
+    ("quick_product_name", "TEXT NOT NULL DEFAULT ''"),
+    ("quick_requirements", "TEXT NOT NULL DEFAULT ''"),
+    ("draft_prd_text", "TEXT NOT NULL DEFAULT ''"),
+    ("paste_prd_text", "TEXT NOT NULL DEFAULT ''"),
+    ("paste_api_docs_text", "TEXT NOT NULL DEFAULT ''"),
+    ("active_job_kind", "TEXT NOT NULL DEFAULT ''"),
+    ("active_job_doc_kind", "TEXT NOT NULL DEFAULT ''"),
+    # 指针本身可空：「没有任务」与「任务 id 是 0」是两件事，不给它编默认值
+    ("active_job_id", "INTEGER"),
+)
+
+
+def _create_chat_tables(conn: sqlite3.Connection) -> None:
+    """v9：方案状态拆成列；新建 `chat_turns` 与 `chat_sessions`。
+
+    `chat_turns` 的三个关键设计
+    --------------------------
+    - **按 `id` 排序，不建 `seq` 列**：主键自增天然单调。排序键存在的唯一理由是
+      「把一条插到两条中间」，而同一线程同时只允许一轮在跑（发起端已拦），
+      轮次永远是追加，不需要插入。为不存在的功能养一列，是负债。
+    - **`role` 含 `tool`**：结构化选择题的作答在上游 API 里必须是 `ToolMessage`，
+      否则历史里留下悬空的 `tool_calls`，调用直接失败。前端拿不到这个角色，
+      由读接口投影成用户气泡。
+    - **`(job_id, role)` 唯一**：一个对话任务恰好产出两条轮次（进去的一条 +
+      出来的一条）。把幂等做成结构事实之后，重连两次、重试两次、收尾撞车，
+      都不可能多写一条——不必指望每条代码路径都记得检查。
+      迁移来的旧数据 `job_id` 为空，被部分索引排除在外。
+
+    `data` 列保留但**不再写也不再读**：它是旧快照的最后一份副本，留着当历史备份；
+    新行写空串（该列是 `NOT NULL`），运行期没有任何代码读它。
+    """
+    for column, ddl in _SOLUTION_STATE_COLUMNS:
+        conn.execute(f"ALTER TABLE solutions ADD COLUMN {column} {ddl}")
+
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_turns (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            solution_id  INTEGER NOT NULL REFERENCES solutions(id) ON DELETE CASCADE,
+            stage        TEXT    NOT NULL,
+            role         TEXT    NOT NULL,
+            content      TEXT    NOT NULL DEFAULT '',
+            tool_call_id TEXT    NOT NULL DEFAULT '',
+            tool_result  TEXT    NOT NULL DEFAULT '',
+            asks         TEXT    NOT NULL DEFAULT '[]',
+            answers      TEXT    NOT NULL DEFAULT '[]',
+            tool_calls   TEXT    NOT NULL DEFAULT '[]',
+            interrupted  INTEGER NOT NULL DEFAULT 0,
+            job_id       INTEGER,
+            created_at   TEXT    NOT NULL
+        )
+        """
+    )
+    # 读线程（按方案 + 线程取全部轮次，按 id 排序）与拼历史（取某一轮之前的）都走它
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_turns_thread "
+        "ON chat_turns(solution_id, stage, id)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_chat_turns_job_role "
+        "ON chat_turns(job_id, role) WHERE job_id IS NOT NULL"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            solution_id     INTEGER NOT NULL REFERENCES solutions(id) ON DELETE CASCADE,
+            stage           TEXT    NOT NULL,
+            conversation_id TEXT    NOT NULL DEFAULT '',
+            updated_at      TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_chat_sessions_thread "
+        "ON chat_sessions(solution_id, stage)"
+    )
+
+
+def _backfill_solution_state(conn: sqlite3.Connection) -> None:
+    """v10：把存量 `solutions.data` 里的状态搬进新列与新表。
+
+    逐行容错
+    --------
+    回填读的是旧的、不受本服务控制的用户数据，**某一行损坏不该拦死整个服务的启动**。
+    解析失败的行原样跳过并记一条 warning：`data` 里的 JSON 仍在，随时可以人工复查，
+    而「启动失败」会让所有人都用不了。
+
+    `messages` 怎么落
+    -----------------
+    - 角色原样保留（`user` / `assistant` / `system`）；
+    - `stage` 缺失的一律归需求澄清——那是旧快照（还没有线程概念）的年代；
+    - `job_id` 留空：这些轮次不是任何一次任务产出的，编一个 id 只会让
+      `(job_id, role)` 唯一约束在将来撞车；
+    - `asks` / `answers` / `tool_calls` 原样搬进 JSON 列，顺序由 `id` 保证。
+
+    幂等
+    ----
+    只在方案还没有任何 `chat_turns` 时导入。迁移本身只会跑一次，但「跑一次」的前提
+    不该是唯一保障——重跑一次不该把聊天记录翻倍。
+    """
+    rows = conn.execute("SELECT id, data FROM solutions").fetchall()
+    migrated_turns = 0
+    migrated_sessions = 0
+    skipped = 0
+
+    for solution_id, raw in rows:
+        if not raw:
+            continue
+        try:
+            snapshot = json.loads(raw)
+        except (TypeError, ValueError):
+            skipped += 1
+            logger.warning(
+                "方案快照不是合法 JSON，跳过回填（data 原样保留）",
+                extra={"event": "migration.solution_snapshot_invalid", "solution_id": solution_id},
+            )
+            continue
+        if not isinstance(snapshot, dict):
+            skipped += 1
+            logger.warning(
+                "方案快照不是对象，跳过回填（data 原样保留）",
+                extra={"event": "migration.solution_snapshot_not_object", "solution_id": solution_id},
+            )
+            continue
+
+        summary = snapshot.get("summary")
+        summary_json = (
+            json.dumps(summary, ensure_ascii=False) if isinstance(summary, dict) else ""
+        )
+        quick = snapshot.get("quickInput")
+        quick = quick if isinstance(quick, dict) else {}
+        paste = snapshot.get("pastePairInput")
+        paste = paste if isinstance(paste, dict) else {}
+
+        conn.execute(
+            "UPDATE solutions SET view_state = ?, entry_mode = ?, chat_tab = ?, "
+            "summary_json = ?, quick_product_name = ?, quick_requirements = ?, "
+            "draft_prd_text = ?, paste_prd_text = ?, paste_api_docs_text = ?, "
+            "active_job_id = ?, active_job_kind = ?, active_job_doc_kind = ? "
+            "WHERE id = ?",
+            (
+                str(snapshot.get("viewState") or ""),
+                str(snapshot.get("entryMode") or ""),
+                str(snapshot.get("chatTab") or ""),
+                summary_json,
+                str(quick.get("productName") or ""),
+                str(quick.get("requirements") or ""),
+                str(snapshot.get("debugPrdText") or ""),
+                str(paste.get("prd") or ""),
+                str(paste.get("apiDocs") or ""),
+                snapshot.get("activeJobId") if isinstance(snapshot.get("activeJobId"), int) else None,
+                str(snapshot.get("activeJobKind") or ""),
+                str(snapshot.get("activeJobDocKind") or ""),
+                solution_id,
+            ),
+        )
+
+        owner = conn.execute(
+            "SELECT user_id FROM solutions WHERE id = ?", (solution_id,)
+        ).fetchone()
+        owner_id = int(owner[0]) if owner else 0
+
+        existing = conn.execute(
+            "SELECT 1 FROM chat_turns WHERE solution_id = ? LIMIT 1", (solution_id,)
+        ).fetchone()
+        if not existing:
+            messages = snapshot.get("messages")
+            for message in messages if isinstance(messages, list) else []:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "")
+                if not is_valid_role(role):
+                    continue
+                asks = message.get("asks")
+                answers = message.get("answers")
+                tool_calls = message.get("tool_calls")
+                conn.execute(
+                    "INSERT INTO chat_turns (user_id, solution_id, stage, role, content, "
+                    "tool_call_id, tool_result, asks, answers, tool_calls, interrupted, "
+                    "job_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, '', '', ?, ?, ?, 0, NULL, ?)",
+                    (
+                        owner_id,
+                        solution_id,
+                        normalize_stage(message.get("stage")),
+                        role,
+                        str(message.get("content") or ""),
+                        json.dumps(asks, ensure_ascii=False) if isinstance(asks, list) else "[]",
+                        json.dumps(answers, ensure_ascii=False)
+                        if isinstance(answers, list)
+                        else "[]",
+                        json.dumps(tool_calls, ensure_ascii=False)
+                        if isinstance(tool_calls, list)
+                        else "[]",
+                        str(message.get("created_at") or "") or utc_now_text(),
+                    ),
+                )
+                migrated_turns += 1
+
+        conversation_ids = snapshot.get("conversationIds")
+        if isinstance(conversation_ids, dict):
+            now = utc_now_text()
+            for stage, conversation_id in conversation_ids.items():
+                if not is_valid_stage(stage) or not conversation_id:
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO chat_sessions "
+                    "(user_id, solution_id, stage, conversation_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (owner_id, solution_id, stage, str(conversation_id), now),
+                )
+                migrated_sessions += 1
+
+    logger.info(
+        "方案快照回填完成",
+        extra={
+            "event": "migration.solution_state_backfilled",
+            "rows": len(rows),
+            "turns": migrated_turns,
+            "sessions": migrated_sessions,
+            "skipped": skipped,
+        },
+    )
+
+
+def _add_chat_stage_to_jobs(conn: sqlite3.Connection) -> None:
+    """v11：给 `generation_jobs` 加 `chat_stage`——这一轮对话属于哪条线程。
+
+    为什么是**单独一步**而不是塞回 v9
+    --------------------------------
+    v9 建表时漏了这一列，而它已经被某些库应用过。迁移是按 `user_version` 跳过的，
+    往一个已应用的步骤里加 DDL，在那些库上**永远不会执行**——表现为「新库一切正常、
+    开发机上却报 `no such column: chat_stage`」，而且报错发生在运行期、离原因很远。
+
+    这正是本模块开头那条约定（历史步骤不可改）要防的事，这次踩了一次。
+    教训：**结构变更只能追加新版本号**，哪怕改动看起来只隔了几分钟。
+
+    这里先查一次列再决定加不加：新库会在 v9 之后顺序跑到本步，而已经手工补过列的库
+    也不该因为「列已存在」而启动失败。幂等靠事实判断，不靠版本号猜。
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
+    if "chat_stage" in columns:
+        return
+    conn.execute(
+        "ALTER TABLE generation_jobs ADD COLUMN chat_stage TEXT NOT NULL DEFAULT ''"
+    )
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -437,6 +716,9 @@ MIGRATIONS: list[Migration] = [
         apply=_add_content_updated_at_to_solutions,
     ),
     Migration(version=8, name="jobs_doc_kind", apply=_add_doc_kind_to_jobs),
+    Migration(version=9, name="solutions_state_and_chat_tables", apply=_create_chat_tables),
+    Migration(version=10, name="backfill_solution_state", apply=_backfill_solution_state),
+    Migration(version=11, name="jobs_chat_stage", apply=_add_chat_stage_to_jobs),
 ]
 
 

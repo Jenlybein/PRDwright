@@ -6,24 +6,25 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from conftest import login, register
 
-# 一份最小可用的会话快照，字段与前端 `SessionDataV2` 对齐
-SNAPSHOT = {
-    "viewState": "review-prd",
-    "entryMode": "structured",
+# 一份最小的方案状态。字段与 `schemas.SolutionStatePayload` 对齐——
+# 聊天记录**不在这里**：它由服务端写进 `chat_turns`，只走轮次接口。
+STATE = {
+    "view_state": "review-prd",
+    "entry_mode": "structured",
+    "chat_tab": "requirement",
     "summary": {"product_name": "团队周报助手", "product_goal": "让周报自动生成"},
-    "messages": [{"role": "user", "content": "帮我写个周报工具"}],
-    "conversationId": "conv-1",
-    "quickInput": {"productName": "", "requirements": ""},
-    "debugPrdText": "",
-    "prdContent": "# 团队周报助手\n\n正文……",
-    "apiDocsContent": "",
-    "promptsContent": "",
+    "quick_product_name": "",
+    "quick_requirements": "",
+    "draft_prd_text": "",
+    "paste_prd_text": "",
+    "paste_api_docs_text": "",
+    "active_job_id": None,
+    "active_job_kind": "",
+    "active_job_doc_kind": "",
 }
 
 
@@ -31,10 +32,10 @@ def _payload(
     title: str = "团队周报助手",
     mode: str = "structured",
     stage: str = "review-prd",
-    data: dict | None = None,
+    state: dict | None = None,
     content_changed: bool = True,
 ) -> dict:
-    """构造保存请求体。`data` 走 json.dumps，模拟前端把快照序列化后提交。
+    """构造保存请求体。
 
     `content_changed` 缺省为真：这个参数是「这次保存报了一次内容变更」，绝大多数用例
     模拟的都是一次真实编辑。要测「只翻页」的保存，显式传 `False`。
@@ -43,7 +44,7 @@ def _payload(
         "title": title,
         "mode": mode,
         "stage": stage,
-        "data": json.dumps(data if data is not None else SNAPSHOT, ensure_ascii=False),
+        "state": state if state is not None else STATE,
         "content_changed": content_changed,
     }
 
@@ -61,7 +62,7 @@ def _create(client, **kwargs) -> dict:
 
 
 def test_create_and_read_round_trip(client):
-    """保存后读回，快照内容必须逐字一致（含中文）。"""
+    """保存后读回，状态与草稿必须逐字一致（含中文）。"""
     register(client)
     created = _create(client)
 
@@ -71,38 +72,40 @@ def test_create_and_read_round_trip(client):
     detail = client.get(f"/api/solutions/{created['id']}")
     assert detail.status_code == 200
     body = detail.json()
-    assert json.loads(body["data"]) == SNAPSHOT
-    # 中文没有被转义成 \uXXXX
-    assert "团队周报助手" in body["data"]
+    assert body["state"]["summary"] == STATE["summary"]
+    assert body["state"]["view_state"] == "review-prd"
+    # 中文没有被转义成 \uXXXX，也没有被包成字符串来回搬运
+    assert "团队周报助手" in str(body["state"]["summary"])
     assert body["created_at"] == body["updated_at"]
 
 
-def test_update_overwrites_whole_snapshot(client):
-    """更新是整份覆盖：旧字段不会残留，updated_at 会前进。"""
+def test_update_overwrites_whole_state(client):
+    """更新是整份覆盖：没传的字段回到空值，不会残留上一版，updated_at 会前进。"""
     register(client)
     created = _create(client)
 
-    changed = dict(SNAPSHOT)
-    changed["prdContent"] = "# 改过的标题"
-    changed["messages"] = []
     response = client.put(
         f"/api/solutions/{created['id']}",
-        json=_payload(title="改名后", stage="done", data=changed),
+        json=_payload(
+            title="改名后",
+            stage="done",
+            state={"view_state": "done", "draft_prd_text": "# 改过的标题"},
+        ),
     )
     assert response.status_code == 200
 
     body = client.get(f"/api/solutions/{created['id']}").json()
-    restored = json.loads(body["data"])
-    assert restored["prdContent"] == "# 改过的标题"
-    # 整份覆盖的语义：上一版的消息不会因为这次没传就保留下来
-    assert restored["messages"] == []
+    assert body["state"]["draft_prd_text"] == "# 改过的标题"
+    # 整份覆盖的语义：上一版的问卷不会因为这次没传就保留下来
+    assert body["state"]["summary"] is None
+    assert body["state"]["entry_mode"] == ""
     assert body["title"] == "改名后"
     assert body["stage"] == "done"
     assert body["updated_at"] >= body["created_at"]
 
 
-def test_list_returns_summaries_without_data(client):
-    """列表只给摘要——响应里不该出现 data 字段，避免把大 JSON 拖出来。"""
+def test_list_returns_summaries_without_state(client):
+    """列表只给摘要——响应里不该出现 state，避免把草稿一起拖出来。"""
     register(client)
     _create(client, title="方案甲")
     _create(client, title="方案乙")
@@ -112,7 +115,7 @@ def test_list_returns_summaries_without_data(client):
     items = response.json()["solutions"]
     assert [item["title"] for item in items] == ["方案乙", "方案甲"]  # 最近更新在前
     for item in items:
-        assert "data" not in item, "列表接口不应返回快照正文"
+        assert "state" not in item, "列表接口不应返回状态与草稿"
 
 
 def test_list_is_empty_for_new_user(client):
@@ -200,14 +203,14 @@ def test_other_users_solution_is_not_updatable(client, two_users):
     as_bob()
     response = client.put(
         f"/api/solutions/{solution_id}",
-        json=_payload(title="被篡改", data={"hacked": True}),
+        json=_payload(title="被篡改", state={"view_state": "done"}),
     )
     assert response.status_code == 404
 
     as_alice()
     body = client.get(f"/api/solutions/{solution_id}").json()
     assert body["title"] == "alice 的机密方案"
-    assert json.loads(body["data"]) == SNAPSHOT
+    assert body["state"]["summary"] == STATE["summary"]
 
 
 def test_other_users_solution_is_not_deletable(client, two_users):
@@ -245,9 +248,9 @@ def test_nonexistent_solution_returns_404(client):
     "method,path,body",
     [
         ("get", "/api/solutions", None),
-        ("post", "/api/solutions", {"title": "x", "data": "{}"}),
+        ("post", "/api/solutions", {"title": "x"}),
         ("get", "/api/solutions/1", None),
-        ("put", "/api/solutions/1", {"title": "x", "data": "{}"}),
+        ("put", "/api/solutions/1", {"title": "x"}),
         ("delete", "/api/solutions/1", None),
     ],
 )
@@ -259,14 +262,38 @@ def test_all_solution_endpoints_require_login(client, method, path, body):
     assert response.json()["detail"] == "请先登录后再使用该功能"
 
 
-def test_empty_data_is_rejected(client):
-    """`data` 不能为空：一份没有任何内容的快照没有保存的意义。"""
+def test_state_is_optional(client):
+    """只提交标题 / 阶段也能建——状态全空是合法输入。
+
+    旧契约要求 `data` 非空（「一份没有任何内容的快照没有保存的意义」）。拆成结构化
+    字段之后，这个约束就失去了落点：`state` 的每一项都有各自的默认值，而「有内容
+    才建方案」的判定在前端（`hasContent`），后端再拦一次只会让两边口径分叉。
+    """
     register(client)
-    response = client.post(
-        "/api/solutions",
-        json={"title": "空方案", "mode": "", "stage": "", "data": ""},
+    response = client.post("/api/solutions", json={"title": "空方案", "stage": "entry"})
+    assert response.status_code == 201
+
+    body = client.get(f"/api/solutions/{response.json()['id']}").json()
+    assert body["state"]["view_state"] == ""
+    assert body["state"]["summary"] is None
+
+
+def test_large_draft_round_trips(client):
+    """粘贴的正文按原样存取，不做截断——它是用户输入，不是展示用的冗余。
+
+    摘要是唯一留在 JSON 里的一项（问卷结构演进快）；这条用例同时守住
+    「嵌套对象过一遍 JSON 列后仍然等值」。
+    """
+    register(client)
+    draft = "# 很长的 PRD\n\n" + "正文段落。\n" * 500
+    summary = {"product_name": "长文产品", "target_users": ["运营", "研发"]}
+    created = _create(
+        client, state={"draft_prd_text": draft, "summary": summary}
     )
-    assert response.status_code == 422
+
+    body = client.get(f"/api/solutions/{created['id']}").json()
+    assert body["state"]["draft_prd_text"] == draft
+    assert body["state"]["summary"] == summary
 
 
 def test_dev_mode_falls_back_to_dev_user(auth_off_client):
@@ -340,10 +367,10 @@ def test_content_save_advances_content_time(client):
     register(client)
     created = _create(client)
 
-    changed = {**SNAPSHOT, "debugPrdText": "# 新贴进来的一份 PRD"}
+    changed = {**STATE, "draft_prd_text": "# 新贴进来的一份 PRD"}
     response = client.put(
         f"/api/solutions/{created['id']}",
-        json=_payload(data=changed, content_changed=True),
+        json=_payload(state=changed, content_changed=True),
     )
     assert response.status_code == 200
 
@@ -351,7 +378,7 @@ def test_content_save_advances_content_time(client):
     assert after["content_updated_at"] >= created["content_updated_at"]
     # 内容真的落库了（推进时间的那次保存不能是空写）
     detail = client.get(f"/api/solutions/{created['id']}").json()
-    assert "新贴进来的一份 PRD" in detail["data"]
+    assert "新贴进来的一份 PRD" in detail["state"]["draft_prd_text"]
 
 
 def test_content_changed_defaults_to_false(client):

@@ -152,8 +152,8 @@ describe('useJob.start', () => {
     expect(solutionApi.createSolution).toHaveBeenCalledTimes(1)
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
     // 第二次 update 的载荷里带着任务指针
-    const savedData = String(vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1].data ?? '')
-    expect(savedData).toContain('"activeJobId":12')
+    const savedState = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1].state
+    expect(savedState?.active_job_id).toBe(12)
 
     expect(api.readJobStream).toHaveBeenCalledWith(12, expect.anything(), expect.anything())
     // 订阅结束后这一支任务收尾：指针随之失效——「生成中」不再是那个与任务无关的全局布尔

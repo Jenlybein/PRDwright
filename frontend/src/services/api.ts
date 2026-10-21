@@ -6,6 +6,7 @@ import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
 import type { BackendErrorCode } from '@/services/errors'
 import type {
   ChatMessage,
+  ChatStage,
   ClarificationAsk,
   CompletedSection,
   DocKind,
@@ -1027,6 +1028,13 @@ export interface JobStatusSummary {
   kind: string
   /** 目标产物（本前端口径）；后端无法确定时为 null */
   docKind: DocumentKind | null
+  /**
+   * 对话任务属于哪条线程（仅 `chat`），其余任务为 null。
+   *
+   * 刷新后凭它认领「这一轮是哪条线程的」：四条线程的人设与上下文完全不同，
+   * 猜一条默认值等于把 A 的回复写进 B 的列表。
+   */
+  chatStage: ChatStage | null
   status: string
   phase: string
   solutionId: number | null
@@ -1050,6 +1058,9 @@ function toJobStatus(data: unknown): JobStatusSummary {
     id: typeof raw.id === 'number' ? raw.id : 0,
     kind: typeof raw.kind === 'string' ? raw.kind : '',
     docKind: fromBackendKind(raw.doc_kind),
+    chatStage: typeof raw.chat_stage === 'string' && raw.chat_stage
+      ? (raw.chat_stage as ChatStage)
+      : null,
     status: typeof raw.status === 'string' ? raw.status : '',
     phase: typeof raw.phase === 'string' ? raw.phase : '',
     solutionId: typeof raw.solution_id === 'number' ? raw.solution_id : null,
@@ -1100,14 +1111,69 @@ export interface CreateJobPayload {
    * 复核的边际收益低，省掉约一半调用（三份产物都一样——快捷流程不审不改）。
    */
   reviewEnabled?: boolean
+  // --- 对话（`kind='chat'`）---
+  /**
+   * 这条对话属于哪条线程：`requirement` / `prd-clarify` / `api-docs-clarify` /
+   * `prompts-clarify`。**必填**——四条线程的人设与上下文完全不同，猜错等于把
+   * 一问一答记到别人头上，而那种错不报错。
+   */
+  chatStage?: ChatStage
+  /** `start` 开新会话（用 `formData` 渲染开场白），`continue` 续聊 */
+  chatMode?: 'start' | 'continue'
+  /** 开新会话要提交的表单（需求澄清的答案 / 文档澄清的正文与待确认清单） */
+  formData?: Record<string, unknown> | null
+  /** 本轮用户输入 */
+  content?: string
+  /** 结构化选择题的作答（`{tool_call_id, answers}`）；带上时按工具结果回灌 */
+  toolResult?: Record<string, unknown> | null
+  /** 对话档案标识；留空取后端默认档案 */
+  profileKey?: string
 }
 
 /**
  * 创建一次生成任务并启动后台生成。
  * 对应后端 `POST /api/jobs`。
  */
+
+/**
+ * 把「任务建不起来」的失败原因翻译成一句能直接显示的人话。
+ *
+ * 三种响应形状都要认，否则调试时会卡在「请稍后重试」这种什么都没说的提示上：
+ *
+ * - 业务错误（`AppError`）：`detail` 是**字符串**，本身就是人话，直接用；
+ * - 字段校验（FastAPI 422）：`detail` 是**数组**，每项带 `loc` 与 `msg`。
+ *   这一支最有诊断价值——它会把「这个后端的 `kind` 还不认识 `chat`」直接印出来；
+ * - 网络层失败（后端没起 / 代理挂了）：没有 `response`，那才是真的「稍后重试」。
+ */
+export function describeJobError(error: unknown): string {
+  const response = (error as { response?: { status?: number; data?: { detail?: unknown } } })
+    ?.response
+  const detail = response?.data?.detail
+
+  if (typeof detail === 'string' && detail.trim()) return detail
+
+  if (Array.isArray(detail) && detail.length) {
+    // `loc` 形如 ["body", "kind"]：去掉第一段 `body`，剩下的就是字段路径
+    return detail
+      .map((item) => {
+        const entry = item as { loc?: unknown[]; msg?: string }
+        const path = Array.isArray(entry.loc)
+          ? entry.loc.filter((part) => part !== 'body').join('.')
+          : ''
+        return path ? `${path}：${entry.msg ?? '不合法'}` : (entry.msg ?? '不合法')
+      })
+      .join('；')
+  }
+
+  if (response?.status === 401) return '登录已过期，请重新登录'
+  if (typeof response?.status === 'number') return `发起对话失败（HTTP ${response.status}）`
+  return '连不上后端服务，请确认它已经启动（对话任务需要后端为最新版本）'
+}
+
 export async function createJob(payload: CreateJobPayload): Promise<JobCreated> {
-  const { data } = await http.post<{ job_id: number; status: string }>('/api/jobs', {
+  let data: { job_id?: number; status?: string }
+  try {
+    ;({ data } = await http.post<{ job_id: number; status: string }>('/api/jobs', {
     kind: toBackendKind(payload.kind),
     solution_id: payload.solutionId ?? null,
     doc_kind: payload.docKind ?? null,
@@ -1124,7 +1190,17 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     pending_items: payload.pendingItems ?? [],
     // 只有 `false` 是「明确关掉」；不传就让后端取配置，不在这里替它挑默认值
     review_enabled: payload.reviewEnabled ?? null,
-  })
+    // --- 对话 ---
+    stage: payload.chatStage ?? '',
+    chat_mode: payload.chatMode ?? 'continue',
+    form_data: payload.formData ?? null,
+    content: payload.content ?? '',
+    tool_result: payload.toolResult ?? null,
+    profile_key: payload.profileKey ?? '',
+    }))
+  } catch (error) {
+    throw new Error(describeJobError(error))
+  }
   return {
     jobId: typeof data?.job_id === 'number' ? data.job_id : 0,
     status: typeof data?.status === 'string' ? data.status : 'running',
@@ -1180,3 +1256,18 @@ export function readJobStream(
 }
 
 export default http
+
+/**
+ * 停止一次任务（用户按「停止生成」）。
+ * 对应后端 `POST /api/jobs/{id}/cancel`。
+ *
+ * 返回 `false` 表示「点的时候它刚好说完了」——那不是失败，界面不该弹错误。
+ * **注意它和退订是两件事**：退订（切方案 / 刷新）只是不看，任务继续跑；
+ * 停止才是真的不做。两者混在一起，就会得到「切走一次内容就白等」那个老毛病。
+ */
+export async function cancelJob(jobId: number): Promise<boolean> {
+  const { data } = await http.post<{ ok: boolean; cancelled: boolean }>(
+    `/api/jobs/${jobId}/cancel`,
+  )
+  return data?.cancelled === true
+}

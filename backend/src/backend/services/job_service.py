@@ -36,12 +36,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
+from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.config import get_settings
 from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
 from backend.core.db import utc_now
 from backend.core.errors import AppError, ErrorCode
+from backend.repositories.chat_session_repo import ChatSessionRepository
+from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
-from backend.services import document_service, document_store, solution_service
+from backend.services import conversation_service, document_service, document_store, solution_service
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import RunMeter, use_meter
 from backend.services.skill_registry import describe_kind
@@ -119,6 +122,24 @@ class JobRuntime:
     # 用户看到的是「新任务跑完了，正文却是上一版的」——不报错，只是内容对不上。
     superseded: bool = False
 
+    # --- 对话任务（`kind='chat'`）专有 ---
+    #
+    # 对话与文档的关键差别：**对话只追加、不覆盖**。因此它既不需要 `superseded`，
+    # 也不能沿用「取消就不落库」的口径——用户按停止，已经说出口的话仍然算数。
+    #
+    # 这一轮属于哪条线程（`requirement` / `prd-clarify` / …）。四条线程的人设与
+    # 上下文互不相通，没有它就分不清「这轮回复该记到谁头上」。
+    chat_stage: str = ""
+    # 本轮结束后要写的轮次 id（创建任务时已落库的那一条输入轮次）
+    chat_input_turn_id: int = 0
+    # 后端会话 id（`done` 事件带回）：只用于下一轮续聊，丢了会自动降级为无状态模式
+    chat_conversation_id: str = ""
+    # 这一轮的提问与它发起的工具调用，都来自 `done`
+    chat_asks: list[dict[str, Any]] = field(default_factory=list)
+    chat_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    # 被用户中途停止：收尾时保留已生成的部分，并给轮次打上标记
+    chat_interrupted: bool = False
+
 
 # ----------------------------------------------------------------------------
 # 对外动作
@@ -146,12 +167,127 @@ def create_job(
     是为了算 `doc_kind`：`optimize` / `clarify` 靠 `kind` 定不了产物，只有请求体知道；
     落成列之后，刷新、进程重启、`GET /api/jobs` 都能回答「这个任务改的是哪一份」。
     """
+    request = request or {}
+    if kind == "chat":
+        return _create_chat_job(owner_id, solution_id, request)
+
     GenerationJobRepository.supersede_active(owner_id, solution_id=solution_id, kind=kind)
     _mark_superseded(owner_id, solution_id=solution_id, kind=kind)
-    doc_kind = _target_product_kind(kind, request or {}) or ""
+    doc_kind = _target_product_kind(kind, request) or ""
     return GenerationJobRepository.create(
         owner_id, kind, solution_id, input_fingerprint, doc_kind=doc_kind
     )
+
+
+def _create_chat_job(owner_id: int, solution_id: int | None, request: dict[str, Any]) -> int:
+    """新建一轮对话任务：校验线程、拦住并发、把「进去的那一条」先落库。
+
+    为什么对话**不走 `supersede`**
+    ------------------------------
+    文档的同种任务互相顶替，是因为它们**写同一个位置**：旧任务晚到的结果会把新稿
+    覆盖成旧结果。对话只追加，两条并存不会互相破坏；照抄顶替只会得到
+    「AI 说到一半消失」这一个纯损失。因此这里改成**有活跃任务就直接拒绝**，
+    把「同一时刻只有一轮」变成一条前置条件，而不是一次破坏性动作。
+
+    为什么输入轮次现在就落库
+    ------------------------
+    ① 它拿到了 id，历史可以按「id 小于它」精确取，不会把本轮输入重复算进上下文；
+    ② 它带上了 `job_id`，于是「一个任务两条轮次」由唯一索引兜住，
+       重连 / 重试 / 收尾撞车都不可能多写一条。
+    """
+    stage = str(request.get("stage") or "")
+    if not is_valid_stage(stage):
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"未知的对话线程：{stage or '（空）'}（可选：{'、'.join(CHAT_STAGES)}）",
+        )
+    if solution_id is None:
+        raise AppError(ErrorCode.INVALID_REQUEST, "对话任务必须关联一份方案")
+    if not solution_service.solution_exists(owner_id, solution_id):
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "方案不存在")
+
+    # 单写者：同一线程同时只允许一轮在跑。先看内存（权威），再看库（进程重启后的残留）。
+    for runtime in _RUNTIMES.values():
+        if (
+            runtime.owner_id == owner_id
+            and runtime.solution_id == solution_id
+            and runtime.kind == "chat"
+            and runtime.chat_stage == stage
+            and runtime.status == STATUS_RUNNING
+        ):
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "这条对话还在生成中，等它说完或先点停止",
+            )
+    if (
+        GenerationJobRepository.find_active(
+            owner_id, solution_id=solution_id, kind="chat", chat_stage=stage
+        )
+        is not None
+    ):
+        raise AppError(ErrorCode.INVALID_REQUEST, "这条对话还在生成中，等它说完或先点停止")
+
+    chat_mode = str(request.get("chat_mode") or "continue")
+    content = str(request.get("content") or "")
+    tool_result = request.get("tool_result")
+    tool_result = tool_result if isinstance(tool_result, dict) else None
+
+    job_id = GenerationJobRepository.create(
+        owner_id, "chat", solution_id, None, doc_kind="", chat_stage=stage
+    )
+
+    # 「开新会话」没有用户输入（用户提交的是表单，界面上只显示 AI 的第一句）；
+    # 「续聊」一定有一句用户输入。两种都落在同一条 `user`/`tool` 轮次上。
+    if chat_mode != "start" and (content.strip() or tool_result is not None):
+        role = "tool" if tool_result is not None else "user"
+        request["input_turn_id"] = ChatTurnRepository.create(
+            owner_id,
+            solution_id,
+            stage=stage,
+            role=role,
+            content=content,
+            job_id=job_id,
+            tool_call_id=str((tool_result or {}).get("tool_call_id") or ""),
+            tool_result=tool_result,
+            answers=(tool_result or {}).get("answers") if tool_result else None,
+        )
+    request["job_id"] = job_id
+    # 事件流只拿得到 `request`（`_build_event_stream(kind, request)`），
+    # 而拼历史与写轮次都要 owner / 方案。放进来而不是另开参数：
+    # 这几项本来就属于「这一轮任务的身份」。
+    request["owner_id"] = owner_id
+    request["solution_id"] = solution_id
+    return job_id
+
+
+def cancel_job(owner_id: int, job_id: int) -> bool:
+    """停止一次任务，返回是否确实停下了一个仍在运行的任务。
+
+    「停止」与「退订」必须分开
+    -------------------------
+    - **退订**（切方案 / 刷新 / 关页面）= 我先不看，任务继续跑，回来还能接上；
+    - **停止**（用户按按钮）= 别做了。
+
+    两者混在一起，就会得到这个项目最早的那个 bug 的反面：切走一次，正在生成的
+    内容就白等了。因此这里标记的是**运行时**（让事件循环在下一个 tick 跳出），
+    而不是断开某个连接。
+
+    收尾由 `_finalize` 负责：文档任务被取消**不写**文档（半截正文会污染产物），
+    对话被停止**要写**轮次并标 `interrupted`（用户按停止通常是「够了」，
+    已经说出口的话比消失有用）。这个差别在 `_finalize` 里按 `kind` 分支。
+    """
+    runtime = _RUNTIMES.get(job_id)
+    marked = False
+    if runtime is not None and runtime.owner_id == owner_id:
+        if runtime.status == STATUS_RUNNING:
+            runtime.cancelled = True
+            if runtime.kind == "chat":
+                runtime.chat_interrupted = True
+            marked = True
+    persisted = GenerationJobRepository.cancel_one(
+        owner_id, job_id, message="用户停止了生成"
+    )
+    return marked or persisted
 
 
 def _mark_superseded(owner_id: int, *, solution_id: int | None, kind: str) -> int:
@@ -271,6 +407,9 @@ def dispatch(
         solution_id=solution_id,
         kind=kind,
         request=request or {},
+        # 对话任务的身份：线程决定「这轮回复记到谁头上」，输入轮次决定「历史取到哪儿为止」
+        chat_stage=str((request or {}).get("stage") or "") if kind == "chat" else "",
+        chat_input_turn_id=int((request or {}).get("input_turn_id") or 0),
         started_at=time.monotonic(),
         last_flush_at=time.monotonic(),
         meter=RunMeter(
@@ -483,6 +622,19 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         # 用 `or []` 兜底，生成器漏带该字段时不至于把整型 / None 写进 DB。
         pending = event.data.get("pending_items")
         runtime.pending_items = pending if isinstance(pending, list) else []
+        if runtime.kind == "chat":
+            # 对话的 `done` 比文档多三样东西：这一轮的选题、它发起的工具调用、
+            # 以及（可能变了）的会话 id。它们不进正文，但缺了会让下一轮
+            # 「选项卡配不上对」——上游直接报错，而界面上只是「点不动了」。
+            #
+            # ⚠️ 键名是 `clarification_asks`（对话服务下发的原名），不是 `asks`。
+            # 写成 `asks` 不会报错，只会让每一轮都存下空数组——界面表现为
+            # 「选项卡再也没出现过」，而日志里 `asks_count` 明明大于 0。
+            asks = event.data.get("clarification_asks")
+            runtime.chat_asks = asks if isinstance(asks, list) else []
+            calls = event.data.get("tool_calls")
+            runtime.chat_tool_calls = calls if isinstance(calls, list) else []
+            runtime.chat_conversation_id = str(event.data.get("conversation_id") or "")
 
 
 def _finalized_text(runtime: JobRuntime) -> str:
@@ -566,7 +718,12 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
         abort_message = ""
         if runtime.cancelled:
             abort_code = "CANCELLED"
-            abort_message = "方案已删除，任务已取消"
+            # 对话的「取消」有两种来源，文案必须分开：用户按了停止 vs 方案被删除。
+            # 混在一起会让用户在自己点过停止之后读到「方案已删除」，以为数据没了。
+            if runtime.kind == "chat" and runtime.chat_interrupted:
+                abort_message = "已停止生成"
+            else:
+                abort_message = "方案已删除，任务已取消"
         elif runtime.superseded:
             # 同一份文档已经被更晚的任务接手：本次结果不能落库，否则会把新稿盖回旧版。
             # 用 `SUPERSEDED` 而不是 `CANCELLED`：这是「被顶替」，不是「用户删了东西」，
@@ -621,7 +778,71 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             pending_items=runtime.pending_items,
         )
 
+    # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`
+    # 后会去拉轮次表，晚一步就会拉到「还没有这一轮」的空列表，表现为
+    # 「生成完了但界面没这条消息」——而刷新一次又出现了，最难查。
+    if runtime.kind == "chat":
+        _write_chat_turn(runtime)
+
     job_bus.publish(runtime.job_id, _run_summary_event(summary))
+
+
+def _write_chat_turn(runtime: JobRuntime) -> None:
+    """把这一轮回复写成一条 `assistant` 轮次（对话收尾的唯一落点）。
+
+    与文档 `_write_document` 的三点不同
+    ----------------------------------
+    1. **失败也写**：文档失败时半截正文会污染产物，所以不写；对话的半截回复
+       是「用户已经看到的内容」，丢掉只会让界面和心理预期对不上。只有正文为空
+       （一个字的没出）才跳过。
+    2. **停止也写**：用户按停止通常是「够了」而不是「不要了」，轮次上打
+       `interrupted` 让界面显示「已停止」。
+    3. **落点是 `chat_turns`，不是 `documents`**：对话不产出文档。
+
+    幂等由 `ux_chat_turns_job_role` 保证——重连、重试、取消与正常结束撞车，
+    都不可能多写一条。
+
+    写库出错只记日志、不改变任务终态：与 `_write_document` 同一口径，
+    正文已经在 `generation_jobs.draft_content` 里有一份，丢的只是「升格成轮次」。
+    """
+    if runtime.solution_id is None or not runtime.chat_stage:
+        return
+    if not solution_service.solution_exists(runtime.owner_id, runtime.solution_id):
+        return
+    # 优先用定稿正文；没有 `done`（出错 / 被停止）时退回「已定稿 + 实时缓冲」的尽力还原
+    content = (runtime.final_reply or "").strip() or _draft(runtime).strip()
+    if not content:
+        return
+    try:
+        ChatTurnRepository.create(
+            runtime.owner_id,
+            runtime.solution_id,
+            stage=runtime.chat_stage,
+            role="assistant",
+            content=content,
+            job_id=runtime.job_id,
+            asks=runtime.chat_asks or None,
+            tool_calls=runtime.chat_tool_calls or None,
+            interrupted=bool(runtime.chat_interrupted),
+        )
+        # 会话 id 随收尾落库：下一轮续聊直接命中内存记录，省一次历史重放。
+        # 它只是加速器——命中不了会自动降级，丢了也不影响正确性。
+        if runtime.chat_conversation_id:
+            ChatSessionRepository.set(
+                runtime.owner_id,
+                runtime.solution_id,
+                runtime.chat_stage,
+                runtime.chat_conversation_id,
+            )
+    except Exception:  # noqa: BLE001 - 落库失败不该让已经成功的一轮变成失败
+        logger.exception(
+            "写入对话轮次失败",
+            extra={
+                "event": "job.chat_turn_failed",
+                "job_id": runtime.job_id,
+                "solution_id": runtime.solution_id,
+            },
+        )
 
 
 def _regenerates_whole_document(kind: str) -> bool:
@@ -935,4 +1156,106 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
             pending_items=request.get("pending_items") or [],
             doc_kind=_target_product_kind(kind, request) or "",
         )
+    if kind == "chat":
+        return _chat_event_stream(request)
     raise ValueError(f"未知的生成任务类型：{kind}")
+
+
+def _chat_event_stream(request: dict[str, Any]) -> AsyncIterator[StreamEvent]:
+    """一轮对话的事件流：历史由后端组装，前端不再回传。"""
+    return _chat_events(request)
+
+
+async def _chat_events(request: dict[str, Any]) -> AsyncIterator[StreamEvent]:
+    """驱动一轮对话，产生与文档任务同一套 `StreamEvent`。
+
+    三个关键取舍
+    ------------
+    1. **历史从 `chat_turns` 拼**，不再由前端随请求回传。前端持有历史就等于
+       前端是权威：两台机器各持一份，谁对？现在只有一个来源，且它与
+       「另一台电脑看到什么」是同一份。
+    2. **首轮把开场白存成一条 `system` 轮次**。开场白（含表单/文档内容）是喂给
+       模型却不展示给用户的那部分上下文；不存它，第二轮模型就只看到自己上一句
+       回复，完全不知道用户提交过什么。
+    3. **会话 id 只是个加速器，不是依赖**。拿它续聊命中内存记录时省一次历史重放；
+       命中不了（进程重启）时收到 `SESSION_NOT_FOUND`，就地清掉并改用历史重试——
+       这段降级原先写在前端，现在归后端：前端不该知道「会话会不会过期」。
+    """
+    owner_id = int(request.get("owner_id") or 0)
+    solution_id = int(request.get("solution_id") or 0)
+    stage = str(request.get("stage") or "")
+    profile_key = str(request.get("profile_key") or "")
+    chat_mode = str(request.get("chat_mode") or "continue")
+    service = conversation_service.get_service()
+
+    if chat_mode == "start":
+        # 未注册的档案在这里抛 `AppError`：它发生在流开始之前，路由层还能变成 400
+        conversation_service.check_profile_key(profile_key)
+        form_data = request.get("form_data")
+        form_data = form_data if isinstance(form_data, dict) else {}
+
+        def _persist_opening(text: str) -> None:
+            """把开场白落成 `system` 轮次（不展示，只作为后续轮次的上下文）。"""
+            if solution_id and text.strip():
+                ChatTurnRepository.create(
+                    owner_id,
+                    solution_id,
+                    stage=stage,
+                    role="system",
+                    content=text,
+                    job_id=int(request.get("job_id") or 0) or None,
+                )
+
+        async for event in service.start_conversation_stream(
+            form_data,
+            title=str(request.get("title") or ""),
+            profile_key=profile_key,
+            on_opening=_persist_opening,
+        ):
+            yield event
+        return
+
+    input_turn_id = int(request.get("input_turn_id") or 0)
+    rows = (
+        ChatTurnRepository.list_history(
+            owner_id, solution_id, stage, before_id=input_turn_id
+        )
+        if input_turn_id
+        else []
+    )
+    history = [to_history_item(row) for row in rows]
+    content = str(request.get("content") or "")
+    tool_result = request.get("tool_result")
+    tool_result = tool_result if isinstance(tool_result, dict) else None
+    conversation_id = ChatSessionRepository.get(owner_id, solution_id, stage)
+
+    def _stream(cid: str) -> AsyncIterator[StreamEvent]:
+        return service.continue_conversation_stream(
+            content,
+            conversation_id=cid or None,
+            history=history,
+            profile_key=profile_key,
+            tool_result=tool_result,
+        )
+
+    retried = False
+    cid = conversation_id
+    while True:
+        stale = False
+        async for event in _stream(cid):
+            if (
+                cid
+                and not retried
+                and event.type == "error"
+                and event.code == ErrorCode.SESSION_NOT_FOUND.value
+            ):
+                stale = True
+                break
+            yield event
+        if not stale:
+            return
+        # 会话在服务内存里已不存在（重启 / 多实例）：清掉 id，改用历史重放一次。
+        # 只重试一次——再失败就是真的失败，无限重试会把一次故障放大成一次风暴。
+        retried = True
+        cid = ""
+        ChatSessionRepository.set(owner_id, solution_id, stage, "")

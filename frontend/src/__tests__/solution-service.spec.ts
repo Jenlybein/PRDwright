@@ -11,6 +11,7 @@ import {
   updateSolution,
 } from '../services/solutionService'
 import type { SolutionSavePayload } from '../types'
+import { toState } from './support/solutionState'
 
 /**
  * 方案接口测试。
@@ -44,7 +45,7 @@ const PAYLOAD: SolutionSavePayload = {
   title: '订单系统',
   mode: 'structured',
   stage: 'form',
-  data: '{"viewState":"form"}',
+  state: toState({ viewState: 'form' }),
   content_changed: true,
 }
 
@@ -105,14 +106,14 @@ describe('fetchSolution', () => {
         stage: 'form',
         created_at: '',
         updated_at: '',
-        data: '{"viewState":"form"}',
+        state: toState({ viewState: 'form' }),
       },
     })
 
     const detail = await fetchSolution(7)
 
     expect(http.get).toHaveBeenCalledWith('/api/solutions/7')
-    expect(detail.data).toBe('{"viewState":"form"}')
+    expect(detail.state.view_state).toBe('form')
   })
 
   it('404 抛 SolutionNotFoundError（与网络异常区分开）', async () => {
@@ -167,7 +168,7 @@ describe('updateSolution', () => {
         stage: 'chatting',
         created_at: '',
         updated_at: '',
-        data: '{"viewState":"chatting"}',
+        state: { view_state: 'chatting' },
       },
     })
 

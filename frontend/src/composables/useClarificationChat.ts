@@ -1,19 +1,17 @@
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 
-import { continueConversationStream, startConversationStream } from '@/services/api'
-import { isApiError } from '@/services/errors'
+import { useJob } from '@/composables/useJob'
+import type { StreamHandlers } from '@/services/api'
+import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { StreamResult } from '@/services/api'
 import type {
   ChatMessage,
   ChatStage,
   ClarificationAnswerItem,
-  ClarificationAsk,
   RequirementAnswers,
   RequirementsSummary,
-  ToolCallRef,
   ToolResultPayload,
 } from '@/types'
 import { normalizeChatStage } from '@/utils/workflow'
@@ -39,10 +37,9 @@ export interface ChatHooks {
 /**
  * 这套骨架服务的线程是哪一条、说的是哪一套人设。
  *
- * 四条澄清线程（需求 / PRD / 接口 / 提示词）共用同一套流式逻辑（缓冲、固化、断线重试），
- * 差异只有两点：**消息归属哪条线程**（`stage`，消息上带着它、会话 id 也按它取）与
- * **后端用哪个档案**（`profileKey`）。把差异做成参数而不是复制四份 composable，
- * 是为了让「断线重试」「错误保留半截内容」这些细节只维护一处。
+ * 四条澄清线程（需求 / PRD / 接口 / 提示词）共用同一套逻辑，差异只有两点：
+ * **消息归属哪条线程**（`stage`，任务创建时随请求提交、由服务端记在轮次上）与
+ * **后端用哪个档案**（`profileKey`）。
  */
 export interface ClarificationChatOptions {
   /** 对话档案标识：后端据此选人设与开场白（如 `doc-clarification`）；不传即后端的默认档案 */
@@ -50,11 +47,11 @@ export interface ClarificationChatOptions {
   /**
    * 这条线程的标识。它决定三件事：
    *
-   * 1. 新产生的消息打哪个 `stage`（对话页据此过滤显示，摘要回填据此只取需求那一条）；
-   * 2. 从哪里读这条线程的后端会话 id（`conversationIds[stage]`）；
-   * 3. 「清空历史」时该清掉哪一段。
+   * 1. 这一轮的任务属于哪条线程（服务端据此写轮次、拼历史）；
+   * 2. 渲染时从哪里过滤消息（`messages` 是四条线程的合并镜像）；
+   * 3. 「重开这条线程」时清哪一段。
    *
-   * 是必填的：四条线程共用一个消息数组，没有它就只能靠猜。
+   * 是必填的：四条线程的人设与上下文完全不同，没有它就只能靠猜。
    */
   stage: ChatStage
   /**
@@ -69,66 +66,75 @@ export interface ClarificationChatOptions {
 /**
  * 澄清对话流程。
  *
- * 收敛「流式接续对话」这一摊状态与副作用：流式缓冲、错误提示，以及把增量
- * 固化成消息的收尾逻辑。会话数据本身仍在 Pinia store 里，这里只做编排，
- * 因此组件侧不需要再持有任何流程状态。
+ * ## 与上一版的根本差别：对话现在是一个**任务**
  *
- * **每条线程一个实例**：四条线程同时存在，各自持有自己的流式缓冲与错误提示，
- * 因此 A 线程出错不会在 B 线程上冒出来。
+ * 从前它是一条裸的 `POST /continue-stream`：切走方案、刷新页面、换设备，这一轮就没了
+ * （前端只能靠会话代次把它整份丢弃，看起来像「生成被中止」）。现在它走与文档生成
+ * **完全相同的通道**：`createJob` → SSE `snapshot` + `chunk` + `done` → 收尾写轮次。
+ * 于是「切走不断」「刷新接回」「换设备能看」三件事一次到位，一行新机制都没写。
+ *
+ * ## 三层归属，各自有判据
+ *
+ * - **哪一次**：`jobId`（`stores/runs`）；
+ * - **哪条线程**：`stage`（随任务提交、由服务端落在轮次上）；
+ * - **消息归谁**：服务端 `chat_turns`——前端只有一份只读镜像（`workflow.messages`）。
+ *
+ * 因此这个文件里**没有**「把增量拼成消息 push 进数组」的代码：那一步现在由服务端做，
+ * 前端只负责在收尾后把轮次重新拉一遍。前端不再持有真源，也就没有第二个写者。
  *
  * @param hooks 需要向外部借用的能力（提示、切阶段）。
  * @param options 线程标识与档案标识。
  */
 export function useClarificationChat(hooks: ChatHooks, options: ClarificationChatOptions) {
   const store = useWorkflowStore()
-  // 会话代次的持有者：迟到的回复必须按它判断「我这一轮还在不在」
   const solutions = useSolutionsStore()
+  const runs = useRunsStore()
+  const job = useJob()
   const state = storeToRefs(store)
-  const { summary, messages, chatStreaming } = state
+  const { summary, messages } = state
   const { stage, profileKey } = options
 
   /**
-   * 本次请求开始那一刻的会话代次（`solutions.sessionEpoch` 的快照）。
+   * 本线程是否正在生成——判据是「那一支任务属于这条线程」。
    *
-   * 对话请求与生成任务一样，发出之后没法撤回。用户在流式回复途中删掉当前方案、
-   * 甚至已经重新选了入口（此时 `entryMode` 非空，`solutions.saveNow` 那道
-   * 「空壳方案」闸门拦不住），一条迟到的澄清回复就会 push 进 `messages`——
-   * `hasContent` 变真 + 入口模式非空，自动保存据此 POST 出一份「未命名方案 · MM-DD HH:mm」。
-   *
-   * 代次只在「整份会话被换掉」时变（打开别的方案 / 开新方案 / 删掉当前方案），
-   * 因此正常聊天过程里它是不变的，不会误伤正在进行的对话。
+   * ⚠️ 从前这里是全局布尔 `chatStreaming`：任何一条线程在跑，四条线程的输入框全都灰掉，
+   * 而且 A 的 `finally` 会把 B 的忙碌标志抹平。改成按线程判之后，
+   * 「A 在生成时能去 B 提问」与「A 的收尾不影响 B」同时成立。
    */
-  let chatEpoch = 0
+  /**
+   * 本线程是否正在生成。
+   *
+   * 判据以「那一支任务属于这条线程」为主。第二个分支是**兜底**：运行态在、确实是一个
+   * 对话任务，但它的线程没登记下来（旧指针没存 `activeChatStage`、或兜底查询拿不到
+   * 线程）时，只要用户看的就是当前标签，就按「在跑」处理。
+   *
+   * 没有这个兜底，症状是「刷新后流式完全看不见，等结束才整段出现」——
+   * 内容其实一直在 `runs.preview` 里，只是渲染层认为没有任何一轮在跑。
+   */
+  const streaming = computed(
+    () =>
+      runs.isRunningForChat(stage) ||
+      (runs.hasRunning &&
+        runs.activeRun?.jobKind === 'chat' &&
+        runs.activeRun.chatStage == null &&
+        store.chatTab === stage),
+  )
 
-  /** 当前会话是否已经被整份换掉（删除 / 新建 / 打开别的方案） */
-  function chatExpired(): boolean {
-    return solutions.sessionEpoch !== chatEpoch
-  }
-
-  /** 本线程（也是本实例）是否正在流式接收回复 */
-  const streaming = ref(false)
+  /** 正在流式生成的正文（预览）；不在生成时为空串 */
+  const streamingContent = computed(() => (streaming.value ? runs.preview.content : ''))
 
   /**
-   * 本线程的后端会话 id。
+   * 对话过程中的错误提示。
    *
-   * 四条线程各有一个会话，所以不能拿 store 里某个字符串字段当引用——用一层可写 computed
-   * 接上去：读的时候按 `stage` 取，写的时候只动自己那一个键。整体换一个新对象，让 store
-   * 的深 watch 稳稳看到变化（就地改也可，但换对象更不容易踩到「同一个引用没被察觉」）。
+   * ⚠️ **不能只在生成中才显示**：任务可能压根没发起（方案还没 id、后端 400、
+   * 网络失败）。那种情况下 `streaming` 从头到尾都是 false，若把错误也挂在它下面，
+   * 用户看到的就只是「进了对话页，一片空白，没有任何提示」——最难自查的一种故障。
+   * 错误属于「上一轮的结果」，与「此刻是否在跑」无关；新一轮开始时由
+   * `runTurn` 的 `resetPreview()` 清掉。
    */
-  const conversationId = computed<string>({
-    get: () => store.conversationIds[stage],
-    set: (value) => {
-      store.conversationIds = { ...store.conversationIds, [stage]: value }
-    },
-  })
+  const chatError = computed(() => runs.preview.error)
 
-  /** 正在流式生成的回复文本，作为列表末尾那条气泡的实时内容 */
-  const streamingContent = ref('')
-
-  /** 对话过程中的错误提示 */
-  const chatError = ref('')
-
-  /** 这条消息属于哪条线程；缺省视为需求澄清（旧快照的消息都没有这个字段） */
+  /** 这条消息属于哪条线程；缺省视为需求澄清（旧数据没有这个字段） */
   function stageOf(message: ChatMessage): ChatStage {
     return normalizeChatStage(message.stage)
   }
@@ -136,8 +142,8 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
   /**
    * 只属于本线程的消息，按发生顺序排列。
    *
-   * 消息列表是四条线程共用的一条，而喂给后端的必须是**本轮**的内容：把别线程的对话混进去，
-   * 模型会以为那些也是本轮上下文（人设还是另一套）。
+   * 镜像里是四条线程的合并数组，而渲染与判断都只该看自己那条：把别线程的对话混进来，
+   * 用户会在「PRD 澄清」里看到需求澄清的内容。
    */
   function history(): ChatMessage[] {
     return messages.value.filter((message) => stageOf(message) === stage)
@@ -147,11 +153,8 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
    * 交给消息列表渲染的内容：**只含本线程**，外加流式生成中的那一条。
    *
    * 流式气泡挂在末尾（还没收到增量时 content 为空，由列表渲染「思考中」动画；
-   * 首字到达后自动切成 Markdown 实时渲染）。
-   *
-   * ⚠️ 判据用的是**本实例**的 `streaming`，不是 store 里全局的 `chatStreaming`：
-   * 后者只要有任何一条线程在跑就是 true，而 `streamingContent` 是本实例私有的——
-   * 用全局量判断，切到别的线程就会拿它那口空缓冲渲染出一条假的「思考中」。
+   * 首字到达后自动切成 Markdown 实时渲染）。收尾后服务端已写好轮次，
+   * `solutions.refreshTurns()` 会把镜像整体换新，气泡随之消失。
    */
   const displayMessages = computed<ChatMessage[]>(() => {
     const thread = history()
@@ -167,98 +170,74 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
   })
 
   /**
-   * 把增量文本追加到流式缓冲，由消息列表实时渲染。
+   * 订阅回调：增量只写进**预览**。
    *
-   * 会话已被换掉时直接丢弃：那段文本属于上一份会话，写进缓冲就会在新会话里
-   * 渲染出一条莫名其妙的「思考中」气泡。
+   * 预览与运行态同 store 不同对象（见 `stores/runs.ts`）：任务收尾后身份该清，
+   * 正文却还要继续显示到服务端轮次到达为止。
+   *
+   * `onSnapshot` 是重连的关键：后端先把「已经生成到哪儿」发过来，界面立刻有半截内容，
+   * 再接着收 live 增量——否则刷新后要盯着空白等到下一个字。
    */
-  function handleChunk(chunk: string): void {
-    if (chatExpired()) return
-    streamingContent.value += chunk
+  function streamHandlers(): StreamHandlers {
+    return {
+      onChunk: (chunk) => {
+        runs.preview.content += chunk
+      },
+      onSnapshot: (snap) => {
+        runs.preview.content = snap.finalizedText + snap.liveBuffer
+      },
+    }
   }
 
   /**
-   * 执行一次流式请求并收尾。
+   * 发起一轮对话并等它收尾。
    *
-   * 增量文本先落到 `streamingContent` 实时展示，请求结束后再固化成消息列表里的一条
-   * assistant 消息；中途出错时保留已经流出的内容，避免整段凭空消失。
-   *
-   * **会话代次在这里定格**：`sendMessage` / `startConversation` /
-   * `startConversationWithAnswers` 三个发起入口最终都收口到本函数（见各自的实现），
-   * 因此只要在这里记一次快照，三条路径就都被覆盖了；收尾处再统一比对一次。
-   *
-   * @param request 实际发起请求的函数；接续对话需要在内部做重试，因此以闭包传入。
+   * 收尾后**必须重新拉轮次**：这一轮的正文由服务端在 `run_summary` 之前写进
+   * `chat_turns`，前端只负责把它取回来。不在这里自己拼一条消息——那会立刻造出
+   * 第二个真源，两份一旦不同步，表现为「刷新前后消息条数不一样」。
    */
-  async function runStream(request: () => Promise<StreamResult>): Promise<void> {
-    // 定格本次请求所属的会话；此后所有回调与收尾都拿它比对
-    chatEpoch = solutions.sessionEpoch
-    // 两个状态各有各的读者：`streaming` 服务本线程的渲染，`chatStreaming` 是全局的
-    // 「有请求在跑」，导航守卫（`store.busy`）靠它拦住跳转与切标签。
-    streaming.value = true
-    chatStreaming.value = true
-    streamingContent.value = ''
-    chatError.value = ''
-
-    let reply = ''
-    // 这一轮提问附带的结构化选择题（后端从工具调用参数里取出来的）
-    let asks: ClarificationAsk[] = []
-    // 本轮助手发起的工具调用；回传历史时不能裁（见 `tool_calls` 的说明）
-    let toolCalls: ToolCallRef[] = []
-    try {
-      const result = await request()
-      // 会话已被整份换掉：会话 id 也不能写——它会成为新会话里「接错线」的起点
-      if (result.conversationId && !chatExpired()) conversationId.value = result.conversationId
-      reply = result.reply
-      asks = result.asks
-      toolCalls = result.toolCalls ?? []
-    } catch (error) {
-      // 迟到的失败同样不该污染新会话：既不留错误提示，也不把半截内容固化下去
-      if (!chatExpired()) {
-        chatError.value = error instanceof Error ? error.message : String(error)
-      }
-      // 报错时把已经流出的半截内容保留下来；半截输出里没有可靠的选题，故 `asks` 留空
-      // 工具调用同理：没走完 `done` 就无从得知这次调用的 id
-      reply = streamingContent.value
-    } finally {
-      // 先结束流式状态再固化消息，否则列表里会短暂多出一条「思考中」气泡。
-      // 这两个标志是**渲染开关**而不是会话数据：不管请求是否过期都要归位，
-      // 否则删掉方案后 `busy` 会永远为真，新会话连入口都点不动。
-      streaming.value = false
-      chatStreaming.value = false
-      const content = reply.trim()
-      // 会话已被换掉 → 整路丢弃：不 push 消息、不带 asks / tool_calls
-      if (content && !chatExpired()) {
-        messages.value.push({
-          role: 'assistant',
-          content,
-          // 带上线程标记：这条消息属于哪条线程，靠它在共享的消息列表里分清归属
-          stage,
-          // ⚠️ 只在**有选项时**才带这个字段：几条既有用例按 `{role, content, stage}` 精确
-          // 断言消息对象，恒带一个空数组会把它们弄红，而那种红会让人误以为「不带也行」
-          ...(asks.length ? { asks } : {}),
-          // 同 `asks` 的口径：只在真有值时挂上去。它要跟着消息进历史回传给后端，
-          // 丢了就会留下「调了工具却没人应答」的悬空调用。
-          ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
-        })
-      }
-      streamingContent.value = ''
+  async function runTurn(
+    mode: 'start' | 'continue',
+    payload: {
+      formData?: Record<string, unknown> | null
+      content?: string
+      toolResult?: ToolResultPayload
+    },
+  ): Promise<void> {
+    runs.resetPreview()
+    const result = await job.start(
+      'chat',
+      {
+        chatStage: stage,
+        chatMode: mode,
+        formData: payload.formData ?? null,
+        content: payload.content ?? '',
+        // 工具结果的形状由后端定义（`{tool_call_id, answers}`），前端只搬运不解释
+        toolResult: (payload.toolResult ?? null) as Record<string, unknown> | null,
+        profileKey,
+      },
+      streamHandlers(),
+    )
+    // 先按服务端拉一遍：成功时有这一轮，失败时也可能有半截（服务端会把已产出的部分落库）
+    await solutions.refreshTurns()
+    if (result.ok) {
+      runs.preview.content = ''
+      return
     }
+    // 保留失败原因，但清掉预览正文——它已经在轮次里了，留着会与列表里的那条重复
+    runs.preview.content = ''
+    runs.preview.error = job.error.value || '生成失败'
   }
 
   /**
    * 发送一条消息并接续对话。
    *
-   * 后端会话存在内存里，服务重启后 ID 会失效；收到 `SESSION_NOT_FOUND` 时清掉 ID，
-   * 改用前端回传的完整历史重试一次（无状态模式）。人设由后端按默认档案解析，
-   * 无状态模式下同样生效，前端不需要补发任何提示词。
-   *
-   * 判据是**错误码**而不是文案：这个错误发生在 SSE 流内（HTTP 状态码仍是 200），
-   * 只能靠事件里的 `code` 识别；早先这里匹配的是「会话不存在」这句中文，
-   * 后端改一个字降级逻辑就静默失效——那正是本次改造要消灭的耦合。
+   * 服务端在**创建任务时**就落一条输入轮次（拿到 id 之后，历史可以按「它之前」精确取），
+   * 因此这里会先乐观地插一条用户气泡，等收尾时被服务端的整体替换掉。乐观插入只为了
+   * 「我发出去的话立刻能看见」——它不是真源，也不参与任何写回。
    *
    * @param content 本轮输入。选项卡提交时它是拼好的展示文本：**照旧发给后端**——
-   *   降级（拿不到 `tool_call_id`）时模型唯一能读到的就是它，所以这里
-   *   刻意保留完整题干与选项文本，不为了界面好看而改短。
+   *   降级（拿不到 `tool_call_id`）时模型唯一能读到的就是它。
    * @param toolResult 结构化作答（**给模型**的回灌）。带上时后端按工具结果回给
    *   当初提问的那次工具调用；缺 `tool_call_id` 时不带，后端按纯文本处理。
    * @param answers 逐题作答（**给界面**的回执）。点选项卡提交就有，与
@@ -270,63 +249,21 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     answers?: ClarificationAnswerItem[],
   ): Promise<void> {
     const text = content.trim()
-    if (!text || chatStreaming.value) return
+    if (!text || streaming.value) return
 
-    // `answers` 只由「点选项卡提交」产生（自由文本作答不传），于是它天然就是
-    // 「这条消息是选出来的」的标记。同 `asks` 的口径：只在真有值时挂键，别挂空数组。
+    // 同 `asks` 的口径：只在真有值时挂键，别挂空数组
     messages.value.push({
       role: 'user',
       content: text,
       stage,
       ...(answers?.length ? { answers } : {}),
     })
-    chatError.value = ''
 
-    // 历史只取本阶段、本轮之前的消息，本轮输入单独通过 content 传递。
-    // 先按阶段过滤再去掉末尾刚推入的那一条（它被塞在上一步，一定在末尾）。
-    //
-    // ⚠️ `tool_calls` 不能裁：它是后端把随后的用户文本包成工具应答、完成配对的
-    // 依据。裁掉会让历史里留下悬空的 tool_call，上游 API 直接报错。
-    // 同 `asks` 的口径，只在真有值时带上。
-    const prior = history()
-      .slice(0, -1)
-      .map(({ role, content, tool_calls }) => ({
-        role,
-        content,
-        ...(tool_calls?.length ? { tool_calls } : {}),
-      }))
-
-    await runStream(async () => {
-      try {
-        return await continueConversationStream(
-          {
-            content: text,
-            conversationId: conversationId.value || undefined,
-            history: prior,
-            profileKey,
-            toolResult,
-          },
-          { onChunk: handleChunk },
-        )
-      } catch (error) {
-        // 会话已被整份换掉：不重试——重试只会对着一个已经不存在的会话再发一次请求。
-        // 抛出后由 `runStream` 的收尾按代次整路丢弃。
-        if (chatExpired()) throw error
-        if (!conversationId.value || !isApiError(error, 'SESSION_NOT_FOUND')) throw error
-        // 会话已失效：丢掉旧 ID 与半截输出，退回无状态模式重试。
-        // 重试时仍要带上档案标识——否则文档澄清的人设会在这里悄悄换回默认的那套。
-        conversationId.value = ''
-        streamingContent.value = ''
-        return continueConversationStream(
-          { content: text, history: prior, profileKey, toolResult },
-          { onChunk: handleChunk },
-        )
-      }
-    })
+    await runTurn('continue', { content: text, toolResult })
   }
 
   /**
-   * 用一组现成的表单数据开启会话：切到对话阶段 → 调流式接口 → 实时展示 AI 的第一轮追问。
+   * 用一组现成的表单数据开启会话：切到对话页 → 建任务 → 实时展示 AI 的第一轮追问。
    *
    * 四条线程共用：需求澄清提交结构化摘要（由 `buildAnswers` 映射到后端题目的字段名），
    * 三条文档澄清提交 `{document, pending_items}`。人设与首轮开场白由后端的对话档案决定，
@@ -337,20 +274,15 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     notice = '正在生成回复',
   ): Promise<void> {
     // 默认清空本线程的历史：需求澄清是一次全新的开始。
-    // ⚠️ **只清本线程**——四条线程共用一个 `messages` 数组，整数组清空会连带抹掉别的线程
-    // （那正是「回到某个标签发现自己聊过的内容没了」这类最难解释的 bug）。
-    // 文档澄清传 `clearHistory: false`：它要在原有对话后面接下去。
+    // ⚠️ **只清本线程**——四条线程共用一个数组，整数组清空会连带抹掉别的线程。
+    // 清的是**服务端**那一份（`clearChatThread`），否则刷新一次旧对话又回来了。
     if (options.clearHistory !== false) {
-      messages.value = messages.value.filter((message) => stageOf(message) !== stage)
+      await solutions.clearChatThread(stage)
     }
-    conversationId.value = ''
-    chatError.value = ''
     hooks.onEnterChat()
     hooks.onNotice(notice)
 
-    await runStream(() =>
-      startConversationStream({ answers, profileKey }, { onChunk: handleChunk }),
-    )
+    await runTurn('start', { formData: answers })
   }
 
   /**
@@ -363,14 +295,43 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     await startConversationWithAnswers(buildAnswers(value), '需求已提交，正在生成回复')
   }
 
-  /** 清空对话相关的临时状态（含正在流式接收的半截内容） */
+  /**
+   * 刷新 / 换设备后，接回**正在进行的那一轮**对话。
+   *
+   * 为什么必须走对话自己这一条，而不是复用文档流水线的重连
+   * ------------------------------------------------------
+   * 文档流水线的 handlers 把增量写进 `docStreamingContent`，收尾走 `finishDoc`——
+   * 那两件事对对话都不适用：对话的进度在 `runs.preview.content`，产物是一条轮次。
+   * 之前对话被塞进那条重连链，结果就是「刷新后流式全丢、过一会儿才整段出现」：
+   * 事件确实到了，只是全写进了另一个预览。
+   *
+   * 收尾后**必须重拉轮次**：服务端在广播 `run_summary` 之前已经写好这一轮，
+   * 这一步把「流式预览」换成「服务端权威的那条消息」，界面不会因为预览清空而闪空。
+   */
+  async function reconnect(jobId: number): Promise<void> {
+    // 有反馈才可诊断：接回是一段看不见的动作，静默失败与「没接回」在界面上长得一样
+    hooks.onNotice('正在接回上一轮的回复…')
+    const result = await job.reconnect(jobId, streamHandlers())
+    await solutions.refreshTurns()
+    if (result.ok) {
+      // 成功：预览让位给服务端那条权威轮次，避免同一句话在列表里出现两次
+      runs.preview.content = ''
+      return
+    }
+    // 失败：**保留**预览里已经接到的半截内容。丢掉它等于把用户已经看到的字抹掉，
+    // 而 refreshTurns 又拿不到这一轮（服务端还没收尾），界面会变成一片空白。
+    if (result.run !== null) {
+      runs.preview.error = job.error.value || '接回上一轮对话失败'
+    }
+  }
+
+  /** 清空对话相关的临时状态（含错误提示） */
   function reset(): void {
-    streamingContent.value = ''
-    chatError.value = ''
+    runs.resetPreview()
   }
 
   return {
-    /** 本线程是否正在流式接收回复（渲染用；导航守卫看的是 store 的 `busy`） */
+    /** 本线程是否正在生成（渲染用；导航不再看它） */
     streaming,
     /** 对话错误提示 */
     chatError,
@@ -382,6 +343,8 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     startConversation,
     /** 用一组现成的表单数据开启会话（文档澄清等） */
     startConversationWithAnswers,
+    /** 刷新 / 换设备后接回正在进行的那一轮 */
+    reconnect,
     /** 清空临时状态 */
     reset,
   }

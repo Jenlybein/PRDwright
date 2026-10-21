@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, status
 from backend.api import schemas
 from backend.api.deps import acting_user
 from backend.api.sse import sse_response
+from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.errors import AppError, ErrorCode
 from backend.services import job_service
 from backend.services.auth_service import User
@@ -78,6 +79,24 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
         # 没有清单就没有可拍板的东西，跑一次只会把正文原样吐回来（还烧一次 token）
         if not payload.pending_items:
             raise AppError(ErrorCode.INVALID_REQUEST, "auto_clarify 需要提供待确认清单（pending_items）")
+    elif payload.kind == "chat":
+        # 线程标识决定「这轮回复记到谁头上」，猜错等于把 A 线程的对话记到 B 线程；
+        # 四条线程的人设与上下文完全不同，因此不给默认值，缺了就 400。
+        if not is_valid_stage(payload.stage):
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"chat 需要合法的 stage（可选：{'、'.join(CHAT_STAGES)}）",
+            )
+        if payload.solution_id is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "chat 必须关联一份方案")
+        if payload.chat_mode not in ("start", "continue"):
+            raise AppError(ErrorCode.INVALID_REQUEST, "chat_mode 只能是 start 或 continue")
+        if payload.chat_mode == "start" and not payload.form_data:
+            raise AppError(ErrorCode.INVALID_REQUEST, "开新会话需要提供 form_data")
+        if payload.chat_mode == "continue" and not (
+            payload.content.strip() or payload.tool_result is not None
+        ):
+            raise AppError(ErrorCode.INVALID_REQUEST, "续聊需要提供 content 或 tool_result")
 
 
 def _requirements_text(payload: schemas.JobCreateRequest) -> str:
@@ -107,6 +126,13 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
         "pending_items": payload.pending_items,
         # 仅 prd：`None` 时由服务层取配置，显式 `false` 才关掉逐章审核
         "review_enabled": payload.review_enabled,
+        # --- 仅 chat ---
+        "stage": payload.stage,
+        "chat_mode": payload.chat_mode,
+        "form_data": payload.form_data,
+        "content": payload.content,
+        "tool_result": payload.tool_result,
+        "profile_key": payload.profile_key,
     }
 
 
@@ -118,6 +144,8 @@ def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
         kind=str(row.get("kind", "")),
         # 空串（旧行）退化成 None：宁可不报，也不猜一份产物出来。
         doc_kind=str(row.get("doc_kind") or "") or None,
+        # 对话线程同理：旧行没有这一列，空串退化成 None，调用方不得猜
+        chat_stage=str(row.get("chat_stage") or "") or None,
         status=str(row.get("status", "")),
         phase=str(row.get("phase", "") or ""),
         solution_id=row.get("solution_id"),
@@ -200,6 +228,36 @@ async def get_job(
     if row is None:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
     return _to_status(row)
+
+
+@router.post(
+    "/{job_id}/cancel",
+    response_model=schemas.JobCancelResponse,
+    summary="停止一次任务",
+)
+async def cancel_job(
+    job_id: int,
+    user: User = Depends(acting_user),
+) -> schemas.JobCancelResponse:
+    """停止某一次任务（用户按「停止生成」）。
+
+    与「退订」严格分开
+    ----------------
+    - 退订（切方案 / 刷新 / 关页面）= 我先不看，任务继续跑，回来还能接上；
+    - 停止（这个接口）= 别做了。
+
+    两者混在一起，就会得到这个项目最早那个 bug 的反面：只是切走一次，
+    正在生成的内容就白等了。
+
+    **任务已经结束不算失败**：`cancelled=false` 表示「你点的时候它刚好说完了」。
+    用 409 报错会让前端把一次无害的时序竞争当成故障弹提示。
+
+    越权与不存在仍然 404（与其它任务接口同一口径）。
+    """
+    if job_service.get_job(user.id, job_id) is None:
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
+    cancelled = job_service.cancel_job(user.id, job_id)
+    return schemas.JobCancelResponse(ok=True, cancelled=cancelled)
 
 
 @router.get("/{job_id}/stream", summary="订阅生成任务的事件流（SSE）")

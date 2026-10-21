@@ -12,7 +12,14 @@
 import axios from 'axios'
 
 import http from '@/services/api'
-import type { SolutionDetail, SolutionSavePayload, SolutionSummary } from '@/types'
+import type {
+  ChatMessage,
+  ChatStage,
+  SolutionDetail,
+  SolutionSavePayload,
+  SolutionStatePayload,
+  SolutionSummary,
+} from '@/types'
 
 /** 从后端错误响应里取可直接展示的说明；取不到时用兜底文案 */
 function backendMessage(error: unknown, fallback: string): string {
@@ -44,6 +51,31 @@ function toSummary(data: unknown): SolutionSummary {
   }
 }
 
+/** 把后端的结构化状态收敛成前端形状；缺字段一律给安全默认值 */
+function toState(value: unknown): SolutionStatePayload {
+  const raw = (value ?? {}) as Partial<SolutionStatePayload>
+  const summary = raw.summary
+  return {
+    view_state: typeof raw.view_state === 'string' ? raw.view_state : '',
+    entry_mode: typeof raw.entry_mode === 'string' ? raw.entry_mode : '',
+    chat_tab: typeof raw.chat_tab === 'string' ? raw.chat_tab : '',
+    summary:
+      summary && typeof summary === 'object' && !Array.isArray(summary)
+        ? (summary as SolutionStatePayload['summary'])
+        : null,
+    quick_product_name: typeof raw.quick_product_name === 'string' ? raw.quick_product_name : '',
+    quick_requirements:
+      typeof raw.quick_requirements === 'string' ? raw.quick_requirements : '',
+    draft_prd_text: typeof raw.draft_prd_text === 'string' ? raw.draft_prd_text : '',
+    paste_prd_text: typeof raw.paste_prd_text === 'string' ? raw.paste_prd_text : '',
+    paste_api_docs_text:
+      typeof raw.paste_api_docs_text === 'string' ? raw.paste_api_docs_text : '',
+    active_job_id: typeof raw.active_job_id === 'number' ? raw.active_job_id : null,
+    active_job_kind: typeof raw.active_job_kind === 'string' ? raw.active_job_kind : '',
+    active_job_doc_kind: typeof raw.active_job_doc_kind === 'string' ? raw.active_job_doc_kind : '',
+  }
+}
+
 /**
  * 列出当前用户的方案摘要，最近更新在前。
  * 对应 `GET /api/solutions`。
@@ -68,7 +100,7 @@ export async function fetchSolutions(): Promise<SolutionSummary[]> {
 export async function fetchSolution(id: number): Promise<SolutionDetail> {
   try {
     const { data } = await http.get<SolutionDetail>(`/api/solutions/${id}`)
-    return { ...toSummary(data), data: typeof data?.data === 'string' ? data.data : '' }
+    return { ...toSummary(data), state: toState(data?.state) }
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) {
       throw new SolutionNotFoundError()
@@ -111,7 +143,7 @@ export async function updateSolution(
 ): Promise<SolutionDetail | null> {
   try {
     const { data } = await http.put<SolutionDetail>(`/api/solutions/${id}`, payload)
-    return { ...toSummary(data), data: typeof data?.data === 'string' ? data.data : '' }
+    return { ...toSummary(data), state: toState(data?.state) }
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) return null
     throw new Error(backendMessage(error, '保存方案失败'))
@@ -130,5 +162,42 @@ export async function deleteSolution(id: number): Promise<void> {
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) return
     throw new Error(backendMessage(error, '删除方案失败'))
+  }
+}
+
+/**
+ * 读取某条对话线程的轮次（按发生顺序）。
+ * 对应 `GET /api/solutions/{id}/turns?stage=…`。
+ *
+ * 这是消息的**唯一读入口**：前端不再从方案状态里拿聊天记录，也不再自己拼历史。
+ * `stage` 必填——四条线程的人设与上下文完全不同，给个默认值等于让用户在
+ * 「PRD 澄清」里看到需求澄清的对话，不报错但答非所问。
+ */
+export async function fetchTurns(id: number, stage?: ChatStage): Promise<ChatMessage[]> {
+  try {
+    const { data } = await http.get<{ turns: unknown[] }>(`/api/solutions/${id}/turns`, {
+      // 不传 stage = 全部线程：前端把四条线程合并成一个展示数组，打开方案只要一次往返
+      params: stage ? { stage } : {},
+    })
+    const items = Array.isArray(data?.turns) ? data.turns : []
+    // 后端已把 `tool` 投影成 `user`，这里只做形状收敛，不再做角色映射
+    return items.map((item) => item as ChatMessage)
+  } catch (error) {
+    throw new Error(backendMessage(error, '无法读取对话记录'))
+  }
+}
+
+/**
+ * 清空某条对话线程（「整篇重新生成」后作废旧线程）。
+ * 对应 `DELETE /api/solutions/{id}/turns?stage=…`。
+ *
+ * 为什么必须打服务端：消息的真源在后端，只清本地镜像会在刷新后「自己长回来」——
+ * 那种现象比不删更难解释。
+ */
+export async function clearTurns(id: number, stage: ChatStage): Promise<void> {
+  try {
+    await http.delete(`/api/solutions/${id}/turns`, { params: { stage } })
+  } catch (error) {
+    throw new Error(backendMessage(error, '无法清空对话记录'))
   }
 }

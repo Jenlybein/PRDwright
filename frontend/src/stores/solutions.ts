@@ -32,6 +32,8 @@ import {
   deleteSolution,
   fetchSolution,
   fetchSolutions,
+  fetchTurns,
+  clearTurns,
   updateSolution,
 } from '@/services/solutionService'
 import { SolutionNotFoundError } from '@/services/solutionService'
@@ -39,8 +41,15 @@ import { detachAll as detachAllSubscriptions } from '@/services/runSubscriptions
 import { useDocumentsStore } from '@/stores/documents'
 import { useRunsStore } from '@/stores/runs'
 import { useWorkflowStore } from '@/stores/workflow'
-import type { EntryMode, SolutionSavePayload, SolutionSummary } from '@/types'
-import { parseSessionSnapshot } from '@/utils/workflow'
+import type {
+  ChatStage,
+  EntryMode,
+  SessionDataV2,
+  SolutionSavePayload,
+  SolutionStatePayload,
+  SolutionSummary,
+} from '@/types'
+import { fromStatePayload, normalizeSessionSnapshot } from '@/utils/workflow'
 
 /** 防抖时长：既能挡住连续输入，又不会让用户觉得「怎么还没存上」 */
 export const SAVE_DEBOUNCE_MS = 1500
@@ -243,6 +252,29 @@ export const useSolutionsStore = defineStore('solutions', () => {
   let lastSavedContentTick = workflow.contentTick
   let lastSavedDocWriteTick = documents.contentWriteTick
 
+  /**
+   * 把前端状态转成提交形状（camelCase → snake_case）。
+   *
+   * 转换放在这一处，而不是让每个调用方各拼一遍：漏一个字段就是「保存了但刷新就丢」，
+   * 而那种 bug 不会报错，只会让人怀疑浏览器缓存。
+   */
+  function toStatePayload(session: SessionDataV2): SolutionStatePayload {
+    return {
+      view_state: session.viewState,
+      entry_mode: session.entryMode ?? '',
+      chat_tab: session.chatTab,
+      summary: session.summary,
+      quick_product_name: session.quickInput.productName,
+      quick_requirements: session.quickInput.requirements,
+      draft_prd_text: session.debugPrdText,
+      paste_prd_text: session.pastePairInput.prd,
+      paste_api_docs_text: session.pastePairInput.apiDocs,
+      active_job_id: session.activeJobId,
+      active_job_kind: session.activeJobKind ?? '',
+      active_job_doc_kind: session.activeJobDocKind ?? '',
+    }
+  }
+
   /** 组装保存载荷 */
   function buildPayload(): SolutionSavePayload {
     return {
@@ -251,7 +283,10 @@ export const useSolutionsStore = defineStore('solutions', () => {
       // 列表显示的是「这份**做到哪了**」，因此取最远里程碑而非当前所在阶段：
       // 取 `viewState` 会让「点回 PRD 回看」把进度倒退成「已出 PRD」。见 `progressStage`。
       stage: workflow.progressStage,
-      data: JSON.stringify(workflow.snapshot()),
+      // 相位与草稿**逐项**提交（不再是一整段 JSON）：后端因此能查、能按列覆盖，
+      // 也不会因为某一段几十 KB 的粘贴稿把整次保存撑大。聊天记录不在这里——
+      // 它由服务端写进 `chat_turns`，前端提交等于又造第二个真源。
+      state: toStatePayload(workflow.snapshot()),
       // 相对**上次落库**的基准来比，而不是相对上一次调用：保存会因失败而重试，基准若
       // 跟着每次调用走，一次失败的保存就把「内容变了」这件事吃掉了。
       content_changed:
@@ -409,6 +444,43 @@ export const useSolutionsStore = defineStore('solutions', () => {
   }
 
   /**
+   * 重新拉取聊天记录（服务端是唯一写者，本地只是镜像）。
+   *
+   * 调用点有两处：对话任务收尾之后（服务端此时已写好这一轮）、以及线程被作废之后。
+   * 不用「把流内容自己拼成一条消息」：那会立刻造出第二个真源，而两份一旦不同步，
+   * 表现是「刷新前后消息条数不一样」——最难解释的一类现象。
+   */
+  async function refreshTurns(): Promise<void> {
+    const id = currentId.value
+    if (id === null) return
+    try {
+      workflow.setTurns(await fetchTurns(id))
+    } catch {
+      // 拉取失败不清空既有镜像：少一条新消息比整段对话突然消失好得多
+    }
+  }
+
+  /**
+   * 作废一条对话线程（服务端 + 本地镜像）。
+   *
+   * 用于「整篇重新生成」之后：旧线程聊的是上一版的待确认项，留着它会让
+   * 「按澄清结果改写」把针对旧文档的结论写进新文档。只清本地会在刷新后长回来，
+   * 因此必须打服务端。
+   */
+  async function clearChatThread(stage: ChatStage): Promise<void> {
+    const id = currentId.value
+    workflow.dropChatThread(stage)
+    if (id === null) return
+    try {
+      await clearTurns(id, stage)
+    } catch {
+      // 服务端没删成功时以它为准把镜像拉回来：界面与真源保持一致，
+      // 而不是「看起来删了、其实还在」
+      await refreshTurns()
+    }
+  }
+
+  /**
    * 打开一份已有方案：拉详情、校验快照、回填 workflow。
    *
    * 快照可能来自旧版本前端，或落在 `generating-*` 这类刷新后无法继续的中间态，
@@ -430,7 +502,9 @@ export const useSolutionsStore = defineStore('solutions', () => {
     saveError.value = ''
     try {
       const detail = await fetchSolution(id)
-      const parsed = parseSessionSnapshot(detail.data)
+      // 两步：先按传输形状搬运，再做校验与降级。搬运层不认识业务规则，
+      // 校验层不关心字段怎么拼——「哪些值可信」因此只有一个判断点。
+      const parsed = normalizeSessionSnapshot(fromStatePayload(detail.state))
 
       currentId.value = detail.id
       if (parsed) {
@@ -445,8 +519,12 @@ export const useSolutionsStore = defineStore('solutions', () => {
         saveError.value = '这份方案的记录已损坏，无法恢复'
         return false
       }
-      // 产物正文单独取：它不属于会话快照，随方案存在后端的 `documents` 表里。
-      // 放在 `onOpened` 之前，保证「打开完成」的回调看到的是一个内容齐备的状态。
+      // 聊天记录单独取：它的真源是后端 `chat_turns`，状态列里没有它。
+      // 取的是**全部线程**（一次往返），本地仍是合并数组、按 stage 过滤渲染。
+      // 放在 `applySnapshot` 之后、`onOpened` 之前：前者刚把镜像清空，
+      // 后者要让「打开完成」的回调看到一个内容齐备的状态。
+      workflow.setTurns(await fetchTurns(detail.id))
+      // 产物正文同样单独取：它不属于方案状态，随方案存在后端的 `documents` 表里。
       await documents.loadAll(detail.id)
       onOpened?.(detail.id)
       return true
@@ -639,6 +717,8 @@ export const useSolutionsStore = defineStore('solutions', () => {
     saving,
     saveError,
     hasContent,
+    refreshTurns,
+    clearChatThread,
     isPersisted,
     // 动作
     loadList,

@@ -103,7 +103,7 @@ beforeEach(() => {
     title: payload.title,
     mode: payload.mode,
     stage: payload.stage,
-    data: payload.data,
+    state: payload.state,
   }))
   vi.mocked(solutionApi.deleteSolution).mockResolvedValue(undefined)
 })
@@ -544,7 +544,6 @@ describe('删除方案后迟到的回调', () => {
     // 2. 用户重新选了入口。此刻 `busy` 必须已经回到 false，否则入口点不动；
     //    `chatStreaming` 是四条线程共用的全局标志，别的线程收尾就会把它清掉，
     //    因此「本线程的请求还在飞、而入口已经可点」是真实可达的状态。
-    workflow.chatStreaming = false
     expect(workflow.chooseEntry('structured')).toBe(true)
     expect(workflow.entryMode).toBe('structured')
 
@@ -555,7 +554,6 @@ describe('删除方案后迟到的回调', () => {
 
     // 整路丢弃：没有新消息、没写会话 id、没留错误提示
     expect(workflow.messages).toHaveLength(0)
-    expect(workflow.conversationIds.requirement).toBe('')
     expect(chat.chatError.value).toBe('')
 
     // 关上最后一道：即便此刻触发一次保存，也不会冒出「未命名方案」

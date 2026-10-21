@@ -284,32 +284,58 @@ class LogoutResponse(BaseModel):
 # ============================================================================
 
 
+class SolutionStatePayload(BaseModel):
+    """方案的状态（相位 + 草稿）。
+
+    它们曾经和聊天记录一起塞在一列 `data` 的 JSON 里。拆出来之后各自是标量列：
+    整份覆盖仍然原子，但不再和「只增不减的记录」挤在同一格里——
+    后者一旦被整份覆盖，两个写者就会互相把对方的记录盖掉。
+
+    `summary` 是**唯一留在 JSON 里**的一项：它是张问卷，加一个问题就加一个字段，
+    拆成列等于每次改问卷都要写迁移。演进快的结构放 JSON，演进慢的建列。
+
+    ⚠️ 这里**不含 `messages`**：聊天记录由服务端写入 `chat_turns`，前端只读
+    （`GET /api/solutions/{id}/turns`）。让前端再提交一份，等于又回到「一个内容
+    两个真源、没有裁决者」。
+    """
+
+    view_state: str = Field(default="", description="当前所处阶段")
+    entry_mode: str = Field(default="", description="入口模式；空串表示未选择")
+    chat_tab: str = Field(default="", description="对话页停留的线程；空串表示未进入对话")
+    summary: dict[str, Any] | None = Field(
+        default=None, description="结构化需求摘要；未提交过为 null"
+    )
+    quick_product_name: str = Field(default="", description="快捷入口：产品名称")
+    quick_requirements: str = Field(default="", description="快捷入口：一段话需求")
+    draft_prd_text: str = Field(default="", description="「我有 PRD」里贴入的草稿正文")
+    paste_prd_text: str = Field(default="", description="「PRD + 接口文档」里的 PRD 草稿")
+    paste_api_docs_text: str = Field(
+        default="", description="「PRD + 接口文档」里的接口文档草稿"
+    )
+    active_job_id: int | None = Field(default=None, description="进行中的任务 id；无任务为 null")
+    active_job_kind: str = Field(default="", description="进行中任务的类型")
+    active_job_doc_kind: str = Field(default="", description="进行中任务写的是哪一份产物")
+
+
 class SolutionSaveRequest(BaseModel):
     """新建 / 更新方案的请求体。
 
-    `data` 是 `SessionDataV2` 的 JSON 文本，前端序列化后直接提交，**后端不解析其内容**——
-    快照结构属于前端契约（`types/index.ts`），后端把它当不透明字符串存取，
-    这样前端调整快照字段时后端不必跟着改。
+    `title` / `mode` / `stage` 是**冗余摘要**：列表接口只读这三列，不必把状态列
+    与草稿取出来。冗余值由前端计算——「产品名该从 summary 还是 quickInput 取」
+    只有前端清楚。三者的长度上限刻意放宽，超长由服务层截断：它们只是展示用的
+    冗余，为此把整次保存判为 422 是本末倒置（用户会看到「保存失败」，数据其实没事）。
 
-    `title` / `mode` / `stage` 是随快照一起提交的**冗余摘要**：列表接口只读这三列，
-    不必把大 JSON 取出来反序列化。冗余值由前端计算——「产品名该从 summary 还是
-    quickInput 取」只有前端清楚。
-
-    `content_changed` 也是前端算的，理由同上且更硬：快照里同时住着**内容**（摘要、
-    对话、粘贴的材料）与**相位**（`viewState` / `activeJobId`）。后端不解析 `data`，
-    因此无从分辨「翻了一页」与「改了内容」；而这件事决定了要不要推进
-    `content_updated_at`——列表的时间与排序都看它。
-
-    这三个字段的长度上限刻意放宽，**不在校验层拒绝超长值**：它们只是展示用的冗余，
-    真正的正文在 `data` 里完好无损，为此把整次保存判为 422 是本末倒置——
-    用户会看到「保存失败」，而数据其实一点问题都没有。超长值由服务层截断
-    （见 `solution_service._clean`）。
+    `content_changed` 也是前端算的：它的 `contentTick` 由「摘要 / 草稿 / 对话」
+    的变更驱动，「翻了一页」不计入，而这件事决定要不要推进 `content_updated_at`——
+    列表的时间与排序都看它。
     """
 
     title: str = Field(default="", max_length=2000, description="方案标题，列表展示用")
     mode: str = Field(default="", max_length=200, description="入口模式，列表展示用")
     stage: str = Field(default="", max_length=200, description="当前阶段，列表展示进度用")
-    data: str = Field(min_length=1, description="完整会话快照的 JSON 文本")
+    state: SolutionStatePayload = Field(
+        default_factory=SolutionStatePayload, description="相位与草稿（不含聊天记录）"
+    )
     content_changed: bool = Field(
         default=False,
         description=(
@@ -340,9 +366,61 @@ class SolutionSummary(BaseModel):
 
 
 class SolutionDetail(SolutionSummary):
-    """方案详情：摘要 + 全量快照文本。"""
+    """方案详情：摘要 + 状态（相位与草稿）。
 
-    data: str = Field(description="完整会话快照的 JSON 文本，由前端自行反序列化")
+    **不含聊天记录**：轮次单独走 `GET /api/solutions/{id}/turns`，按线程取。
+    两者放在一个响应里会让「打开方案」变成一次大请求，也会让「只轮询轮次」
+    顺带把草稿一起拖着走。
+    """
+
+    state: SolutionStatePayload = Field(
+        default_factory=SolutionStatePayload, description="相位与草稿（不含聊天记录）"
+    )
+
+
+class ChatTurn(BaseModel):
+    """一条对话轮次（**展示形状**）。
+
+    `role` 只会是 `user` / `assistant` / `system`：存储里的 `tool`（结构化选择题的
+    作答，上游协议要求以工具结果回灌）在服务端就被投影成用户气泡。
+    前端类型 `ChatMessage.role` 刻意不含 `tool`——让它流过去，会在复建时被
+    白名单整条丢掉，表现为「刷新一次消息就没了」，而且不报错。
+    """
+
+    id: int = Field(description="轮次 id；同时是排序依据")
+    role: str = Field(description="user / assistant / system")
+    content: str = Field(default="", description="正文")
+    stage: str = Field(default="", description="属于哪条线程")
+    asks: list[dict[str, Any]] = Field(
+        default_factory=list, description="这一轮附带的结构化选择题；没有则为空数组"
+    )
+    answers: list[dict[str, Any]] = Field(
+        default_factory=list, description="作答回执（界面上这条是用户选的）"
+    )
+    tool_calls: list[dict[str, Any]] = Field(
+        default_factory=list, description="这一轮发起的工具调用；回传上下文时不能裁"
+    )
+    interrupted: bool = Field(
+        default=False, description="是否被用户中途停止（正文保留已生成的部分）"
+    )
+    created_at: str = Field(default="", description="写入时间（UTC ISO 8601）")
+
+
+class ChatTurnListResponse(BaseModel):
+    """某条线程的轮次列表，按发生顺序排列。"""
+
+    turns: list[ChatTurn] = Field(default_factory=list, description="按 id 升序")
+
+
+class JobCancelResponse(BaseModel):
+    """取消任务的结果。
+
+    `cancelled` 与 HTTP 200 分开表达：任务可能刚刚自然结束，此时「取消」什么也没做，
+    但请求本身是合法的——用 409 报错会让前端把它当成失败，而实际上什么都不用做。
+    """
+
+    ok: bool = Field(default=True, description="请求已处理")
+    cancelled: bool = Field(description="是否确实取消了一个仍在运行的任务")
 
 
 class SolutionListResponse(BaseModel):
@@ -514,7 +592,14 @@ class DocumentVersionDeleteResponse(BaseModel):
 # `optimize`（按用户指令就地优化）、`clarify`（按澄清对话就地改写）与
 # `auto_clarify`（AI 自行拍板待确认项后就地改写）都是**对某一份已有文档的动作**，
 # 因此它们必须额外带 `doc_kind` 才能落库。
-JobKind = Literal["prd", "api_docs", "prompts", "optimize", "clarify", "auto_clarify"]
+#
+# `chat` 是**对话的一轮**：它不写文档，产出是一条 `chat_turns` 轮次。
+# 把对话塞进同一条任务通道，换来的是「切走不断」「刷新接回」「换设备能看」
+# 三者共用现有机制——它们全建立在 `jobId + JobBus + draft_content` 上，
+# 对话原本一样都没有。
+JobKind = Literal[
+    "prd", "api_docs", "prompts", "optimize", "clarify", "auto_clarify", "chat"
+]
 
 
 class JobCreateRequest(BaseModel):
@@ -570,6 +655,47 @@ class JobCreateRequest(BaseModel):
             "提示词由后端持有，前端只能给数据。"
         ),
     )
+    # --- chat ---
+    stage: str = Field(
+        default="",
+        description=(
+            "对话线程（仅 `chat`，必填）：requirement / prd-clarify / "
+            "api-docs-clarify / prompts-clarify。**缺省不猜默认值**——猜错等于把 A 线程"
+            "的对话记到 B 线程头上，而四条线程的人设与上下文完全不同。"
+        ),
+    )
+    content: str = Field(default="", description="本轮用户输入（仅 `chat`）")
+    chat_mode: str = Field(
+        default="continue",
+        description=(
+            "这一轮是**开新会话**还是**续聊**（仅 `chat`）：`start` 会用 `form_data` "
+            "渲染开场白并新建一条会话；`continue` 走续聊。**不给默认值的语义留白**——"
+            "缺省取 `continue` 是因为续聊是绝大多数情况，而漏传 `start` 的后果是"
+            "「开场白没生成、模型直接对着一句空话作答」，用户一眼能看出来。"
+        ),
+    )
+    form_data: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "开新会话要提交的表单（仅 `chat` 且 `chat_mode=start`）："
+            "需求澄清传问卷答案；文档澄清传 `{document, pending_items}`。"
+        ),
+    )
+    tool_result: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "结构化选择题的作答（仅 `chat`）：`{tool_call_id, answers}`。"
+            "带上时按工具结果回灌给当初那次工具调用，不再重复投喂人话。"
+        ),
+    )
+    profile_key: str = Field(
+        default="",
+        description=(
+            "对话档案标识（仅 `chat`）：后端据此选人设与开场白；留空取默认档案。"
+            "命中不了注册表时**直接 400**，不静默退回默认人设——否则文档澄清会在中途"
+            "悄悄变回需求澄清，用户突然被问「要不要生成 PRD」却没有任何报错。"
+        ),
+    )
     # --- prd / api_docs / prompts ---
     review_enabled: bool | None = Field(
         default=None,
@@ -603,6 +729,14 @@ class JobStatus(BaseModel):
             "目标产物（prd / api_docs / prompts）。`optimize` / `clarify` 这类动作凭 `kind` "
             "定不了产物，靠这个字段告诉前端「改的是哪一份」；取不到时为 null，"
             "调用方不得猜一个默认值。"
+        ),
+    )
+    chat_stage: str | None = Field(
+        default=None,
+        description=(
+            "对话任务属于哪条线程（仅 `chat`）。`kind` 只说「这是对话」，四条线程的"
+            "人设与上下文完全不同——刷新后要认领这一轮，就得知道它是哪条线程的。"
+            "非对话任务为 null。"
         ),
     )
     status: str = Field(description="任务状态：running / completed / failed")
