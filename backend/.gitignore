@@ -38,6 +38,10 @@ htmlcov/
 .nox/
 .hypothesis/
 
+# pytest 报告（--junit-xml 的产物；沙箱下靠它判成败，但本身是生成物，不入库）
+*.pytest-junit.xml
+*.pytest-report.xml
+
 # Jupyter
 .ipynb_checkpoints/
 

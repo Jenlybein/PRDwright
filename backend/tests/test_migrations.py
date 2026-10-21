@@ -232,7 +232,7 @@ def test_v3_migration_adds_pending_items_column_to_jobs() -> None:
     assert "pending_items" not in {row["name"] for row in _table_info("generation_jobs")}
 
     # 跑真实迁移清单（含 v3），最终版本应为 7（v4~v7 与本步无关）
-    assert run_migrations() == 7
+    assert run_migrations() == 8
 
     cols = {row["name"]: row for row in _table_info("generation_jobs")}
     assert "pending_items" in cols
@@ -314,7 +314,7 @@ def test_v4_v6_build_version_chain_and_backfill(monkeypatch) -> None:
 
     # 再跑完整清单：v4（建表 + 加指针）、v5（回填）、v6（删列）
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 7
+    assert run_migrations() == 8
 
     assert _table_exists("document_versions")
     cols = _columns("documents")
@@ -347,8 +347,8 @@ def test_v4_v6_is_idempotent(monkeypatch) -> None:
     solution_id = _seed_solution_with_document()
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 7
-    assert run_migrations() == 7
+    assert run_migrations() == 8
+    assert run_migrations() == 8
 
     with connect() as conn:
         count = conn.execute(
@@ -430,7 +430,7 @@ def test_v7_adds_content_updated_at_and_backfills(monkeypatch) -> None:
     newer = _seed_legacy_solution("legacy-new", "2026-02-02T00:00:00+00:00")
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
-    assert run_migrations() == 7
+    assert run_migrations() == 8
 
     cols = {row["name"]: row for row in _table_info("solutions")}
     assert "content_updated_at" in cols
@@ -454,5 +454,42 @@ def test_v7_is_idempotent(monkeypatch) -> None:
     from backend.core.migrations import MIGRATIONS
 
     monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    assert run_migrations() == 8
+    assert run_migrations() == 8
+
+
+def test_v8_adds_doc_kind_to_jobs(monkeypatch) -> None:
+    """v8：给 `generation_jobs` 加 `doc_kind`，旧行是空串（未知），不是 prd。
+
+    「未知就不猜」是这一列的核心口径：空串被读取侧退化成 `None`，前端据此走
+    「按 viewState 反推」的旧路，而不是拿 prd 去覆盖一份接口文档。
+    """
+    from backend.core.migrations import MIGRATIONS
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS[:7])
     assert run_migrations() == 7
-    assert run_migrations() == 7
+    assert "doc_kind" not in _columns("generation_jobs")
+
+    monkeypatch.setattr("backend.core.migrations.MIGRATIONS", MIGRATIONS)
+    assert run_migrations() == 8
+
+    cols = {row["name"]: row for row in _table_info("generation_jobs")}
+    assert "doc_kind" in cols
+    assert cols["doc_kind"]["notnull"] == 1
+
+    with connect() as conn:
+        # 旧行没有依据可考：默认值是空串，不得被回填成任何具体产物。
+        cur = conn.execute(
+            "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
+            ("legacy-optimize", "hash", b"salt", "2026-01-01T00:00:00+00:00"),
+        )
+        user_id = int(cur.lastrowid or 0)
+        conn.execute(
+            "INSERT INTO generation_jobs (owner_id, solution_id, kind, status, created_at, updated_at)"
+            " VALUES (?, NULL, 'optimize', 'running', '2026-01-01T00:00:00+00:00',"
+            " '2026-01-01T00:00:00+00:00')",
+            (user_id,),
+        )
+        conn.commit()
+        row = conn.execute("SELECT doc_kind FROM generation_jobs").fetchone()
+    assert row["doc_kind"] == ""

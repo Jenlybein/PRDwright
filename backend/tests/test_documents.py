@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 
 from backend.core.db import connect, utc_now_text
-from backend.core.migrations import run_migrations
+from backend.core.migrations import MIGRATIONS, run_migrations
 from backend.services import document_store
 from conftest import register
 
@@ -108,7 +108,9 @@ def _user_id(username: str) -> int:
 
 def test_real_plan_creates_documents_table() -> None:
     """真实的迁移清单跑完后，`documents` 与 `document_versions` 表就位（防止清单与建表语句脱节）。"""
-    assert run_migrations() == 7
+    # 与清单长度比而不是写死数字：新增一步迁移不该顺手改坏这两个用例，
+    # 而「清单没跑完」这件事仍然会被抓住
+    assert run_migrations() == len(MIGRATIONS)
 
     with connect() as conn:
         row = conn.execute(
@@ -157,7 +159,9 @@ def test_backfill_skips_corrupt_row_and_continues() -> None:
     broken = _seed_solution(owner, "{这不是合法 JSON")
     good = _seed_solution(owner, _legacy_snapshot())
 
-    assert run_migrations() == 7
+    # 与清单长度比而不是写死数字：新增一步迁移不该顺手改坏这两个用例，
+    # 而「清单没跑完」这件事仍然会被抓住
+    assert run_migrations() == len(MIGRATIONS)
 
     assert _documents(broken) == {}
     assert set(_documents(good)) == {"prd", "api_docs", "prompts"}

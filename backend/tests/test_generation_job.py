@@ -382,11 +382,45 @@ def test_new_job_supersedes_previous_running(alice):
     old_row = GenerationJobRepository.get(alice, old)
     assert old_row is not None
     assert old_row["status"] == "failed"
-    assert old_row["error_code"] == "INTERNAL_ERROR"
+    # 有明确原因，不是笼统的 INTERNAL_ERROR：这个任务没出错，是被人接手了
+    assert old_row["error_code"] == "SUPERSEDED"
     assert old_row["error_message"] == "被新任务取代"
 
     # 新建的是 running
     assert GenerationJobRepository.get(alice, new)["status"] == "running"
+
+
+def test_superseded_job_does_not_write_document(client, alice, monkeypatch):
+    """被顶替的旧任务收尾时**不写文档**，并落 `failed + SUPERSEDED`。
+
+    只把库里那一行改成 failed 是不够的：内存里的旧运行时并不知道自己被取代，
+    它收尾时照样 `_write_document`，把旧稿盖在新稿上——用户看到「新任务跑完了，
+    正文却是上一版的」，不报错、只是内容对不上。因此新建任务时两处都要标记。
+    """
+    monkeypatch.setattr(job_service.solution_service, "solution_exists", lambda *a, **k: True)
+    solution_id = _create_solution(client)
+
+    old = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
+    runtime = job_service.JobRuntime(
+        job_id=old, owner_id=alice, solution_id=solution_id, kind="prd"
+    )
+    runtime.started_at = 0.0
+    runtime.final_reply = "# 旧稿"
+    runtime.finalized_parts = ["# 旧稿"]
+    job_service._RUNTIMES[old] = runtime  # noqa: SLF001 - 直接摆一支在途运行时
+
+    # 新任务接手：库里的旧行与内存里的旧运行时都要被标记
+    job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
+    assert runtime.superseded is True
+
+    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
+
+    row = GenerationJobRepository.get(alice, old)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_code"] == "SUPERSEDED"
+    # 关键：正文没有被写进 documents（这一份是别人要写的位置）
+    assert document_store.get_document(alice, solution_id, "prd") is None
 
 
 def test_find_active_ignores_other_solution_and_kind(alice):
@@ -771,6 +805,69 @@ def test_create_optimize_job_via_http_carries_doc_kind(client, monkeypatch):
 
     doc = document_store.get_document(uid, solution_id, "prompts")
     assert doc is not None and doc["content"] == "优化结果"
+
+    # 同一个结论也要能从**任务记录**读到：前端重连时靠它定位「改的是哪一份」，
+    # 而不是靠「当前停在哪个审阅页」去猜。
+    status = client.get(f"/api/jobs/{created.json()['job_id']}")
+    assert status.status_code == 200
+    assert status.json()["doc_kind"] == "prompts"
+
+
+def test_create_job_persists_doc_kind_from_request(alice):
+    """`create_job` 在**创建时**就把 doc_kind 算出来落列（不是收尾时才算）。
+
+    创建时能算是因为它是纯请求推导（`_target_product_kind`），不依赖入口模式或前端快照。
+    晚算的话，进程重启后 DB 兜底快照与 `GET /api/jobs` 就永远答不出「改的是哪一份」。
+    """
+    job_id = job_service.create_job(
+        owner_id=alice,
+        solution_id=None,
+        kind="optimize",
+        request={"doc_kind": "api_docs"},
+    )
+    row = GenerationJobRepository.get(alice, job_id)
+    assert row is not None
+    assert row["doc_kind"] == "api_docs"
+
+    # 整篇生成的产物由 kind 直接决定，不依赖请求体
+    prd_id = job_service.create_job(
+        owner_id=alice, solution_id=None, kind="prd", request={"requirements": "x"}
+    )
+    assert GenerationJobRepository.get(alice, prd_id)["doc_kind"] == "prd"
+
+
+def test_snapshot_events_carry_doc_kind():
+    """内存快照带 `doc_kind`；取不到时是 `None`，**不猜成 prd**。
+
+    「不猜」是硬口径：猜错等于把优化接口文档的结果写进 PRD 正文，属于静默的数据损坏。
+    """
+    optimize = job_service.JobRuntime(
+        job_id=1,
+        owner_id=1,
+        solution_id=None,
+        kind="optimize",
+        request={"doc_kind": "api_docs"},
+    )
+    assert job_service._snapshot_event(optimize).data["doc_kind"] == "api_docs"  # noqa: SLF001
+
+    prd = job_service.JobRuntime(job_id=2, owner_id=1, solution_id=None, kind="prd")
+    assert job_service._snapshot_event(prd).data["doc_kind"] == "prd"  # noqa: SLF001
+
+    unknown = job_service.JobRuntime(job_id=3, owner_id=1, solution_id=None, kind="optimize")
+    assert job_service._snapshot_event(unknown).data["doc_kind"] is None  # noqa: SLF001
+
+
+def test_db_snapshot_event_carries_doc_kind(alice):
+    """DB 兜底快照同样带 `doc_kind`；旧行（空串）退化成 `None`。"""
+    job_id = GenerationJobRepository.create(alice, "prompts", None, doc_kind="prompts")
+    row = GenerationJobRepository.get(alice, job_id)
+    assert row is not None
+    assert job_service._db_snapshot_event(row).data["doc_kind"] == "prompts"  # noqa: SLF001
+
+    legacy = GenerationJobRepository.create(alice, "optimize", None)
+    row = GenerationJobRepository.get(alice, legacy)
+    assert row is not None
+    assert job_service._db_snapshot_event(row).data["doc_kind"] is None  # noqa: SLF001
 
 
 def test_doc_kind_rejects_unknown_value(client):

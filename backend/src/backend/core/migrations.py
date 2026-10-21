@@ -394,6 +394,34 @@ def _add_content_updated_at_to_solutions(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_doc_kind_to_jobs(conn: sqlite3.Connection) -> None:
+    """v8：给 `generation_jobs` 加 `doc_kind`——这次任务**写的是哪一份产物**。
+
+    为什么需要单独一列
+    ------------------
+    `kind` 回答的是「做了什么」（`prd` / `api_docs` / `prompts` / `optimize` /
+    `clarify` / `auto_clarify`），但对后三个动作**定不了产物**：「优化」既可以优化 PRD，
+    也可以优化提示词。产物类型原本只存在于**请求体**里，落库时才由
+    `_target_product_kind(kind, request)` 现场推导——于是刷新 / 进程重启之后，
+    任何只拿得到数据库行的路径（DB 兜底快照、`GET /api/jobs`）都无法回答
+    「这个 optimize 任务改的是哪一份」。
+
+    前端的代价最直观：重连时只能靠「当前停在哪个审阅页」去猜，猜不到就 `?? 'prd'`
+    兜底——**猜错就是拿优化接口文档的结果覆盖 PRD 正文**。把目标产物落成列，
+    归属就变成一条可查的事实，而不是一次推断。
+
+    设计取舍
+    --------
+    - **创建时就写**：`_build_request` 在创建接口里已经拿到完整请求体，
+      `_target_product_kind` 是纯请求推导，不依赖入口模式或前端快照，没有「创建时算不出来」
+      的问题。晚算（收尾时）只是历史写法。
+    - **`NOT NULL DEFAULT ''`**：旧行没有依据可考，空串表示「未知」；读取侧统一
+      `or None`。不用可空列是为了避免 SQLite 对已有行填 NULL 之后还要再 `UPDATE` 一次。
+    - 空串**不等于** `prd`：不知道就不猜，与 `_document_kind` 的既有口径一致。
+    """
+    conn.execute("ALTER TABLE generation_jobs ADD COLUMN doc_kind TEXT NOT NULL DEFAULT ''")
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -408,6 +436,7 @@ MIGRATIONS: list[Migration] = [
         name="solutions_content_updated_at",
         apply=_add_content_updated_at_to_solutions,
     ),
+    Migration(version=8, name="jobs_doc_kind", apply=_add_doc_kind_to_jobs),
 ]
 
 

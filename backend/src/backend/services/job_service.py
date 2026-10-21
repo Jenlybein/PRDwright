@@ -108,6 +108,16 @@ class JobRuntime:
     # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
     # 收尾也**不写**文档——见 `cancel_for_solution` / `_finalize`。
     cancelled: bool = False
+    # 是否已被**同一份文档的新任务**顶替（`create_job` 在建新任务时置位）。
+    #
+    # 与 `cancelled` 分开：那个是「方案没了，谁也别写」，这个是「有更晚的结果要写，
+    # 你先让开」。两者在收尾时都不写文档，但原因不同，`error_code` 也要能区分
+    # （`CANCELLED` vs `SUPERSEDED`）——否则排查时会误以为是用户删了方案。
+    #
+    # ⚠️ 只落库是不够的：`supersede_active` 改的是**库里那一行**，内存里的旧运行时
+    # 完全不知道自己被顶替了，于是它收尾时照样 `_write_document`，把旧稿盖在新稿上。
+    # 用户看到的是「新任务跑完了，正文却是上一版的」——不报错，只是内容对不上。
+    superseded: bool = False
 
 
 # ----------------------------------------------------------------------------
@@ -121,14 +131,46 @@ def create_job(
     solution_id: int | None,
     kind: str,
     input_fingerprint: str | None = None,
+    request: dict[str, Any] | None = None,
 ) -> int:
     """新建一次生成任务，返回其 id。
 
     先 `supersede_active` 把同 owner + solution + kind 下旧的 running 置为 failed，
     保证「同一组合至多一个 running」。随后落一行 running。
+
+    被顶替的不只是库里那一行，**内存里的旧运行时也要标记**（`superseded`）：只改库的话
+    旧任务收尾时仍然会 `_write_document`，把旧稿盖在新稿上（不报错，只是内容对不上）。
+    标记之后它在下一个事件处跳出循环、收尾落 `failed + SUPERSEDED` 且**不写文档**。
+
+    `request` 是**摊平后的生成参数**（`api/jobs.py::_build_request` 的产物）。创建时就传进来
+    是为了算 `doc_kind`：`optimize` / `clarify` 靠 `kind` 定不了产物，只有请求体知道；
+    落成列之后，刷新、进程重启、`GET /api/jobs` 都能回答「这个任务改的是哪一份」。
     """
     GenerationJobRepository.supersede_active(owner_id, solution_id=solution_id, kind=kind)
-    return GenerationJobRepository.create(owner_id, kind, solution_id, input_fingerprint)
+    _mark_superseded(owner_id, solution_id=solution_id, kind=kind)
+    doc_kind = _target_product_kind(kind, request or {}) or ""
+    return GenerationJobRepository.create(
+        owner_id, kind, solution_id, input_fingerprint, doc_kind=doc_kind
+    )
+
+
+def _mark_superseded(owner_id: int, *, solution_id: int | None, kind: str) -> int:
+    """把内存里同 owner + solution + kind 的旧运行时标记为「已被顶替」，返回条数。
+
+    判据与 `GenerationJobRepository.supersede_active` 逐字一致——两处若分叉，
+    就会出现「库里说被取代了、内存里还在跑」这种最难查的组合。
+    """
+    marked = 0
+    for runtime in _RUNTIMES.values():
+        if (
+            runtime.owner_id == owner_id
+            and runtime.solution_id == solution_id
+            and runtime.kind == kind
+            and not runtime.superseded
+        ):
+            runtime.superseded = True
+            marked += 1
+    return marked
 
 
 def cancel_for_solution(owner_id: int, solution_id: int) -> int:
@@ -260,7 +302,10 @@ async def run_job(runtime: JobRuntime) -> None:
                 # 方案在生成途中被删除：下一个事件不再消费。
                 # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，
                 # 收尾时 `_finalize` 也就拿不到新的 `done`，不会把半截过程当成「已产出」。
-                if runtime.cancelled:
+                #
+                # `superseded` 同理：同一份文档已经有更新的任务在写，这一支的结果反正不会
+                # 落库，继续烧 token 只是白花钱，而且它的 `done` 还会覆盖运行时的终稿。
+                if runtime.cancelled or runtime.superseded:
                     break
                 _apply_event(runtime, event)
                 job_bus.publish(runtime.job_id, event)
@@ -517,13 +562,22 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     # 两道判断覆盖的正是这两个方向，缺任何一道都会留下一条「方案已删、文档却写进去了」
     # 的路径（正文写进一个不存在的 solution_id，前端下次打开就是幽灵文档）。
     if status == "completed":
-        cancel_reason = ""
+        abort_code = ""
+        abort_message = ""
         if runtime.cancelled:
-            cancel_reason = "方案已删除，任务已取消"
+            abort_code = "CANCELLED"
+            abort_message = "方案已删除，任务已取消"
+        elif runtime.superseded:
+            # 同一份文档已经被更晚的任务接手：本次结果不能落库，否则会把新稿盖回旧版。
+            # 用 `SUPERSEDED` 而不是 `CANCELLED`：这是「被顶替」，不是「用户删了东西」，
+            # 排查时两者的处理方式完全不同（前者要看谁发起了新任务，后者要看删除路径）。
+            abort_code = "SUPERSEDED"
+            abort_message = "被同一份文档的新任务取代，本次结果不再写入"
         elif runtime.solution_id is not None and not solution_service.solution_exists(
             runtime.owner_id, runtime.solution_id
         ):
-            cancel_reason = "方案已删除，任务已取消"
+            abort_code = "CANCELLED"
+            abort_message = "方案已删除，任务已取消"
             logger.warning(
                 "生成任务收尾时方案已不存在，不再写入文档",
                 extra={
@@ -532,13 +586,13 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
                     "solution_id": runtime.solution_id,
                 },
             )
-        if cancel_reason:
+        if abort_code:
             # 语义上确实「没有成功」：复用 failed 而不是新造状态（状态值是前后端共享契约，
             # 新增取值会让前端每一处 status 分支都要多一条分支）。
             status = "failed"
             runtime.failed = True
-            runtime.error_code = "CANCELLED"
-            runtime.error_message = cancel_reason
+            runtime.error_code = abort_code
+            runtime.error_message = abort_message
 
     runtime.status = status
     draft = _draft(runtime)
@@ -746,6 +800,9 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
         data={
             "job_id": runtime.job_id,
             "kind": runtime.kind,
+            # 目标产物：与 `kind` 分开。`optimize` / `clarify` 的 kind 只说「做了什么」，
+            # 前端重连时要靠这个字段知道「改的是哪一份」，否则只能猜（猜错即串稿）。
+            "doc_kind": _document_kind(runtime),
             "status": runtime.status,
             "phase": runtime.phase,
             "finalized_text": _finalized_text(runtime),
@@ -800,6 +857,8 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
         data={
             "job_id": row.get("id"),
             "kind": row.get("kind", ""),
+            # 旧行没有这一列时为 `''`，这里统一退化成 None（「未知」），不猜成 prd。
+            "doc_kind": row.get("doc_kind") or None,
             "status": row.get("status", ""),
             "phase": row.get("phase", ""),
             "finalized_text": row.get("draft_content", "") or "",

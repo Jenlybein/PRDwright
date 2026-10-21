@@ -43,6 +43,7 @@ class GenerationJobRepository:
         kind: str,
         solution_id: int | None,
         input_fingerprint: str | None = None,
+        doc_kind: str = "",
     ) -> int:
         """新建一条 running 任务，返回其 id。
 
@@ -51,19 +52,21 @@ class GenerationJobRepository:
             kind: 任务类型，`prd` / `api_docs` / `prompts` / `optimize`。
             solution_id: 关联方案；快捷入口等场景可为 `None`。
             input_fingerprint: 输入指纹（本期仅 prd 计算），可为空。
+            doc_kind: 这次任务**写哪一份产物**；未知时传空串。
 
-        Returns:
-            新任务的 id。
+        `doc_kind` 与 `kind` 分开：`kind` 是「做了什么」，`doc_kind` 是「写到哪」。
+        `optimize` / `clarify` 这类动作凭 `kind` 定不了产物，只有请求体知道；
+        创建时就把结论落列，刷新 / 进程重启后仍能回答「这个任务改的是哪一份」。
         """
         now = utc_now_text()
         with connect() as conn:
             cur = conn.execute(
                 "INSERT INTO generation_jobs "
-                "(owner_id, solution_id, kind, status, phase, draft_content, "
+                "(owner_id, solution_id, kind, doc_kind, status, phase, draft_content, "
                 " completed_sections, input_fingerprint, usage, max_provider_switches, "
                 " error_code, error_message, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'running', '', '', '[]', ?, NULL, 2, '', '', ?, ?)",
-                (owner_id, solution_id, kind, input_fingerprint, now, now),
+                "VALUES (?, ?, ?, ?, 'running', '', '', '[]', ?, NULL, 2, '', '', ?, ?)",
+                (owner_id, solution_id, kind, doc_kind, input_fingerprint, now, now),
             )
             conn.commit()
             return int(cur.lastrowid or 0)
@@ -237,6 +240,10 @@ class GenerationJobRepository:
         「同一 owner + solution + kind 至多一个 running」是一条业务不变量，在新建任务前
         先把旧的中止掉，避免两个任务同时往同一处写正文。
         `solution_id` 可能为 `None`，SQL 需用 `IS NULL` 而不是 `= NULL`。
+
+        `error_code` 用 `SUPERSEDED` 而不是笼统的 `INTERNAL_ERROR`：这次失败有明确原因
+        （被别人接手了，不是出错），运维看这一行时不该去翻日志找异常。
+        调用方还要把内存里的旧运行时一并标记——只改库的话，那个运行时收尾时仍会写文档。
         """
         clauses = ["owner_id = ?", "kind = ?", "status = 'running'"]
         where_params: list[Any] = [owner_id, kind]
@@ -245,7 +252,7 @@ class GenerationJobRepository:
         else:
             clauses.append("solution_id = ?")
             where_params.append(solution_id)
-        set_params: list[Any] = ["INTERNAL_ERROR", "被新任务取代", utc_now_text()]
+        set_params: list[Any] = ["SUPERSEDED", "被新任务取代", utc_now_text()]
         with connect() as conn:
             cur = conn.execute(
                 "UPDATE generation_jobs "

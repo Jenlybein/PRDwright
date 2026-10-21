@@ -597,6 +597,14 @@ class JobStatus(BaseModel):
 
     id: int = Field(description="任务 id")
     kind: str = Field(description="任务类型")
+    doc_kind: str | None = Field(
+        default=None,
+        description=(
+            "目标产物（prd / api_docs / prompts）。`optimize` / `clarify` 这类动作凭 `kind` "
+            "定不了产物，靠这个字段告诉前端「改的是哪一份」；取不到时为 null，"
+            "调用方不得猜一个默认值。"
+        ),
+    )
     status: str = Field(description="任务状态：running / completed / failed")
     phase: str = Field(default="", description="当前阶段（如 writing / reviewing）")
     solution_id: int | None = Field(default=None, description="关联方案 id，可空")

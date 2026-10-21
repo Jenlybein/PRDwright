@@ -116,6 +116,8 @@ def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
     return schemas.JobStatus(
         id=int(row.get("id", 0)),
         kind=str(row.get("kind", "")),
+        # 空串（旧行）退化成 None：宁可不报，也不猜一份产物出来。
+        doc_kind=str(row.get("doc_kind") or "") or None,
         status=str(row.get("status", "")),
         phase=str(row.get("phase", "") or ""),
         solution_id=row.get("solution_id"),
@@ -149,18 +151,24 @@ async def create_job(
     if payload.kind == "prd":
         fingerprint = compute_input_fingerprint(_requirements_text(payload))
 
+    # 摊平参数只算一次：创建时要靠它算 `doc_kind`，dispatch 时要靠它跑生成。
+    request = _build_request(payload)
+
     job_id = job_service.create_job(
         owner_id=user.id,
         solution_id=payload.solution_id,
         kind=payload.kind,
         input_fingerprint=fingerprint,
+        # 同一份摊平参数既用于「创建时算 doc_kind」，也用于后续 dispatch：
+        # 两处共用一次 `_build_request`，避免口径分叉（例如一处多了字段、一处没有）。
+        request=request,
     )
     job_service.dispatch(
         job_id,
         owner_id=user.id,
         solution_id=payload.solution_id,
         kind=payload.kind,
-        request=_build_request(payload),
+        request=request,
     )
     return schemas.JobCreated(job_id=job_id, status="running")
 
