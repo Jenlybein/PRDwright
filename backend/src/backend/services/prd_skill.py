@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from backend.services.prompts import SYSTEM_PROMPT
@@ -158,6 +159,149 @@ def format_conversation(history: list[dict[str, Any]] | None) -> str:
         speaker = "用户" if role == "user" else "AI" if role == "assistant" else role or "系统"
         lines.append(f"**{speaker}**：{content}")
     return "\n\n".join(lines) if lines else NO_CONVERSATION_PLACEHOLDER
+
+
+# ---------------------------------------------------------------------------
+# 输入字段契约压缩
+# ---------------------------------------------------------------------------
+
+# 单个字段说明的长度上限。字段说明逐字取自 schema，这里只截断「太啰嗦的尾巴」——
+# 例表、`minLength`、`anyOf` 那些校验细节属于归一化阶段，撰写时一条都用不上。
+_FIELD_NOTE_LIMIT = 90
+
+# 枚举扫描的最大深度。`priority` 的 P0/P1/P2 藏在 `items.anyOf[].properties` 里，
+# 只看一层会漏掉它——而漏掉的后果是模型自创一套「高 / 中 / 低」优先级。
+_ENUM_SCAN_DEPTH = 4
+
+# `description` 里混着「必填。」与「可选：」这类必填性标记。按 required 分组时已经
+# 表达过一次，再留着就成了同一句话说两遍。
+_OPTIONAL_PREFIX = re.compile(r"^可选\s*[：:]\s*")
+_OPTIONAL_MARK = "可选："
+
+# 拼接时我们自己会加分隔符，schema 说明自带的句末标点就成了「。；」这种脏尾巴。
+_TRAILING_PUNCT = "。.；;，,、 "
+
+
+def _trim_tail(text: str) -> str:
+    """去掉句末标点，供外部拼接。"""
+    return text.rstrip(_TRAILING_PUNCT)
+
+
+def _field_note(spec: Any) -> str:
+    """把一个字段的 schema 定义压成一句人话：说明 + 本层枚举取值。"""
+    if not isinstance(spec, dict):
+        return ""
+    text = " ".join(str(spec.get("description") or "").split())
+    if not text:
+        return ""
+    text = _OPTIONAL_PREFIX.sub("", text)
+    if _OPTIONAL_MARK not in text:
+        text = text.replace("必填。", "")
+    enum = spec.get("enum")
+    if isinstance(enum, list) and enum:
+        values = "/".join(str(item) for item in enum)
+        text = f"{_trim_tail(text)}（取值 {values}）"
+    if len(text) > _FIELD_NOTE_LIMIT:
+        text = _trim_tail(text[:_FIELD_NOTE_LIMIT]) + "…"
+    return text
+
+
+def _collect_enums(node: Any, depth: int = 0) -> dict[str, list[str]]:
+    """递归收集子树里的枚举：`{字段名: [取值…]}`。
+
+    为什么要递归：`priority` 的 `P0/P1/P2` 藏在 `items.anyOf[].properties` 下两层，
+    只看当前层就漏了它——漏掉之后模型会自创「高 / 中 / 低」这类取值。
+    """
+    found: dict[str, list[str]] = {}
+    if depth > _ENUM_SCAN_DEPTH or not isinstance(node, dict):
+        return found
+    for key, value in (node.get("properties") or {}).items():
+        if not isinstance(value, dict):
+            continue
+        enum = value.get("enum")
+        if isinstance(enum, list) and enum:
+            found.setdefault(str(key), [str(item) for item in enum])
+        else:
+            found.update(_collect_enums(value, depth + 1))
+    items = node.get("items")
+    if isinstance(items, dict):
+        found.update(_collect_enums(items, depth + 1))
+        for branch in items.get("anyOf") or []:
+            found.update(_collect_enums(branch, depth + 1))
+    return found
+
+
+def _flatten_field_note(name: str, spec: Any) -> str:
+    """字段说明 + 子键说明 + 子树枚举，供「一个字段讲一句」用。"""
+    note = _field_note(spec)
+    children = spec.get("properties") if isinstance(spec, dict) else None
+    if isinstance(children, dict) and children:
+        inner = "、".join(
+            f"{key} {_trim_tail(_field_note(value))}"
+            for key, value in children.items()
+            if _field_note(value)
+        )
+        if inner:
+            note = f"{_trim_tail(note)}；含 {inner}"
+    enums = "、".join(
+        f"{key} 取值 {'/'.join(values)}" for key, values in _collect_enums(spec).items()
+    )
+    if enums:
+        note = f"{_trim_tail(note)}；{enums}"
+    return note
+
+
+def format_field_contract(schema_text: str) -> str:
+    """把整份输入字段契约（JSON Schema）压成几行字段清单，供撰写提示词使用。
+
+    为什么要压：整份 `field-schema.json` 有 8.6KB，而撰写真正需要的只有三件事——
+    **哪些字段必填、每个字段是什么、有哪些枚举取值**。`examples` / `minLength` /
+    `anyOf` / `x_source_aliases` 是给**归一化与校验**用的，照着写正文时一条都用不上，
+    却是每一章都要原样付一遍的输入——六章就是五十几 KB 的纯重复。
+
+    字段说明逐字取自 schema 的 `description`，**不另写一份**：单一真源，改 schema 时
+    这里自动跟着改，不会出现两处说法不一致（那正是提示词互相打架的常见来源）。
+
+    Args:
+        schema_text: `references/field-schema.json` 的全文。
+
+    Returns:
+        形如「必填：a（…）／选填：b（…）」的多行清单。schema 缺失或损坏时返回一句显式
+        说明而非空串——留空会被模型读成「没有字段契约」，从而静默降级。
+    """
+    try:
+        schema = json.loads(schema_text or "")
+    except (TypeError, ValueError) as exc:
+        logger.warning("输入字段契约不是合法 JSON，各字段以需求输入原文为准", exc_info=exc)
+        return "（字段契约不可解析，各字段以需求输入原文为准。）"
+    if not isinstance(schema, dict):
+        return "（字段契约格式异常，各字段以需求输入原文为准。）"
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return "（字段契约未声明字段，各字段以需求输入原文为准。）"
+
+    required = {str(name) for name in schema.get("required") or []}
+    required_lines: list[str] = []
+    optional_lines: list[str] = []
+    for name, spec in properties.items():
+        note = _trim_tail(_flatten_field_note(str(name), spec))
+        entry = f"{name}（{note}）" if note else str(name)
+        (required_lines if str(name) in required else optional_lines).append(entry)
+
+    lines: list[str] = []
+    if required_lines:
+        lines.append("必填（缺失即按「缺失信息处理」标注待确认）：" + "；".join(required_lines))
+    if optional_lines:
+        lines.append("选填：" + "；".join(optional_lines))
+
+    rules = schema.get("x_normalization_rules")
+    if isinstance(rules, list) and rules:
+        kept = [_trim_tail(str(rule).strip()) for rule in rules[:4] if str(rule).strip()]
+        if kept:
+            lines.append("归一化：" + "；".join(kept))
+
+    return "\n".join(lines)
 
 
 def build_prd_system_prompt(writing_rules: str) -> str:

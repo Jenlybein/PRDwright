@@ -90,6 +90,7 @@ from backend.services.pending_items import (
 from backend.services.prd_skill import (
     build_prd_system_prompt,
     format_conversation,
+    format_field_contract,
     format_freeform_requirements,
     format_summary_as_requirements,
     load_prd_skill_artifacts,
@@ -149,15 +150,23 @@ PRD_SECTIONS: tuple[PrdSection, ...] = (
         id="features",
         heading="## 2. 功能需求",
         title="功能需求",
+        # 逐条换行而不是一整段：这段要点有十来条命令，挤在一句里模型会从后往前漏
+        # （实测漏掉的四条全在这一段里，且都是靠后的那几条）。
         focus=(
-            "2.1 MVP 功能按 mvp_features 逐行渲染进表格，编号从 F-01 起连续唯一，"
-            "全文引用功能时只引用编号；module 缺失归入「基础功能」；description 缺失时用 name 展开并标注「（建议）」；"
-            "acceptance 缺失时写「待确认」。mvp_features 为空数组（用户未填）时，依据 ui_pages 的页面 / 模块 /"
-            "关键交互推导一份候选功能清单：每条功能都要能落到某个页面模块或关键交互上，不得造与页面无关的功能；"
-            "功能点名称后统一加「（建议）」后缀，优先级无依据时写「待确认」，验收标准一律写「待确认：该功能的验收标准」；"
-            "表格上方加一句总说明「以下功能清单由模型依据页面结构与关键交互推断，均标注（建议），请确认或修改」，"
-            "数量宁少勿滥。ui_pages 也为空时才写「待确认：MVP 功能清单未提供」，两者都登记进待确认清单。"
-            "2.2 未来功能按 v2_features 逐条列出，为空时写「用户未提供后续规划，本节暂空」。"
+            "2.1 MVP 功能：按 mvp_features 逐行渲染，编号从 F-01 起连续唯一，全文只引用编号；\n"
+            "module 缺失归入「基础功能」；description 缺失时用 name 展开并标注「（建议）」；"
+            "acceptance 缺失时写「待确认」。\n"
+            "mvp_features 为空数组时，依据 ui_pages 的页面 / 模块 / 关键交互推导候选功能清单，"
+            "每条都要能落到某个页面模块或关键交互上，不得造与页面无关的功能：\n"
+            "  · 名称后统一加「（建议）」后缀；\n"
+            "  · 优先级无依据时写「待确认」；\n"
+            "  · 验收标准一律写「待确认：该功能的验收标准」；\n"
+            "  · 表格上方加一句总说明「以下功能清单由模型依据页面结构与关键交互推断，"
+            "均标注（建议），请确认或修改」；\n"
+            "  · 在待确认清单里登记一条：功能清单为推断结果，影响章节 2.1 / 6.1。\n"
+            "ui_pages 也为空时，2.1 整表替换为「待确认：MVP 功能清单未提供」；"
+            "两种情况都要登记进待确认清单。\n"
+            "2.2 未来功能：按 v2_features 逐条列出；为空时写「用户未提供后续规划，本节暂空」。"
         ),
     ),
     PrdSection(
@@ -513,10 +522,17 @@ class PrdSectionWriter:
         system_prompt = build_prd_system_prompt(writing_rules)
         conversation = format_conversation(history or [])
         template_sections = split_template_by_section(artifacts["prd_template"])
-        # 审核用的需求输入走**骨架**：审核只核对「有没有编造 / 漏掉」，需要的是事实
-        # 索引而不是整篇散文。撰写侧仍用完整的 `requirements_text`——那是事实来源，
-        # 压缩它会让章节内容失去依据。
-        review_requirements = skeletonize(requirements_text)
+        # 需求输入**原样**交给审核，不做骨架化。
+        #
+        # 骨架器是为 Markdown 正文设计的，遇到代码块只留围栏首行、块体整块丢。而结构化
+        # 摘要整篇就是一个 ```json 块，压完只剩 `'```json'` 七个字符——审核的「唯一事实
+        # 来源」成了空壳，于是正文里任何具体内容都会被判成编造。
+        # 骨架化真正要治的是 `prior_sections` 的平方增长（见 `_join_prior`）；需求输入
+        # 每章都一样、大小固定，不属于那个问题，不该一起压。
+        #
+        # 字段契约则相反：整份 JSON Schema 有 8.6KB，而撰写只需要「哪些必填、每字段是什么、
+        # 枚举取值」，压成几行清单（`format_field_contract`）。它是六章都要付一遍的重复输入。
+        field_contract = format_field_contract(artifacts["field_schema"])
 
         total = len(PRD_SECTIONS)
         yield StreamEvent(
@@ -558,7 +574,7 @@ class PrdSectionWriter:
                         system_prompt=system_prompt,
                         requirements=requirements_text,
                         conversation=conversation,
-                        field_schema=artifacts["field_schema"],
+                        field_contract=field_contract,
                         prior_sections=_join_prior(written),
                     )
                 ):
@@ -583,7 +599,7 @@ class PrdSectionWriter:
                     section=section,
                     section_text=section_text,
                     writing_rules=writing_rules,
-                    requirements=review_requirements,
+                    requirements=requirements_text,
                     prior_sections=_join_prior(written),
                 )
                 # `max_rewrites` 为 0 时仍是「只审不改」的有效开关；> 0 时最多改一次
@@ -692,10 +708,17 @@ class PrdSectionWriter:
         system_prompt = build_prd_system_prompt(writing_rules)
         conversation = format_conversation(history or [])
         template_sections = split_template_by_section(artifacts["prd_template"])
-        # 审核用的需求输入走**骨架**：审核只核对「有没有编造 / 漏掉」，需要的是事实
-        # 索引而不是整篇散文。撰写侧仍用完整的 `requirements_text`——那是事实来源，
-        # 压缩它会让章节内容失去依据。
-        review_requirements = skeletonize(requirements_text)
+        # 需求输入**原样**交给审核，不做骨架化。
+        #
+        # 骨架器是为 Markdown 正文设计的，遇到代码块只留围栏首行、块体整块丢。而结构化
+        # 摘要整篇就是一个 ```json 块，压完只剩 `'```json'` 七个字符——审核的「唯一事实
+        # 来源」成了空壳，于是正文里任何具体内容都会被判成编造。
+        # 骨架化真正要治的是 `prior_sections` 的平方增长（见 `_join_prior`）；需求输入
+        # 每章都一样、大小固定，不属于那个问题，不该一起压。
+        #
+        # 字段契约则相反：整份 JSON Schema 有 8.6KB，而撰写只需要「哪些必填、每字段是什么、
+        # 枚举取值」，压成几行清单（`format_field_contract`）。它是六章都要付一遍的重复输入。
+        field_contract = format_field_contract(artifacts["field_schema"])
 
         total = len(PRD_SECTIONS)
         yield StreamEvent(
@@ -755,7 +778,7 @@ class PrdSectionWriter:
                                 section=section,
                                 section_text=section_text,
                                 writing_rules=writing_rules,
-                                requirements=review_requirements,
+                                requirements=requirements_text,
                                 prior_sections=prior_sections,
                             )
                 except AppError:
@@ -866,7 +889,7 @@ class PrdSectionWriter:
                                     system_prompt=system_prompt,
                                     requirements=requirements_text,
                                     conversation=conversation,
-                                    field_schema=artifacts["field_schema"],
+                                    field_contract=field_contract,
                                     prior_sections=prior,
                                 ),
                                 "writing",
@@ -1017,18 +1040,17 @@ class PrdSectionWriter:
         system_prompt: str,
         requirements: str,
         conversation: str,
-        field_schema: str,
+        field_contract: str,
         prior_sections: str,
     ) -> list[BaseMessage]:
         """组装「撰写某一章」的消息。"""
         user_content = PRD_SECTION_GENERATION_PROMPT.format(
             requirements=requirements,
             conversation=conversation,
-            field_schema=field_schema,
+            field_contract=field_contract,
             prd_template=section_template,
             prior_sections=prior_sections,
             section_heading=section.heading,
-            section_title=section.title,
             section_focus=section.focus,
             pending_spec=render_spec(),
         )

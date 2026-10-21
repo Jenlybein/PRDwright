@@ -347,3 +347,75 @@ def test_prior_sections_are_skeletonized() -> None:
     assert verbose not in second_chapter_msg
     # 但章节标题必须还在，否则编号与口径就无从核对
     assert PRD_SECTIONS[0].heading in second_chapter_msg
+
+
+# 结构化摘要里带两个「只可能来自需求输入」的事实：产品名与技术约束。
+# 下面两条用例靠它们断言审核与撰写**各自**拿到的是什么。
+_SUMMARY: dict[str, Any] = {
+    "product_name": "问卷星Plus",
+    "product_goal": "让产品团队自助收集需求问卷",
+    "target_users": ["产品经理", "运营"],
+    "platform": "Web",
+    "mvp_features": [],
+    "v2_features": ["导出为 Excel"],
+    "ui_pages": [{"name": "问卷列表", "modules": ["筛选"], "interactions": ["点击新建"]}],
+    "technical_constraints": ["后端用 Python", "前端用 Vue", "部署在云服务器"],
+}
+# 审核提示词里才有的那一节标题，用来把审核消息从撰写消息里挑出来
+_REVIEW_SECTION_MARKER = "## 四、待审章节"
+
+
+def _collect_summary(writer: PrdSectionWriter) -> list[StreamEvent]:
+    """用结构化摘要跑一次（`_collect` 走的是自由文本那条路，碰不到 JSON 代码块）。"""
+
+    async def drain() -> list[StreamEvent]:
+        return [event async for event in writer.stream(summary=_SUMMARY)]
+
+    return asyncio.run(drain())
+
+
+def test_review_sees_the_whole_requirements_not_a_skeleton() -> None:
+    """审核的唯一事实来源必须是**完整**的需求输入，不能是骨架。
+
+    骨架器（`doc_skeleton.skeletonize`）是为 Markdown 正文设计的：遇到代码块只留围栏
+    首行、块体整块丢。而结构化摘要整篇就是一个 ```json 块，压完只剩 ```` ```json ````。
+    那时审核对着空材料判定，凡正文里出现具体内容都符合「输入里没有的技术栈」这条
+    high 定义——真实存在的事实被整片误判成编造。
+
+    提示词那边已经写了「先取证再判定」，但取证的前提是**手里真有材料**。
+    """
+    pass_reply = json.dumps({"verdict": "pass", "issues": []}, ensure_ascii=False)
+    llm = FakeLLM(section_replies=["本章正文内容"], review_replies=[pass_reply])
+    _collect_summary(PrdSectionWriter(llm=llm, review_enabled=True))
+
+    review_messages = [msg for msg in llm.user_messages if _REVIEW_SECTION_MARKER in msg]
+    assert len(review_messages) == len(PRD_SECTIONS), "审核调用数不对"
+    for message in review_messages:
+        assert "问卷星Plus" in message, "审核没拿到需求输入里的产品名"
+        assert "后端用 Python" in message, "审核没拿到需求输入里的技术约束"
+
+    # 对照：骨架化会把这些事实全部丢掉——写出来是为了让这条用例在退化时必然变红
+    from backend.services.doc_skeleton import skeletonize
+    from backend.services.prd_skill import format_summary_as_requirements
+
+    skeleton = skeletonize(format_summary_as_requirements(_SUMMARY))
+    assert "问卷星Plus" not in skeleton and "后端用 Python" not in skeleton
+
+
+def test_generation_prompt_carries_compacted_field_contract() -> None:
+    """撰写侧带的是**压过的字段清单**，不是 8.6KB 的整份 JSON Schema。
+
+    压掉的必须是校验细节、不能是语义：字段名、必填性、枚举取值都要留着。
+    """
+    llm = FakeLLM(section_replies=["本章正文内容"])
+    _collect_summary(PrdSectionWriter(llm=llm, review_enabled=False))
+
+    write_messages = [msg for msg in llm.user_messages if _REVIEW_SECTION_MARKER not in msg]
+    assert write_messages
+    for message in write_messages:
+        assert "必填（缺失即按「缺失信息处理」标注待确认）" in message
+        assert "product_name" in message
+        assert "priority 取值 P0/P1/P2" in message
+        # 整份 JSON Schema 的校验细节不该再出现
+        assert '"$schema"' not in message
+        assert "x_normalization_rules" not in message
