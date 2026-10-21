@@ -65,6 +65,55 @@ async def stats(user: User = Depends(require_admin)) -> schemas.AdminStatsRespon
     return schemas.AdminStatsResponse(**admin_service.platform_stats())
 
 
+@router.get(
+    "/stats/daily",
+    response_model=schemas.AdminDailyStatsResponse,
+    summary="按日用量趋势",
+)
+async def stats_daily(
+    days: int = 7,
+    tz_offset_minutes: int = 0,
+    user: User = Depends(require_admin),
+) -> schemas.AdminDailyStatsResponse:
+    """最近 N 天的每日用量（生成数 / 失败率 / Token）。
+
+    `tz_offset_minutes` 由前端按浏览器实际时区传（东八区 480）。**服务端不猜时区**：
+    猜错会让整条「按日」错位，而且错得很隐蔽——数字都合理，只是每一天都挪了格。
+
+    没有任务的那天也会返回（各项为 0）：折线图若跳过空白日，会把「那天没人用」
+    画成一条平滑斜线，看起来像用量在缓慢变化。
+    """
+    del user
+    data = admin_service.daily_stats(days=days, tz_offset_minutes=tz_offset_minutes)
+    summary = data.get("summary") or {}
+    return schemas.AdminDailyStatsResponse(
+        items=[schemas.AdminDailyStat(**row) for row in data["items"]],
+        # 汇总行的 `day` 不是某一天，用空串明确表示「这是整段区间」
+        summary=schemas.AdminDailyStat(day="", **summary) if summary else None,
+        days=len(data["items"]),
+    )
+
+
+@router.get(
+    "/stats/users",
+    response_model=schemas.AdminTopUsersResponse,
+    summary="用户用量排行",
+)
+async def stats_users(
+    limit: int = 10,
+    user: User = Depends(require_admin),
+) -> schemas.AdminTopUsersResponse:
+    """用量最高的用户。
+
+    口径与 `/users` 列表**同源**（共用仓储里的同一段聚合表达式）：两处各算一遍，
+    迟早会给出两个数，而管理员只会更困惑。
+    """
+    del user
+    return schemas.AdminTopUsersResponse(
+        users=[schemas.AdminTopUserItem(**row) for row in admin_service.top_users(limit)]
+    )
+
+
 # ----------------------------------------------------------------------
 # 审计
 # ----------------------------------------------------------------------
@@ -259,3 +308,73 @@ async def delete_invite(code: str, user: User = Depends(require_admin)) -> schem
     """
     admin_service.delete_invite(user, code)
     return schemas.AdminOkResponse()
+
+
+# ----------------------------------------------------------------------
+# 日志检索（v4 T4）
+# ----------------------------------------------------------------------
+
+
+@router.get("/logs", response_model=schemas.AdminLogListResponse, summary="日志检索")
+async def list_logs(
+    level: str = "",
+    since: str = "",
+    until: str = "",
+    logger_name: str = "",
+    event: str = "",
+    request_id: str = "",
+    user_id: int | None = None,
+    keyword: str = "",
+    exclude_event: str = "",
+    page: int = 1,
+    page_size: int = 100,
+    user: User = Depends(require_admin),
+) -> schemas.AdminLogListResponse:
+    """按条件检索应用日志（分页）。
+
+    与 `/audit` 的分工
+    ------------------
+    `/audit` 是**人**做了什么（问责，不该随便清）；
+    这里是**系统**在说什么（排障，可随时清空重建）。混在一起时，
+    排查故障会被大量人为操作淹没，追责时又会漏在日志风暴里。
+
+    为什么所有过滤条件都是查询参数而不是请求体
+    ------------------------------------------
+    它是**只读**接口，而且最常见的用法是「把链接发给自己或同事」——
+    过滤条件进 URL 才能分享，进请求体就只能靠截图。这也让浏览器能直接缓存与回退。
+
+    Args:
+        level: 最低级别（选 WARNING 即「警告及以上」，含 ERROR）。
+        since / until: 时间范围，UTC ISO 8601。
+        logger_name: logger 名前缀，如 `backend.services`。
+        event: 事件名精确匹配，如 `job.started`。
+        request_id: 请求号精确匹配——**排障主路径**：粘一个号拉出该请求全部日志。
+        user_id: 归属用户。
+        keyword: 消息关键词。
+        exclude_event: 排除某个事件名。**访问日志（`request.completed`）每个请求一条**，
+            量级会压过业务事件——排掉它才看得见「刚才那次生成怎么了」。
+        page / page_size: 分页，页码从 1 开始。
+
+    Returns:
+        一页日志与命中总数。`extra` 已由后端解析成对象。
+    """
+    del user  # 只读接口，不涉及写操作，也不记审计
+    data = admin_service.list_logs(
+        level=level,
+        since=since,
+        until=until,
+        logger_name=logger_name,
+        event=event,
+        request_id=request_id,
+        user_id=user_id,
+        keyword=keyword,
+        exclude_event=exclude_event,
+        page=page,
+        page_size=page_size,
+    )
+    return schemas.AdminLogListResponse(
+        items=[schemas.AdminLogItem(**row) for row in data["items"]],
+        total=data["total"],
+        page=data["page"],
+        page_size=data["page_size"],
+    )

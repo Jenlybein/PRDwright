@@ -1,23 +1,70 @@
 <script setup lang="ts">
 /**
- * 概览页：平台总量。
+ * 概览页：总量数字 + 按日趋势 + 用户排行。
  *
- * 这里只放**后端已经算得出来**的数字。空有图表的仪表盘比没有图表更误导——
- * 在 T2（平台统计）之前，趋势图没有数据源，所以这一版只有总量卡片。
+ * 这一页回答两个不同的问题
+ * ------------------------
+ * - **卡片**回答「一共多少」：从开天辟地到此刻的累计。
+ * - **趋势图**回答「在变好还是变坏」：每天多少、失败率涨没涨。
+ *
+ * 只有卡片时，你知道一共跑了 10 万次，但看不出「昨天突然掉了」——
+ * 而后者才是需要立刻知道的事。
+ *
+ * 三个刻意的取舍
+ * --------------
+ * 1. **时区偏移由浏览器传**。后端存 UTC，按 UTC 分组会让东八区的「昨晚」出现在
+ *    「今天」那一格。服务端不猜客户端时区（猜错会整体错位，且错得很隐蔽）。
+ * 2. **失败率的分母是「已收尾」任务**，且排除主动取消 / 被顶替——它们同样是
+ *    `failed` 状态，但成因不是「模型坏了」。这个口径在后端算，前端只显示。
+ * 3. **空数据不画空图**。全员为 0 时给一句明确文案：一张什么都没有的图
+ *    看起来像「页面坏了」，而不是「这段时间确实没人用」。
  */
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
-import { fetchStats, messageOf, type AdminStats } from '@/services/adminService'
+import {
+  fetchDailyStats,
+  fetchStats,
+  fetchTopUsers,
+  messageOf,
+  type AdminDailyStat,
+  type AdminStats,
+  type AdminTopUser,
+} from '@/services/adminService'
 
 const stats = ref<AdminStats | null>(null)
+const daily = ref<AdminDailyStat[]>([])
+/** 区间汇总由后端给：失败率若在前端再算一遍，就成了同一口径的两套实现 */
+const rangeSummary = ref<AdminDailyStat | null>(null)
+const topUsers = ref<AdminTopUser[]>([])
 const loading = ref(true)
 const error = ref('')
+
+/** 趋势的天数窗口 */
+const days = ref(7)
+/** 当前看的指标：生成数 / Token / 失败率 */
+const metric = ref<'tasks' | 'tokens' | 'failure'>('tasks')
+
+const METRICS = [
+  { key: 'tasks' as const, label: '生成数' },
+  { key: 'tokens' as const, label: 'Token' },
+  { key: 'failure' as const, label: '失败率' },
+]
+
+const DAY_OPTIONS = [7, 14, 30]
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    stats.value = await fetchStats()
+    const [platform, dailyRows, ranking] = await Promise.all([
+      fetchStats(),
+      fetchDailyStats(days.value),
+      fetchTopUsers(10),
+    ])
+    stats.value = platform
+    daily.value = dailyRows.items
+    rangeSummary.value = dailyRows.summary
+    topUsers.value = ranking
   } catch (err) {
     error.value = messageOf(err)
   } finally {
@@ -25,7 +72,19 @@ async function load() {
   }
 }
 
-onMounted(load)
+/**
+ * 只换天数时**只重拉趋势**：卡片与排行与天数无关，一起拉等于白白多发两个请求，
+ * 而用户连点「7 天 / 30 天」时会把这个浪费放大好几倍。
+ */
+watch(days, async () => {
+  try {
+    const rows = await fetchDailyStats(days.value)
+    daily.value = rows.items
+    rangeSummary.value = rows.summary
+  } catch (err) {
+    error.value = messageOf(err)
+  }
+})
 
 /** 数字卡片。总数与成功数放在一起，成功率才不用心算 */
 const cards = [
@@ -36,6 +95,116 @@ const cards = [
   { key: 'prompt_tokens' as const, label: '输入 Token', hint: '累计' },
   { key: 'completion_tokens' as const, label: '输出 Token', hint: '累计' },
 ]
+
+/** 这段时间内一条业务数据都没有——用于决定显示空态而不是空图 */
+const isEmpty = computed(() =>
+  daily.value.every((row) => row.task_count === 0 && row.prompt_tokens === 0),
+)
+
+/** 柱状图的一根柱 */
+interface Bar {
+  day: string
+  /** 横轴标签，30 天时只显示一部分，否则会挤成一团 */
+  label: string
+  /** 柱身总高百分比 0-100 */
+  height: number
+  /** 柱内分段（自下而上渲染）：用来表达「其中多少是失败」 */
+  segments: { cls: string; height: number }[]
+  /** 柱顶/悬停的说明 */
+  caption: string
+  /** 失败率这类可能没有值的指标，用空柱表示 */
+  empty: boolean
+}
+
+/** 当前指标下每根柱的画法 */
+const bars = computed<Bar[]>(() => {
+  const rows = daily.value
+  // 30 天时每 6 天显示一个标签，避免横轴糊成一片
+  const labelStep = rows.length > 14 ? 6 : 1
+
+  if (metric.value === 'tasks') {
+    const max = Math.max(1, ...rows.map((r) => r.task_count))
+    return rows.map((row, index) => {
+      const other = Math.max(
+        0,
+        row.task_count - row.completed_count - row.failed_count,
+      )
+      const total = row.task_count
+      return {
+        day: row.day,
+        label: index % labelStep === 0 ? row.day.slice(5) : '',
+        height: (total / max) * 100,
+        // 顺序即渲染顺序（自上而下）：失败置顶、成功垫底。
+        // 成功在底、失败在上，是柱状图的默认读法——「坏的那部分长在最上面」一眼可见。
+        segments: total
+          ? [
+              { cls: 'bg-danger', height: (row.failed_count / total) * 100 },
+              {
+                cls: 'bg-line-strong',
+                height: (other / total) * 100,
+              },
+              { cls: 'bg-accent', height: (row.completed_count / total) * 100 },
+            ].filter((seg) => seg.height > 0)
+          : [],
+        caption: `${row.day}：${total} 个（成功 ${row.completed_count}、失败 ${row.failed_count}）`,
+        empty: total === 0,
+      }
+    })
+  }
+
+  if (metric.value === 'tokens') {
+    const totals = rows.map((r) => r.prompt_tokens + r.completion_tokens)
+    const max = Math.max(1, ...totals)
+    return rows.map((row, index) => {
+      const total = row.prompt_tokens + row.completion_tokens
+      return {
+        day: row.day,
+        label: index % labelStep === 0 ? row.day.slice(5) : '',
+        height: (total / max) * 100,
+        segments: total ? [{ cls: 'bg-accent', height: 100 }] : [],
+        caption: `${row.day}：${total.toLocaleString()} Token`,
+        empty: total === 0,
+      }
+    })
+  }
+
+  // 失败率：柱子高度即百分比（0-100 固定刻度，不按最大值缩放）
+  return rows.map((row, index) => {
+    const rate = row.failure_rate
+    return {
+      day: row.day,
+      label: index % labelStep === 0 ? row.day.slice(5) : '',
+      height: rate === null ? 0 : rate * 100,
+      segments: rate === null ? [] : [{ cls: 'bg-danger', height: 100 }],
+      caption:
+        rate === null
+          ? `${row.day}：没有任务`
+          : `${row.day}：${(rate * 100).toFixed(1)}% 失败（${row.failed_count} / ${row.completed_count + row.failed_count}）`,
+      empty: rate === null,
+    }
+  })
+})
+
+/** 区间汇总：直接读后端给的那份，前端不再自己加总 */
+const summary = computed(() => {
+  const row = rangeSummary.value
+  return {
+    tasks: row?.task_count ?? 0,
+    failed: row?.failed_count ?? 0,
+    tokens: (row?.prompt_tokens ?? 0) + (row?.completion_tokens ?? 0),
+    // 后端已按「已收尾」为分母算好；null 表示这段区间没有已收尾任务
+    rate: row?.failure_rate === null || row?.failure_rate === undefined
+      ? null
+      : row.failure_rate * 100,
+  }
+})
+
+/** 排行表里「总 Token」列 */
+function totalTokens(row: AdminTopUser): number {
+  return row.prompt_tokens + row.completion_tokens
+}
+
+onMounted(load)
 </script>
 
 <template>
@@ -44,27 +213,179 @@ const cards = [
       <h1 class="text-base font-semibold text-fg">平台概览</h1>
       <p class="mt-1 text-sm text-muted">
         Token 统计包含失败的任务——重试恰恰是最烧钱的部分，剔掉它们会让成本看起来偏低。
+        失败率不含主动取消与被新任务顶替的那些：它们在库里同样是 failed，但成因不是模型坏了。
       </p>
     </div>
 
-    <p v-if="error" class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg">
+    <p
+      v-if="error"
+      class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg"
+    >
       {{ error }}
     </p>
 
     <div v-else-if="loading" class="text-sm text-subtle">加载中…</div>
 
-    <div v-else-if="stats" class="grid gap-3 sm:grid-cols-3">
-      <div
-        v-for="card in cards"
-        :key="card.key"
-        class="rounded-card border border-line bg-surface p-4"
-      >
-        <div class="text-xs text-subtle">{{ card.label }}</div>
-        <div class="mt-1 text-2xl font-semibold text-fg">
-          {{ stats[card.key].toLocaleString() }}
+    <template v-else>
+      <!-- 总量卡片 -->
+      <div v-if="stats" class="grid gap-3 sm:grid-cols-3">
+        <div
+          v-for="card in cards"
+          :key="card.key"
+          class="rounded-card border border-line bg-surface p-4"
+        >
+          <div class="text-xs text-subtle">{{ card.label }}</div>
+          <div class="mt-1 text-2xl font-semibold text-fg">
+            {{ stats[card.key].toLocaleString() }}
+          </div>
+          <div class="mt-0.5 text-xs text-subtle">{{ card.hint }}</div>
         </div>
-        <div class="mt-0.5 text-xs text-subtle">{{ card.hint }}</div>
       </div>
-    </div>
+
+      <!-- 趋势图 -->
+      <div class="rounded-card border border-line bg-surface p-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <h2 class="text-sm font-medium text-fg">按日趋势</h2>
+
+          <!-- 指标切换 -->
+          <div class="ml-auto flex gap-1">
+            <button
+              v-for="item in METRICS"
+              :key="item.key"
+              type="button"
+              class="rounded-control px-2.5 py-1 text-xs"
+              :class="
+                metric === item.key
+                  ? 'bg-surface-2 font-medium text-fg'
+                  : 'text-body hover:bg-surface-2'
+              "
+              @click="metric = item.key"
+            >
+              {{ item.label }}
+            </button>
+          </div>
+
+          <!-- 天数切换 -->
+          <div class="flex gap-1">
+            <button
+              v-for="option in DAY_OPTIONS"
+              :key="option"
+              type="button"
+              class="rounded-control px-2 py-1 text-xs"
+              :class="
+                days === option
+                  ? 'bg-surface-2 font-medium text-fg'
+                  : 'text-body hover:bg-surface-2'
+              "
+              @click="days = option"
+            >
+              {{ option }} 天
+            </button>
+          </div>
+        </div>
+
+        <!-- 空数据：给文案，不画一张什么都没有的图 -->
+        <div v-if="isEmpty" class="px-2 py-12 text-center text-sm text-subtle">
+          这段时间还没有生成记录。等有人开始用，这里会出现每天的趋势。
+        </div>
+
+        <template v-else>
+          <!-- 汇总：图看趋势，这行看总量 -->
+          <div class="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted">
+            <span>生成 <b class="text-fg">{{ summary.tasks.toLocaleString() }}</b> 个</span>
+            <span>失败 <b class="text-fg">{{ summary.failed.toLocaleString() }}</b> 个</span>
+            <span>
+              失败率
+              <b class="text-fg">
+                {{ summary.rate === null ? '—' : summary.rate.toFixed(1) + '%' }}
+              </b>
+            </span>
+            <span>Token <b class="text-fg">{{ summary.tokens.toLocaleString() }}</b></span>
+          </div>
+
+          <!-- 柱状图：纯 CSS 高度百分比，天然自适应，不必算坐标 -->
+          <div
+            class="mt-3 flex h-44 items-end border-b border-line pb-0.5"
+            :class="days > 14 ? 'gap-px' : 'gap-1'"
+          >
+            <div
+              v-for="bar in bars"
+              :key="bar.day"
+              class="group flex h-full flex-1 flex-col justify-end"
+              :title="bar.caption"
+            >
+              <div
+                v-if="!bar.empty"
+                class="flex w-full flex-col justify-end overflow-hidden rounded-t-sm"
+                :style="{ height: Math.max(bar.height, 1.5) + '%' }"
+              >
+                <!-- 分段自上而下（见 `bars` 里的顺序说明）：失败在顶、成功垫底 -->
+                <div
+                  v-for="(seg, index) in bar.segments"
+                  :key="index"
+                  :class="seg.cls"
+                  :style="{ height: seg.height + '%' }"
+                ></div>
+              </div>
+              <!-- 空柱：画一条 2px 的浅色底，表示「这天有格子但值是 0 / 无」 -->
+              <div v-else class="w-full rounded-t-sm bg-line" style="height: 2px"></div>
+            </div>
+          </div>
+
+          <!-- 横轴 -->
+          <div class="mt-1 flex" :class="days > 14 ? 'gap-px' : 'gap-1'">
+            <div
+              v-for="bar in bars"
+              :key="bar.day"
+              class="flex-1 whitespace-nowrap text-center text-xs text-subtle"
+            >
+              {{ bar.label }}
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- 用户排行 -->
+      <div class="rounded-card border border-line bg-surface">
+        <div class="border-b border-line px-4 py-3">
+          <h2 class="text-sm font-medium text-fg">用户用量排行</h2>
+          <p class="mt-0.5 text-xs text-subtle">
+            只列生成过任务的账号。口径与「用户」页同源——两处各算一遍，迟早会给出两个数。
+          </p>
+        </div>
+
+        <table class="w-full text-sm">
+          <thead class="border-b border-line text-left text-xs text-subtle">
+            <tr>
+              <th class="w-12 px-4 py-2 font-medium">#</th>
+              <th class="px-4 py-2 font-medium">用户</th>
+              <th class="px-4 py-2 font-medium">任务数</th>
+              <th class="px-4 py-2 font-medium">总 Token</th>
+              <th class="px-4 py-2 font-medium">状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(row, index) in topUsers"
+              :key="row.id"
+              class="border-b border-line last:border-0"
+            >
+              <td class="px-4 py-2 text-subtle">{{ index + 1 }}</td>
+              <td class="px-4 py-2 font-medium text-fg">{{ row.username }}</td>
+              <td class="px-4 py-2 text-muted">{{ row.task_count.toLocaleString() }}</td>
+              <td class="px-4 py-2 text-muted">{{ totalTokens(row).toLocaleString() }}</td>
+              <td class="px-4 py-2 text-xs" :class="row.is_active ? 'text-muted' : 'text-danger-fg'">
+                {{ row.is_active ? '正常' : '已停用' }}
+              </td>
+            </tr>
+            <tr v-if="!topUsers.length">
+              <td colspan="5" class="px-4 py-8 text-center text-sm text-subtle">
+                还没有任何用户生成过任务。
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
   </div>
 </template>

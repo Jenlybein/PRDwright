@@ -18,6 +18,7 @@ const navItems = [
   { name: 'dashboard', label: '概览' },
   { name: 'users', label: '用户' },
   { name: 'invites', label: '邀请码' },
+  { name: 'logs', label: '系统日志' },
   { name: 'audit', label: '操作记录' },
 ]
 

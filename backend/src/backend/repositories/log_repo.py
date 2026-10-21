@@ -98,3 +98,130 @@ class LogRepository:
         with connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM app_logs").fetchone()
             return int(row["n"]) if row else 0
+
+    # ------------------------------------------------------------------
+    # 检索（v4 T4：把攒下来的日志变成可查的）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def search(
+        *,
+        level: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        logger_name: str | None = None,
+        event: str | None = None,
+        request_id: str | None = None,
+        user_id: int | None = None,
+        keyword: str | None = None,
+        exclude_event: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """按条件检索日志，返回 `(当页行, 命中总数)`。
+
+        为什么返回总数
+        --------------
+        分页器必须知道「一共多少条」才能显示页数；让前端自己推算会不准
+        （它只知道自己拿到的那一页）。两条 SQL 在**同一个连接**里跑，
+        保证「总数」与「当页」看到的是同一时刻的表状态。
+
+        过滤条件的取舍
+        --------------
+        - **级别用 `>=` 而不是等值**：选 `WARNING` 时人想看的是「警告及以上」，
+          而不是「只要 WARNING、不要 ERROR」——后者几乎没人需要，却更容易误解。
+          级别在 SQL 里按 `level_rank` 映射成数字比较（SQLite 无枚举类型）。
+        - **关键词只搜 `msg`**：`extra_json` 也被搜的话，一次 `LIKE` 会扫全表两列，
+          在 SQLite 上代价明显；而人找日志时最先记得的是那句话本身。
+          要按结构化字段找，用 `event` / `request_id` / `user_id` 那几个精确条件。
+        - **`logger` 用前缀匹配**（`LIKE 'x%'`）：`backend.services.job_service` 这整棵
+          子树一起看是常态，要求精确等于反而更麻烦。
+        - 所有条件都是**可选**：不传就不加那个 `WHERE` 子句，而不是传空串当条件。
+
+        Args:
+            level: 最低级别（INFO / WARNING / ERROR / CRITICAL）。
+            since: 起始时间（含），`utc_ms_text` 格式。
+            until: 结束时间（含），同格式。
+            logger_name: logger 名前缀。
+            event: 事件名，精确匹配。
+            request_id: 请求号，精确匹配（排障主路径）。
+            user_id: 归属用户。
+            keyword: 消息关键词（`LIKE %kw%`）。
+            exclude_event: 要**排除**的事件名。访问日志（`request.completed`）每来一个
+                请求就写一条，量级远远压过业务事件——日志页默认把它排掉，
+                否则「刚才那次生成怎么了」会被几十条「请求完成」埋掉。
+            limit: 每页条数。
+            offset: 跳过多少条。
+
+        Returns:
+            `(rows, total)`：`rows` 为当前页（按时间倒序），`total` 为命中总数。
+        """
+        # 级别映射：SQLite 里没有枚举，靠 `CASE` 把字符串折成可比较的序。
+        # 未登记的级别一律当 0（低于 INFO），于是「按 INFO 过滤」不会把它漏掉。
+        level_rank = (
+            "CASE level WHEN 'DEBUG' THEN 10 WHEN 'INFO' THEN 20 "
+            "WHEN 'WARNING' THEN 30 WHEN 'ERROR' THEN 40 WHEN 'CRITICAL' THEN 50 "
+            "ELSE 0 END"
+        )
+
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if level:
+            min_rank = {
+                "DEBUG": 10,
+                "INFO": 20,
+                "WARNING": 30,
+                "ERROR": 40,
+                "CRITICAL": 50,
+            }.get(level.upper())
+            # 认不出的级别就不过滤，而不是返回空列表：
+            # 「筛了个不存在的级别」应当表现为「没筛」，让调用方看到数据而非空页。
+            if min_rank is not None:
+                clauses.append(f"{level_rank} >= ?")
+                params.append(min_rank)
+
+        if since:
+            clauses.append("ts >= ?")
+            params.append(since)
+        if until:
+            clauses.append("ts <= ?")
+            params.append(until)
+        if logger_name:
+            # 前缀匹配：给 `LIKE` 的通配符只有尾部一个，仍可走索引
+            clauses.append("logger LIKE ?")
+            params.append(f"{logger_name}%")
+        if event:
+            clauses.append("event = ?")
+            params.append(event)
+        if request_id:
+            clauses.append("request_id = ?")
+            params.append(request_id)
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if exclude_event:
+            # 用 `IS NOT` 而不是 `!=`：`event` 可为 NULL，而 `NULL != 'x'`
+            # 在 SQL 里求值为 NULL（不成立），会把所有「没有事件名」的日志一起丢掉。
+            # `IS NOT` 对 NULL 成立，语义正是「不是这个事件（含没有事件名的）」。
+            clauses.append("event IS NOT ?")
+            params.append(exclude_event)
+        if keyword:
+            # 转义 `%` / `_`：用户搜「50%」时不该被当成通配符，否则会搜出无关的行
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("msg LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with connect() as conn:
+            total_row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM app_logs {where}", tuple(params)
+            ).fetchone()
+            total = int(total_row["n"]) if total_row else 0
+
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM app_logs {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, max(1, min(int(limit), 500)), max(0, int(offset))),
+            ).fetchall()
+            return [dict(row) for row in rows], total

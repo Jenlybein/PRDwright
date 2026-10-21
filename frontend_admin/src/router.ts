@@ -65,6 +65,12 @@ export const router = createRouter({
       component: () => import('@/views/AuditView.vue'),
       meta: { requiresAdmin: true },
     },
+    {
+      path: '/logs',
+      name: 'logs',
+      component: () => import('@/views/LogsView.vue'),
+      meta: { requiresAdmin: true },
+    },
     // 未匹配的地址一律回概览，避免刷新时白屏
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],

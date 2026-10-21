@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -31,6 +32,7 @@ from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.admin_repo import AdminStatsRepository, AuditRepository
 from backend.repositories.auth_repo import InviteCodeRepository, UserRepository
+from backend.repositories.log_repo import LogRepository
 from backend.services import auth_service
 from backend.services.auth_service import User
 
@@ -129,6 +131,44 @@ def list_users() -> list[dict[str, Any]]:
 def platform_stats() -> dict[str, Any]:
     """平台总量：用户数、管理员数、任务数、成功数、Token 合计。"""
     return AdminStatsRepository.platform_usage()
+
+
+def daily_stats(days: int = 7, tz_offset_minutes: int = 0) -> dict[str, Any]:
+    """按本地日期聚合最近 `days` 天的用量，并附上这段区间的汇总。
+
+    时区偏移由前端按浏览器实际时区传（东八区传 480）。默认 0 即 UTC——
+    服务端不猜客户端的时区，猜错会让「按日」整体错位，而且错得很隐蔽。
+
+    **区间汇总在这里算，不交给前端**：失败率若让前端把每天的数字再加一遍，
+    就等于同一套口径实现了两次。两处一旦有一处改了口径（比如以后把「运行中」
+    也算进分母），页面上的日线和汇总行就会互相矛盾，而没人知道该信哪个。
+    """
+    items = AdminStatsRepository.daily(days=days, tz_offset_minutes=tz_offset_minutes)
+
+    def _sum(key: str) -> int:
+        return sum(int(row[key]) for row in items)
+
+    completed = _sum("completed_count")
+    failed = _sum("failed_count")
+    finished = completed + failed
+    summary = {
+        "task_count": _sum("task_count"),
+        "completed_count": completed,
+        "failed_count": failed,
+        "cancelled_count": _sum("cancelled_count"),
+        "running_count": _sum("running_count"),
+        "prompt_tokens": _sum("prompt_tokens"),
+        "completion_tokens": _sum("completion_tokens"),
+        # 区间失败率用**加权**算法（区间失败 / 区间已收尾），不是「每天率的平均」：
+        # 后者会让任务量少的那天与任务量大的那天等权，把真实的失败率算偏。
+        "failure_rate": round(failed / finished, 4) if finished else None,
+    }
+    return {"items": items, "summary": summary}
+
+
+def top_users(limit: int = 10) -> list[dict[str, Any]]:
+    """用量最高的用户（只含真的生成过任务的人）。"""
+    return AdminStatsRepository.top_users(limit=limit)
 
 
 def create_user(actor: User, username: str, password: str, *, is_admin: bool = False) -> User:
@@ -298,3 +338,78 @@ def delete_invite(actor: User, code: str) -> None:
     if not InviteCodeRepository.delete(cleaned):
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该邀请码不存在")
     _audit(actor, "invite.delete", target=cleaned, detail="已删除")
+
+
+# ----------------------------------------------------------------------
+# 日志检索（v4 T4）
+# ----------------------------------------------------------------------
+
+
+def list_logs(
+    *,
+    level: str = "",
+    since: str = "",
+    until: str = "",
+    logger_name: str = "",
+    event: str = "",
+    request_id: str = "",
+    user_id: int | None = None,
+    keyword: str = "",
+    exclude_event: str = "",
+    page: int = 1,
+    page_size: int = 100,
+) -> dict[str, Any]:
+    """检索 `app_logs`，返回 `{items, total, page, page_size}`。
+
+    为什么分页在服务端算
+    --------------------
+    日志是**只增不减**的表，量级远超用户或任务。前端拉全量再切片，等于每次翻页
+    都把整张表搬过网络——第一次打开日志页就会卡住，而那时恰恰是最需要它的时候。
+
+    `extra_json` 在这里**解析成对象**再返回，而不是把那段字符串原样丢给前端：
+    后端知道它是什么（`json.dumps` 写的），前端不该为了看一个 `job_id`
+    再写一遍 JSON 解析与容错。解析失败给 `{}` 而不是抛错——一条格式异常的旧日志
+    不该让整个列表 500。
+
+    Args:
+        level / since / until / logger_name / event / request_id / user_id / keyword:
+            过滤条件，全部可选（空串视为不筛）。
+        exclude_event: 要排除的事件名（如 `request.completed`）。访问日志每个请求一条，
+            量级压过业务事件，默认排掉它，日志页才看得见「生成发生了什么」。
+        page: 第几页，从 1 开始。
+        page_size: 每页条数。
+
+    Returns:
+        `{"items": [...], "total": int, "page": int, "page_size": int}`
+    """
+    safe_page = max(1, int(page))
+    safe_size = max(1, min(int(page_size), 500))
+    rows, total = LogRepository.search(
+        level=level or None,
+        since=since or None,
+        until=until or None,
+        logger_name=logger_name or None,
+        event=event or None,
+        request_id=request_id or None,
+        user_id=user_id,
+        keyword=keyword or None,
+        exclude_event=exclude_event or None,
+        limit=safe_size,
+        offset=(safe_page - 1) * safe_size,
+    )
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        extra: Any = {}
+        raw_extra = row.get("extra_json") or ""
+        if raw_extra:
+            try:
+                parsed = json.loads(raw_extra)
+                # 只接受对象：历史上有过把数组写进去的可能，非对象一律当空，
+                # 免得前端拿到一个数组还要判断类型。
+                extra = parsed if isinstance(parsed, dict) else {}
+            except (ValueError, TypeError):
+                extra = {}
+        items.append({**row, "extra": extra})
+
+    return {"items": items, "total": total, "page": safe_page, "page_size": safe_size}

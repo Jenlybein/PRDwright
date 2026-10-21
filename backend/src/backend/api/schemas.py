@@ -420,6 +420,95 @@ class AdminAuditListResponse(BaseModel):
     items: list[AdminAuditItem] = Field(description="最近的操作，倒序")
 
 
+class AdminLogItem(BaseModel):
+    """一条应用日志（`app_logs` 的一行）。
+
+    `extra` 是后端**已经解析好的**对象，不是原始字符串：前端不该为了看一个
+    `job_id` 再写一遍 JSON 解析与容错。解析失败时后端给 `{}`，不会让整个列表失败。
+    """
+
+    id: int = Field(description="日志 ID（自增，用于前端列表的 key）")
+    ts: str = Field(description="发生时间（UTC ISO 8601，毫秒精度）")
+    level: str = Field(description="级别：DEBUG / INFO / WARNING / ERROR / CRITICAL")
+    logger: str = Field(description="来源 logger 名")
+    msg: str = Field(description="日志正文")
+    request_id: str | None = Field(default=None, description="请求 ID；启动日志等无请求来源时为 null")
+    user_id: int | None = Field(default=None, description="归属用户；无归属时为 null")
+    event: str | None = Field(default=None, description="事件名，如 job.started / llm.call_retry")
+    extra: dict[str, Any] = Field(default_factory=dict, description="业务字段（job_id / 耗时 / token 等）")
+    exc: str | None = Field(default=None, description="异常堆栈（仅 ERROR 类日志有）")
+
+
+class AdminLogListResponse(BaseModel):
+    """日志检索结果（一页）。
+
+    `total` 是**命中总数**而不是本页条数：分页器要靠它算页数，前端自己推算会不准。
+    """
+
+    items: list[AdminLogItem] = Field(description="当前页，按时间倒序")
+    total: int = Field(description="命中总数")
+    page: int = Field(description="当前页码，从 1 开始")
+    page_size: int = Field(description="每页条数")
+
+
+class AdminDailyStat(BaseModel):
+    """按天的用量聚合（一天一行）。
+
+    **没有任务的那天也会出现（各项为 0）**：折线图若跳过空白日，会把「那天没人用」
+    画成一条平滑的斜线，看起来像用量在缓慢变化——而真相是那天一个都没有。
+    """
+
+    day: str = Field(description="本地日期，形如 2026-10-22")
+    task_count: int = Field(description="当天创建的任务数（含运行中）")
+    completed_count: int = Field(description="成功完成数")
+    failed_count: int = Field(description="**真失败**数，已排除主动取消与被顶替")
+    cancelled_count: int = Field(description="主动取消 / 被新任务顶替的数量")
+    running_count: int = Field(description="仍在该天创建、尚未收尾的任务数")
+    prompt_tokens: int = Field(description="输入 Token 合计")
+    completion_tokens: int = Field(description="输出 Token 合计")
+    failure_rate: float | None = Field(
+        default=None,
+        description="失败率（已收尾任务中真失败的比例）。分母为 0 时为 null——"
+        "「那天没有任务」与「那天 0% 失败」是两回事。",
+    )
+
+
+class AdminDailyStatsResponse(BaseModel):
+    """按日趋势 + 这段区间的汇总。
+
+    `summary` 由后端算，**不让前端把每天的数字再加一遍**：失败率若两处各算一套，
+    改口径时必然漏一处，页面上日线与汇总行就会互相矛盾。
+    """
+
+    items: list[AdminDailyStat] = Field(description="按日期升序的每一天")
+    summary: AdminDailyStat | None = Field(
+        default=None,
+        description="区间汇总（字段与单日一致，`day` 为空串）。失败率为加权值而非每日平均。",
+    )
+    days: int = Field(description="实际返回的天数")
+
+
+class AdminTopUserItem(BaseModel):
+    """用量排行的一行。
+
+    与用户列表**共用同一段聚合表达式**：「这个用户用了多少」只能有一个算法，
+    否则两个页面给出两个数，而没人知道该信哪个。
+    """
+
+    id: int = Field(description="用户 ID")
+    username: str = Field(description="用户名")
+    is_active: bool = Field(description="是否启用")
+    task_count: int = Field(description="生成任务总数")
+    prompt_tokens: int = Field(description="输入 Token 合计")
+    completion_tokens: int = Field(description="输出 Token 合计")
+
+
+class AdminTopUsersResponse(BaseModel):
+    """用量排行。只含真的生成过任务的人。"""
+
+    users: list[AdminTopUserItem] = Field(description="按任务数、再按 Token 降序")
+
+
 # ============================================================================
 # 方案（solutions）：整份会话快照的持久化
 # ============================================================================

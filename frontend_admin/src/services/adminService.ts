@@ -45,6 +45,31 @@ export interface AdminStats {
   completion_tokens: number
 }
 
+/** 按天的一行用量（`GET /api/admin/stats/daily`） */
+export interface AdminDailyStat {
+  day: string
+  task_count: number
+  completed_count: number
+  /** 真失败（已排除主动取消与被顶替） */
+  failed_count: number
+  cancelled_count: number
+  running_count: number
+  prompt_tokens: number
+  completion_tokens: number
+  /** 分母为 0 时为 null：「那天没任务」与「那天 0% 失败」是两回事 */
+  failure_rate: number | null
+}
+
+/** 用量排行的一行（`GET /api/admin/stats/users`） */
+export interface AdminTopUser {
+  id: number
+  username: string
+  is_active: boolean
+  task_count: number
+  prompt_tokens: number
+  completion_tokens: number
+}
+
 /** 用户列表的一行（`GET /api/admin/users`）：账号信息 + 用量聚合 */
 export interface AdminUser {
   id: number
@@ -140,6 +165,35 @@ export async function fetchAdminMe(): Promise<AdminMe | null> {
 export async function fetchStats(): Promise<AdminStats> {
   const { data } = await http.get<AdminStats>('/api/admin/stats')
   return data
+}
+
+/**
+ * 最近 `days` 天的每日用量。对应 `GET /api/admin/stats/daily`。
+ *
+ * ⚠️ 必须带 `tz_offset_minutes`：后端按这个偏移把 UTC 分组成**本地日期**。
+ * 不传就是 UTC，东八区用户会看到「昨晚用的」出现在「今天」那一格。
+ * `getTimezoneOffset()` 返回的是「本地落后 UTC 多少分钟」（东八区为 -480），
+ * 所以这里取负号才是「本地相对 UTC 的偏移」。
+ */
+export async function fetchDailyStats(
+  days = 7,
+): Promise<{ items: AdminDailyStat[]; summary: AdminDailyStat | null }> {
+  const { data } = await http.get<{
+    items: AdminDailyStat[]
+    summary: AdminDailyStat | null
+    days: number
+  }>('/api/admin/stats/daily', {
+    params: { days, tz_offset_minutes: -new Date().getTimezoneOffset() },
+  })
+  return { items: data.items ?? [], summary: data.summary ?? null }
+}
+
+/** 用量排行。对应 `GET /api/admin/stats/users`。 */
+export async function fetchTopUsers(limit = 10): Promise<AdminTopUser[]> {
+  const { data } = await http.get<{ users: AdminTopUser[] }>('/api/admin/stats/users', {
+    params: { limit },
+  })
+  return data.users ?? []
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +299,74 @@ export async function createInvite(payload: {
 /** 删除邀请码。对应 `DELETE /api/admin/invites/{code}`。 */
 export async function deleteInvite(code: string): Promise<void> {
   await http.delete(`/api/admin/invites/${encodeURIComponent(code)}`)
+}
+
+// ---------------------------------------------------------------------------
+// 日志检索
+// ---------------------------------------------------------------------------
+
+/** 一条应用日志（`GET /api/admin/logs` 的一行） */
+export interface AdminLog {
+  id: number
+  ts: string
+  level: string
+  logger: string
+  msg: string
+  request_id: string | null
+  user_id: number | null
+  event: string | null
+  /** 业务字段（job_id / 耗时 / token 数…）已由后端解析成对象 */
+  extra: Record<string, unknown>
+  /** 异常堆栈，仅错误类日志有 */
+  exc: string | null
+}
+
+/** 日志检索结果（一页） */
+export interface AdminLogPage {
+  items: AdminLog[]
+  /** 命中总数（不是本页条数）：分页器靠它算页数 */
+  total: number
+  page: number
+  page_size: number
+}
+
+/** 日志检索条件。空串一律视为「不筛」，交给后端判断。 */
+export interface LogQuery {
+  level?: string
+  since?: string
+  until?: string
+  logger_name?: string
+  event?: string
+  request_id?: string
+  user_id?: number
+  keyword?: string
+  /** 排除某个事件名。默认排掉访问日志 `request.completed`——它每个请求一条，
+   *  量级会压过业务事件，把「刚才那次生成怎么了」埋掉。 */
+  exclude_event?: string
+  page?: number
+  page_size?: number
+}
+
+/**
+ * 检索日志。对应 `GET /api/admin/logs`。
+ *
+ * 过滤条件全部走**查询参数**而不是请求体：这是只读接口，且最常见的用法是
+ * 把当前筛选的链接发给同事——进 URL 才能分享。空值一律不发，
+ * 免得后端收到 `level=` 这种「筛了个空串」的语义。
+ */
+export async function fetchLogs(query: LogQuery = {}): Promise<AdminLogPage> {
+  const params: Record<string, string | number> = {}
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') continue
+    params[key] = value as string | number
+  }
+  const { data } = await http.get<AdminLogPage>('/api/admin/logs', { params })
+  return {
+    items: data.items ?? [],
+    total: data.total ?? 0,
+    page: data.page ?? 1,
+    page_size: data.page_size ?? 100,
+  }
 }
 
 /**
