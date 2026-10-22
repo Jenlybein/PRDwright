@@ -11,6 +11,8 @@
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
+import PageHeader from '@/components/PageHeader.vue'
+
 import {
   cancelJob,
   cancelStuckJobs,
@@ -249,47 +251,41 @@ function totalTokens(job: AdminJob): string {
 <template>
   <div class="space-y-5">
     <!-- 页头 + 全局动作 -->
-    <header class="brut-card-lg p-5">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <p class="kicker">Jobs / 现场</p>
-          <h1 class="page-title mt-2">任务监控</h1>
-          <p class="mt-3 max-w-2xl text-sm text-body">
-            在飞任务超过 30 分钟没有更新会被标记为卡死。取消是协作式的：任务在下一个可中断点停下。
-          </p>
-        </div>
+    <PageHeader kicker="Jobs / 现场" title="任务监控">
+      <template #actions>
+        <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
+        <label
+          class="flex items-center gap-1.5 border-2 border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
+        >
+          <input
+            type="checkbox"
+            class="brut-check"
+            :checked="autoRefresh"
+            @change="onAutoRefreshChange"
+          />
+          自动刷新（10 秒）
+        </label>
+        <!-- 只在「在飞」页显示：失败页没有 running 数据，按钮会一直是（0），
+             反而让人以为「没有卡死任务」，而真正该清理的可能在别处 -->
+        <button
+          v-if="tab === 'running'"
+          type="button"
+          class="brut-btn brut-btn-xs"
+          :class="stuckCount > 0 ? 'brut-btn-danger' : ''"
+          :disabled="bulkCancelling || stuckCount === 0"
+          @click="onCancelStuck"
+        >
+          {{ bulkCancelling ? '清理中…' : `取消全部卡死（${stuckCount}）` }}
+        </button>
+      </template>
 
-        <div class="flex flex-col items-start gap-2 sm:items-end">
-          <div class="flex flex-wrap items-center gap-2">
-            <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
-            <label
-              class="flex items-center gap-1.5 border-2 border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
-            >
-              <input
-                type="checkbox"
-                class="brut-check"
-                :checked="autoRefresh"
-                @change="onAutoRefreshChange"
-              />
-              自动刷新（10 秒）
-            </label>
-            <!-- 只在「在飞」页显示：失败页没有 running 数据，按钮会一直是（0），
-                 反而让人以为「没有卡死任务」，而真正该清理的可能在别处 -->
-            <button
-              v-if="tab === 'running'"
-              type="button"
-              class="brut-btn brut-btn-xs"
-              :class="stuckCount > 0 ? 'brut-btn-danger' : ''"
-              :disabled="bulkCancelling || stuckCount === 0"
-              @click="onCancelStuck"
-            >
-              {{ bulkCancelling ? '清理中…' : `取消全部卡死（${stuckCount}）` }}
-            </button>
-          </div>
-          <p class="kicker">卡死判定 = running 且 updated_at 超 30 分钟</p>
-        </div>
-      </div>
-    </header>
+      <template #desc>
+        <p>
+          在飞任务超过 30 分钟没有更新会被标记为卡死（判据 running 且 updated_at 超 30 分钟）。
+          取消是协作式的：任务在下一个可中断点停下。
+        </p>
+      </template>
+    </PageHeader>
 
     <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>

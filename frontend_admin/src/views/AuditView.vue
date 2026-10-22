@@ -13,6 +13,8 @@
  */
 import { onMounted, ref } from 'vue'
 
+import PageHeader from '@/components/PageHeader.vue'
+
 import { fetchAudit, messageOf, type AdminAudit } from '@/services/adminService'
 
 const items = ref<AdminAudit[]>([])
@@ -61,18 +63,16 @@ onMounted(load)
 
 <template>
   <div class="space-y-5">
-    <header class="brut-card-lg p-5">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <p class="kicker">Audit / 留痕</p>
-          <h1 class="page-title mt-2">操作记录</h1>
-        </div>
+    <PageHeader kicker="Audit / 留痕" title="操作记录">
+      <template #actions>
         <span class="brut-tag brut-tag-slab">{{ items.length }} 条</span>
-      </div>
-      <p class="mt-3 max-w-3xl text-sm text-body">
-        管理员的每一次写操作都会留痕。账号被删之后，记录仍在，操作者名字也保留。
-      </p>
-    </header>
+      </template>
+      <template #desc>
+        <p>
+          管理员的每一次写操作都会留痕。账号被删之后，记录仍在，操作者名字也保留。
+        </p>
+      </template>
+    </PageHeader>
 
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 

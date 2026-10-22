@@ -21,6 +21,7 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 
+import PageHeader from '@/components/PageHeader.vue'
 import {
   fetchDailyStats,
   fetchStats,
@@ -214,29 +215,25 @@ onMounted(load)
 <template>
   <div class="space-y-5">
     <!-- 页头 -->
-    <header class="brut-card-lg p-5">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <p class="kicker">Overview / 平台</p>
-          <h1 class="page-title mt-2">平台概览</h1>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="brut-tag brut-tag-sky">累计口径</span>
-          <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
-        </div>
-      </div>
+    <PageHeader kicker="Overview / 平台" title="平台概览">
+      <template #actions>
+        <span class="brut-tag brut-tag-sky">累计口径</span>
+        <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
+      </template>
 
-      <div class="mt-4 grid gap-2 border-t-2 border-line pt-3 text-xs text-body sm:grid-cols-2">
-        <p>
-          Token 统计<b class="text-ink">包含失败的任务</b>——重试恰恰是最烧钱的部分，
-          剔掉它们会让成本看起来偏低。
-        </p>
-        <p>
-          失败率<b class="text-ink">不含主动取消与被新任务顶替</b>的那些：它们在库里同样是
-          failed，但成因不是模型坏了。
-        </p>
-      </div>
-    </header>
+      <template #desc>
+        <div class="page-head-desc-grid">
+          <p>
+            Token 统计<b>包含失败的任务</b>——重试恰恰是最烧钱的部分，
+            剔掉它们会让成本看起来偏低。
+          </p>
+          <p>
+            失败率<b>不含主动取消与被新任务顶替</b>的那些：它们在库里同样是
+            failed，但成因不是模型坏了。
+          </p>
+        </div>
+      </template>
+    </PageHeader>
 
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 

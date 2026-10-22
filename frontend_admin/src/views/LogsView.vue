@@ -18,6 +18,8 @@
  */
 import { computed, onMounted, ref } from 'vue'
 
+import PageHeader from '@/components/PageHeader.vue'
+
 import { fetchLogs, messageOf, type AdminLog, type LogQuery } from '@/services/adminService'
 
 /** 页面上的筛选条件（时间用 `datetime-local` 的原生值，形如 `2026-10-22T10:30`） */
@@ -234,19 +236,17 @@ onMounted(load)
 <template>
   <div class="space-y-5">
     <!-- 说明条：告诉人这个页面和「操作记录」不是一回事 -->
-    <header class="brut-card-lg p-5">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <p class="kicker">Logs / 排障</p>
-          <h1 class="page-title mt-2">系统日志</h1>
-        </div>
+    <PageHeader kicker="Logs / 排障" title="系统日志">
+      <template #actions>
         <span class="brut-tag brut-tag-sky">共 {{ total }} 条</span>
-      </div>
-      <p class="mt-3 max-w-3xl text-sm text-body">
-        系统在说什么（排障用）。人为操作留下的痕迹在「操作记录」页，两者刻意分开——
-        混在一起时，排查故障会被大量人为操作淹没。
-      </p>
-    </header>
+      </template>
+      <template #desc>
+        <p>
+          系统在说什么（排障用）。人为操作留下的痕迹在「操作记录」页，两者刻意分开——
+          混在一起时，排查故障会被大量人为操作淹没。
+        </p>
+      </template>
+    </PageHeader>
 
     <!-- 过滤条 -->
     <section class="brut-card">

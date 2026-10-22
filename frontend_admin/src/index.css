@@ -228,14 +228,37 @@
 
   /* ------------------------------------------------------------------ 页头 */
 
-  /* 报头：不装箱，靠一条 3px 粗线与内容分家。
-     全页「有投影」的只有内容块，标题区没有——层级只由**材质**决定，
-     不再靠「谁在上面」。少一层白盒子，页面也轻一档。 */
+  /* 报头：一条整块实色的「表头带」——只有底色与下沿一条 3px 线，
+     上、左、右都**不描边**，也没有投影。
+     三层信号同时成立：底色（带 vs 白）、材质（无投影 vs 有投影）、
+     边框（无框 vs 硬框）。眼睛一眼就知道「上面是标题、下面是内容」，
+     同时满页的黑框少掉一整圈——边框太多正是「看着累」的主因。
+     ⚠️ 亮色用**墨色**、暗色用**天蓝**，各自取该主题下最跳的那一档。
+     亮色若也用天蓝，会与内容里的天蓝强调块（如「当前供应商」）连成一片、
+     反而分不出层次——天蓝在这套体系里始终只表示「强调」，不表示「结构」。 */
   .page-head {
+    --head-fg: var(--ui-card);
+    background: var(--ui-ink);
     border-bottom: 3px solid var(--ui-brut);
-    padding-bottom: 1rem;
+    /* 窄屏左右收一点：main 自己还有 1rem 内边距，页头再各留 1.2rem 会让
+       标题比下面的内容卡明显内缩，看起来像没对齐 */
+    padding: 1rem clamp(0.9rem, 2vw, 1.2rem) 0.95rem;
+    color: var(--head-fg);
   }
-  /* 栏目名用天蓝：它是页头唯一的彩色信号，也是「这页是干什么的」最快的一眼 */
+  /* 暗色下 --ui-ink 是亮白，直接拿来当底色会让页头变成一大块白；
+     改用天蓝，同时把文字换成 on-sky 深色 */
+  .dark .page-head {
+    --head-fg: var(--ui-on-sky);
+    background: var(--ui-sky);
+  }
+  /* 页头里的标签统一翻成「卡片底 + 墨色字」：brut-tag-sky / -slab 的浅底
+     在实色带子上会糊成一片，两种主题下都读不清 */
+  .page-head .brut-tag {
+    background: var(--ui-card);
+    color: var(--ui-ink);
+    border-color: var(--ui-brut);
+  }
+  /* 栏目名：带子上的小字，前面跟一个实心方块（印刷式的段落起头符号） */
   .page-head-kicker {
     display: flex;
     align-items: center;
@@ -245,35 +268,37 @@
     line-height: 1;
     letter-spacing: 0.16em;
     text-transform: uppercase;
-    color: var(--ui-sky-deep);
+    color: var(--head-fg);
+    opacity: 0.72;
   }
-  /* 印刷式的段落起头方块：一像素的偏移投影让它像盖上去的，而不是画上去的 */
   .page-head-kicker::before {
     content: '';
     flex: none;
     width: 0.4375rem;
     height: 0.4375rem;
-    background: var(--ui-sky);
-    box-shadow: 1.5px 1.5px 0 0 var(--ui-brut);
+    background: var(--head-fg);
+    opacity: 0.85;
   }
-  /* 整页唯一的 h1，比内容区的小标题再大一档 */
+  /* 整页唯一的 h1：比内容区的小标题大一档，颜色跟着表头带走 */
   .page-head .page-title {
+    color: var(--head-fg);
     font-size: clamp(1.85rem, 1.15rem + 2.1vw, 2.75rem);
     line-height: 1;
   }
-  /* 说明文字降级成注解：左侧天蓝竖线 + 字号小一档 + muted。
-     读不读都不影响操作，所以不该和内容抢注意力。 */
+  /* 说明文字降级成注解：左侧竖线 + 小一档字号 + 略降透明度。
+     读不读都不影响操作，所以不该和标题抢注意力。 */
   .page-head-desc {
     margin-top: 0.9rem;
     max-width: 68ch;
-    border-left: 3px solid var(--ui-sky);
+    border-left: 3px solid var(--head-fg);
     padding-left: 0.7rem;
     font-size: 0.8125rem;
     line-height: 1.6;
-    color: var(--ui-muted);
+    color: var(--head-fg);
+    opacity: 0.82;
   }
   .page-head-desc b {
-    color: var(--ui-ink);
+    font-weight: 800;
   }
   /* 注解里的两列对照（概览页的用户口径） */
   .page-head-desc-grid {

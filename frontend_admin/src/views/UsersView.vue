@@ -14,6 +14,8 @@
  */
 import { computed, onMounted, ref } from 'vue'
 
+import PageHeader from '@/components/PageHeader.vue'
+
 import {
   createUser,
   deleteUser,
@@ -334,21 +336,17 @@ function totalTokens(user: AdminUser): number {
 <template>
   <div class="space-y-5">
     <!-- 页头 -->
-    <header class="brut-card-lg p-5">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <p class="kicker">Users / 账号</p>
-          <h1 class="page-title mt-2">用户管理</h1>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="brut-tag brut-tag-sky">{{ users.length }} 个账号</span>
-        </div>
-      </div>
-      <p class="mt-3 max-w-3xl text-sm text-body">
-        停用只是禁止登录（可恢复）；删除会连同方案、文档与任务一并清除，不可恢复。
-        操作被后端拒绝时，这里会原样显示它给出的理由——规则只在服务端写一份。
-      </p>
-    </header>
+    <PageHeader kicker="Users / 账号" title="用户管理">
+      <template #actions>
+        <span class="brut-tag brut-tag-sky">{{ users.length }} 个账号</span>
+      </template>
+      <template #desc>
+        <p>
+          停用只是禁止登录（可恢复）；删除会连同方案、文档与任务一并清除，不可恢复。
+          操作被后端拒绝时，这里会原样显示它给出的理由——规则只在服务端写一份。
+        </p>
+      </template>
+    </PageHeader>
 
     <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>

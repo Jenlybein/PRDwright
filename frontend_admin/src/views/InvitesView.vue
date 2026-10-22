@@ -10,6 +10,8 @@
  */
 import { onMounted, ref } from 'vue'
 
+import PageHeader from '@/components/PageHeader.vue'
+
 import {
   createInvite,
   deleteInvite,
@@ -97,18 +99,14 @@ function formatDate(value: string | null): string {
 
 <template>
   <div class="space-y-5">
-    <header class="brut-card-lg p-5">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <p class="kicker">Invites / 准入门票</p>
-          <h1 class="page-title mt-2">邀请码管理</h1>
-        </div>
+    <PageHeader kicker="Invites / 准入门票" title="邀请码管理">
+      <template #actions>
         <span class="brut-tag brut-tag-sky">{{ invites.length }} 个码</span>
-      </div>
-      <p class="mt-3 max-w-3xl text-sm text-body">
-        注册需要邀请码。删除一个码只影响之后的注册，已经注册的用户不受影响。
-      </p>
-    </header>
+      </template>
+      <template #desc>
+        <p>注册需要邀请码。删除一个码只影响之后的注册，已经注册的用户不受影响。</p>
+      </template>
+    </PageHeader>
 
     <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
