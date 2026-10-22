@@ -211,7 +211,8 @@ describe('配置页', () => {
     // 这里说的是**白名单参数**没在后台改过，与模型配置无关。
     expect(text).toContain('默认值（未在后台改过）')
     expect(text).toContain('并发章节数')
-    expect(text).toContain('prd_pipeline_concurrency')
+    // 变量名不上页面：管理员只关心「并发章节数」，不关心它在代码里叫什么
+    expect(text).not.toContain('prd_pipeline_concurrency')
   })
 
   it('启动类配置没有可编辑入口', async () => {
@@ -221,9 +222,16 @@ describe('配置页', () => {
     const wrapper = await render()
     expect(wrapper.text()).not.toContain('db_path')
     expect(wrapper.text()).not.toContain('log_db_enabled')
-    // 页面上出现的 number 输入里，不该有给启动类配置留的位置
-    const keys = wrapper.findAll('.font-mono').map((n) => n.text())
-    expect(keys.some((t) => t.startsWith('log_'))).toBe(false)
+  })
+
+  it('页面上不出现任何配置项的原始变量名', async () => {
+    // 管理员看到的是「并发章节数」，不是 `prd_pipeline_concurrency`。
+    // 这条把整页的 key 都扫一遍：以后新增配置项时，模板里一旦又把 key 印出来就会红。
+    const wrapper = await render()
+    const text = wrapper.text()
+    for (const key of ['prd_pipeline_concurrency', 'prd_section_review_enabled']) {
+      expect(text).not.toContain(key)
+    }
   })
 
   it('密钥只显示「已配置/未配置」，绝不渲染密钥值', async () => {
@@ -362,11 +370,13 @@ describe('配置页', () => {
     const tags = wrapper.findAll('.brut-tag').map((t) => t.text())
     expect(tags.filter((t) => t === '使用中')).toHaveLength(1)
     expect(tags).toContain('待命')
-    // 每行都要能一眼看到「协议 / 密钥状态 / max_tokens」，否则排查缺密钥只能去翻库
+    // 每行都要能一眼看到「协议 / 密钥状态 / 输出上限」，否则排查缺密钥只能去翻库。
+    // 写的是中文「输出上限」而不是 `max_tokens`：界面上不该出现字段名。
     const text = wrapper.text()
     expect(text).toContain('密钥')
     expect(text).toContain('已配置')
-    expect(text).toContain('max_tokens 8192')
+    expect(text).toContain('输出上限 8192')
+    expect(text).not.toContain('max_tokens')
   })
 
   it('使用中的配置也给出删除按钮，被拒绝时原样显示后端原因', async () => {

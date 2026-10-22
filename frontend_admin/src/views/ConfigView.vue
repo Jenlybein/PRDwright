@@ -671,10 +671,12 @@ onMounted(load)
                 <span class="font-mono text-xs text-muted">{{ p.default_model || '未填模型' }}</span>
               </div>
 
-              <!-- 机器可读的那一行：协议 / 密钥变量 / 输出上限。
-                   密钥变量名之后只跟「有没有值」，绝不显示值本身。 -->
-              <p class="mt-1 flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-subtle">
-                <span>{{ p.protocol }}</span>
+              <!-- 机器可读的那一行：协议 / 密钥状态 / 输出上限。
+                   密钥变量名之后只跟「有没有值」，绝不显示值本身。
+                   协议写中文名、上限写人话——`ark`、`max_tokens` 这类是代码里的叫法，
+                   管理员在界面上找不到对应的东西。 -->
+              <p class="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-subtle">
+                <span>{{ p.protocol_label }}</span>
                 <span>｜</span>
                 <span>密钥</span>
                 <span v-if="p.key_present" class="font-bold text-success-fg">✓ 已配置</span>
@@ -688,7 +690,7 @@ onMounted(load)
                   查看密钥
                 </button>
                 <span>｜</span>
-                <span>max_tokens {{ p.max_tokens }}</span>
+                <span>输出上限 {{ p.max_tokens }}</span>
               </p>
 
               <p
@@ -764,10 +766,11 @@ onMounted(load)
                 <h3 class="mt-1 text-base font-extrabold tracking-tight text-ink">
                   编辑「{{ editing.name }}」
                 </h3>
-                <!-- 协议放这里而不是表单格：它改不了，就不该长得像一个输入框。 -->
-                <span class="mt-1 flex flex-wrap items-baseline gap-2">
+                <!-- 协议放这里而不是表单格：它改不了，就不该长得像一个输入框。
+                     配置 id（cfg_xxx）不再显示——它对管理员没有任何用处，
+                     只是同一家供应商可以有多条配置时用来区分身份，而「配置名」已经承担了这件事。 -->
+                <span class="mt-1 inline-flex">
                   <span class="brut-tag">{{ editing.protocol_label }}</span>
-                  <span class="font-mono text-[11px] text-subtle">{{ editing.id }}</span>
                 </span>
               </div>
               <button type="button" class="brut-btn brut-btn-xs" @click="cancelEdit">关闭</button>
@@ -781,7 +784,7 @@ onMounted(load)
             </label>
 
             <label class="block sm:col-span-2">
-              <span class="brut-label">base_url</span>
+              <span class="brut-label">接口地址</span>
               <input v-model="editForm.base_url" type="text" class="brut-field font-mono" />
             </label>
 
@@ -807,7 +810,7 @@ onMounted(load)
             </label>
 
             <label class="block">
-              <span class="brut-label">输出上限（max_tokens）</span>
+              <span class="brut-label">输出上限</span>
               <input v-model.number="editForm.max_tokens" type="number" class="brut-field" />
             </label>
 
@@ -832,8 +835,7 @@ onMounted(load)
 
           <p class="mt-2 text-xs text-subtle">
             换供应商请<b class="text-muted">新建一条配置</b>：协议一变，
-            <code class="font-mono">max_tokens</code> 与思考模式的语义全都不同，
-            就地改会留下半新半旧的字段。
+            输出上限与思考模式的语义全都不同，就地改会留下半新半旧的字段。
           </p>
 
               <div class="mt-3 flex flex-wrap items-center gap-2">
@@ -908,7 +910,7 @@ onMounted(load)
             </label>
 
             <label class="block sm:col-span-2">
-              <span class="brut-label">base_url（OpenAI 兼容类通常要带 /v1）</span>
+              <span class="brut-label">接口地址（OpenAI 兼容类通常要带 /v1）</span>
               <input
                 v-model="form.base_url"
                 type="text"
@@ -930,7 +932,7 @@ onMounted(load)
             </label>
 
             <label class="block">
-              <span class="brut-label">输出上限（max_tokens）</span>
+              <span class="brut-label">输出上限</span>
               <input v-model.number="form.max_tokens" type="number" class="brut-field" />
             </label>
 
@@ -1006,11 +1008,17 @@ onMounted(load)
                 <span class="text-sm font-bold text-ink">{{ item.label }}</span>
                 <span v-if="item.danger" class="brut-tag brut-tag-warn">危险</span>
               </div>
-              <div class="mt-0.5 font-mono text-[11px] text-subtle">{{ item.key }}</div>
+              <!-- 说明跟着名字走：左侧是「这是什么」，右侧是「怎么改」。
+                   原来这里印的是 item.key（PRD_PIPELINE_CONCURRENCY 这种变量名）——
+                   管理员不需要知道配置在代码里叫什么，那一行既占位置又只有噪音。 -->
+              <p class="mt-1 text-xs leading-relaxed text-subtle">{{ item.help }}</p>
             </div>
 
             <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-2">
+              <!-- 控件靠右：左边是「这是什么」，右边是「改成什么」，
+                   两端对齐之后每一行的输入框落在同一条竖线上，扫视时不用来回找。
+                   窄屏（单列堆叠）保持左对齐——那时控件在标签正下方，贴右反而脱节。 -->
+              <div class="flex flex-wrap items-center gap-2 sm:justify-end">
                 <!-- 布尔 -->
                 <label
                   v-if="item.type === 'bool'"
@@ -1048,11 +1056,12 @@ onMounted(load)
                   @change="setDraft(group, item, Number(($event.target as HTMLInputElement).value))"
                 />
 
-                <!-- 文本 -->
+                <!-- 文本：给个上限，否则 width:100% 会撑满整列，
+                     右对齐就只剩「左边起点也不齐」这一个结果 -->
                 <input
                   v-else
                   type="text"
-                  class="brut-field font-mono"
+                  class="brut-field font-mono max-w-[22rem]"
                   :value="String(draftOf(group, item) ?? '')"
                   @change="setDraft(group, item, ($event.target as HTMLInputElement).value)"
                 />
@@ -1067,7 +1076,6 @@ onMounted(load)
                   </template>
                 </span>
               </div>
-              <p class="mt-1 text-xs text-subtle">{{ item.help }}</p>
             </div>
           </div>
         </div>
