@@ -28,13 +28,15 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from backend.core.db import utc_now
 from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories import quota_repo
 from backend.repositories.admin_repo import AdminStatsRepository, AuditRepository
 from backend.repositories.auth_repo import InviteCodeRepository, UserRepository
+from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.log_repo import LogRepository
-from backend.services import auth_service, quota_service
+from backend.services import auth_service, job_service, quota_service
 from backend.services.auth_service import User
 
 logger = logging.getLogger(__name__)
@@ -519,3 +521,153 @@ def list_logs(
         items.append({**row, "extra": extra})
 
     return {"items": items, "total": total, "page": safe_page, "page_size": safe_size}
+
+
+# ----------------------------------------------------------------------
+# 任务监控（v4.5 T5-1）
+# ----------------------------------------------------------------------
+
+# 卡死判定阈值：running 任务超过这么久没有更新，就认为它「卡住了」。
+#
+# 为什么看 `updated_at` 而不是 `created_at`：正文在流式写入时 `updated_at`
+# 会持续刷新，它停住不动恰恰说明「不再产出」。半小时足以覆盖长文档里最慢的
+# 单章生成；再短会把正常的长任务误报成卡死，管理员就会对红色标记脱敏。
+STUCK_MINUTES = 30
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    """解析库里的 UTC ISO 串（`utc_now_text()` 写的，不带时区标记）。"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _job_view(row: dict[str, Any]) -> dict[str, Any]:
+    """把一行任务补上「耗时 / 是否卡死」，供前端直接展示。
+
+    耗时与卡死**在这里算一次**。前端再算一遍就会出现两套口径：浏览器与服务器
+    的时钟差几分钟，卡死边界就会对不上，而管理员只会看到「列表说卡死、点了
+    却说还在跑」这种互相矛盾的状态。
+    """
+    created = _parse_ts(row.get("created_at"))
+    updated = _parse_ts(row.get("updated_at"))
+    now = utc_now()
+
+    duration = int((now - created).total_seconds()) if created else 0
+    is_stuck = False
+    stuck_minutes = 0
+    if row.get("status") == STATUS_RUNNING and updated is not None:
+        idle = int((now - updated).total_seconds())
+        if idle >= STUCK_MINUTES * 60:
+            is_stuck = True
+            stuck_minutes = idle // 60
+
+    return {
+        "id": int(row["id"]),
+        "owner_id": int(row["owner_id"]),
+        "owner_name": str(row.get("owner_name") or ""),
+        "kind": str(row.get("kind") or ""),
+        "status": str(row.get("status") or ""),
+        "phase": str(row.get("phase") or ""),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+        "duration_seconds": max(0, duration),
+        "is_stuck": is_stuck,
+        "stuck_minutes": stuck_minutes,
+        "prompt_tokens": int(row.get("prompt_tokens") or 0),
+        "completion_tokens": int(row.get("completion_tokens") or 0),
+        "error_code": str(row.get("error_code") or ""),
+        "error_message": str(row.get("error_message") or ""),
+    }
+
+
+def list_jobs(
+    *,
+    status: str = "",
+    username: str = "",
+    kind: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """任务监控列表：在飞 / 最近失败 / 全部（可按用户名、类型过滤）。
+
+    Returns:
+        `{"items": [...], "total": int}`。`total` 是同口径命中总数，
+        前端据此判断「还有多少没显示」。
+    """
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    clean_username = username.strip() or None
+    rows = GenerationJobRepository.admin_list(
+        status=status or None,
+        username=clean_username,
+        kind=kind or None,
+        limit=safe_limit,
+        offset=safe_offset,
+    )
+    total = GenerationJobRepository.admin_count(
+        status=status or None,
+        username=clean_username,
+        kind=kind or None,
+    )
+    return {"items": [_job_view(row) for row in rows], "total": total}
+
+
+def cancel_job_as_admin(actor: User, job_id: int) -> bool:
+    """管理员手动取消一次任务，返回是否确实取消了仍在运行的那一次。
+
+    三种结果要分清：
+
+    - **任务不存在** → 404。静默成功会让管理员以为「已经掐掉了」；
+    - **任务已结束** → 返回 False（「你点的时候它刚好说完」不是失败）；
+    - **真正取消** → 走 `job_service.cancel_job`，它同时标记内存运行时
+      （在途协程下一个 await 点跳出）并落库终态。
+
+    ⚠️ 取消是**协作式**的，不是强杀：卡在纯同步阻塞调用上的任务不会立刻退出。
+    但库里已是终态，重启后不会再显示「生成中」——卡死最多是临时的。
+    """
+    row = GenerationJobRepository.get_for_admin(job_id)
+    if row is None:
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该任务不存在", status_code=404)
+
+    owner_id = int(row["owner_id"])
+    # 与用户点「停止」共用同一条链路；只换掉 error_message 的措辞，
+    # 让运维在任务详情里能区分「用户放弃」与「管理员清理」。
+    changed = job_service.cancel_job(owner_id, job_id, message="管理员手动停止了任务")
+    if changed:
+        _audit(
+            actor,
+            "job.cancel",
+            target=str(job_id),
+            detail=f"取消 {row.get('owner_name') or owner_id} 的 {row.get('kind') or ''} 任务",
+        )
+    return changed
+
+
+def cancel_stuck_jobs(actor: User) -> int:
+    """取消所有「running 且已停更超过阈值」的任务，返回实际取消条数。
+
+    只动**判定为卡死**的那些：正常在跑的任务一个都不碰——批量取消一旦误伤，
+    用户的正文会直接断在半截，比卡死更难解释。
+    """
+    # running 按 created_at 升序，卡死（最久）的必然排在最前；500 条足够覆盖
+    # 单机在飞任务的实际量级。
+    rows = GenerationJobRepository.admin_list(status=STATUS_RUNNING, limit=500)
+    views = [_job_view(row) for row in rows]
+    stuck = [view for view in views if view["is_stuck"]]
+    if not stuck:
+        return 0
+
+    cancelled = 0
+    for item in stuck:
+        if job_service.cancel_job(
+            int(item["owner_id"]), int(item["id"]), message="管理员清理卡死任务"
+        ):
+            cancelled += 1
+
+    if cancelled:
+        _audit(actor, "job.cancel_stuck", detail=f"清理卡死任务 {cancelled} 个")
+    return cancelled

@@ -180,26 +180,32 @@ def test_daily_groups_by_local_date_not_utc(client):
 
     构造 UTC 16:30 —— 在东八区是次日 00:30。这条若按 UTC 分组，管理员会看到
     「昨晚用的」出现在「今天」那一格。
+
+    ⚠️ 刻意用**昨天** 16:30，而不是「今天 16:30」：后者在 UTC 16:30 之前跑用例时
+    还属于**未来**，查询窗口不含未来数据，用例会在每天上午随机变红（与代码无关）。
+    判据只看「有没有跨过 UTC 与东八区的日界」，用哪天都成立。
     """
     _as_admin(client)
     owner_id = _user_id("root")
 
-    utc_today = utc_now().replace(hour=16, minute=30, second=0, microsecond=0)
-    _job(owner_id, created_at=utc_today.isoformat())
+    moment = (utc_now() - timedelta(days=1)).replace(
+        hour=16, minute=30, second=0, microsecond=0
+    )
+    _job(owner_id, created_at=moment.isoformat())
 
-    # 按 UTC 看：归在 UTC 今天
+    # 按 UTC 看：归在 moment 当天
     utc_scope = client.get(
         "/api/admin/stats/daily", params={"days": 3, "tz_offset_minutes": 0}
     ).json()
-    assert utc_scope["items"][-1]["day"] == utc_today.date().isoformat()
-    assert utc_scope["items"][-1]["task_count"] == 1
+    utc_days = {item["day"]: item["task_count"] for item in utc_scope["items"]}
+    assert utc_days.get(moment.date().isoformat()) == 1
 
     # 按东八区看：同一个任务落在次日
     local_scope = client.get(
         "/api/admin/stats/daily", params={"days": 3, "tz_offset_minutes": 480}
     ).json()
     local_days = {item["day"]: item["task_count"] for item in local_scope["items"]}
-    expected_day = (utc_today + timedelta(hours=8)).date().isoformat()
+    expected_day = (moment + timedelta(hours=8)).date().isoformat()
     assert local_days.get(expected_day) == 1, f"应按本地日期归组，实际：{local_days}"
 
 

@@ -237,6 +237,11 @@ v15 `admin_audit_log`）；日志采集已挂上并在攒数据；`frontend_admi
 
 **进度**
 
+- **第 1 项已完成**：`GET /api/admin/jobs`（按状态 / 用户名 / 类型筛）、
+  `POST /api/admin/jobs/{id}/cancel`、`POST /api/admin/jobs/cancel-stuck` +
+  `/jobs` 页（在飞 / 最近失败 / 全部、卡死标红、单条与批量取消、自动刷新、详情展开）。
+  口径见 **ADR-046**：卡死看 `updated_at` 而非 `created_at`、取消复用用户侧同一条链路、
+  `cancelled=false` 表示「点击前已结束」而不是失败。
 - **第 2 项已完成**（提交见 git log「配额限流」）。实现口径：
   - 三个维度：每人每日**次数**、每人每日 **Token**、每人同时**运行数**。
   - 上限三态：`-1` 跟随全局（配置页「每日额度」分组）、`0` 不限、`N` 具体值。

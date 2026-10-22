@@ -16,6 +16,7 @@ const router = useRouter()
 /** 后台的顶栏导航。新增页面时只改这一处，不用去每个页面里放返回链接 */
 const navItems = [
   { name: 'dashboard', label: '概览' },
+  { name: 'jobs', label: '任务' },
   { name: 'users', label: '用户' },
   { name: 'invites', label: '邀请码' },
   { name: 'logs', label: '系统日志' },

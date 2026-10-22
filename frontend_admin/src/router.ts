@@ -48,6 +48,12 @@ export const router = createRouter({
       meta: { requiresAdmin: true },
     },
     {
+      path: '/jobs',
+      name: 'jobs',
+      component: () => import('@/views/JobsView.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
       path: '/users',
       name: 'users',
       component: () => import('@/views/UsersView.vue'),

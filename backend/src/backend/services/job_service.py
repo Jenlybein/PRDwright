@@ -290,7 +290,7 @@ def _create_chat_job(owner_id: int, solution_id: int | None, request: dict[str, 
     return job_id
 
 
-def cancel_job(owner_id: int, job_id: int) -> bool:
+def cancel_job(owner_id: int, job_id: int, *, message: str = "用户停止了生成") -> bool:
     """停止一次任务，返回是否确实停下了一个仍在运行的任务。
 
     「停止」与「退订」必须分开
@@ -305,6 +305,10 @@ def cancel_job(owner_id: int, job_id: int) -> bool:
     收尾由 `_finalize` 负责：文档任务被取消**不写**文档（半截正文会污染产物），
     对话被停止**要写**轮次并标 `interrupted`（用户按停止通常是「够了」，
     已经说出口的话比消失有用）。这个差别在 `_finalize` 里按 `kind` 分支。
+
+    `message` 是落进 `error_message` 的终止原因：用户点停止写「用户停止了生成」，
+    管理员在后台清理卡死任务写「管理员手动停止」——两者都走 `CANCELLED`，
+    但运维看这一行时要知道是谁动的手。
     """
     runtime = _RUNTIMES.get(job_id)
     marked = False
@@ -314,9 +318,7 @@ def cancel_job(owner_id: int, job_id: int) -> bool:
             if runtime.kind == "chat":
                 runtime.chat_interrupted = True
             marked = True
-    persisted = GenerationJobRepository.cancel_one(
-        owner_id, job_id, message="用户停止了生成"
-    )
+    persisted = GenerationJobRepository.cancel_one(owner_id, job_id, message=message)
     return marked or persisted
 
 

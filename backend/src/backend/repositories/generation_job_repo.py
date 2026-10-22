@@ -354,3 +354,105 @@ class GenerationJobRepository:
             )
             conn.commit()
             return int(cur.rowcount or 0)
+
+    # ------------------------------------------------------------------
+    # 管理面查询（v4.5 T5-1：任务监控）
+    #
+    # ⚠️ 这几个方法**跨 owner**，与上面「每个方法第一个参数都是 owner_id」的纪律
+    # 不同——它们只服务管理员后台，安全性由路由层的 `require_admin` 保证。
+    # 用户面永远不该走到这里；`reap_running` 是同类先例（系统级维护）。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def admin_list(
+        *,
+        status: str | None = None,
+        username: str | None = None,
+        kind: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """列出任务（管理员视角，JOIN 出用户名）。
+
+        排序按状态分开：
+        - `running` 用 `created_at ASC`——卡死任务的特征就是「跑得最久」，
+          把它顶到最前面才看得见；
+        - 其余用 `updated_at DESC`——最近有动静的在前。
+
+        `username` 是**模糊匹配**（`LIKE`）：管理员通常只记得半个用户名，
+        要求精确输入等于让他先去用户页复制一遍。参数绑定由 sqlite3 负责，
+        `%` 只会被当成通配符，不构成注入。
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("j.status = ?")
+            params.append(status)
+        if kind:
+            clauses.append("j.kind = ?")
+            params.append(kind)
+        if username:
+            clauses.append("u.username LIKE ?")
+            params.append(f"%{username}%")
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        order = (
+            "j.created_at ASC, j.id ASC"
+            if status == STATUS_RUNNING
+            else "j.updated_at DESC, j.id DESC"
+        )
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT j.*, u.username AS owner_name "
+                "FROM generation_jobs j JOIN users u ON u.id = j.owner_id "
+                f"{where} ORDER BY {order} LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    @staticmethod
+    def admin_count(
+        *,
+        status: str | None = None,
+        username: str | None = None,
+        kind: str | None = None,
+    ) -> int:
+        """与 `admin_list` 同口径的命中总数（分页 / 「还有多少」用）。"""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("j.status = ?")
+            params.append(status)
+        if kind:
+            clauses.append("j.kind = ?")
+            params.append(kind)
+        if username:
+            clauses.append("u.username LIKE ?")
+            params.append(f"%{username}%")
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_jobs j "
+                "JOIN users u ON u.id = j.owner_id "
+                f"{where}",
+                params,
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    @staticmethod
+    def get_for_admin(job_id: int) -> dict[str, Any] | None:
+        """按 id 取**任意用户**的任务（管理面取消前定位 owner）。
+
+        ⚠️ 跨 owner，非用户面方法。调用方必须先过 `require_admin`。
+        用户名一并 JOIN 出来，用于审计里写「取消了谁的任务」——只记一个 id
+        会让事后追责时要再查一次库。
+        """
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT j.*, u.username AS owner_name "
+                "FROM generation_jobs j JOIN users u ON u.id = j.owner_id "
+                "WHERE j.id = ?",
+                (job_id,),
+            ).fetchone()
+            return dict(row) if row else None

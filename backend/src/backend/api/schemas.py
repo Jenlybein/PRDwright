@@ -539,6 +539,57 @@ class AdminTopUsersResponse(BaseModel):
     users: list[AdminTopUserItem] = Field(description="按任务数、再按 Token 降序")
 
 
+# ----------------------------------------------------------------------------
+# 任务监控（v4.5 T5-1）
+# ----------------------------------------------------------------------------
+
+
+class AdminJobItem(BaseModel):
+    """任务监控列表的一行。
+
+    `duration_seconds` / `is_stuck` / `stuck_minutes` 都由**服务端算好**：
+    浏览器与服务器时钟有偏差，前端自己算会让「列表说卡死」与「点了还能取消」
+    互相矛盾。
+    """
+
+    id: int = Field(description="任务 ID")
+    owner_id: int = Field(description="归属用户 ID")
+    owner_name: str = Field(description="归属用户名")
+    kind: str = Field(description="任务类型：prd / api_docs / prompts / optimize / chat")
+    status: str = Field(description="running / completed / failed")
+    phase: str = Field(description="当前阶段（如 writing / reviewing）")
+    created_at: str = Field(description="创建时间（UTC ISO 8601）")
+    updated_at: str = Field(description="最后更新时间（UTC ISO 8601）")
+    duration_seconds: int = Field(description="已运行秒数；running 为「至今」，其余为收尾耗时")
+    is_stuck: bool = Field(description="是否判定为卡死（running 且超过阈值未更新）")
+    stuck_minutes: int = Field(description="已停更分钟数；仅 is_stuck 为 true 时有意义")
+    prompt_tokens: int = Field(description="输入 Token")
+    completion_tokens: int = Field(description="输出 Token")
+    error_code: str = Field(description="终态错误码（如 CANCELLED / LLM_UPSTREAM_ERROR）")
+    error_message: str = Field(description="终态错误说明")
+
+
+class AdminJobListResponse(BaseModel):
+    """任务监控列表。"""
+
+    items: list[AdminJobItem] = Field(description="当前返回的任务")
+    total: int = Field(description="同口径命中总数（不只是本页条数）")
+
+
+class AdminCancelJobResponse(BaseModel):
+    """取消单条任务的结果。"""
+
+    cancelled: bool = Field(
+        description="是否确实取消了一个仍在运行的任务；false 表示它在点击前已结束"
+    )
+
+
+class AdminCancelStuckResponse(BaseModel):
+    """批量取消卡死任务的结果。"""
+
+    cancelled: int = Field(description="实际取消的任务条数")
+
+
 # ============================================================================
 # 方案（solutions）：整份会话快照的持久化
 # ============================================================================

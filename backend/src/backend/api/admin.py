@@ -413,6 +413,78 @@ async def list_logs(
 
 
 # ----------------------------------------------------------------------
+# 任务监控（v4.5 T5-1）
+# ----------------------------------------------------------------------
+
+
+@router.get("/jobs", response_model=schemas.AdminJobListResponse, summary="任务监控列表")
+async def list_jobs(
+    status: str = "",
+    username: str = "",
+    kind: str = "",
+    limit: int = 100,
+    offset: int = 0,
+    user: User = Depends(require_admin),
+) -> schemas.AdminJobListResponse:
+    """在飞 / 最近失败 / 全部任务（可按状态、用户名、类型筛）。
+
+    `status` 为空表示不筛（页面的「全部」标签）；常用的两个值是 `running`
+    与 `failed`。running 按「跑得最久优先」排序——卡死任务的特征就是时间长，
+    顶到最前面才看得见。
+
+    `is_stuck` 由服务端按「running 且超过 `STUCK_MINUTES` 未更新」判定：
+    前端只负责把它画红，不重复实现这条规则。
+    """
+    del user
+    data = admin_service.list_jobs(
+        status=status,
+        username=username,
+        kind=kind,
+        limit=limit,
+        offset=offset,
+    )
+    return schemas.AdminJobListResponse(
+        items=[schemas.AdminJobItem(**row) for row in data["items"]],
+        total=data["total"],
+    )
+
+
+@router.post(
+    "/jobs/cancel-stuck",
+    response_model=schemas.AdminCancelStuckResponse,
+    summary="批量取消卡死任务",
+)
+async def cancel_stuck_jobs(user: User = Depends(require_admin)) -> schemas.AdminCancelStuckResponse:
+    """一次性取消所有判定为卡死的任务，返回实际取消条数。
+
+    只动「已停更超过阈值」的那些：正常在跑的任务一个都不碰——批量误伤会让
+    用户的正文断在半截，比卡死更难解释。
+    """
+    return schemas.AdminCancelStuckResponse(cancelled=admin_service.cancel_stuck_jobs(user))
+
+
+@router.post(
+    "/jobs/{job_id}/cancel",
+    response_model=schemas.AdminCancelJobResponse,
+    summary="取消一次任务",
+)
+async def cancel_job(
+    job_id: int,
+    user: User = Depends(require_admin),
+) -> schemas.AdminCancelJobResponse:
+    """手动取消一次任务（管理员可取消任意用户的任务）。
+
+    `cancelled=false` 不是错误：它表示「你点的时候任务刚好结束了」。
+    这种情况若报错，管理员会以为操作失败而反复点击；返回 false 让他
+    刷新后看到它已不在运行列表里，反而更清楚。
+
+    任务是**协作式**停止：在途协程在下一个 await 点跳出。卡在纯同步阻塞上的
+    任务不会立刻退出，但库里已是终态，重启后不会再显示「生成中」。
+    """
+    return schemas.AdminCancelJobResponse(cancelled=admin_service.cancel_job_as_admin(user, job_id))
+
+
+# ----------------------------------------------------------------------
 # 系统配置（v4 T3）
 # ----------------------------------------------------------------------
 

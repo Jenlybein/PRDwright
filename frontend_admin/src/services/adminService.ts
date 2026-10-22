@@ -423,6 +423,79 @@ export async function fetchLogs(query: LogQuery = {}): Promise<AdminLogPage> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 任务监控（v4.5 T5-1）
+// ---------------------------------------------------------------------------
+
+/** 任务监控列表的一行（`GET /api/admin/jobs` 的一行） */
+export interface AdminJob {
+  id: number
+  owner_id: number
+  owner_name: string
+  kind: string
+  status: 'running' | 'completed' | 'failed' | string
+  phase: string
+  created_at: string
+  updated_at: string
+  /** 已运行秒数；running 为「至今」，其余为收尾耗时 */
+  duration_seconds: number
+  /** 是否判定为卡死（running 且超过阈值未更新） */
+  is_stuck: boolean
+  /** 已停更分钟数；仅 is_stuck 时有意义 */
+  stuck_minutes: number
+  prompt_tokens: number
+  completion_tokens: number
+  error_code: string
+  error_message: string
+}
+
+/** 任务监控列表的一页 */
+export interface AdminJobPage {
+  items: AdminJob[]
+  /** 同口径命中总数，不只是本页条数 */
+  total: number
+}
+
+/** 任务列表的筛选条件。空串一律视为「不筛」。 */
+export interface JobQuery {
+  /** running / failed；空串 = 全部 */
+  status?: string
+  /** 用户名模糊匹配 */
+  username?: string
+  /** 任务类型 */
+  kind?: string
+  limit?: number
+  offset?: number
+}
+
+/** 任务列表。对应 `GET /api/admin/jobs`。 */
+export async function fetchJobs(query: JobQuery = {}): Promise<AdminJobPage> {
+  const params: Record<string, string | number> = {}
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') continue
+    params[key] = value as string | number
+  }
+  const { data } = await http.get<AdminJobPage>('/api/admin/jobs', { params })
+  return { items: data.items ?? [], total: data.total ?? 0 }
+}
+
+/**
+ * 取消一条任务。对应 `POST /api/admin/jobs/{id}/cancel`。
+ *
+ * `cancelled=false` 不是失败：它表示任务在点击前已经自然结束。
+ * 页面据此提示「它刚好结束了」，而不是弹一个红色错误。
+ */
+export async function cancelJob(jobId: number): Promise<{ cancelled: boolean }> {
+  const { data } = await http.post<{ cancelled: boolean }>(`/api/admin/jobs/${jobId}/cancel`)
+  return { cancelled: data.cancelled ?? false }
+}
+
+/** 批量取消所有卡死任务。对应 `POST /api/admin/jobs/cancel-stuck`。 */
+export async function cancelStuckJobs(): Promise<{ cancelled: number }> {
+  const { data } = await http.post<{ cancelled: number }>('/api/admin/jobs/cancel-stuck')
+  return { cancelled: data.cancelled ?? 0 }
+}
+
 /**
  * 把一个可能失败的操作收敛成 `ActionResult`。
  *
