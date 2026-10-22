@@ -14,6 +14,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 vi.mock('@/services/adminService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/adminService')>()
@@ -177,16 +178,78 @@ function providerList(list: Provider[] = [provider()]) {
   }
 }
 
-async function render(cfg = config(), list = providerList()) {
+/**
+ * 挂载配置页。
+ *
+ * ⚠️ 必须带**真路由**：分区写在 `?sec=` 上，页面是靠 `useRoute()` 读它的。
+ * 用假路由（或不带路由）mount，读到的是「没有分区」的默认态——
+ * 那些分区用例会一路绿着，却什么都没验证。
+ */
+async function mountAt(query = '', cfg = config(), list = providerList()) {
   configMock.mockResolvedValue(cfg)
   providersMock.mockResolvedValue(list)
-  const wrapper = mount(ConfigView, { global: { plugins: [createPinia()] } })
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/', name: 'config', component: ConfigView }],
+  })
+  if (query) await router.push(`/${query}`)
+  await router.isReady()
+  const wrapper = mount(ConfigView, { global: { plugins: [createPinia(), router] } })
   await vi.waitFor(() => {
     expect(configMock).toHaveBeenCalled()
     expect(providersMock).toHaveBeenCalled()
   })
   await wrapper.vm.$nextTick()
-  return wrapper
+  return { wrapper, router }
+}
+
+/**
+ * 默认落在「模型生成配置」这一分区：
+ * 下面多数用例动的是参数项（并发、审核、保存校验），它们都在这个分区里。
+ */
+async function render(cfg = config(), list = providerList()) {
+  return (await mountAt('?sec=generation', cfg, list)).wrapper
+}
+
+/** 模型配置分区：供应商列表那一段（新增/编辑/测试连接）的用例用它 */
+async function renderProviders(cfg = config(), list = providerList()) {
+  return (await mountAt('?sec=model', cfg, list)).wrapper
+}
+
+/** 五个后端分组各放一项，用来验「这个分区里该有谁、不该有谁」 */
+function allGroups(): ConfigGroup[] {
+  return [
+    {
+      key: 'prd',
+      label: '分章节生成',
+      help: '',
+      items: [item({ key: 'prd_pipeline_concurrency', label: '并发章节数' })],
+    },
+    {
+      key: 'review',
+      label: '审核与改写',
+      help: '',
+      items: [item({ key: 'review_enabled', label: '审核开关', type: 'bool', value: true, min: null, max: null })],
+    },
+    {
+      key: 'llm',
+      label: '调用与预算',
+      help: '',
+      items: [item({ key: 'llm_timeout', label: '调用超时秒数', min: null, max: null })],
+    },
+    {
+      key: 'quota',
+      label: '每日额度',
+      help: '',
+      items: [item({ key: 'daily_quota', label: '每日生成上限', min: null, max: null })],
+    },
+    {
+      key: 'auth',
+      label: '安全与登录',
+      help: '',
+      items: [item({ key: 'login_limit', label: '登录失败限流', min: null, max: null })],
+    },
+  ]
 }
 
 beforeEach(() => {
@@ -202,17 +265,24 @@ beforeEach(() => {
 })
 
 describe('配置页', () => {
-  it('渲染三要素：当前供应商、配置来源、配置项', async () => {
+  it('渲染分区标题、配置指纹与配置项', async () => {
     const wrapper = await render()
 
     const text = wrapper.text()
-    expect(text).toContain('火山方舟')
-    // 不再写「环境变量默认值」：模型配置已整体迁入后台（ADR-051），
-    // 这里说的是**白名单参数**没在后台改过，与模型配置无关。
-    expect(text).toContain('默认值（未在后台改过）')
+    expect(wrapper.find('h1').text()).toBe('模型生成配置')
+    // 配置指纹：排查「改了没生效」时，第一眼要看的就是它有没有变
+    expect(text).toContain('REV rev-1')
     expect(text).toContain('并发章节数')
     // 变量名不上页面：管理员只关心「并发章节数」，不关心它在代码里叫什么
     expect(text).not.toContain('prd_pipeline_concurrency')
+  })
+
+  it('不再跨分区挂一块「当前供应商」卡（那条信息只属于模型配置那一屏）', async () => {
+    const wrapper = await render()
+    const text = wrapper.text()
+    expect(text).not.toContain('当前供应商')
+    expect(text).not.toContain('Active Provider')
+    expect(text).not.toContain('火山方舟')
   })
 
   it('启动类配置没有可编辑入口', async () => {
@@ -235,7 +305,7 @@ describe('配置页', () => {
   })
 
   it('密钥只显示「已配置/未配置」，绝不渲染密钥值', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     const text = wrapper.text()
     expect(text).toContain('已配置')
     // 页面里不该出现任何像密钥的东西
@@ -328,7 +398,7 @@ describe('配置页', () => {
   })
 
   it('激活供应商要二次确认，确认后才发请求', async () => {
-    const wrapper = await render(
+    const wrapper = await renderProviders(
       config(),
       providerList([
         provider(),
@@ -359,7 +429,7 @@ describe('配置页', () => {
   })
 
   it('列表里只有使用中的那一条带「使用中」，其余是「待命」', async () => {
-    const wrapper = await render(
+    const wrapper = await renderProviders(
       config(),
       providerList([
         provider(),
@@ -382,7 +452,7 @@ describe('配置页', () => {
   it('使用中的配置也给出删除按钮，被拒绝时原样显示后端原因', async () => {
     // ⚠️ 前端**不**自己判断「使用中不能删」：藏起按钮会让人以为这行坏了，
     // 而且规则一改两边就不一致。按钮照给，让后端用 403 + 原话回答。
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     deleteMock.mockRejectedValue(
       new ApiError('这是使用中的配置，请先切换到另一条再删除', 403),
     )
@@ -397,7 +467,7 @@ describe('配置页', () => {
   })
 
   it('测试连接成功走悬浮提示，不再在列表行里占一行字', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     testMock.mockResolvedValue({ ok: true, detail: '连通正常（120 ms）', latency_ms: 120 })
 
     await wrapper.findAll('button').find((b) => b.text() === '测试连接')!.trigger('click')
@@ -417,7 +487,7 @@ describe('配置页', () => {
   })
 
   it('测试连接失败时把后端给的原因显示出来', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     testMock.mockResolvedValue({
       ok: false,
       detail: '调用失败：ConnectError: 域名解析失败',
@@ -432,7 +502,7 @@ describe('配置页', () => {
   })
 
   it('新增与编辑都以弹窗呈现，点「关闭」可收起', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     // 初始不弹：列表才是主要内容
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
 
@@ -454,7 +524,7 @@ describe('配置页', () => {
   })
 
   it('新增配置时从「供应商」填充地址与配置名，且没有 id 输入框', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
 
     // 表单默认收起：列表才是主要内容，供应商下拉只在展开后出现
     await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
@@ -477,7 +547,7 @@ describe('配置页', () => {
   })
 
   it('表单里只有能改的东西：没有协议、也没有密钥变量名', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
     await wrapper.vm.$nextTick()
 
@@ -498,7 +568,7 @@ describe('配置页', () => {
   })
 
   it('列表为空时只有一个新增入口（不再重复摆一个「新增第一条配置」）', async () => {
-    const wrapper = await render(config(), providerList([]))
+    const wrapper = await renderProviders(config(), providerList([]))
 
     expect(wrapper.text()).toContain('还没有任何模型配置')
     // 右上角那个就在同一屏，再摆一个大按钮做同一件事只会让人先愣一下
@@ -509,7 +579,7 @@ describe('配置页', () => {
   })
 
   it('新增成功后显示后端给的提示（首条会自动设为使用中）', async () => {
-    const wrapper = await render(config(), providerList([]))
+    const wrapper = await renderProviders(config(), providerList([]))
     await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
     await wrapper.vm.$nextTick()
 
@@ -530,7 +600,7 @@ describe('配置页', () => {
   })
 
   it('提交时带上填写的密钥（表单里的明文，后端加密入库）', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
     await wrapper.vm.$nextTick()
 
@@ -554,7 +624,7 @@ describe('配置页', () => {
   })
 
   it('不填密钥时请求体不带 api_key（= 稍后再配）', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
     await wrapper.vm.$nextTick()
 
@@ -573,7 +643,7 @@ describe('配置页', () => {
   })
 
   it('没选供应商就提交：直接提示，不发请求', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
     await wrapper.vm.$nextTick()
 
@@ -586,7 +656,7 @@ describe('配置页', () => {
   })
 
   it('选了供应商但清空配置名：提示配置名必填，不发请求', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
     await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
     await wrapper.vm.$nextTick()
 
@@ -609,7 +679,7 @@ describe('配置页', () => {
   })
 
   it('编辑面板不冒充可改控件，密钥只通过 api_key 字段提交', async () => {
-    const wrapper = await render()
+    const wrapper = await renderProviders()
 
     await wrapper.findAll('button').find((b) => b.text() === '编辑')!.trigger('click')
     await wrapper.vm.$nextTick()
@@ -637,5 +707,81 @@ describe('配置页', () => {
     expect(payload).not.toHaveProperty('api_key_env_var')
     // 留空表示「保持不变」，所以也不该发 api_key
     expect(payload).not.toHaveProperty('api_key')
+  })
+})
+
+describe('配置页 · 分区', () => {
+  it('每个分区只显示自己那一摊，别的分区的配置不出现', async () => {
+    const cases: Array<{ sec: string; wanted: string[]; unwanted: string[] }> = [
+      {
+        sec: 'generation',
+        wanted: ['并发章节数', '审核开关'],
+        unwanted: ['调用超时秒数', '每日生成上限', '登录失败限流', '测试连接'],
+      },
+      {
+        sec: 'budget',
+        wanted: ['调用超时秒数', '每日生成上限'],
+        unwanted: ['并发章节数', '审核开关', '登录失败限流'],
+      },
+      {
+        sec: 'security',
+        wanted: ['登录失败限流'],
+        unwanted: ['并发章节数', '调用超时秒数', '每日生成上限'],
+      },
+    ]
+
+    for (const one of cases) {
+      const wrapper = await mountAt(`?sec=${one.sec}`, config({ groups: allGroups() })).then(
+        (r) => r.wrapper,
+      )
+      const text = wrapper.text()
+      for (const label of one.wanted) expect(text).toContain(label)
+      for (const label of one.unwanted) expect(text).not.toContain(label)
+    }
+  })
+
+  it('「模型配置」这一屏只有供应商列表，没有参数组', async () => {
+    const wrapper = await renderProviders(config({ groups: allGroups() }))
+    const text = wrapper.text()
+    // 供应商列表在
+    expect(text).toContain('测试连接')
+    expect(text).toContain('输出上限 8192')
+    // 参数组不在：它们各自属于「生成 / 预算 / 安全」三屏
+    expect(text).not.toContain('并发章节数')
+    expect(text).not.toContain('调用超时秒数')
+    expect(text).not.toContain('登录失败限流')
+  })
+
+  it('标题与内容都由 URL 上的 sec 决定（刷新/分享链接都回到同一屏）', async () => {
+    const wrapper = await mountAt('?sec=budget', config({ groups: allGroups() })).then(
+      (r) => r.wrapper,
+    )
+    // 页头标题就是这个分区的名字
+    expect(wrapper.find('h1').text()).toBe('预算与额度')
+    expect(wrapper.text()).toContain('调用超时秒数')
+    expect(wrapper.text()).toContain('每日生成上限')
+  })
+
+  it('页面里不再摆一排分区切换按钮（入口只有侧栏子菜单）', async () => {
+    const wrapper = await renderProviders(config({ groups: allGroups() }))
+    expect(wrapper.find('.brut-seg').exists()).toBe(false)
+  })
+
+  it('不认识的 ?sec= 回落到第一个分区，不白屏', async () => {
+    const wrapper = await mountAt('?sec=not-a-section', config({ groups: allGroups() })).then(
+      (r) => r.wrapper,
+    )
+    // 兜底分区是「模型配置」：供应商列表在，参数组不在
+    expect(wrapper.text()).toContain('测试连接')
+    expect(wrapper.text()).not.toContain('登录失败限流')
+  })
+
+  it('缺密钥的提醒保留为一行（它会在生成时直接报错，不能跟着卡片一起删）', async () => {
+    const wrapper = await mountAt(
+      '?sec=security',
+      config({ groups: allGroups(), missing_key: '当前供应商还没有配置密钥：生成会直接报错。' }),
+    ).then((r) => r.wrapper)
+    expect(wrapper.text()).toContain('还没有配置密钥')
+    expect(wrapper.text()).toContain('生成会直接报错')
   })
 })

@@ -18,6 +18,7 @@
 
 import { createRouter, createWebHistory } from 'vue-router'
 
+import { DEFAULT_SEC } from '@/nav'
 import { useSessionStore } from '@/stores/session'
 
 // 让 `meta.requiresAdmin` 有类型：不写这段，TS 会把 meta 当成任意字段，
@@ -80,6 +81,14 @@ export const router = createRouter({
       name: 'config',
       component: () => import('@/views/ConfigView.vue'),
       meta: { requiresAdmin: true },
+      /**
+       * 裸 `/config` 自动补上默认分区。
+       *
+       * ⚠️ 配置页只按分区显示（没有「全部」这一屏），所以「没有分区」不是一个
+       * 合法的落点：留在那里，侧栏四个子项没有一个能高亮，刷新后也不知道自己
+       * 原本在哪一屏。补上 `sec` 之后 URL 就始终是完整的。
+       */
+      beforeEnter: (to) => (to.query.sec ? true : { name: 'config', query: { sec: DEFAULT_SEC } }),
     },
     // 未匹配的地址一律回概览，避免刷新时白屏
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

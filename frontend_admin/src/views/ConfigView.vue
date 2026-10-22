@@ -16,9 +16,11 @@
  * 它们改了必须重启，放进来只会制造「显示已保存、实际没变」的困惑。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 
 import AdminModal from '@/components/AdminModal.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { sectionOf } from '@/nav'
 
 import {
   activateProvider,
@@ -120,9 +122,30 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer)
 })
 
+const route = useRoute()
+
 const groups = computed<ConfigGroup[]>(() => config.value?.groups ?? [])
 const providers = computed<Provider[]>(() => providerList.value?.providers ?? [])
 const presets = computed(() => providerList.value?.presets ?? [])
+
+/**
+ * 当前分区（模型配置 / 模型生成配置 / 预算与额度 / 安全与登录）。
+ *
+ * 分区写在 URL 上（`?sec=`）而不是组件内部状态：写进内存的话，刷新、
+ * 复制链接、浏览器后退都会把人送回第一屏。侧栏子菜单读的是同一个值，
+ * 所以「菜单高亮」与「页面内容」不可能对不上。
+ *
+ * `sectionOf` 对不认识的值回落到「全部」——拼错一个字母不该得到白屏。
+ */
+const section = computed(() => sectionOf(String(route?.query?.sec ?? '')))
+
+/** 该分区要显示的配置分组 */
+const shownGroups = computed<ConfigGroup[]>(() =>
+  groups.value.filter((g) => section.value.groups.includes(g.key)),
+)
+
+/** 模型配置列表只出现在「模型配置」这一屏：别的分区它是噪音 */
+const showProviders = computed(() => section.value.providers)
 
 function itemOf(groupKey: string, key: string): ConfigItem | undefined {
   return groups.value.find((g) => g.key === groupKey)?.items.find((i) => i.key === key)
@@ -547,20 +570,23 @@ onMounted(load)
 
 <template>
   <div class="space-y-5">
-    <!-- 页头 -->
-    <PageHeader kicker="Config / 运行时" title="系统配置">
+    <!-- 页头。标题跟着分区走：从侧栏子菜单进来时，这是「我进了哪一摊」的第二处确认 -->
+    <PageHeader kicker="Config / 运行时" :title="section.label">
       <template #actions>
         <span v-if="config" class="brut-tag brut-tag-slab">REV {{ config.revision }}</span>
       </template>
       <template #desc>
         <p>
-          改完保存后立即作用于<b>下一次生成</b>；正在跑的任务不受影响。
+          {{ section.help || '改完保存后立即作用于下一次生成；正在跑的任务不受影响。' }}
           可调项<b>全在这一页</b>——<code class="font-mono">.env</code>
           里只剩启动项，没有第二份。
           日志级别、落库开关这类「改了必须重启」的配置不在此页——它们改了不重启只会造成错觉。
         </p>
       </template>
     </PageHeader>
+
+    <!-- 分区切换只在侧栏子菜单里，页面内不再摆一排同样的按钮：
+         两处入口做同一件事，结果是每次改配置都要先判断「这两个是不是一样」。 -->
 
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
     <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
@@ -578,47 +604,14 @@ onMounted(load)
     <div v-if="loading" class="brut-card px-4 py-8 text-sm text-subtle">加载中…</div>
 
     <template v-else-if="config">
-      <!-- 当前生效状态：排查「改了没生效」的第一眼就该落在这里 -->
-      <section class="brut-slab-sky p-4">
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div class="min-w-0">
-            <p class="kicker text-on-sky/75">当前供应商 · Active Provider</p>
-            <p class="mt-1 text-xl font-extrabold tracking-tight">
-              {{ config.active_provider?.name || '还没有模型配置' }}
-            </p>
-            <p class="mt-0.5 font-mono text-xs text-on-sky/80">
-              <template v-if="config.active_provider">
-                {{ config.active_provider.protocol_label }} ·
-                {{ config.active_provider.default_model || '未填模型' }}
-              </template>
-              <template v-else>在下方「模型配置」里新增一条即可，生成会立刻可用</template>
-            </p>
-          </div>
-
-          <div class="text-right">
-            <p class="kicker text-on-sky/75">配置来源</p>
-            <p class="mt-1 text-sm font-bold">
-              {{
-                config.config_source === 'db'
-                  ? '数据库（含后台覆盖）'
-                  : config.config_source === 'env'
-                    ? '默认值（未在后台改过）'
-                    : '降级（表不可用）'
-              }}
-            </p>
-          </div>
-        </div>
-
-        <p
-          v-if="config.missing_key"
-          class="mt-3 border-2 border-on-sky/50 bg-card px-3 py-2 text-xs font-bold text-danger-fg"
-        >
-          ⚠ {{ config.missing_key }}
-        </p>
-      </section>
+      <!-- 缺密钥的提醒留着，但缩成一行。
+           原来它挂在「当前供应商」那块卡里——那块卡在四个分区都显示，
+           而「现在生效的是哪一条」只有模型配置那一屏用得上（列表里本来就有）。
+           卡删了，这条**会在生成时直接报错**的提醒不能跟着删。 -->
+      <p v-if="config.missing_key" class="brut-note brut-note-warn">⚠ {{ config.missing_key }}</p>
 
       <!-- 模型配置：一条 = 一个接口 + 一套参数，用列表而不是「一家一张卡」 -->
-      <section class="brut-card-lg">
+      <section v-if="showProviders" class="brut-card-lg">
         <header class="flex flex-wrap items-center justify-between gap-2 border-b-2 border-brut px-4 py-3">
           <div>
             <p class="kicker">Providers</p>
@@ -932,7 +925,7 @@ onMounted(load)
       </section>
 
       <!-- 配置分组 -->
-      <section v-for="group in groups" :key="group.key" class="brut-card-lg">
+      <section v-for="group in shownGroups" :key="group.key" class="brut-card-lg">
         <header
           class="flex flex-wrap items-start justify-between gap-3 border-b-2 border-brut px-4 py-3"
         >
@@ -1050,6 +1043,15 @@ onMounted(load)
           </div>
         </div>
       </section>
+
+      <!-- 这一分区一项都没有：后端分组改了名、或还没上线时的兜底。
+           没有它，页面就是「一片空白，且不说为什么」。 -->
+      <p
+        v-if="!shownGroups.length && !showProviders"
+        class="brut-card px-4 py-6 text-sm text-subtle"
+      >
+        「{{ section.label }}」暂时没有可调的配置项。
+      </p>
     </template>
 
     <!-- 危险项确认 -->

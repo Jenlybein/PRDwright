@@ -721,6 +721,103 @@
     color: var(--ui-danger-fg);
   }
 
+  /* ---------------------------------------------------------------- 侧栏导航 */
+
+  /* 一级项与子项共用一套「悬停描边 + 选中填墨」的语言。
+     层级只靠「缩进 + 左侧竖线」表达——不靠颜色深浅：侧栏本身就是天蓝底，
+     深浅差在这里既不可靠也说不清（深一点到底是「子级」还是「更重要」）。 */
+  .brut-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .brut-nav-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+    border: 2px solid transparent;
+    border-radius: 2px;
+    padding: 0.35rem 0.55rem;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--ui-ink);
+    text-align: left;
+    transition:
+      background-color 0.1s linear,
+      border-color 0.1s linear;
+  }
+  .brut-nav-row:hover {
+    border-color: var(--ui-brut);
+    background: var(--ui-sky-soft);
+  }
+  /* 选中：整块翻墨。投影用卡片色而不是墨色——侧栏底是天蓝，墨色投影看不见 */
+  .brut-nav-row.is-active {
+    border-color: var(--ui-brut);
+    background: var(--ui-ink);
+    color: var(--ui-card);
+    box-shadow: 4px 4px 0 0 var(--ui-card);
+  }
+  /* 分支：当前页在这一组里，但选中的是组里的某一项。
+     比选中态弱一档——两组「选中」并排会让人以为选了两个页面 */
+  .brut-nav-row.is-branch {
+    border-color: var(--ui-brut);
+    background: var(--ui-sky-soft);
+  }
+  /* 右侧那列等宽小字（OVERVIEW / MODEL …）：装饰，不参与阅读动线 */
+  .brut-nav-code {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    letter-spacing: 0.1em;
+    color: var(--ui-ink);
+    opacity: 0.55;
+  }
+  .brut-nav-row.is-active .brut-nav-code {
+    color: var(--ui-sky);
+    opacity: 1;
+  }
+  /* 子菜单：缩进 + 竖线 + 字号小一档 */
+  .brut-nav-sub {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    margin: 0.15rem 0 0.3rem 0.85rem;
+    padding-left: 0.5rem;
+    border-left: 2px solid var(--ui-brut);
+  }
+  .brut-nav-sub .brut-nav-row {
+    padding: 0.25rem 0.45rem;
+    font-size: 0.75rem;
+  }
+  /* 折叠箭头：只有「有子项的组」才有，点它只开合、不跳转 */
+  .brut-nav-caret {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.15rem;
+    height: 1.15rem;
+    border: 2px solid transparent;
+    border-radius: 2px;
+    font-size: 0.625rem;
+    line-height: 1;
+    color: var(--ui-ink);
+    cursor: pointer;
+    transition:
+      transform 0.12s var(--ease-snap),
+      background-color 0.1s linear,
+      border-color 0.1s linear;
+  }
+  .brut-nav-caret:hover {
+    border-color: var(--ui-brut);
+    background: var(--ui-card);
+  }
+  .brut-nav-caret.is-closed {
+    transform: rotate(-90deg);
+  }
+
   /* -------------------------------------------------------------- 主题切换 */
 
   /* 单按钮循环（自动 → 亮色 → 暗色）。形状走 .brut-btn，这里只收紧成图标 + 短标签 */

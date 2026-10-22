@@ -13,43 +13,16 @@
  * 账号块放在侧栏底部而不是顶栏：顶栏留给「我在哪一页」，
  * 侧栏留给「我是谁、怎么退出」，两件事不抢同一个位置。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import ThemeSwitch from '@/components/ThemeSwitch.vue'
+import { NAV, flatNav, type NavChild, type NavItem } from '@/nav'
 import { useSessionStore } from '@/stores/session'
 
 const session = useSessionStore()
 const route = useRoute()
 const router = useRouter()
-
-/** 侧栏导航。新增页面只改这一处，不用去每个页面里放返回链接 */
-const NAV = [
-  {
-    key: 'ops',
-    label: '运营',
-    code: 'OPS',
-    items: [
-      { name: 'dashboard', label: '概览', code: 'OVERVIEW' },
-      { name: 'jobs', label: '任务监控', code: 'JOBS' },
-      { name: 'users', label: '用户', code: 'USERS' },
-      { name: 'invites', label: '邀请码', code: 'INVITES' },
-    ],
-  },
-  {
-    key: 'sys',
-    label: '系统',
-    code: 'SYS',
-    items: [
-      { name: 'logs', label: '系统日志', code: 'LOGS' },
-      { name: 'config', label: '配置', code: 'CONFIG' },
-      { name: 'audit', label: '操作记录', code: 'AUDIT' },
-    ],
-  },
-]
-
-/** 扁平化一份，供「当前页面是什么」与移动端横排导航共用 */
-const flatNav = NAV.flatMap((group) => group.items)
 
 /**
  * 是否处于「后台外壳」里。
@@ -60,7 +33,57 @@ const flatNav = NAV.flatMap((group) => group.items)
  */
 const isConsole = computed(() => Boolean(route.meta.requiresAdmin))
 
-const current = computed(() => flatNav.find((item) => item.name === route.name))
+/** 当前 URL 上的分区（`?sec=`）。侧栏高亮与页面内容读的是同一个值 */
+const currentSec = computed(() => String(route.query.sec ?? ''))
+
+/**
+ * 某一项是否就是当前这一屏。
+ *
+ * 判据是「路由名 **且** 分区」两条都对上：只比路由名的话，
+ * 「配置」和它下面的四个子项会同时高亮，看上去像选了两个。
+ */
+function isActive(item: NavItem | NavChild): boolean {
+  return route.name === item.name && currentSec.value === (item.sec ?? '')
+}
+
+/** 有子项、且当前页就在这组里（选中的可能是组里的某一项） */
+const branch = computed(() => NAV.flatMap((g) => g.items).find((i) => i.children?.length && i.name === route.name))
+
+/**
+ * 子菜单的展开状态。
+ *
+ * ⚠️ **只由点击决定，不跟着路由变**。早先的版本是「人在配置页就展开、
+ * 离开就收起」，结果点开配置再点别的页，菜单当着面自己合上了——
+ * 展开是一个人说「我要看这摊」的动作，只有他自己再点一次才该收。
+ *
+ * 默认展开：子菜单存在的意义就是被看见，藏起来只是多一次点击。
+ */
+const openGroups = ref<Record<string, boolean>>({})
+
+function isOpen(item: NavItem): boolean {
+  return openGroups.value[item.name] ?? true
+}
+
+function toggleGroup(item: NavItem) {
+  openGroups.value = { ...openGroups.value, [item.name]: !isOpen(item) }
+}
+
+/** 跳转目标：有 `sec` 就带在 query 上（配置页的子项），没有就是裸链接 */
+function toOf(item: NavChild) {
+  return { name: item.name, query: item.sec ? { sec: item.sec } : {} }
+}
+
+/** 精确命中的那一项（可能是子项） */
+const current = computed(
+  () => flatNav.find((item) => route.name === item.name && (item.sec ?? '') === currentSec.value) ?? null,
+)
+
+/** 顶栏标题：在子菜单里时写成「配置 · 模型配置」，让人知道自己在哪一摊 */
+const heading = computed(() => {
+  const item = current.value
+  if (!item) return '管理后台'
+  return branch.value && branch.value !== item ? `${branch.value.label} · ${item.label}` : item.label
+})
 
 /** 顶栏日期。用本地时区，和日志页的显示口径一致 */
 const today = computed(() => {
@@ -102,28 +125,53 @@ async function onLogout() {
           </span>
         </div>
 
-        <nav class="flex flex-col gap-1" aria-label="后台导航">
+        <!-- 导航。样式（含子菜单的缩进与竖线）都在 index.css 的 .brut-nav-* 里，
+             层次只靠缩进 + 竖线表达，不靠颜色深浅——暗色下深浅差不可靠。 -->
+        <nav class="brut-nav" aria-label="后台导航">
           <template v-for="group in NAV" :key="group.key">
             <p class="kicker mt-2 mb-1 px-1">{{ group.label }} / {{ group.code }}</p>
-            <RouterLink
-              v-for="item in group.items"
-              :key="item.name"
-              :to="{ name: item.name }"
-              class="group flex items-center justify-between gap-2 border-2 px-2.5 py-2 text-sm font-bold transition-colors"
-              :class="
-                route.name === item.name
-                  ? 'border-brut bg-ink text-card shadow-[4px_4px_0_0_var(--ui-card)]'
-                  : 'border-transparent text-ink hover:border-brut hover:bg-card/55'
-              "
-            >
-              <span>{{ item.label }}</span>
-              <span
-                class="font-mono text-[10px] tracking-widest"
-                :class="route.name === item.name ? 'text-sky' : 'text-ink/45'"
+
+            <template v-for="item in group.items" :key="item.name">
+              <!-- 有子项：整行就是一个「展开/收起」按钮，点了**不跳转**。
+                   配置页被切成四个分区，「配置」本身不再是一屏，
+                   点它跳进某一屏只会让人以为那是「配置的概览」。 -->
+              <template v-if="item.children?.length">
+                <button
+                  type="button"
+                  class="brut-nav-row"
+                  :class="route.name === item.name ? 'is-branch' : ''"
+                  :aria-expanded="isOpen(item)"
+                  @click="toggleGroup(item)"
+                >
+                  <span class="min-w-0 flex-1 truncate">{{ item.label }}</span>
+                  <span class="brut-nav-caret" :class="isOpen(item) ? '' : 'is-closed'">▾</span>
+                </button>
+
+                <div v-if="isOpen(item)" class="brut-nav-sub">
+                  <RouterLink
+                    v-for="child in item.children"
+                    :key="child.sec ?? child.name"
+                    :to="toOf(child)"
+                    class="brut-nav-row"
+                    :class="isActive(child) ? 'is-active' : ''"
+                  >
+                    <span class="truncate">{{ child.label }}</span>
+                    <span class="brut-nav-code">{{ child.code }}</span>
+                  </RouterLink>
+                </div>
+              </template>
+
+              <!-- 无子项：整行就是一个链接 -->
+              <RouterLink
+                v-else
+                :to="toOf(item)"
+                class="brut-nav-row"
+                :class="isActive(item) ? 'is-active' : ''"
               >
-                {{ item.code }}
-              </span>
-            </RouterLink>
+                <span class="truncate">{{ item.label }}</span>
+                <span class="brut-nav-code">{{ item.code }}</span>
+              </RouterLink>
+            </template>
           </template>
         </nav>
 
@@ -160,9 +208,7 @@ async function onLogout() {
               </span>
               <span class="kicker hidden lg:inline">PRDwright Admin</span>
               <span class="hidden text-brut/40 lg:inline">/</span>
-              <span class="truncate text-sm font-extrabold text-ink">
-                {{ current?.label ?? '管理后台' }}
-              </span>
+              <span class="truncate text-sm font-extrabold text-ink">{{ heading }}</span>
               <span
                 v-if="current"
                 class="brut-tag brut-tag-slab hidden md:inline-flex"
@@ -196,10 +242,10 @@ async function onLogout() {
           >
             <RouterLink
               v-for="item in flatNav"
-              :key="item.name"
-              :to="{ name: item.name }"
+              :key="`${item.name}-${item.sec ?? ''}`"
+              :to="toOf(item)"
               class="brut-btn brut-btn-xs shrink-0"
-              :class="route.name === item.name ? 'brut-btn-ink' : ''"
+              :class="isActive(item) ? 'brut-btn-ink' : ''"
             >
               {{ item.label }}
             </RouterLink>
