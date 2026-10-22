@@ -386,7 +386,7 @@ describe('配置页', () => {
     })
   })
 
-  it('测试连接会显示结果（成功与失败分开）', async () => {
+  it('测试连接成功走悬浮提示，不再在列表行里占一行字', async () => {
     const wrapper = await render()
     testMock.mockResolvedValue({ ok: true, detail: '连通正常（120 ms）', latency_ms: 120 })
 
@@ -395,7 +395,15 @@ describe('配置页', () => {
       expect(testMock).toHaveBeenCalledWith('cfg_ark0001')
     })
     await wrapper.vm.$nextTick()
-    expect(wrapper.text()).toContain('连通正常')
+
+    // 悬浮提示：role=status 的固定浮层，带耗时
+    const toast = wrapper.find('[role="status"]')
+    expect(toast.exists()).toBe(true)
+    expect(toast.text()).toContain('连通正常')
+    expect(toast.text()).toContain('120 ms')
+
+    // 成功不再写进列表行（行内只保留失败原因）
+    expect(wrapper.findAll('li')[0]!.text()).not.toContain('连通正常')
   })
 
   it('测试连接失败时把后端给的原因显示出来', async () => {
@@ -411,6 +419,28 @@ describe('配置页', () => {
       expect(wrapper.text()).toContain('连接失败')
     })
     expect(wrapper.text()).toContain('域名解析失败')
+  })
+
+  it('新增与编辑都以弹窗呈现，点「关闭」可收起', async () => {
+    const wrapper = await render()
+    // 初始不弹：列表才是主要内容
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+
+    await wrapper.findAll('button').find((b) => b.text() === '+ 新增配置')!.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+
+    await wrapper.findAll('button').find((b) => b.text() === '关闭')!.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+
+    await wrapper.findAll('button').find((b) => b.text() === '编辑')!.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+
+    await wrapper.findAll('button').find((b) => b.text() === '关闭')!.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 
   it('新增配置时从「供应商」填充地址与配置名，且没有 id 输入框', async () => {

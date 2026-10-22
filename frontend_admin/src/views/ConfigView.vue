@@ -15,7 +15,9 @@
  * 另一个刻意的设计：**启动类配置不显示在这里**（日志级别、落库开关、库文件路径等）。
  * 它们改了必须重启，放进来只会制造「显示已保存、实际没变」的困惑。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+
+import PageHeader from '@/components/PageHeader.vue'
 
 import {
   activateProvider,
@@ -94,6 +96,28 @@ const testResults = ref<Record<string, { ok: boolean; detail: string }>>({})
 /** 已查看过明文的密钥（按 id 存；只在本页内存里，刷新即消失） */
 const revealedKeys = ref<Record<string, string>>({})
 const testingId = ref('')
+
+/**
+ * 测试连接**成功**时的悬浮提示。
+ *
+ * 成功是「看一眼就够」的信息，不该在列表行里长期占一行；失败则继续用行内展示
+ * ——原因往往很长（域名解析失败 / 401 / base_url 少了 /v1），需要停下来读、照着改。
+ * 所以这个浮层只承载成功，4 秒后自动收起。
+ */
+const toast = ref<{ text: string } | null>(null)
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+
+function showToast(text: string) {
+  toast.value = { text }
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.value = null
+  }, 4000)
+}
+
+onBeforeUnmount(() => {
+  if (toastTimer) clearTimeout(toastTimer)
+})
 
 const groups = computed<ConfigGroup[]>(() => config.value?.groups ?? [])
 const providers = computed<Provider[]>(() => providerList.value?.providers ?? [])
@@ -327,6 +351,18 @@ function resetCreateForm() {
   }
 }
 
+/** 打开「新增配置」弹窗：每次从空白表单开始，避免上一次的残留值被误提交。 */
+function openCreate() {
+  resetCreateForm()
+  showCreate.value = true
+}
+
+/** 关闭新增弹窗并丢弃未提交内容。 */
+function closeCreate() {
+  showCreate.value = false
+  resetCreateForm()
+}
+
 async function onCreate() {
   if (creating.value) return
   // 只做「必填」这一层提示，真正的规则仍在后端（名字为空它会 400）。
@@ -488,7 +524,8 @@ async function onTest(provider: Provider) {
   if (!result.ok) sayFail(result.message)
   else {
     const outcome = testResults.value[provider.id]
-    if (outcome?.ok) sayOk(`「${provider.name}」连通正常`)
+    // 成功走悬浮提示（一眼即够）；失败仍进顶部横幅 + 行内原因（便于细读与对照修改）。
+    if (outcome?.ok) showToast(`「${provider.name}」${outcome.detail || '连通正常'}`)
     else sayFail(`「${provider.name}」连接失败：${outcome?.detail ?? ''}`)
   }
 }
@@ -510,24 +547,32 @@ onMounted(load)
 <template>
   <div class="space-y-5">
     <!-- 页头 -->
-    <header class="brut-card-lg p-5">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div class="min-w-0">
-          <p class="kicker">Config / 运行时</p>
-          <h1 class="page-title mt-2">系统配置</h1>
-        </div>
+    <PageHeader kicker="Config / 运行时" title="系统配置">
+      <template #actions>
         <span v-if="config" class="brut-tag brut-tag-slab">REV {{ config.revision }}</span>
-      </div>
-      <p class="mt-3 max-w-3xl text-sm text-body">
-        改完保存后立即作用于<b class="text-ink">下一次生成</b>；正在跑的任务不受影响。
-        可调项<b class="text-ink">全在这一页</b>——<code class="font-mono">.env</code>
-        里只剩密钥与启动项，没有第二份。
-        日志级别、落库开关这类「改了必须重启」的配置不在此页——它们改了不重启只会造成错觉。
-      </p>
-    </header>
+      </template>
+      <template #desc>
+        <p>
+          改完保存后立即作用于<b>下一次生成</b>；正在跑的任务不受影响。
+          可调项<b>全在这一页</b>——<code class="font-mono">.env</code>
+          里只剩启动项，没有第二份。
+          日志级别、落库开关这类「改了必须重启」的配置不在此页——它们改了不重启只会造成错觉。
+        </p>
+      </template>
+    </PageHeader>
 
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
     <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
+
+    <!-- 测试连接的悬浮提示（成功）：固定右上角，不挤占列表行，4 秒自动收起。 -->
+    <div
+      v-if="toast"
+      class="brut-card fixed right-4 top-4 z-[60] max-w-sm px-4 py-3 text-sm font-extrabold text-success-fg"
+      role="status"
+      aria-live="polite"
+    >
+      ✓ {{ toast.text }}
+    </div>
 
     <div v-if="loading" class="brut-card px-4 py-8 text-sm text-subtle">加载中…</div>
 
@@ -580,15 +625,11 @@ onMounted(load)
           </div>
           <div class="flex flex-wrap items-center justify-end gap-2">
             <p class="hidden max-w-sm text-xs text-subtle sm:block">
-              密钥只按<b class="text-muted">变量名</b>登记，值留在 .env。
+              密钥由后端加密入库，列表只显示<b class="text-muted">已配置 / 未配置</b>。
               同一家可以有多条配置（生产/测试各一条）。
             </p>
-            <button
-              type="button"
-              class="brut-btn brut-btn-xs brut-btn-primary"
-              @click="showCreate = !showCreate"
-            >
-              {{ showCreate ? '收起表单' : '+ 新增配置' }}
+            <button type="button" class="brut-btn brut-btn-xs brut-btn-primary" @click="openCreate">
+              + 新增配置
             </button>
           </div>
         </header>
@@ -600,7 +641,7 @@ onMounted(load)
           <p class="text-sm font-extrabold tracking-tight text-ink">还没有任何模型配置</p>
           <p class="mt-1 max-w-xl text-xs text-subtle">
             点右上角<b class="text-muted">「+ 新增配置」</b>建第一条：选供应商、写个配置名就够。
-            在此之前生成无法进行——地址、模型、密钥变量名全部由这里的配置决定，
+            在此之前生成无法进行——地址、模型、密钥全部由这里的配置决定，
             .env 里不再有第二份。
           </p>
         </div>
@@ -657,16 +698,13 @@ onMounted(load)
                 密钥：{{ revealedKeys[p.id] }}
               </p>
 
+              <!-- 只保留**失败**的行内原因：成功已改由右上角悬浮提示展示，
+                   不再在这里长期占一行。原因写全，方便照着细节直改配置。 -->
               <p
-                v-if="testResults[p.id]"
-                class="mt-1 border-l-4 pl-2 text-[11px] font-bold"
-                :class="
-                  testResults[p.id]!.ok
-                    ? 'border-success-line text-success-fg'
-                    : 'border-danger-line text-danger-fg'
-                "
+                v-if="testResults[p.id] && !testResults[p.id]!.ok"
+                class="mt-1 border-l-4 border-danger-line pl-2 text-[11px] font-bold text-danger-fg"
               >
-                {{ testResults[p.id]!.ok ? '连通正常' : '连接失败' }} · {{ testResults[p.id]!.detail }}
+                连接失败 · {{ testResults[p.id]!.detail }}
               </p>
             </div>
 
@@ -706,21 +744,37 @@ onMounted(load)
           </li>
         </ul>
 
-        <!-- 编辑面板：协议不在表单里（它在标题行当标签显示） -->
-        <div v-if="editing" class="border-t-2 border-brut px-4 py-4">
-          <header class="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 class="text-sm font-extrabold tracking-tight text-ink">
-              编辑「{{ editing.name }}」
-            </h3>
-            <!-- 协议放这里而不是表单格：它改不了，就不该长得像一个输入框。
-                 想看「这条走的是哪套协议」时，这一行照旧答得出来。 -->
-            <span class="flex flex-wrap items-baseline gap-2">
-              <span class="brut-tag">{{ editing.protocol_label }}</span>
-              <span class="font-mono text-[11px] text-subtle">{{ editing.id }}</span>
-            </span>
-          </header>
+        <!-- 编辑弹窗：协议不在表单里（它在标题行当标签显示）。
+             用 fixed 遮罩 + 居中卡片，而不是页面内展开块——配置项一多，就地展开
+             会把下面的分组配置整个挤出视野。点遮罩空白处或「关闭」都能收起。 -->
+        <div
+          v-if="editing"
+          class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center sm:p-8"
+          role="dialog"
+          aria-modal="true"
+          aria-label="编辑模型配置"
+          @click.self="cancelEdit"
+        >
+          <div class="brut-card-lg w-full max-w-3xl bg-card">
+            <header
+              class="flex flex-wrap items-start justify-between gap-2 border-b-2 border-brut px-4 py-3"
+            >
+              <div class="min-w-0">
+                <p class="kicker">Edit provider</p>
+                <h3 class="mt-1 text-base font-extrabold tracking-tight text-ink">
+                  编辑「{{ editing.name }}」
+                </h3>
+                <!-- 协议放这里而不是表单格：它改不了，就不该长得像一个输入框。 -->
+                <span class="mt-1 flex flex-wrap items-baseline gap-2">
+                  <span class="brut-tag">{{ editing.protocol_label }}</span>
+                  <span class="font-mono text-[11px] text-subtle">{{ editing.id }}</span>
+                </span>
+              </div>
+              <button type="button" class="brut-btn brut-btn-xs" @click="cancelEdit">关闭</button>
+            </header>
 
-          <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div class="px-4 py-4">
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <label class="block">
               <span class="brut-label">配置名（必填）</span>
               <input v-model="editForm.name" type="text" class="brut-field" />
@@ -782,23 +836,42 @@ onMounted(load)
             就地改会留下半新半旧的字段。
           </p>
 
-          <div class="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              class="brut-btn brut-btn-primary"
-              :disabled="savingEdit"
-              @click="onSaveEdit"
-            >
-              {{ savingEdit ? '保存中…' : '保存修改' }}
-            </button>
-            <button type="button" class="brut-btn" @click="cancelEdit">取消</button>
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  class="brut-btn brut-btn-primary"
+                  :disabled="savingEdit"
+                  @click="onSaveEdit"
+                >
+                  {{ savingEdit ? '保存中…' : '保存修改' }}
+                </button>
+                <button type="button" class="brut-btn" @click="cancelEdit">取消</button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- 新增配置 -->
-        <div v-if="showCreate" class="border-t-2 border-brut px-4 py-4">
-          <h3 class="text-sm font-extrabold tracking-tight text-ink">新增配置</h3>
-          <p class="mt-0.5 text-xs text-subtle">
+        <!-- 新增配置弹窗 -->
+        <div
+          v-if="showCreate"
+          class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center sm:p-8"
+          role="dialog"
+          aria-modal="true"
+          aria-label="新增模型配置"
+          @click.self="closeCreate"
+        >
+          <div class="brut-card-lg w-full max-w-3xl bg-card">
+            <header
+              class="flex flex-wrap items-start justify-between gap-2 border-b-2 border-brut px-4 py-3"
+            >
+              <div class="min-w-0">
+                <p class="kicker">New provider</p>
+                <h3 class="mt-1 text-base font-extrabold tracking-tight text-ink">新增配置</h3>
+              </div>
+              <button type="button" class="brut-btn brut-btn-xs" @click="closeCreate">关闭</button>
+            </header>
+            <div class="px-4 py-4">
+              <p class="mt-0.5 text-xs text-subtle">
             选好<b class="text-muted">供应商</b>，协议与地址就定了，剩下只要写配置名和模型。
             要接自建网关，选「本地 vLLM / Ollama」或「自建网关」再把地址改成你的端点。
           </p>
@@ -867,18 +940,21 @@ onMounted(load)
             </label>
           </div>
 
-          <div class="mt-3 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              class="brut-btn brut-btn-primary"
-              :disabled="creating"
-              @click="onCreate"
-            >
-              {{ creating ? '添加中…' : '添加配置' }}
-            </button>
-            <p class="text-xs text-subtle">
-              自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
-            </p>
+              <div class="mt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  class="brut-btn brut-btn-primary"
+                  :disabled="creating"
+                  @click="onCreate"
+                >
+                  {{ creating ? '添加中…' : '添加配置' }}
+                </button>
+                <button type="button" class="brut-btn" @click="closeCreate">取消</button>
+                <p class="text-xs text-subtle">
+                  自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       </section>

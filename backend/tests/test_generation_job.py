@@ -362,6 +362,48 @@ def test_failure_event_marks_job_failed_and_keeps_partial(alice, monkeypatch):
     assert row["draft_content"].strip() != ""
 
 
+def test_late_subscriber_gets_error_when_job_already_failed(alice, monkeypatch):
+    """订阅晚于失败：也必须收到 `error` 事件。
+
+    真实场景：没有模型配置时 `get_llm()` 在建任务后**立刻**抛错，任务往往在浏览器
+    来得及订阅之前就已失败。收尾那一刻广播的 `error` 没有听众；若不再补发一条，
+    前端只会看到「流正常结束、正文为空」，把它当成生成成功（空内容）——这正是
+    「只显示成功、没有任何生成内容」那个 bug。`open_stream` 因此在快照后补发原因。
+    """
+
+    async def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("还没有任何模型配置。请先在管理后台「模型配置」页新增一条")
+        yield  # pragma: no cover - 有 yield 才是 async generator，@ 第一次迭代即抛
+
+    monkeypatch.setattr(document_service, "generate_prd_from_summary_stream", _boom)
+
+    async def scenario() -> list:
+        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
+        job_service.dispatch(
+            job_id,
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={"requirements": "随便写点", "product_name": "演示"},
+        )
+        # 等任务彻底收尾、运行时被摘掉：确保订阅发生在失败**之后**（走 DB 兜底分支）。
+        for _ in range(200):
+            if job_id not in job_service._RUNTIMES:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.005)
+        return [event async for event in job_service.open_stream(alice, job_id)]
+
+    events = _run(scenario())
+
+    assert events[0].type == "snapshot"
+    assert events[0].data["status"] == "failed"
+    error = next(event for event in events if event.type == "error")
+    assert "模型配置" in error.content
+    # 收尾汇总照旧补发
+    assert events[-1].type == "run_summary"
+    assert events[-1].data["status"] == "failed"
+
+
 def test_open_stream_rejects_other_owner(alice, monkeypatch):
     """owner 不符时不泄内容：退化为失败/未命中的 404 语义（流内不返回任何事件）。"""
 

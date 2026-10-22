@@ -226,6 +226,66 @@
     box-shadow: 6px 6px 0 0 var(--brut-shadow);
   }
 
+  /* ------------------------------------------------------------------ 页头 */
+
+  /* 报头：不装箱，靠一条 3px 粗线与内容分家。
+     全页「有投影」的只有内容块，标题区没有——层级只由**材质**决定，
+     不再靠「谁在上面」。少一层白盒子，页面也轻一档。 */
+  .page-head {
+    border-bottom: 3px solid var(--ui-brut);
+    padding-bottom: 1rem;
+  }
+  /* 栏目名用天蓝：它是页头唯一的彩色信号，也是「这页是干什么的」最快的一眼 */
+  .page-head-kicker {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    line-height: 1;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ui-sky-deep);
+  }
+  /* 印刷式的段落起头方块：一像素的偏移投影让它像盖上去的，而不是画上去的 */
+  .page-head-kicker::before {
+    content: '';
+    flex: none;
+    width: 0.4375rem;
+    height: 0.4375rem;
+    background: var(--ui-sky);
+    box-shadow: 1.5px 1.5px 0 0 var(--ui-brut);
+  }
+  /* 整页唯一的 h1，比内容区的小标题再大一档 */
+  .page-head .page-title {
+    font-size: clamp(1.85rem, 1.15rem + 2.1vw, 2.75rem);
+    line-height: 1;
+  }
+  /* 说明文字降级成注解：左侧天蓝竖线 + 字号小一档 + muted。
+     读不读都不影响操作，所以不该和内容抢注意力。 */
+  .page-head-desc {
+    margin-top: 0.9rem;
+    max-width: 68ch;
+    border-left: 3px solid var(--ui-sky);
+    padding-left: 0.7rem;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    color: var(--ui-muted);
+  }
+  .page-head-desc b {
+    color: var(--ui-ink);
+  }
+  /* 注解里的两列对照（概览页的用户口径） */
+  .page-head-desc-grid {
+    display: grid;
+    gap: 0.35rem 1.5rem;
+  }
+  @media (min-width: 40rem) {
+    .page-head-desc-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+
   /* ------------------------------------------------------------------ 文字 */
 
   /* 小号等宽说明行：像印刷品的栏目名，用来给每个块贴标签 */

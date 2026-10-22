@@ -720,7 +720,7 @@ def reveal_provider_key(actor: User, provider_id: str) -> dict[str, Any]:
     return {"api_key": value}
 
 
-def test_provider(actor: User, provider_id: str) -> dict[str, Any]:
+async def test_provider(actor: User, provider_id: str) -> dict[str, Any]:
     """真发一次最小调用，验证这家**到底能不能用**。
 
     为什么必须真调
@@ -769,8 +769,11 @@ def test_provider(actor: User, provider_id: str) -> dict[str, Any]:
         return "".join(chunks)
 
     try:
-        # 独立事件循环：本函数在同步上下文里被调用（服务层），不能依赖外层循环
-        reply = asyncio.run(asyncio.wait_for(_probe(), timeout=20))
+        # ⚠️ 这个函数被 async 路由直接 await，**必须复用外层事件循环**。
+        # 早先写成同步函数 + `asyncio.run(...)`：在 FastAPI 已运行的事件循环里调用
+        # 会直接抛 `RuntimeError: asyncio.run() cannot be called from a running event loop`，
+        # 表现为「填了配置、点测试连接永远失败」。
+        reply = await asyncio.wait_for(_probe(), timeout=20)
         latency = int((time.monotonic() - started) * 1000)
         detail = f"连通正常（{latency} ms）"
         if not reply:

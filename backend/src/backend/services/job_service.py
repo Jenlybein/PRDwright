@@ -52,6 +52,11 @@ from backend.services.skill_registry import describe_kind
 
 logger = logging.getLogger(__name__)
 
+# 失败收尾里「不是错误」的两个中止码：取消（用户走开 / 删方案）与被顶替（同一份
+# 文档已有更新的任务接手）。它们同样落 failed 状态，但不该作为红色错误弹给用户，
+# 因此补发 `error` 事件时要排除——否则「用户自己按了停止」会被渲染成「生成失败」。
+_ABORT_CODES = frozenset({"CANCELLED", "SUPERSEDED"})
+
 # 合并写的节奏：距上次 flush 超过该秒数，或 live_buffer 增量超过该字节数，就写一次
 _FLUSH_INTERVAL_SECONDS = 0.3
 _FLUSH_BYTES = 4096
@@ -532,6 +537,8 @@ async def run_job(runtime: JobRuntime) -> None:
         _finalize(runtime, "failed" if runtime.failed else "completed")
     except Exception as exc:  # noqa: BLE001 - 后台任务必须自兜异常，不能静默消失
         runtime.failed = True
+        # 管线可能已把错误转成 `error` 事件（运行时因此带着错误码），别重复发第二条。
+        already_reported = bool(runtime.error_code)
         if isinstance(exc, AppError):
             # 异常自带的码更准：预算超顶是 INVALID_REQUEST（重试也没用），
             # 不该被笼统记成「上游故障」，否则前端会去做无意义的重试。
@@ -540,6 +547,14 @@ async def run_job(runtime: JobRuntime) -> None:
         else:
             runtime.error_code = ErrorCode.LLM_UPSTREAM_ERROR.value
             runtime.error_message = f"生成失败：{exc}"
+        # ⚠️ 兜底异常**必须广播**：前端只有收到 `error` 事件才判失败。只改运行时
+        # 而不发事件，界面上就是「流结束、正文为空」——被当成生成成功（空内容）。
+        # 无模型配置时 `get_llm()` 就在这一层抛出，正是这条路径。
+        if not already_reported:
+            job_bus.publish(
+                runtime.job_id,
+                _failure_event(runtime.error_code, runtime.error_message),
+            )
         # 兜底异常单独留一条 ERROR（带 traceback）：`_finalize` 的终态日志是「收尾了」，
         # 这一条才是「为什么收尾」——它俩缺一，排障时都得猜另一半。
         logger.error(
@@ -565,6 +580,22 @@ async def run_job(runtime: JobRuntime) -> None:
             _TASKS.discard(current)
 
 
+def _failure_event(code: str, message: str) -> StreamEvent:
+    """由终态的错误码 / 文案补一条 `error` 事件。
+
+    为什么需要它：任务可能在**订阅者挂上之前**就已经失败。收尾那一刻广播的 `error`
+    没有听众，而前端 live 路径（`useJob.start`）只看有没有收到 `error` 事件——
+    于是「流正常结束 + 正文为空」会被当成生成成功。补这一条，迟到的订阅者也能拿到
+    真实原因（例如「还没有任何模型配置」），而不是对着空白稿发呆。
+    """
+    return StreamEvent(
+        type="error",
+        content=message or "生成失败",
+        data={"error_type": "JobFailed"},
+        code=code or ErrorCode.INTERNAL_ERROR.value,
+    )
+
+
 async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
     """订阅一个任务的事件流：先 `snapshot`，再 live。
 
@@ -588,8 +619,13 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
         if row is None:
             return
         yield _db_snapshot_event(row)
+        status = str(row.get("status") or "")
+        code = str(row.get("error_code") or "")
+        # 已经失败且不是「取消 / 被顶替」：补一条 error，迟到的订阅者才知道为什么空。
+        if status == "failed" and code not in _ABORT_CODES:
+            yield _failure_event(code, str(row.get("error_message") or ""))
         usage = parse_usage(row.get("usage"))
-        if usage is not None and row.get("status") != STATUS_RUNNING:
+        if usage is not None and status != STATUS_RUNNING:
             yield _run_summary_event(usage)
         return
 
@@ -600,6 +636,9 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
     try:
         yield snapshot
         if runtime.status != "running":
+            # 同上：快照里已是 failed 时补一条 error，让「失败发生在订阅之前」也能被看见。
+            if runtime.status == "failed" and runtime.error_code not in _ABORT_CODES:
+                yield _failure_event(runtime.error_code, runtime.error_message)
             yield _run_summary_event(_summary_data(runtime, runtime.status))
             return
         while True:

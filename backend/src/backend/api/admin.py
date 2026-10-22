@@ -838,5 +838,5 @@ async def test_provider(
     它是本项目唯一会花钱的管理接口，所以额度压到最低；无论成败都记审计。
     """
     return schemas.AdminProviderTestResponse(
-        **admin_config_service.test_provider(user, provider_id)
+        **await admin_config_service.test_provider(user, provider_id)
     )
