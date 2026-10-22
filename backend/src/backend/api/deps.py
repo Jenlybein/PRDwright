@@ -36,6 +36,10 @@ _PUBLIC_EXACT: frozenset[str] = frozenset(
         "/health",
         # 问卷配置是静态内容，未登录也要能渲染入口页
         "/api/conversation/questions",
+        # 管理后台的登录入口：登录这件事本身不能要求先登录。这是 `/api/admin` 下
+        # **唯一**的例外，写在这里而不是给整个前缀开口子——前缀放行会让新增的
+        # 管理接口默默变成公开接口。
+        "/api/admin/login",
         # 交互式文档，方便本地联调；部署到公网时可从这里移除
         "/docs",
         "/redoc",
@@ -50,9 +54,10 @@ _PUBLIC_PREFIXES: tuple[str, ...] = ("/api/auth",)
 # 避免泄露额外信息。
 _UNAUTHORIZED_DETAIL = "请先登录后再使用该功能"
 
-# 已登录但非管理员的统一提示。刻意只说「权限不够」——
-# 不复述「你是普通用户」「管理员名单里有谁」这类可用于勾勒后台结构的信息。
-_FORBIDDEN_DETAIL = "需要管理员权限才能使用该功能"
+# 已登录但非管理员的统一提示。**刻意说「账号不存在」而不是「权限不足」**
+# （ADR-049）：后台对外只承认管理员账号存在，非管理员账号在这里等同于不存在。
+# 这句话不泄露「谁是管理员」，也不给出一条「这个账号确实注册过」的确认。
+_NOT_ADMIN_DETAIL = "账号不存在"
 
 
 def is_public_path(path: str) -> bool:
@@ -272,16 +277,20 @@ def get_current_user(request: Request) -> User:
 def require_admin(user: User = Depends(get_current_user)) -> User:
     """取当前用户**且**要求是管理员；不是管理员抛 403（带 `FORBIDDEN` 错误码）。
 
-    这是所有 `/api/admin/**` 路由的**唯一入口依赖**。刻意做成依赖，而不是让各路由
-    自己写 `if not user.is_admin`：漏写一次判断就是一次越权，且它在代码里长得跟
-    正常分支没什么两样；而依赖**漏挂**会直接体现为「这个函数签名里没有它」，
-    评审时一眼能看到。
+    这是所有 `/api/admin/**` 路由的**唯一入口依赖**（`/login` 除外，它在白名单里且
+    自己判身份）。刻意做成依赖，而不是让各路由自己写 `if not user.is_admin`：
+    漏写一次判断就是一次越权，且它在代码里长得跟正常分支没什么两样；而依赖**漏挂**
+    会直接体现为「这个函数签名里没有它」，评审时一眼能看到。
 
     注意它只管「权限」，不管「登录」——后者由 `AuthMiddleware` 统一拦
     （`/api/admin` 不在白名单里），所以走到这里时用户必然已登录。
+
+    ⚠️ 文案是「账号不存在」而不是「权限不足」（`_NOT_ADMIN_DETAIL`）：登录入口已经在
+    源头挡住了非管理员，这个人还能走到这里，只可能是「会话建立之后被撤销了管理员」或
+    「绕过前端直接敲接口」。两种情况都不该告诉对方「你存在、只是不够格」。
     """
     if not user.is_admin:
-        raise AppError(ErrorCode.FORBIDDEN, _FORBIDDEN_DETAIL)
+        raise AppError(ErrorCode.FORBIDDEN, _NOT_ADMIN_DETAIL)
     return user
 
 

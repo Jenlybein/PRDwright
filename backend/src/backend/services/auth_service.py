@@ -483,10 +483,16 @@ def _on_login_success(username: str) -> None:
     AuthSessionRepository.delete_expired()
 
 
-def login(username: str, password: str, ip: str = "") -> tuple[User, str, datetime]:
+def login(
+    username: str,
+    password: str,
+    ip: str = "",
+    *,
+    require_admin: bool = False,
+) -> tuple[User, str, datetime]:
     """校验账号密码并签发会话。
 
-    注意四个细节：
+    注意五个细节：
     1. 用户不存在与密码错误**返回同一句提示**，避免泄露哪些用户名已注册（账号枚举）。
     2. 用户不存在时也执行一次等价的 scrypt 运算再返回，避免「响应更快」
        从时序上暴露该用户名不存在。
@@ -496,6 +502,8 @@ def login(username: str, password: str, ip: str = "") -> tuple[User, str, dateti
        不一致。
     4. **失败要计数，不存在的用户名也计数**（见 `_record_failure`）。若只给真实账号
        计数，「有没有延时」本身就成了新的枚举信号，把第 1、2 条白做了。
+    5. `require_admin=True` 时，**密码正确但账号不是管理员**一律当作 `账号不存在`
+       （见 ADR-049）。从管理后台这个入口看过去，非管理员账号本来就不存在于它的世界里。
 
     ⚠️ 渐进延时不在本函数里落实：调用方必须先问 `login_delay()` 并自行 `await`
     相应时长，否则要么不生效、要么把事件循环卡死。
@@ -504,12 +512,13 @@ def login(username: str, password: str, ip: str = "") -> tuple[User, str, dateti
         username: 用户名。
         password: 明文密码（仅在内存中与库里的哈希比对）。
         ip: 来源 IP，只用于记录失败现场，不参与判定。
+        require_admin: 是否要求管理员身份（管理后台的登录入口传 `True`）。
 
     Returns:
         `(用户, 写入 Cookie 的凭据, 过期时间)`。
 
     Raises:
-        AuthError: 账号或密码错误、账号已停用。
+        AuthError: 账号或密码错误、账号已停用、账号不是管理员。
     """
     username = username.strip()
     row = UserRepository.get_by_username(username)
@@ -526,6 +535,17 @@ def login(username: str, password: str, ip: str = "") -> tuple[User, str, dateti
     if not row["is_active"]:
         # 密码是对的，只是账号被停用：这不是一次「猜错」，不计入失败次数
         raise AuthError("该账号已被停用")
+    if require_admin and not bool(row.get("is_admin")):
+        # 密码是对的，但不是管理员。**必须查完密码再说这句话**，理由有两条：
+        #
+        # 1. 反过来（先查 is_admin）会让「这个用户名是不是管理员」在不知道密码的情况下
+        #    就能被问出来——那等于给出一条管理员名单的探测通道；
+        # 2. 现在是「凭据本来有效、只是不该从这里进」，与 brute force 无关，
+        #    不计失败次数（同「账号已被停用」），也不触发单点登录的会话替换。
+        #
+        # 文案取「账号不存在」而不是「无权限」：管理后台对外只承认管理员账号存在
+        # （ADR-049）。这句话在**不签发任何会话**的前提下返回，所以它不改变主站登录态。
+        raise AuthError("账号不存在")
 
     _on_login_success(username)
     user = _to_user(row)

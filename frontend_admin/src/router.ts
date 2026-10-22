@@ -2,15 +2,18 @@
  * 管理端路由与「门禁」。
  *
  * 守卫只有一条规则：标了 `requiresAdmin` 的页面，必须先在服务端确认过
- * 「已登录 **且** 是管理员」才放行。三种结果对应三个去处：
+ * 「是管理员」才放行。两种结果对应两个去处：
  *
- * - 未登录 → 登录页（并记下原本想去哪，登录完送回去）
- * - 已登录但不是管理员 → 无权限页
+ * - 不是管理员（未登录 / 账号不存在 / 会话失效）→ 登录页（并记下原本想去哪）
  * - 是管理员 → 放行
  *
+ * ⚠️ 只有两种去处是**有意的**（ADR-049）：后台不再区分「你没登录」与「你这个账号
+ * 不是管理员」。对非管理员一律表现为「账号不存在」（后端给文案），停在登录页上
+ * 比停在一页「你没有权限」更接近事实，也不会顺带确认「这个账号确实存在」。
+ *
  * ⚠️ 这个守卫**不是安全边界**。它只是让正常用户少点一次、少看一个空白页；
- * 真正的拦截在后端 `require_admin`（页面藏起来挡不住直接敲接口的人）。
- * 所以这里判断的每一条，后端都必须能独立再判一次。
+ * 真正的拦截在后端 `require_admin` 与 `POST /api/admin/login`
+ * （页面藏起来挡不住直接敲接口的人）。
  */
 
 import { createRouter, createWebHistory } from 'vue-router'
@@ -35,11 +38,6 @@ export const router = createRouter({
       name: 'login',
       // 懒加载：未登录的用户不该为了看登录页而下载整个后台的代码
       component: () => import('@/views/LoginView.vue'),
-    },
-    {
-      path: '/forbidden',
-      name: 'forbidden',
-      component: () => import('@/views/ForbiddenView.vue'),
     },
     {
       path: '/dashboard',
@@ -95,13 +93,12 @@ router.beforeEach(async (to) => {
   // 首屏必须先问后端：在拿到答案之前，`phase` 是 unknown，任何判断都是猜的。
   await session.ensureLoaded()
 
-  if (!session.isLoggedIn) {
+  if (!session.isAdmin) {
     return {
       name: 'login',
       // 带上原本要去哪，登录成功后送回去；首页本身不必带，免得出现 redirect=/
       query: to.fullPath === '/' ? {} : { redirect: to.fullPath },
     }
   }
-  if (!session.isAdmin) return { name: 'forbidden' }
   return true
 })

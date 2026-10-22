@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 from conftest import login, register
 
-from backend.api import auth as auth_api
+from backend.api import login_flow
 from backend.core.db import connect, utc_now
 from backend.repositories.account_repo import AccountDataRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository
@@ -34,7 +34,7 @@ def sleeps(monkeypatch):
     async def fake_sleep(seconds: float) -> None:
         recorded.append(seconds)
 
-    monkeypatch.setattr(auth_api, "_sleep", fake_sleep)
+    monkeypatch.setattr(login_flow, "_sleep", fake_sleep)
     return recorded
 
 

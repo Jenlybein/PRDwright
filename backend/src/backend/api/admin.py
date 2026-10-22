@@ -1,21 +1,24 @@
 """管理员路由：v4 后台的服务端接口。
 
-本模块当前只有一个「身份自检」接口。它的意义不在返回什么，而在**它是第一个被
-`require_admin` 保护起来的接口**——有了它，「非管理员进不去后台」才有一个能被
-用例钉住的具体落点，后面的用户管理 / 系统配置 / 日志接口都照此办理。
+本模块有两个「身份」落点：`POST /api/admin/login`（**进后台的唯一入口**）与
+`GET /api/admin/me`（身份自检）。后者本身不返回什么有用的数据，它的价值在于
+「它是第一个被 `require_admin` 保护起来的接口」——「非管理员进不去后台」因此有了
+一个能被用例钉住的具体落点。
 
 两层拦截的分工
 --------------
-- **未登录**：由 `AuthMiddleware` 拦成 401。`/api/admin` 不在白名单里，所以
-  匿名请求到不了路由层。
-- **已登录但非管理员**：由 `require_admin` 依赖拦成 403。
+- **未登录**：由 `AuthMiddleware` 拦成 401。`/api/admin/login` 是白名单里唯一的例外
+  （登录这件事本身不能要求先登录），其余 `/api/admin/**` 的匿名请求到不了路由层。
+- **已登录但不是管理员**：由 `require_admin` 依赖拦成 403。
 
-两者刻意分开：401 让前端跳登录，403 让前端停在无权限页。合成一种的话，
-普通用户会被反复踢去登录却永远登不进去。
+状态码仍然分开（401 让前端去登录、403 说明「这个身份不行」），但**文案已经统一**：
+非管理员看到的是「账号不存在」而不是「权限不足」——后台对外只承认管理员账号存在
+（ADR-049）。管理端前端据此把这种情况与「没登录」呈现为同一页（登录页），
+不再有「你登录了，但你不是管理员」这种既泄露又说不出解决办法的页面。
 
 本模块只做三件事
 ----------------
-1. 解析请求、调用 `admin_service`、渲染响应；
+1. 解析请求、调用服务层、渲染响应；
 2. 把服务层的业务异常转成正确的状态码；
 3. 把「当前是谁」传给服务层——**操作者身份由服务端从会话里取，不由请求体带**，
    否则任何人都能伪造成「是管理员 A 干的」。
@@ -27,13 +30,14 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from backend.api import schemas
 from backend.api.deps import require_admin
+from backend.api.login_flow import set_session_cookie, wait_login_delay
 from backend.core.errors import AppError
 from backend.core.providers import PRESETS
-from backend.services import admin_config_service, admin_service
+from backend.services import admin_config_service, admin_service, auth_service
 from backend.services.auth_service import AuthError, User
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -42,6 +46,41 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 # ----------------------------------------------------------------------
 # 身份与总览
 # ----------------------------------------------------------------------
+
+
+@router.post("/login", response_model=schemas.AuthUserResponse, summary="管理员登录")
+async def login(
+    payload: schemas.LoginRequest,
+    request: Request,
+    response: Response,
+) -> schemas.AuthUserResponse:
+    """管理后台的唯一登录入口：**只认管理员账号**。
+
+    为什么单开一条而不是复用 `/api/auth/login`
+    -----------------------------------------
+    复用那条接口意味着：普通账号在后台登录页输对密码后**会真的登进主站**
+    （两个前端共用同一份 Cookie），随后才发现自己进不了后台。这既是误导，
+    也在用户端与后台之间留下一条「后台顺手帮你登录了另一个产品」的暗路。
+    这里改成**先判身份、再决定要不要签发会话**：非管理员一个字节的凭据都不下发，
+    也不会顶掉他在主站上的那条会话。
+
+    三处口径与用户端完全共用同一份 `auth_service.login`：密码错/用户不存在 →
+    「用户名或密码错误」；账号停用 → 「该账号已被停用」；渐进延时同样在路由层 `await`。
+    差异只有一处：**密码正确但不是管理员 → 401「账号不存在」**（ADR-049）。
+    """
+    await wait_login_delay(payload.username)
+
+    client_ip = request.client.host if request.client else ""
+    try:
+        user, credential, _ = auth_service.login(
+            payload.username, payload.password, ip=client_ip, require_admin=True
+        )
+    except AuthError as exc:
+        # 一律 401：语义是「这次登不进去」，不是「你缺某个功能的权限」
+        raise AppError(exc.code, exc.message, status.HTTP_401_UNAUTHORIZED) from exc
+
+    set_session_cookie(response, credential)
+    return schemas.AuthUserResponse(id=user.id, username=user.username)
 
 
 @router.get("/me", response_model=schemas.AdminMeResponse, summary="管理员身份自检")

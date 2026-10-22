@@ -145,10 +145,14 @@ function toUser(data: unknown): AuthUser {
 
 /**
  * 登录。成功时后端下发会话 Cookie，浏览器自动保存。
- * 对应 `POST /api/auth/login`。
+ * 对应 `POST /api/admin/login`（**只允许管理员账号**）。
+ *
+ * ⚠️ 刻意**不**走用户端的 `/api/auth/login`：两个前端共用同一份 Cookie，
+ * 那条接口不判身份，普通账号在后台登录页输对密码会真的登进主站，然后才发现自己
+ * 进不了后台。后台这条入口先判身份再决定要不要签发会话，非管理员一个字节都不发。
  */
 export async function login(payload: LoginPayload): Promise<AuthUser> {
-  const { data } = await http.post<AuthUser>('/api/auth/login', {
+  const { data } = await http.post<AuthUser>('/api/admin/login', {
     username: payload.username,
     password: payload.password,
   })
@@ -161,37 +165,36 @@ export async function logout(): Promise<void> {
 }
 
 /**
- * 查询当前登录用户。对应 `GET /api/auth/me`。
+ * 管理员身份探测的结果。
  *
- * 401 是**正常结果**（表示未登录），这里返回 `null` 而不是抛异常；
- * 其它错误（服务 500、网络不通）才抛出，让调用方能区分「没登录」与「服务挂了」。
+ * 三种情况必须分开，因为界面要给出**三句不同的话**：放行、请登录、账号不存在。
+ * 合成一个布尔值的话，「没登录」与「这个账号不是管理员」只能共用一句文案。
  */
-export async function fetchCurrentUser(): Promise<AuthUser | null> {
-  try {
-    const { data } = await http.get<AuthUser>('/api/auth/me')
-    return toUser(data)
-  } catch (error) {
-    if (isStatus(error, HTTP_UNAUTHORIZED)) return null
-    throw error
-  }
-}
+export type AdminSessionProbe =
+  | { kind: 'admin'; me: AdminMe }
+  | { kind: 'anonymous' }
+  | { kind: 'not_admin'; message: string }
 
 /**
- * 管理员身份自检。对应 `GET /api/admin/me`。
+ * 问后端「我是不是管理员」。对应 `GET /api/admin/me`。
  *
- * - 200 → 是管理员，返回身份；
- * - 403 → **已登录但不是管理员**，返回 `null`（不是异常，是正常业务结果）；
- * - 401 → 未登录，同样返回 `null`。
+ * - 200 → 是管理员；
+ * - 401 → 未登录；
+ * - 403 → 已登录但不是管理员，**文案由后端给**（「账号不存在」，ADR-049）。
  *
- * 只把 401/403 收敛成 `null`：其余错误照抛，避免把「服务不可用」
- * 误判成「你不是管理员」——那会让用户在后端故障时看到一个完全错误的原因。
+ * 只把 401/403 收敛成结果，其余错误照抛：把「服务不可用」当成「账号不存在」，
+ * 用户会在后端故障时看到一条完全错误的原因。
  */
-export async function fetchAdminMe(): Promise<AdminMe | null> {
+export async function probeAdminSession(): Promise<AdminSessionProbe> {
   try {
     const { data } = await http.get<AdminMe>('/api/admin/me')
-    return data
+    return { kind: 'admin', me: data }
   } catch (error) {
-    if (isStatus(error, HTTP_UNAUTHORIZED) || isStatus(error, HTTP_FORBIDDEN)) return null
+    if (isStatus(error, HTTP_UNAUTHORIZED)) return { kind: 'anonymous' }
+    if (isStatus(error, HTTP_FORBIDDEN)) {
+      // 原样用后端那句话，前端不自己编一句「无权限」——业务口径只有一处定义
+      return { kind: 'not_admin', message: messageOf(error) }
+    }
     throw error
   }
 }

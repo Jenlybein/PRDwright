@@ -10,9 +10,12 @@
   于是「防账号枚举」那两条（统一文案、常量时间）全白做。所以不存在的用户名
   也必须计数、也必须延时。
 
-延时的计算在服务层（`auth_service.login_delay`），真正的等待在路由层
-（`api/auth.py::_sleep`）——因为 `login()` 是同步函数，在里面 sleep 会卡死
+延时的计算在服务层（`auth_service.login_delay`），真正的等待在路由层的
+`api/login_flow.py::_sleep`——因为 `login()` 是同步函数，在里面 sleep 会卡死
 整个事件循环。两者分开测：数值由服务层断言，接线由路由层断言。
+
+⚠️ 这个模块（而不是某个具体路由）才是**唯一**的等待落点：用户端与管理端后台的
+登录都经它，所以这里换掉假函数，两条入口同时被覆盖。
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from datetime import datetime, timedelta
 import pytest
 from conftest import login, register
 
-from backend.api import auth as auth_api
+from backend.api import login_flow
 from backend.core.config import get_settings
 from backend.core.db import connect, utc_now
 from backend.repositories.auth_repo import AuthSessionRepository, LoginFailureRepository, UserRepository
@@ -40,7 +43,7 @@ def sleeps(monkeypatch):
     async def fake_sleep(seconds: float) -> None:
         recorded.append(seconds)
 
-    monkeypatch.setattr(auth_api, "_sleep", fake_sleep)
+    monkeypatch.setattr(login_flow, "_sleep", fake_sleep)
     return recorded
 
 

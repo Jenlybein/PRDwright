@@ -126,15 +126,18 @@ def test_admin_me_returns_200_for_admin(client):
 def test_admin_me_returns_403_for_normal_user(client):
     """已登录但非管理员：必须是 **403 `FORBIDDEN`**，不能是 401。
 
-    两者合成一种的话，前端只能给同一句文案，普通用户会被反复踢去登录页——
-    而他们登录进去之后依然进不来，陷入死循环。
+    状态码保留 403（不是 401）是为了让前端能区分「去登录」与「这个身份不行」；
+    但**文案是「账号不存在」**（ADR-049）：后台对外只承认管理员账号存在，
+    原来那句「需要管理员权限」等于确认了「你这个账号确实注册过」。
     """
     register(client, "alice")
 
     response = client.get("/api/admin/me")
 
     assert response.status_code == 403
-    assert response.json()["code"] == "FORBIDDEN"
+    body = response.json()
+    assert body["code"] == "FORBIDDEN"
+    assert body["detail"] == "账号不存在"
 
 
 def test_admin_me_returns_401_when_anonymous(client):

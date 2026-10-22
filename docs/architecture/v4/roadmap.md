@@ -45,7 +45,7 @@
 | 8 | 日志保留策略 | 启动 + 懒裁剪 | 超 `log_retention_days` / `log_max_rows` 自动淘汰 |
 | 9 | CORS 放开管理员源 | `core/config.py::cors_origins` | 管理员 dev 源与部署源都能登录 |
 | 10 | `frontend_admin/` 脚手架 | 根目录新工程 | 端口 5174、`/api` 代理 8000、`npm run build` 通过 |
-| 11 | 登录页 + `is_admin` 路由守卫 + 403/401 拦截 | `frontend_admin/src` | 非管理员停在无权限页；未登录跳登录 |
+| 11 | 登录页 + `is_admin` 路由守卫 + 403/401 拦截 | `frontend_admin/src` | 非管理员一律停在登录页（提示「账号不存在」，ADR-049）；未登录同样跳登录 |
 
 **进度：1–11 已全部落地。** 迁移到 v15（v12 `is_admin`、v13 `app_logs`、v14 Token 列、
 v15 `admin_audit_log`）；日志采集已挂上并在攒数据；`frontend_admin` 可登录且门禁生效。

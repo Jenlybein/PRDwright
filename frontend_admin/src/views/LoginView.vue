@@ -6,8 +6,9 @@
  * 用不着在这里介绍后台有哪些功能、谁能登录、登录态存在哪——
  * 管理员已经知道自己在找什么；其余每一句都在削弱输入框的存在感。
  *
- * 登录成功后**还要再判一次是不是管理员**：普通账号登录成功是正常结果，
- * 只是随后会被送到无权限页。这个判断由 `stores/session.ts` 里的 `login()` 完成。
+ * 登录成功即等于「是管理员」：`POST /api/admin/login` 只放行管理员账号，
+ * 非管理员会被 401 挡下，提示就是「账号不存在」（ADR-049）。
+ * 所以这里**没有**「登录成功了但不是管理员」这条分支——那扇门已经关上了。
  */
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -33,10 +34,12 @@ const redirectTo = computed(() => {
 })
 
 /**
- * 优先显示探测阶段的错误（例如后端连不上），其次才是本次登录失败。
- * 「后端不可用」比「密码错了」更需要被看见。
+ * 先显示本次提交的结果，其次才是会话探测留下的说明（后端连不上、或「账号不存在」）。
+ *
+ * 顺序不能反：被守卫送进来的人页面上已经挂着「账号不存在」，若它在提交失败后
+ * 仍然压在上面，管理员打错密码就会一直看到那句旧话，以为提示没刷新。
  */
-const visibleError = computed(() => session.error || formError.value)
+const notice = computed(() => formError.value || session.notice)
 
 async function submit() {
   if (submitting.value) return
@@ -44,12 +47,7 @@ async function submit() {
   submitting.value = true
   try {
     await session.login({ username: username.value.trim(), password: password.value })
-    if (session.isAdmin) {
-      await router.replace(redirectTo.value)
-    } else {
-      // 登录成功了，但不是管理员：停在无权限页，而不是把人放进一个处处 403 的后台
-      await router.replace({ name: 'forbidden' })
-    }
+    await router.replace(redirectTo.value)
   } catch (caught) {
     formError.value = isApiError(caught) ? caught.message : '登录失败，请稍后重试'
   } finally {
@@ -98,8 +96,8 @@ async function submit() {
           <p class="kicker">Sign in</p>
           <h1 class="mt-2 text-2xl font-black tracking-tight text-ink">管理员登录</h1>
 
-          <p v-if="visibleError" class="brut-note brut-note-fail mt-4" role="alert">
-            {{ visibleError }}
+          <p v-if="notice" class="brut-note brut-note-fail mt-4" role="alert">
+            {{ notice }}
           </p>
 
           <form class="mt-6 space-y-4" @submit.prevent="submit">
