@@ -128,7 +128,7 @@ describe('日志页', () => {
     expect(query.exclude_event).toBeFalsy()
   })
 
-  it('展开详情能看到业务字段与异常堆栈', async () => {
+  it('点一行打开详情弹窗，能看到业务字段与异常堆栈', async () => {
     const wrapper = await render(
       page([
         log({
@@ -139,11 +139,16 @@ describe('日志页', () => {
       ])
     )
 
-    // 详情默认折叠：先在页面上找不到堆栈
+    // 弹窗默认关着：先在页面上找不到堆栈
     expect(wrapper.text()).not.toContain('上游连接中断')
+    const rowsBefore = wrapper.findAll('tbody tr').length
 
     await wrapper.find('tbody tr').trigger('click')
     await wrapper.vm.$nextTick()
+
+    // 详情不再插一行（日志行本来就密，插进去会把相邻几条打散）
+    expect(wrapper.findAll('tbody tr')).toHaveLength(rowsBefore)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
 
     const text = wrapper.text()
     expect(text).toContain('job_id')

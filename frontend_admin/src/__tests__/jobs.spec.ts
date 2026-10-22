@@ -93,6 +93,22 @@ describe('任务监控页', () => {
     expect(wrapper.find('.bg-danger-surface').exists()).toBe(true)
   })
 
+  it('详情走弹窗，不往表格里插行', async () => {
+    const wrapper = await render([
+      job({ error_code: 'UPSTREAM_TIMEOUT', error_message: '模型响应超时（60s）' }),
+    ])
+    const rowsBefore = wrapper.findAll('tbody tr').length
+
+    await button(wrapper, '详情').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    // 行数不变：详情若就地插一行，8 列的宽度会重算，下面的行也跟着歪
+    expect(wrapper.findAll('tbody tr')).toHaveLength(rowsBefore)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('UPSTREAM_TIMEOUT')
+    expect(wrapper.text()).toContain('模型响应超时（60s）')
+  })
+
   it('取消先确认；未确认前不发请求', async () => {
     const wrapper = await render([job()])
 
@@ -100,7 +116,10 @@ describe('任务监控页', () => {
     await wrapper.vm.$nextTick()
 
     expect(cancelMock).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('确定取消任务 #1')
+    // 标题里的任务号就是「你要取消的是哪一个」的确认依据
+    expect(wrapper.text()).toContain('取消任务 #1')
+    // 后果说明必须在：文档任务不保留半截正文，这句是取消前的最后一道提示
+    expect(wrapper.text()).toContain('不会保留半截正文')
   })
 
   it('确认后才真正取消，并提示已取消', async () => {

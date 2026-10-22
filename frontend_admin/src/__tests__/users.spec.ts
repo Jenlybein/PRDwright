@@ -128,9 +128,41 @@ async function render(users: AdminUser[]) {
   return wrapper
 }
 
-/** 点「删除」并把预览等回来 */
+/**
+ * 打开某一行的「操作」清单。
+ *
+ * 七个动作已从表格里收进一个弹窗列表（一排小按钮会把操作列撑到 320px），
+ * 所以任何动作都要先开清单——用例也必须走同一条路径，否则测的是不存在的按钮。
+ */
+async function openActions(wrapper: Awaited<ReturnType<typeof render>>, username = 'alice') {
+  const row = wrapper.findAll('tr').find((tr) => tr.text().includes(username))
+  expect(row, `找不到 ${username} 那一行`).toBeTruthy()
+  const button = row!.findAll('button').find((b) => b.text().startsWith('操作'))
+  expect(button, '找不到「操作」按钮').toBeTruthy()
+  await button!.trigger('click')
+  await wrapper.vm.$nextTick()
+}
+
+/** 在操作清单里点某一项（菜单文案比旧按钮长，按包含匹配） */
+async function clickAction(wrapper: Awaited<ReturnType<typeof render>>, label: string) {
+  const item = wrapper.findAll('.action-list-item').find((b) => b.text().includes(label))
+  expect(item, `操作清单里没有「${label}」`).toBeTruthy()
+  await item!.trigger('click')
+  await wrapper.vm.$nextTick()
+}
+
+/** 关掉当前弹窗 */
+async function closeModal(wrapper: Awaited<ReturnType<typeof render>>) {
+  const close = wrapper.findAll('button').find((b) => b.text() === '关闭')
+  expect(close, '弹窗上没有关闭按钮').toBeTruthy()
+  await close!.trigger('click')
+  await wrapper.vm.$nextTick()
+}
+
+/** 点「删除账号」并把预览等回来 */
 async function openDeletePanel(wrapper: Awaited<ReturnType<typeof render>>) {
-  await wrapper.findAll('button').find((b) => b.text() === '删除')!.trigger('click')
+  await openActions(wrapper)
+  await clickAction(wrapper, '删除账号')
   await vi.waitFor(() => {
     expect(previewMock).toHaveBeenCalled()
   })
@@ -178,10 +210,8 @@ describe('用户管理页', () => {
     const wrapper = await render([user()])
     activeMock.mockRejectedValue(rejectedByBackend('不能停用自己的账号'))
 
-    const buttons = wrapper.findAll('button')
-    const toggle = buttons.find((b) => b.text() === '停用')
-    expect(toggle).toBeTruthy()
-    await toggle!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '停用账号')
     await vi.waitFor(() => {
       expect(activeMock).toHaveBeenCalled()
     })
@@ -198,7 +228,8 @@ describe('用户管理页', () => {
     await openDeletePanel(wrapper)
 
     expect(deleteMock).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('确定删除')
+    expect(wrapper.text()).toContain('删除「alice」')
+    expect(wrapper.text()).toContain('无法恢复')
   })
 
   it('确认面板显示预览条数与「会保留什么」', async () => {
@@ -294,7 +325,8 @@ describe('用户管理页', () => {
   it('点「导出」调用导出并提示结果', async () => {
     const wrapper = await render([user()])
 
-    await wrapper.findAll('button').find((b) => b.text() === '导出')!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '导出账号数据')
 
     await vi.waitFor(() => {
       expect(exportMock).toHaveBeenCalled()
@@ -309,7 +341,8 @@ describe('用户管理页', () => {
     const wrapper = await render([user()])
     exportMock.mockRejectedValue(rejectedByBackend('这个账号的数据超过导出上限（50 MB）'))
 
-    await wrapper.findAll('button').find((b) => b.text() === '导出')!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '导出账号数据')
 
     await vi.waitFor(() => {
       expect(wrapper.text()).toContain('超过导出上限')
@@ -319,16 +352,21 @@ describe('用户管理页', () => {
   it('普通账号显示「设为管理员」，管理员显示「撤销管理员」', async () => {
     const wrapper = await render([user(), user({ id: 2, username: 'boss', is_admin: true })])
 
-    const labels = wrapper.findAll('button').map((b) => b.text())
-    expect(labels).toContain('设为管理员')
-    expect(labels).toContain('撤销管理员')
+    await openActions(wrapper, 'alice')
+    expect(wrapper.text()).toContain('设为管理员')
+
+    // 清单一次只显示一个人的动作，换人要看另一个人的清单
+    await closeModal(wrapper)
+    await openActions(wrapper, 'boss')
+    expect(wrapper.text()).toContain('撤销管理员')
   })
 
   it('撤销管理员被后端拒绝时，原样显示「最后一位管理员」的理由', async () => {
     const wrapper = await render([user({ is_admin: true })])
     adminMock.mockRejectedValue(rejectedByBackend('这是最后一位管理员，不能撤销——至少保留一位'))
 
-    await wrapper.findAll('button').find((b) => b.text() === '撤销管理员')!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '撤销管理员')
 
     await vi.waitFor(() => {
       expect(adminMock).toHaveBeenCalledWith(1, false)
@@ -366,13 +404,12 @@ describe('用户额度', () => {
       user({ id: 3, username: 'own', daily_task_limit: 7, daily_task_source: 'user' }),
     ])
 
-    const openButtons = wrapper.findAll('button').filter((b) => b.text() === '额度')
-    expect(openButtons.length).toBe(3)
-
     for (const [index, expected] of [['-1'], ['0'], ['7']].entries()) {
-      await openButtons[index]!.trigger('click')
+      await openActions(wrapper, ['inherit', 'no-limit', 'own'][index]!)
+      await clickAction(wrapper, '编辑额度')
       const input = wrapper.find('input[type="number"]')
       expect((input.element as HTMLInputElement).value).toBe(String(expected))
+      await closeModal(wrapper)
     }
   })
 
@@ -382,7 +419,8 @@ describe('用户额度', () => {
       user({ daily_task_limit: 2, daily_task_source: 'user' }),
     )
 
-    await wrapper.findAll('button').filter((b) => b.text() === '额度')[0]!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '编辑额度')
     const input = wrapper.find('input[type="number"]')
     await input.setValue('2')
 
@@ -401,7 +439,8 @@ describe('用户额度', () => {
     const wrapper = await render([user()])
     quotaMock.mockRejectedValue(rejectedByBackend('每日生成次数取值非法'))
 
-    await wrapper.findAll('button').filter((b) => b.text() === '额度')[0]!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '编辑额度')
     await wrapper.findAll('button').find((b) => b.text() === '保存')!.trigger('click')
 
     await vi.waitFor(() => {
@@ -412,7 +451,8 @@ describe('用户额度', () => {
   it('强制下线要先确认，不能点一下就踢人', async () => {
     const wrapper = await render([user()])
 
-    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '强制下线')
 
     // 只弹确认面板，还没有真的发请求——踢人是干预别人账号的动作，不该一次点击就发生
     expect(revokeMock).not.toHaveBeenCalled()
@@ -429,7 +469,8 @@ describe('用户额度', () => {
     const wrapper = await render([user()])
     revokeMock.mockResolvedValue(1)
 
-    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '强制下线')
     await wrapper.findAll('button').find((b) => b.text() === '确认下线')!.trigger('click')
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('吊销 1 条会话'))
@@ -441,7 +482,8 @@ describe('用户额度', () => {
     const wrapper = await render([user()])
     revokeMock.mockResolvedValue(0)
 
-    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '强制下线')
     await wrapper.findAll('button').find((b) => b.text() === '确认下线')!.trigger('click')
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('并未登录'))
@@ -452,7 +494,8 @@ describe('用户额度', () => {
     const wrapper = await render([user()])
     revokeMock.mockRejectedValue(rejectedByBackend('该用户不存在'))
 
-    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+    await openActions(wrapper)
+    await clickAction(wrapper, '强制下线')
     await wrapper.findAll('button').find((b) => b.text() === '确认下线')!.trigger('click')
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('该用户不存在'))

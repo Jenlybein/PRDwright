@@ -17,6 +17,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
+import AdminModal from '@/components/AdminModal.vue'
 import PageHeader from '@/components/PageHeader.vue'
 
 import {
@@ -746,219 +747,188 @@ onMounted(load)
           </li>
         </ul>
 
-        <!-- 编辑弹窗：协议不在表单里（它在标题行当标签显示）。
-             用 fixed 遮罩 + 居中卡片，而不是页面内展开块——配置项一多，就地展开
-             会把下面的分组配置整个挤出视野。点遮罩空白处或「关闭」都能收起。 -->
-        <div
-          v-if="editing"
-          class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center sm:p-8"
-          role="dialog"
-          aria-modal="true"
-          aria-label="编辑模型配置"
-          @click.self="cancelEdit"
+    <!-- 编辑弹窗。用统一的 AdminModal：Esc 关闭、锁页面滚动、打开后聚焦面板，
+         这些行为不该每个弹窗各写一遍。 -->
+    <AdminModal
+      :open="Boolean(editing)"
+      kicker="Edit provider"
+      :title="`编辑「${editing?.name ?? ''}」`"
+      size="lg"
+      @close="cancelEdit"
+    >
+      <template #subtitle>
+        <span v-if="editing" class="mt-1 inline-flex">
+          <span class="brut-tag">{{ editing.protocol_label }}</span>
+        </span>
+      </template>
+
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label class="block">
+          <span class="brut-label">配置名（必填）</span>
+          <input v-model="editForm.name" type="text" class="brut-field" />
+        </label>
+
+        <label class="block sm:col-span-2">
+          <span class="brut-label">接口地址</span>
+          <input v-model="editForm.base_url" type="text" class="brut-field font-mono" />
+        </label>
+
+        <!-- 密钥：留空表示不动；填了才会重加密覆盖。明文只在本次提交里出现。 -->
+        <label class="block sm:col-span-2">
+          <span class="brut-label">API 密钥（留空=保持不变）</span>
+          <input
+            v-model="editForm.api_key"
+            type="password"
+            placeholder="填入新密钥才会覆盖"
+            autocomplete="new-password"
+            class="brut-field font-mono"
+          />
+        </label>
+
+        <label class="flex items-center gap-2">
+          <input v-model="editForm.clear_key" type="checkbox" class="brut-check" />
+          <span class="brut-label">清空密钥</span>
+        </label>
+        <label class="block">
+          <span class="brut-label">默认模型</span>
+          <input v-model="editForm.default_model" type="text" class="brut-field font-mono" />
+        </label>
+
+        <label class="block">
+          <span class="brut-label">输出上限</span>
+          <input v-model.number="editForm.max_tokens" type="number" class="brut-field" />
+        </label>
+
+        <label class="block">
+          <span class="brut-label">上下文窗口（0=用内置默认）</span>
+          <input v-model.number="editForm.context_window" type="number" class="brut-field" />
+        </label>
+
+        <label class="block">
+          <span class="brut-label">预留输出（0=用内置默认）</span>
+          <input v-model.number="editForm.max_output" type="number" class="brut-field" />
+        </label>
+
+        <label class="block">
+          <span class="brut-label">思考模式</span>
+          <select v-model="editForm.thinking_enabled" class="brut-field">
+            <option :value="false">关闭</option>
+            <option :value="true">开启</option>
+          </select>
+        </label>
+      </div>
+
+      <p class="mt-2 text-xs text-subtle">
+        换供应商请<b class="text-muted">新建一条配置</b>：协议一变，
+        输出上限与思考模式的语义全都不同，就地改会留下半新半旧的字段。
+      </p>
+
+      <template #footer>
+        <button
+          type="button"
+          class="brut-btn brut-btn-primary"
+          :disabled="savingEdit"
+          @click="onSaveEdit"
         >
-          <div class="brut-card-lg w-full max-w-3xl bg-card">
-            <header
-              class="flex flex-wrap items-start justify-between gap-2 border-b-2 border-brut px-4 py-3"
-            >
-              <div class="min-w-0">
-                <p class="kicker">Edit provider</p>
-                <h3 class="mt-1 text-base font-extrabold tracking-tight text-ink">
-                  编辑「{{ editing.name }}」
-                </h3>
-                <!-- 协议放这里而不是表单格：它改不了，就不该长得像一个输入框。
-                     配置 id（cfg_xxx）不再显示——它对管理员没有任何用处，
-                     只是同一家供应商可以有多条配置时用来区分身份，而「配置名」已经承担了这件事。 -->
-                <span class="mt-1 inline-flex">
-                  <span class="brut-tag">{{ editing.protocol_label }}</span>
-                </span>
-              </div>
-              <button type="button" class="brut-btn brut-btn-xs" @click="cancelEdit">关闭</button>
-            </header>
+          {{ savingEdit ? '保存中…' : '保存修改' }}
+        </button>
+        <button type="button" class="brut-btn" @click="cancelEdit">取消</button>
+      </template>
+    </AdminModal>
 
-            <div class="px-4 py-4">
-              <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <label class="block">
-              <span class="brut-label">配置名（必填）</span>
-              <input v-model="editForm.name" type="text" class="brut-field" />
-            </label>
+    <!-- 新增配置弹窗 -->
+    <AdminModal
+      :open="showCreate"
+      kicker="New provider"
+      title="新增配置"
+      size="lg"
+      @close="closeCreate"
+    >
+      <p class="text-xs text-subtle">
+        选好<b class="text-muted">供应商</b>，协议与地址就定了，剩下只要写配置名和模型。
+        要接自建网关，选「本地 vLLM / Ollama」或「自建网关」再把地址改成你的端点。
+      </p>
 
-            <label class="block sm:col-span-2">
-              <span class="brut-label">接口地址</span>
-              <input v-model="editForm.base_url" type="text" class="brut-field font-mono" />
-            </label>
+      <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label class="block">
+          <span class="brut-label">供应商</span>
+          <select class="brut-field" :value="form.presetKey" @change="onPickPreset">
+            <option value="">请选择供应商…</option>
+            <option v-for="preset in presets" :key="preset.key" :value="preset.key">
+              {{ preset.name }}
+            </option>
+          </select>
+        </label>
 
-            <!-- 密钥：留空表示不动；填了才会重加密覆盖。明文只在本次提交里出现。 -->
-            <label class="block sm:col-span-2">
-              <span class="brut-label">API 密钥（留空=保持不变）</span>
-              <input
-                v-model="editForm.api_key"
-                type="password"
-                placeholder="填入新密钥才会覆盖"
-                autocomplete="new-password"
-                class="brut-field font-mono"
-              />
-            </label>
+        <label class="block">
+          <span class="brut-label">配置名（必填，可重名）</span>
+          <input
+            v-model="form.name"
+            type="text"
+            placeholder="如 方舟-生产"
+            class="brut-field"
+          />
+        </label>
 
-            <label class="flex items-center gap-2">
-              <input v-model="editForm.clear_key" type="checkbox" />
-              <span class="brut-label">清空密钥</span>
-            </label>
-            <label class="block">
-              <span class="brut-label">默认模型</span>
-              <input v-model="editForm.default_model" type="text" class="brut-field font-mono" />
-            </label>
+        <label class="block">
+          <span class="brut-label">默认模型</span>
+          <input
+            v-model="form.default_model"
+            type="text"
+            placeholder="deepseek-chat"
+            class="brut-field font-mono"
+          />
+        </label>
 
-            <label class="block">
-              <span class="brut-label">输出上限</span>
-              <input v-model.number="editForm.max_tokens" type="number" class="brut-field" />
-            </label>
+        <label class="block sm:col-span-2">
+          <span class="brut-label">接口地址（OpenAI 兼容类通常要带 /v1）</span>
+          <input
+            v-model="form.base_url"
+            type="text"
+            placeholder="https://api.deepseek.com/v1"
+            class="brut-field font-mono"
+          />
+        </label>
 
-            <label class="block">
-              <span class="brut-label">上下文窗口（0=用内置默认）</span>
-              <input v-model.number="editForm.context_window" type="number" class="brut-field" />
-            </label>
+        <!-- 密钥：明文只在提交时出现，后端加密入库。本地 vLLM 可填 not-needed。 -->
+        <label class="block sm:col-span-2">
+          <span class="brut-label">API 密钥（加密入库；本地服务可填 not-needed）</span>
+          <input
+            v-model="form.api_key"
+            type="password"
+            placeholder="留空=稍后再配"
+            autocomplete="new-password"
+            class="brut-field font-mono"
+          />
+        </label>
 
-            <label class="block">
-              <span class="brut-label">预留输出（0=用内置默认）</span>
-              <input v-model.number="editForm.max_output" type="number" class="brut-field" />
-            </label>
+        <label class="block">
+          <span class="brut-label">输出上限</span>
+          <input v-model.number="form.max_tokens" type="number" class="brut-field" />
+        </label>
 
-            <label class="block">
-              <span class="brut-label">思考模式</span>
-              <select v-model="editForm.thinking_enabled" class="brut-field">
-                <option :value="false">关闭</option>
-                <option :value="true">开启</option>
-              </select>
-            </label>
-          </div>
+        <label class="block">
+          <span class="brut-label">上下文窗口（0=用内置默认）</span>
+          <input v-model.number="form.context_window" type="number" class="brut-field" />
+        </label>
+      </div>
 
-          <p class="mt-2 text-xs text-subtle">
-            换供应商请<b class="text-muted">新建一条配置</b>：协议一变，
-            输出上限与思考模式的语义全都不同，就地改会留下半新半旧的字段。
-          </p>
+      <p class="mt-2 text-xs text-subtle">
+        自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
+      </p>
 
-              <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  class="brut-btn brut-btn-primary"
-                  :disabled="savingEdit"
-                  @click="onSaveEdit"
-                >
-                  {{ savingEdit ? '保存中…' : '保存修改' }}
-                </button>
-                <button type="button" class="brut-btn" @click="cancelEdit">取消</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 新增配置弹窗 -->
-        <div
-          v-if="showCreate"
-          class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center sm:p-8"
-          role="dialog"
-          aria-modal="true"
-          aria-label="新增模型配置"
-          @click.self="closeCreate"
+      <template #footer>
+        <button
+          type="button"
+          class="brut-btn brut-btn-primary"
+          :disabled="creating"
+          @click="onCreate"
         >
-          <div class="brut-card-lg w-full max-w-3xl bg-card">
-            <header
-              class="flex flex-wrap items-start justify-between gap-2 border-b-2 border-brut px-4 py-3"
-            >
-              <div class="min-w-0">
-                <p class="kicker">New provider</p>
-                <h3 class="mt-1 text-base font-extrabold tracking-tight text-ink">新增配置</h3>
-              </div>
-              <button type="button" class="brut-btn brut-btn-xs" @click="closeCreate">关闭</button>
-            </header>
-            <div class="px-4 py-4">
-              <p class="mt-0.5 text-xs text-subtle">
-            选好<b class="text-muted">供应商</b>，协议与地址就定了，剩下只要写配置名和模型。
-            要接自建网关，选「本地 vLLM / Ollama」或「自建网关」再把地址改成你的端点。
-          </p>
-
-          <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <label class="block">
-              <span class="brut-label">供应商</span>
-              <select class="brut-field" :value="form.presetKey" @change="onPickPreset">
-                <option value="">请选择供应商…</option>
-                <option v-for="preset in presets" :key="preset.key" :value="preset.key">
-                  {{ preset.name }}
-                </option>
-              </select>
-            </label>
-
-            <label class="block">
-              <span class="brut-label">配置名（必填，可重名）</span>
-              <input
-                v-model="form.name"
-                type="text"
-                placeholder="如 方舟-生产"
-                class="brut-field"
-              />
-            </label>
-
-            <label class="block">
-              <span class="brut-label">默认模型</span>
-              <input
-                v-model="form.default_model"
-                type="text"
-                placeholder="deepseek-chat"
-                class="brut-field font-mono"
-              />
-            </label>
-
-            <label class="block sm:col-span-2">
-              <span class="brut-label">接口地址（OpenAI 兼容类通常要带 /v1）</span>
-              <input
-                v-model="form.base_url"
-                type="text"
-                placeholder="https://api.deepseek.com/v1"
-                class="brut-field font-mono"
-              />
-            </label>
-
-            <!-- 密钥：明文只在提交时出现，后端加密入库。本地 vLLM 可填 not-needed。 -->
-            <label class="block sm:col-span-2">
-              <span class="brut-label">API 密钥（加密入库；本地服务可填 not-needed）</span>
-              <input
-                v-model="form.api_key"
-                type="password"
-                placeholder="留空=稍后再配"
-                autocomplete="new-password"
-                class="brut-field font-mono"
-              />
-            </label>
-
-            <label class="block">
-              <span class="brut-label">输出上限</span>
-              <input v-model.number="form.max_tokens" type="number" class="brut-field" />
-            </label>
-
-            <label class="block">
-              <span class="brut-label">上下文窗口（0=用内置默认）</span>
-              <input v-model.number="form.context_window" type="number" class="brut-field" />
-            </label>
-          </div>
-
-              <div class="mt-3 flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  class="brut-btn brut-btn-primary"
-                  :disabled="creating"
-                  @click="onCreate"
-                >
-                  {{ creating ? '添加中…' : '添加配置' }}
-                </button>
-                <button type="button" class="brut-btn" @click="closeCreate">取消</button>
-                <p class="text-xs text-subtle">
-                  自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
+          {{ creating ? '添加中…' : '添加配置' }}
+        </button>
+        <button type="button" class="brut-btn" @click="closeCreate">取消</button>
+      </template>
+    </AdminModal>
       </section>
 
       <!-- 配置分组 -->

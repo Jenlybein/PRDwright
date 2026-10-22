@@ -10,6 +10,7 @@
  */
 import { onMounted, ref } from 'vue'
 
+import AdminModal from '@/components/AdminModal.vue'
 import PageHeader from '@/components/PageHeader.vue'
 
 import {
@@ -27,6 +28,8 @@ const error = ref('')
 const notice = ref('')
 
 const form = ref({ code: '', max_uses: 0, expires_at: '', note: '' })
+/** 新建弹窗是否打开。与「提交中」分开：提交时弹窗要留着，成功后才收 */
+const formOpen = ref(false)
 const creating = ref(false)
 const pendingDelete = ref<AdminInvite | null>(null)
 
@@ -43,6 +46,11 @@ async function load() {
 }
 
 onMounted(load)
+
+function openCreate() {
+  form.value = { code: '', max_uses: 0, expires_at: '', note: '' }
+  formOpen.value = true
+}
 
 async function onCreate() {
   creating.value = true
@@ -62,6 +70,7 @@ async function onCreate() {
     notice.value = ''
     return
   }
+  formOpen.value = false
   form.value = { code: '', max_uses: 0, expires_at: '', note: '' }
   notice.value = '邀请码已创建'
   error.value = ''
@@ -102,6 +111,9 @@ function formatDate(value: string | null): string {
     <PageHeader kicker="Invites / 准入门票" title="邀请码管理">
       <template #actions>
         <span class="brut-tag brut-tag-sky">{{ invites.length }} 个码</span>
+        <button type="button" class="brut-btn brut-btn-xs brut-btn-primary" @click="openCreate">
+          + 新建邀请码
+        </button>
       </template>
       <template #desc>
         <p>注册需要邀请码。删除一个码只影响之后的注册，已经注册的用户不受影响。</p>
@@ -111,56 +123,58 @@ function formatDate(value: string | null): string {
     <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 
-    <!-- 新建 -->
-    <section class="brut-card">
-      <header class="flex items-center justify-between border-b-2 border-brut px-4 py-2">
-        <h2 class="text-sm font-extrabold tracking-tight text-ink">新建邀请码</h2>
-        <span class="kicker">Create</span>
-      </header>
+    <!-- 新建邀请码：弹窗而不是常驻卡片。
+         常驻表单会一直占着垂直空间，而建码是低频动作——多数时候它只是把列表往下推。 -->
+    <AdminModal
+      :open="formOpen"
+      kicker="Create"
+      title="新建邀请码"
+      size="sm"
+      @close="formOpen = false"
+    >
+      <form class="space-y-3" @submit.prevent="onCreate">
+        <label class="block">
+          <span class="brut-label">邀请码</span>
+          <input
+            v-model="form.code"
+            type="text"
+            required
+            minlength="4"
+            maxlength="32"
+            class="brut-field font-mono tracking-widest uppercase"
+            placeholder="如 ALPHA2"
+          />
+          <span class="mt-1 block text-xs text-subtle">
+            只允许大写字母与数字，且不含 O/0、I/1 等易混字符——码是要被人手抄的。
+          </span>
+        </label>
+        <label class="block">
+          <span class="brut-label">次数上限（0 = 不限）</span>
+          <input v-model.number="form.max_uses" type="number" min="0" class="brut-field" />
+        </label>
+        <label class="block">
+          <span class="brut-label">过期时间</span>
+          <input v-model="form.expires_at" type="date" class="brut-field" />
+        </label>
+        <label class="block">
+          <span class="brut-label">备注</span>
+          <input
+            v-model="form.note"
+            type="text"
+            maxlength="64"
+            class="brut-field"
+            placeholder="给谁用"
+          />
+        </label>
 
-      <form class="px-4 py-3" @submit.prevent="onCreate">
-        <div
-          class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1.1fr_0.7fr_1fr_1.3fr_auto] lg:items-end"
-        >
-          <label class="block">
-            <span class="brut-label">邀请码</span>
-            <input
-              v-model="form.code"
-              type="text"
-              required
-              minlength="4"
-              maxlength="32"
-              class="brut-field font-mono tracking-widest uppercase"
-              placeholder="如 ALPHA2"
-            />
-          </label>
-          <label class="block">
-            <span class="brut-label">次数上限（0 = 不限）</span>
-            <input v-model.number="form.max_uses" type="number" min="0" class="brut-field" />
-          </label>
-          <label class="block">
-            <span class="brut-label">过期时间</span>
-            <input v-model="form.expires_at" type="date" class="brut-field" />
-          </label>
-          <label class="block">
-            <span class="brut-label">备注</span>
-            <input
-              v-model="form.note"
-              type="text"
-              maxlength="64"
-              class="brut-field"
-              placeholder="给谁用"
-            />
-          </label>
-          <button type="submit" :disabled="creating" class="brut-btn brut-btn-primary py-2">
+        <div class="flex items-center gap-2 pt-1">
+          <button type="submit" :disabled="creating" class="brut-btn brut-btn-primary">
             {{ creating ? '创建中…' : '新建邀请码' }}
           </button>
+          <button type="button" class="brut-btn" @click="formOpen = false">取消</button>
         </div>
-        <p class="mt-2 text-xs text-subtle">
-          只允许大写字母与数字，且不含 O/0、I/1 等易混字符——码是要被人手抄的。
-        </p>
       </form>
-    </section>
+    </AdminModal>
 
     <!-- 列表 -->
     <section class="brut-card-lg overflow-hidden">
@@ -216,17 +230,30 @@ function formatDate(value: string | null): string {
       </div>
     </section>
 
-    <section v-if="pendingDelete" class="brut-note brut-note-fail">
-      <p class="text-sm font-bold">
-        确定删除邀请码「{{ pendingDelete.code }}」？之后将无法用它注册。
+    <!-- 删除确认：弹窗。之前是页面底部一块内联提示，展开会把列表往下顶 -->
+    <AdminModal
+      :open="Boolean(pendingDelete)"
+      kicker="Delete"
+      :title="`删除邀请码「${pendingDelete?.code ?? ''}」`"
+      size="sm"
+      tone="danger"
+      @close="pendingDelete = null"
+    >
+      <p class="text-sm text-body">
+        之后将无法用它注册。已经用它注册的用户不受影响——他们与码之间没有关联。
       </p>
-      <p class="mt-1 text-xs">已经用它注册的用户不受影响，他们与码之间没有关联。</p>
-      <div class="mt-3 flex items-center gap-2">
-        <button type="button" class="brut-btn brut-btn-danger" @click="onDelete(pendingDelete)">
+
+      <template #footer>
+        <button
+          type="button"
+          class="brut-btn brut-btn-danger"
+          :disabled="!pendingDelete"
+          @click="pendingDelete && onDelete(pendingDelete)"
+        >
           确认删除
         </button>
         <button type="button" class="brut-btn" @click="pendingDelete = null">取消</button>
-      </div>
-    </section>
+      </template>
+    </AdminModal>
   </div>
 </template>

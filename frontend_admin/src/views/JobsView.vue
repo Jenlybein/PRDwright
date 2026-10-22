@@ -11,6 +11,7 @@
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
+import AdminModal from '@/components/AdminModal.vue'
 import PageHeader from '@/components/PageHeader.vue'
 
 import {
@@ -57,8 +58,8 @@ const loading = ref(true)
 const error = ref('')
 const notice = ref('')
 
-/** 展开详情的任务 id（同一时间只展开一条，避免长表格滚不完） */
-const expandedId = ref<number | null>(null)
+/** 正在查看详情的任务。详情走弹窗，不再往表格里插一行 */
+const openedJob = ref<AdminJob | null>(null)
 /** 待确认取消的任务；用面板而不是 confirm()，后者没法说明后果 */
 const pendingCancel = ref<AdminJob | null>(null)
 const cancelling = ref(false)
@@ -104,25 +105,21 @@ onUnmounted(stopTimer)
 function selectTab(next: TabKey) {
   if (tab.value === next) return
   tab.value = next
-  expandedId.value = null
+  openedJob.value = null
   pendingCancel.value = null
   load()
 }
 
 function applyFilters() {
-  expandedId.value = null
+  openedJob.value = null
   load()
 }
 
 function resetFilters() {
   username.value = ''
   kind.value = ''
-  expandedId.value = null
+  openedJob.value = null
   load()
-}
-
-function toggleDetail(job: AdminJob) {
-  expandedId.value = expandedId.value === job.id ? null : job.id
 }
 
 function onAutoRefreshChange(event: Event) {
@@ -348,77 +345,41 @@ function totalTokens(job: AdminJob): string {
             </tr>
           </thead>
           <tbody>
-            <template v-for="job in jobs" :key="job.id">
-              <tr :class="job.is_stuck ? 'bg-danger-surface' : ''">
-                <td>
-                  <span class="flex items-center gap-1.5">
-                    <span class="inline-block h-2.5 w-2.5 border border-brut" :class="dotClass(job)"></span>
-                    <span class="text-xs font-bold" :class="statusClass(job)">
-                      {{ statusLabel(job) }}
-                    </span>
+            <tr v-for="job in jobs" :key="job.id" :class="job.is_stuck ? 'bg-danger-surface' : ''">
+              <td>
+                <span class="flex items-center gap-1.5">
+                  <span class="inline-block h-2.5 w-2.5 border border-brut" :class="dotClass(job)"></span>
+                  <span class="text-xs font-bold" :class="statusClass(job)">
+                    {{ statusLabel(job) }}
                   </span>
-                </td>
-                <td class="font-bold text-ink">{{ job.owner_name }}</td>
-                <td>
-                  <span class="brut-tag brut-tag-slab">{{ kindLabel(job.kind) }}</span>
-                </td>
-                <td class="font-mono text-xs">{{ job.phase || '—' }}</td>
-                <td class="tnum">{{ formatDuration(job.duration_seconds) }}</td>
-                <td class="tnum">{{ totalTokens(job) }}</td>
-                <td class="tnum text-xs">{{ formatTime(job.updated_at) }}</td>
-                <td>
-                  <div class="flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      class="brut-btn brut-btn-xs"
-                      @click="toggleDetail(job)"
-                    >
-                      {{ expandedId === job.id ? '收起' : '详情' }}
-                    </button>
-                    <button
-                      v-if="job.status === 'running'"
-                      type="button"
-                      class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
-                      @click="pendingCancel = job"
-                    >
-                      取消
-                    </button>
-                  </div>
-                </td>
-              </tr>
-
-              <!-- 详情：错误原因 / 时间线 / Token 明细 -->
-              <tr v-if="expandedId === job.id" class="bg-slab">
-                <td colspan="8" class="px-4 py-3">
-                  <dl class="grid gap-x-6 gap-y-2 sm:grid-cols-2">
-                    <div class="flex gap-2">
-                      <dt class="kicker w-24 shrink-0 pt-0.5">任务 ID</dt>
-                      <dd class="tnum text-xs text-ink">#{{ job.id }}</dd>
-                    </div>
-                    <div class="flex gap-2">
-                      <dt class="kicker w-24 shrink-0 pt-0.5">创建时间</dt>
-                      <dd class="tnum text-xs text-ink">{{ formatTime(job.created_at) }}</dd>
-                    </div>
-                    <div class="flex gap-2">
-                      <dt class="kicker w-24 shrink-0 pt-0.5">输入 Token</dt>
-                      <dd class="tnum text-xs text-ink">{{ job.prompt_tokens.toLocaleString() }}</dd>
-                    </div>
-                    <div class="flex gap-2">
-                      <dt class="kicker w-24 shrink-0 pt-0.5">输出 Token</dt>
-                      <dd class="tnum text-xs text-ink">{{ job.completion_tokens.toLocaleString() }}</dd>
-                    </div>
-                    <div class="flex gap-2">
-                      <dt class="kicker w-24 shrink-0 pt-0.5">错误码</dt>
-                      <dd class="tnum text-xs text-ink">{{ job.error_code || '—' }}</dd>
-                    </div>
-                    <div class="flex gap-2">
-                      <dt class="kicker w-24 shrink-0 pt-0.5">错误说明</dt>
-                      <dd class="break-all text-xs text-ink">{{ job.error_message || '—' }}</dd>
-                    </div>
-                  </dl>
-                </td>
-              </tr>
-            </template>
+                </span>
+              </td>
+              <td class="font-bold text-ink">{{ job.owner_name }}</td>
+              <td>
+                <span class="brut-tag brut-tag-slab">{{ kindLabel(job.kind) }}</span>
+              </td>
+              <td class="font-mono text-xs">{{ job.phase || '—' }}</td>
+              <td class="tnum">{{ formatDuration(job.duration_seconds) }}</td>
+              <td class="tnum">{{ totalTokens(job) }}</td>
+              <td class="tnum text-xs">{{ formatTime(job.updated_at) }}</td>
+              <td>
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <!-- 详情进弹窗：就地插一行会把整张表的列宽重新算一遍，
+                       8 列里被撑开的那一列会把其它行也带歪 -->
+                  <button type="button" class="brut-btn brut-btn-xs" @click="openedJob = job">
+                    详情
+                  </button>
+                  <button
+                    v-if="job.status === 'running'"
+                    type="button"
+                    class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
+                    @click="pendingCancel = job"
+                  >
+                    取消
+                  </button>
+                </div>
+              </td>
+            </tr>
 
             <tr v-if="!jobs.length">
               <td colspan="8" class="px-4 py-10 text-center text-sm text-subtle">
@@ -430,16 +391,82 @@ function totalTokens(job: AdminJob): string {
       </div>
     </section>
 
-    <!-- 取消确认。用面板而不是 confirm()：要说明「文档任务不保留半截正文」这个后果 -->
-    <section v-if="pendingCancel" class="brut-note brut-note-fail border-2 border-danger-line">
-      <p class="text-sm font-bold">
-        确定取消任务 #{{ pendingCancel.id }}（{{ pendingCancel.owner_name }} ·
-        {{ kindLabel(pendingCancel.kind) }}）？
+    <!-- 详情：错误原因 / 时间线 / Token 明细 -->
+    <AdminModal
+      :open="Boolean(openedJob)"
+      kicker="Job Detail"
+      :title="`任务 #${openedJob?.id ?? ''}`"
+      size="md"
+      @close="openedJob = null"
+    >
+      <template #subtitle>
+        <p v-if="openedJob" class="mt-1 text-xs text-subtle">
+          {{ openedJob.owner_name }} · {{ kindLabel(openedJob.kind) }} ·
+          {{ statusLabel(openedJob) }} · {{ openedJob.phase || '无阶段' }}
+        </p>
+      </template>
+
+      <dl v-if="openedJob" class="grid gap-x-6 gap-y-2 sm:grid-cols-2">
+        <div class="flex gap-2">
+          <dt class="kicker w-20 shrink-0 pt-0.5">创建时间</dt>
+          <dd class="tnum text-xs text-ink">{{ formatTime(openedJob.created_at) }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="kicker w-20 shrink-0 pt-0.5">最后更新</dt>
+          <dd class="tnum text-xs text-ink">{{ formatTime(openedJob.updated_at) }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="kicker w-20 shrink-0 pt-0.5">输入 Token</dt>
+          <dd class="tnum text-xs text-ink">{{ openedJob.prompt_tokens.toLocaleString() }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="kicker w-20 shrink-0 pt-0.5">输出 Token</dt>
+          <dd class="tnum text-xs text-ink">
+            {{ openedJob.completion_tokens.toLocaleString() }}
+          </dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="kicker w-20 shrink-0 pt-0.5">错误码</dt>
+          <dd class="tnum text-xs text-ink">{{ openedJob.error_code || '—' }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="kicker w-20 shrink-0 pt-0.5">耗时</dt>
+          <dd class="tnum text-xs text-ink">{{ formatDuration(openedJob.duration_seconds) }}</dd>
+        </div>
+      </dl>
+
+      <div v-if="openedJob?.error_message" class="mt-3">
+        <p class="kicker">错误说明</p>
+        <p class="mt-1 border-l-4 border-danger-line pl-2 text-xs break-all text-danger-fg">
+          {{ openedJob.error_message }}
+        </p>
+      </div>
+
+      <p v-if="openedJob?.is_stuck" class="brut-note brut-note-warn mt-3">
+        已停更 {{ openedJob.stuck_minutes }} 分钟，判定为卡死。
       </p>
-      <p class="mt-1 text-xs">
+    </AdminModal>
+
+    <!-- 取消确认。用弹窗而不是 confirm()：要说明「文档任务不保留半截正文」这个后果 -->
+    <AdminModal
+      :open="Boolean(pendingCancel)"
+      kicker="Cancel Job"
+      :title="`取消任务 #${pendingCancel?.id ?? ''}`"
+      size="sm"
+      tone="danger"
+      @close="pendingCancel = null"
+    >
+      <template #subtitle>
+        <p v-if="pendingCancel" class="mt-1 text-xs text-subtle">
+          {{ pendingCancel.owner_name }} · {{ kindLabel(pendingCancel.kind) }}
+        </p>
+      </template>
+
+      <p class="text-sm text-body">
         任务会在下一个可中断点停下；文档任务不会保留半截正文，对话会保留已说出口的部分。
       </p>
-      <div class="mt-3 flex items-center gap-2">
+
+      <template #footer>
         <button
           type="button"
           class="brut-btn brut-btn-danger"
@@ -449,7 +476,7 @@ function totalTokens(job: AdminJob): string {
           {{ cancelling ? '取消中…' : '确认取消' }}
         </button>
         <button type="button" class="brut-btn" @click="pendingCancel = null">返回</button>
-      </div>
-    </section>
+      </template>
+    </AdminModal>
   </div>
 </template>

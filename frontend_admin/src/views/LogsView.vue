@@ -18,6 +18,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 
+import AdminModal from '@/components/AdminModal.vue'
 import PageHeader from '@/components/PageHeader.vue'
 
 import { fetchLogs, messageOf, type AdminLog, type LogQuery } from '@/services/adminService'
@@ -44,7 +45,8 @@ const pageSize = ref(100)
 const loading = ref(false)
 const error = ref('')
 /** 已展开详情的日志 id（只允许一条：同时展开多条会刷屏） */
-const expandedId = ref<number | null>(null)
+/** 正在查看那条日志。详情走弹窗，不再往表格里插一行 */
+const openedLog = ref<AdminLog | null>(null)
 
 /** 默认时间范围的起点：24 小时前，转成 `datetime-local` 要的本地时间格式 */
 function defaultSince(): string {
@@ -170,7 +172,7 @@ async function load() {
 /** 改条件后回到第 1 页：停在第 3 页却换了筛选条件，常常直接落到空页 */
 function applyFilters() {
   page.value = 1
-  expandedId.value = null
+  openedLog.value = null
   load()
 }
 
@@ -211,10 +213,6 @@ function drillIntoRequest(requestId: string) {
   applyFilters()
 }
 
-function toggleDetail(id: number) {
-  expandedId.value = expandedId.value === id ? null : id
-}
-
 /** `extra` 转成可读的多行文本；没有内容时给空串，模板里据此隐藏该块 */
 function extraText(extra: Record<string, unknown>): string {
   const keys = Object.keys(extra)
@@ -226,7 +224,7 @@ function goto(next: number) {
   const target = Math.min(Math.max(1, next), totalPages.value)
   if (target === page.value) return
   page.value = target
-  expandedId.value = null
+  openedLog.value = null
   load()
 }
 
@@ -351,7 +349,7 @@ onMounted(load)
           />
           只看业务事件
         </label>
-        <span class="ml-auto text-xs text-subtle">点任意一行展开结构化字段与堆栈</span>
+        <span class="ml-auto text-xs text-subtle">点任意一行查看结构化字段与堆栈</span>
       </div>
     </section>
 
@@ -378,7 +376,7 @@ onMounted(load)
                 <tr
                   class="cursor-pointer"
                   :class="rowClass(item.level)"
-                  @click="toggleDetail(item.id)"
+                  @click="openedLog = item"
                 >
                   <td class="tnum text-xs">{{ formatTime(item.ts) }}</td>
                   <td>
@@ -408,43 +406,6 @@ onMounted(load)
                   </td>
                 </tr>
 
-                <!-- 详情：默认折叠，展开后显示全部结构化字段与 traceback -->
-                <tr v-if="expandedId === item.id" class="bg-slab">
-                  <td colspan="5" class="px-4 py-3">
-                    <dl class="grid gap-3 sm:grid-cols-2">
-                      <div>
-                        <dt class="kicker">来源</dt>
-                        <dd class="mt-1 font-mono text-xs text-ink">{{ item.logger }}</dd>
-                      </div>
-                      <div>
-                        <dt class="kicker">完整请求号</dt>
-                        <dd class="mt-1 font-mono text-xs text-ink">
-                          {{ item.request_id || '—（无请求来源）' }}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt class="kicker">归属用户</dt>
-                        <dd class="mt-1 font-mono text-xs text-ink">{{ item.user_id ?? '—' }}</dd>
-                      </div>
-                      <div v-if="extraText(item.extra)">
-                        <dt class="kicker">业务字段</dt>
-                        <dd>
-                          <pre
-                            class="mt-1 overflow-x-auto border-2 border-brut bg-card p-2 font-mono text-xs text-body"
-                          >{{ extraText(item.extra) }}</pre>
-                        </dd>
-                      </div>
-                      <div v-if="item.exc" class="sm:col-span-2">
-                        <dt class="kicker">异常堆栈</dt>
-                        <dd>
-                          <pre
-                            class="mt-1 overflow-x-auto border-2 border-danger-line bg-card p-2 font-mono text-xs text-danger-fg"
-                          >{{ item.exc }}</pre>
-                        </dd>
-                      </div>
-                    </dl>
-                  </td>
-                </tr>
               </template>
 
               <tr v-if="!items.length">
@@ -483,5 +444,73 @@ onMounted(load)
         </div>
       </template>
     </section>
+
+    <!-- 详情：结构化字段与 traceback。弹窗承载，不插行——日志行本来就密，
+         中间插一行十几行的详情会把「相邻几条日志」彻底打散。 -->
+    <AdminModal
+      :open="Boolean(openedLog)"
+      kicker="Log Detail"
+      :title="openedLog?.msg ?? ''"
+      size="md"
+      @close="openedLog = null"
+    >
+      <template #subtitle>
+        <p v-if="openedLog" class="mt-1 flex flex-wrap items-center gap-2 text-xs">
+          <span class="brut-tag" :class="openedLog.level === 'ERROR' ? 'brut-tag-danger' : 'brut-tag-slab'">
+            {{ openedLog.level }}
+          </span>
+          <span class="tnum text-subtle">{{ formatTime(openedLog.ts) }}</span>
+        </p>
+      </template>
+
+      <dl v-if="openedLog" class="grid gap-3 sm:grid-cols-2">
+        <div>
+          <dt class="kicker">来源</dt>
+          <dd class="mt-1 font-mono text-xs text-ink">{{ openedLog.logger }}</dd>
+        </div>
+        <div>
+          <dt class="kicker">完整请求号</dt>
+          <dd class="mt-1 font-mono text-xs text-ink">
+            {{ openedLog.request_id || '—（无请求来源）' }}
+          </dd>
+        </div>
+        <div>
+          <dt class="kicker">归属用户</dt>
+          <dd class="mt-1 font-mono text-xs text-ink">{{ openedLog.user_id ?? '—' }}</dd>
+        </div>
+        <div>
+          <dt class="kicker">事件</dt>
+          <dd class="mt-1 font-mono text-xs text-ink">{{ openedLog.event || '—' }}</dd>
+        </div>
+        <div v-if="extraText(openedLog.extra)" class="sm:col-span-2">
+          <dt class="kicker">业务字段</dt>
+          <dd>
+            <pre
+              class="mt-1 overflow-x-auto border-2 border-brut bg-field p-2 font-mono text-xs text-body"
+            >{{ extraText(openedLog.extra) }}</pre>
+          </dd>
+        </div>
+        <div v-if="openedLog.exc" class="sm:col-span-2">
+          <dt class="kicker">异常堆栈</dt>
+          <dd>
+            <pre
+              class="mt-1 max-h-72 overflow-auto border-2 border-danger-line bg-field p-2 font-mono text-xs text-danger-fg"
+            >{{ openedLog.exc }}</pre>
+          </dd>
+        </div>
+      </dl>
+
+      <template #footer>
+        <button
+          v-if="openedLog?.request_id"
+          type="button"
+          class="brut-btn brut-btn-xs"
+          @click="openedLog && drillIntoRequest(openedLog.request_id); openedLog = null"
+        >
+          按此请求号反查
+        </button>
+        <button type="button" class="brut-btn" @click="openedLog = null">关闭</button>
+      </template>
+    </AdminModal>
   </div>
 </template>

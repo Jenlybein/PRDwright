@@ -14,6 +14,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 
+import AdminModal from '@/components/AdminModal.vue'
 import PageHeader from '@/components/PageHeader.vue'
 
 import {
@@ -44,6 +45,18 @@ const error = ref('')
 /** 操作反馈。成功也要说一句，否则点了没反应会被当成没生效 */
 const notice = ref('')
 
+/**
+ * 当前打开的弹窗。
+ *
+ * 所有「需要额外空间才填得完」的东西都进弹窗，不再在卡片里就地展开：
+ * 行内展开会撑高整行（额度编辑尤其明显），把下面几行推到视野之外，滚动位置也跟着漂。
+ * `actions` 是这一页的操作清单——七个动作收进一个竖排列表，不在表格里排成一片小按钮。
+ */
+type Panel = 'create' | 'actions' | 'quota' | 'password' | 'revoke' | 'delete' | null
+const panel = ref<Panel>(null)
+/** 当前被操作的用户；新建账号时为 null */
+const activeUser = ref<AdminUser | null>(null)
+
 // 新建账号表单
 const form = ref({ username: '', password: '', is_admin: false })
 const creating = ref(false)
@@ -69,19 +82,51 @@ const exportingId = ref<number | null>(null)
  */
 const pendingRevoke = ref<AdminUser | null>(null)
 const revoking = ref(false)
-// 重置密码：按行展开一个输入框，密码不落在列表状态里
-const resettingId = ref<number | null>(null)
+// 重置密码：密码不落在列表状态里，只在弹窗里活到提交那一刻
 const newPassword = ref('')
 
-// 额度编辑：同样按行展开。记住的是「被编辑那一行的原始覆盖值」，
-// 而不是生效值——两者不同（继承全局的 10 与单独设的 10 数字一样，含义不同）。
-const quotaEditingId = ref<number | null>(null)
+// 额度编辑：记住的是「被编辑那一行的原始覆盖值」，而不是生效值——
+// 两者不同（继承全局的 10 与单独设的 10 数字一样，含义不同）。
 const quotaForm = ref<UserQuotaPatch>({
   daily_task_limit: -1,
   daily_token_limit: -1,
   max_running: -1,
 })
 const savingQuota = ref(false)
+
+/** 关掉当前弹窗并清掉临时输入：任何一条出路（取消 / 成功 / 点遮罩）都走它 */
+function closePanel() {
+  panel.value = null
+  activeUser.value = null
+  pendingDelete.value = null
+  pendingRevoke.value = null
+  deleteConfirmText.value = ''
+  newPassword.value = ''
+  preview.value = null
+}
+
+function openCreate() {
+  form.value = { username: '', password: '', is_admin: false }
+  panel.value = 'create'
+}
+
+/** 打开某一行的操作清单 */
+function openActions(user: AdminUser) {
+  activeUser.value = user
+  panel.value = 'actions'
+}
+
+function openPassword(user: AdminUser) {
+  activeUser.value = user
+  newPassword.value = ''
+  panel.value = 'password'
+}
+
+function openRevoke(user: AdminUser) {
+  activeUser.value = user
+  pendingRevoke.value = user
+  panel.value = 'revoke'
+}
 
 /**
  * 生效值 → 提交值。
@@ -97,16 +142,13 @@ function rawOf(value: number, source: QuotaSource): number {
 }
 
 function openQuota(user: AdminUser) {
-  quotaEditingId.value = user.id
+  activeUser.value = user
   quotaForm.value = {
     daily_task_limit: rawOf(user.daily_task_limit, user.daily_task_source),
     daily_token_limit: rawOf(user.daily_token_limit, user.daily_token_source),
     max_running: rawOf(user.max_running, user.max_running_source),
   }
-}
-
-function closeQuota() {
-  quotaEditingId.value = null
+  panel.value = 'quota'
 }
 
 async function onSaveQuota(user: AdminUser) {
@@ -120,7 +162,7 @@ async function onSaveQuota(user: AdminUser) {
     sayFail(result.message)
     return
   }
-  quotaEditingId.value = null
+  closePanel()
   await load()
   // 复核「提交的」与「生效的」是否一致。
   // `-1`（跟随全局）跳过——它到底等于几由全局默认决定，前端不知道那个值，
@@ -200,7 +242,7 @@ async function onCreate() {
     sayFail(result.message)
     return
   }
-  form.value = { username: '', password: '', is_admin: false }
+  closePanel()
   sayOk('账号已创建')
   await load()
 }
@@ -234,8 +276,7 @@ async function onResetPassword(user: AdminUser) {
     sayFail(result.message)
     return
   }
-  resettingId.value = null
-  newPassword.value = ''
+  closePanel()
   sayOk(`${user.username} 的密码已重置`)
 }
 
@@ -248,6 +289,8 @@ async function onResetPassword(user: AdminUser) {
  */
 async function openDelete(user: AdminUser) {
   pendingDelete.value = user
+  activeUser.value = user
+  panel.value = 'delete'
   preview.value = null
   deleteConfirmText.value = ''
   previewLoading.value = true
@@ -272,9 +315,7 @@ async function onDelete(user: AdminUser) {
   deleting.value = true
   const result = await toResult(() => deleteUser(user.id))
   deleting.value = false
-  pendingDelete.value = null
-  preview.value = null
-  deleteConfirmText.value = ''
+  closePanel()
   if (!result.ok) {
     sayFail(result.message)
     return
@@ -311,7 +352,7 @@ async function onRevokeSessions(user: AdminUser) {
   revoking.value = true
   const result = await toResult(() => revokeUserSessions(user.id))
   revoking.value = false
-  pendingRevoke.value = null
+  closePanel()
   if (!result.ok) {
     sayFail(result.message)
     return
@@ -339,6 +380,9 @@ function totalTokens(user: AdminUser): number {
     <PageHeader kicker="Users / 账号" title="用户管理">
       <template #actions>
         <span class="brut-tag brut-tag-sky">{{ users.length }} 个账号</span>
+        <button type="button" class="brut-btn brut-btn-xs brut-btn-primary" @click="openCreate">
+          + 新建账号
+        </button>
       </template>
       <template #desc>
         <p>
@@ -351,60 +395,12 @@ function totalTokens(user: AdminUser): number {
     <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
     <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 
-    <!-- 新建账号 -->
-    <section class="brut-card">
-      <header class="flex items-center justify-between border-b-2 border-brut px-4 py-2">
-        <h2 class="text-sm font-extrabold tracking-tight text-ink">新建账号</h2>
-        <span class="kicker">Create</span>
-      </header>
-      <form class="px-4 py-3" @submit.prevent="onCreate">
-        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1.2fr_1.2fr_auto_auto] lg:items-end">
-          <label class="block">
-            <span class="brut-label">用户名</span>
-            <input
-              v-model="form.username"
-              type="text"
-              required
-              minlength="3"
-              maxlength="32"
-              class="brut-field"
-              placeholder="3-32 个字符"
-            />
-          </label>
-          <label class="block">
-            <span class="brut-label">密码</span>
-            <input
-              v-model="form.password"
-              type="password"
-              required
-              minlength="8"
-              class="brut-field"
-              placeholder="至少 8 位"
-            />
-          </label>
-          <label
-            class="flex items-center gap-2 border-2 border-brut bg-field px-3 py-2 text-sm font-bold text-ink"
-          >
-            <input v-model="form.is_admin" type="checkbox" class="brut-check" />
-            设为管理员
-          </label>
-          <button
-            type="submit"
-            :disabled="creating"
-            class="brut-btn brut-btn-primary py-2"
-          >
-            {{ creating ? '创建中…' : '新建账号' }}
-          </button>
-        </div>
-      </form>
-    </section>
-
-    <!-- 列表 -->
+    <!-- 列表。行内不展开任何东西：所有输入都进弹窗，行高因此恒定 -->
     <section class="brut-card-lg overflow-hidden">
       <div v-if="loading" class="px-4 py-8 text-sm text-subtle">加载中…</div>
 
       <div v-else class="overflow-x-auto">
-        <table class="brut-table min-w-[900px]">
+        <table class="brut-table min-w-[860px]">
           <thead>
             <tr>
               <th>用户</th>
@@ -413,7 +409,7 @@ function totalTokens(user: AdminUser): number {
               <th>Token 合计</th>
               <th>今日额度</th>
               <th>状态</th>
-              <th class="w-[320px]">操作</th>
+              <th class="w-[104px]">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -446,125 +442,16 @@ function totalTokens(user: AdminUser): number {
                 </span>
               </td>
               <td>
-                <!-- 七个动作平铺成小块：藏进菜单会多一次点击，也让人记不住有哪些能力 -->
-                <div class="grid grid-cols-3 gap-1">
-                  <button type="button" class="brut-btn brut-btn-xs" @click="onToggleActive(user)">
-                    {{ user.is_active ? '停用' : '启用' }}
-                  </button>
-                  <button type="button" class="brut-btn brut-btn-xs" @click="onToggleAdmin(user)">
-                    {{ user.is_admin ? '撤销管理员' : '设为管理员' }}
-                  </button>
-                  <button
-                    type="button"
-                    class="brut-btn brut-btn-xs"
-                    @click="resettingId = user.id"
-                  >
-                    重置密码
-                  </button>
-                  <button type="button" class="brut-btn brut-btn-xs" @click="openQuota(user)">
-                    额度
-                  </button>
-                  <button
-                    type="button"
-                    class="brut-btn brut-btn-xs"
-                    :disabled="exportingId === user.id"
-                    title="导出他的方案、文档正文、对话记录与任务明细（ZIP）"
-                    @click="onExport(user)"
-                  >
-                    {{ exportingId === user.id ? '导出中…' : '导出' }}
-                  </button>
-                  <button
-                    type="button"
-                    class="brut-btn brut-btn-xs"
-                    :disabled="!user.is_active"
-                    :title="user.is_active ? '吊销他的登录会话，下次请求即失效' : '账号已停用，本就无法登录'"
-                    @click="pendingRevoke = user"
-                  >
-                    强制下线
-                  </button>
-                  <button
-                    type="button"
-                    class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
-                    @click="openDelete(user)"
-                  >
-                    删除
-                  </button>
-                </div>
-
-                <!-- 额度编辑：三个输入都是三态（-1 跟全局 / 0 不限 / 正数上限） -->
-                <div v-if="quotaEditingId === user.id" class="mt-2 border-2 border-brut bg-slab p-2">
-                  <p class="kicker">-1 跟随全局 · 0 不限 · 正数为上限</p>
-                  <div class="mt-1.5 flex flex-wrap items-center gap-2">
-                    <label class="flex items-center gap-1 text-xs font-bold text-ink">
-                      次数
-                      <input
-                        v-model.number="quotaForm.daily_task_limit"
-                        type="number"
-                        min="-1"
-                        class="brut-field w-20 px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label class="flex items-center gap-1 text-xs font-bold text-ink">
-                      Token
-                      <input
-                        v-model.number="quotaForm.daily_token_limit"
-                        type="number"
-                        min="-1"
-                        step="1000"
-                        class="brut-field w-24 px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label class="flex items-center gap-1 text-xs font-bold text-ink">
-                      并发
-                      <input
-                        v-model.number="quotaForm.max_running"
-                        type="number"
-                        min="-1"
-                        class="brut-field w-16 px-2 py-1 text-xs"
-                      />
-                    </label>
-                  </div>
-                  <div class="mt-2 flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      class="brut-btn brut-btn-xs brut-btn-primary"
-                      :disabled="savingQuota"
-                      @click="onSaveQuota(user)"
-                    >
-                      保存
-                    </button>
-                    <button type="button" class="brut-btn-bare" @click="closeQuota">取消</button>
-                    <span class="tnum ml-auto text-[11px] text-subtle">
-                      今日已用 {{ user.usage_tasks_today }} 次 /
-                      {{ user.usage_tokens_today.toLocaleString() }} Token
-                    </span>
-                  </div>
-                </div>
-
-                <!-- 重置密码：就地展开 -->
-                <div v-if="resettingId === user.id" class="mt-2 flex flex-wrap items-center gap-2">
-                  <input
-                    v-model="newPassword"
-                    type="password"
-                    minlength="8"
-                    placeholder="新密码，至少 8 位"
-                    class="brut-field w-48 px-2 py-1 text-xs"
-                  />
-                  <button
-                    type="button"
-                    class="brut-btn brut-btn-xs brut-btn-primary"
-                    @click="onResetPassword(user)"
-                  >
-                    确定
-                  </button>
-                  <button
-                    type="button"
-                    class="brut-btn-bare"
-                    @click="resettingId = null; newPassword = ''"
-                  >
-                    取消
-                  </button>
-                </div>
+                <!-- 七个动作收进一个弹窗列表：平铺成小按钮会把这一列撑到 320px，
+                     整张表被挤得没有呼吸；列表里还能给每个动作配一句说明。 -->
+                <button
+                  type="button"
+                  class="brut-btn brut-btn-xs"
+                  :aria-label="`${user.username} 的操作`"
+                  @click="openActions(user)"
+                >
+                  操作<span class="ml-1 text-[10px] text-subtle" aria-hidden="true">▾</span>
+                </button>
               </td>
             </tr>
             <tr v-if="!users.length">
@@ -577,32 +464,246 @@ function totalTokens(user: AdminUser): number {
       </div>
     </section>
 
-    <!-- 强制下线确认。说清「只是踢下线、不改密码、不禁登录」——三者的区别是后台最常见的误解 -->
-    <section v-if="pendingRevoke" class="brut-note brut-note-warn">
-      <p class="text-sm font-bold">
-        让「{{ pendingRevoke.username }}」立刻下线？
+    <!-- 新建账号 -->
+    <AdminModal
+      :open="panel === 'create'"
+      kicker="Create"
+      title="新建账号"
+      size="sm"
+      @close="closePanel"
+    >
+      <form class="space-y-3" @submit.prevent="onCreate">
+        <label class="block">
+          <span class="brut-label">用户名</span>
+          <input
+            v-model="form.username"
+            type="text"
+            required
+            minlength="3"
+            maxlength="32"
+            class="brut-field"
+            placeholder="3-32 个字符"
+          />
+        </label>
+        <label class="block">
+          <span class="brut-label">密码</span>
+          <input
+            v-model="form.password"
+            type="password"
+            required
+            minlength="8"
+            class="brut-field"
+            placeholder="至少 8 位"
+          />
+        </label>
+        <label
+          class="flex items-center gap-2 border-2 border-brut bg-field px-3 py-2 text-sm font-bold text-ink"
+        >
+          <input v-model="form.is_admin" type="checkbox" class="brut-check" />
+          设为管理员
+        </label>
+
+        <div class="flex items-center gap-2 pt-1">
+          <button type="submit" :disabled="creating" class="brut-btn brut-btn-primary">
+            {{ creating ? '创建中…' : '新建账号' }}
+          </button>
+          <button type="button" class="brut-btn" @click="closePanel">取消</button>
+        </div>
+      </form>
+    </AdminModal>
+
+    <!-- 操作清单：竖排可选列表，危险动作也在这里（染色，但不抢主位） -->
+    <AdminModal
+      :open="panel === 'actions'"
+      kicker="Actions"
+      :title="`操作 · ${activeUser?.username ?? ''}`"
+      size="sm"
+      @close="closePanel"
+    >
+      <div v-if="activeUser" class="action-list">
+        <button type="button" class="action-list-item" @click="openQuota(activeUser)">
+          <span class="action-list-name">编辑额度</span>
+          <span class="action-list-hint">次数 / Token / 并发</span>
+        </button>
+        <button type="button" class="action-list-item" @click="openPassword(activeUser)">
+          <span class="action-list-name">重置密码</span>
+          <span class="action-list-hint">下一次登录起生效</span>
+        </button>
+        <button type="button" class="action-list-item" @click="onToggleAdmin(activeUser); closePanel()">
+          <span class="action-list-name">
+            {{ activeUser.is_admin ? '撤销管理员' : '设为管理员' }}
+          </span>
+          <span class="action-list-hint">至少保留一位</span>
+        </button>
+        <button type="button" class="action-list-item" @click="onToggleActive(activeUser); closePanel()">
+          <span class="action-list-name">{{ activeUser.is_active ? '停用账号' : '启用账号' }}</span>
+          <span class="action-list-hint">
+            {{ activeUser.is_active ? '禁止登录，可恢复' : '恢复登录' }}
+          </span>
+        </button>
+        <button
+          type="button"
+          class="action-list-item"
+          :disabled="!activeUser.is_active"
+          @click="openRevoke(activeUser)"
+        >
+          <span class="action-list-name">强制下线</span>
+          <span class="action-list-hint">
+            {{ activeUser.is_active ? '只吊销会话，不改密码' : '账号已停用，本就无法登录' }}
+          </span>
+        </button>
+        <button
+          type="button"
+          class="action-list-item"
+          :disabled="exportingId === activeUser.id"
+          @click="onExport(activeUser); closePanel()"
+        >
+          <span class="action-list-name">
+            {{ exportingId === activeUser.id ? '导出中…' : '导出账号数据' }}
+          </span>
+          <span class="action-list-hint">方案 / 文档 / 对话 / 任务的 ZIP</span>
+        </button>
+        <button
+          type="button"
+          class="action-list-item is-danger"
+          @click="openDelete(activeUser)"
+        >
+          <span class="action-list-name">删除账号</span>
+          <span class="action-list-hint">连同数据一并清除，不可恢复</span>
+        </button>
+      </div>
+    </AdminModal>
+
+    <!-- 额度：三个输入都是三态（-1 跟全局 / 0 不限 / 正数上限） -->
+    <AdminModal
+      :open="panel === 'quota'"
+      kicker="Quota"
+      :title="`编辑额度 · ${activeUser?.username ?? ''}`"
+      size="sm"
+      @close="closePanel"
+    >
+      <p class="kicker">-1 跟随全局 · 0 不限 · 正数为上限</p>
+      <div v-if="activeUser" class="mt-3 grid gap-3">
+        <label class="block">
+          <span class="brut-label">每日生成次数</span>
+          <input
+            v-model.number="quotaForm.daily_task_limit"
+            type="number"
+            min="-1"
+            class="brut-field"
+          />
+        </label>
+        <label class="block">
+          <span class="brut-label">每日 Token</span>
+          <input
+            v-model.number="quotaForm.daily_token_limit"
+            type="number"
+            min="-1"
+            step="1000"
+            class="brut-field"
+          />
+        </label>
+        <label class="block">
+          <span class="brut-label">同时运行任务</span>
+          <input
+            v-model.number="quotaForm.max_running"
+            type="number"
+            min="-1"
+            class="brut-field"
+          />
+        </label>
+      </div>
+      <p v-if="activeUser" class="tnum mt-3 text-[11px] text-subtle">
+        今日已用 {{ activeUser.usage_tasks_today }} 次 /
+        {{ activeUser.usage_tokens_today.toLocaleString() }} Token
       </p>
-      <p class="mt-1 text-xs">
-        只吊销他当前的登录会话，<strong>不改密码、不禁登录</strong>——他下次请求会被要求重新登录，
-        但用原密码立刻就能登回来。正在跑的任务不受影响（要停任务请去任务监控页）。
-      </p>
-      <div class="mt-3 flex items-center gap-2">
+
+      <template #footer>
         <button
           type="button"
           class="brut-btn brut-btn-primary"
-          :disabled="revoking"
-          @click="onRevokeSessions(pendingRevoke)"
+          :disabled="savingQuota || !activeUser"
+          @click="activeUser && onSaveQuota(activeUser)"
+        >
+          {{ savingQuota ? '保存中…' : '保存' }}
+        </button>
+        <button type="button" class="brut-btn" @click="closePanel">取消</button>
+      </template>
+    </AdminModal>
+
+    <!-- 重置密码 -->
+    <AdminModal
+      :open="panel === 'password'"
+      kicker="Password"
+      :title="`重置密码 · ${activeUser?.username ?? ''}`"
+      size="sm"
+      @close="closePanel"
+    >
+      <label class="block">
+        <span class="brut-label">新密码</span>
+        <input
+          v-model="newPassword"
+          type="password"
+          minlength="8"
+          placeholder="至少 8 位"
+          class="brut-field"
+        />
+      </label>
+      <p class="mt-2 text-xs text-subtle">
+        密码只在提交时经过一次内存，后端只记「已重置」，不记明文。
+      </p>
+
+      <template #footer>
+        <button
+          type="button"
+          class="brut-btn brut-btn-primary"
+          :disabled="!activeUser"
+          @click="activeUser && onResetPassword(activeUser)"
+        >
+          确定
+        </button>
+        <button type="button" class="brut-btn" @click="closePanel">取消</button>
+      </template>
+    </AdminModal>
+
+    <!-- 强制下线确认。说清「只是踢下线、不改密码、不禁登录」——三者的区别是后台最常见的误解 -->
+    <AdminModal
+      :open="panel === 'revoke'"
+      kicker="Revoke"
+      :title="`让「${pendingRevoke?.username ?? ''}」立刻下线？`"
+      size="sm"
+      @close="closePanel"
+    >
+      <p class="text-sm text-body">
+        只吊销他当前的登录会话，<strong class="text-ink">不改密码、不禁登录</strong>——
+        他下次请求会被要求重新登录，但用原密码立刻就能登回来。
+        正在跑的任务不受影响（要停任务请去任务监控页）。
+      </p>
+
+      <template #footer>
+        <button
+          type="button"
+          class="brut-btn brut-btn-primary"
+          :disabled="revoking || !pendingRevoke"
+          @click="pendingRevoke && onRevokeSessions(pendingRevoke)"
         >
           {{ revoking ? '处理中…' : '确认下线' }}
         </button>
-        <button type="button" class="brut-btn" @click="pendingRevoke = null">取消</button>
-      </div>
-    </section>
+        <button type="button" class="brut-btn" @click="closePanel">取消</button>
+      </template>
+    </AdminModal>
 
-    <!-- 删除确认。用面板而不是 confirm()：后者在部分环境被禁用，且没法说明后果 -->
-    <section v-if="pendingDelete" class="border-2 border-danger-line bg-danger-surface p-4 shadow-brut">
+    <!-- 删除确认。用弹窗而不是 confirm()：后者在部分环境被禁用，且没法摆出明细 -->
+    <AdminModal
+      :open="panel === 'delete'"
+      kicker="Delete"
+      :title="`删除「${pendingDelete?.username ?? ''}」`"
+      size="md"
+      tone="danger"
+      @close="closePanel"
+    >
       <p class="text-sm font-bold text-danger-fg">
-        确定删除「{{ pendingDelete.username }}」？其方案、文档与任务会一并清除，且无法恢复。
+        其方案、文档与任务会一并清除，且无法恢复。
       </p>
 
       <!-- 明细：删之前先让人看清「删掉多少、留下什么」 -->
@@ -629,33 +730,31 @@ function totalTokens(user: AdminUser): number {
         明细暂时取不到（不影响删除，但建议先刷新再操作）。
       </p>
 
-      <p class="mt-1 text-xs text-danger-fg">
-        如果只是想禁止他登录，请改用「停用」。
-      </p>
+      <p class="mt-2 text-xs text-danger-fg">如果只是想禁止他登录，请改用「停用账号」。</p>
 
       <label class="mt-3 block text-xs font-bold text-danger-fg">
-        请输入「{{ pendingDelete.username }}」以确认：
+        请输入「{{ pendingDelete?.username }}」以确认：
         <input
           v-model="deleteConfirmText"
           data-testid="delete-confirm-input"
           type="text"
-          class="brut-field mt-1 w-56 border-danger-line bg-card px-2 py-1 text-sm text-ink"
-          :placeholder="pendingDelete.username"
+          class="brut-field mt-1 border-danger-line bg-card text-sm text-ink"
+          :placeholder="pendingDelete?.username"
           autocomplete="off"
         />
       </label>
 
-      <div class="mt-3 flex items-center gap-2">
+      <template #footer>
         <button
           type="button"
           class="brut-btn brut-btn-danger"
-          :disabled="!deleteAllowed"
-          @click="onDelete(pendingDelete)"
+          :disabled="!deleteAllowed || !pendingDelete"
+          @click="pendingDelete && onDelete(pendingDelete)"
         >
           {{ deleting ? '删除中…' : '确认删除' }}
         </button>
-        <button type="button" class="brut-btn" @click="pendingDelete = null">取消</button>
-      </div>
-    </section>
+        <button type="button" class="brut-btn" @click="closePanel">取消</button>
+      </template>
+    </AdminModal>
   </div>
 </template>

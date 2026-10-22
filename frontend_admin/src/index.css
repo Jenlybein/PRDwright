@@ -603,6 +603,124 @@
     );
   }
 
+  /* ------------------------------------------------------------------ 弹窗 */
+
+  /* 遮罩层：半透明墨色。卡片本身没有模糊/投影过渡，遮罩也就不做动画——
+     粗野风的层级靠色块与描边，不靠淡入淡出。 */
+  .admin-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    overflow-y: auto;
+    padding: 1rem;
+    background: rgb(4 12 20 / 0.52);
+  }
+  @media (min-width: 40rem) {
+    .admin-modal {
+      align-items: center;
+      padding: 2rem;
+    }
+  }
+  .admin-modal-panel {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-height: calc(100vh - 2rem);
+    border: 2px solid var(--ui-brut);
+    border-radius: 2px;
+    background: var(--ui-card);
+    box-shadow: 8px 8px 0 0 var(--brut-shadow);
+    outline: none;
+  }
+  .admin-modal-sm {
+    max-width: 28rem;
+  }
+  .admin-modal-md {
+    max-width: 36rem;
+  }
+  .admin-modal-lg {
+    max-width: 56rem;
+  }
+  /* 头：与页面里的卡片头同一套语言（kicker + 标题 + 右侧动作），
+     但底边用 3px 而不是 2px——它是弹窗里唯一的分界线，要压得住内容 */
+  .admin-modal-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-bottom: 3px solid var(--ui-brut);
+    padding: 0.85rem 1rem;
+  }
+  .admin-modal-title {
+    margin-top: 0.35rem;
+    font-size: 1.0625rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--ui-ink);
+  }
+  .admin-modal-body {
+    overflow-y: auto;
+    padding: 1rem;
+  }
+  .admin-modal-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    border-top: 2px solid var(--ui-brut);
+    padding: 0.75rem 1rem;
+  }
+  /* 危险语气：只染标题与那条顶线，遮罩与面板保持中性——
+     整块红底会让人以为「已经执行了」 */
+  .admin-modal-danger .admin-modal-head {
+    border-bottom-color: var(--ui-danger-line);
+  }
+  .admin-modal-danger .admin-modal-title {
+    color: var(--ui-danger-fg);
+  }
+
+  /* 动作列表：弹窗里的竖排可选清单（用户页「操作」用它替代一排小按钮） */
+  .action-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .action-list-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-bottom: 2px solid var(--ui-line);
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    transition: background-color 0.1s linear;
+  }
+  .action-list-item:last-child {
+    border-bottom: 0;
+  }
+  .action-list-item:hover:not(:disabled) {
+    background: var(--ui-sky-soft);
+  }
+  .action-list-item:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .action-list-name {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: var(--ui-ink);
+  }
+  .action-list-hint {
+    font-size: 0.75rem;
+    color: var(--ui-subtle);
+    text-align: right;
+  }
+  .action-list-item.is-danger .action-list-name {
+    color: var(--ui-danger-fg);
+  }
+
   /* -------------------------------------------------------------- 主题切换 */
 
   /* 单按钮循环（自动 → 亮色 → 暗色）。形状走 .brut-btn，这里只收紧成图标 + 短标签 */
