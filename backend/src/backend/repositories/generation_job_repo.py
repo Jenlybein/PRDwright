@@ -34,6 +34,28 @@ def _dump_pending_items(items: list[dict[str, Any]] | None) -> str:
     return json.dumps(items or [], ensure_ascii=False)
 
 
+# 供应商快照的四列，顺序与 UPDATE 语句里的占位符一一对应。
+# 单独列一份是为了让「写入列」只有一处定义：漏一列不会报错，只会让账单里那一列为空。
+_PROVIDER_SNAPSHOT_KEYS: tuple[str, ...] = (
+    "provider_protocol",
+    "provider_config_id",
+    "provider_name",
+    "provider_model",
+)
+
+
+def _provider_columns(provider: dict[str, str] | None) -> tuple[str, str, str, str]:
+    """把供应商快照字典摊成定长元组，缺的补空串。
+
+    永不返回 `None`：这四列是 `NOT NULL DEFAULT ''`，写 `NULL` 会被 SQLite 拒绝。
+    调用方少传一个键（例如只有 protocol 没有 name）时补空串而不是报错——
+    账单宁可少一列可读信息，也不该让任务收尾失败。
+    """
+    data = provider or {}
+    values = tuple(str(data.get(key) or "") for key in _PROVIDER_SNAPSHOT_KEYS)
+    return values  # type: ignore[return-value]
+
+
 class GenerationJobRepository:
     """`generation_jobs` 表的读写。所有用户面方法强制带 `owner_id`。"""
 
@@ -184,18 +206,27 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        provider: dict[str, str] | None = None,
     ) -> None:
         """标记任务完成，落最终正文与章节。清空错误字段。
 
-        `prompt_tokens` / `completion_tokens` 是 `usage` 那份 JSON 的**派生副本**：
-        管理员后台统计消耗时用 SQL 直接求和，不必把每行 JSON 取回解析（见迁移 v14）。
+        `prompt_tokens` / `completion_tokens` 与 `provider` 里的四列都是 `usage`
+        那份 JSON 的**派生副本**：管理员后台统计消耗时用 SQL 直接求和，不必把每行
+        JSON 取回解析（见迁移 v14 / v19）。
+
+        `provider` 收的是一个字典（`provider_protocol` / `provider_config_id` /
+        `provider_name` / `provider_model`），而不是四个位置参数：它们总是同时有值、
+        同时为空，拆成四个参数只会让调用点写四行 `''` 兜底。
         """
+        snapshot = _provider_columns(provider)
         with connect() as conn:
             conn.execute(
                 "UPDATE generation_jobs "
                 "SET status = 'completed', draft_content = ?, completed_sections = ?, "
                 "    usage = ?, error_code = '', error_message = '', pending_items = ?, "
-                "    prompt_tokens = ?, completion_tokens = ?, updated_at = ? "
+                "    prompt_tokens = ?, completion_tokens = ?, "
+                "    provider_protocol = ?, provider_config_id = ?, "
+                "    provider_name = ?, provider_model = ?, updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     draft_content,
@@ -204,6 +235,7 @@ class GenerationJobRepository:
                     _dump_pending_items(pending_items),
                     prompt_tokens,
                     completion_tokens,
+                    *snapshot,
                     utc_now_text(),
                     job_id,
                     owner_id,
@@ -224,22 +256,25 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        provider: dict[str, str] | None = None,
     ) -> None:
         """标记任务失败，保留已产出的半截正文、章节与已发生的用量。
 
         `usage` 在失败路径同样要落：失败的生成**照样消耗了 token**，
         只记成功那次等于把最贵的失败藏起来。
 
-        两个 token 列同理一并写：成本统计若跳过失败任务，「这次为什么这么贵」
-        永远查不出来——失败的重试恰恰是最烧钱的部分。
+        两个 token 列与供应商四列同理一并写：成本统计若跳过失败任务，
+        「这次为什么这么贵」永远查不出来——失败的重试恰恰是最烧钱的部分。
         """
+        snapshot = _provider_columns(provider)
         with connect() as conn:
             conn.execute(
                 "UPDATE generation_jobs "
                 "SET status = 'failed', error_code = ?, error_message = ?, "
                 "    draft_content = ?, completed_sections = ?, usage = ?, "
                 "    pending_items = ?, prompt_tokens = ?, completion_tokens = ?, "
-                "    updated_at = ? "
+                "    provider_protocol = ?, provider_config_id = ?, "
+                "    provider_name = ?, provider_model = ?, updated_at = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (
                     error_code,
@@ -250,6 +285,7 @@ class GenerationJobRepository:
                     _dump_pending_items(pending_items),
                     prompt_tokens,
                     completion_tokens,
+                    *snapshot,
                     utc_now_text(),
                     job_id,
                     owner_id,

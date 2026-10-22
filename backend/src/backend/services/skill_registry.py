@@ -43,12 +43,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from backend.core.secrets import lookup_env
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +107,14 @@ def skills_root() -> Path:
     1. 环境变量 `PRDWRIGHT_SKILLS_DIR`（部署时显式指定，优先）；
     2. 从当前文件向上逐级查找 `<祖先目录>/skills`；
     3. 兜底按目录层级推算（`services/ → backend/ → src/ → backend/ → 仓库根`）。
+
+    ⚠️ 第 1 步走 `lookup_env` 而不是 `os.environ`：`pydantic-settings` 读 `.env`
+    **不会把内容写进 `os.environ`**，所以此前「在 `.env` 里写 PRDWRIGHT_SKILLS_DIR」
+    是完全无效的——只有真正导出到进程环境（Docker / systemd）才生效。而
+    `cp .env.example .env` 恰恰是最常见的使用方式，于是模板给了个写了没用的开关。
+    `lookup_env` 先看进程环境、再按 mtime 读 `.env`，两条路都通。
     """
-    env_dir = os.environ.get(SKILLS_DIR_ENV)
+    env_dir = lookup_env(SKILLS_DIR_ENV)
     if env_dir:
         return Path(env_dir)
 

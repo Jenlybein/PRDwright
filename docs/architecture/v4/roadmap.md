@@ -179,6 +179,66 @@ v15 `admin_audit_log`）；日志采集已挂上并在攒数据；`frontend_admi
 > （字段名 `ark_base_url`，pydantic 按字段名大写匹配）。原写法被 `extra="ignore"`
 > 静默忽略，自定义地址从未生效过。
 
+**补记（v4.6，ADR-050）：T3 的「一家一个固定空位」被换成「配置条目」**
+
+上面第 5 项与「播种六家内置供应商」都已被推翻，不是缺陷修补而是模型换代：
+
+- `model_providers.id` 不再等于厂商名，改由后端生成 `cfg_xxx`（短 uuid）；
+  `name` 必填、**允许重名**；同一协议可以有多条配置（生产 / 测试各一条）。
+- **协议创建后不可改**（显式 400）；删除只拦「使用中」那一条，不再有「内置行」
+  与「回到出厂状态」；`builtin` 列保留但一律 0、代码不再读取。
+- 迁移 **v19 `provider_config_entries`** 清掉六条播种行（四条件 AND，含「不是使用中」），
+  并给 `generation_jobs` 补 4 列供应商快照、回填历史 `usage`。
+- `PRESETS` 降级为新增表单的模板，字段 `id → key`（它不再是任何东西的 id）。
+- 用户端回执显示「配置名 · 模型」；解析入口收敛为 `frontend/src/utils/runSummary.ts`
+  ——顺带修掉「刷新后回执整块消失」（库里那份是 snake_case，旧解析按 camelCase 判）。
+- 用例：`test_config_tables`(+5) / `test_admin_config_api`(36) / `runSummary.spec.ts`(5)，
+  前端 `config.spec.ts` 改列表形态（15）。
+
+**补记（v4.6，ADR-051）：`.env` 里不再留任何模型配置**
+
+ADR-050 只改了「一条配置长什么样」，env 里那份旧的默认值还在（`DEFAULT_LLM_PROVIDER` /
+`DEFAULT_LLM_MODEL` / 各家 `*_API_URL` / `*_MAX_TOKENS` / `ARK_THINKING_ENABLED`），
+并由 `_synthesize_from_env` 在「表空 / 表坏」时合成 `env:ark` 继续跑。这一轮把它撤了：
+
+- `Settings` 删掉那 9 个字段（连 `api_key_env_var()` / `require_api_key()` 一起）——
+  **写进 `.env` 也不再有效果**，结构上没有读取点。
+- 删 `_synthesize_from_env` / `ENV_SPEC_PREFIX`；无指针时取**第一条启用中**的配置，
+  一条都没有就是 `None`，`get_llm()` / `/health` 直接说「还没有任何模型配置，请先在后台新增一条」。
+- **第一条配置自动设为使用中**（已有指针时不抢）——否则「配好了却生成说没配置」。
+- v16 迁移改成**常量播种**（不再读 `Settings`）：老库不重跑、新库那六行随即被 v19 删掉。
+- `.env.example` 只剩三把密钥，并写明其余都不在这里配。
+- 表格上方与空状态只留**一个**新增入口（「新增第一条配置」已删）。
+- 用例：一批靠 env 默认值的用例改为显式造配置（`test_llm_resilience` 3 条、
+  `test_observability` 3 条 + 新增无配置分支、`test_generation_job` 1 条、
+  `test_token_budget` 1 条、`test_runtime_config` 6 条重写 + 1 条新增、
+  `test_admin_config_api` 新增「首条自动使用中 / 新建不抢」2 条）；后端 **852 passed**，
+  管理端 **86 passed**（`config.spec.ts` 21）。
+
+**补记（v4.6，ADR-052）：可热改参数也不再出现在 `.env.example`**
+
+模板里还留着 16 个白名单键（`LLM_BUDGET_*`、`LLM_TIMEOUT*`、`PRD_*`、`DOC_REVIEW_*`、
+`REVIEW_REWRITE_MIN_SEVERITY`、`AUTH_SESSION_TTL_HOURS`、`AUTH_COOKIE_SECURE`），
+它们后台早就能改，留在模板里只会被当成「配置入口」。
+
+- 模板现在是**纯说明**：一行生效配置都没有。密钥与全部启动项都以注释形式给出
+  （`AUTH_ENABLED` / `AUTH_COOKIE_NAME` / `INVITE_CODE` / `INIT_ADMIN_*` / `DB_PATH` /
+  skills / 日志 / CORS / `HOST` / `PORT`），取消注释才生效，不写就用默认值。
+  空值密钥行（`ARK_API_KEY=`）也是噪音——空值本来就等于没写，改成注释照样答得出
+  「要准备哪几把钥匙」。
+- 逐项核对过：删掉的 16 行里，代码默认值与模板所写**完全一致**，所以删除不改变运行行为。
+  唯一不一致的是 `PRD_SECTION_REVIEW_MAX_TOKENS`（模板 1024 / 代码 2048）——那是修死配置时
+  代码改了、模板没跟上，正好借此收敛。
+- 本地 `.env` 里手动调过的 `PRD_SECTION_MAX_REWRITES=2` 先写进 `system_config` 再删行：
+  覆盖层在 env 之前，行为不变，且这一项从此能在后台看到。
+- 守门用例 `test_env_example_has_no_effective_lines`：模板出现**任何**生效行即红
+  （`assert keys == set()`），比「只该有三把密钥」更严。反向验证过：加回 `LLM_TIMEOUT=60` → 变红。
+- 顺手修掉两个「模板给了开关却不生效」的死配置：`PRDWRIGHT_SKILLS_STRICT`
+  从来没被 pydantic 认（字段名是 `skills_strict`，现用 `AliasChoices` 两个键名都认）；
+  `PRDWRIGHT_SKILLS_DIR` 走 `os.environ`，写进 `.env` 无效（改走 `secrets.lookup_env`）。
+  各配一条守门用例。
+- 后台 `_FIELD_META` 补两条只存在于旧注释里的说明（帧间隔≠总时长、有效预算=min(物理顶,业务顶)）。
+
 ---
 
 ## T4 · 日志查看 UI（v4.4）
@@ -300,3 +360,13 @@ v15 `admin_audit_log`）；日志采集已挂上并在攒数据；`frontend_admi
 - 迁移用例的断言**不写死版本号**（`run_migrations() == len(MIGRATIONS)`）。
 - 结构变更**只追加新版本号**，改已应用的步骤等于没改（旧库按 `user_version` 跳过）。
 - 提交前先 `git add -An .` 预演，且**必须经用户确认**才提交。
+
+### 密钥加密入库（ADR-053，已实施）
+
+- `model_providers.api_key_env_var` → `value_token`（迁移 v20，删旧列）。
+- 新模块 `core/crypto.py`：主密钥 `backend/secrets/master.key`（600、gitignore），
+  Fernet 加解密；`scripts/keygen/generate_keys.py` 负责生成与 `--rotate`。
+- 后台「模型配置」直接录入密钥（密码框），列表只回 `key_present`；
+  查看明文走独立 `reveal-key` 接口并写审计。
+- `.env.example` 第一节改为「密钥不在这里」；导出不涉及该表，无需额外 redact。
+- 旧的 `PROTOCOL_KEY_ENV_VARS` / `key_env_var` / `key_env_hint` 一并删除。

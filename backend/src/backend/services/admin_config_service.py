@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from typing import Any
 
+from backend.core import crypto
 from backend.core import runtime_config as rc
 from backend.core.config import Settings, get_settings
 from backend.core.errors import AppError, ErrorCode
@@ -29,9 +31,9 @@ from backend.core.providers import (
     PROTOCOL_LABELS,
     PROTOCOLS,
     ProviderSpec,
+    new_config_id,
     spec_from_row,
 )
-from backend.core.secrets import is_present
 from backend.repositories.runtime_config_repo import (
     ModelProviderRepository,
     SystemConfigRepository,
@@ -41,6 +43,10 @@ from backend.services.admin_service import record_audit
 from backend.services.auth_service import User
 
 logger = logging.getLogger(__name__)
+
+# 生成配置 id 的最多尝试次数。10 位十六进制的碰撞概率可以忽略，
+# 但「忽略」不等于「不可能」——撞了就换一个，比抛 500 让管理员重填表单友好。
+_ID_ATTEMPTS = 3
 
 # 配置项的分组与展示元数据。`danger=True` 的项前端要弹二次确认——
 # 它们的共同点是「改错了不明显，但影响很大」。
@@ -103,7 +109,9 @@ _FIELD_META: dict[str, dict[str, Any]] = {
     "llm_timeout": {
         "group": "llm",
         "label": "帧间隔超时（秒）",
-        "help": "相邻两次数据之间最多等多久。0 表示沿用各家 SDK 默认值。",
+        "help": "相邻两次数据之间最多等多久。0 表示沿用各家 SDK 默认值。"
+        "⚠️ 它不是总时长：一个每 59 秒才吐一个字的模型，能把调用无限拖下去而不触发它。"
+        "要约束总时长请用下面的「墙钟硬顶」。",
     },
     "llm_total_timeout": {
         "group": "llm",
@@ -129,7 +137,9 @@ _FIELD_META: dict[str, dict[str, Any]] = {
     "llm_budget_default_cap": {
         "group": "llm",
         "label": "默认业务顶（token）",
-        "help": "故意小于模型物理窗口：让用户逼近极限前就收束，而不是等上游报错。",
+        "help": "有效预算 = min(物理顶, 业务顶)。物理顶＝当前配置的上下文窗口 − 预留输出，"
+        "业务顶＝这一项。故意设得比物理顶小：让输入在逼近模型极限前就收束，"
+        "而不是等上游返回一句厂商自己的报错（那时钱已经花了）。",
     },
     "llm_budget_caps": {
         "group": "llm",
@@ -140,11 +150,6 @@ _FIELD_META: dict[str, dict[str, Any]] = {
         "group": "llm",
         "label": "预算告警比例",
         "help": "估算值达到有效预算的这个比例时记一条告警（随回执返回）。只提示、不拦截。",
-    },
-    "llm_context_window": {
-        "group": "llm",
-        "label": "覆盖上下文窗口（token）",
-        "help": "0 表示用模型注册表/供应商配置的值。换表里没有的型号时用这一项，不必改代码。",
     },
     "quota_daily_task_limit": {
         "group": "quota",
@@ -319,7 +324,9 @@ def _diff_detail(before: dict[str, Any], after: dict[str, Any]) -> str:
         new = after[key]
         if old == new:
             continue
-        if any(marker in key.lower() for marker in ("key", "secret", "token_value")):
+        if key == "value_token" or any(
+            marker in key.lower() for marker in ("key", "secret")
+        ):
             parts.append(f"{key}: ***")
             continue
         parts.append(f"{key}: {old!r} → {new!r}")
@@ -399,10 +406,12 @@ def reset_config(actor: User, keys: list[str] | None = None) -> dict[str, Any]:
 
 
 def list_providers() -> dict[str, Any]:
-    """全部供应商 + 当前激活项。
+    """全部配置条目 + 当前使用中的那一条。
 
-    `key_present` 只回布尔：界面要能提示「这家还没配密钥」，
+    `key_present` 只回布尔：界面要能提示「这条还没配密钥」，
     但绝不能把密钥值本身带到前端。
+
+    `builtin` 不再返回：v19 起所有条目一视同仁（只有「使用中」的不能直删）。
     """
     config = rc.get_runtime_config()
     active_id = config.active_provider.id if config.active_provider else ""
@@ -416,14 +425,12 @@ def list_providers() -> dict[str, Any]:
                 "protocol": row["protocol"],
                 "protocol_label": PROTOCOL_LABELS.get(row["protocol"], row["protocol"]),
                 "base_url": row["base_url"],
-                "api_key_env_var": row["api_key_env_var"],
-                "key_present": is_present(row["api_key_env_var"]) if row["api_key_env_var"] else False,
+                "key_present": crypto.is_configured(row.get("value_token") or ""),
                 "default_model": row["default_model"],
                 "max_tokens": row["max_tokens"],
                 "context_window": row["context_window"],
                 "max_output": row["max_output"],
                 "thinking_enabled": bool(row["thinking_enabled"]),
-                "builtin": bool(row["builtin"]),
                 "enabled": bool(row["enabled"]),
                 "sort_order": row["sort_order"],
                 "active": row["id"] == active_id,
@@ -434,7 +441,10 @@ def list_providers() -> dict[str, Any]:
         "providers": providers,
         "active_provider_id": active_id,
         "presets": PRESETS,
-        "protocols": [{"value": value, "label": PROTOCOL_LABELS[value]} for value in PROTOCOLS],
+        "protocols": [
+            {"value": value, "label": PROTOCOL_LABELS[value]}
+            for value in PROTOCOLS
+        ],
     }
 
 
@@ -442,8 +452,43 @@ def _provider_or_404(provider_id: str) -> dict[str, Any]:
     row = ModelProviderRepository.get(provider_id)
     if row is None:
         # 沿用既有口径：错误码只有 9 个，「找不到」统一用 SOLUTION_NOT_FOUND（404）
-        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该供应商不存在")
+        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该配置不存在")
     return row
+
+
+def _active_pointer_id() -> str:
+    """`system_config.active_provider_id` 的**原始值**（不是解析后的激活项）。
+
+    为什么要读原始指针，而不是 `get_runtime_config().active_provider.id`：
+    使用中的那条配置一旦被停用，解析会回退到别的一条，于是「用解析结果判断」
+    就会把悬空指针放过去——删完之后库里留下一个指向已删行的 key，
+    此后每次读配置都刷一条 WARN，而后台「当前供应商」与列表对不上。
+    """
+    try:
+        raw = SystemConfigRepository.get_all().get(rc.ACTIVE_PROVIDER_KEY)
+    except Exception:  # noqa: BLE001 - 表不可用时按「没有指针」处理
+        return ""
+    if not raw:
+        return ""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def _encrypt_key(api_key: str) -> str:
+    """把明文密钥加密入库；空串原样返回。
+
+    主密钥缺失时给一条**能照着做**的错误，而不是让 500 吞掉原因：
+    这是部署漏跑生成脚本时最常见的第一次失败。
+    """
+    if not api_key:
+        return ""
+    try:
+        return crypto.encrypt_value(api_key)
+    except RuntimeError as exc:
+        raise AppError(ErrorCode.INTERNAL_ERROR, str(exc), status_code=500) from exc
 
 
 def _check_protocol(protocol: str) -> str:
@@ -458,67 +503,124 @@ def _check_protocol(protocol: str) -> str:
 
 
 def create_provider(actor: User, payload: dict[str, Any]) -> dict[str, Any]:
-    """登记一家新供应商。
+    """新增一条配置。
 
-    `id` 是身份（会进 `RunMeter.provider` 与回执），必须由管理员指定且不可改；
-    冲突时给 400 而不是静默覆盖别人的行。
+    三处与「一家供应商一行」时代不同：
+
+    1. **`id` 由后端生成**（`cfg_xxx`）。同一条协议可以有多条配置，让管理员手填
+       id 只会撞名，而撞名后唯一可做的决定是「谁让」——没有业务价值。
+    2. **`name` 必填、允许重名**。它只是给人看的标签（「方舟-生产」），身份是 id。
+       重名拦下来的话，管理员会被迫起名叫「方舟-2」这种谁也记不住的东西。
+    3. **不再有「id 已存在」的 400**。同理，冲突只可能来自 uuid 碰撞，重试即可。
     """
-    provider_id = str(payload.get("id") or "").strip()
-    if not provider_id:
-        raise AppError(ErrorCode.INVALID_REQUEST, "id 不能为空", status_code=400)
-    if ModelProviderRepository.get(provider_id) is not None:
-        raise AppError(
-            ErrorCode.INVALID_REQUEST, f"供应商 id「{provider_id}」已存在", status_code=400
-        )
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise AppError(ErrorCode.INVALID_REQUEST, "配置名不能为空", status_code=400)
 
     protocol = _check_protocol(str(payload.get("protocol") or ""))
-    key_var = str(payload.get("api_key_env_var") or "").strip()
-    # ⚠️ `isalnum()` 对中文也返回 True（汉字属于字母类），所以必须另加 `isascii()`。
-    # 少了这一条，「我的密钥」会被当成合法变量名存进去，然后永远查不到值、
-    # 报一句「尚未配置 我的密钥」——错因藏在最不像错的地方。
-    bare = key_var.replace("_", "")
-    if key_var and not (bare.isascii() and bare.isalnum()):
+
+    # 密钥明文进来、加密后落库。空串 = 未配置（本地无密钥接入点可填占位值，
+    # 如 `not-needed`——OpenAI 兼容客户端要求 api_key 非空）。
+    api_key = str(payload.get("api_key") or "").strip()
+    value_token = _encrypt_key(api_key)
+
+    fields = {
+        "name": name,
+        "protocol": protocol,
+        "base_url": str(payload.get("base_url") or ""),
+        "value_token": value_token,
+        "default_model": str(payload.get("default_model") or ""),
+        "max_tokens": int(payload.get("max_tokens") or 4096),
+        "context_window": int(payload.get("context_window") or 0),
+        "max_output": int(payload.get("max_output") or 0),
+        "thinking_enabled": bool(payload.get("thinking_enabled")),
+        "extra_json": json.dumps(payload.get("extra") or {}, ensure_ascii=False),
+        "sort_order": payload.get("sort_order"),
+    }
+
+    # 生成 id 与写入之间存在碰撞窗口：撞了就换一个重试，而不是先查后写
+    # （「先查再写」有竞态，两个并发请求都能查到「不存在」）。
+    provider_id = ""
+    for _ in range(_ID_ATTEMPTS):
+        candidate = new_config_id()
+        try:
+            ModelProviderRepository.create(provider_id=candidate, **fields)
+        except sqlite3.IntegrityError:
+            continue
+        provider_id = candidate
+        break
+    if not provider_id:
         raise AppError(
-            ErrorCode.INVALID_REQUEST,
-            "密钥变量名只能包含 ASCII 字母、数字与下划线",
-            status_code=400,
+            ErrorCode.INTERNAL_ERROR, "生成配置 id 连续冲突，请重试", status_code=500
         )
 
-    ModelProviderRepository.create(
-        provider_id=provider_id,
-        name=str(payload.get("name") or provider_id),
-        protocol=protocol,
-        base_url=str(payload.get("base_url") or ""),
-        api_key_env_var=key_var,
-        default_model=str(payload.get("default_model") or ""),
-        max_tokens=int(payload.get("max_tokens") or 4096),
-        context_window=int(payload.get("context_window") or 0),
-        max_output=int(payload.get("max_output") or 0),
-        thinking_enabled=bool(payload.get("thinking_enabled")),
-        extra_json=json.dumps(payload.get("extra") or {}, ensure_ascii=False),
-        sort_order=int(payload.get("sort_order") or 100),
-    )
+    # 列表里本来一条都没有（或指针悬着）时，这一条自动成为「使用中」。
+    #
+    # 为什么不是「让用户再点一次设为使用中」：此时它是唯一可选项，那一步只是仪式；
+    # 而一旦忘了点，就会得到「配好了却生成说没有配置」的困惑——排查还得先懂
+    # 「指针」这个概念。已有指针时**不抢**：新建第二条不该把正在用的那条顶掉。
+    activated = False
+    known_ids = {str(row["id"]) for row in ModelProviderRepository.list_all()}
+    pointer = _active_pointer_id()
+    if not pointer or pointer not in known_ids:
+        SystemConfigRepository.upsert_many(
+            {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=actor.id
+        )
+        activated = True
+
     rc.invalidate()
     record_audit(
         actor,
         "provider.create",
         target=provider_id,
-        # 带上协议与密钥变量名：排查「这家为什么一直报缺密钥」时，这两样是唯一线索
-        detail=f"{protocol} {payload.get('base_url') or ''}｜密钥变量 {key_var or '(未设)'}".strip(),
+        # 只记「有没有配密钥」，绝不记密钥本身。
+        detail=f"{name}｜{protocol} {fields['base_url']}｜{'已配置密钥' if value_token else '未配置密钥'}".strip(),
     )
-    return list_providers()
+    data = list_providers()
+    if activated:
+        data["warning"] = (
+            f"已新增并设为使用中：{name}。"
+            + ("" if value_token else "但还没有配置密钥：下一次生成会直接报错。")
+        ).strip()
+    return data
 
 
 def update_provider(actor: User, provider_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """编辑一家供应商。`id` 与 `builtin` 不可改（仓储层也会过滤）。"""
+    """编辑一条配置。
+
+    `id` 与 `builtin` 不可改（仓储层也会过滤）；**`protocol` 同样不可改**：
+    换协议等于换一家厂商，`max_tokens` / `thinking_enabled` / `extra` 的语义全都变了。
+    就地改会留下「半新半旧」的字段，而错误要到某次生成时才以「参数不认」的形式出现。
+    所以这里**显式报 400**，而不是让 pydantic 或仓储层静默丢掉这个字段——
+    静默丢的结果是「200 但没改」，比报错难查得多。
+    """
     row = _provider_or_404(provider_id)
     fields: dict[str, Any] = {}
 
     if "protocol" in payload and payload["protocol"]:
-        fields["protocol"] = _check_protocol(str(payload["protocol"]))
-    for key in ("name", "base_url", "api_key_env_var", "default_model"):
+        wanted = _check_protocol(str(payload["protocol"]))
+        current = str(row.get("protocol") or "")
+        if wanted != current:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "协议创建后不可修改（换供应商请新建一条配置）",
+                status_code=400,
+            )
+
+    if "name" in payload:
+        name = str(payload["name"] or "").strip()
+        if not name:
+            raise AppError(ErrorCode.INVALID_REQUEST, "配置名不能为空", status_code=400)
+        fields["name"] = name
+
+    for key in ("base_url", "default_model"):
         if key in payload:
             fields[key] = str(payload[key] or "")
+    # 密钥单独处理：传 api_key 就重加密覆盖；clear_key=True 就清空（= 未配置）。
+    if payload.get("clear_key"):
+        fields["value_token"] = ""
+    elif payload.get("api_key"):
+        fields["value_token"] = _encrypt_key(str(payload["api_key"]).strip())
     for key in ("max_tokens", "context_window", "max_output", "sort_order"):
         if key in payload and payload[key] is not None:
             fields[key] = int(payload[key])
@@ -544,23 +646,22 @@ def update_provider(actor: User, provider_id: str, payload: dict[str, Any]) -> d
 
 
 def delete_provider(actor: User, provider_id: str) -> dict[str, Any]:
-    """删除一家供应商。
+    """删除一条配置。
 
-    两条拦截都写在服务层（UI 与脚本共用）：
-    - **内置行不可删**：它是「回到出厂状态」的锚点，删了就再也没法恢复默认配置；
-    - **激活中的不可删**：删掉之后下一次生成会因「找不到供应商」而全线失败，
-      而那时管理员多半已经离开页面了。让他先激活别的，是唯一安全的顺序。
+    唯一拦截：**使用中的不能删**。删掉之后下一次生成会因「找不到配置」而全线失败，
+    而那时管理员多半已经离开页面了。让他先切到另一条，是唯一安全的顺序。
+
+    ⚠️ 判断「是不是使用中」必须看 `system_config` 里的**原始指针**，不能看
+    `config.active_provider`：那条配置若被停用，解析会回退到别的一条，
+    于是「用解析结果判断」就会放行，留下一个指向已删行的悬空指针。
     """
-    row = _provider_or_404(provider_id)
-    if int(row.get("builtin") or 0):
-        raise AppError(
-            ErrorCode.FORBIDDEN, "内置供应商不能删除，可以改为停用", status_code=403
-        )
+    _provider_or_404(provider_id)
 
-    config = rc.get_runtime_config()
-    if config.active_provider is not None and config.active_provider.id == provider_id:
+    if _active_pointer_id() == provider_id:
         raise AppError(
-            ErrorCode.FORBIDDEN, "这是当前激活的供应商，请先激活另一家", status_code=403
+            ErrorCode.FORBIDDEN,
+            "这是使用中的配置，请先切换到另一条再删除",
+            status_code=403,
         )
 
     ModelProviderRepository.delete(provider_id)
@@ -570,7 +671,7 @@ def delete_provider(actor: User, provider_id: str) -> dict[str, Any]:
 
 
 def activate_provider(actor: User, provider_id: str) -> dict[str, Any]:
-    """激活一家供应商。
+    """把一条配置设为「使用中」（同一时刻只有一条）。
 
     缺密钥时**允许激活**，但会返回一条 `warning`：拦着不让激活会让「先切过去、
     再去配密钥」这个正常顺序走不通；而一旦真去生成，`get_llm()` 会用带变量名的
@@ -579,7 +680,7 @@ def activate_provider(actor: User, provider_id: str) -> dict[str, Any]:
     row = _provider_or_404(provider_id)
     if not int(row.get("enabled") or 0):
         raise AppError(
-            ErrorCode.INVALID_REQUEST, "该供应商已停用，请先启用再激活", status_code=400
+            ErrorCode.INVALID_REQUEST, "这条配置已停用，请先启用再切换", status_code=400
         )
 
     SystemConfigRepository.upsert_many(
@@ -591,14 +692,32 @@ def activate_provider(actor: User, provider_id: str) -> dict[str, Any]:
         actor, "provider.activate", target=provider_id, detail=f"协议 {row['protocol']}"
     )
 
-    key_var = str(row.get("api_key_env_var") or "")
     warning = ""
-    if key_var and not is_present(key_var):
-        warning = f"已激活，但 {key_var} 还没配：下一次生成会直接报错。"
+    if not crypto.is_configured(str(row.get("value_token") or "")):
+        warning = "已激活，但还没有配置密钥：下一次生成会直接报错。"
 
     data = list_providers()
     data["warning"] = warning
     return data
+
+
+def reveal_provider_key(actor: User, provider_id: str) -> dict[str, Any]:
+    """解密并返回一条配置的密钥明文（**只此一次**），并写审计。
+
+    这是后台唯一能把密钥看回明文的地方。之所以要做成独立动作而不是列表里直接带出：
+    列表是高频、随手可看的，密钥不该随手可见；单独一次「查看」能强制留下
+    「谁、什么时候、看了哪条」的痕迹（审计表是问责底线）。
+    """
+    row = _provider_or_404(provider_id)
+    token = str(row.get("value_token") or "")
+    if not token:
+        raise AppError(ErrorCode.INVALID_REQUEST, "这条配置还没有密钥", status_code=400)
+    try:
+        value = crypto.decrypt_value(token)
+    except RuntimeError as exc:
+        raise AppError(ErrorCode.INVALID_REQUEST, str(exc), status_code=400) from exc
+    record_audit(actor, "provider.reveal_key", target=provider_id, detail="已查看密钥")
+    return {"api_key": value}
 
 
 def test_provider(actor: User, provider_id: str) -> dict[str, Any]:

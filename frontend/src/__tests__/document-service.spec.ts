@@ -110,7 +110,9 @@ describe('fetchDocuments', () => {
       steps: [],
       injectedSkills: [],
       warnings: [],
-      provider: 'ark',
+      protocol: 'ark',
+      providerConfigId: 'cfg_ark0001',
+      providerName: '火山方舟',
       model: 'doubao',
       requestId: 'prd-req',
     }
@@ -387,6 +389,45 @@ describe('fetchVersion', () => {
     expect(detail.pendingItems).toHaveLength(1)
     expect(detail.runSummary?.requestId).toBe('req-1')
     expect(detail.updatedAt).toBe('2026-10-16T02:30:00')
+  })
+
+  it('库里那份回执是 snake_case——刷新后必须还能读出来（旧实现这里整块消失）', async () => {
+    // 后端把 `run_summary` 事件的**同一个 dict** 存进 `documents.last_run_summary`，
+    // 所以真实数据的键一定是 `duration_ms` / `request_id`。旧实现在这里直接断言成
+    // `RunSummary` 并要求有 `durationMs`，于是刷新后回执永远为 null——
+    // 界面上表现为「生成当下有、刷新就没了」，而且不报错。
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        ...backendVersion(),
+        content: '# 定稿正文',
+        last_run_summary: {
+          kind: 'prd',
+          status: 'completed',
+          duration_ms: 61_000,
+          total_calls: 12,
+          prompt_tokens: 90_000,
+          completion_tokens: 8_000,
+          protocol: 'ark',
+          provider_config_id: 'cfg_ark0001',
+          provider_name: '火山方舟',
+          model: 'doubao-seed-2-1-turbo',
+          request_id: 'req-refresh',
+        },
+        updated_at: '2026-10-16T02:30:00',
+      },
+    })
+
+    const detail = await fetchVersion(7, 'prd', 11)
+
+    expect(detail.runSummary).not.toBeNull()
+    expect(detail.runSummary?.durationMs).toBe(61_000)
+    expect(detail.runSummary?.totalCalls).toBe(12)
+    expect(detail.runSummary?.promptTokens).toBe(90_000)
+    expect(detail.runSummary?.requestId).toBe('req-refresh')
+    // 回执上要能说清「走的是哪条配置」：协议 + 配置名 + 配置 id
+    expect(detail.runSummary?.protocol).toBe('ark')
+    expect(detail.runSummary?.providerName).toBe('火山方舟')
+    expect(detail.runSummary?.providerConfigId).toBe('cfg_ark0001')
   })
 
   it('摘要字段不合法（缺 version_id）时抛错，不静默返回空版本', async () => {

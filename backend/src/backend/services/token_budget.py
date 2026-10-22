@@ -194,24 +194,32 @@ class BudgetExceededError(AppError):
 # ============================================================================
 
 
-def _physical_ceiling(provider: str, model: str, settings: Settings) -> int:
+def _physical_ceiling(provider: str, model: str) -> int:
     """本次调用的物理输入上限（窗口 − 预留输出）。
 
     分两种情况：
-    - **当前激活的供应商**：走 `runtime_config`，它会优先取后台填的
+    - **当前使用中的那一条配置**：走 `runtime_config`，它优先取后台填的
       `context_window`。自定义供应商（OpenAI 兼容 + 自己的模型名）在
       `model_registry` 里查不到，不这么做就会落到 32k 兜底——症状是
       「换了个 128k 的模型，却老是报输入超顶」。
-    - **其它供应商**（调用方显式传了 provider）：退回注册表，因为后台只登记了
-      激活那一家，别家的窗口无处可查。
+    - **其它**（调用方显式传了 provider）：退回注册表，因为后台只登记了当前那一条，
+      别家的窗口无处可查。
+
+    ⚠️ `provider` 的取值域是「**协议名或厂商名**」（`_PROVIDER_DEFAULTS` 两种键都有），
+    **永远不能传配置条目 id**（`cfg_xxx`）。传错不会报错——`resolve_limits` 查不到就
+    静默退到 `_FALLBACK`（32k），症状同上，而错误现场看不出原因。
+    这条由 `test_config_id_never_reaches_provider_defaults` 钉住。
+
+    ⚠️ 不再接收 `Settings`：全局的 `LLM_CONTEXT_WINDOW` 已被 ADR-051 删除，
+    窗口只有「配置条目填的值 → 注册表」一条链。留着那个参数只会让下一个
+    读代码的人以为 env 还能影响这里。
     """
     config = get_runtime_config()
     spec = config.active_provider
     if spec is not None and spec.protocol == provider:
         limits = resolve_model_limits()
-        window = settings.llm_context_window or limits.context_window
-        return max(window - limits.max_output, 1_000)
-    return input_ceiling(provider, model, override=settings.llm_context_window)
+        return max(limits.context_window - limits.max_output, 1_000)
+    return input_ceiling(provider, model)
 
 
 def evaluate(
@@ -225,20 +233,26 @@ def evaluate(
 
     Args:
         messages: 待发送的消息。
-        provider: 供应商；留空时取配置的默认供应商。
-        model: 型号；留空时取配置的默认型号。
+        provider: 协议名或厂商名；留空时取**当前使用中那条配置**的协议。
+        model: 型号；留空时取当前使用中那条配置的模型。
         step: 步骤名；留空时按默认业务顶计算。
 
     Returns:
         `BudgetDecision`。
     """
-    settings = get_runtime_config().settings
-    provider = provider or settings.default_llm_provider
-    model = model or settings.default_llm_model
+    config = get_runtime_config()
+    settings = config.settings
+    if not provider or not model:
+        # 没有计量器时（例如单测、脚本直接调用）只能看「当前使用中那条」。
+        # 一条配置都没有时两个值都是空串：`resolve_limits` 会落到 32k 兜底，
+        # 这不影响正确性——真正发请求前会因为「没有可用配置」先失败。
+        spec = config.active_provider
+        provider = provider or (spec.protocol if spec else "")
+        model = model or (spec.model if spec else "")
     # 物理顶走 `runtime_config`：它会先看该供应商在后台填的 `context_window`，
     # 再退回 `model_registry`。自定义供应商在注册表里查不到，不这么做就会落到
     # 32k 兜底，把正常的长文请求误判成「超顶」。
-    physical = _physical_ceiling(provider, model, settings)
+    physical = _physical_ceiling(provider, model)
     business = step_cap(step, settings)
     budget = max(min(physical, business), 1)
     return BudgetDecision(

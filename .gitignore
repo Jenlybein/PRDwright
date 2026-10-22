@@ -184,3 +184,6 @@ uploads/**
 # 静态资源不忽略
 !**/public/**
 !**/src/assets/**
+
+# 主密钥（生成脚本产出；绝不入库）
+backend/secrets/

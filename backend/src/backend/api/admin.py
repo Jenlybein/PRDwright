@@ -681,16 +681,16 @@ async def config_effective(
 @router.get(
     "/providers",
     response_model=schemas.AdminProviderListResponse,
-    summary="供应商列表",
+    summary="配置条目列表",
 )
 async def list_providers(
     user: User = Depends(require_admin),
 ) -> schemas.AdminProviderListResponse:
-    """全部供应商 + 当前激活项 + 新增时的预设模板。
+    """全部配置条目 + 当前使用中的那条 + 新增时的供应商模板。
 
-    **响应里没有密钥**，只有 `api_key_env_var`（变量名）与 `key_present`（布尔）。
-    `key_present=false` 表示「这个变量当前没值」，界面据此提示「还没配密钥」——
-    而密钥值本身永远不出后端（ADR-042）。
+    **响应里没有密钥**，只有 `key_present`（布尔）。`key_present=false` 表示
+    「这条还没配可用密钥」，界面据此提示——密钥值本身永远不出后端（ADR-053）。
+    要看回明文只能调 `POST /providers/{id}/reveal-key`（会写审计）。
     """
     del user
     return schemas.AdminProviderListResponse(**admin_config_service.list_providers())
@@ -699,15 +699,15 @@ async def list_providers(
 @router.get(
     "/providers/presets",
     response_model=list[schemas.AdminProviderPreset],
-    summary="新增供应商的预设模板",
+    summary="新增配置的供应商模板",
 )
 async def provider_presets(
     user: User = Depends(require_admin),
 ) -> list[schemas.AdminProviderPreset]:
-    """常见厂商的地址与变量名模板。
+    """常见厂商的地址与变量名模板（**不入库**，只是表单默认值）。
 
     ⚠️ 路由必须注册在 `/{provider_id}` **之前**，否则 `presets` 会被当成一个
-    provider id 去查（然后 404）。
+    配置 id 去查（然后 404）。
     """
     del user
     return [schemas.AdminProviderPreset(**item) for item in PRESETS]
@@ -717,18 +717,18 @@ async def provider_presets(
     "/providers",
     response_model=schemas.AdminProviderListResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="新增供应商",
+    summary="新增配置",
 )
 async def create_provider(
     payload: schemas.AdminCreateProviderRequest,
     user: User = Depends(require_admin),
 ) -> schemas.AdminProviderListResponse:
-    """登记一家新供应商。
+    """新增一条配置。
 
-    `id` 是身份（会进 `RunMeter.provider` 与任务回执），创建后不可改；
-    重复时给 400 而不是静默覆盖别人的行。
+    **没有 `id`**：由后端生成（`cfg_xxx`）。同一协议可以有多条配置，
+    手填 id 只会撞名。`name` 必填但允许重名——它只是给人看的标签。
 
-    `api_key_env_var` 只填**变量名**（如 `DEEPSEEK_API_KEY`），不是密钥本身。
+    `api_key` 是**密钥明文**，只用于本次加密入库，响应里绝不会再出现它。
     """
     return schemas.AdminProviderListResponse(
         **admin_config_service.create_provider(user, payload.model_dump())
@@ -738,14 +738,18 @@ async def create_provider(
 @router.patch(
     "/providers/{provider_id}",
     response_model=schemas.AdminProviderListResponse,
-    summary="编辑供应商",
+    summary="编辑配置",
 )
 async def update_provider(
     provider_id: str,
     payload: schemas.AdminUpdateProviderRequest,
     user: User = Depends(require_admin),
 ) -> schemas.AdminProviderListResponse:
-    """只改传入的字段。`id` 与 `builtin` 不可改（服务层会过滤掉）。"""
+    """只改传入的字段。
+
+    `id` / `builtin` 由仓储层过滤；**`protocol` 改了会 400**——换协议等于换一家
+    厂商，参数语义全变，只能新建一条。
+    """
     return schemas.AdminProviderListResponse(
         **admin_config_service.update_provider(
             user, provider_id, payload.model_dump(exclude_unset=True)
@@ -756,16 +760,19 @@ async def update_provider(
 @router.delete(
     "/providers/{provider_id}",
     response_model=schemas.AdminProviderListResponse,
-    summary="删除供应商",
+    summary="删除配置",
 )
 async def delete_provider(
     provider_id: str,
     user: User = Depends(require_admin),
 ) -> schemas.AdminProviderListResponse:
-    """删除一家供应商。
+    """删除一条配置。
 
-    两种情形会被拒（403）：**内置行**（删了就回不到出厂状态）、
-    **当前激活的那家**（删完下次生成会全线失败，而那时管理员多半已经离开了）。
+    唯一会被拒的情形（403）：**它是当前使用中的那条**——删完下次生成会全线失败，
+    而那时管理员多半已经离开了。先切到另一条再删，是唯一安全的顺序。
+
+    「使用中」按 `system_config` 里的**原始指针**判断，不看解析后的激活项：
+    后者在被停用时会回退到别条，于是会放行并留下悬空指针。
     """
     return schemas.AdminProviderListResponse(
         **admin_config_service.delete_provider(user, provider_id)
@@ -775,16 +782,18 @@ async def delete_provider(
 @router.post(
     "/providers/{provider_id}/activate",
     response_model=schemas.AdminProviderListResponse,
-    summary="激活供应商",
+    summary="设为使用中",
 )
 async def activate_provider(
     provider_id: str,
     user: User = Depends(require_admin),
 ) -> schemas.AdminProviderListResponse:
-    """切换到这家供应商，**下一次生成即生效**（正在跑的任务不受影响）。
+    """把这条配置设为「使用中」，**下一次生成即生效**（正在跑的任务不受影响）。
 
-    缺密钥时**允许激活**，但响应里的 `warning` 会说明「下一次生成会报错」。
-    拦着不让激活会让「先切过去、再去配密钥」这个正常顺序走不通。
+    同一时刻只有一条：它在 `system_config.active_provider_id` 里。
+
+    缺密钥时**允许切换**，但响应里的 `warning` 会说明「下一次生成会报错」。
+    拦着不让切会让「先切过去、再去配密钥」这个正常顺序走不通。
     """
     return schemas.AdminProviderListResponse(
         **admin_config_service.activate_provider(user, provider_id)
@@ -792,9 +801,29 @@ async def activate_provider(
 
 
 @router.post(
+    "/providers/{provider_id}/reveal-key",
+    response_model=schemas.AdminProviderKeyResponse,
+    summary="查看密钥明文（一次性，写审计）",
+)
+async def reveal_provider_key(
+    provider_id: str,
+    user: User = Depends(require_admin),
+) -> schemas.AdminProviderKeyResponse:
+    """解密并返回该配置的密钥明文。
+
+    这是后台唯一能把密钥看回明文的地方，所以刻意做成**独立动作**并写审计：
+    列表是随手可看的，密钥不该随手可见；单独一次「查看」能留下
+    「谁、什么时候、看了哪条」的痕迹。
+    """
+    return schemas.AdminProviderKeyResponse(
+        **admin_config_service.reveal_provider_key(user, provider_id)
+    )
+
+
+@router.post(
     "/providers/{provider_id}/test",
     response_model=schemas.AdminProviderTestResponse,
-    summary="测试供应商连通性",
+    summary="测试配置连通性",
 )
 async def test_provider(
     provider_id: str,

@@ -238,15 +238,20 @@ def test_task_snapshot_does_not_drift():
 
 
 def test_job_meter_uses_active_provider(monkeypatch):
-    """任务回执里记的供应商是**激活的那家**，而不是 `DEFAULT_LLM_PROVIDER`。
+    """任务回执里记的是**使用中的那条配置**，而不是 `DEFAULT_LLM_PROVIDER`。
 
-    切过供应商之后，后者可能与实际发出的请求不符——回执与账单就对不上了。
+    切过配置之后，后者可能与实际发出的请求不符——回执与账单就对不上了。
     """
     from backend.services import job_service
 
     run_migrations()
-    _set(active_provider_id="anthropic")
-    ModelProviderRepository.update("anthropic", {"default_model": "claude-test"})
+    ModelProviderRepository.create(
+        provider_id="cfg_claude01",
+        name="Claude-测试",
+        protocol="anthropic",
+        default_model="claude-test",
+    )
+    _set(active_provider_id="cfg_claude01")
     rc.invalidate()
 
     captured = {}
@@ -286,7 +291,10 @@ def test_job_meter_uses_active_provider(monkeypatch):
 
     meter = captured.get("meter")
     assert meter is not None
-    assert meter.provider == "anthropic", f"应按激活供应商记录，实际 {meter.provider}"
+    # 协议与条目 id 必须同时记下：前者用于查限值与聚合账单，后者用于定位到具体一条
+    assert meter.protocol == "anthropic", f"应按协议记录，实际 {meter.protocol}"
+    assert meter.config_id == "cfg_claude01"
+    assert meter.name == "Claude-测试"
     assert meter.model == "claude-test"
     assert captured.get("config") is not None
 
@@ -304,17 +312,16 @@ def test_custom_provider_window_no_longer_falls_back_to_32k():
     """
     run_migrations()
     ModelProviderRepository.create(
-        provider_id="mylocal",
+        provider_id="cfg_mylocal1",
         name="本地 vLLM",
         protocol="openai_compatible",
         base_url="http://127.0.0.1:8000/v1",
-        api_key_env_var="",
+        value_token="",
         default_model="qwen-72b",
         context_window=100_000,
         max_output=8_000,
-        sort_order=1,
     )
-    _set(active_provider_id="mylocal")
+    _set(active_provider_id="cfg_mylocal1")
 
     limits = rc.resolve_model_limits()
     assert limits.context_window == 100_000
@@ -323,6 +330,6 @@ def test_custom_provider_window_no_longer_falls_back_to_32k():
     assert rc.current_input_ceiling() == 92_000
 
     # 没填窗口时退回注册表（openai_compatible 的 128k，不是 32k）
-    ModelProviderRepository.update("mylocal", {"context_window": 0, "max_output": 0})
+    ModelProviderRepository.update("cfg_mylocal1", {"context_window": 0, "max_output": 0})
     rc.invalidate()
     assert rc.resolve_model_limits().context_window == 128_000

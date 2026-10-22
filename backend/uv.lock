@@ -262,6 +262,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "arkruntime" },
+    { name = "cryptography" },
     { name = "fastapi", extra = ["standard"] },
     { name = "langchain" },
     { name = "langchain-anthropic" },
@@ -282,6 +283,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "arkruntime", specifier = ">=0.8.0" },
+    { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.142.2" },
     { name = "langchain", specifier = ">=1.4.3" },
     { name = "langchain-anthropic", specifier = ">=1.7.5" },

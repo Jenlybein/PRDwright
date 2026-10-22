@@ -582,7 +582,10 @@ def get_llm(
     config = get_runtime_config()
     spec = config.active_provider
     if spec is None:
-        raise RuntimeError("没有可用的模型供应商，请在后台上传配置并激活一家")
+        raise RuntimeError(
+            "还没有任何模型配置。请先在管理后台「模型配置」页新增一条"
+            "（选供应商、填配置名即可），再重新发起生成。"
+        )
 
     if model:
         spec = spec.with_model(str(model))

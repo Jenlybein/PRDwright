@@ -1,7 +1,12 @@
-"""应用配置。
+"""应用配置（环境变量这一侧）。
 
-所有运行时配置都从环境变量读取，并允许被后端项目根目录（backend/.env）下的
-本地 .env 文件覆盖。复制 .env.example 为 .env 即可开始使用。
+除**模型接入**外，所有配置都从环境变量读取，并允许被后端项目根目录
+（backend/.env）下的本地 .env 文件覆盖。复制 .env.example 为 .env 即可开始使用。
+
+⚠️ 模型接入（供应商 / 协议 / 地址 / 型号 / 输出上限 / 思考开关 / **密钥**）**不在这里**，
+它只住在 `model_providers` 表里，由管理后台维护（ADR-051）。本文件里连字段都
+不声明——写了也不会有任何效果。密钥用主密钥加密后以密文存库（ADR-053），
+加密与解密在 `core/crypto.py`；本文件里**没有也不该有**任何密钥。
 
 使用方式::
 
@@ -16,26 +21,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# 供应商 → 密钥环境变量名的映射已移进 `core/providers.py`（那里还管着六个协议
-# 与「新增供应商」的预设模板，是同一件事）。这里**反向再导出**，
-# 让 `from backend.core.config import API_KEY_ENV_VARS` 这个既有写法、
-# 以及 `Settings.api_key_env_var()` 的签名都不变。
-# 依赖方向是单向的：`providers` 不 import `config`，不存在循环。
-from backend.core.providers import API_KEY_ENV_VARS as API_KEY_ENV_VARS
 
 # config.py -> core/ -> backend/(包) -> src/ -> backend/(项目根目录)
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILE = BACKEND_ROOT / ".env"
-
-# 供应商 → 密钥所在的环境变量名。
-# 错误文案（`require_api_key`）与健康检查的自检（`api/health.py`）共用这一份，
-# 避免两处各写一遍之后悄悄漂移——那会变成「报错说缺 A、体检说缺 B」的经典故障。
-#
-# 真实定义在 `core/providers.py`（模块顶部已再导出），本行只是把「它属于这里」
-# 这件事留在原处，方便按老路径读代码的人找到。
 
 
 class Settings(BaseSettings):
@@ -48,66 +39,18 @@ class Settings(BaseSettings):
         extra="ignore",  # 忽略 .env 中出现的多余变量
     )
 
-    # --- LLM 供应商凭据 ------------------------------------------------------
-    # 默认为空，这样即使没有密钥服务也能启动；真正调用模型时再通过
-    # require_api_key() 惰性获取，缺失时才报错。
-    anthropic_api_key: str = Field(
-        default="",
-        description="Anthropic Claude API 密钥。",
-    )
-    openai_api_key: str = Field(
-        default="",
-        description="OpenAI API 密钥（通用 OpenAI 兼容分支使用）。",
-    )
-    # 自定义 API 地址：用于自建网关 / 中转代理 / 兼容服务，留空则用官方默认地址
-    anthropic_api_url: str = Field(
-        default="",
-        description="Anthropic API 地址；留空则使用官方默认地址。",
-    )
-    openai_api_url: str = Field(
-        default="",
-        description="OpenAI API 地址（通用 OpenAI 兼容分支使用）；留空则使用官方默认地址。",
-    )
-
-    # 火山方舟（Volcano Ark）：调用豆包等模型走官方 SDK，而不是 OpenAI 兼容伪装
-    ark_api_key: str = Field(
-        default="",
-        description="火山方舟（Volcano Ark）API 密钥，用于调用豆包系列模型。",
-    )
-    ark_base_url: str = Field(
-        default="https://ark.cn-beijing.volces.com/api/v3",
-        description="火山方舟 API 地址；一般无需修改。",
-    )
-    ark_thinking_enabled: bool = Field(
-        default=False,
-        description="是否开启方舟混合思考模型的深度思考（reasoning）。"
-        "默认关闭，模型直接回答，避免先吐一大段思考再出正文导致的「首字极慢 + 正文爆发」观感。"
-        "后续若接入自主可控的思考机制，与此开关无关。",
-    )
-    ark_max_tokens: int = Field(
-        default=4096,
-        description="火山方舟模型单次回复的最大 token 数。默认 4096 会截断较长文档"
-        "（finish_reason=length），生成 PRD 等长文时需调大（如 131072 即 128k）。",
-    )
-    anthropic_max_tokens: int = Field(
-        default=4096,
-        description="Anthropic Claude 单次回复的最大 token 数。注意 Anthropic 的"
-        "截断标记为 stop_reason=max_tokens。",
-    )
-    openai_max_tokens: int = Field(
-        default=4096,
-        description="OpenAI（兼容协议）单次回复的最大 token 数。",
-    )
-
-    # --- 默认模型选择 --------------------------------------------------------
-    default_llm_provider: Literal["anthropic", "openai", "ark"] = Field(
-        default="ark",
-        description="默认使用的 LLM 供应商。",
-    )
-    default_llm_model: str = Field(
-        default="doubao-seed-2-1-turbo-260628",
-        description="所选供应商下的默认模型名称。",
-    )
+    # --- 模型接入 ------------------------------------------------------------
+    # ⚠️ **这里刻意一个字段都没有**。
+    #
+    # 接哪家、走哪个协议、地址是什么、用哪个型号、输出上限多少、要不要开思考——
+    # 这些全部是**运行时数据**，只住在 `model_providers` 表里，由管理后台面板维护
+    # （ADR-051）。理由不是洁癖，而是这些值必须能**按条**存在：同一家要配
+    # 「生产」「测试」两条时，一个进程级变量根本表达不了「这次用哪条」。
+    #
+    # 密钥**值**仍在 `.env`（或进程环境）里，数据库只存变量名（ADR-042）——
+    # 那是安全边界，与「配置放哪」是两件事：配置可以进库，凭据不行。
+    # 密钥按**变量名**取（`core/secrets.lookup_env`），不经过 `Settings`，
+    # 所以新增一条配置不必改代码、也不必重启。
 
     # --- Token 预算（事前） --------------------------------------------------
     # 事后计量（llm_meter）只能告诉你「刚才花了多少」；这几个开关负责在调用
@@ -137,12 +80,11 @@ class Settings(BaseSettings):
         description="估算值达到有效预算的这个比例时记一条告警（随 run_summary 回传）。"
         "只提示、不拦截。",
     )
-    llm_context_window: int = Field(
-        default=0,
-        ge=0,
-        description="覆盖模型注册表里的上下文窗口（token）；0 表示用注册表的值。"
-        "换了表里没有的型号、或厂商调整了窗口时用这一个变量，不必改代码。",
-    )
+
+    # ⚠️ 这里原本还有一个 `llm_context_window`（全局覆盖上下文窗口）。
+    # 它已随 ADR-051 删除：配置条目自己就有 `context_window` / `max_output`，
+    # 而全局那个值会**静默覆盖**条目的设置（`settings.llm_context_window or ...`）
+    # ——后台给某条填了 128k 却仍按 env 的 32k 判预算，症状是「换了大窗口还老报超顶」。
 
     # --- 每日额度（每人每天能生成多少） --------------------------------------
     # 为什么需要：邀请码只管「谁能进来」，不管「进来后用多少」。没有这一层，
@@ -285,6 +227,13 @@ class Settings(BaseSettings):
     # --- 技能包（PRD 生成的提示词资产） --------------------------------------
     skills_strict: bool = Field(
         default=False,
+        # ⚠️ 这一项的名字和字段名不一致，所以必须显式声明别名：pydantic 默认按
+        # **字段名**匹配 env（`SKILLS_STRICT`），而模板与运维口径一直写的是
+        # `PRDWRIGHT_SKILLS_STRICT`（与 `PRDWRIGHT_SKILLS_DIR` 成对）。不声明的话，
+        # 模板里那一行会被 `extra="ignore"` 静默吃掉——部署时「设了 fail-fast 却仍然
+        # 悄悄降级」，而这正是这个开关要防的事。
+        # 两个名字都认：老部署里写 `SKILLS_STRICT` 的不会因为这次修正而失效。
+        validation_alias=AliasChoices("PRDWRIGHT_SKILLS_STRICT", "SKILLS_STRICT"),
         description="技能资源缺失时是否中止启动（fail-fast）。默认 false 以便本地调试："
         "技能包不在位时服务照常起，只是本次生成退回内置提示词（会在回执上显式标出）。"
         "**部署环境应设为 true**——漏打包 skills/ 目录应在起服务时就炸出来，"
@@ -437,14 +386,6 @@ class Settings(BaseSettings):
         description="服务监听端口。",
     )
 
-    @field_validator("default_llm_provider", mode="before")
-    @classmethod
-    def _normalize_provider(cls, value: object) -> object:
-        """兼容大小写，例如 ANTHROPIC / OpenAI 都能识别。"""
-        if isinstance(value, str):
-            return value.strip().lower()
-        return value
-
     @property
     def budget_step_caps(self) -> dict[str, int]:
         """把 `llm_budget_caps` 解析成 `{step: cap}`。
@@ -490,34 +431,6 @@ class Settings(BaseSettings):
         if self.log_dir:
             return Path(self.log_dir).expanduser().resolve()
         return BACKEND_ROOT / "logs"
-
-    def api_key_env_var(self) -> str:
-        """当前所选供应商对应的 API 密钥环境变量名；供应商未知时为空串。
-
-        给两处用：`require_api_key` 的报错文案、以及健康检查里「密钥没配」的自检。
-        **只有这一处知道「哪个供应商看哪个变量」**，加供应商时不会漏掉某一边。
-        """
-        return API_KEY_ENV_VARS.get(self.default_llm_provider, "")
-
-    def require_api_key(self) -> str:
-        """返回当前所选供应商对应的 API 密钥。
-
-        Raises:
-            RuntimeError: 所选供应商的密钥未配置时抛出。
-        """
-        if self.default_llm_provider == "anthropic":
-            key = self.anthropic_api_key
-        elif self.default_llm_provider == "ark":
-            key = self.ark_api_key
-        else:
-            key = self.openai_api_key
-        if not key:
-            raise RuntimeError(
-                f"尚未配置 {self.api_key_env_var()}，但当前请求的供应商是"
-                f" '{self.default_llm_provider}'。"
-                f"请在 {ENV_FILE} 中设置（可参考 .env.example）。"
-            )
-        return key
 
 
 @lru_cache(maxsize=1)

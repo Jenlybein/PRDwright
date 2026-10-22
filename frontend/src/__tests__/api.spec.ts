@@ -476,7 +476,10 @@ describe('生成任务接口（jobs）', () => {
               { name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' },
             ],
             warnings: ['prd:writing 的输入约 96,000 tokens，已达预算上限 120,000 的 80%'],
-            provider: 'ark',
+            // 后端 dataclass 直出，字段是 snake_case——事件与落库那份（last_run_summary）同形
+            protocol: 'ark',
+            provider_config_id: 'cfg_ark0001',
+            provider_name: '火山方舟',
             model: 'doubao-seed-2-1-turbo-260628',
             request_id: 'req-abc',
           },
@@ -561,7 +564,10 @@ describe('生成任务接口（jobs）', () => {
         ],
         injectedSkills: [{ name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' }],
         warnings: ['prd:writing 的输入约 96,000 tokens，已达预算上限 120,000 的 80%'],
-        provider: 'ark',
+        // 供应商身份三件套：协议查限值、配置 id 定位到具体一条、名字给人读
+        protocol: 'ark',
+        providerConfigId: 'cfg_ark0001',
+        providerName: '火山方舟',
         model: 'doubao-seed-2-1-turbo-260628',
         requestId: 'req-abc',
         partial: false,
@@ -592,7 +598,8 @@ describe('生成任务接口（jobs）', () => {
               ],
               // 告警同理：非字符串项丢弃，合法项保留
               warnings: ['api_docs 的输入已达预算上限的 88%', 7],
-              provider: 'ark',
+              protocol: 'ark',
+              provider_name: '火山方舟',
               model: 'm',
               request_id: '',
             },

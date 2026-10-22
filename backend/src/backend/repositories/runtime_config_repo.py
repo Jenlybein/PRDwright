@@ -15,8 +15,8 @@
 
 密钥的处理
 ----------
-本文件**永远不存、不返回明文密钥**。`api_key_env_var` 只是「去哪个环境变量取」的指针
-（ADR-042）。真正取值在 `core/secrets.py`，且只发生在构造 LLM 的前一刻。
+本文件**只存、只返回密文**（`value_token`），永远不出现明文密钥。加密与解密都在
+`core/crypto.py`，且解密只发生在构造 LLM 的前一刻（ADR-053）。
 """
 
 from __future__ import annotations
@@ -27,10 +27,12 @@ from typing import Any
 from backend.core.db import connect, utc_now_text
 
 # `model_providers` 的显式列清单。凭证只暴露变量名，绝不暴露值。
+# `builtin` 不在其中：它是 v16 的遗留列，v19 起一律为 0，代码不再读取——
+# 留在 SELECT 里只会让人以为「还有内置/自定义之分」。
 _PROVIDER_COLUMNS = (
-    "id, name, protocol, base_url, api_key_env_var, default_model, max_tokens, "
-    "context_window, max_output, thinking_enabled, extra_json, builtin, enabled, "
-    "sort_order, created_at, updated_at"
+    "id, name, protocol, base_url, value_token, default_model, max_tokens, "
+    "context_window, max_output, thinking_enabled, extra_json, "
+    "enabled, sort_order, created_at, updated_at"
 )
 
 
@@ -85,25 +87,32 @@ class SystemConfigRepository:
 
 
 class ModelProviderRepository:
-    """`model_providers`：供应商登记与读取。"""
+    """`model_providers`：模型配置条目（一条 = 一个 endpoint + 一套参数）。
+
+    ⚠️ 这里的 `provider_id` 是**配置条目**的 id（`cfg_xxx`），不是协议名。
+    同一协议可以有多行，所以任何「按协议取唯一一行」的假设都不成立。
+    """
 
     @staticmethod
     def list_all() -> list[dict[str, Any]]:
-        """全部供应商，按 `sort_order`、`id` 升序。
+        """全部配置条目，按 `sort_order`、`created_at` 升序。
 
         不过滤 `enabled`：后台要能看见「已停用」的那些并重新启用；
         过滤由调用方（`runtime_config` 取激活项时）自己做。
+
+        排序用 `created_at` 而不是 `id`：id 现在是随机后缀，按它排等于随机顺序，
+        而「后加的在后面」才是管理员对列表的预期。
         """
         with connect() as conn:
             rows = conn.execute(
                 f"SELECT {_PROVIDER_COLUMNS} FROM model_providers "
-                "ORDER BY sort_order, id"
+                "ORDER BY sort_order, created_at, id"
             ).fetchall()
             return [dict(row) for row in rows]
 
     @staticmethod
     def get(provider_id: str) -> dict[str, Any] | None:
-        """按 id 取一家；不存在返回 `None`（由调用方决定 404 还是降级）。"""
+        """按 id 取一条；不存在返回 `None`（由调用方决定 404 还是降级）。"""
         with connect() as conn:
             row = conn.execute(
                 f"SELECT {_PROVIDER_COLUMNS} FROM model_providers WHERE id = ?",
@@ -118,25 +127,34 @@ class ModelProviderRepository:
         name: str,
         protocol: str,
         base_url: str = "",
-        api_key_env_var: str = "",
+        value_token: str = "",
         default_model: str = "",
         max_tokens: int = 4096,
         context_window: int = 0,
         max_output: int = 0,
         thinking_enabled: bool = False,
         extra_json: str = "{}",
-        sort_order: int = 100,
+        sort_order: int | None = None,
     ) -> None:
-        """登记一家新供应商。`builtin` 恒为 0（内置行只由迁移播种）。
+        """登记一条新配置。
 
-        id 冲突由调用方先查重并转成 400：这里让它直接抛 `sqlite3.IntegrityError`，
-        是为了「检查与写入之间被并发插入」这条竞态也有兜底，而不是静默覆盖别人的行。
+        `sort_order` 缺省时取「当前最大值 + 1」，让新加的一律排在末尾。
+        不再写死 100：那样同批创建的条目顺序取决于 id（现在是随机串），
+        管理员会看到列表顺序莫名跳动。
+
+        id 冲突由调用方重试：这里让它直接抛 `sqlite3.IntegrityError`，
+        是为了让「生成 id 与写入之间」也有兜底，而不是静默覆盖别人的行。
         """
         now = utc_now_text()
         with connect() as conn:
+            if sort_order is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM model_providers"
+                ).fetchone()
+                sort_order = int(row["n"]) if row else 1
             conn.execute(
                 "INSERT INTO model_providers "
-                "(id, name, protocol, base_url, api_key_env_var, default_model, max_tokens, "
+                "(id, name, protocol, base_url, value_token, default_model, max_tokens, "
                 " context_window, max_output, thinking_enabled, extra_json, builtin, enabled, "
                 " sort_order, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)",
@@ -145,7 +163,7 @@ class ModelProviderRepository:
                     name,
                     protocol,
                     base_url,
-                    api_key_env_var,
+                    value_token,
                     default_model,
                     int(max_tokens),
                     int(context_window),
@@ -161,16 +179,17 @@ class ModelProviderRepository:
 
     @staticmethod
     def update(provider_id: str, fields: dict[str, Any]) -> bool:
-        """按字段更新一家供应商，返回是否命中。
+        """按字段更新一条配置，返回是否命中。
 
-        `id` 与 `builtin` 不允许改（前者是身份、后者由迁移决定），
-        即使调用方传了也会被这里过滤掉——规则写在一处，接口层不必各自记得。
+        `id` / `builtin` / **`protocol`** 不允许改：前两者是身份与遗留标记，
+        后者是这条配置的**本质**（换协议等于换一家厂商，参数语义全变：
+        `max_tokens` 在 ark 与 anthropic 下的含义不同、`thinking_enabled`
+        只有 ark 有语义）。规则写在这里，接口层与服务层都不必各自记得。
         """
         allowed = {
             "name",
-            "protocol",
             "base_url",
-            "api_key_env_var",
+            "value_token",
             "default_model",
             "max_tokens",
             "context_window",
@@ -180,6 +199,7 @@ class ModelProviderRepository:
             "enabled",
             "sort_order",
         }
+
         patch = {key: value for key, value in fields.items() if key in allowed}
         if not patch:
             return False
@@ -197,7 +217,7 @@ class ModelProviderRepository:
 
     @staticmethod
     def delete(provider_id: str) -> bool:
-        """删除一家供应商。内置行的拦截在服务层（这里不判断业务规则）。"""
+        """删除一条配置。业务拦截（使用中的不能删）在服务层，这里不判断规则。"""
         with connect() as conn:
             cursor = conn.execute(
                 "DELETE FROM model_providers WHERE id = ?", (provider_id,)

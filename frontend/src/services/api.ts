@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 import { normalizeImportance } from '@/utils/pendingItems'
+import { normalizeRunSummary } from '@/utils/runSummary'
 import { fromBackendKind } from '@/utils/workflow'
 import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
 import type { BackendErrorCode } from '@/services/errors'
@@ -539,57 +540,8 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
   }
 }
 
-/** 把 `run_summary` 里的 `steps` 数组归一成 `StepUsage[]`（坏项丢弃，不打断整条流）。 */
-function parseSteps(data: Record<string, unknown>): StepUsage[] {
-  return readObjectArray(data, 'steps').map((item) => ({
-    step: readString(item, 'step'),
-    calls: readNumber(item, 'calls'),
-    failedCalls: readNumber(item, 'failed_calls'),
-    promptTokens: readNumber(item, 'prompt_tokens'),
-    completionTokens: readNumber(item, 'completion_tokens'),
-    durationMs: readNumber(item, 'duration_ms'),
-  }))
-}
-
-/** 把 `run_summary` 里的 `injected_skills` 归一成 `SkillRef[]`（坏项丢弃）。 */
-function parseSkills(data: Record<string, unknown>): SkillRef[] {
-  return readObjectArray(data, 'injected_skills').map((item) => ({
-    name: readString(item, 'name'),
-    version: readString(item, 'version'),
-    fingerprint: readString(item, 'fingerprint'),
-  }))
-}
-
-/**
- * 把任务流 `run_summary` 事件的 `data` 归一成 `RunSummary`。
- *
- * 与其它解析函数同一口径：字段缺失或类型不对只退化那一个字段。`steps`、
- * `injected_skills`、`warnings` 逐项校验，坏项被丢弃而不是让整份摘要失效——用量是
- * **锦上添花**的信息，绝不能因为它取不到就把整条流打断。
- */
-function parseRunSummary(data: Record<string, unknown>): RunSummary {
-  return {
-    kind: readString(data, 'kind'),
-    status: readString(data, 'status'),
-    durationMs: readNumber(data, 'duration_ms'),
-    totalCalls: readNumber(data, 'total_calls'),
-    failedCalls: readNumber(data, 'failed_calls'),
-    promptTokens: readNumber(data, 'prompt_tokens'),
-    completionTokens: readNumber(data, 'completion_tokens'),
-    steps: parseSteps(data),
-    injectedSkills: parseSkills(data),
-    warnings: readStringArray(data, 'warnings'),
-    partial: data.partial === true,
-    failedSections: readObjectArray(data, 'failed_sections').map((item) => ({
-      sectionId: readString(item, 'section_id'),
-      title: readString(item, 'title'),
-      reason: readString(item, 'reason'),
-    })),
-    provider: readString(data, 'provider'),
-    model: readString(data, 'model'),
-    requestId: readString(data, 'request_id'),
-  }
-}
+// `run_summary` 的解析统一走 `@/utils/runSummary`：落库那份（`documents.last_run_summary`）
+// 与事件是**同一个形状**，两处各写一套的结果是「生成当下有回执、刷新后消失」。
 
 /**
  * 解析单个 SSE 事件块。
@@ -738,9 +690,13 @@ async function readStreamRequest(
         handlers.onSnapshot?.(snapshot)
         break
       }
-      case 'run_summary':
-        handlers.onRunSummary?.(parseRunSummary(event.data))
+      case 'run_summary': {
+        // 解析不出「像回执的东西」就**不广播**：一个空壳回执会让审核页显示
+        // 「耗时 0 秒」，比不显示更让人困惑。
+        const summary = normalizeRunSummary(event.data)
+        if (summary) handlers.onRunSummary?.(summary)
         break
+      }
       case 'review':
         handlers.onReview?.(parseReviewEvent(event.data))
         break
@@ -1110,7 +1066,7 @@ function toJobStatus(data: unknown): JobStatusSummary {
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
     usage:
       typeof rawUsage === 'object' && rawUsage !== null
-        ? parseRunSummary(rawUsage as Record<string, unknown>)
+        ? normalizeRunSummary(rawUsage)
         : null,
   }
 }

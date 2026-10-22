@@ -129,6 +129,14 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     -- 它们是从 usage 派生的**副本**，不与 JSON 竞争真源——聚合只查列，展示仍读 JSON。
     prompt_tokens         INTEGER NOT NULL DEFAULT 0,
     completion_tokens     INTEGER NOT NULL DEFAULT 0,
+    -- 供应商快照（迁移 v19）。同样是从 usage JSON 派生的**副本**，同样只用于聚合：
+    -- 「这次生成到底走了哪条配置」必须留在这行自己身上，不能靠 config_id 回查
+    -- `model_providers`——配置条目会被删、会被改，回查等于让历史账单跟着今天的状态变。
+    -- 四条都是文本、都不是外键，就是这个原因。
+    provider_protocol     TEXT    NOT NULL DEFAULT '',   -- 协议名（ark / openai_compatible …）
+    provider_config_id    TEXT    NOT NULL DEFAULT '',   -- 配置条目 id；env 合成时为 env:ark
+    provider_name         TEXT    NOT NULL DEFAULT '',   -- 配置名快照（可读，删了配置也解释得清）
+    provider_model        TEXT    NOT NULL DEFAULT '',   -- 实际模型名
     created_at            TEXT    NOT NULL,
     updated_at            TEXT    NOT NULL
 );
@@ -182,7 +190,8 @@ CREATE INDEX IF NOT EXISTS idx_admin_audit_ts    ON admin_audit_log(ts);
 -- 「这个人最近做过什么」是事后追责最高频的问法
 CREATE INDEX IF NOT EXISTS idx_admin_audit_actor ON admin_audit_log(actor_id, ts);
 
--- 供应商登记（迁移 v16）。密钥**只存环境变量名**，不落明文（ADR-042）。
+-- 供应商登记（迁移 v16）。密钥用主密钥加密后存 value_token（**只存密文**，
+-- 主密钥在 backend/secrets/master.key，不进库、不进 env；见 ADR-053）。
 -- `protocol` 是「协议」而不是厂商：加一家 OpenAI 兼容的新厂商只需填 base_url，
 -- 不改代码、不加依赖。激活真源在 system_config.active_provider_id，
 -- 本表刻意**不加 is_active 列**——否则可能出现两行都为 1 的矛盾状态。
@@ -191,14 +200,14 @@ CREATE TABLE IF NOT EXISTS model_providers (
     name              TEXT    NOT NULL DEFAULT '',
     protocol          TEXT    NOT NULL DEFAULT 'openai_compatible',
     base_url          TEXT    NOT NULL DEFAULT '',
-    api_key_env_var   TEXT    NOT NULL DEFAULT '',
+    value_token       TEXT    NOT NULL DEFAULT '',   -- 加密后的密钥；空=未配置
     default_model     TEXT    NOT NULL DEFAULT '',
     max_tokens        INTEGER NOT NULL DEFAULT 4096,
     context_window    INTEGER NOT NULL DEFAULT 0,   -- 0 = 交给 model_registry
     max_output        INTEGER NOT NULL DEFAULT 0,
     thinking_enabled  INTEGER NOT NULL DEFAULT 0,   -- 仅 ark 有语义
     extra_json        TEXT    NOT NULL DEFAULT '{}',
-    builtin           INTEGER NOT NULL DEFAULT 0,   -- 1 = 内置，不可删
+    builtin           INTEGER NOT NULL DEFAULT 0,   -- 遗留列：v19 起一律为 0，**代码不再读取**
     enabled           INTEGER NOT NULL DEFAULT 1,
     sort_order        INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT    NOT NULL,

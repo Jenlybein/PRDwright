@@ -16,8 +16,8 @@
 也不要等请求打到上游才被厂商拒（那时钱已经花了，而且错误文案来自厂商、不可控）。
 
 **这些数字会过时**——厂商随时会升级窗口、也会新增型号。所以注册表只是**默认值**，
-不是事实断言：换模型或窗口变了，改 `LLM_CONTEXT_WINDOW` 环境变量即可覆盖，
-不必动代码（见 `core/config.py` 的同名字段）。
+不是事实断言：窗口以**后台那条配置**填的 `context_window` 为准（它优先于本表，
+见 `runtime_config.resolve_model_limits`），换模型时在面板里改，不必动代码。
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ class ModelLimits:
 
 # 具体型号：只登记「窗口与 provider 默认值确实不同」的型号，避免为了凑数而瞎填
 _KNOWN_MODELS: dict[tuple[str, str], ModelLimits] = {
-    # 当前默认型号。登记值取厂商公开文档标注的量级，与实际不符时用
-    # LLM_CONTEXT_WINDOW 覆盖——注册表提供默认值，不替厂商做事实担保。
+    # 常用于豆包系列。登记值取厂商公开文档标注的量级；与实际不符时在后台
+    # 那条配置里填 context_window 覆盖——注册表提供默认值，不替厂商做事实担保。
     ("ark", "doubao-seed-2-1-turbo-260628"): ModelLimits(
         context_window=256_000, max_output=32_768
     ),

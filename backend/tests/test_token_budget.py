@@ -243,6 +243,38 @@ def test_enforce_raises_before_any_call(monkeypatch) -> None:
     assert error.decision.exceeded
 
 
+def _seed_ark_provider() -> None:
+    """放一条 ark + doubao 配置并设为使用中。
+
+    ⚠️ 物理顶是按「当前使用中那条配置」算的（`runtime_config.resolve_model_limits`）。
+    ADR-051 之后 `.env` 不再提供默认供应商，一条配置都没有时只能落到 32k 兜底——
+    于是「默认业务顶给真实提示词留了余量」这条断言会假失败（其实是被 32k 卡住）。
+    """
+    import json
+
+    from backend.core import runtime_config as rc
+    from backend.core.migrations import run_migrations
+    from backend.repositories.runtime_config_repo import (
+        ModelProviderRepository,
+        SystemConfigRepository,
+    )
+
+    run_migrations()
+    provider_id = "cfg_budget001"
+    ModelProviderRepository.create(
+        provider_id=provider_id,
+        name="预算用例",
+        protocol="ark",
+        value_token="",
+        default_model="doubao-seed-2-1-turbo-260628",
+        max_tokens=131072,
+    )
+    SystemConfigRepository.upsert_many(
+        {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=None
+    )
+    rc.invalidate()
+
+
 def test_default_cap_leaves_headroom_for_real_prompts() -> None:
     """默认业务顶必须给真实提示词留足余量，否则正常生成会被误拦。
 
@@ -251,6 +283,7 @@ def test_default_cap_leaves_headroom_for_real_prompts() -> None:
     章节，最坏情况约 4 万 token。默认上限应留出数倍余量——**闸门的目的是拦失控，
     不是拦正常使用**。
     """
+    _seed_ark_provider()
     realistic_cjk_chars = 50_000  # ≈4 万 token，接近最坏情况
     decision = evaluate([HumanMessage(content="产" * realistic_cjk_chars)])
 
@@ -342,16 +375,16 @@ def test_gate_disabled_does_not_intercept(monkeypatch) -> None:
 
 
 def test_gate_uses_meter_identity_for_step(monkeypatch) -> None:
-    """有计量器时用它的供应商/型号/步骤名：判定与记账必须同源，否则口径会打架。"""
+    """有计量器时用它的协议/型号/步骤名：判定与记账必须同源，否则口径会打架。"""
     _apply_env(monkeypatch, LLM_BUDGET_CAPS="prd=5000,api_docs=100", LLM_BUDGET_DEFAULT_CAP="1000")
-    meter = RunMeter(kind="prd", provider="ark", model="doubao-seed-2-1-turbo-260628")
+    meter = RunMeter(kind="prd", protocol="ark", model="doubao-seed-2-1-turbo-260628")
     meter.set_phase("writing")
     llm = _RecordingLLM()
 
     # prd 类型上限 5000（宽松），同样体积在 api_docs（上限 100）下会被拒
     assert _run(meter, llm, [HumanMessage(content=_ascii(10_500))]) == "正文"
 
-    other = RunMeter(kind="api_docs", provider="ark", model="doubao-seed-2-1-turbo-260628")
+    other = RunMeter(kind="api_docs", protocol="ark", model="doubao-seed-2-1-turbo-260628")
     with pytest.raises(BudgetExceededError):
         _run(other, _CountingLLM(), [HumanMessage(content=_ascii(10_500))])
 

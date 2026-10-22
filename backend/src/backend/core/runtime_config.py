@@ -11,11 +11,17 @@
   所以「升级后行为零变化」是结构保证，而不是靠人记得别写默认值。
 - 白名单之外的键**永不查库**（连 `SELECT` 都不需要）。`db_path` / 日志 / 认证
   这类「改了必须重启」的项刻意不在白名单里——后台也不显示它们。
+- ⚠️ **模型接入不在这条链上**（ADR-051）：接哪家、走哪个协议、地址、型号、
+  输出上限、思考开关只住在 `model_providers` 表里，`.env` 里连字段都没有。
+  所以本模块除了「白名单参数」还负责一件事：算出**当前使用中那一条配置**
+  （`active_provider`）。一条都没有时它是 `None`——生成会明确报错，
+  而不是退回某个界面上看不见、也改不了的默认值。
 
 三条铁律
 --------
 1. **只读、不写、不抛**。启动期表还没建、行被写坏、库打不开……一律降级成
-   「只有 env 的配置」并记一条 WARN。生成主链路不能因为配置层失败而失败。
+   「只有 env 的配置」并记一条 WARN。这**不等于**「生成一定成功」：
+   没有可用模型配置时 `active_provider` 是 `None`，由调用方给出人话报错。
 2. **一次生成冻结一份快照**（`use_config`）。这同时满足两个相反的需求：
    「改了下次生成生效」与「跑到一半不会参数漂移」。
 3. **白名单是硬编码常量**。不在表里、不在配置里，改白名单要改代码——
@@ -46,7 +52,6 @@ from pydantic import TypeAdapter, ValidationError
 from backend.core.config import Settings, get_settings
 from backend.core.model_registry import ModelLimits, input_ceiling
 from backend.core.providers import ProviderSpec, spec_from_row
-from backend.core.secrets import is_present
 from backend.repositories.runtime_config_repo import (
     ModelProviderRepository,
     SystemConfigRepository,
@@ -82,7 +87,8 @@ WHITELIST: tuple[str, ...] = (
     "llm_budget_default_cap",
     "llm_budget_caps",
     "llm_budget_warn_ratio",
-    "llm_context_window",
+    # ⚠️ `llm_context_window` 不在这里，也不再存在于 `Settings`（ADR-051）：
+    # 窗口属于「这条配置」，由 `model_providers.context_window` 决定。
     # 每日额度（v4.5 T5-2）。这五项都是「每次检查时现读」，所以改完下一次生成即生效。
     # 注意 `quota_timezone_offset_minutes` 也在这里：它改的是「日界怎么算」，
     # 不是「进程启动时算一次」——否则跨时区部署就没法在不重启的前提下纠正。
@@ -115,10 +121,12 @@ _loading = False
 class RuntimeConfig:
     """某一刻的生效配置快照。
 
-    `settings` 是把覆盖项 `model_copy` 进去之后的 `Settings`——它保留了
-    `budget_step_caps` / `require_api_key()` / `api_key_env_var()` 等派生属性，
-    所以读取点从 `get_settings()` 换成 `get_runtime_config().settings`
-    **不需要改任何取值写法**。
+    `settings` 是把覆盖项 `model_copy` 进去之后的 `Settings`——派生属性
+    （如 `budget_step_caps`）照旧可用，所以读取点从 `get_settings()` 换成
+    `get_runtime_config().settings` **不需要改任何取值写法**。
+
+    ⚠️ 它**不含**模型接入（供应商 / 协议 / 地址 / 型号）：那些在这份快照的
+    `active_provider` 里，而且可能为 `None`（一条配置都没有），见 ADR-051。
     """
 
     settings: Settings
@@ -131,9 +139,11 @@ class RuntimeConfig:
     def provider_missing_key(self) -> str:
         """激活供应商缺密钥时的提示文案；不缺则返回空串。"""
         spec = self.active_provider
-        if spec is None or not spec.api_key_env_var:
+        if spec is None or not spec.value_token:
             return ""
-        return "" if is_present(spec.api_key_env_var) else spec.key_env_hint
+        from backend.core.crypto import is_configured
+
+        return "" if is_configured(spec.value_token) else spec.key_hint
 
 
 # 任务级冻结：`job_service.dispatch` 取快照后 `use_config` 把它挂到上下文，
@@ -202,66 +212,31 @@ def _apply_overrides(base: Settings, decoded: dict[str, Any]) -> Settings:
     return base.model_copy(update=decoded)
 
 
-def _synthesize_from_env(settings: Settings) -> ProviderSpec:
-    """没有数据库时的供应商 spec（降级路径）。
-
-    这条路径必须能独立工作——表还没建、库损坏、启动早期都会走到这里。
-    值全部取自 `Settings`，所以降级时的行为与**升级前完全一致**：
-    这是「默认行为零变化」最后一道保证。
-    """
-    provider = (settings.default_llm_provider or "ark").strip().lower()
-    if provider == "anthropic":
-        return ProviderSpec(
-            id="anthropic",
-            name="Anthropic Claude",
-            protocol="anthropic",
-            base_url=settings.anthropic_api_url or "",
-            api_key_env_var="ANTHROPIC_API_KEY",
-            model=settings.default_llm_model,
-            max_tokens=int(settings.anthropic_max_tokens),
-        )
-    if provider == "openai":
-        return ProviderSpec(
-            id="openai",
-            name="OpenAI",
-            protocol="openai_compatible",
-            base_url=settings.openai_api_url or "",
-            api_key_env_var="OPENAI_API_KEY",
-            model=settings.default_llm_model,
-            max_tokens=int(settings.openai_max_tokens),
-        )
-    return ProviderSpec(
-        id="ark",
-        name="火山方舟",
-        protocol="ark",
-        base_url=settings.ark_base_url or "",
-        api_key_env_var="ARK_API_KEY",
-        model=settings.default_llm_model,
-        max_tokens=int(settings.ark_max_tokens),
-        thinking=bool(settings.ark_thinking_enabled),
-    )
-
-
-def _resolve_active_provider(
-    settings: Settings, override_id: str | None
-) -> ProviderSpec | None:
-    """定出「当前激活哪一家」。
+def _resolve_active_provider(override_id: str | None) -> ProviderSpec | None:
+    """定出「当前使用中哪一条配置」；**一条都没有时返回 `None`**。
 
     优先级：
-    1. `system_config.active_provider_id`（后台显式激活的）；
-    2. `DEFAULT_LLM_PROVIDER` 对应的内置行（升级后未激活任何一家时的行为）；
-    3. env 合成的 spec（表不可用时的降级）。
+    1. `system_config.active_provider_id`（后台显式选定的）；
+    2. 没有指针 / 指针悬空 / 指针指向已停用的那条 → 按 `sort_order` 取**第一条可用的**
+       （仓库层已按 `sort_order, created_at` 排序，所以结果稳定可预期）。
 
-    第 3 条不能省：它让「配置表丢了」从「生成全挂」降级成「行为回到升级前」。
+    ⚠️ **不再有第 3 条「env 合成」**（ADR-051）。模型接入已整体迁入后台面板，
+    `.env` 里没有第二份默认供应商可回退——写进去也不会被读。列表为空时
+    `None` 就是**正确答案**：调用方据此报一句「请先在后台新增一条」，
+    而不是拿着一个界面上看不见、也改不了的 spec 继续跑。
+
+    ⚠️ 第 2 条**不能按 id 查**：`model_providers.id` 现在是 `cfg_xxx`，
+    而厂商名（`ark` / `openai`）是**协议**的近似值。按 id 找必然落空，
+    于是「管理员明明配好了那一条，运行时却根本不用它」——而且不报错。
     """
     rows: list[dict[str, Any]] = []
     try:
         rows = ModelProviderRepository.list_all()
-    except Exception:  # noqa: BLE001 - 表可能还不存在，降级即可
+    except Exception:  # noqa: BLE001 - 表可能还不存在
         rows = []
 
     if not rows:
-        return _synthesize_from_env(settings)
+        return None
 
     by_id = {str(row["id"]): row for row in rows}
 
@@ -269,25 +244,30 @@ def _resolve_active_provider(
         row = by_id.get(override_id)
         if row is None:
             logger.warning(
-                "激活的供应商已不存在，回退到默认供应商",
+                "使用中的配置已不存在，回退到第一条可用配置",
                 extra={"event": "config.active_provider_missing", "provider_id": override_id},
             )
         elif not int(row.get("enabled") or 0):
             logger.warning(
-                "激活的供应商已被停用，回退到默认供应商",
+                "使用中的配置已被停用，回退到第一条可用配置",
                 extra={"event": "config.active_provider_disabled", "provider_id": override_id},
             )
         else:
             return spec_from_row({**row, "extra": decode_extra(row.get("extra_json"))})
 
-    # 回退：按 DEFAULT_LLM_PROVIDER 找对应 id 的内置行
-    fallback_id = (settings.default_llm_provider or "ark").strip().lower()
-    row = by_id.get(fallback_id)
-    if row is not None and int(row.get("enabled") or 0):
+    # 没有明确指针：取第一条**启用中**的。此时「哪条在用」这件事本身没有歧义——
+    # 只有一条可用就没有选择的余地，让用户多点一次「设为使用中」只是仪式。
+    for row in rows:
+        if not int(row.get("enabled") or 0):
+            continue
         return spec_from_row({**row, "extra": decode_extra(row.get("extra_json"))})
 
-    # 连内置行都不在（表被清空过）：用 env 合成，行为回到升级前
-    return _synthesize_from_env(settings)
+    # 全被停用：这也是合法状态（管理员在收摊），生成前会明确报错。
+    logger.warning(
+        "所有模型配置都已停用，生成将无法进行",
+        extra={"event": "config.no_enabled_provider"},
+    )
+    return None
 
 
 def _load() -> RuntimeConfig:
@@ -300,10 +280,12 @@ def _load() -> RuntimeConfig:
 
     if _loading:
         # 走到这里说明有人在配置的加载路径里又调了本模块（预期外的递归）。
-        # 直接返回纯 env 快照，把递归就地掐断。
+        # 直接返回只有 env 的快照，把递归就地掐断。
+        # ⚠️ 这里**不解析模型配置**：解析本身要查库，那正是递归的来源。
+        # 返回 `None` 是安全的——调用方本来就按「没有可用配置」处理。
         return RuntimeConfig(
             settings=base,
-            active_provider=_synthesize_from_env(base),
+            active_provider=None,
             source="env",
             loaded_at=time.monotonic(),
             revision=_revision_of({}),
@@ -354,7 +336,7 @@ def _load() -> RuntimeConfig:
             source = "db"
 
         settings = _apply_overrides(base, overrides)
-        provider = _resolve_active_provider(settings, active_id)
+        provider = _resolve_active_provider(active_id)
 
         return RuntimeConfig(
             settings=settings,
@@ -460,10 +442,14 @@ def resolve_model_limits() -> ModelLimits:
 
 
 def current_input_ceiling(override: int = 0) -> int:
-    """当前配置下「可用于输入」的 token 上限（含 `llm_context_window` 覆盖）。"""
+    """当前配置下「可用于输入」的 token 上限。
+
+    窗口只有一个来源：**当前使用中那条配置**填的 `context_window`，
+    没填才退回 `model_registry`。不再有全局的 `LLM_CONTEXT_WINDOW` 覆盖项
+    （ADR-051）——它会静默盖掉条目里的值，表现为「换了大窗口还老报超顶」。
+    """
     limits = resolve_model_limits()
-    config = get_runtime_config()
-    window = override or config.settings.llm_context_window or limits.context_window
+    window = override or limits.context_window
     return max(window - limits.max_output, 1_000)
 
 
@@ -473,25 +459,32 @@ def config_service_window() -> int:
 
 
 def provider_key_present(spec: ProviderSpec | None = None) -> bool:
-    """该供应商的密钥是否存在。只回布尔，绝不回值。"""
+    """该供应商的密钥是否**可用**（非空且能被当前主密钥解开）。只回布尔，绝不回值。"""
     target = spec or active_provider()
-    if target is None or not target.api_key_env_var:
+    if target is None or not target.value_token:
         return False
-    return is_present(target.api_key_env_var)
+    from backend.core.crypto import is_configured
+
+    return is_configured(target.value_token)
 
 
 def lookup_provider_key(spec: ProviderSpec) -> str:
-    """取该供应商的密钥值。缺失时抛 `RuntimeError`（文案带变量名）。
+    """取该供应商的密钥明文。缺失或解不开时抛 `RuntimeError`。
 
-    与 `Settings.require_api_key()` 同口径：**在构造 LLM 的前一刻**才失败，
-    而不是等到真正发请求。文案里的变量名是刻意的——只说「未配置密钥」
-    会让人翻半天 `.env`，而答案就在这句话里。
+    与体检（`/health` 的 llm 项）同一口径：**在构造 LLM 的前一刻**才失败，
+    而不是等到真正发请求。
+
+    ⚠️ 本地 vLLM / Ollama / 内网网关这类不要密钥的接入点，请把密钥填成一个
+    占位值（如 `not-needed`）——OpenAI 兼容客户端要求 `api_key` 非空，传空串
+    会在构造时抛「api_key must be set」。占位值服务端不会校验。
     """
-    from backend.core.secrets import lookup_env
+    from backend.core.crypto import decrypt_value
 
-    value = lookup_env(spec.api_key_env_var) if spec.api_key_env_var else ""
+    if not spec.value_token:
+        raise RuntimeError(spec.key_hint)
+    value = decrypt_value(spec.value_token)
     if not value:
-        raise RuntimeError(spec.key_env_hint)
+        raise RuntimeError(spec.key_hint)
     return value
 
 

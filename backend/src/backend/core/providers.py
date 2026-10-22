@@ -22,16 +22,18 @@ LangChain 的 chat 集成有二十来家独立包，但按**协议**归类只有
 | `nvidia`            | `langchain_nvidia_ai_endpoints.ChatNVIDIA` | 无 `timeout` 参数 |
 | `huggingface`       | `ChatHuggingFace` 包 `HuggingFaceEndpoint` | **两段式**构造 |
 
-密钥永不入库
-------------
-`ProviderSpec.api_key_env_var` 只是「去哪个环境变量取」的指针，取自环境或 `.env`
-（见 `core/secrets.py`）。数据库里没有、也不该有任何明文密钥（ADR-042）。
+密钥怎么存（ADR-053）
+--------------------
+`ProviderSpec.value_token` 是**加密后的密钥密文**（主密钥在
+`backend/secrets/master.key`，见 `core/crypto.py`）。数据库里只有密文，
+env 里不放密钥；取值在构造 LLM 的前一刻解密。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 # 六个协议。新增协议 = 加一个值 + 在 `llm_factory` 加一个分支，
 # 这是**唯一**需要改代码的扩展方式；加厂商不需要。
@@ -63,29 +65,52 @@ PROTOCOL_LABELS: dict[str, str] = {
     "huggingface": "Hugging Face",
 }
 
-# 内置三家的密钥变量名。**这是唯一的映射点**：`Settings.api_key_env_var()` 与
-# 健康检查的报错文案都引用它，新增内置供应商只改这里一处。
-API_KEY_ENV_VARS: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "ark": "ARK_API_KEY",
-    "openai": "OPENAI_API_KEY",
-}
+# ---------------------------------------------------------------------------
+# 配置条目的身份
+# ---------------------------------------------------------------------------
+#
+# `model_providers.id` 现在的语义是「**一条配置**的身份」，不是「一家供应商」的身份。
+# 同一家（同一协议）可以有多条配置，所以 id 必须由后端生成——让管理员填，
+# 两个人都想加一条方舟配置时必然撞名，而撞名之后唯一能做的决定是「谁让」。
+#
+# 前缀不是装饰：日志、审计、回执里一串裸十六进制谁也认不出，`cfg_` 一眼就能
+# 看出这是「库里的配置条目」。
+CONFIG_ID_PREFIX = "cfg_"
+
+
+def new_config_id() -> str:
+    """生成一条配置的 id：`cfg_` + 10 位十六进制（40 bit）。
+
+    40 bit 在「几百条配置」的规模下碰撞概率可以忽略，但**不因此省掉兜底**：
+    仓储层的 `INSERT` 撞主键会抛 `IntegrityError`，服务层捕获后重试。
+    「先查再写」看着更严谨，其实有竞态——两个并发请求都能查到「不存在」。
+    """
+    return CONFIG_ID_PREFIX + uuid4().hex[:10]
 
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    """一家供应商的完整解析结果（供构造 LLM 用）。
+    """一条模型配置的完整解析结果（供构造 LLM 用）。
 
     刻意做成不可变：它由「DB 行 + 密钥是否存在的探测结果」拼出来，
     一旦构造就该代表**那一刻**的事实。可变的话，一个任务中途改配置就会
     让调用方手里的 spec 与真实配置悄悄分叉。
+
+    字段分工（这三者混用是最容易犯的错）：
+
+    - `id` 是**配置条目**的身份：`cfg_xxx`；env 合成出来的走 `env:xxx`。
+      它只用于「指向哪一条配置」——缓存指纹、激活指针、回执里的
+      `provider_config_id`。**绝不能拿去查模型限值**。
+    - `protocol` 是**协议**（六选一），决定用哪个构造器、查哪一组限值默认值。
+      日志、健康检查、预算都认它。
+    - `name` 是给人看的配置名（「方舟-主力」），可以重名、可以改。
     """
 
     id: str
     name: str
     protocol: str
     base_url: str
-    api_key_env_var: str
+    value_token: str  # 加密后的密钥密文（主密钥解密）；空=未配置
     model: str
     max_tokens: int
     context_window: int = 0
@@ -94,17 +119,15 @@ class ProviderSpec:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def key_env_hint(self) -> str:
+    def key_hint(self) -> str:
         """缺密钥时给人看的提示。
 
-        一定要带**变量名**：只说「未配置密钥」会让人去翻 `.env` 找半天，
-        而答案就在这句话里。
+        不要只说「未配置密钥」——要告诉人去哪儿配。密钥现在只在管理后台录入，
+        所以提示里直接点名那个页面。
         """
-        if not self.api_key_env_var:
-            return f"供应商「{self.name or self.id}」未指定密钥环境变量名"
         return (
-            f"供应商「{self.name or self.id}」尚未配置 {self.api_key_env_var}，"
-            f"请在 .env 中设置后重启（或确认已导出到进程环境）"
+            f"供应商「{self.name or self.id}」尚未配置密钥，"
+            f"请在管理后台「模型配置」页填入后重试"
         )
 
     def with_model(self, model: str) -> ProviderSpec:
@@ -114,7 +137,7 @@ class ProviderSpec:
             name=self.name,
             protocol=self.protocol,
             base_url=self.base_url,
-            api_key_env_var=self.api_key_env_var,
+            value_token=self.value_token,
             model=model or self.model,
             max_tokens=self.max_tokens,
             context_window=self.context_window,
@@ -135,7 +158,7 @@ class ProviderSpec:
             name=self.name,
             protocol=self.protocol,
             base_url=self.base_url,
-            api_key_env_var=self.api_key_env_var,
+            value_token=self.value_token,
             model=self.model,
             max_tokens=int(max_tokens),
             context_window=self.context_window,
@@ -159,7 +182,7 @@ def spec_from_row(row: dict[str, Any]) -> ProviderSpec:
         name=str(row.get("name") or ""),
         protocol=str(row.get("protocol") or "openai_compatible"),
         base_url=str(row.get("base_url") or ""),
-        api_key_env_var=str(row.get("api_key_env_var") or ""),
+        value_token=str(row.get("value_token") or ""),
         model=str(row.get("default_model") or ""),
         max_tokens=int(row.get("max_tokens") or 4096),
         context_window=int(row.get("context_window") or 0),
@@ -169,56 +192,105 @@ def spec_from_row(row: dict[str, Any]) -> ProviderSpec:
     )
 
 
-# 新增供应商时的预设模板：选一家常见厂商就把地址与变量名填好，
-# 管理员只需要填密钥值。**地址会变**——界面上一并提示「以官方文档为准」，
-# 不要把它当事实断言（这也是为什么它只是「预设」，填完仍可改）。
+# 新建配置时的模板：选一家就把地址、密钥变量名、建议模型填好。
+#
+# **模板不入库**：它只是表单的默认值，选完随表单一并提交，库里只留最终结果。
+# （v16 曾经把「每个协议一行」直接播进 `model_providers`，后果是后台一进去就
+# 摆着六张空卡片，且「同一家只能有一条」成了表结构的隐含约束——v19 已废弃该做法。）
+#
+# `key` 只是模板标识（前端下拉用的 value），**不是**配置 id：配置 id 由
+# `new_config_id()` 生成。这两者一旦混用，就会退回「一家只能一条」的老路。
+#
+# 地址会变，以官方文档为准；这里给的是「能跑通」的起点，填完仍可改。
 PRESETS: list[dict[str, str]] = [
+    # —— 常见厂商与本地部署 ——
     {
-        "id": "deepseek",
+        "key": "ark",
+        "name": "火山方舟",
+        "protocol": "ark",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "default_model": "",
+    },
+    {
+        "key": "deepseek",
         "name": "DeepSeek",
         "protocol": "openai_compatible",
         "base_url": "https://api.deepseek.com/v1",
-        "api_key_env_var": "DEEPSEEK_API_KEY",
         "default_model": "deepseek-chat",
     },
     {
-        "id": "moonshot",
+        "key": "moonshot",
         "name": "Moonshot / Kimi",
         "protocol": "openai_compatible",
         "base_url": "https://api.moonshot.cn/v1",
-        "api_key_env_var": "MOONSHOT_API_KEY",
         "default_model": "",
     },
     {
-        "id": "zhipu",
+        "key": "zhipu",
         "name": "智谱 GLM",
         "protocol": "openai_compatible",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "api_key_env_var": "ZHIPU_API_KEY",
         "default_model": "",
     },
     {
-        "id": "dashscope",
+        "key": "dashscope",
         "name": "阿里通义（百炼）",
         "protocol": "openai_compatible",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key_env_var": "DASHSCOPE_API_KEY",
         "default_model": "",
     },
     {
-        "id": "openrouter",
+        "key": "openrouter",
         "name": "OpenRouter",
         "protocol": "openai_compatible",
         "base_url": "https://openrouter.ai/api/v1",
-        "api_key_env_var": "OPENROUTER_API_KEY",
         "default_model": "",
     },
     {
-        "id": "vllm",
+        "key": "vllm",
         "name": "本地 vLLM / Ollama",
         "protocol": "openai_compatible",
         "base_url": "http://127.0.0.1:8000/v1",
-        "api_key_env_var": "",
+        "default_model": "",
+    },
+    {
+        # 与上一条**并列存在**，不是重复：本地推理服务不要密钥，而企业内网网关
+        # 通常是 OpenAI 兼容 + Bearer token。管理界面不再给「自定义」入口（变量名
+        # 也不让填），所以需要密钥的自建接入点必须有这么一条预设，否则是死路。
+        "key": "selfhosted",
+        "name": "自建网关（OpenAI 兼容，需密钥）",
+        "protocol": "openai_compatible",
+        "base_url": "",
+        "default_model": "",
+    },
+    # —— 其余五个协议各给一个模板，否则「新建一条方舟/Claude」只能手填全部字段 ——
+    {
+        "key": "anthropic",
+        "name": "Anthropic Claude",
+        "protocol": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "default_model": "",
+    },
+    {
+        "key": "gemini",
+        "name": "Google Gemini",
+        "protocol": "google_genai",
+        "base_url": "",
+        "default_model": "",
+    },
+    {
+        "key": "nvidia",
+        "name": "NVIDIA NIM",
+        "protocol": "nvidia",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "default_model": "",
+    },
+    {
+        "key": "huggingface",
+        "name": "Hugging Face",
+        "protocol": "huggingface",
+        "base_url": "",
         "default_model": "",
     },
 ]
+

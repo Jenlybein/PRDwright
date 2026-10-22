@@ -63,7 +63,9 @@ function makeRunSummary(requestId: string): RunSummary {
     warnings: [],
     partial: false,
     failedSections: [],
-    provider: 'ark',
+    protocol: 'ark',
+    providerConfigId: 'cfg_ark0001',
+    providerName: '火山方舟',
     model: 'doubao',
     requestId,
   }

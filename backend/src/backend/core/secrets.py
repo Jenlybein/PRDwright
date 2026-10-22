@@ -7,12 +7,16 @@
 
     # .env 里明明写着 DEEPSEEK_API_KEY=sk-xxx
     os.environ.get("DEEPSEEK_API_KEY")   # → None
-    get_settings().ark_api_key           # → sk-xxx（只有**已声明**的字段能读到）
+    get_settings().某字段                # → sk-xxx（只有**已声明**的字段能读到）
 
-内置那三家之所以没暴露这个问题，是因为它们都是 `Settings` 的声明字段、走
-`require_api_key()` 取。而**后台新增的供应商**是运行时数据，`Settings` 里没有
-对应字段，只能按键名去取——这时 `os.environ` 就是空的，界面会一直报
-「尚未配置 XXX_API_KEY」，而用户明明已经写在 `.env` 里了。
+历史上内置那三家没暴露这个问题，是因为它们的密钥是 `Settings` 的声明字段。
+但配置条目是**运行时数据**，`Settings` 里没有对应字段，只能按键名去取——
+这时 `os.environ` 就是空的，界面会一直报「尚未配置 XXX_API_KEY」，
+而用户明明已经写在 `.env` 里了。
+
+现在它只用于**非密钥**的运行时值（如 `PRDWRIGHT_SKILLS_DIR`）。模型 API 密钥
+自 ADR-053 起改为加密入库（见 `core/crypto.py`），不再经过这里——密钥需要被
+还原成明文发给上游，用途与「读一次环境变量」不同。
 
 所以这里补一条「按键名查找」的路：`os.environ` 优先（容器/CI 里通常用它注入），
 其次按 mtime 缓存的 `.env` 快照。

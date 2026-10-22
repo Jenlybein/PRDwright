@@ -993,8 +993,17 @@ export interface RunSummary {
   partial: boolean
   /** 失败章节清单 */
   failedSections: FailedSection[]
-  /** 实际使用的供应商 */
-  provider: string
+  /** 实际使用的**协议**（openai_compatible / anthropic / ark / google_genai …） */
+  protocol: string
+  /**
+   * 实际使用的那条**配置条目**的 id（`cfg_xxx`；表不可用时是 `env:ark` 这类降级项）。
+   *
+   * 与 `providerName` 分开：名字可以重名、也可以事后被改，id 才能定位到具体一条。
+   * 出问题时「走的是生产那条还是测试那条」只能靠它回答。
+   */
+  providerConfigId: string
+  /** 配置名快照（如「火山方舟」）。快照而非当前值：事后改名不影响历史回执。 */
+  providerName: string
   /** 实际使用的模型名 */
   model: string
   /** 该次生成所属请求的追踪号；可念给维护者定位问题 */

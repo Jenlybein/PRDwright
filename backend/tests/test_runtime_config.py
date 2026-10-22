@@ -186,10 +186,13 @@ def test_degraded_when_table_missing():
     assert config.settings.prd_pipeline_concurrency == get_settings().prd_pipeline_concurrency
 
 
-def test_degraded_provider_falls_back_to_env():
-    """供应商表也不可用时，激活供应商由 env 合成。
+def test_tables_missing_means_no_provider():
+    """表都不可用时 `active_provider` 是 `None`：不崩，也不从 env 编一个出来。
 
-    这条保证「配置表丢了」从「生成全挂」降级成「行为回到升级前」。
+    这是 ADR-051 的取舍。`.env` 里已经没有第二份模型配置，所以「配置层失败」
+    只能表现为「没有可用配置」，由调用方给出人话报错（「请先在后台新增一条」）。
+    悄悄用一个界面上看不见、也改不了的 spec 继续跑，会把排查方向从
+    「后台还没配」误导到「为什么这次请求失败」。
     """
     with connect() as conn:
         conn.execute("DROP TABLE IF EXISTS model_providers")
@@ -199,11 +202,8 @@ def test_degraded_provider_falls_back_to_env():
     rc.invalidate()
 
     config = rc.get_runtime_config()
-    spec = config.active_provider
-    assert spec is not None
-    base = get_settings()
-    assert spec.protocol == base.default_llm_provider
-    assert spec.model == base.default_llm_model
+    assert config.active_provider is None
+    assert config.source == "degraded", "降级读配置本身仍不许抛"
 
 
 def test_input_ceiling_never_recurses():
@@ -225,77 +225,186 @@ def test_input_ceiling_never_recurses():
 # ---------------------------------------------------------------------------
 
 
-def test_active_provider_follows_default_when_not_activated():
-    """没激活任何一家时，跟随 `DEFAULT_LLM_PROVIDER`（升级后的行为）。"""
+def test_unactivated_config_uses_first_enabled_entry():
+    """没设「使用中」时取**排序第一条启用中的**配置。
+
+    ⚠️ 不能按 id 猜协议，也不再有 `DEFAULT_LLM_PROVIDER` 兜底（env 里已经没有它）：
+    只有一条可用时，「哪条在用」本来就没有歧义，让用户再点一次「设为使用中」
+    只是仪式。多条时按 `sort_order` 取最早建的那条，结果稳定可预期。
+    """
     run_migrations()
-    rc.invalidate()
-    config = rc.get_runtime_config()
-    base = get_settings()
-
-    assert config.active_provider is not None
-    assert config.active_provider.protocol == base.default_llm_provider
-    assert config.active_provider.model == base.default_llm_model
-
-
-def test_activate_switches_provider():
-    """写 `active_provider_id` 后生效。"""
-    run_migrations()
-    _set(active_provider_id="anthropic")
+    ModelProviderRepository.create(
+        provider_id="cfg_first001",
+        name="先建的那条",
+        protocol="openai_compatible",
+        default_model="m-first",
+    )
+    ModelProviderRepository.create(
+        provider_id="cfg_second01",
+        name="后建的那条",
+        protocol="ark",
+        default_model="m-second",
+    )
     rc.invalidate()
 
     spec = rc.get_runtime_config().active_provider
     assert spec is not None
-    assert spec.id == "anthropic"
+    assert spec.id == "cfg_first001"
+    assert spec.model == "m-first"
+
+
+def test_no_config_at_all_means_none():
+    """库里一条配置都没有 → `None`。
+
+    这是「彻底迁入后台面板」的必然结果：装完就是空的，生成必须明确报
+    「还没有任何模型配置」，而不是拿 env 里某个默认值把它撑起来。
+    """
+    run_migrations()
+    rc.invalidate()
+
+    assert rc.get_runtime_config().active_provider is None
+
+
+def test_activate_switches_to_a_config_entry():
+    """写 `active_provider_id`（配置条目 id）后生效。"""
+    run_migrations()
+    ModelProviderRepository.create(
+        provider_id="cfg_claude01",
+        name="Claude",
+        protocol="anthropic",
+        default_model="claude-test",
+    )
+    _set(active_provider_id="cfg_claude01")
+    rc.invalidate()
+
+    spec = rc.get_runtime_config().active_provider
+    assert spec is not None
+    assert spec.id == "cfg_claude01"
     assert spec.protocol == "anthropic"
 
 
-def test_activated_provider_missing_falls_back():
-    """激活指针指向一个已删除的供应商时，回退到默认而不是崩。"""
+def test_dangling_pointer_falls_back_to_an_existing_entry():
+    """「使用中」指向一条已删除的配置时，回退到第一条可用的，而不是崩。
+
+    指针悬空是删配置的正常残留（也见过手工改库）。此时**不能**返回 None 了事：
+    库里明明有一条能用的配置，却对用户说「还没有任何配置」，比直接用它更糟。
+    """
     run_migrations()
-    _set(active_provider_id="ghost")
+    ModelProviderRepository.create(
+        provider_id="cfg_alive001", name="还活着的", protocol="ark", default_model="m1"
+    )
+    _set(active_provider_id="cfg_ghost")
     rc.invalidate()
 
     config = rc.get_runtime_config()
     assert config.active_provider is not None
-    # 回退到 DEFAULT_LLM_PROVIDER 对应的那家，而不是返回 None
-    assert config.active_provider.id != "ghost"
+    assert config.active_provider.id == "cfg_alive001"
 
 
-def test_disabled_provider_falls_back():
-    """激活的那家被停用后回退。"""
+def test_disabled_config_falls_back_to_another_entry():
+    """使用中的那条被停用后回退到另一条启用中的配置。"""
     run_migrations()
-    _set(active_provider_id="openai")
-    ModelProviderRepository.update("openai", {"enabled": 0})
+    ModelProviderRepository.create(
+        provider_id="cfg_used0001", name="在用的", protocol="openai_compatible", default_model="m1"
+    )
+    ModelProviderRepository.create(
+        provider_id="cfg_spare001", name="备用的", protocol="openai_compatible", default_model="m2"
+    )
+    _set(active_provider_id="cfg_used0001")
+    ModelProviderRepository.update("cfg_used0001", {"enabled": 0})
     rc.invalidate()
 
     config = rc.get_runtime_config()
     assert config.active_provider is not None
-    assert config.active_provider.id != "openai"
+    assert config.active_provider.id == "cfg_spare001"
 
 
-def test_provider_missing_key_reports_variable_name():
-    """缺密钥的提示必须带变量名——只说「未配置」会让人翻半天 .env。"""
+def test_provider_missing_key_points_to_admin_panel():
+    """缺密钥的提示必须告诉人去哪儿配——现在密钥只在管理后台录入。"""
     run_migrations()
+    ModelProviderRepository.create(
+        provider_id="cfg_nokey001",
+        name="没配密钥的",
+        protocol="ark",
+        value_token="",
+        default_model="m1",
+    )
     rc.invalidate()
     config = rc.get_runtime_config()
-    hint = config.provider_missing_key()
     assert config.active_provider is not None
-    assert config.active_provider.api_key_env_var in hint
+    assert "管理后台" in config.active_provider.key_hint
+
+
+def test_env_context_window_is_gone(monkeypatch):
+    """`LLM_CONTEXT_WINDOW` 写了也不再影响任何东西：窗口只看配置条目。
+
+    升级用户的 `.env` 里往往还留着这一行（`extra="ignore"` 会静默吃掉它）。
+    留着它的后果不是报错，而是**悄悄把后台填的窗口盖回去**：后台给某条填了 128k、
+    env 里留着 32k，预算就按 32k 判——症状是「换了大窗口还老报超顶」，
+    而看代码的人以为配置生效了。ADR-051 把这根线彻底拔掉。
+    """
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "32000")
+    get_settings.cache_clear()
+
+    assert not hasattr(get_settings(), "llm_context_window")
+
+    run_migrations()
+    ModelProviderRepository.create(
+        provider_id="cfg_bigwin01", name="大窗口", protocol="ark", default_model="m"
+    )
+    _set(active_provider_id="cfg_bigwin01")
+    ModelProviderRepository.update("cfg_bigwin01", {"context_window": 200_000, "max_output": 8_000})
+    rc.invalidate()
+
+    assert rc.resolve_model_limits().context_window == 200_000
 
 
 def test_model_limits_use_provider_row_when_filled():
-    """供应商行里填了窗口就用它，没填才退回注册表。
+    """配置条目里填了窗口就用它，没填才退回注册表。
 
     自定义供应商（OpenAI 兼容 + 自己的模型名）在注册表里查不到，会落到 32k
     兜底——对 128k 的模型等于把正常请求误判成超顶。所以这一列必须有优先级。
     """
     run_migrations()
-    ModelProviderRepository.update("ark", {"context_window": 64_000, "max_output": 8_000})
+    ModelProviderRepository.create(
+        provider_id="cfg_window01", name="本地大窗口", protocol="ark", default_model="local-m"
+    )
+    _set(active_provider_id="cfg_window01")
+    ModelProviderRepository.update("cfg_window01", {"context_window": 64_000, "max_output": 8_000})
     rc.invalidate()
 
     limits = rc.resolve_model_limits()
     assert limits.context_window == 64_000
     assert limits.max_output == 8_000
+
+
+def test_config_id_never_reaches_provider_defaults(monkeypatch):
+    """查限值时第一个实参必须是**协议名**，永远不能是配置条目 id。
+
+    为什么值得单独立一条：`model_registry` 查不到就静默落到 `_FALLBACK`（32k），
+    不报错。于是「配了个 128k 的模型却老被拦超顶」这种问题，从错误现场完全看不出
+    原因，只能靠这条断言把它钉死在改动的那一刻。
+    """
+    from backend.core import model_registry
+
+    seen: list[str] = []
+    original = model_registry.resolve_limits
+
+    def spy(provider: str, model: str):
+        seen.append(provider)
+        return original(provider, model)
+
+    run_migrations()
+    ModelProviderRepository.create(
+        provider_id="cfg_window02", name="方舟", protocol="ark", default_model="doubao"
+    )
+    _set(active_provider_id="cfg_window02")
+    rc.invalidate()
+
+    monkeypatch.setattr(model_registry, "resolve_limits", spy)
+    rc.resolve_model_limits()
+
+    assert seen == ["ark"], f"限值查表拿到了非协议值：{seen}"
 
     ModelProviderRepository.update("ark", {"context_window": 0, "max_output": 0})
     rc.invalidate()
@@ -346,3 +455,97 @@ def test_invalidate_drops_cache():
     _set(llm_max_retries=5)
     rc.invalidate()
     assert rc.get_runtime_config().settings.llm_max_retries == 5
+
+
+def test_placeholder_key_for_keyless_endpoints():
+    """本地 vLLM / Ollama 这类不要密钥的接入点，填占位值即可。
+
+    空 `value_token` 现在表示「未配置」，所以这类接入点必须显式给一个占位值
+    （如 `not-needed`）——OpenAI 兼容客户端要求 api_key 非空。
+    """
+    from backend.core import crypto
+    from backend.core.providers import ProviderSpec
+
+    spec = ProviderSpec(
+        id="cfg_local",
+        name="本地 vLLM",
+        protocol="openai_compatible",
+        base_url="http://127.0.0.1:8000/v1",
+        value_token=crypto.encrypt_value("not-needed"),
+        model="qwen2.5",
+        max_tokens=4096,
+    )
+    assert rc.lookup_provider_key(spec) == "not-needed"
+
+
+def test_missing_key_fails_loudly_with_admin_hint():
+    """没有密钥 → 必须报错，且提示指向管理后台，而不是含糊的「未配置」。
+
+    静默用占位值会让它变成一次 401，而 401 的文案不会告诉你去哪儿填。
+    """
+    from backend.core.providers import ProviderSpec
+
+    spec = ProviderSpec(
+        id="cfg_ark",
+        name="方舟-生产",
+        protocol="ark",
+        base_url="https://ark.cn-beijing.volces.com/api/v3",
+        value_token="",
+        model="doubao-seed",
+        max_tokens=4096,
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        rc.lookup_provider_key(spec)
+    assert "管理后台" in str(excinfo.value)
+
+
+def test_get_llm_without_any_config_says_build_one_first():
+    """一条配置都没有时，`get_llm()` 的报错必须说清「去哪儿建」。
+
+    ADR-051 之后这里没有 env 兜底了，所以「装完直接用」会撞到这条。
+    报错若是「没有可用的模型供应商」这类含糊话，用户第一反应是去翻 `.env`——
+    而答案恰恰是「`.env` 里没有了，去后台建一条」。文案本身就是修复指引。
+    """
+    from backend.services.llm_factory import get_llm
+
+    run_migrations()
+    rc.invalidate()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        get_llm()
+
+    message = str(excinfo.value)
+    assert "还没有任何模型配置" in message
+    assert "管理后台" in message
+
+
+def test_env_example_has_no_effective_lines():
+    """`.env.example` 里**一行生效配置都没有**——它是说明，不是配置。
+
+    三层理由叠在一起：
+
+    1. **可热改项不能出现**（ADR-052）：模板是所有人第一次接触配置的地方，
+       列着 `LLM_TIMEOUT` / `PRD_*` / `LLM_BUDGET_*` 就会让人以为「这里才是入口」，
+       改完不生效（后台覆盖在它前面）。
+    2. **启动项也不写成生效行**：全都有可用默认值，而且默认值通常比手写更对
+       （`CORS_ORIGINS` 的默认含后台端口 5174，模板里手写的那版反而漏了）。
+    3. **密钥改成注释占位**：`ARK_API_KEY=` 这种空值行本来就等于没写，
+       留着只会让人以为「这里是一个需要打勾的配置项」。真正的问题是部署者
+       不知道要准备哪几把钥匙，注释照样答得出来。
+
+    断言强到「一个生效行都不许有」：下一次有人「顺手补个默认值」时它就红，
+    比在文档里写一句「请勿添加」可靠得多。
+    """
+    from backend.core.config import BACKEND_ROOT
+
+    text = (BACKEND_ROOT / ".env.example").read_text(encoding="utf-8")
+    keys: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        keys.add(line.split("=", 1)[0].strip().lower())
+
+    assert keys == set(), f"模板里不该有任何生效配置行，实际有：{sorted(keys)}"
+    # 冗余但留着当文档：可热改项永远不该回到模板里
+    assert not (keys & set(rc.WHITELIST))

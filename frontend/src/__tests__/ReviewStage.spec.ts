@@ -57,7 +57,9 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     warnings: [],
     partial: false,
     failedSections: [],
-    provider: 'ark',
+    protocol: 'ark',
+    providerConfigId: 'cfg_ark0001',
+    providerName: '火山方舟',
     model: 'doubao-seed',
     requestId: 'req-abc123',
     ...overrides,
@@ -256,6 +258,24 @@ describe('ReviewStage 的生成用量回执', () => {
     const code = wrapper.find('code')
     expect(code.exists()).toBe(true)
     expect(code.classes()).toContain('select-all')
+  })
+
+  it('回执里写明走的是哪条配置 · 哪个模型', () => {
+    // 同一家配了多条（生产/测试各一条，协议相同）时，只显示模型名分不清是哪条在花钱
+    const wrapper = mountWithSummary(runSummary())
+    expect(wrapper.text()).toContain('火山方舟 · doubao-seed')
+  })
+
+  it('降级路径没有配置名时退回显示协议，而不是留一个「 · 」', () => {
+    const wrapper = mountWithSummary(
+      runSummary({ providerName: '', protocol: 'ark', model: 'doubao-seed' }),
+    )
+    expect(wrapper.text()).toContain('ark · doubao-seed')
+
+    const bare = mountWithSummary(
+      runSummary({ providerName: '', protocol: '', model: '' }),
+    )
+    expect(bare.text()).not.toContain(' · ')
   })
 
   it('没有失败调用时不提这一茬（正常情况下回执不该多一行）', () => {

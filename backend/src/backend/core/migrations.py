@@ -28,6 +28,19 @@
   问题拖到运行期，而且更难定位。启动失败是这里最便宜的失败方式。
 - **数据回填失败 → 逐行容错**：回填读的是旧的、不受本服务控制的用户数据，
   某一行损坏不该拦死整个服务的启动。具体策略由各步骤自己实现。
+
+数据清理型迁移（与结构变更不同，多一条要求）
+------------------------------------------
+绝大多数步骤只加表 / 加列，删错了也还能重建。**「清理数据」的步骤删完就没了**，
+所以它必须做到：
+
+1. **判据能窄就窄**，且每一条都要写成 SQL 里的显式条件——「用户从来没动过这条」
+   这种判断要用 `created_at = updated_at` 这类**事实**，而不是猜。
+2. **永不删「正在生效的那一条」**。所谓「出厂默认」里往往总有用户正在用的那一行，
+   把它一起清掉的结果是「升级完列表空了、生成也挂了」，而迁移本身不会报错。
+   （v19 `provider_config_entries` 就是靠多一个「不是当前使用中」的条件兜住的。）
+3. **配一条「该活下来的活下来了」的用例**，而不只是断言「该删的删了」。
+   只测删的话，判据写宽了照样绿。
 """
 
 from __future__ import annotations
@@ -855,11 +868,14 @@ def _create_runtime_config_tables(conn: sqlite3.Connection) -> None:
     按协议建模，加一家 OpenAI 兼容的新厂商只需填 `base_url` + 密钥变量名，
     **不改代码、不加依赖**；只有换协议才需要加适配分支。
 
-    为什么播种「六家」而不是「当前那一家」
-    ------------------------------------
-    后台的供应商页一进去就该看到全部可选协议，而不是从空列表开始猜要填什么。
-    播种只插内置行、不激活任何一家：没配 `active_provider_id` 时跟随
-    `DEFAULT_LLM_PROVIDER`，所以升级后的实际行为与升级前完全一致。
+    为什么播种「六家」而不是「当前那一家」（历史，已由 v19 收回）
+    --------------------------------------------------------------
+    当时的想法是「后台的供应商页一进去就该看到全部可选协议」，播种只插内置行、
+    不激活任何一家：没配 `active_provider_id` 时跟随 `DEFAULT_LLM_PROVIDER`。
+
+    这个假设后来被真实使用打破：六行里五行是用户永远不用的，列表被它们占满，
+    「哪些是我真配的」反而看不出来。所以 **v19 把这六行清掉了**，
+    本步骤在新库上播下的行随即被删；本函数保留原样只是因为老库不会重跑它。
 
     `INSERT OR IGNORE` 的用意
     -------------------------
@@ -900,49 +916,31 @@ def _create_runtime_config_tables(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # 延迟导入：`core/config` 在模块级不依赖本模块，放函数内避免任何循环可能
-    from backend.core.config import get_settings
-
-    settings = get_settings()
-    current = (settings.default_llm_provider or "").strip().lower()
+    # ⚠️ **这里不再读 `Settings`**（v19 起，模型接入已整体迁入后台面板，ADR-051）。
+    # 但本步骤仍必须原样播种这六行：v16 早已在所有既有库上执行过，改它等于没改；
+    # 而在**全新库**上它仍会跑一次，播下的行随即被 v19 删除（判据见 v19）。
+    # 所以这里给的是**固定的历史形状**，值只求「能插进去」——
+    # 它们的最终归宿是 `DELETE`，不是被读取。
+    #
+    # 用常量而不是「干脆不播种」：那样新库与老库的中间状态就分叉了，
+    # 而 `INSERT OR IGNORE` 的存在意义（重跑不覆盖管理员改过的值）也会失去验证场景。
     now = utc_now_text()
 
-    # 前三家的地址/窗口沿用现有配置——升级后「默认行为零变化」的落点。
-    # 后三家是新协议：只给密钥变量名与保守窗口，**模型名留空**让管理员填。
-    # 写死型号会过时；而「猜一个型号」比「空着并提示」更容易误导。
     seeds: list[tuple[str, str, str, str, str, str, int, int]] = [
         (
             "ark",
             "火山方舟",
             "ark",
-            settings.ark_base_url or "",
+            "https://ark.cn-beijing.volces.com/api/v3",
             "ARK_API_KEY",
-            settings.default_llm_model if current == "ark" else "",
-            int(settings.ark_max_tokens),
-            1 if settings.ark_thinking_enabled else 0,
-        ),
-        (
-            "anthropic",
-            "Anthropic Claude",
-            "anthropic",
-            settings.anthropic_api_url or "",
-            "ANTHROPIC_API_KEY",
-            settings.default_llm_model if current == "anthropic" else "",
-            int(settings.anthropic_max_tokens),
+            "",
+            4096,
             0,
         ),
-        (
-            "openai",
-            "OpenAI",
-            "openai_compatible",
-            settings.openai_api_url or "",
-            "OPENAI_API_KEY",
-            settings.default_llm_model if current == "openai" else "",
-            int(settings.openai_max_tokens),
-            0,
-        ),
-        # 以下三家没有对应的 Settings 字段（它们不是既有供应商），
-        # 地址取各家公开端点，窗口留 0 = 交给 `model_registry` 兜底。
+        ("anthropic", "Anthropic Claude", "anthropic", "", "ANTHROPIC_API_KEY", "", 4096, 0),
+        ("openai", "OpenAI", "openai_compatible", "", "OPENAI_API_KEY", "", 4096, 0),
+        # 后三家是新协议：只给密钥变量名与地址，**模型名留空**让管理员填。
+        # 写死型号会过时；而「猜一个型号」比「空着并提示」更容易误导。
         ("gemini", "Google Gemini", "google_genai", "", "GOOGLE_API_KEY", "", 8192, 0),
         (
             "nvidia",
@@ -957,9 +955,17 @@ def _create_runtime_config_tables(conn: sqlite3.Connection) -> None:
         ("huggingface", "Hugging Face", "huggingface", "", "HUGGINGFACEHUB_API_TOKEN", "", 4096, 0),
     ]
 
+    # 新库基线（v20 起）直接是 value_token，没有 api_key_env_var 列；而这些出厂行
+    # 随后会被 v19 全部删掉，所以新库上压根不需要播种。不加这个守卫，v16 会在
+    # 全新数据库上因「无 api_key_env_var 列」直接报错。老库仍有该列，行为不变。
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(model_providers)")}
+    # 新基线（v20 起）直接用 value_token，老库仍是 api_key_env_var。出厂行一律
+    # 不带密钥值，且 v19 会把这些行全部删掉，所以这里只求「插得进去、不报错」。
+    key_col = "api_key_env_var" if "api_key_env_var" in columns else "value_token"
+
     conn.executemany(
-        "INSERT OR IGNORE INTO model_providers "
-        "(id, name, protocol, base_url, api_key_env_var, default_model, max_tokens, "
+        f"INSERT OR IGNORE INTO model_providers "
+        f"(id, name, protocol, base_url, {key_col}, default_model, max_tokens, "
         " thinking_enabled, extra_json, builtin, enabled, sort_order, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', 1, 1, ?, ?, ?)",
         [
@@ -968,7 +974,7 @@ def _create_runtime_config_tables(conn: sqlite3.Connection) -> None:
                 name,
                 protocol,
                 base_url,
-                key_var,
+                key_var if key_col == "api_key_env_var" else "",
                 model,
                 max_tokens,
                 thinking,
@@ -1081,8 +1087,178 @@ def _create_login_failures_table(conn: sqlite3.Connection) -> None:
     )
 
 
+# v16 播种过的六条内置供应商行。v19 只认这六个 id——即使将来有人手工插入
+# `builtin = 1` 的行，也不会被误当成出厂数据删掉。
+_V16_SEED_PROVIDER_IDS: tuple[str, ...] = (
+    "ark",
+    "anthropic",
+    "openai",
+    "gemini",
+    "nvidia",
+    "huggingface",
+)
+
+# 任务行上的供应商快照列（v19）。与 `core/db.py` 的 `SCHEMA_SQL` 双写：
+# 新库由基线建好，旧库靠这里 `ALTER` 补上（`PRAGMA table_info` 守卫防重跑）。
+_JOB_PROVIDER_SNAPSHOT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("provider_protocol", "TEXT NOT NULL DEFAULT ''"),
+    ("provider_config_id", "TEXT NOT NULL DEFAULT ''"),
+    ("provider_name", "TEXT NOT NULL DEFAULT ''"),
+    ("provider_model", "TEXT NOT NULL DEFAULT ''"),
+)
+
+
+def _provider_config_entries(conn: sqlite3.Connection) -> None:
+    """v19：供应商从「一协议一固定槽位」改为「配置条目列表」，并给任务留供应商快照。
+
+    为什么要改
+    ----------
+    v16 把「每个协议一行」直接播进 `model_providers`，于是 `id` 既是行身份、又是
+    协议名，两者绑死：想加第二条方舟配置只能手填一个不冲突的 id，而界面上那五张
+    空卡片永远占着位置（见 ADR-050）。改成配置条目之后，`id` 由后端生成
+    （`cfg_xxx`），同一协议可以有多条，预设退回「表单模板」、不再入库。
+
+    这一版做三件事
+    --------------
+    1. **给 `generation_jobs` 加四个供应商快照列**，并从历史 `usage` JSON 回填。
+       存快照而不是存 config_id 再回查：配置会被删、会被改，回查等于让历史账单
+       跟着今天的状态变。
+    2. **删掉「出厂空壳」**：v16 播种、且从建表起没被后台改过、且当前没在用的行。
+    3. **把残留的 `builtin` 归零**：改过的内置行是同一条真实配置，它的地址与密钥
+       变量名是管理员填的，不能删；但 `builtin` 这个「不可删」标记已经没有意义了
+       （所有条目一视同仁，只有「使用中」的不能直删）。
+       列本身保留不删：SQLite 的 `DROP COLUMN` 是单向门（v6 已经有教训）。
+
+    ⚠️ 删除条件是四重与，缺一不可
+    ---------------------------
+    `builtin = 1` **且** `created_at = updated_at`（没被 `update()` 碰过，每次
+    更新都会刷新 `updated_at`）**且** id 属于 v16 那六个 **且** 不是当前激活项。
+
+    最后一条是**硬约束，不是优化**：现网正是「只有 ark 一条在跑」，它同样满足前三条。
+    若把它也当出厂态删掉，后台列表会变成空的、只能靠 `env:ark` 兜底——在管理员眼里
+    等于「迁移把我的配置弄丢了」。保留它（`builtin` 置 0）之后，升级完成的列表
+    正好只显示这一条，与「我当前只有一个配置」的事实一致。
+
+    顺序也不能换：**先读激活指针 → 再删（排除它）→ 最后校验指针是否还指得着**。
+
+    对旧数据意味着什么
+    ------------------
+    - 升级前没配过供应商的库：六条空壳全删，列表为空，运行时走 env 合成（行为不变）。
+    - 升级前只配过 ark 并激活：只留 ark 一条，其余五条消失。
+    - 改过任意一条内置配置：那条一行不删，只是失去 `builtin` 标记。
+    删除不可逆，发布前请做一次库文件备份。
+    """
+    # ① 快照列：新库由 `SCHEMA_SQL` 建好，这里只补旧库（PRAGMA 是事实判断，不靠版本号猜）
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
+    for name, ddl in _JOB_PROVIDER_SNAPSHOT_COLUMNS:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE generation_jobs ADD COLUMN {name} {ddl}")
+
+    # ② 历史回填。坏 JSON 会让 `json_extract` 直接抛错（整个库起不来），
+    #    所以 `json_valid` / `json_type` 两个守卫必须写在 WHERE 里，不能指望 COALESCE。
+    #    末尾的 `provider_protocol = ''` 让这条语句重跑时幂等（不会覆盖已写入的值）。
+    #    历史行只有 `provider`（协议名）与 `model`，没有 config_id / name，留空即可。
+    conn.execute(
+        """
+        UPDATE generation_jobs
+           SET provider_protocol  = COALESCE(CAST(json_extract(usage, '$.provider') AS TEXT), ''),
+               provider_model     = COALESCE(CAST(json_extract(usage, '$.model') AS TEXT), ''),
+               provider_name      = COALESCE(CAST(json_extract(usage, '$.provider_name') AS TEXT), ''),
+               provider_config_id = COALESCE(CAST(json_extract(usage, '$.provider_config_id') AS TEXT), '')
+         WHERE usage IS NOT NULL
+           AND json_valid(usage)
+           AND json_type(usage) = 'object'
+           AND provider_protocol = ''
+        """
+    )
+
+    # ③ 先读激活指针：它可能是 JSON 文本（`"ark"`），也可能被手工改坏
+    active_id: str | None = None
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'active_provider_id'"
+    ).fetchone()
+    if row is not None:
+        try:
+            decoded = json.loads(row[0])
+        except (TypeError, ValueError):
+            decoded = None
+        if isinstance(decoded, str) and decoded:
+            active_id = decoded
+
+    # ④ 删出厂空壳（四重与）
+    placeholders = ", ".join("?" for _ in _V16_SEED_PROVIDER_IDS)
+    doomed = [
+        str(found[0])
+        for found in conn.execute(
+            f"SELECT id FROM model_providers "
+            f"WHERE builtin = 1 AND created_at = updated_at "
+            f"  AND id IN ({placeholders}) AND id IS NOT ?",
+            (*_V16_SEED_PROVIDER_IDS, active_id),
+        )
+    ]
+    if doomed:
+        conn.executemany(
+            "DELETE FROM model_providers WHERE id = ?", [(pid,) for pid in doomed]
+        )
+        logger.info(
+            "v19 清掉出厂供应商空壳 %d 条：%s",
+            len(doomed),
+            "、".join(doomed),
+            extra={"event": "migration.provider_seed_removed", "count": len(doomed)},
+        )
+
+    # ⑤ 留下的内置行降级为普通条目（可编辑、可删除）
+    conn.execute("UPDATE model_providers SET builtin = 0 WHERE builtin = 1")
+
+    # ⑥ 指针兜底：删完之后若仍指向不存在的行（手工改库等），清掉该键。
+    #    不清的后果是每次读配置都刷一条 WARN，且后台「当前供应商」与列表对不上。
+    if active_id is not None:
+        alive = {str(found[0]) for found in conn.execute("SELECT id FROM model_providers")}
+        if active_id not in alive:
+            conn.execute("DELETE FROM system_config WHERE key = 'active_provider_id'")
+            logger.info(
+                "v19 清掉指向不存在配置的激活指针：%s",
+                active_id,
+                extra={"event": "migration.active_pointer_cleared", "provider_id": active_id},
+            )
+
+
+def _model_providers_value_token(conn: sqlite3.Connection) -> None:
+    """v20：密钥从「环境变量名指针」改为「主密钥加密后的密文」。
+
+    背景：ADR-053 推翻了 ADR-042 的「密钥不进库」。此后每条配置的密钥用主密钥
+    加密后直接存本表，env 不再放密钥。
+
+    对旧数据的处理
+    --------------
+    `api_key_env_var` 里存的是**变量名**（如 `ARK_API_KEY`），不是密钥值，
+    无法自动变成密文——密钥值本来就在 `.env` 里，且新方案要求它进库。
+    所以这里**直接丢掉旧列**，管理员在后台「模型配置」页重新录入一次密钥。
+    这是一次性的：丢掉变量名不影响任何历史数据（旧的密钥值仍在 `.env` 里，
+    需要的话可以抄过去，然后删掉 `.env` 里的密钥行）。
+
+    幂等
+    ----
+    新库由基线（`init_schema`）直接建成 `value_token`，本步骤是空操作；
+    旧库先补 `value_token` 再删旧列。两处都用 `PRAGMA table_info` 守卫，重跑安全。
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(model_providers)")}
+    if not columns:
+        return
+    if "value_token" not in columns:
+        conn.execute(
+            "ALTER TABLE model_providers ADD COLUMN value_token TEXT NOT NULL DEFAULT ''"
+        )
+    if "api_key_env_var" in columns:
+        # 旧列只是变量名，不含密钥值，删掉不丢任何可用数据。
+        conn.execute("ALTER TABLE model_providers DROP COLUMN api_key_env_var")
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
+# ⚠️ v19 起出现「数据清理型」迁移：只允许删**可由结构重建的出厂/派生数据**，
+#    条件必须写成多重与（`builtin` + 未编辑 + id 白名单 + 非激活项），且 docstring
+#    要写明「删了之后怎么恢复」——删除是单向门，`user_version` 只会前进。
 MIGRATIONS: list[Migration] = [
     Migration(version=1, name="documents_table", apply=_create_documents_table),
     Migration(version=2, name="backfill_documents", apply=_backfill_documents),
@@ -1106,6 +1282,16 @@ MIGRATIONS: list[Migration] = [
     Migration(version=16, name="runtime_config_tables", apply=_create_runtime_config_tables),
     Migration(version=17, name="users_quota_columns", apply=_add_quota_columns_to_users),
     Migration(version=18, name="login_failures_table", apply=_create_login_failures_table),
+    Migration(
+        version=19,
+        name="provider_config_entries",
+        apply=_provider_config_entries,
+    ),
+    Migration(
+        version=20,
+        name="model_providers_value_token",
+        apply=_model_providers_value_token,
+    ),
 ]
 
 

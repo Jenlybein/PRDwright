@@ -39,15 +39,37 @@ class RunMeter:
     计时与 token 都只做累加，不判断成功失败：**被截断或失败的调用同样消耗了 token**，
     半途而废的生成恰恰是最需要看见成本的场合。
 
+    供应商身份的四个字段为什么不合成一个
+    ------------------------------------
+    `protocol` 是**协议**（查限值、选构造器、账单按它聚合）；
+    `config_id` 是**配置条目**（`cfg_xxx`，排障要定位到具体一条）；
+    `name` 是人读的配置名；`model` 是模型。
+
+    四者在任务开始时**一次性定格**（`job_service` 用同一个 `ProviderSpec` 同时
+    造 LLM 与写这里）。合成一个字符串的话，「同一协议两条配置」就分不清账，
+    而回执里也解释不了「这次到底走的是哪条」——这正是 v19 之前的痛点。
+
     Args:
         kind: 任务类型（`prd` / `api_docs` / `prompts` / `optimize`）。
-        provider: 供应商名，来自配置。
+        protocol: 协议名，来自配置（**不是**配置 id）。
         model: 模型名，来自配置。
+        config_id: 配置条目 id（`cfg_xxx` / `env:ark`），来自配置。
+        name: 配置名快照，来自配置。
     """
 
-    def __init__(self, kind: str = "", provider: str = "", model: str = "") -> None:
+    def __init__(
+        self,
+        kind: str = "",
+        protocol: str = "",
+        model: str = "",
+        *,
+        config_id: str = "",
+        name: str = "",
+    ) -> None:
         self.kind = kind
-        self.provider = provider
+        self.protocol = protocol
+        self.config_id = config_id
+        self.name = name
         self.model = model
         # 当前阶段，由 `set_phase` 随 `stage` 事件更新
         self.phase = ""
@@ -180,7 +202,11 @@ class RunMeter:
             # 技能注册表在 v3.1 统一后填充，当前恒为空
             "injected_skills": [],
             "warnings": [message for _, message in self._warnings.values()],
-            "provider": self.provider,
+            # 供应商身份四个字段，语义见类 docstring。原名 `provider` 装的是协议名，
+            # 名不副实；v19 起改叫 `protocol`，并把条目 id 与配置名一并带上。
+            "protocol": self.protocol,
+            "provider_config_id": self.config_id,
+            "provider_name": self.name,
             "model": self.model,
             "request_id": current_request_id(),
         }

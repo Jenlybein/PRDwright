@@ -84,7 +84,13 @@ def _run_expecting_truncation(meter: RunMeter, llm: Any) -> None:
 
 def test_record_accumulates_per_step_and_total() -> None:
     """按步骤累加：同一步的多次调用合并，跨步骤分别记账，总计等于各步之和。"""
-    meter = RunMeter(kind="prd", provider="ark", model="doubao-seed")
+    meter = RunMeter(
+        kind="prd",
+        protocol="ark",
+        model="doubao-seed",
+        config_id="cfg_abc123",
+        name="方舟-主力",
+    )
     meter.set_phase("writing")
     meter.record(input_tokens=100, output_tokens=50, duration_ms=1200)
     meter.record(input_tokens=10, output_tokens=5, duration_ms=300)
@@ -109,7 +115,11 @@ def test_record_accumulates_per_step_and_total() -> None:
     assert usage["steps"][1]["calls"] == 1
     assert sum(step["calls"] for step in usage["steps"]) == usage["total_calls"]
     assert sum(step["prompt_tokens"] for step in usage["steps"]) == usage["prompt_tokens"]
-    assert usage["provider"] == "ark"
+    # 供应商身份拆成四个键：协议查限值/聚合账单、config_id 定位到具体一条、
+    # name 是给人看的快照、model 是模型。混成一个字符串就分不清「同协议两条配置」。
+    assert usage["protocol"] == "ark"
+    assert usage["provider_config_id"] == "cfg_abc123"
+    assert usage["provider_name"] == "方舟-主力"
     assert usage["model"] == "doubao-seed"
 
 
@@ -135,7 +145,9 @@ def test_usage_shape_matches_run_summary_fields() -> None:
         "steps",
         "injected_skills",
         "warnings",
-        "provider",
+        "protocol",
+        "provider_config_id",
+        "provider_name",
         "model",
         "request_id",
     }

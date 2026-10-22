@@ -80,12 +80,46 @@ def make_client(isolated_db, monkeypatch):  # noqa: ARG001
 # ---------------------------------------------------------------------------
 
 
+def _seed_provider(
+    *,
+    protocol: str = "ark",
+    api_key: str = "test-key",
+    model: str = "doubao-seed-2-1-turbo-260628",
+) -> str:
+    """在**已经建好表的**库里放一条配置并设为使用中。
+
+    ⚠️ ADR-051 之后体检读的是运行时配置，而模型接入只能在后台面板里配——
+    `.env` 里连字段都没有了。所以用例必须先落一条配置，否则验到的是
+    「没有可用模型配置」那条分支，而不是想验的那条。
+    """
+    from backend.core import runtime_config as rc
+    from backend.core import crypto
+    from backend.core.migrations import run_migrations
+    from backend.repositories.runtime_config_repo import (
+        ModelProviderRepository,
+        SystemConfigRepository,
+    )
+
+    run_migrations()
+    provider_id = "cfg_health001"
+    ModelProviderRepository.create(
+        provider_id=provider_id,
+        name="体检用",
+        protocol=protocol,
+        value_token=crypto.encrypt_value(api_key),
+        default_model=model,
+    )
+    SystemConfigRepository.upsert_many(
+        {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=None
+    )
+    rc.invalidate()
+    return provider_id
+
+
 def test_health_reports_three_checks(make_client):
     """三项齐全且都能过时，status 才是 `ok`。"""
-    client = make_client(
-        DEFAULT_LLM_PROVIDER="ark",
-        ARK_API_KEY="test-key-not-real",
-    )
+    client = make_client(ARK_API_KEY="test-key-not-real")
+    _seed_provider()
 
     response = client.get("/health")
 
@@ -103,11 +137,8 @@ def test_health_reports_llm_without_pretending_to_call_it(make_client):
     健康检查会被探针高频触发，让它按次烧额度不合适。既然没真的调过，
     就不能让文案读起来像「已验证可用」——不诚实的绿灯比红灯更贵。
     """
-    client = make_client(
-        DEFAULT_LLM_PROVIDER="ark",
-        ARK_API_KEY="test-key-not-real",
-        DEFAULT_LLM_MODEL="doubao-seed-2-1-turbo-260628",
-    )
+    client = make_client(ARK_API_KEY="test-key-not-real")
+    _seed_provider(protocol="ark", model="doubao-seed-2-1-turbo-260628")
 
     llm = client.get("/health").json()["checks"]["llm"]
 
@@ -119,16 +150,27 @@ def test_health_reports_llm_without_pretending_to_call_it(make_client):
 
 def test_health_flags_missing_api_key(make_client):
     """密钥没配是「生成必然失败」的头号原因，必须在体检里报出来。"""
-    client = make_client(DEFAULT_LLM_PROVIDER="ark", ARK_API_KEY="")
+    client = make_client(ARK_API_KEY="")
+    _seed_provider(api_key="")
 
     body = client.get("/health").json()
 
     assert body["status"] == "degraded"
     assert body["checks"]["llm"]["ok"] is False
-    assert "ARK_API_KEY" in body["checks"]["llm"]["detail"]
+    assert "未配置密钥" in body["checks"]["llm"]["detail"]
     # 只这一项不过，其余两项仍应通过——分开报的意义就在这里
     assert body["checks"]["database"]["ok"] is True
     assert body["checks"]["skills"]["ok"] is True
+
+
+def test_health_flags_no_provider_at_all(make_client):
+    """一条配置都没有时，体检要说「还没有任何模型配置」，而不是含糊地说缺密钥。"""
+    client = make_client()
+
+    llm = client.get("/health").json()["checks"]["llm"]
+
+    assert llm["ok"] is False
+    assert "还没有任何模型配置" in llm["detail"]
 
 
 def test_health_flags_absent_skills_directory(make_client, tmp_path):

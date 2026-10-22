@@ -65,7 +65,7 @@ def _check_llm() -> dict:
     if spec is None:
         return {
             "ok": False,
-            "detail": "没有可用的模型供应商，请在后台激活一家",
+            "detail": "还没有任何模型配置，请先在管理后台新增一条",
             "provider": "",
             "model": "",
             "config_source": config.source,
@@ -79,7 +79,7 @@ def _check_llm() -> dict:
         # 变量名本身可以给——它不含密钥值，只是「去哪个环境变量取」。
         return {
             "ok": False,
-            "detail": f"未配置 {spec.api_key_env_var or '密钥'}",
+            "detail": "未配置密钥（请在管理后台「模型配置」页填入）",
             "provider": provider,
             "model": model,
             "config_source": config.source,

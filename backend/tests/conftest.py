@@ -26,10 +26,11 @@ def _reset_runtime_state() -> None:
     # 运行时配置有进程内快照（TTL 5 秒）与 `.env` 快照缓存。不清的话，
     # 「上一个用例往 system_config 写了覆盖项」会带进下一个用例——
     # 而 `DB_PATH` 每次都换，缓存里那份却指向旧库，症状是「查到的配置对不上」。
-    from backend.core import runtime_config, secrets
+    from backend.core import crypto, runtime_config, secrets
 
     runtime_config.invalidate()
     secrets.reset_cache()
+    crypto.reset_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +44,15 @@ def isolated_db(tmp_path, monkeypatch):
     # 日志目录也要隔离：v4 起 lifespan 会把日志写进轮转文件，若不指到临时目录，
     # 每跑一次用例就会往仓库的 backend/logs/ 里塞一份，且用例之间互相覆盖。
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+
+    # 每个用例一把独立主密钥：密钥加密用例才有东西可解，且互不串味。
+    from cryptography.fernet import Fernet
+
+    master_key = tmp_path / "secrets" / "master.key"
+    master_key.parent.mkdir(parents=True, exist_ok=True)
+    master_key.write_bytes(Fernet.generate_key())
+    monkeypatch.setenv("PRDWRIGHT_MASTER_KEY_PATH", str(master_key))
+
     _reset_runtime_state()
 
     # 建表（幂等）。放在这里而不是客户端夹具里，纯服务层测试也能直接用数据库。

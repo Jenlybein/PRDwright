@@ -1195,42 +1195,42 @@ class AdminResetConfigRequest(BaseModel):
 
 
 class AdminProviderItem(BaseModel):
-    """一家供应商。
+    """一条模型配置。
 
-    ⚠️ **没有任何密钥字段**：`api_key_env_var` 只是变量名，`key_present` 只回布尔。
-    密钥值永远不出后端（ADR-042）。
+    ⚠️ **没有任何密钥字段**：`key_present` 只回布尔，密钥值永远不出后端（ADR-053）。
+
+    `id` 是**配置条目**的身份（`cfg_xxx`），不是供应商/协议名——同一协议可以有多条。
     """
 
-    id: str = Field(description="供应商 id（身份，不可改；会进任务回执）")
-    name: str = Field(description="展示名")
+    id: str = Field(description="配置条目 id（cfg_ 开头，后端生成，创建后不可改）")
+    name: str = Field(description="配置名（给人看的标签，允许重名）")
     protocol: str = Field(description="协议：openai_compatible / anthropic / ark / google_genai / nvidia / huggingface")
     protocol_label: str = Field(description="协议的中文说明")
     base_url: str = Field(default="", description="自定义地址；空=SDK 官方地址")
-    api_key_env_var: str = Field(default="", description="去哪个环境变量取密钥（只存变量名）")
-    key_present: bool = Field(default=False, description="该变量当前是否有值（只回布尔）")
+    key_present: bool = Field(default=False, description="是否已有可用密钥（只回布尔）")
     default_model: str = Field(default="", description="默认模型名")
     max_tokens: int = Field(description="输出上限")
     context_window: int = Field(description="上下文窗口；0=用注册表默认值")
     max_output: int = Field(description="预留输出；0=用注册表默认值")
     thinking_enabled: bool = Field(default=False, description="是否开启思考（仅方舟有语义）")
-    builtin: bool = Field(default=False, description="内置项：不可删除，只能停用")
-    enabled: bool = Field(default=True, description="是否启用；停用后不能被激活")
+    enabled: bool = Field(default=True, description="是否启用；停用后不能被设为使用中")
     sort_order: int = Field(default=0, description="列表排序")
-    active: bool = Field(default=False, description="是否是当前激活的那一家")
+    active: bool = Field(default=False, description="是否是当前使用中的那一条")
     extra: dict[str, Any] = Field(default_factory=dict, description="其他协议参数")
 
 
 class AdminProviderPreset(BaseModel):
-    """新增供应商时的预设模板（选一家常见厂商自动填好地址与变量名）。
+    """新增配置时的供应商模板（选一家自动填好协议、地址与变量名）。
 
-    ⚠️ 地址会变，以官方文档为准；它只是**预设**，填完仍可改。
+    ⚠️ 地址会变，以官方文档为准；它只是**模板**，填完仍可改。
+
+    `key` 只是下拉框的 value，**不是**配置 id——配置 id 由后端生成。
     """
 
-    id: str = Field(description="建议的供应商 id")
-    name: str = Field(description="展示名")
-    protocol: str = Field(description="协议")
+    key: str = Field(description="模板标识（下拉框用；不是配置 id）")
+    name: str = Field(description="供应商展示名")
+    protocol: str = Field(description="协议；选定后该配置的协议即确定，创建后不可改")
     base_url: str = Field(description="建议的接口地址")
-    api_key_env_var: str = Field(description="建议的密钥变量名")
     default_model: str = Field(default="", description="建议的模型名")
 
 
@@ -1242,39 +1242,56 @@ class AdminProtocolOption(BaseModel):
 
 
 class AdminProviderListResponse(BaseModel):
-    """供应商列表 + 新增所需的选择项。"""
+    """配置列表 + 新增所需的选择项。"""
 
-    providers: list[AdminProviderItem] = Field(default_factory=list, description="全部供应商")
-    active_provider_id: str = Field(default="", description="当前激活的供应商 id")
-    presets: list[AdminProviderPreset] = Field(default_factory=list, description="新增时的预设模板")
+    providers: list[AdminProviderItem] = Field(default_factory=list, description="全部配置条目")
+    active_provider_id: str = Field(default="", description="当前使用中的那条配置 id")
+    presets: list[AdminProviderPreset] = Field(default_factory=list, description="新增时的供应商模板")
     protocols: list[AdminProtocolOption] = Field(default_factory=list, description="可选的协议")
-    warning: str = Field(default="", description="激活成功但有风险时的提示（如缺密钥）")
+    warning: str = Field(default="", description="切换成功但有风险时的提示（如缺密钥）")
 
 
 class AdminCreateProviderRequest(BaseModel):
-    """新增一家供应商。"""
+    """新增一条配置。
 
-    id: str = Field(min_length=1, max_length=32, description="身份标识，如 deepseek；创建后不可改")
-    name: str = Field(default="", description="展示名；留空用 id")
-    protocol: str = Field(description="协议（见 /providers 的 protocols）")
+    ⚠️ **没有 `id`**：它由后端生成（`cfg_xxx`）。同一协议可以有多条配置，
+    让管理员手填 id 只会撞名。
+    """
+
+    name: str = Field(min_length=1, max_length=64, description="配置名，如「方舟-生产」；必填、允许重名")
+    protocol: str = Field(description="协议（见 /providers 的 protocols）；创建后不可改")
     base_url: str = Field(default="", description="接口地址；OpenAI 兼容类通常要带 /v1")
-    api_key_env_var: str = Field(default="", description="密钥所在的环境变量名（只填名字，不要填密钥）")
+    api_key: str | None = Field(
+        default=None,
+        description=(
+            "密钥明文（只用于本次加密入库，响应里不会出现）。"
+            "不传/空串=这条配置暂不配密钥（本地 vLLM 可填占位值 not-needed）"
+        ),
+    )
     default_model: str = Field(default="", description="默认模型名")
     max_tokens: int = Field(default=4096, ge=1, description="输出上限")
     context_window: int = Field(default=0, ge=0, description="上下文窗口；0=用注册表（自定义模型建议填）")
     max_output: int = Field(default=0, ge=0, description="预留输出；0=用注册表")
     thinking_enabled: bool = Field(default=False, description="是否开启思考（仅方舟有语义）")
     extra: dict[str, Any] = Field(default_factory=dict, description="其他协议参数")
-    sort_order: int = Field(default=100, description="列表排序")
+    sort_order: int | None = Field(default=None, description="列表排序；不传=排到末尾")
 
 
 class AdminUpdateProviderRequest(BaseModel):
-    """编辑一家供应商。只传要改的字段；`id` 不可改。"""
+    """编辑一条配置。只传要改的字段；`id` 不可改。
 
-    name: str | None = Field(default=None, description="展示名")
-    protocol: str | None = Field(default=None, description="协议")
+    `protocol` 字段**保留**但只允许「与原值相同」：服务层对不同的值显式报 400。
+    删掉这个字段看似更干净，实际更糟——旧客户端发 `protocol` 会得到「200 但没改」，
+    比一句明确的报错难查得多。
+    """
+
+    name: str | None = Field(default=None, description="配置名")
+    protocol: str | None = Field(default=None, description="协议；创建后不可改（换了会 400）")
     base_url: str | None = Field(default=None, description="接口地址")
-    api_key_env_var: str | None = Field(default=None, description="密钥变量名")
+    api_key: str | None = Field(
+        default=None, description="新密钥明文；传了才会重加密覆盖（不传=保持不变）"
+    )
+    clear_key: bool | None = Field(default=None, description="传 true 清空密钥（= 未配置）")
     default_model: str | None = Field(default=None, description="默认模型名")
     max_tokens: int | None = Field(default=None, ge=1, description="输出上限")
     context_window: int | None = Field(default=None, ge=0, description="上下文窗口")
@@ -1283,6 +1300,12 @@ class AdminUpdateProviderRequest(BaseModel):
     enabled: bool | None = Field(default=None, description="是否启用")
     extra: dict[str, Any] | None = Field(default=None, description="其他协议参数")
     sort_order: int | None = Field(default=None, description="列表排序")
+
+
+class AdminProviderKeyResponse(BaseModel):
+    """查看密钥明文的响应（一次性；每次查看都会写审计）。"""
+
+    api_key: str = Field(description="解密后的密钥明文。前端应只用于本地展示/复制，不要缓存")
 
 
 class AdminProviderTestResponse(BaseModel):

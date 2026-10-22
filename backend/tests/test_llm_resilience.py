@@ -34,6 +34,42 @@ from fakes import STREAM_ERROR
 _MESSAGES: list[BaseMessage] = [HumanMessage(content="写一段话")]
 
 
+def _use_provider(*, api_key: str = "test-key", **overrides: Any) -> str:
+    """建一条配置并设为「使用中」，返回它的 id。
+
+    ⚠️ ADR-051 之后**没有 env 兜底了**：`.env` 里不再有供应商 / 地址 / 型号，
+    `get_llm()` 在没有配置时直接抛「还没有任何模型配置」。所以凡是要真构造实例的
+    用例都得先把那条配置建出来——这不是用例啰嗦，而是真实前提。
+    """
+    import json
+    import uuid
+
+    from backend.core import runtime_config as rc
+    from backend.core import crypto
+    from backend.core.migrations import run_migrations
+    from backend.repositories.runtime_config_repo import (
+        ModelProviderRepository,
+        SystemConfigRepository,
+    )
+
+    run_migrations()
+    provider_id = "cfg_" + uuid.uuid4().hex[:10]
+    fields: dict[str, Any] = {
+        "name": "用例配置",
+        "protocol": "ark",
+        "value_token": crypto.encrypt_value(api_key),
+        "default_model": "doubao-test",
+        "max_tokens": 4096,
+    }
+    fields.update(overrides)
+    ModelProviderRepository.create(provider_id=provider_id, **fields)
+    SystemConfigRepository.upsert_many(
+        {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=None
+    )
+    rc.invalidate()
+    return provider_id
+
+
 # ---------------------------------------------------------------------------
 # 三个假定 differing 时点的假模型
 # ---------------------------------------------------------------------------
@@ -301,22 +337,21 @@ def test_factories_disable_sdk_retries_and_pass_timeout(monkeypatch) -> None:
     from backend.services.llm_factory import get_llm
 
     monkeypatch.setenv("ARK_API_KEY", "test-ark-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("LLM_TIMEOUT", "45")
     get_settings.cache_clear()
 
+    _use_provider(protocol="ark", api_key="test-ark-key")
     ark = get_llm()
     assert ark.timeout == 45
 
-    monkeypatch.setenv("DEFAULT_LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    get_settings.cache_clear()
+    _use_provider(protocol="openai_compatible", api_key="test-openai-key")
     openai_llm = get_llm()
     assert openai_llm.request_timeout == 45
     assert openai_llm.max_retries == 0
 
-    monkeypatch.setenv("DEFAULT_LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    get_settings.cache_clear()
+    _use_provider(protocol="anthropic", api_key="test-anthropic-key")
     anthropic_llm = get_llm()
     assert anthropic_llm.default_request_timeout == 45
     assert anthropic_llm.max_retries == 0
@@ -330,6 +365,7 @@ def test_timeout_zero_falls_back_to_sdk_default(monkeypatch) -> None:
     monkeypatch.setenv("ARK_API_KEY", "test-ark-key")
     monkeypatch.setenv("LLM_TIMEOUT", "0")
     get_settings.cache_clear()
+    _use_provider(protocol="ark")
 
     assert get_llm().timeout is None
 
@@ -337,7 +373,7 @@ def test_timeout_zero_falls_back_to_sdk_default(monkeypatch) -> None:
 def test_max_tokens_override_reaches_the_ark_adapter(monkeypatch) -> None:
     """`get_llm(max_tokens=...)` 在方舟下必须真的生效。
 
-    方舟分支曾经把 `**kwargs` 整个丢掉、硬写 `settings.ark_max_tokens`，于是
+    方舟分支曾经把 `**kwargs` 整个丢掉、硬写配置里的 max_tokens，于是
     「按调用调小输出窗口」在本项目**默认供应商**上是条死路——不报错、不警告，
     只是悄悄用了配置值。审核要设小窗口就指着这条路。
 
@@ -347,8 +383,8 @@ def test_max_tokens_override_reaches_the_ark_adapter(monkeypatch) -> None:
     from backend.services.llm_factory import get_llm
 
     monkeypatch.setenv("ARK_API_KEY", "test-ark-key")
-    monkeypatch.setenv("ARK_MAX_TOKENS", "131072")
     get_settings.cache_clear()
+    _use_provider(protocol="ark", max_tokens=131072)
 
     assert get_llm().max_tokens == 131072
     assert get_llm(max_tokens=2048).max_tokens == 2048

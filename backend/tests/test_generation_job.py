@@ -40,6 +40,38 @@ from fakes import ScriptedLLM
 # ---------------------------------------------------------------------------
 
 
+def _seed_provider() -> str:
+    """放一条配置并设为使用中，返回 id。
+
+    ⚠️ ADR-051 之后 `.env` 不再是模型配置的来源：一条配置都没有时
+    `active_provider` 是 `None`，回执里的 `protocol` / `model` 会是空串。
+    而这两个字段正是「这次走了哪条配置」的唯一凭据，所以凡是要断言它们的用例
+    都得先把配置落下来——这不是用例啰嗦，是真实前提。
+    """
+    from backend.core import runtime_config as rc
+    from backend.core.migrations import run_migrations
+    from backend.repositories.runtime_config_repo import (
+        ModelProviderRepository,
+        SystemConfigRepository,
+    )
+
+    run_migrations()
+    provider_id = "cfg_jobtest01"
+    ModelProviderRepository.create(
+        provider_id=provider_id,
+        name="用例配置",
+        protocol="ark",
+        value_token="",
+        default_model="doubao-test",
+    )
+    SystemConfigRepository.upsert_many(
+        {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=None
+    )
+    rc.invalidate()
+    return provider_id
+
+
+
 @pytest.fixture(autouse=True)
 def no_real_llm(monkeypatch):
     """硬约束：真实 LLM 工厂一被调用就抛，杜绝任何测试触网。"""
@@ -137,6 +169,7 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
     # 方案必须真实存在：收尾会校验「方案还在不在」，挂在不存在方案上的任务不再算成功
     solution_id = _create_solution(client)
+    _seed_provider()
 
     async def scenario() -> tuple[int, list]:
         job_id = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
@@ -183,7 +216,11 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     assert skills[0]["version"]
     # 指纹由三份资源内容算出，长度固定；改了模板它就变（不必依赖人工改版本号）
     assert len(skills[0]["fingerprint"]) == 12
-    assert isinstance(data["provider"], str) and data["provider"]
+    # 供应商身份拆成四个字段：协议查限值、配置 id 定位到具体一条、名字给人读、型号记账。
+    # 合成一个字符串就解释不了「同一协议两条配置到底走的哪条」。
+    assert isinstance(data["protocol"], str) and data["protocol"]
+    assert isinstance(data["provider_config_id"], str)
+    assert isinstance(data["provider_name"], str)
     assert isinstance(data["model"], str) and data["model"]
     # 直连服务、没有 HTTP 请求上下文，request_id 为空（不抛异常）
     assert data["request_id"] == ""

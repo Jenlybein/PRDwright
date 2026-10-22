@@ -27,6 +27,7 @@ import type {
   ViewState,
 } from '@/types'
 import type { DocType } from '@/utils/download'
+import { normalizeRunSummary } from '@/utils/runSummary'
 
 /** 全部合法阶段；顺序与业务流程一致 */
 export const VIEW_STATES: readonly ViewState[] = [
@@ -637,22 +638,16 @@ export function normalizeSessionSnapshot(parsed: unknown): ParsedSessionSnapshot
 
 
 /**
- * 校验一份「生成用量回执」是否可信。
+ * 校验并归一一份「生成用量回执」。
  *
- * 只核对几个**不可能由脏数据伪造**的字段（`kind` / `durationMs` / `requestId`），
- * 其余字段原样透传——回执是后端产出的诊断信息，结构一旦变了我们更愿意直接报错而不是静默吞掉，
- * 所以这里不做深校验。脏数据（非对象 / 缺关键字段 / 旧版本快照里根本没有这一项）一律退化为 `null`，
+ * 它来自 `documents.last_run_summary`——后端存的是**与 SSE 事件同一个 dict**
+ * （`snake_case`）。旧实现在这里直接把对象断言成 `RunSummary` 并按要求必须有
+ * `durationMs`，于是库里那份永远被判成脏数据、刷新后回执整块消失。
+ * 现在统一走 `normalizeRunSummary`（两种键都认），本函数只保留入口名。
+ *
+ * 脏数据（非对象 / 缺 `kind` / 连耗时都没有）一律退化为 `null`，
  * 该文档就「不显示回执」，与上线前的行为一致。
  */
 export function parseRunSummary(value: unknown): RunSummary | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  if (
-    typeof record.kind !== 'string' ||
-    typeof record.durationMs !== 'number' ||
-    typeof record.requestId !== 'string'
-  ) {
-    return null
-  }
-  return value as RunSummary
+  return normalizeRunSummary(value)
 }

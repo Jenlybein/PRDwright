@@ -190,6 +190,9 @@ UI 四件事：
 做法（ADR-041）：`system_config` 表 + `core/runtime_config.py`。
 
 - **解析顺序**：DB 覆盖值 > 环境变量 > 字段默认值。
+  ⚠️ 但**白名单项不再写进 `.env`**（ADR-052）：模板里一个都不出现，
+  字段默认值就是推荐值。留着的只有密钥与启动项——两个入口必然导致「改了模板却不生效」，
+  而且 `PRD_SECTION_REVIEW_MAX_TOKENS` 早就在模板（1024）与代码（2048）之间漂过一次。
 - **只有白名单项可进 DB**。白名单之外的项永远读 env——避免把
   `db_path` / `host` / `port` / `auth_enabled` / `cors_origins` / 供应商密钥
   这类**启动项**变成「改了要重启」的认知陷阱。
@@ -203,32 +206,103 @@ UI 四件事：
 | 分组 | 可调项 |
 | --- | --- |
 | 配额 | 单用户每日 PRD 上限、单用户并发生成数、全局每日上限、单用户 Token 上限、全局告警阈值、超限行为（拦截 / 只告警） |
-| 模型与调用 | **激活供应商**、默认模型、单次超时、总超时、重试次数与间隔、预算上限与分阶段覆盖、并发度、单章重试 / 改写次数、是否启用审核、各类 `max_tokens` |
+| 模型与调用 | 单次超时、总超时、重试次数与间隔、预算上限与分阶段覆盖、并发度、单章重试 / 改写次数、是否启用审核、审核类 `max_tokens` |
 | 安全 | 会话有效期、是否开放注册、登录失败次数上限与锁定时长 |
 | 日志 | 日志级别、日志格式、**日志保留天数 / 最大条数 / 是否落库 / 落库最低级别** |
 | 运维 | 维护模式（临时停新生成、保留只读） |
 
 > 这些字段**绝大多数在 `core/config.py` 里已经存在**（`llm_timeout` / `llm_max_retries` /
-> `prd_pipeline_concurrency` / `default_llm_provider` …），把它们从「只读 env」改成
+> `prd_pipeline_concurrency` / `llm_budget_default_cap` …），把它们从「只读 env」改成
 > 「优先读 runtime_config」即可，UI 是纯增量。这是整个 v4 里**性价比最高**的一块。
+>
+> ⚠️ **模型接入不在白名单里**（ADR-051）：`default_llm_provider` / `default_llm_model` /
+> 各家 `*_max_tokens` / `*_api_url` / `ark_thinking_enabled` 这些字段**已从 `Settings` 删除**。
+> 它们必须按「条」存在（同一家要配生产 / 测试两条，各自的地址与上限都不同），
+> 一个进程级变量表达不了；真源只有 §5.3 的 `model_providers` 一张表。
 
-### 5.3 模型供应商：`model_providers` 表（迁移 v16）
+### 5.3 模型配置：`model_providers` 表（v16 建表，v19 改为「配置条目」）
+
+**一条 = 一个 endpoint + 一套参数**，不是「一家供应商一个固定空位」（ADR-050）。
+同一协议可以有多条（「方舟-生产」「方舟-测试」），所以任何「按协议取唯一一行」的
+假设都不成立。
 
 | 列 | 说明 |
 | --- | --- |
-| `id` / `name` | 标识与展示名 |
-| `provider_type` | `anthropic` / `openai` / `ark` / `custom` |
-| `api_key_env_var` | **只存环境变量名**（如 `ARK_API_KEY`），不落明文（ADR-042） |
+| `id` | **配置条目**的身份：`cfg_` + 10 位十六进制，**后端生成**，创建后不可改 |
+| `name` | 配置名（如「方舟-生产」）：必填、**允许重名**——身份是 id，名字只是标签 |
+| `protocol` | `openai_compatible` / `anthropic` / `ark` / `google_genai` / `nvidia` / `huggingface`；**创建后不可改**（换协议等于换厂商，参数语义全变） |
 | `base_url` / `default_model` | 端点与默认型号 |
-| `priority` / `created_at` / `updated_at` | 排序与审计信息 |
+| `api_key_env_var` | **只存环境变量名**（如 `ARK_API_KEY`），不落明文（ADR-042） |
+| `max_tokens` / `context_window` / `max_output` / `thinking_enabled` | 这条配置自己的参数 |
+| `extra_json` | 协议特有的其他参数 |
+| `enabled` | 停用后不能被设为使用中 |
+| `sort_order` / `created_at` / `updated_at` | 列表顺序与审计；新条目取 `MAX(sort_order)+1`，排到末尾 |
+| `builtin` | **遗留列**：v19 起一律 0，代码不再读取 |
 
-**激活哪一个**：单一真源放在 `system_config.active_provider_id`，**不靠表里加 `is_active` 列**
-——后者会出现「两行都是 1」的不一致态，而前者天然只有一个值。
-`services/llm_factory.py` 改读「激活供应商行」（经 runtime_config 缓存），切换后立即失效缓存。
+**使用中只有一个**：真源是 `system_config.active_provider_id`，**不靠表里加 `is_active`
+列**——后者会出现「两行都是 1」的不一致态，而前者天然只有一个值。
+`services/llm_factory.py` 经 runtime_config 读「使用中的那条」，切换后立即失效缓存。
 
-**密钥取舍**：库里存变量名引用，密钥仍由 `require_api_key()` 从环境取。
-代价是新增供应商仍需碰 `.env`；收益是**把明文凭据的泄漏面挡在数据库之外**。
-（真要做密钥托管，得先解决加密存储与轮换，本期不做。）
+⚠️ **判断「某条是不是使用中」要读原始指针**，不要读解析后的 `config.active_provider`：
+那条配置被停用后解析会回退到别的一条，于是「按解析结果判断」会放行删除，
+留下一个指向已删行的悬空 key（`delete_provider` 的注释与
+`test_v19_clears_dangling_active_pointer` 钉的就是这个）。
+
+**列表为空是正常状态**：v19 清掉了六条播种行，刚装完一条都没有。此时
+`active_provider` 是 `None`——不是异常，是「还没配过」。生成会明确报
+「还没有任何模型配置，请先在管理后台新增一条」，而不是退回某个界面上看不见、
+也改不了的默认值（ADR-051：`.env` 里已不再有第二份模型配置）。
+
+**第一条配置自动成为「使用中」**：列表空着时它是唯一可选项，让用户再点一次
+「设为使用中」只是仪式；而忘了点就会得到「配好了却生成说没有配置」——排查还得先懂
+「指针」这个概念。已有指针时新建**不会抢**：新建第二条不该把正在跑的那条顶掉。
+没有指针（或指针悬空）时按 `sort_order` 取第一条**启用中**的，结果稳定可预期。
+
+**`PRESETS` 只是表单模板**：新增时选一家自动填好协议、地址与密钥变量名，
+字段 `key` 是下拉框的值、**不是**配置 id。创建后 id 由后端发。
+
+⚠️ **「供应商」是这张表单唯一的入口**。协议、`base_url`、密钥变量名本来就是「这家厂商
+怎么接」的一组知识，拆成三个手填框必然出现「ark 协议 + 火山地址 + `DEEPSEEK_API_KEY`」
+这种照抄文档都发现不了的错配。所以表单只剩**能改的四项**：
+
+| 表单里有 | 表单里没有 | 为什么 |
+| --- | --- | --- |
+| 供应商（下拉，必选） | —— | 它是驱动项，其余都由它决定 |
+| 配置名、`base_url`、默认模型 | —— | 同一条配置的多个副本要靠它们区分 |
+| `max_tokens`、`context_window` | —— | 调优项 |
+| —— | **协议** | 由供应商决定，创建后也不可改 |
+| —— | **密钥变量名** | 由供应商决定；它只是「去哪个环境变量取密钥」的指针，不是需要人做的决定 |
+
+**不能改的东西就不该摆在表单里冒充可改项**——灰掉的框、只读的输入框同样在暗示
+「这里本该能改」。需要核对的场合看得到：协议在列表行与编辑面板标题上，变量名在
+列表行的元信息里。同一条纪律适用于编辑面板（协议与变量名都不在表单里，请求体里也不发）。
+
+**下拉里没有「其他 / 自定义」**。预设即全部入口；要接自建接入点，选
+「本地 vLLM / Ollama」（不要密钥）或「自建网关（OpenAI 兼容，需密钥）」再把地址改掉——
+这两条预设并列存在，正是因为「要不要密钥」没法从协议推出来。
+
+**密钥变量名的来源是预设**（`PRESETS[].api_key_env_var`），**原样提交**，包括空串：
+空串表示这条配置不需要密钥。⚠️ 前端不渲染这个字段，但绝不能因此漏发——配置建得出来，
+第一次生成才以「未指定密钥环境变量名」失败，而界面上根本无从修。
+
+**`PROTOCOL_KEY_ENV_VARS` 只管「没传」的情况**：脚本或第三方调 `POST /providers` 时
+不传 `api_key_env_var`（`None`），服务端按协议补默认值。**显式空串不补**——那是
+「这条不要密钥」的明确表达。
+
+**空变量名 = 不需要密钥**，不是「配置漏了」：`lookup_provider_key` 给它一个占位值
+（OpenAI 兼容客户端要求 `api_key` 非空，传空串会在构造时自己抛错）。变量名写了、
+环境里却没有值的，仍然报错并带出变量名——那才是真正需要人去 .env 补一行的情况。
+
+**计量快照**：`generation_jobs` 另有 4 列 `provider_protocol` / `provider_config_id` /
+`provider_name` / `provider_model`，在任务收尾时**定格**，不建外键。配置事后改名或删掉，
+历史账单不该跟着变——与 `prompt_tokens` 同一条纪律。用户端回执显示的就是
+「配置名 · 模型」，解析入口只有一个（`frontend/src/utils/runSummary.ts`）。
+
+**密钥取舍**：库里只存变量名，值只在环境里（`.env` 或进程环境），按名取值的入口是
+`core/secrets.lookup_env`。它**不经过 `Settings`**——所以新增一条配置不必改代码、
+不必重启，改密钥值也不必重启（按文件 mtime 重读）。
+代价是新配置仍需在 `.env` 里补一行密钥；收益是**把明文凭据的泄漏面挡在数据库之外**
+（ADR-042）。（真要做密钥托管，得先解决加密存储与轮换，本期不做。）
 
 ---
 
@@ -289,9 +363,12 @@ UI 四件事：
 | POST | `/users/{id}/disable`、`/enable`、`/reset-password` | 启停与改密 |
 | GET / POST / DELETE | `/invites`、`/invites/{code}` | 邀请码 CRUD |
 | GET | `/stats/overview`、`/stats/users`、`/stats/daily` | 平台与用户统计 |
-| GET / PUT | `/config` | 读 / 改白名单内的运行时配置 |
-| GET / POST / PUT / DELETE | `/providers`、`/providers/{id}` | 供应商 CRUD |
-| POST | `/providers/{id}/activate` | 切换激活供应商 |
+| GET / PUT / PATCH | `/config`、`/config/effective` | 读 / 改白名单内的运行时配置（`/effective` 用于保存后的独立复核） |
+| GET / POST | `/providers` | 配置条目列表（含 `presets` 模板与 `protocols` 选项，后者每项带 `key_env_var`）/ 新增一条（id 由后端生成） |
+| GET | `/providers/presets` | 新增表单的供应商预填模板（⚠️ 必须注册在 `/providers/{id}` **之前**） |
+| PATCH / DELETE | `/providers/{id}` | 编辑 / 删除一条（协议不可改；使用中的不可删） |
+| POST | `/providers/{id}/activate` | 设为「使用中」 |
+| POST | `/providers/{id}/test` | 真发一次最小调用验证连通性 |
 | GET | `/logs` | 日志检索（分页 + 过滤） |
 | GET | `/logs/stream` | SSE 实时尾随 |
 | GET | `/audit` | 审计日志 |
@@ -308,7 +385,10 @@ UI 四件事：
 | 后台形态 | 独立应用：硬隔离、独立构建部署 | 多一套工具链与少量 HTTP 封装重复；**git 冲突并不会因此减少**（同仓库同历史） | ADR-039 |
 | 日志存储 | 文件 + DB 双写：不丢且可查 | 多一份存储与保留策略要维护 | ADR-040 |
 | 配置生效 | DB 覆盖 env（白名单） | 白名单外的项仍需改 env 重启；多进程下靠 TTL 而非广播 | ADR-041 |
-| 供应商密钥 | env 引用，不落明文 | 新增供应商仍需碰 `.env` | ADR-042 |
+| 供应商密钥 | env 引用，不落明文 | 新增配置仍需碰 `.env` | ADR-042 |
+| 模型配置的粒度 | 「配置条目」：一条 = 一个 endpoint + 一套参数，同一协议可多条 | id 变成不可读的 `cfg_xxx`，凡「按 id 猜协议」的代码都会落空 | ADR-050 |
+| 模型配置的归宿 | **只**住在 `model_providers`，`.env` 里连字段都没有；一条都没有时生成明确报错 | 装完不能直接用，必须先在后台建一条；「配置表丢了」不再有 env 兜底 | ADR-051 |
+| 计量与回执的供应商 | 4 列**快照**（协议 / 配置 id / 名字 / 模型），不建外键 | 无法按配置做级联查询，只能事后聚合 | ADR-050 |
 | 管理员角色 | 单一 `is_admin` | 不做分级 RBAC（YAGNI）；审计表已留 `actor/action`，将来分级只加列 | — |
 
 **风险登记**

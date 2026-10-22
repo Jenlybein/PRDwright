@@ -167,6 +167,24 @@ const totalTokens = computed(() => {
 })
 
 /**
+ * 「这次走的是哪条配置」的一行：`配置名 · 模型`。
+ *
+ * 为什么要把配置名摆出来：同一家可以配多条（生产 / 测试各一条，协议相同），
+ * 只显示模型名的话，用户看到 `doubao-…` 根本分不清是哪条在花钱。
+ *
+ * 降级路径（表不可用、按 env 合成）没有配置名，这时退回显示协议——
+ * 它是那一刻唯一能说清「走的是哪类接口」的信息。两者都没有就整段不显示，
+ * 而不是渲染一个「 · 」。
+ */
+const providerLabel = computed(() => {
+  const summary = props.runSummary
+  if (!summary) return ''
+  const who = summary.providerName || summary.protocol
+  if (who && summary.model) return `${who} · ${summary.model}`
+  return who || summary.model
+})
+
+/**
  * 这次生成是否**没能用上技能包**（退回了内置兜底提示词）。
  *
  * 只有 PRD 生成依赖技能包，接口文档与提示词本来就不注入，所以必须先判 `kind`——
@@ -287,6 +305,11 @@ function submitOptimize(): void {
       class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-subtle"
     >
       <span>本次生成耗时 {{ formatDuration(runSummary.durationMs) }}</span>
+      <!-- 走的是哪条配置 + 哪个模型：同一家配了多条时，这一行是唯一能区分的地方 -->
+      <template v-if="providerLabel">
+        <span aria-hidden="true">·</span>
+        <span>{{ providerLabel }}</span>
+      </template>
       <template v-if="totalTokens > 0">
         <span aria-hidden="true">·</span>
         <span>约 {{ formatTokens(totalTokens) }} tokens</span>

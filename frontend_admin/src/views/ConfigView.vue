@@ -25,6 +25,7 @@ import {
   fetchProviders,
   messageOf,
   resetConfig,
+  revealProviderKey,
   testProvider,
   toResult,
   updateConfig,
@@ -54,25 +55,48 @@ const pendingChange = ref<{ key: string; label: string; value: unknown; group: s
 /** 待确认的供应商操作（激活 / 删除） */
 const pendingProvider = ref<{ action: 'activate' | 'delete'; provider: Provider } | null>(null)
 
-// 新增供应商表单
+/**
+ * 新增配置表单。
+ *
+ * ⚠️ **没有 `id`**：它由后端生成（`cfg_xxx`）。同一条协议可以有多条配置，
+ * 让管理员手填 id 只会撞名；而撞名后唯一可做的决定是「谁让」——没有业务价值。
+ * `presetKey` 只是下拉框的选中值，用于「从模板填表」，不参与提交。
+ */
+const showCreate = ref(false)
 const form = ref({
-  id: '',
+  presetKey: '',
   name: '',
   protocol: 'openai_compatible',
   base_url: '',
-  api_key_env_var: '',
+  api_key: '',
   default_model: '',
   max_tokens: 4096,
   context_window: 0,
 })
 
+/** 正在编辑的那一条（`null` = 没在编辑）。编辑面板独立于新增表单。 */
+const editing = ref<Provider | null>(null)
+const savingEdit = ref(false)
+const editForm = ref({
+  name: '',
+  base_url: '',
+  api_key: '',
+  clear_key: false,
+  default_model: '',
+  max_tokens: 4096,
+  context_window: 0,
+  max_output: 0,
+  thinking_enabled: false,
+})
+
 /** 测试连接的结果（按供应商 id 存） */
 const testResults = ref<Record<string, { ok: boolean; detail: string }>>({})
+/** 已查看过明文的密钥（按 id 存；只在本页内存里，刷新即消失） */
+const revealedKeys = ref<Record<string, string>>({})
 const testingId = ref('')
 
 const groups = computed<ConfigGroup[]>(() => config.value?.groups ?? [])
 const providers = computed<Provider[]>(() => providerList.value?.providers ?? [])
-const protocols = computed(() => providerList.value?.protocols ?? [])
 const presets = computed(() => providerList.value?.presets ?? [])
 
 function itemOf(groupKey: string, key: string): ConfigItem | undefined {
@@ -245,17 +269,59 @@ async function restoreGroup(group: ConfigGroup) {
   else sayFail(result.message)
 }
 
-/** 用预设填表：省去手记 base_url 与变量名 */
-function applyPreset(presetId: string) {
-  const preset = presets.value.find((p) => p.id === presetId)
+/**
+ * 用模板填表：把「这家怎么接」一次带齐。
+ *
+ * 模板只是**表单初值**，不是一条已存在的配置——`preset.key` 与配置 id（`cfg_xxx`）
+ * 完全是两回事。选完仍可改地址与模型，改完才由后端生成 id。
+ *
+ * 「供应商」这一栏是整张表的**驱动项**：协议、地址、密钥变量名、建议模型都由它带出来。
+ *
+ * 于是有两项**不进表单**：
+ * - **协议**：由供应商决定，创建后也不可改。
+ * - **密钥变量名**：由供应商决定（`ARK_API_KEY` / `DEEPSEEK_API_KEY` …），
+ *   它只是「去哪个环境变量取密钥」的指针，不是需要人来做的决定。
+ *
+ * 都不能改的东西就不该摆在表单里冒充可改项——灰掉的框同样在暗示「这里本该能改」。
+ * 需要核对的场合看得到：列表行的元信息里有变量名，协议在列表与编辑标题上。
+ */
+function onPickPreset(event: Event) {
+  const presetKey = (event.target as HTMLSelectElement).value
+  if (!presetKey) {
+    // 回到「还没选」：不动已填的值，只把驱动项清掉
+    form.value.presetKey = ''
+    return
+  }
+
+  const preset = presets.value.find((p) => p.key === presetKey)
   if (!preset) return
+
+  // 配置名只在这两种情况下跟着模板走：还没填、或还是**上一个模板**带出来的名字。
+  // 否则会把用户自己起的「方舟-生产」冲掉。
+  const previousName = presets.value.find((p) => p.key === form.value.presetKey)?.name ?? ''
+  const keepName = form.value.name.trim() && form.value.name !== previousName
+
   form.value = {
-    id: preset.id,
-    name: preset.name,
+    presetKey,
+    name: keepName ? form.value.name : preset.name,
     protocol: preset.protocol,
     base_url: preset.base_url,
-    api_key_env_var: preset.api_key_env_var,
+    // 换供应商时保留已填的密钥（它跟供应商模板无关，由管理员自己录入）。
+    api_key: form.value.api_key,
     default_model: preset.default_model,
+    max_tokens: form.value.max_tokens,
+    context_window: form.value.context_window,
+  }
+}
+
+function resetCreateForm() {
+  form.value = {
+    presetKey: '',
+    name: '',
+    protocol: 'openai_compatible',
+    base_url: '',
+    api_key: '',
+    default_model: '',
     max_tokens: 4096,
     context_window: 0,
   }
@@ -263,10 +329,36 @@ function applyPreset(presetId: string) {
 
 async function onCreate() {
   if (creating.value) return
+  // 只做「必填」这一层提示，真正的规则仍在后端（名字为空它会 400）。
+  // 这里拦一下是为了不让一次明显的空填跑一趟网络、再回一句同样的话。
+  //
+  // 供应商也是必选：协议、地址、变量名全靠它带出来。没选就提交，得到的是
+  // 一条「协议默认 openai_compatible、地址空着」的配置——看着建成了，第一次
+  // 生成才报错，而报错里还看不出是当初少选了一步。
+  if (!form.value.presetKey) {
+    sayFail('请先选供应商——协议和地址都由它决定')
+    return
+  }
+  if (!form.value.name.trim()) {
+    sayFail('请先填配置名——列表里就靠它认出这是哪一条')
+    return
+  }
   creating.value = true
-  const payload = { ...form.value, max_tokens: Number(form.value.max_tokens) || 4096 }
+  const payload = {
+    name: form.value.name.trim(),
+    protocol: form.value.protocol,
+    base_url: form.value.base_url,
+    // 密钥是明文，只用于本次加密入库；留空表示暂不配。
+    ...(form.value.api_key ? { api_key: form.value.api_key } : {}),
+    default_model: form.value.default_model,
+    max_tokens: Number(form.value.max_tokens) || 4096,
+    context_window: Number(form.value.context_window) || 0,
+  }
+  let createdWarning = ''
   const result = await toResult(async () => {
-    providerList.value = await createProvider(payload)
+    const created = await createProvider(payload)
+    createdWarning = created.warning
+    providerList.value = created
     await load()
   })
   creating.value = false
@@ -275,17 +367,85 @@ async function onCreate() {
     sayFail(result.message)
     return
   }
-  form.value = {
-    id: '',
-    name: '',
-    protocol: 'openai_compatible',
-    base_url: '',
-    api_key_env_var: '',
-    default_model: '',
-    max_tokens: 4096,
-    context_window: 0,
+  resetCreateForm()
+  showCreate.value = false
+  // 后端会在「这是第一条、已自动设为使用中」或「密钥还没配」时给一句 warning。
+  // 直接用它，而不是自己拼一句固定话：判断在服务端，前端再拼一遍就会漂移。
+  sayOk(createdWarning || '配置已添加。填入密钥后点「测试连接」验证')
+}
+
+/**
+ * 打开编辑面板：把这一条**可改**的值抄进表单。
+ *
+ * 协议与密钥变量名都不抄——它们由供应商决定、创建后不可改（换供应商请新建一条）。
+ * 不抄也就不会出现在请求体里，这两项保持原值。
+ */
+function openEdit(provider: Provider) {
+  editing.value = provider
+  editForm.value = {
+    name: provider.name,
+    base_url: provider.base_url,
+    api_key: '',
+    clear_key: false,
+    default_model: provider.default_model,
+    max_tokens: provider.max_tokens,
+    context_window: provider.context_window,
+    max_output: provider.max_output,
+    thinking_enabled: provider.thinking_enabled,
   }
-  sayOk('供应商已添加。记得在 .env 里配好密钥变量，然后点「测试连接」验证')
+}
+
+function cancelEdit() {
+  editing.value = null
+}
+
+/**
+ * 保存编辑。
+ *
+ * ⚠️ **不发 `protocol`**：它由供应商决定、创建后不可改。密钥单独用 `api_key` 字段提交
+ * （换供应商等于换一家厂商，参数语义与密钥变量全变）。它们不在表单里，也就不会出现在
+ * 请求体里——发了相同值虽然会放行，但那份「看起来能改」的请求体会让下一个人以为它真的能改。
+ */
+async function onSaveEdit() {
+  const target = editing.value
+  if (!target || savingEdit.value) return
+  if (!editForm.value.name.trim()) {
+    sayFail('配置名不能为空')
+    return
+  }
+
+  savingEdit.value = true
+  const result = await toResult(async () => {
+    providerList.value = await updateProvider(target.id, {
+      name: editForm.value.name.trim(),
+      base_url: editForm.value.base_url,
+      ...(editForm.value.api_key ? { api_key: editForm.value.api_key } : {}),
+      ...(editForm.value.clear_key ? { clear_key: true } : {}),
+      default_model: editForm.value.default_model,
+      max_tokens: Number(editForm.value.max_tokens) || 4096,
+      context_window: Number(editForm.value.context_window) || 0,
+      max_output: Number(editForm.value.max_output) || 0,
+      thinking_enabled: editForm.value.thinking_enabled,
+    })
+    await load()
+  })
+  savingEdit.value = false
+
+  if (!result.ok) {
+    sayFail(result.message)
+    return
+  }
+  editing.value = null
+  sayOk(`「${target.name}」已更新（下一次生成生效）`)
+}
+
+/** 查看密钥明文：点一次取一次，并写进审计（后端负责）。 */
+async function revealKey(provider: Provider) {
+  const result = await toResult(async () => {
+    const data = await revealProviderKey(provider.id)
+    revealedKeys.value = { ...revealedKeys.value, [provider.id]: data.api_key }
+  })
+  if (!result.ok) sayFail(result.message)
 }
 
 async function toggleEnabled(provider: Provider) {
@@ -337,10 +497,6 @@ function sourceText(item: ConfigItem): string {
   return item.source === 'db' ? '后台覆盖' : '默认'
 }
 
-function protocolOptionsLabel(value: string): string {
-  return protocols.value.find((p) => p.value === value)?.label ?? value
-}
-
 /** 供应商状态：使用中 / 已停用 / 待命，三态各自带一个标签样式 */
 function providerState(p: Provider): { text: string; cls: string } {
   if (p.active) return { text: '使用中', cls: 'brut-tag-sky' }
@@ -364,6 +520,8 @@ onMounted(load)
       </div>
       <p class="mt-3 max-w-3xl text-sm text-body">
         改完保存后立即作用于<b class="text-ink">下一次生成</b>；正在跑的任务不受影响。
+        可调项<b class="text-ink">全在这一页</b>——<code class="font-mono">.env</code>
+        里只剩密钥与启动项，没有第二份。
         日志级别、落库开关这类「改了必须重启」的配置不在此页——它们改了不重启只会造成错觉。
       </p>
     </header>
@@ -380,11 +538,14 @@ onMounted(load)
           <div class="min-w-0">
             <p class="kicker text-on-sky/75">当前供应商 · Active Provider</p>
             <p class="mt-1 text-xl font-extrabold tracking-tight">
-              {{ config.active_provider?.name || '（无）' }}
+              {{ config.active_provider?.name || '还没有模型配置' }}
             </p>
             <p class="mt-0.5 font-mono text-xs text-on-sky/80">
-              {{ config.active_provider?.protocol_label || '—' }} ·
-              {{ config.active_provider?.default_model || '未填模型' }}
+              <template v-if="config.active_provider">
+                {{ config.active_provider.protocol_label }} ·
+                {{ config.active_provider.default_model || '未填模型' }}
+              </template>
+              <template v-else>在下方「模型配置」里新增一条即可，生成会立刻可用</template>
             </p>
           </div>
 
@@ -395,7 +556,7 @@ onMounted(load)
                 config.config_source === 'db'
                   ? '数据库（含后台覆盖）'
                   : config.config_source === 'env'
-                    ? '环境变量默认值'
+                    ? '默认值（未在后台改过）'
                     : '降级（表不可用）'
               }}
             </p>
@@ -410,75 +571,109 @@ onMounted(load)
         </p>
       </section>
 
-      <!-- 供应商 -->
+      <!-- 模型配置：一条 = 一个接口 + 一套参数，用列表而不是「一家一张卡」 -->
       <section class="brut-card-lg">
-        <header class="flex flex-wrap items-end justify-between gap-2 border-b-2 border-brut px-4 py-3">
+        <header class="flex flex-wrap items-center justify-between gap-2 border-b-2 border-brut px-4 py-3">
           <div>
             <p class="kicker">Providers</p>
-            <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">模型供应商</h2>
+            <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">模型配置</h2>
           </div>
-          <p class="max-w-md text-xs text-subtle">
-            密钥只按<b class="text-muted">变量名</b>登记，值留在 .env 里，不会进数据库。
-            「测试连接」会真发一次最小调用（约 16 token）——填对参数与真的能用是两件事。
-          </p>
+          <div class="flex flex-wrap items-center justify-end gap-2">
+            <p class="hidden max-w-sm text-xs text-subtle sm:block">
+              密钥只按<b class="text-muted">变量名</b>登记，值留在 .env。
+              同一家可以有多条配置（生产/测试各一条）。
+            </p>
+            <button
+              type="button"
+              class="brut-btn brut-btn-xs brut-btn-primary"
+              @click="showCreate = !showCreate"
+            >
+              {{ showCreate ? '收起表单' : '+ 新增配置' }}
+            </button>
+          </div>
         </header>
 
-        <!-- 供应商卡片：一块一家，比表格多出的那一列正好放动作按钮 -->
-        <div class="grid gap-3 px-4 py-3 lg:grid-cols-2">
-          <article
+        <!-- 一条都没有：这不是异常状态，是刚装完的样子。
+             ⚠️ 这里不放按钮——右上角那个「+ 新增配置」就在同一屏，
+             两个入口做同一件事只会让人先愣一下「这两个是不是不一样」。 -->
+        <div v-if="!providers.length" class="px-4 py-6">
+          <p class="text-sm font-extrabold tracking-tight text-ink">还没有任何模型配置</p>
+          <p class="mt-1 max-w-xl text-xs text-subtle">
+            点右上角<b class="text-muted">「+ 新增配置」</b>建第一条：选供应商、写个配置名就够。
+            在此之前生成无法进行——地址、模型、密钥变量名全部由这里的配置决定，
+            .env 里不再有第二份。
+          </p>
+        </div>
+
+        <ul v-else class="divide-y-2 divide-brut">
+          <li
             v-for="p in providers"
             :key="p.id"
-            class="brut-card flex flex-col p-3"
-            :class="p.active ? 'border-[3px] border-brut' : ''"
+            class="grid grid-cols-1 items-start gap-2 px-4 py-3 lg:grid-cols-[6.5rem_minmax(0,1fr)_auto]"
           >
-            <div class="flex flex-wrap items-start justify-between gap-2">
-              <div class="min-w-0">
-                <div class="flex flex-wrap items-center gap-1.5">
-                  <h3 class="text-sm font-extrabold tracking-tight text-ink">{{ p.name }}</h3>
-                  <span class="brut-tag" :class="providerState(p).cls">
-                    {{ providerState(p).text }}
-                  </span>
-                  <span v-if="p.builtin" class="brut-tag brut-tag-slab">内置</span>
-                </div>
-                <p class="mt-0.5 font-mono text-[11px] text-subtle">{{ p.id }}</p>
-              </div>
+            <!-- 状态：实心点＝使用中，空心点＝待命/停用。
+                 形状与颜色同时变化，不依赖单一通道（色弱也能分清）。 -->
+            <div class="flex items-center gap-1.5">
+              <span
+                class="inline-block h-2.5 w-2.5 shrink-0 rounded-full border-2 border-brut"
+                :class="p.active ? 'bg-sky' : 'bg-card'"
+              />
+              <span class="brut-tag" :class="providerState(p).cls">
+                {{ providerState(p).text }}
+              </span>
             </div>
 
-            <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-              <div>
-                <dt class="kicker">协议</dt>
-                <dd class="mt-0.5">{{ p.protocol_label }}</dd>
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-baseline gap-1.5">
+                <span class="text-sm font-extrabold tracking-tight text-ink">{{ p.name }}</span>
+                <span class="text-subtle">·</span>
+                <span class="font-mono text-xs text-muted">{{ p.default_model || '未填模型' }}</span>
               </div>
-              <div>
-                <dt class="kicker">默认模型</dt>
-                <dd class="mt-0.5 truncate font-mono text-[11px]">{{ p.default_model || '—' }}</dd>
-              </div>
-              <div class="col-span-2">
-                <dt class="kicker">密钥变量</dt>
-                <dd class="mt-0.5 font-mono text-[11px]">
-                  <span :class="p.key_present ? 'text-ink' : 'text-danger-fg'">
-                    {{ p.api_key_env_var || '—（无需）' }}
-                  </span>
-                  <span v-if="p.api_key_env_var && !p.key_present" class="ml-1 font-bold text-danger-fg">
-                    尚未配置
-                  </span>
-                </dd>
-              </div>
-            </dl>
 
-            <p
-              v-if="testResults[p.id]"
-              class="mt-2 border-l-4 pl-2 text-[11px] font-bold"
-              :class="
-                testResults[p.id]!.ok
-                  ? 'border-success-line text-success-fg'
-                  : 'border-danger-line text-danger-fg'
-              "
-            >
-              {{ testResults[p.id]!.ok ? '连通正常' : '连接失败' }} · {{ testResults[p.id]!.detail }}
-            </p>
+              <!-- 机器可读的那一行：协议 / 密钥变量 / 输出上限。
+                   密钥变量名之后只跟「有没有值」，绝不显示值本身。 -->
+              <p class="mt-1 flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-subtle">
+                <span>{{ p.protocol }}</span>
+                <span>｜</span>
+                <span>密钥</span>
+                <span v-if="p.key_present" class="font-bold text-success-fg">✓ 已配置</span>
+                <span v-else class="font-bold text-danger-fg">⚠ 未配置</span>
+                <button
+                  v-if="p.key_present"
+                  type="button"
+                  class="brut-btn brut-btn-xs"
+                  @click="revealKey(p)"
+                >
+                  查看密钥
+                </button>
+                <span>｜</span>
+                <span>max_tokens {{ p.max_tokens }}</span>
+              </p>
 
-            <div class="mt-3 flex flex-wrap gap-1.5 border-t-2 border-line pt-2">
+              <p
+                v-if="revealedKeys[p.id]"
+                class="mt-1 break-all border-l-4 border-brut pl-2 font-mono text-[11px]"
+              >
+                密钥：{{ revealedKeys[p.id] }}
+              </p>
+
+              <p
+                v-if="testResults[p.id]"
+                class="mt-1 border-l-4 pl-2 text-[11px] font-bold"
+                :class="
+                  testResults[p.id]!.ok
+                    ? 'border-success-line text-success-fg'
+                    : 'border-danger-line text-danger-fg'
+                "
+              >
+                {{ testResults[p.id]!.ok ? '连通正常' : '连接失败' }} · {{ testResults[p.id]!.detail }}
+              </p>
+            </div>
+
+            <!-- 动作：主操作在最右。
+                 ⚠️ 「使用中的不能删」这条**不在这里判断**——按钮照给，让后端用 403 + 原话
+                 回答。前端藏起按钮只会让人以为「这行坏了」，而且规则一改两边就不一致。 -->
+            <div class="flex flex-wrap items-center gap-1.5 lg:justify-end">
               <button
                 v-if="!p.active"
                 type="button"
@@ -486,8 +681,9 @@ onMounted(load)
                 :disabled="!p.enabled"
                 @click="pendingProvider = { action: 'activate', provider: p }"
               >
-                激活
+                设为使用中
               </button>
+              <button type="button" class="brut-btn brut-btn-xs" @click="openEdit(p)">编辑</button>
               <button
                 type="button"
                 class="brut-btn brut-btn-xs"
@@ -496,15 +692,10 @@ onMounted(load)
               >
                 {{ testingId === p.id ? '测试中…' : '测试连接' }}
               </button>
-              <button
-                type="button"
-                class="brut-btn brut-btn-xs"
-                @click="toggleEnabled(p)"
-              >
+              <button type="button" class="brut-btn brut-btn-xs" @click="toggleEnabled(p)">
                 {{ p.enabled ? '停用' : '启用' }}
               </button>
               <button
-                v-if="!p.builtin && !p.active"
                 type="button"
                 class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
                 @click="pendingProvider = { action: 'delete', provider: p }"
@@ -512,48 +703,135 @@ onMounted(load)
                 删除
               </button>
             </div>
-          </article>
+          </li>
+        </ul>
+
+        <!-- 编辑面板：协议不在表单里（它在标题行当标签显示） -->
+        <div v-if="editing" class="border-t-2 border-brut px-4 py-4">
+          <header class="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 class="text-sm font-extrabold tracking-tight text-ink">
+              编辑「{{ editing.name }}」
+            </h3>
+            <!-- 协议放这里而不是表单格：它改不了，就不该长得像一个输入框。
+                 想看「这条走的是哪套协议」时，这一行照旧答得出来。 -->
+            <span class="flex flex-wrap items-baseline gap-2">
+              <span class="brut-tag">{{ editing.protocol_label }}</span>
+              <span class="font-mono text-[11px] text-subtle">{{ editing.id }}</span>
+            </span>
+          </header>
+
+          <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label class="block">
+              <span class="brut-label">配置名（必填）</span>
+              <input v-model="editForm.name" type="text" class="brut-field" />
+            </label>
+
+            <label class="block sm:col-span-2">
+              <span class="brut-label">base_url</span>
+              <input v-model="editForm.base_url" type="text" class="brut-field font-mono" />
+            </label>
+
+            <!-- 密钥：留空表示不动；填了才会重加密覆盖。明文只在本次提交里出现。 -->
+            <label class="block sm:col-span-2">
+              <span class="brut-label">API 密钥（留空=保持不变）</span>
+              <input
+                v-model="editForm.api_key"
+                type="password"
+                placeholder="填入新密钥才会覆盖"
+                autocomplete="new-password"
+                class="brut-field font-mono"
+              />
+            </label>
+
+            <label class="flex items-center gap-2">
+              <input v-model="editForm.clear_key" type="checkbox" />
+              <span class="brut-label">清空密钥</span>
+            </label>
+            <label class="block">
+              <span class="brut-label">默认模型</span>
+              <input v-model="editForm.default_model" type="text" class="brut-field font-mono" />
+            </label>
+
+            <label class="block">
+              <span class="brut-label">输出上限（max_tokens）</span>
+              <input v-model.number="editForm.max_tokens" type="number" class="brut-field" />
+            </label>
+
+            <label class="block">
+              <span class="brut-label">上下文窗口（0=用内置默认）</span>
+              <input v-model.number="editForm.context_window" type="number" class="brut-field" />
+            </label>
+
+            <label class="block">
+              <span class="brut-label">预留输出（0=用内置默认）</span>
+              <input v-model.number="editForm.max_output" type="number" class="brut-field" />
+            </label>
+
+            <label class="block">
+              <span class="brut-label">思考模式</span>
+              <select v-model="editForm.thinking_enabled" class="brut-field">
+                <option :value="false">关闭</option>
+                <option :value="true">开启</option>
+              </select>
+            </label>
+          </div>
+
+          <p class="mt-2 text-xs text-subtle">
+            换供应商请<b class="text-muted">新建一条配置</b>：协议一变，
+            <code class="font-mono">max_tokens</code> 与思考模式的语义全都不同，
+            就地改会留下半新半旧的字段。
+          </p>
+
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="brut-btn brut-btn-primary"
+              :disabled="savingEdit"
+              @click="onSaveEdit"
+            >
+              {{ savingEdit ? '保存中…' : '保存修改' }}
+            </button>
+            <button type="button" class="brut-btn" @click="cancelEdit">取消</button>
+          </div>
         </div>
 
-        <!-- 新增供应商 -->
-        <div class="border-t-2 border-brut px-4 py-4">
-          <h3 class="text-sm font-extrabold tracking-tight text-ink">新增供应商</h3>
+        <!-- 新增配置 -->
+        <div v-if="showCreate" class="border-t-2 border-brut px-4 py-4">
+          <h3 class="text-sm font-extrabold tracking-tight text-ink">新增配置</h3>
           <p class="mt-0.5 text-xs text-subtle">
-            绝大多数厂商都是 OpenAI 兼容：填对 <code class="font-mono">base_url</code> 即可接入，
-            不需要装新依赖。地址会变，以官方文档为准。
+            选好<b class="text-muted">供应商</b>，协议与地址就定了，剩下只要写配置名和模型。
+            要接自建网关，选「本地 vLLM / Ollama」或「自建网关」再把地址改成你的端点。
           </p>
 
           <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <label class="block">
-              <span class="brut-label">从预设填充</span>
-              <select
-                class="brut-field"
-                @change="applyPreset(($event.target as HTMLSelectElement).value)"
-              >
-                <option value="">（手动填写）</option>
-                <option v-for="preset in presets" :key="preset.id" :value="preset.id">
+              <span class="brut-label">供应商</span>
+              <select class="brut-field" :value="form.presetKey" @change="onPickPreset">
+                <option value="">请选择供应商…</option>
+                <option v-for="preset in presets" :key="preset.key" :value="preset.key">
                   {{ preset.name }}
                 </option>
               </select>
             </label>
 
             <label class="block">
-              <span class="brut-label">id（身份，创建后不可改）</span>
-              <input v-model="form.id" type="text" placeholder="如 deepseek" class="brut-field font-mono" />
+              <span class="brut-label">配置名（必填，可重名）</span>
+              <input
+                v-model="form.name"
+                type="text"
+                placeholder="如 方舟-生产"
+                class="brut-field"
+              />
             </label>
 
             <label class="block">
-              <span class="brut-label">协议</span>
-              <select v-model="form.protocol" class="brut-field">
-                <option v-for="opt in protocols" :key="opt.value" :value="opt.value">
-                  {{ opt.label }}
-                </option>
-              </select>
-            </label>
-
-            <label class="block">
-              <span class="brut-label">展示名</span>
-              <input v-model="form.name" type="text" placeholder="如 DeepSeek" class="brut-field" />
+              <span class="brut-label">默认模型</span>
+              <input
+                v-model="form.default_model"
+                type="text"
+                placeholder="deepseek-chat"
+                class="brut-field font-mono"
+              />
             </label>
 
             <label class="block sm:col-span-2">
@@ -566,22 +844,14 @@ onMounted(load)
               />
             </label>
 
-            <label class="block">
-              <span class="brut-label">密钥变量名（不是密钥本身）</span>
+            <!-- 密钥：明文只在提交时出现，后端加密入库。本地 vLLM 可填 not-needed。 -->
+            <label class="block sm:col-span-2">
+              <span class="brut-label">API 密钥（加密入库；本地服务可填 not-needed）</span>
               <input
-                v-model="form.api_key_env_var"
-                type="text"
-                placeholder="DEEPSEEK_API_KEY"
-                class="brut-field font-mono"
-              />
-            </label>
-
-            <label class="block">
-              <span class="brut-label">默认模型</span>
-              <input
-                v-model="form.default_model"
-                type="text"
-                placeholder="deepseek-chat"
+                v-model="form.api_key"
+                type="password"
+                placeholder="留空=稍后再配"
+                autocomplete="new-password"
                 class="brut-field font-mono"
               />
             </label>
@@ -604,7 +874,7 @@ onMounted(load)
               :disabled="creating"
               @click="onCreate"
             >
-              {{ creating ? '添加中…' : '添加供应商' }}
+              {{ creating ? '添加中…' : '添加配置' }}
             </button>
             <p class="text-xs text-subtle">
               自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
@@ -751,7 +1021,7 @@ onMounted(load)
           切换到「{{ pendingProvider.provider.name }}」？下一次生成起所有模型调用都会走这家。
         </p>
         <p v-if="!pendingProvider.provider.key_present" class="mt-1 text-xs">
-          注意：{{ pendingProvider.provider.api_key_env_var }} 当前没有值，切过去后生成会直接报错。
+          注意：这条配置还没有密钥，切过去后生成会直接报错。
         </p>
       </template>
       <p v-else class="text-sm font-bold">

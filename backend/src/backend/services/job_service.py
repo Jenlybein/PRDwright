@@ -455,9 +455,12 @@ def dispatch(
     自动随任务带走，`run_summary` 里能直接读到，无需任何显式传参。
     """
     config = get_runtime_config()
-    # 这一笔 meter 记的是「这次任务**实际**用了哪家、哪个模型」——所以取激活供应商，
-    # 而不是 `DEFAULT_LLM_PROVIDER`：后台切过供应商之后，后者可能与实际发出的请求不符，
+    # 这一笔 meter 记的是「这次任务**实际**用了哪条配置、哪个模型」——所以取使用中的那条，
+    # 而不是 `DEFAULT_LLM_PROVIDER`：后台切过配置之后，后者可能与实际发出的请求不符，
     # 回执与账单就对不上了。
+    #
+    # 四个字段分开传：`protocol` 用于查限值/聚合账单，`config_id` 用于定位到具体一条，
+    # `name` 是给人看的快照。合成一个字符串会在「同一协议两条配置」时分不清账。
     spec = config.active_provider
     runtime = JobRuntime(
         job_id=job_id,
@@ -472,8 +475,10 @@ def dispatch(
         last_flush_at=time.monotonic(),
         meter=RunMeter(
             kind=kind,
-            provider=spec.protocol if spec is not None else "",
+            protocol=spec.protocol if spec is not None else "",
             model=spec.model if spec is not None else "",
+            config_id=spec.id if spec is not None else "",
+            name=spec.name if spec is not None else "",
         ),
         config=config,
     )
@@ -969,6 +974,15 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     # 不用把每行 JSON 取回解析。取不到就当 0——宁可少算，不猜数字。
     prompt_tokens = int(summary.get("prompt_tokens") or 0)
     completion_tokens = int(summary.get("completion_tokens") or 0)
+    # 供应商快照同理：五列都从**同一份** summary 里取，不另外读一次配置。
+    # 它必须落在这行自己身上（而不是只留 config_id 回查）：配置会被改名/删除，
+    # 回查等于让历史账单跟着今天的状态变。
+    provider_snapshot = {
+        "provider_protocol": str(summary.get("protocol") or ""),
+        "provider_config_id": str(summary.get("provider_config_id") or ""),
+        "provider_name": str(summary.get("provider_name") or ""),
+        "provider_model": str(summary.get("model") or ""),
+    }
     if status == "completed":
         GenerationJobRepository.finish(
             runtime.owner_id,
@@ -979,6 +993,7 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             pending_items=runtime.pending_items,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            provider=provider_snapshot,
         )
         _write_document(runtime, summary)
     else:
@@ -994,6 +1009,7 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             pending_items=runtime.pending_items,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            provider=provider_snapshot,
         )
 
     # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`

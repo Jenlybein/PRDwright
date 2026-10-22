@@ -188,7 +188,22 @@ class RunSummary(BaseModel):
             "也更不该拿它做重试决策——真正的拦截在超顶时已经转成 `error` 事件了。"
         ),
     )
-    provider: str = Field(default="", description="最终使用的供应商")
+    protocol: str = Field(
+        default="",
+        description="实际使用的**协议**（ark / openai_compatible / anthropic …）。"
+        "它是「用哪套适配器、查哪组限值」的判据，也是账单按供应商聚合的口径。"
+        "⚠️ 不是配置名、也不是配置 id。",
+    )
+    provider_config_id: str = Field(
+        default="",
+        description="实际使用的**配置条目** id：`cfg_xxx`；若来自环境变量合成，则是 "
+        "`env:ark` 这种带前缀的伪 id（表示这次没用库里的配置）。排障时按它可以定位到具体一条。",
+    )
+    provider_name: str = Field(
+        default="",
+        description="配置名的**快照**（如「方舟-生产」）。存快照不存指针：配置可以被改名、"
+        "被删除，历史回执仍要能解释「当时用的是哪一条」。",
+    )
     model: str = Field(default="", description="最终使用的模型名")
     request_id: str = Field(default="", description="该次生成所属请求的追踪 id")
     partial: bool = Field(

@@ -698,34 +698,43 @@ export interface SystemConfig {
   missing_key: string
 }
 
-/** 一家供应商（⚠️ 不含任何密钥值） */
+/**
+ * 一条模型配置（⚠️ 不含任何密钥值）。
+ *
+ * `id` 是**配置条目**的身份（`cfg_xxx`，后端生成），不是供应商/协议名——
+ * 同一协议可以有多条配置（「方舟-生产」「方舟-测试」），所以界面上任何
+ * 「按协议去重」的想法都是错的。
+ */
 export interface Provider {
   id: string
   name: string
   protocol: string
   protocol_label: string
   base_url: string
-  api_key_env_var: string
-  /** 该变量当前是否有值（只回布尔） */
+  /** 是否已有可用密钥（只回布尔；密钥值永远不出后端） */
   key_present: boolean
   default_model: string
   max_tokens: number
   context_window: number
   max_output: number
   thinking_enabled: boolean
-  builtin: boolean
   enabled: boolean
   sort_order: number
   active: boolean
   extra: Record<string, unknown>
 }
 
+/**
+ * 新增配置时的**表单模板**（选一家自动填好协议、地址与变量名）。
+ *
+ * `key` 只是下拉框的 value，**不是**配置 id——配置 id 由后端生成。
+ * 字段名从 `id` 改成 `key` 就是为了让这个区别在类型上就看得出来。
+ */
 export interface ProviderPreset {
-  id: string
+  key: string
   name: string
   protocol: string
   base_url: string
-  api_key_env_var: string
   default_model: string
 }
 
@@ -780,23 +789,38 @@ export async function fetchProviders(): Promise<ProviderList> {
   }
 }
 
-/** 新增供应商。对应 `POST /api/admin/providers`。 */
+/**
+ * 新增一条配置。对应 `POST /api/admin/providers`。
+ *
+ * ⚠️ **没有 `id`**：它由后端生成（`cfg_xxx`）。让管理员手填 id 只会撞名，
+ * 而撞名后唯一可做的决定是「谁让」——没有业务价值。
+ *
+ * ⚠️ `name` **必填**：它是列表里唯一能让人认出「这是哪一条」的东西。
+ * 允许重名（身份是 id），所以不必为了避开重名去起「方舟-2」这种名字。
+ */
 export async function createProvider(payload: {
-  id: string
-  name?: string
+  name: string
   protocol: string
   base_url?: string
-  api_key_env_var?: string
+  /** 密钥明文；只用于本次加密入库，响应里不会返回 */
+  api_key?: string
   default_model?: string
   max_tokens?: number
   context_window?: number
   max_output?: number
+  thinking_enabled?: boolean
 }): Promise<ProviderList> {
   const { data } = await http.post<ProviderList>('/api/admin/providers', payload)
   return data
 }
 
-/** 编辑供应商。对应 `PATCH /api/admin/providers/{id}`。 */
+/**
+ * 编辑一条配置。对应 `PATCH /api/admin/providers/{id}`。
+ *
+ * ⚠️ **协议不可改**：换协议等于换一家厂商，`max_tokens` / `thinking_enabled` 的语义
+ * 全变了。后端对不同的 `protocol` 显式报 400，所以表单里那一项要禁用、
+ * 不要发这个字段——发了也一样（相同值放行、不同值 400）。
+ */
 export async function updateProvider(
   providerId: string,
   payload: Record<string, unknown>,
@@ -833,6 +857,17 @@ export async function activateProvider(providerId: string): Promise<ProviderList
 export async function testProvider(providerId: string): Promise<ProviderTestResult> {
   const { data } = await http.post<ProviderTestResult>(
     `/api/admin/providers/${encodeURIComponent(providerId)}/test`,
+  )
+  return data
+}
+
+/**
+ * 查看密钥明文（一次性；后端每次都会写审计）。
+ * 对应 `POST /api/admin/providers/{id}/reveal-key`。
+ */
+export async function revealProviderKey(providerId: string): Promise<{ api_key: string }> {
+  const { data } = await http.post<{ api_key: string }>(
+    `/api/admin/providers/${encodeURIComponent(providerId)}/reveal-key`,
   )
   return data
 }

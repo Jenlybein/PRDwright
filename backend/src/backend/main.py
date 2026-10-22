@@ -122,7 +122,7 @@ def _startup_llm_label(config) -> str:
     """
     spec = config.active_provider
     if spec is None:
-        return "（无可用供应商）"
+        return "（尚无模型配置）"
     return f"{spec.protocol}/{spec.model or '（未填模型）'}"
 
 

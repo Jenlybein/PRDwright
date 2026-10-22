@@ -153,14 +153,22 @@ def _check_budget(messages: list[BaseMessage]) -> None:
         BudgetExceededError: 估算值超过有效预算。
     """
     meter = current_meter()
-    settings = get_runtime_config().settings
-    if not settings.llm_budget_enabled:
+    config = get_runtime_config()
+    if not config.settings.llm_budget_enabled:
         return
 
     if meter is not None:
-        provider, model, step = meter.provider, meter.model, meter.current_step()
+        # ⚠️ 传的是**协议**（`meter.protocol`），不是配置条目 id。限值注册表的键
+        # 是协议名，传 id 不会报错，只会静默落到 32k 兜底——表现为「换了个 128k
+        # 模型却老报超顶」。
+        provider, model, step = meter.protocol, meter.model, meter.current_step()
     else:
-        provider, model, step = settings.default_llm_provider, settings.default_llm_model, ""
+        # 没有计量器时（脚本 / 单测直接调）只能看「当前使用中那条配置」。
+        # 空值交给 `evaluate` 自己再兜一次，这里不猜默认供应商——env 里已经没有这个配置了。
+        spec = config.active_provider
+        provider = spec.protocol if spec else ""
+        model = spec.model if spec else ""
+        step = ""
 
     decision = enforce(messages, provider=provider, model=model, step=step)
     if meter is not None and decision.warned:
