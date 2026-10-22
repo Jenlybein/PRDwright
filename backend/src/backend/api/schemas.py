@@ -441,6 +441,29 @@ class AdminRevokeSessionsResponse(BaseModel):
     revoked: int = Field(description="实际吊销的会话条数；0 表示该用户当时并未登录")
 
 
+class AdminDeletionPreview(BaseModel):
+    """删除账号前的「会删掉什么 / 会留下什么」。
+
+    存在的理由是删除不可逆且原先只问一句「确认删除」——管理员并不知道自己点掉的
+    是 1 份方案还是 30 份。`retained_*` 两项把「按设计会保留」的数据提前讲明白，
+    免得事后看到日志里还有这个人，以为没删干净。
+    """
+
+    user_id: int = Field(description="目标账号 id")
+    username: str = Field(description="目标账号用户名")
+    solutions: int = Field(description="将被删除的方案数")
+    documents: int = Field(description="将被删除的文档数（三份产物各算一份）")
+    document_versions: int = Field(description="将被删除的正文版本数（含历史版本）")
+    chat_turns: int = Field(description="将被删除的对话轮次数")
+    jobs: int = Field(description="将被删除的生成任务数（平台历史统计会随之减少）")
+    running_jobs: int = Field(description="其中正在运行、删除前会先被取消的任务数")
+    sessions: int = Field(description="将被吊销的登录会话数")
+    prompt_tokens: int = Field(description="这些任务累计消耗的输入 Token")
+    completion_tokens: int = Field(description="这些任务累计消耗的输出 Token")
+    retained_audit: int = Field(description="会保留的操作审计条数（他作为操作者的记录）")
+    retained_logs: int = Field(description="会保留的应用日志条数（运维记录，不是用户数据）")
+
+
 class AdminAuditItem(BaseModel):
     """一条管理员操作记录。"""
 

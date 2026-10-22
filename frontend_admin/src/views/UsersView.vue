@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 用户管理：列表 + 新建 + 启停 / 重置密码 / 强制下线 / 删除。
+ * 用户管理：列表 + 新建 + 启停 / 重置密码 / 强制下线 / 导出 / 删除。
  *
  * 三条交互纪律：
  * 1. **规则由后端说了算**。页面上的禁用按钮只是提示，真正的判断在服务端
@@ -17,6 +17,8 @@ import { computed, onMounted, ref } from 'vue'
 import {
   createUser,
   deleteUser,
+  exportUserData,
+  fetchDeletionPreview,
   fetchUsers,
   messageOf,
   resetUserPassword,
@@ -25,6 +27,7 @@ import {
   setUserAdmin,
   setUserQuota,
   toResult,
+  type AdminDeletionPreview,
   type AdminUser,
   type QuotaSource,
   type UserQuotaPatch,
@@ -45,6 +48,19 @@ const creating = ref(false)
 
 // 删除确认：记住待删的那一行，避免用 confirm() 弹窗（在部分环境被禁用）
 const pendingDelete = ref<AdminUser | null>(null)
+/**
+ * 删除预览与「手打用户名」确认。
+ *
+ * 删除不可逆，原先只有一句「确定删除？」——管理员并不知道自己点掉的是 1 份方案
+ * 还是 30 份。现在先拉一次预览把条数摆出来，并要求**手打被删的用户名**，
+ * 打错按钮就是灰的（防的是「手滑点两下」这种最常见的误删）。
+ */
+const preview = ref<AdminDeletionPreview | null>(null)
+const previewLoading = ref(false)
+const deleteConfirmText = ref('')
+const deleting = ref(false)
+/** 正在导出哪一行（导出可能有点慢，按钮要给出反应，否则会被连点） */
+const exportingId = ref<number | null>(null)
 /**
  * 强制下线确认。与删除同样走面板而非 `confirm()`：
  * 这一步会把对方当前的登录立刻踢掉，说清「只踢下线、不禁登录」比一个系统弹窗有用。
@@ -221,15 +237,65 @@ async function onResetPassword(user: AdminUser) {
   sayOk(`${user.username} 的密码已重置`)
 }
 
+/**
+ * 打开删除面板：先拉预览。
+ *
+ * 预览拉不到（网络抖动 / 后端报错）**不拦着删除**——真删不动的时候后端会给出理由，
+ * 而「因为预览挂了所以不能删」会让管理员卡在一个没有出口的界面里。
+ * 这里只把数字留空，并在面板里说明「明细暂时取不到」。
+ */
+async function openDelete(user: AdminUser) {
+  pendingDelete.value = user
+  preview.value = null
+  deleteConfirmText.value = ''
+  previewLoading.value = true
+  const result = await toResult(() => fetchDeletionPreview(user.id))
+  previewLoading.value = false
+  // 期间可能已经关掉或换了另一行，别把旧结果写进去
+  if (pendingDelete.value?.id !== user.id) return
+  preview.value = result.ok ? result.value : null
+  if (!result.ok) error.value = result.message
+}
+
+/** 手打用户名与目标一致才允许删：防「手滑点两下」这类最常见的误删 */
+const deleteAllowed = computed(
+  () =>
+    !!pendingDelete.value &&
+    deleteConfirmText.value.trim() === pendingDelete.value.username &&
+    !deleting.value,
+)
+
 async function onDelete(user: AdminUser) {
+  if (!deleteAllowed.value) return
+  deleting.value = true
   const result = await toResult(() => deleteUser(user.id))
+  deleting.value = false
   pendingDelete.value = null
+  preview.value = null
+  deleteConfirmText.value = ''
   if (!result.ok) {
     sayFail(result.message)
     return
   }
-  sayOk(`已删除 ${user.username}`)
+  sayOk(`已删除 ${user.username}，其方案、文档与任务已一并清除`)
   await load()
+}
+
+/**
+ * 导出账号数据（ZIP）。
+ *
+ * 失败理由要原样显示：后端会区分「账号不存在」与「数据超过导出上限」，
+ * 两者都远好过一句「导出失败」。下载本身由 service 层触发（见 `exportUserData`）。
+ */
+async function onExport(user: AdminUser) {
+  exportingId.value = user.id
+  const result = await toResult(() => exportUserData(user))
+  exportingId.value = null
+  if (!result.ok) {
+    sayFail(result.message)
+    return
+  }
+  sayOk(`已导出 ${user.username} 的数据`)
 }
 
 /**
@@ -415,6 +481,15 @@ function totalTokens(user: AdminUser): number {
                 </button>
                 <button
                   type="button"
+                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body disabled:opacity-50"
+                  :disabled="exportingId === user.id"
+                  title="导出他的方案、文档正文、对话记录与任务明细（ZIP）"
+                  @click="onExport(user)"
+                >
+                  {{ exportingId === user.id ? '导出中…' : '导出' }}
+                </button>
+                <button
+                  type="button"
                   class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
                   :disabled="!user.is_active"
                   :title="user.is_active ? '吊销他的登录会话，下次请求即失效' : '账号已停用，本就无法登录'"
@@ -425,7 +500,7 @@ function totalTokens(user: AdminUser): number {
                 <button
                   type="button"
                   class="rounded-control border border-danger-line px-2.5 py-1 text-xs text-danger-fg"
-                  @click="pendingDelete = user"
+                  @click="openDelete(user)"
                 >
                   删除
                 </button>
@@ -558,16 +633,55 @@ function totalTokens(user: AdminUser): number {
       <p class="text-sm text-danger-fg">
         确定删除「{{ pendingDelete.username }}」？其方案、文档与任务会一并清除，且无法恢复。
       </p>
+
+      <!-- 明细：删之前先让人看清「删掉多少、留下什么」 -->
+      <div v-if="previewLoading" class="mt-2 text-xs text-danger-fg">正在统计将删除的数据…</div>
+      <div v-else-if="preview" class="mt-2 space-y-1 text-xs text-danger-fg">
+        <p>
+          将删除：方案 {{ preview.solutions }} 份 · 文档 {{ preview.documents }} 篇（含
+          {{ preview.document_versions }} 个历史版本）· 对话 {{ preview.chat_turns }} 条 ·
+          任务 {{ preview.jobs }} 个
+          <span v-if="preview.running_jobs > 0">
+            （其中 {{ preview.running_jobs }} 个正在运行，会先被取消）
+          </span>
+        </p>
+        <p v-if="preview.sessions > 0">将同时吊销他当前的 {{ preview.sessions }} 条登录会话。</p>
+        <p>
+          会保留：操作审计 {{ preview.retained_audit }} 条、平台日志
+          {{ preview.retained_logs }} 条 —— 这两类按设计不随账号删除。
+        </p>
+        <p class="font-medium">
+          注意：任务记录会被一并删除，因此平台的总任务数与总 Token、以及历史图表都会随之减少。
+        </p>
+      </div>
+      <p v-else class="mt-2 text-xs text-danger-fg">
+        明细暂时取不到（不影响删除，但建议先刷新再操作）。
+      </p>
+
       <p class="mt-1 text-xs text-danger-fg">
         如果只是想禁止他登录，请改用「停用」。
       </p>
+
+      <label class="mt-3 block text-xs text-danger-fg">
+        请输入「{{ pendingDelete.username }}」以确认：
+        <input
+          v-model="deleteConfirmText"
+          data-testid="delete-confirm-input"
+          type="text"
+          class="mt-1 w-56 rounded-control border border-danger-line bg-surface px-2 py-1 text-sm text-fg"
+          :placeholder="pendingDelete.username"
+          autocomplete="off"
+        />
+      </label>
+
       <div class="mt-3 flex items-center gap-2">
         <button
           type="button"
-          class="rounded-control bg-danger px-3 py-1.5 text-sm text-on-accent"
+          class="rounded-control bg-danger px-3 py-1.5 text-sm text-on-accent disabled:opacity-50"
+          :disabled="!deleteAllowed"
           @click="onDelete(pendingDelete)"
         >
-          确认删除
+          {{ deleting ? '删除中…' : '确认删除' }}
         </button>
         <button
           type="button"

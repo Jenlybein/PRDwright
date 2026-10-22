@@ -403,6 +403,22 @@ def _attempt_key(username: str) -> str:
     return username.strip().lower()
 
 
+def clear_login_failures(username: str) -> int:
+    """清掉某用户名的登录失败记录，返回清除条数（删除账号时调用）。
+
+    为什么删除账号必须清
+    --------------------
+    失败计数按**用户名**存而不是按 `user_id`（登录时还没有 id——用户可能压根不存在，
+    而「不存在的用户名也要计数」正是防枚举的关键）。代价是它不随账号级联删除：
+    删掉一个失败过 5 次的 `alice`，再注册一个同名 `alice`，新账号一上来就被延时 2 秒，
+    继承了一笔它没欠过的账。
+
+    归一化走 `_attempt_key`，与写计数时同一个键——否则删的时候清的是另一种拼写，
+    行还留着。
+    """
+    return LoginFailureRepository.clear(_attempt_key(username))
+
+
 def _window_start() -> str:
     """统计窗口的起点（UTC ISO 文本；字典序即时间序，可直接在 SQL 里比大小）。"""
     minutes = get_runtime_config().settings.login_failure_window_minutes

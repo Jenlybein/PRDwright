@@ -336,6 +336,28 @@ class GenerationJobRepository:
             return int(cur.rowcount or 0)
 
     @staticmethod
+    def cancel_running_for_owner(owner_id: int, *, message: str) -> int:
+        """把该 owner 名下**所有** running 任务置为 failed + CANCELLED，返回条数。
+
+        用在「删除账号」：账号一旦消失，任务再跑完也没有地方落正文，继续跑只是白烧
+        token——而且收尾那一刻还会去写一个已经不存在的归属。
+
+        与 `cancel_running`（按方案）的区别只有过滤维度：删账号要覆盖他名下**所有**
+        方案，包括还没有方案的逃生口任务（`solution_id IS NULL`），所以这里按
+        `owner_id` 过滤，不加 `solution_id` 条件。
+        """
+        with connect() as conn:
+            cur = conn.execute(
+                "UPDATE generation_jobs "
+                "SET status = 'failed', error_code = 'CANCELLED', "
+                "    error_message = ?, updated_at = ? "
+                "WHERE owner_id = ? AND status = 'running'",
+                (message, utc_now_text(), owner_id),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    @staticmethod
     def reap_running() -> int:
         """系统级维护：把所有残留的 running 任务置为 failed，返回条数。
 

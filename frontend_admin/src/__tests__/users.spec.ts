@@ -28,16 +28,21 @@ vi.mock('@/services/adminService', async (importOriginal) => {
     deleteUser: vi.fn(),
     setUserQuota: vi.fn(),
     revokeUserSessions: vi.fn(),
+    fetchDeletionPreview: vi.fn(),
+    exportUserData: vi.fn(),
   }
 })
 
 import {
   deleteUser,
+  exportUserData,
+  fetchDeletionPreview,
   fetchUsers,
   revokeUserSessions,
   setUserActive,
   setUserAdmin,
   setUserQuota,
+  type AdminDeletionPreview,
   type AdminUser,
 } from '@/services/adminService'
 import { ApiError } from '@/services/errors'
@@ -60,6 +65,28 @@ const adminMock = vi.mocked(setUserAdmin)
 const deleteMock = vi.mocked(deleteUser)
 const quotaMock = vi.mocked(setUserQuota)
 const revokeMock = vi.mocked(revokeUserSessions)
+const previewMock = vi.mocked(fetchDeletionPreview)
+const exportMock = vi.mocked(exportUserData)
+
+/** 删除预览的默认形状：一份方案 + 两篇文档 + 一条对话 + 三个任务 */
+function preview(overrides: Partial<AdminDeletionPreview> = {}): AdminDeletionPreview {
+  return {
+    user_id: 1,
+    username: 'alice',
+    solutions: 1,
+    documents: 2,
+    document_versions: 3,
+    chat_turns: 4,
+    jobs: 5,
+    running_jobs: 0,
+    sessions: 1,
+    prompt_tokens: 100,
+    completion_tokens: 50,
+    retained_audit: 7,
+    retained_logs: 8,
+    ...overrides,
+  }
+}
 
 function user(overrides: Partial<AdminUser> = {}): AdminUser {
   return {
@@ -86,6 +113,10 @@ function user(overrides: Partial<AdminUser> = {}): AdminUser {
 
 async function render(users: AdminUser[]) {
   usersMock.mockResolvedValue(users)
+  // 预览与导出各有默认实现：没有它们，点「删除」时会真的走 axios，
+  // 用例会因为「明细暂时取不到」而照常通过，掩盖掉预览根本没接上的问题。
+  previewMock.mockResolvedValue(preview())
+  exportMock.mockResolvedValue(undefined)
   const wrapper = mount(UsersView, {
     global: { plugins: [createPinia()] },
   })
@@ -97,6 +128,23 @@ async function render(users: AdminUser[]) {
   return wrapper
 }
 
+/** 点「删除」并把预览等回来 */
+async function openDeletePanel(wrapper: Awaited<ReturnType<typeof render>>) {
+  await wrapper.findAll('button').find((b) => b.text() === '删除')!.trigger('click')
+  await vi.waitFor(() => {
+    expect(previewMock).toHaveBeenCalled()
+  })
+  await wrapper.vm.$nextTick()
+}
+
+/** 在删除面板里手打用户名（现在的二次确认要求打字，不再是点两下） */
+async function typeConfirm(wrapper: Awaited<ReturnType<typeof render>>, text: string) {
+  // 按 testid 取，不用 `input[type="text"]`：新建账号表单里也有一个 text 输入，
+  // 按类型取会打到第一个，用例会「通过但验的是别的输入框」。
+  await wrapper.find('[data-testid="delete-confirm-input"]').setValue(text)
+  await wrapper.vm.$nextTick()
+}
+
 beforeEach(() => {
   setActivePinia(createPinia())
   usersMock.mockReset()
@@ -105,6 +153,8 @@ beforeEach(() => {
   deleteMock.mockReset()
   quotaMock.mockReset()
   revokeMock.mockReset()
+  previewMock.mockReset()
+  exportMock.mockReset()
 })
 
 describe('用户管理页', () => {
@@ -145,20 +195,64 @@ describe('用户管理页', () => {
   it('点击删除先弹确认面板，未确认前不发请求', async () => {
     const wrapper = await render([user()])
 
-    const del = wrapper.findAll('button').find((b) => b.text() === '删除')
-    await del!.trigger('click')
-    await wrapper.vm.$nextTick()
+    await openDeletePanel(wrapper)
 
     expect(deleteMock).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('确定删除')
+  })
+
+  it('确认面板显示预览条数与「会保留什么」', async () => {
+    const wrapper = await render([user()])
+
+    await openDeletePanel(wrapper)
+    const text = wrapper.text()
+
+    expect(text).toContain('方案 1 份')
+    expect(text).toContain('文档 2 篇')
+    expect(text).toContain('3 个历史版本')
+    expect(text).toContain('对话 4 条')
+    expect(text).toContain('任务 5 个')
+    // 说明「删了但没删干净」的两类数据，免得事后以为没删掉
+    expect(text).toContain('会保留：操作审计 7 条')
+    expect(text).toMatch(/历史图表都会随之减少/)
+  })
+
+  it('在飞任务要在预览里点名「会先被取消」', async () => {
+    const wrapper = await render([user()])
+    previewMock.mockResolvedValue(preview({ running_jobs: 2 }))
+
+    await openDeletePanel(wrapper)
+
+    expect(wrapper.text()).toContain('其中 2 个正在运行，会先被取消')
+  })
+
+  it('没手打用户名时「确认删除」是禁用的', async () => {
+    const wrapper = await render([user()])
+
+    await openDeletePanel(wrapper)
+    const confirm = wrapper.findAll('button').find((b) => b.text() === '确认删除')!
+
+    expect(confirm.attributes('disabled')).toBeDefined()
+
+    // 打错了也不行
+    await typeConfirm(wrapper, 'alic')
+    expect(
+      wrapper.findAll('button').find((b) => b.text() === '确认删除')!.attributes('disabled'),
+    ).toBeDefined()
+
+    // 打对了才放开
+    await typeConfirm(wrapper, 'alice')
+    expect(
+      wrapper.findAll('button').find((b) => b.text() === '确认删除')!.attributes('disabled'),
+    ).toBeUndefined()
   })
 
   it('确认后才真正删除，并提示已删除', async () => {
     const wrapper = await render([user()])
     deleteMock.mockResolvedValue(undefined)
 
-    await wrapper.findAll('button').find((b) => b.text() === '删除')!.trigger('click')
-    await wrapper.vm.$nextTick()
+    await openDeletePanel(wrapper)
+    await typeConfirm(wrapper, 'alice')
     await wrapper.findAll('button').find((b) => b.text() === '确认删除')!.trigger('click')
 
     await vi.waitFor(() => {
@@ -172,12 +266,53 @@ describe('用户管理页', () => {
     const wrapper = await render([user()])
     deleteMock.mockRejectedValue(rejectedByBackend('这是最后一位管理员，不能删除'))
 
-    await wrapper.findAll('button').find((b) => b.text() === '删除')!.trigger('click')
-    await wrapper.vm.$nextTick()
+    await openDeletePanel(wrapper)
+    await typeConfirm(wrapper, 'alice')
     await wrapper.findAll('button').find((b) => b.text() === '确认删除')!.trigger('click')
 
     await vi.waitFor(() => {
       expect(wrapper.text()).toContain('最后一位管理员')
+    })
+  })
+
+  it('预览取不到时仍可删除（明细缺失不能变成「无法操作」）', async () => {
+    const wrapper = await render([user()])
+    previewMock.mockRejectedValue(rejectedByBackend('服务暂时不可用'))
+    deleteMock.mockResolvedValue(undefined)
+
+    await openDeletePanel(wrapper)
+    expect(wrapper.text()).toContain('明细暂时取不到')
+
+    await typeConfirm(wrapper, 'alice')
+    await wrapper.findAll('button').find((b) => b.text() === '确认删除')!.trigger('click')
+
+    await vi.waitFor(() => {
+      expect(deleteMock).toHaveBeenCalledWith(1)
+    })
+  })
+
+  it('点「导出」调用导出并提示结果', async () => {
+    const wrapper = await render([user()])
+
+    await wrapper.findAll('button').find((b) => b.text() === '导出')!.trigger('click')
+
+    await vi.waitFor(() => {
+      expect(exportMock).toHaveBeenCalled()
+    })
+    expect(exportMock.mock.calls[0]![0]).toMatchObject({ id: 1, username: 'alice' })
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('已导出 alice 的数据')
+    })
+  })
+
+  it('导出失败时原样显示后端理由（如「超过导出上限」）', async () => {
+    const wrapper = await render([user()])
+    exportMock.mockRejectedValue(rejectedByBackend('这个账号的数据超过导出上限（50 MB）'))
+
+    await wrapper.findAll('button').find((b) => b.text() === '导出')!.trigger('click')
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('超过导出上限')
     })
   })
 

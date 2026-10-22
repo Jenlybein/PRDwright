@@ -25,7 +25,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, Response, status
 
 from backend.api import schemas
 from backend.api.deps import require_admin
@@ -298,6 +300,56 @@ async def revoke_sessions(
     return schemas.AdminRevokeSessionsResponse(revoked=revoked)
 
 
+@router.get(
+    "/users/{user_id}/deletion-preview",
+    response_model=schemas.AdminDeletionPreview,
+    summary="删除前预览",
+)
+async def deletion_preview(
+    user_id: int, user: User = Depends(require_admin)
+) -> schemas.AdminDeletionPreview:
+    """删除账号前先看「会删什么、会留什么」。
+
+    不改任何数据。前端拿它在确认面板里列出条数，并提醒「平台历史统计会随之减少」
+    （任务记录是级联删除的，删完之后总量与历史图表都会变小）。
+    """
+    data = admin_service.deletion_preview(user_id)
+    return schemas.AdminDeletionPreview(**data)
+
+
+@router.get(
+    "/users/{user_id}/export",
+    response_class=Response,
+    summary="导出账号数据（ZIP）",
+    responses={200: {"content": {"application/zip": {}}, "description": "账号数据压缩包"}},
+)
+async def export_user_data(
+    user_id: int, user: User = Depends(require_admin)
+) -> Response:
+    """把该账号的方案、文档正文、对话记录与任务明细打成一个 ZIP 下载。
+
+    **只读**，但会留下一条 `user.export` 审计：它把某人的全部内容搬出了系统，
+    事后必须能回答「谁在什么时候导走了谁的数据」。
+
+    `Cache-Control: no-store` 是必须的：响应体是个人数据，任何中间缓存都不该留存。
+    文件名用 RFC 5987 的 `filename*` 再带一份纯 ASCII 兜底，避免中文名在旧客户端
+    退化成 `download.bin`。
+    """
+    payload, filename, _ = admin_service.export_user_data(user, user_id)
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"; '
+                f"filename*=UTF-8''{quote(filename)}"
+            ),
+            "Content-Length": str(len(payload)),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.delete(
     "/users/{user_id}",
     response_model=schemas.AdminOkResponse,
@@ -306,10 +358,13 @@ async def revoke_sessions(
 async def delete_user(
     user_id: int, user: User = Depends(require_admin)
 ) -> schemas.AdminOkResponse:
-    """删除账号，其登录会话一并失效（外键级联），等于强制下线。
+    """彻底删除账号及其数据（不可逆）。
 
-    这是**不可逆**的：方案、文档、任务都跟着走。若只是想暂时禁止登录，
-    应该用「停用」而不是删除。
+    方案、文档与版本、对话轮次、任务记录都会级联删除；在飞任务会**先被取消**
+    （否则它还会继续烧 token 到跑完才发现没有归属可写）。
+
+    与「停用」「强制下线」的区别：停用只是禁止登录、数据都在；强制下线只是踢掉会话。
+    若只是想暂时禁止登录，用停用而不是删除。
     """
     admin_service.delete_user(user, user_id)
     return schemas.AdminOkResponse()

@@ -343,6 +343,113 @@ export async function revokeUserSessions(userId: number): Promise<number> {
   return data.revoked
 }
 
+/**
+ * 删除预览：点「删除」之前先看会删掉什么、会留下什么。
+ * 对应 `GET /api/admin/users/{id}/deletion-preview`。
+ *
+ * 为什么要先问一次：删除不可逆，而原先界面上只有一句「确认删除」，管理员并不知道
+ * 自己点掉的是 1 份方案还是 30 份。`retained_*` 两项则说明「按设计会保留」的数据
+ * （审计与日志），免得事后看到日志里还有这个人，以为没删干净。
+ */
+export interface AdminDeletionPreview {
+  user_id: number
+  username: string
+  solutions: number
+  documents: number
+  document_versions: number
+  chat_turns: number
+  jobs: number
+  running_jobs: number
+  sessions: number
+  prompt_tokens: number
+  completion_tokens: number
+  retained_audit: number
+  retained_logs: number
+}
+
+const PREVIEW_ZERO: AdminDeletionPreview = {
+  user_id: 0,
+  username: '',
+  solutions: 0,
+  documents: 0,
+  document_versions: 0,
+  chat_turns: 0,
+  jobs: 0,
+  running_jobs: 0,
+  sessions: 0,
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  retained_audit: 0,
+  retained_logs: 0,
+}
+
+export async function fetchDeletionPreview(userId: number): Promise<AdminDeletionPreview> {
+  const { data } = await http.get<Partial<AdminDeletionPreview>>(
+    `/api/admin/users/${userId}/deletion-preview`,
+  )
+  // 字段缺失时给 0 而不是 undefined：面板里到处是 `n > 0` 判断，
+  // 一个 undefined 会让「有数据」静默变成「没数据」。
+  const merged = { ...PREVIEW_ZERO, ...(data ?? {}) }
+  return { ...merged, user_id: userId }
+}
+
+/**
+ * 导出账号数据（ZIP 下载）。对应 `GET /api/admin/users/{id}/export`。
+ *
+ * 三处细节都不能省：
+ *
+ * 1. `responseType: 'blob'`：不设的话 axios 会按文本解析二进制，拿到的 zip 打不开。
+ * 2. **错误响应也是 Blob**——由 `api.ts` 的拦截器读回文本再解析，否则管理员只能
+ *    看到「请求失败」，看不到「该用户不存在」这类真理由。
+ * 3. `URL.revokeObjectURL` **要等一拍再调**：立即释放会让部分浏览器来不及取数据，
+ *    表现为「点了导出，下载下来是 0 字节」。
+ */
+export async function exportUserData(user: { id: number; username: string }): Promise<void> {
+  const response = await http.get<Blob>(`/api/admin/users/${user.id}/export`, {
+    responseType: 'blob',
+  })
+  const blob =
+    response.data instanceof Blob
+      ? response.data
+      : new Blob([response.data as unknown as BlobPart], { type: 'application/zip' })
+  const filename =
+    parseFilename(response.headers?.['content-disposition']) ||
+    `prdwright-${user.username}.zip`
+
+  const url = URL.createObjectURL(blob)
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+}
+
+/**
+ * 从 `Content-Disposition` 里取文件名。
+ *
+ * 优先 `filename*=UTF-8''...`（RFC 5987，支持中文），退回 `filename="..."`。
+ * 取不到就返回空串，由调用方给一个兜底名——绝不返回 `download.bin` 这种名字，
+ * 管理员会分不清导的是谁的数据。
+ */
+export function parseFilename(disposition: unknown): string {
+  if (typeof disposition !== 'string') return ''
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1].trim())
+    } catch {
+      // 百分号编码坏了就退回下一分支，不让一个坏 header 拦住下载
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(disposition)
+  return plain?.[1]?.trim() ?? ''
+}
+
 // ---------------------------------------------------------------------------
 // 邀请码管理
 // ---------------------------------------------------------------------------

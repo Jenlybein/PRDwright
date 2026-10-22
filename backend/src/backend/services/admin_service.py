@@ -32,6 +32,7 @@ from backend.core.db import utc_now
 from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories import quota_repo
+from backend.repositories.account_repo import AccountDataRepository
 from backend.repositories.admin_repo import AdminStatsRepository, AuditRepository
 from backend.repositories.auth_repo import (
     AuthSessionRepository,
@@ -40,7 +41,7 @@ from backend.repositories.auth_repo import (
 )
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.log_repo import LogRepository
-from backend.services import auth_service, job_service, quota_service
+from backend.services import auth_service, export_service, job_service, quota_service
 from backend.services.auth_service import User
 
 logger = logging.getLogger(__name__)
@@ -395,14 +396,84 @@ def set_admin(actor: User, user_id: int, is_admin: bool) -> User:
     return user
 
 
+def deletion_preview(user_id: int) -> dict[str, Any]:
+    """删除前先算清楚「会删掉什么、会留下什么」，供确认面板展示。
+
+    为什么要有这一步
+    ----------------
+    删除是**不可逆**的，而原先界面上只有一句「确认删除」——管理员并不知道自己点掉的
+    是 1 份方案还是 30 份。更要紧的是「删了但没删干净」（审计与日志按设计会保留），
+    如果不提前说明，事后看到日志里还有这个人的记录会以为是没删干净。
+
+    ⚠️ 删账号会让平台历史统计变小
+    ---------------------------
+    `generation_jobs` 是级联删除的，所以删完之后「总任务数 / 总 Token」以及过去某天的
+    图表都会一起减少。这是「彻底删除」的必然结果（合规要求就是「当我没来过」），
+    但必须让管理员在点之前就知道，否则会以为统计坏了。前端确认面板里写了这句。
+
+    Raises:
+        AppError: 用户不存在（404）。
+    """
+    row = _row_or_404(user_id)
+    counts = AccountDataRepository.counts(user_id)
+    return {"user_id": int(row["id"]), "username": str(row["username"]), **counts}
+
+
+def export_user_data(actor: User, user_id: int) -> tuple[bytes, str, int]:
+    """把一个账号的数据打成一个 ZIP 包，返回 `(内容, 文件名, 包内文件数)`。
+
+    读别人的数据必须留痕
+    --------------------
+    导出是只读操作，但它**把某人的全部内容搬出了系统**。审计里记一条 `user.export`
+    （含条数与体积），事后才能回答「谁在什么时候导走了谁的数据」。
+    这也是为什么本函数要 `actor` 而不是只留 `user_id`。
+
+    Raises:
+        AppError: 用户不存在（404）或数据超过导出上限（413）。
+    """
+    row = _row_or_404(user_id)
+    payload, filename, file_count = export_service.build_zip(row, exported_by=actor.username)
+    _audit(
+        actor,
+        "user.export",
+        target=str(row["username"]),
+        detail=f"导出 {file_count} 个文件，{len(payload) // 1024} KB",
+    )
+    return payload, filename, file_count
+
+
 def delete_user(actor: User, user_id: int) -> None:
-    """删除账号。级联效果：其登录会话一并失效（外键 ON DELETE CASCADE）。"""
+    """彻底删除账号：先停任务，再删数据，最后清掉不随账号走的那点残留。
+
+    顺序是有讲究的
+    --------------
+    1. **先取消在飞任务**。任务与连接解耦，删号不会让在途协程自己停下；不停的话它会
+       继续调上游烧 token，直到跑完才发现没有归属可写。
+    2. **再删 `users` 行**。会话、方案、文档与版本、对话轮次、任务记录都靠外键
+       `ON DELETE CASCADE` 一起走——级联必须在库里，不能指望调用方逐个记得。
+    3. **最后清 `login_failures`**。这张表按**用户名**记，没有外键、不参与级联；
+       不清的话，删掉一个失败过 N 次的 `alice`、再注册一个同名 `alice`，
+       新账号一上来就被延时——它继承了一笔没欠过的账。
+
+    **不删**的两处（有意保留）：`admin_audit_log`（账号没了更要有据可查）、
+    `app_logs`（运维记录，不是用户业务数据）。
+
+    Raises:
+        AppError: 用户不存在（404）、操作者删自己或最后一位管理员（403）。
+    """
     row = _row_or_404(user_id)
     _reject_locking_out(actor, row, "删除")
 
     username = str(row["username"])
+    cancelled = job_service.cancel_for_user(user_id)
     UserRepository.delete(user_id)
-    _audit(actor, "user.delete", target=username, detail="账号及其数据已删除")
+    cleared = auth_service.clear_login_failures(username)
+    _audit(
+        actor,
+        "user.delete",
+        target=username,
+        detail=f"账号及其数据已删除；取消在飞任务 {cancelled} 个，清理登录失败记录 {cleared} 条",
+    )
 
 
 # ----------------------------------------------------------------------

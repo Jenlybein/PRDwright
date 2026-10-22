@@ -364,6 +364,28 @@ def cancel_for_solution(owner_id: int, solution_id: int) -> int:
     return affected
 
 
+def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务已取消") -> int:
+    """取消某用户名下正在跑的全部任务，返回落库条数（删除账号前必须调用）。
+
+    为什么删号前必须先停任务
+    ------------------------
+    任务与浏览器连接是**解耦**的（刷新只退订、不中断），所以「删账号」这件事
+    并不会让在途的协程自己停下来：它还会继续调上游、继续烧 token，直到跑完才发现
+    方案和账号都没了。
+
+    `_finalize` 里确实有一道兜底（方案不存在就不写文档），但那只是**不写坏数据**，
+    并不省钱。真正让它停下的只有内存运行时上的 `cancelled` 标记。
+
+    与 `cancel_job`（单条）和 `cancel_for_solution`（单方案）同一套机制，区别只有
+    过滤维度是 `owner_id`。
+    """
+    affected = GenerationJobRepository.cancel_running_for_owner(owner_id, message=message)
+    for runtime in _RUNTIMES.values():
+        if runtime.owner_id == owner_id and runtime.status == STATUS_RUNNING:
+            runtime.cancelled = True
+    return affected
+
+
 def _target_product_kind(kind: str, request: dict[str, Any]) -> str | None:
     """任务要**产出/改写**的是哪一份产物；无法确定时返回 `None`。
 

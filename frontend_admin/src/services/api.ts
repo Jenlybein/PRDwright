@@ -49,7 +49,7 @@ function readCode(data: unknown): string {
 
 http.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
     if (!axios.isAxiosError(error)) {
       return Promise.reject(new ApiError(String(error), 0))
     }
@@ -58,8 +58,21 @@ http.interceptors.response.use(
       return Promise.reject(new ApiError(fallbackMessage(0), 0))
     }
     const { status, data } = error.response
+    // 下载类请求带 `responseType: 'blob'`，出错时响应体**也是 Blob**：
+    // 直接按对象读 `detail` 读不到，管理员只能看到「请求失败」这类状态码兜底文案，
+    // 真正的原因（如「该用户不存在」）就丢了。这里把 Blob 读回文本再解析一次。
+    const payload = data instanceof Blob ? await readBlobJson(data) : data
     return Promise.reject(
-      new ApiError(readDetail(data) ?? fallbackMessage(status), status, readCode(data)),
+      new ApiError(readDetail(payload) ?? fallbackMessage(status), status, readCode(payload)),
     )
   },
 )
+
+/** 把错误响应里的 Blob 读回 JSON；不是 JSON 就返回 null（交给兜底文案） */
+async function readBlobJson(blob: Blob): Promise<unknown> {
+  try {
+    return JSON.parse(await blob.text()) as unknown
+  } catch {
+    return null
+  }
+}
