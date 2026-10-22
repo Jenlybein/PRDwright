@@ -431,6 +431,16 @@ class AdminOkResponse(BaseModel):
     ok: bool = Field(default=True, description="是否成功")
 
 
+class AdminRevokeSessionsResponse(BaseModel):
+    """强制下线的结果。
+
+    刻意回**条数**而不是 `ok`：单点登录下每人至多一条会话，`revoked=0` 表示
+    「他本来就没登录」。若只回 ok，管理员无法区分「踢掉了」与「本来就不在」。
+    """
+
+    revoked: int = Field(description="实际吊销的会话条数；0 表示该用户当时并未登录")
+
+
 class AdminAuditItem(BaseModel):
     """一条管理员操作记录。"""
 

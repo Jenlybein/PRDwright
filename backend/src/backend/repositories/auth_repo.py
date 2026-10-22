@@ -1,4 +1,4 @@
-"""认证相关的数据仓储：users / auth_sessions / invite_codes 三张表。
+"""认证相关的数据仓储：users / auth_sessions / invite_codes / login_failures 四张表。
 
 日期时间统一按 **UTC 的 ISO 8601 字符串**存储（不带时区后缀，例如
 `2026-10-13T05:20:00`）。这样字典序与时间序一致，可以直接在 SQL 里比较大小。
@@ -218,6 +218,81 @@ class AuthSessionRepository:
         with connect() as conn:
             cur = conn.execute(
                 "DELETE FROM auth_sessions WHERE expires_at <= ?", (utc_now_text(),)
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    @staticmethod
+    def delete_by_user(user_id: int) -> int:
+        """吊销某用户的全部会话，返回吊销条数（管理员「强制下线」的落点）。
+
+        单点登录（`replace_for_user`）决定了正常情况下每人**至多一条**会话，
+        所以返回值通常是 0 或 1：0 表示他本来就没登录，1 表示确实踢掉了一条。
+        把条数返回出去，管理员才分得清「踢成功了」与「他压根没在线」，
+        否则两种情况的界面反馈一模一样。
+
+        删掉之后该 token 立刻失效：`fetch_valid` 查不到记录即判定未登录。
+        """
+        with connect() as conn:
+            cur = conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+
+class LoginFailureRepository:
+    """`login_failures` 表的读写：登录失败计数，供渐进延时使用。
+
+    只记失败、不记成功——成功登录时整批删掉，因此「行数」本身就是
+    「尚未清账的失败次数」。这样就不需要 `ok` 列，也不必在查询里过滤。
+
+    `username` 一律由调用方（`auth_service`）按小写归一后传入：归一放在服务层
+    而不是这里，是因为「按什么键计数」属于策略，而仓储只负责存取。
+    """
+
+    @staticmethod
+    def record(username: str, ip: str) -> None:
+        """记一次失败。
+
+        Args:
+            username: **已归一**（strip + lower）的用户名。
+            ip: 来源 IP，仅记录供排查，不参与判定。
+        """
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO login_failures (username, ip, created_at) VALUES (?, ?, ?)",
+                (username, ip, utc_now_text()),
+            )
+            conn.commit()
+
+    @staticmethod
+    def count_since(username: str, since: str) -> int:
+        """数某用户名在 `since` 之后的失败次数（`since` 为 ISO 文本，字典序即时间序）。"""
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM login_failures "
+                "WHERE username = ? AND created_at > ?",
+                (username, since),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    @staticmethod
+    def clear(username: str) -> int:
+        """清掉某用户名的全部失败记录（登录成功时调用），返回清除条数。"""
+        with connect() as conn:
+            cur = conn.execute("DELETE FROM login_failures WHERE username = ?", (username,))
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    @staticmethod
+    def purge_before(cutoff: str) -> int:
+        """删掉 `cutoff` 之前的记录，返回删除条数。
+
+        窗口外的失败已经不影响任何判定（`count_since` 只数窗口内），留着只会让表
+        无限增长。由登录链路顺手调用，不需要额外的定时任务。
+        """
+        with connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM login_failures WHERE created_at < ?", (cutoff,)
             )
             conn.commit()
             return int(cur.rowcount or 0)

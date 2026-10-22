@@ -19,9 +19,11 @@ from typing import Protocol
 from backend.core.config import get_settings
 from backend.core.db import utc_now
 from backend.core.errors import ErrorCode
+from backend.core.runtime_config import get_runtime_config
 from backend.repositories.auth_repo import (
     AuthSessionRepository,
     InviteCodeRepository,
+    LoginFailureRepository,
     UserRepository,
 )
 
@@ -170,18 +172,39 @@ class OpaqueSessionIssuer:
     相比动辄几十秒的 LLM 调用完全可以忽略。
     """
 
-    def __init__(self, ttl_hours: int) -> None:
-        self._ttl = timedelta(hours=ttl_hours)
+    def __init__(self, ttl_hours: float | None = None) -> None:
+        """构造签发器。
+
+        Args:
+            ttl_hours: 显式指定有效期时**固定**用它（测试要造「立刻过期」的会话走这条）；
+                留空则每次签发时从配置**现读**。
+
+        为什么不在构造时固定有效期
+        --------------------------
+        签发器是模块级单例（`get_token_issuer`），进程活着就不会重建。若在 `__init__`
+        里把小时数转成 `timedelta` 存下来，后台把「会话有效期」改小之后**看起来毫无反应**
+        ——配置读了、界面也变了，唯独签出来的会话还是旧时长。改配置要生效，就只能让
+        真正用到它的那一刻去读。
+        """
+        self._fixed_ttl = timedelta(hours=ttl_hours) if ttl_hours is not None else None
+
+    def ttl(self) -> timedelta:
+        """当前应当使用的有效期。"""
+        if self._fixed_ttl is not None:
+            return self._fixed_ttl
+        # ⚠️ 必须读 `get_runtime_config().settings`：`get_settings()` 只反映环境变量，
+        # 后台改的值存在 system_config 里，走 get_settings 会「改了看起来没反应」。
+        return timedelta(hours=get_runtime_config().settings.auth_session_ttl_hours)
 
     def issue(self, user_id: int) -> tuple[str, datetime]:
         token = secrets.token_urlsafe(32)
-        expires_at = utc_now() + self._ttl
+        expires_at = utc_now() + self.ttl()
         AuthSessionRepository.create(_sha256(token), user_id, expires_at)
         return token, expires_at
 
     def replace(self, user_id: int) -> tuple[str, datetime]:
         token = secrets.token_urlsafe(32)
-        expires_at = utc_now() + self._ttl
+        expires_at = utc_now() + self.ttl()
         AuthSessionRepository.replace_for_user(_sha256(token), user_id, expires_at)
         return token, expires_at
 
@@ -200,10 +223,14 @@ _issuer: TokenIssuer | None = None
 
 
 def get_token_issuer() -> TokenIssuer:
-    """返回进程内共享的凭据签发器（懒加载单例）。"""
+    """返回进程内共享的凭据签发器（懒加载单例）。
+
+    单例只承载「用哪种签发方式」，**不承载有效期**——有效期由 `OpaqueSessionIssuer.ttl()`
+    每次现读配置，否则后台改了配置也不会对新登录生效。
+    """
     global _issuer
     if _issuer is None:
-        _issuer = OpaqueSessionIssuer(get_settings().auth_session_ttl_hours)
+        _issuer = OpaqueSessionIssuer()
     return _issuer
 
 
@@ -356,10 +383,94 @@ def set_admin(username: str, is_admin: bool) -> User:
     return _to_user(updated) if updated else _to_user(row)
 
 
-def login(username: str, password: str) -> tuple[User, str, datetime]:
+# ---------------------------------------------------------------------------
+# 登录失败限流：渐进延时
+# ---------------------------------------------------------------------------
+
+# 递增延时的封顶（秒）。8 秒能把在线爆破的吞吐压到每天一万次以内，
+# 又不至于让打错密码的真人以为页面卡死。
+_LOGIN_DELAY_CAP_SECONDS = 8.0
+
+
+def _attempt_key(username: str) -> str:
+    """失败计数的键：`strip` + **小写**。
+
+    `users.username` 是大小写敏感的（`get_by_username` 精确匹配），所以 `admin`、
+    `Admin`、`ADMIN` 是三个不同的查询键。计数若也按原始大小写存，攻击者在三者之间
+    轮换就永远触发不了阈值。归一之后它们共用一个计数器，而这不会影响任何合法登录
+    ——大小写不对本来也登不进去。
+    """
+    return username.strip().lower()
+
+
+def _window_start() -> str:
+    """统计窗口的起点（UTC ISO 文本；字典序即时间序，可直接在 SQL 里比大小）。"""
+    minutes = get_runtime_config().settings.login_failure_window_minutes
+    return (utc_now() - timedelta(minutes=minutes)).isoformat()
+
+
+def login_delay(username: str) -> float:
+    """本次登录应当**先等几秒**再校验（渐进延时）。
+
+    为什么是延时而不是锁账号
+    ------------------------
+    硬锁（失败 N 次后拒绝该账号登录一段时间）挡得更死，但它有一个致命副作用：
+    攻击者只要知道用户名，故意输错几次就能把这个人**锁在门外**——用防爆破的功能
+    做出了拒绝服务的效果。延时没有这个问题：别人最多让你每次登录慢 8 秒，
+    正确密码依然进得去。
+
+    阈值与递增
+    ----------
+    窗口内失败次数 `< login_max_attempts` → 不延时。
+    达到阈值后每多失败一次翻一倍，封顶 `_LOGIN_DELAY_CAP_SECONDS`：
+
+        5 次（阈值 5）→ 0s，6 次 → 2s，7 次 → 4s，8 次及以上 → 8s
+
+    ⚠️ 本函数只**算**不**睡**
+    -------------------------
+    `login` 及其调用链是同步代码，跑在事件循环线程里。在这里 `time.sleep` 会把
+    **整个进程**卡住（不只是这一条请求，全站的 SSE 流都会停）。真正的等待必须由
+    路由层用 `await asyncio.sleep()` 落实。
+
+    Args:
+        username: 用户提交的原始用户名（内部自行归一）。
+
+    Returns:
+        应当等待的秒数；`login_max_attempts <= 0`（关闭限流）时恒为 0。
+    """
+    limit = get_runtime_config().settings.login_max_attempts
+    if limit <= 0:
+        return 0.0
+    failures = LoginFailureRepository.count_since(_attempt_key(username), _window_start())
+    if failures < limit:
+        return 0.0
+    return float(min(2 ** (failures - limit + 1), _LOGIN_DELAY_CAP_SECONDS))
+
+
+def _record_failure(username: str, ip: str) -> None:
+    """记一次登录失败。"""
+    LoginFailureRepository.record(_attempt_key(username), ip)
+
+
+def _on_login_success(username: str) -> None:
+    """登录成功后清账。
+
+    三件事：
+    1. 删掉该用户名的失败记录——不清的话「昨天错了 5 次」会让今天第一次登录就白等 2 秒。
+    2. 删掉窗口外的陈旧计数（已经不影响任何判定，留着只是让表变大）。
+    3. 清掉过期会话。`AuthSessionRepository.delete_expired` 之前**从来没被调用过**
+       （定义了但没人调，属于死代码），会话表只增不减；挂在登录成功这条必经且低频的
+       路径上，不需要额外的定时任务。
+    """
+    LoginFailureRepository.clear(_attempt_key(username))
+    LoginFailureRepository.purge_before(_window_start())
+    AuthSessionRepository.delete_expired()
+
+
+def login(username: str, password: str, ip: str = "") -> tuple[User, str, datetime]:
     """校验账号密码并签发会话。
 
-    注意三个细节：
+    注意四个细节：
     1. 用户不存在与密码错误**返回同一句提示**，避免泄露哪些用户名已注册（账号枚举）。
     2. 用户不存在时也执行一次等价的 scrypt 运算再返回，避免「响应更快」
        从时序上暴露该用户名不存在。
@@ -367,6 +478,16 @@ def login(username: str, password: str) -> tuple[User, str, datetime]:
        此前的全部会话（见 ADR-024）。代价是多设备会互相踢下线，这是明确接受的风险；
        好处是不需要再维护一套「会话版本号 + 乐观锁」来对付并发登录，少一处状态就少一类
        不一致。
+    4. **失败要计数，不存在的用户名也计数**（见 `_record_failure`）。若只给真实账号
+       计数，「有没有延时」本身就成了新的枚举信号，把第 1、2 条白做了。
+
+    ⚠️ 渐进延时不在本函数里落实：调用方必须先问 `login_delay()` 并自行 `await`
+    相应时长，否则要么不生效、要么把事件循环卡死。
+
+    Args:
+        username: 用户名。
+        password: 明文密码（仅在内存中与库里的哈希比对）。
+        ip: 来源 IP，只用于记录失败现场，不参与判定。
 
     Returns:
         `(用户, 写入 Cookie 的凭据, 过期时间)`。
@@ -380,13 +501,17 @@ def login(username: str, password: str) -> tuple[User, str, datetime]:
     if row is None:
         # 用固定 salt 做一次等价运算，抹平与「用户存在」时的耗时差异
         _derive(password, b"prdwright-dummy-salt")
+        _record_failure(username, ip)
         raise AuthError("用户名或密码错误")
 
     if not verify_password(password, str(row["password_hash"]), bytes(row["salt"])):
+        _record_failure(username, ip)
         raise AuthError("用户名或密码错误")
     if not row["is_active"]:
+        # 密码是对的，只是账号被停用：这不是一次「猜错」，不计入失败次数
         raise AuthError("该账号已被停用")
 
+    _on_login_success(username)
     user = _to_user(row)
     credential, expires_at = get_token_issuer().replace(user.id)
     return user, credential, expires_at

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 用户管理：列表 + 新建 + 启停 / 重置密码 / 删除。
+ * 用户管理：列表 + 新建 + 启停 / 重置密码 / 强制下线 / 删除。
  *
  * 三条交互纪律：
  * 1. **规则由后端说了算**。页面上的禁用按钮只是提示，真正的判断在服务端
@@ -20,6 +20,7 @@ import {
   fetchUsers,
   messageOf,
   resetUserPassword,
+  revokeUserSessions,
   setUserActive,
   setUserAdmin,
   setUserQuota,
@@ -44,6 +45,12 @@ const creating = ref(false)
 
 // 删除确认：记住待删的那一行，避免用 confirm() 弹窗（在部分环境被禁用）
 const pendingDelete = ref<AdminUser | null>(null)
+/**
+ * 强制下线确认。与删除同样走面板而非 `confirm()`：
+ * 这一步会把对方当前的登录立刻踢掉，说清「只踢下线、不禁登录」比一个系统弹窗有用。
+ */
+const pendingRevoke = ref<AdminUser | null>(null)
+const revoking = ref(false)
 // 重置密码：按行展开一个输入框，密码不落在列表状态里
 const resettingId = ref<number | null>(null)
 const newPassword = ref('')
@@ -225,6 +232,29 @@ async function onDelete(user: AdminUser) {
   await load()
 }
 
+/**
+ * 强制下线。
+ *
+ * `revoked === 0` 要单独说一句「他本来就没登录」——后端返回的就是 0，不是失败。
+ * 若统一提示「已强制下线」，管理员会以为踢掉了，实际上对方根本没在线，
+ * 下次排查「为什么他还能用」时就会被这句话误导。
+ */
+async function onRevokeSessions(user: AdminUser) {
+  revoking.value = true
+  const result = await toResult(() => revokeUserSessions(user.id))
+  revoking.value = false
+  pendingRevoke.value = null
+  if (!result.ok) {
+    sayFail(result.message)
+    return
+  }
+  sayOk(
+    result.value > 0
+      ? `已让 ${user.username} 下线（吊销 ${result.value} 条会话）`
+      : `${user.username} 当前并未登录，无需下线`,
+  )
+}
+
 /** 时间只显示到日：后台关心的是「什么时候注册的」，不是精确到毫秒 */
 function formatDate(value: string): string {
   return value ? value.slice(0, 10) : '—'
@@ -385,6 +415,15 @@ function totalTokens(user: AdminUser): number {
                 </button>
                 <button
                   type="button"
+                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
+                  :disabled="!user.is_active"
+                  :title="user.is_active ? '吊销他的登录会话，下次请求即失效' : '账号已停用，本就无法登录'"
+                  @click="pendingRevoke = user"
+                >
+                  强制下线
+                </button>
+                <button
+                  type="button"
                   class="rounded-control border border-danger-line px-2.5 py-1 text-xs text-danger-fg"
                   @click="pendingDelete = user"
                 >
@@ -478,6 +517,37 @@ function totalTokens(user: AdminUser): number {
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- 强制下线确认。说清「只是踢下线、不改密码、不禁登录」——三者的区别是后台最常见的误解 -->
+    <div
+      v-if="pendingRevoke"
+      class="rounded-card border border-warning-line bg-warning-surface p-4"
+    >
+      <p class="text-sm text-warning-fg">
+        让「{{ pendingRevoke.username }}」立刻下线？
+      </p>
+      <p class="mt-1 text-xs text-warning-fg">
+        只吊销他当前的登录会话，<strong>不改密码、不禁登录</strong>——他下次请求会被要求重新登录，
+        但用原密码立刻就能登回来。正在跑的任务不受影响（要停任务请去任务监控页）。
+      </p>
+      <div class="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          class="rounded-control bg-accent px-3 py-1.5 text-sm font-medium text-on-accent disabled:opacity-50"
+          :disabled="revoking"
+          @click="onRevokeSessions(pendingRevoke)"
+        >
+          {{ revoking ? '处理中…' : '确认下线' }}
+        </button>
+        <button
+          type="button"
+          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
+          @click="pendingRevoke = null"
+        >
+          取消
+        </button>
+      </div>
     </div>
 
     <!-- 删除确认。用面板而不是 confirm()：后者在部分环境被禁用，且没法说明后果 -->

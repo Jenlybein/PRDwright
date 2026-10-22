@@ -388,6 +388,24 @@ class Settings(BaseSettings):
         description="初始邀请码。首次启动且 invite_codes 表为空时自动播种这一条"
         "（不限使用次数、永不过期）；注册时必须填写有效的邀请码。",
     )
+    auth_allow_register: bool = Field(
+        default=True,
+        description="是否开放自助注册。关闭后注册接口一律拒绝，新账号只能由管理员"
+        "或运维脚本创建。已有账号的登录不受影响。",
+    )
+    login_max_attempts: int = Field(
+        default=5,
+        ge=0,
+        description="同一账号在一个时间窗内允许的失败次数。超过后每次登录都会被"
+        "**递增延时**（2/4/8 秒封顶）而不是锁定账号——锁定会被人拿来把别人挡在门外。"
+        "填 0 表示完全不限流（不建议）。",
+    )
+    login_failure_window_minutes: int = Field(
+        default=15,
+        ge=1,
+        description="登录失败次数的统计窗口（分钟）。窗口外的失败不再计入，"
+        "也由登录链路顺手清理，表不会无限增长。",
+    )
     init_admin_user: str = Field(
         default="",
         description="初始管理员用户名，仅在 users 表为空时自动创建，用于初始化首个账号。"

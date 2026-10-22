@@ -1026,6 +1026,61 @@ def _add_quota_columns_to_users(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE users ADD COLUMN {name} INTEGER NOT NULL DEFAULT -1")
 
 
+def _create_login_failures_table(conn: sqlite3.Connection) -> None:
+    """v18：`login_failures` 表——登录失败计数，用于渐进延时。
+
+    为什么需要它
+    ------------
+    v4 之前 `auth_service.login` 只做了两件事：统一报错文案、用户不存在时也跑一次
+    等价的 scrypt 运算。这两件都是**防账号枚举**的手段，对「反复猜密码」毫无作用——
+    攻击者可以每秒试几十次，直到猜中为止。会话、邀请码、配额都管不到这里，
+    因为这条路径发生在登录之前。
+
+    为什么只存失败
+    --------------
+    计数要的是「最近失败了几次」。成功登录时直接删掉该用户名的记录，
+    表里就只剩「尚未清账的失败」，语义与「连续失败次数」完全一致，
+    不必再存一个 `ok` 列再由查询去过滤（多一列就多一种写错的可能）。
+
+    ⚠️ 用户名按**小写归一**后存
+    --------------------------
+    `users.username` 是大小写敏感的（`get_by_username` 精确匹配），所以 `Root` 与 `root`
+    是两个不同的查询键。若计数也按原始大小写存，攻击者只要在 `admin` / `Admin` / `ADMIN`
+    之间轮换，每次都是「新的一轮」，延时形同不存在。归一之后它们共用同一个计数器。
+    真正的用户查不到 `Root` 本来也会失败，所以这不影响任何合法登录。
+
+    ⚠️ `ip` 列本期**只记录、不参与判定**
+    ------------------------------------
+    本期只做账号维度的渐进延时（不做 IP 维度），但把来源 IP 记下来：一是事后排查
+    「这次爆破来自哪里」时不用再从访问日志里反查，二是将来真要加 IP 维度时
+    不必为补一列再走一次迁移（迁移只能追加，加列要新版本号）。
+
+    存量数据意味着什么
+    ------------------
+    新表，无存量。未登录过的库是空表，`count_failures` 恒为 0 → 升级后行为完全不变。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS login_failures (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            username   TEXT    NOT NULL,
+            ip         TEXT    NOT NULL DEFAULT '',
+            created_at TEXT    NOT NULL
+        )
+        """
+    )
+    # 计数只查「某用户名在某时刻之后」，复合索引正好覆盖过滤与排序
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_login_failures_user "
+        "ON login_failures(username, created_at DESC)"
+    )
+    # 清理按时间扫全表（没有用户名条件），单独一个索引避免退化成全表扫描
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_login_failures_created "
+        "ON login_failures(created_at)"
+    )
+
+
 # 迁移清单。顺序即执行顺序。新增结构一律追加到末尾，**不要修改历史步骤**。
 # 每一版的内容请在该步骤的 docstring 里写清「为什么需要它、对旧数据意味着什么」。
 MIGRATIONS: list[Migration] = [
@@ -1050,6 +1105,7 @@ MIGRATIONS: list[Migration] = [
     Migration(version=15, name="admin_audit_log_table", apply=_create_admin_audit_log_table),
     Migration(version=16, name="runtime_config_tables", apply=_create_runtime_config_tables),
     Migration(version=17, name="users_quota_columns", apply=_add_quota_columns_to_users),
+    Migration(version=18, name="login_failures_table", apply=_create_login_failures_table),
 ]
 
 

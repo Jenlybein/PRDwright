@@ -330,6 +330,19 @@ export async function deleteUser(userId: number): Promise<void> {
   await http.delete(`/api/admin/users/${userId}`)
 }
 
+/**
+ * 强制下线：吊销该用户的全部会话。对应 `POST /api/admin/users/{id}/sessions/revoke`。
+ *
+ * 返回实际吊销条数而不是空——单点登录下每人至多一条，`revoked=0` 表示「当时并未登录」，
+ * 界面要能区分这两种情况，否则管理员会以为点了没反应。
+ */
+export async function revokeUserSessions(userId: number): Promise<number> {
+  const { data } = await http.post<{ revoked: number }>(
+    `/api/admin/users/${userId}/sessions/revoke`,
+  )
+  return data.revoked
+}
+
 // ---------------------------------------------------------------------------
 // 邀请码管理
 // ---------------------------------------------------------------------------

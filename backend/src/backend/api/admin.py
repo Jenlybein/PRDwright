@@ -277,12 +277,35 @@ async def reset_password(
     return schemas.AdminOkResponse()
 
 
+@router.post(
+    "/users/{user_id}/sessions/revoke",
+    response_model=schemas.AdminRevokeSessionsResponse,
+    summary="强制下线",
+)
+async def revoke_sessions(
+    user_id: int,
+    user: User = Depends(require_admin),
+) -> schemas.AdminRevokeSessionsResponse:
+    """吊销指定账号的全部会话，等于「立刻踢下线」。
+
+    与删除、停用的区别：只删会话，不改密码、不禁登录——他下次请求 401，
+    但只要密码还对，立刻就能重新登录。这是「踢下线」，不是「封号」。
+
+    返回实际吊销条数：单点登录下每人至多一条，`revoked=0` 表示他当时并未登录，
+    这不是失败。正在跑的任务不受影响（任务与连接解耦），要停任务请用任务监控页。
+    """
+    revoked = admin_service.revoke_sessions(user, user_id)
+    return schemas.AdminRevokeSessionsResponse(revoked=revoked)
+
+
 @router.delete(
     "/users/{user_id}",
     response_model=schemas.AdminOkResponse,
     summary="删除账号",
 )
-async def delete_user(user_id: int, user: User = Depends(require_admin)) -> schemas.AdminOkResponse:
+async def delete_user(
+    user_id: int, user: User = Depends(require_admin)
+) -> schemas.AdminOkResponse:
     """删除账号，其登录会话一并失效（外键级联），等于强制下线。
 
     这是**不可逆**的：方案、文档、任务都跟着走。若只是想暂时禁止登录，

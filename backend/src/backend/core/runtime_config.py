@@ -91,6 +91,15 @@ WHITELIST: tuple[str, ...] = (
     "quota_max_running",
     "quota_enforce",
     "quota_timezone_offset_minutes",
+    # 安全（v4.5 T5-3）。这五项都必须在**使用的那一刻**现读，不能启动时缓存：
+    # `auth_session_ttl_hours` 若被 `OpaqueSessionIssuer` 在导入时抓走，
+    # 后台改完看起来没反应（见 services/auth_service.get_token_issuer）；
+    # `auth_cookie_secure` 只在签发 Cookie 时读，改完下一次登录生效。
+    "auth_allow_register",
+    "auth_session_ttl_hours",
+    "auth_cookie_secure",
+    "login_max_attempts",
+    "login_failure_window_minutes",
 )
 
 # 成功快照的 TTL。多 worker 部署时它决定「改了配置多久在所有进程生效」的上界。

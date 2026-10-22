@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     note       TEXT
 );
 
+-- 登录失败计数（v18）：只存失败，成功登录即删该用户名的记录，
+-- 因此「表里有几行」就等于「还没清账的失败次数」。
+-- username 按小写归一后存：users.username 是大小写敏感的，
+-- 不归一的话在 admin / Admin / ADMIN 之间轮换就能绕开计数。
+-- ip 本期只记录、不参与判定（留给事后排查与将来的 IP 维度）。
+CREATE TABLE IF NOT EXISTS login_failures (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    username   TEXT    NOT NULL,
+    ip         TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL
+);
+
 -- 方案：一份完整会话的全量快照。
 -- data 是 SessionDataV2 的 JSON 文本，后端**不解析其内容**，保持「不透明快照」；
 -- title / mode / stage 是前端随快照提交的冗余摘要，让方案列表不必反序列化大 JSON。
@@ -79,6 +91,11 @@ CREATE TABLE IF NOT EXISTS solutions (
 
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user    ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+
+-- 登录失败计数只查「某用户名在某时刻之后」，复合索引正好覆盖过滤与排序
+CREATE INDEX IF NOT EXISTS idx_login_failures_user    ON login_failures(username, created_at DESC);
+-- 清理按时间扫全表（没有用户名条件），单独一个索引避免退化成全表扫描
+CREATE INDEX IF NOT EXISTS idx_login_failures_created ON login_failures(created_at);
 
 -- 方案列表按「owner + 最近更新」查询，复合索引同时覆盖过滤与排序
 CREATE INDEX IF NOT EXISTS idx_solutions_owner ON solutions(user_id, updated_at DESC);

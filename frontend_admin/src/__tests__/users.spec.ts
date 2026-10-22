@@ -27,12 +27,14 @@ vi.mock('@/services/adminService', async (importOriginal) => {
     resetUserPassword: vi.fn(),
     deleteUser: vi.fn(),
     setUserQuota: vi.fn(),
+    revokeUserSessions: vi.fn(),
   }
 })
 
 import {
   deleteUser,
   fetchUsers,
+  revokeUserSessions,
   setUserActive,
   setUserAdmin,
   setUserQuota,
@@ -57,6 +59,7 @@ const activeMock = vi.mocked(setUserActive)
 const adminMock = vi.mocked(setUserAdmin)
 const deleteMock = vi.mocked(deleteUser)
 const quotaMock = vi.mocked(setUserQuota)
+const revokeMock = vi.mocked(revokeUserSessions)
 
 function user(overrides: Partial<AdminUser> = {}): AdminUser {
   return {
@@ -101,6 +104,7 @@ beforeEach(() => {
   adminMock.mockReset()
   deleteMock.mockReset()
   quotaMock.mockReset()
+  revokeMock.mockReset()
 })
 
 describe('用户管理页', () => {
@@ -268,5 +272,54 @@ describe('用户额度', () => {
     await vi.waitFor(() => {
       expect(wrapper.text()).toContain('每日生成次数取值非法')
     })
+  })
+
+  it('强制下线要先确认，不能点一下就踢人', async () => {
+    const wrapper = await render([user()])
+
+    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+
+    // 只弹确认面板，还没有真的发请求——踢人是干预别人账号的动作，不该一次点击就发生
+    expect(revokeMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('立刻下线')
+    // 面板必须说清「只是踢下线」：三者（踢下线 / 改密码 / 封号）在后台最常被混为一谈
+    expect(wrapper.text()).toContain('不改密码、不禁登录')
+
+    await wrapper.findAll('button').find((b) => b.text() === '确认下线')!.trigger('click')
+
+    await vi.waitFor(() => expect(revokeMock).toHaveBeenCalledWith(1))
+  })
+
+  it('真的踢掉了要报出条数', async () => {
+    const wrapper = await render([user()])
+    revokeMock.mockResolvedValue(1)
+
+    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === '确认下线')!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('吊销 1 条会话'))
+  })
+
+  it('对方本来没登录时，不能提示「已下线」', async () => {
+    // revoked=0 是正常结果（单点登录下每人至多一条会话），
+    // 若统一说「已强制下线」，管理员会以为踢掉了，排查「他为什么还能用」时被这句误导
+    const wrapper = await render([user()])
+    revokeMock.mockResolvedValue(0)
+
+    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === '确认下线')!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('并未登录'))
+    expect(wrapper.text()).not.toContain('吊销 0 条会话')
+  })
+
+  it('强制下线被后端回绝时，原因原样显示', async () => {
+    const wrapper = await render([user()])
+    revokeMock.mockRejectedValue(rejectedByBackend('该用户不存在'))
+
+    await wrapper.findAll('button').find((b) => b.text() === '强制下线')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === '确认下线')!.trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('该用户不存在'))
   })
 })

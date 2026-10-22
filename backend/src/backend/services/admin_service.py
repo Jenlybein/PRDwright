@@ -33,7 +33,11 @@ from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories import quota_repo
 from backend.repositories.admin_repo import AdminStatsRepository, AuditRepository
-from backend.repositories.auth_repo import InviteCodeRepository, UserRepository
+from backend.repositories.auth_repo import (
+    AuthSessionRepository,
+    InviteCodeRepository,
+    UserRepository,
+)
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.log_repo import LogRepository
 from backend.services import auth_service, job_service, quota_service
@@ -323,6 +327,40 @@ def reset_password(actor: User, user_id: int, password: str) -> None:
     auth_service.reset_password(username, password)
     # 只记「改过了」，不记改成了什么
     _audit(actor, "user.password", target=username, detail="已重置")
+
+
+def revoke_sessions(actor: User, user_id: int) -> int:
+    """强制下线：吊销该用户的全部会话，返回实际吊销条数。
+
+    为什么是「吊销会话」而不是「改密码」或「停用」
+    --------------------------------------------
+    改密码会顺带把密码换掉，停用会连新登录一起禁掉——两者都超出了「把这个人现在
+    的登录踢掉」这个诉求。只删会话，他下次请求就 401，但拿着正确密码仍能立刻登录回来，
+    这是「踢下线」而不是「封号」，两者在后台是分开的按钮。
+
+    ⚠️ 返回值可能是 0
+    -----------------
+    登录是单点语义（`replace_for_user` 会先删旧会话），所以正常情况每人**至多一条**。
+    返回 0 表示"他本来就没登录"，不是失败——把条数返回给前端，管理员才分得清
+    「踢了 1 条」和「他压根没在线」。若这里只回 `ok`，两种情况在界面上无法区分。
+
+    ⚠️ 正在跑的任务不会被终止
+    ------------------------
+    任务与连接本就解耦（刷新页面不会中断生成），所以吊销会话只影响下一个 HTTP 请求。
+    真想停掉在飞任务，用任务监控页的「取消」。
+
+    Args:
+        actor: 执行操作的管理员（写进审计）。
+        user_id: 目标用户。
+
+    Raises:
+        AppError: 用户不存在（404）。
+    """
+    row = _row_or_404(user_id)
+    username = str(row["username"])
+    revoked = AuthSessionRepository.delete_by_user(user_id)
+    _audit(actor, "user.revoke_sessions", target=username, detail=f"吊销 {revoked} 条会话")
+    return revoked
 
 
 def set_admin(actor: User, user_id: int, is_admin: bool) -> User:

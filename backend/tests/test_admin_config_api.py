@@ -90,7 +90,7 @@ def test_get_config_groups_and_metadata(client):
     _as_admin(client)
     data = client.get("/api/admin/config").json()
 
-    assert [g["key"] for g in data["groups"]] == ["prd", "review", "llm", "quota"]
+    assert [g["key"] for g in data["groups"]] == ["prd", "review", "llm", "quota", "auth"]
     items = {item["key"]: item for g in data["groups"] for item in g["items"]}
     assert len(items) == len(rc.WHITELIST)
 
@@ -105,6 +105,14 @@ def test_get_config_groups_and_metadata(client):
     # 额度项的边界也要从 `Settings` 反射出来（时区偏移有上下界）
     tz = items["quota_timezone_offset_minutes"]
     assert tz["min"] == -720 and tz["max"] == 840
+
+    # 布尔项必须渲染成开关而不是文本框：控件类型由字段注解推导。
+    # 这条钉住一次真实踩坑——手写名单漏了 quota_enforce，配置页让管理员手敲 true/false。
+    for key in ("quota_enforce", "auth_allow_register", "auth_cookie_secure"):
+        assert items[key]["type"] == "bool", f"{key} 应渲染为开关"
+    # 安全项：阈值 0 表示关闭限流，允许为 0；窗口至少 1 分钟
+    assert items["login_max_attempts"]["min"] == 0
+    assert items["login_failure_window_minutes"]["min"] == 1
 
 
 def test_patch_applies_and_changes_revision(client):
