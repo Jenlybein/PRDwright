@@ -332,305 +332,278 @@ function totalTokens(user: AdminUser): number {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="rounded-card border border-line bg-surface p-5 shadow-card">
-      <h1 class="text-base font-semibold text-fg">用户管理</h1>
-      <p class="mt-1 text-sm text-muted">
+  <div class="space-y-5">
+    <!-- 页头 -->
+    <header class="brut-card-lg p-5">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="min-w-0">
+          <p class="kicker">Users / 账号</p>
+          <h1 class="page-title mt-2">用户管理</h1>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="brut-tag brut-tag-sky">{{ users.length }} 个账号</span>
+        </div>
+      </div>
+      <p class="mt-3 max-w-3xl text-sm text-body">
         停用只是禁止登录（可恢复）；删除会连同方案、文档与任务一并清除，不可恢复。
+        操作被后端拒绝时，这里会原样显示它给出的理由——规则只在服务端写一份。
       </p>
-    </div>
+    </header>
 
-    <p v-if="notice" class="rounded-card border border-success-line bg-success-surface px-4 py-3 text-sm text-success-fg">
-      {{ notice }}
-    </p>
-    <p v-if="error" class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg">
-      {{ error }}
-    </p>
+    <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
+    <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 
     <!-- 新建账号 -->
-    <form
-      class="rounded-card border border-line bg-surface p-4"
-      @submit.prevent="onCreate"
-    >
-      <div class="grid gap-3 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-end">
-        <label class="block">
-          <span class="text-xs text-subtle">用户名</span>
-          <input
-            v-model="form.username"
-            type="text"
-            required
-            minlength="3"
-            maxlength="32"
-            class="mt-1 w-full rounded-control border border-line bg-field px-3 py-2 text-sm text-fg"
-            placeholder="3-32 个字符"
-          />
-        </label>
-        <label class="block">
-          <span class="text-xs text-subtle">密码</span>
-          <input
-            v-model="form.password"
-            type="password"
-            required
-            minlength="8"
-            class="mt-1 w-full rounded-control border border-line bg-field px-3 py-2 text-sm text-fg"
-            placeholder="至少 8 位"
-          />
-        </label>
-        <label class="flex items-center gap-2 pb-2 text-sm text-body">
-          <input v-model="form.is_admin" type="checkbox" />
-          设为管理员
-        </label>
-        <button
-          type="submit"
-          :disabled="creating"
-          class="rounded-control bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:opacity-60"
-        >
-          {{ creating ? '创建中…' : '新建账号' }}
-        </button>
-      </div>
-    </form>
+    <section class="brut-card">
+      <header class="flex items-center justify-between border-b-2 border-brut px-4 py-2">
+        <h2 class="text-sm font-extrabold tracking-tight text-ink">新建账号</h2>
+        <span class="kicker">Create</span>
+      </header>
+      <form class="px-4 py-3" @submit.prevent="onCreate">
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1.2fr_1.2fr_auto_auto] lg:items-end">
+          <label class="block">
+            <span class="brut-label">用户名</span>
+            <input
+              v-model="form.username"
+              type="text"
+              required
+              minlength="3"
+              maxlength="32"
+              class="brut-field"
+              placeholder="3-32 个字符"
+            />
+          </label>
+          <label class="block">
+            <span class="brut-label">密码</span>
+            <input
+              v-model="form.password"
+              type="password"
+              required
+              minlength="8"
+              class="brut-field"
+              placeholder="至少 8 位"
+            />
+          </label>
+          <label
+            class="flex items-center gap-2 border-2 border-brut bg-field px-3 py-2 text-sm font-bold text-ink"
+          >
+            <input v-model="form.is_admin" type="checkbox" class="brut-check" />
+            设为管理员
+          </label>
+          <button
+            type="submit"
+            :disabled="creating"
+            class="brut-btn brut-btn-primary py-2"
+          >
+            {{ creating ? '创建中…' : '新建账号' }}
+          </button>
+        </div>
+      </form>
+    </section>
 
     <!-- 列表 -->
-    <div class="rounded-card border border-line bg-surface">
-      <div v-if="loading" class="px-4 py-6 text-sm text-subtle">加载中…</div>
+    <section class="brut-card-lg overflow-hidden">
+      <div v-if="loading" class="px-4 py-8 text-sm text-subtle">加载中…</div>
 
-      <table v-else class="w-full text-sm">
-        <thead class="border-b border-line text-left text-xs text-subtle">
-          <tr>
-            <th class="px-4 py-2 font-medium">用户</th>
-            <th class="px-4 py-2 font-medium">注册时间</th>
-            <th class="px-4 py-2 font-medium">任务数</th>
-            <th class="px-4 py-2 font-medium">Token 合计</th>
-            <th class="px-4 py-2 font-medium">今日额度</th>
-            <th class="px-4 py-2 font-medium">状态</th>
-            <th class="px-4 py-2 font-medium">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="user in users"
-            :key="user.id"
-            class="border-b border-line last:border-0"
-          >
-            <td class="align-top px-4 py-3">
-              <div class="flex items-center gap-2">
-                <span class="font-medium text-fg">{{ user.username }}</span>
-                <span
-                  v-if="user.is_admin"
-                  class="rounded bg-accent-soft px-1.5 py-0.5 text-xs text-accent-soft-line"
-                >
-                  管理员
-                </span>
-                <span
-                  v-if="user.id === currentUserId"
-                  class="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-subtle"
-                >
-                  本人
-                </span>
-              </div>
-            </td>
-            <td class="align-top px-4 py-3 text-muted">{{ formatDate(user.created_at) }}</td>
-            <td class="align-top px-4 py-3 text-muted">{{ user.task_count }}</td>
-            <td class="align-top px-4 py-3 text-muted">{{ totalTokens(user).toLocaleString() }}</td>
-            <td class="align-top px-4 py-3">
-              <span
-                :class="quotaExhausted(user) ? 'text-danger-fg' : 'text-muted'"
-                class="text-xs"
-                :title="`次数 ${user.daily_task_limit || '不限'} · Token ${user.daily_token_limit || '不限'} · 并发 ${user.max_running || '不限'}`"
-              >
-                {{ quotaLabel(user) }}
-              </span>
-            </td>
-            <td class="align-top px-4 py-3">
-              <span
-                :class="user.is_active ? 'text-success-fg' : 'text-warning-fg'"
-                class="text-xs"
-              >
-                {{ user.is_active ? '启用' : '已停用' }}
-              </span>
-            </td>
-            <td class="align-top px-4 py-3">
-              <div class="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-                  @click="onToggleActive(user)"
-                >
-                  {{ user.is_active ? '停用' : '启用' }}
-                </button>
-                <button
-                  type="button"
-                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-                  @click="onToggleAdmin(user)"
-                >
-                  {{ user.is_admin ? '撤销管理员' : '设为管理员' }}
-                </button>
-                <button
-                  type="button"
-                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-                  @click="resettingId = user.id"
-                >
-                  重置密码
-                </button>
-                <button
-                  type="button"
-                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-                  @click="openQuota(user)"
-                >
-                  额度
-                </button>
-                <button
-                  type="button"
-                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body disabled:opacity-50"
-                  :disabled="exportingId === user.id"
-                  title="导出他的方案、文档正文、对话记录与任务明细（ZIP）"
-                  @click="onExport(user)"
-                >
-                  {{ exportingId === user.id ? '导出中…' : '导出' }}
-                </button>
-                <button
-                  type="button"
-                  class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-                  :disabled="!user.is_active"
-                  :title="user.is_active ? '吊销他的登录会话，下次请求即失效' : '账号已停用，本就无法登录'"
-                  @click="pendingRevoke = user"
-                >
-                  强制下线
-                </button>
-                <button
-                  type="button"
-                  class="rounded-control border border-danger-line px-2.5 py-1 text-xs text-danger-fg"
-                  @click="openDelete(user)"
-                >
-                  删除
-                </button>
-              </div>
-
-              <!-- 额度编辑：三个输入都是三态（-1 跟全局 / 0 不限 / 正数上限） -->
-              <div v-if="quotaEditingId === user.id" class="mt-2 space-y-2">
-                <p class="text-xs text-subtle">
-                  -1 跟随全局（配置页的「每日额度」）· 0 不限 · 正数为上限
-                </p>
-                <div class="flex flex-wrap items-center gap-2">
-                  <label class="flex items-center gap-1 text-xs text-muted">
-                    次数
-                    <input
-                      v-model.number="quotaForm.daily_task_limit"
-                      type="number"
-                      min="-1"
-                      class="w-20 rounded-control border border-line bg-field px-2 py-1 text-xs text-fg"
-                    />
-                  </label>
-                  <label class="flex items-center gap-1 text-xs text-muted">
-                    Token
-                    <input
-                      v-model.number="quotaForm.daily_token_limit"
-                      type="number"
-                      min="-1"
-                      step="1000"
-                      class="w-24 rounded-control border border-line bg-field px-2 py-1 text-xs text-fg"
-                    />
-                  </label>
-                  <label class="flex items-center gap-1 text-xs text-muted">
-                    并发
-                    <input
-                      v-model.number="quotaForm.max_running"
-                      type="number"
-                      min="-1"
-                      class="w-16 rounded-control border border-line bg-field px-2 py-1 text-xs text-fg"
-                    />
-                  </label>
+      <div v-else class="overflow-x-auto">
+        <table class="brut-table min-w-[900px]">
+          <thead>
+            <tr>
+              <th>用户</th>
+              <th>注册时间</th>
+              <th>任务数</th>
+              <th>Token 合计</th>
+              <th>今日额度</th>
+              <th>状态</th>
+              <th class="w-[320px]">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="user in users" :key="user.id">
+              <td>
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="font-bold text-ink">{{ user.username }}</span>
+                  <span v-if="user.is_admin" class="brut-tag brut-tag-sky">管理员</span>
+                  <span v-if="user.id === currentUserId" class="brut-tag brut-tag-slab">本人</span>
                 </div>
-                <div class="flex items-center gap-2">
+              </td>
+              <td class="tnum text-xs">{{ formatDate(user.created_at) }}</td>
+              <td class="tnum">{{ user.task_count }}</td>
+              <td class="tnum">{{ totalTokens(user).toLocaleString() }}</td>
+              <td>
+                <span
+                  :class="quotaExhausted(user) ? 'text-danger-fg' : 'text-muted'"
+                  class="tnum text-xs font-bold"
+                  :title="`次数 ${user.daily_task_limit || '不限'} · Token ${user.daily_token_limit || '不限'} · 并发 ${user.max_running || '不限'}`"
+                >
+                  {{ quotaLabel(user) }}
+                </span>
+              </td>
+              <td>
+                <span
+                  class="brut-tag"
+                  :class="user.is_active ? 'brut-tag-ok' : 'brut-tag-warn'"
+                >
+                  {{ user.is_active ? '启用' : '已停用' }}
+                </span>
+              </td>
+              <td>
+                <!-- 七个动作平铺成小块：藏进菜单会多一次点击，也让人记不住有哪些能力 -->
+                <div class="grid grid-cols-3 gap-1">
+                  <button type="button" class="brut-btn brut-btn-xs" @click="onToggleActive(user)">
+                    {{ user.is_active ? '停用' : '启用' }}
+                  </button>
+                  <button type="button" class="brut-btn brut-btn-xs" @click="onToggleAdmin(user)">
+                    {{ user.is_admin ? '撤销管理员' : '设为管理员' }}
+                  </button>
                   <button
                     type="button"
-                    class="rounded-control bg-accent px-2.5 py-1 text-xs text-on-accent"
-                    :disabled="savingQuota"
-                    @click="onSaveQuota(user)"
+                    class="brut-btn brut-btn-xs"
+                    @click="resettingId = user.id"
                   >
-                    保存
+                    重置密码
                   </button>
-                  <button type="button" class="text-xs text-subtle" @click="closeQuota">
+                  <button type="button" class="brut-btn brut-btn-xs" @click="openQuota(user)">
+                    额度
+                  </button>
+                  <button
+                    type="button"
+                    class="brut-btn brut-btn-xs"
+                    :disabled="exportingId === user.id"
+                    title="导出他的方案、文档正文、对话记录与任务明细（ZIP）"
+                    @click="onExport(user)"
+                  >
+                    {{ exportingId === user.id ? '导出中…' : '导出' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="brut-btn brut-btn-xs"
+                    :disabled="!user.is_active"
+                    :title="user.is_active ? '吊销他的登录会话，下次请求即失效' : '账号已停用，本就无法登录'"
+                    @click="pendingRevoke = user"
+                  >
+                    强制下线
+                  </button>
+                  <button
+                    type="button"
+                    class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
+                    @click="openDelete(user)"
+                  >
+                    删除
+                  </button>
+                </div>
+
+                <!-- 额度编辑：三个输入都是三态（-1 跟全局 / 0 不限 / 正数上限） -->
+                <div v-if="quotaEditingId === user.id" class="mt-2 border-2 border-brut bg-slab p-2">
+                  <p class="kicker">-1 跟随全局 · 0 不限 · 正数为上限</p>
+                  <div class="mt-1.5 flex flex-wrap items-center gap-2">
+                    <label class="flex items-center gap-1 text-xs font-bold text-ink">
+                      次数
+                      <input
+                        v-model.number="quotaForm.daily_task_limit"
+                        type="number"
+                        min="-1"
+                        class="brut-field w-20 px-2 py-1 text-xs"
+                      />
+                    </label>
+                    <label class="flex items-center gap-1 text-xs font-bold text-ink">
+                      Token
+                      <input
+                        v-model.number="quotaForm.daily_token_limit"
+                        type="number"
+                        min="-1"
+                        step="1000"
+                        class="brut-field w-24 px-2 py-1 text-xs"
+                      />
+                    </label>
+                    <label class="flex items-center gap-1 text-xs font-bold text-ink">
+                      并发
+                      <input
+                        v-model.number="quotaForm.max_running"
+                        type="number"
+                        min="-1"
+                        class="brut-field w-16 px-2 py-1 text-xs"
+                      />
+                    </label>
+                  </div>
+                  <div class="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      class="brut-btn brut-btn-xs brut-btn-primary"
+                      :disabled="savingQuota"
+                      @click="onSaveQuota(user)"
+                    >
+                      保存
+                    </button>
+                    <button type="button" class="brut-btn-bare" @click="closeQuota">取消</button>
+                    <span class="tnum ml-auto text-[11px] text-subtle">
+                      今日已用 {{ user.usage_tasks_today }} 次 /
+                      {{ user.usage_tokens_today.toLocaleString() }} Token
+                    </span>
+                  </div>
+                </div>
+
+                <!-- 重置密码：就地展开 -->
+                <div v-if="resettingId === user.id" class="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    v-model="newPassword"
+                    type="password"
+                    minlength="8"
+                    placeholder="新密码，至少 8 位"
+                    class="brut-field w-48 px-2 py-1 text-xs"
+                  />
+                  <button
+                    type="button"
+                    class="brut-btn brut-btn-xs brut-btn-primary"
+                    @click="onResetPassword(user)"
+                  >
+                    确定
+                  </button>
+                  <button
+                    type="button"
+                    class="brut-btn-bare"
+                    @click="resettingId = null; newPassword = ''"
+                  >
                     取消
                   </button>
-                  <span class="text-xs text-subtle">
-                    今日已用 {{ user.usage_tasks_today }} 次 / {{ user.usage_tokens_today.toLocaleString() }} Token
-                  </span>
                 </div>
-              </div>
-
-              <!-- 重置密码：就地展开 -->
-              <div v-if="resettingId === user.id" class="mt-2 flex items-center gap-2">
-                <input
-                  v-model="newPassword"
-                  type="password"
-                  minlength="8"
-                  placeholder="新密码，至少 8 位"
-                  class="w-48 rounded-control border border-line bg-field px-2 py-1 text-xs text-fg"
-                />
-                <button
-                  type="button"
-                  class="rounded-control bg-accent px-2.5 py-1 text-xs text-on-accent"
-                  @click="onResetPassword(user)"
-                >
-                  确定
-                </button>
-                <button
-                  type="button"
-                  class="text-xs text-subtle"
-                  @click="resettingId = null; newPassword = ''"
-                >
-                  取消
-                </button>
-              </div>
-            </td>
-          </tr>
-          <tr v-if="!users.length">
-            <td colspan="7" class="px-4 py-6 text-center text-sm text-subtle">
-              还没有任何用户
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+              </td>
+            </tr>
+            <tr v-if="!users.length">
+              <td colspan="7" class="px-4 py-10 text-center text-sm text-subtle">
+                还没有任何用户
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- 强制下线确认。说清「只是踢下线、不改密码、不禁登录」——三者的区别是后台最常见的误解 -->
-    <div
-      v-if="pendingRevoke"
-      class="rounded-card border border-warning-line bg-warning-surface p-4"
-    >
-      <p class="text-sm text-warning-fg">
+    <section v-if="pendingRevoke" class="brut-note brut-note-warn">
+      <p class="text-sm font-bold">
         让「{{ pendingRevoke.username }}」立刻下线？
       </p>
-      <p class="mt-1 text-xs text-warning-fg">
+      <p class="mt-1 text-xs">
         只吊销他当前的登录会话，<strong>不改密码、不禁登录</strong>——他下次请求会被要求重新登录，
         但用原密码立刻就能登回来。正在跑的任务不受影响（要停任务请去任务监控页）。
       </p>
       <div class="mt-3 flex items-center gap-2">
         <button
           type="button"
-          class="rounded-control bg-accent px-3 py-1.5 text-sm font-medium text-on-accent disabled:opacity-50"
+          class="brut-btn brut-btn-primary"
           :disabled="revoking"
           @click="onRevokeSessions(pendingRevoke)"
         >
           {{ revoking ? '处理中…' : '确认下线' }}
         </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
-          @click="pendingRevoke = null"
-        >
-          取消
-        </button>
+        <button type="button" class="brut-btn" @click="pendingRevoke = null">取消</button>
       </div>
-    </div>
+    </section>
 
     <!-- 删除确认。用面板而不是 confirm()：后者在部分环境被禁用，且没法说明后果 -->
-    <div
-      v-if="pendingDelete"
-      class="rounded-card border border-danger-line bg-danger-surface p-4"
-    >
-      <p class="text-sm text-danger-fg">
+    <section v-if="pendingDelete" class="border-2 border-danger-line bg-danger-surface p-4 shadow-brut">
+      <p class="text-sm font-bold text-danger-fg">
         确定删除「{{ pendingDelete.username }}」？其方案、文档与任务会一并清除，且无法恢复。
       </p>
 
@@ -650,7 +623,7 @@ function totalTokens(user: AdminUser): number {
           会保留：操作审计 {{ preview.retained_audit }} 条、平台日志
           {{ preview.retained_logs }} 条 —— 这两类按设计不随账号删除。
         </p>
-        <p class="font-medium">
+        <p class="font-bold">
           注意：任务记录会被一并删除，因此平台的总任务数与总 Token、以及历史图表都会随之减少。
         </p>
       </div>
@@ -662,13 +635,13 @@ function totalTokens(user: AdminUser): number {
         如果只是想禁止他登录，请改用「停用」。
       </p>
 
-      <label class="mt-3 block text-xs text-danger-fg">
+      <label class="mt-3 block text-xs font-bold text-danger-fg">
         请输入「{{ pendingDelete.username }}」以确认：
         <input
           v-model="deleteConfirmText"
           data-testid="delete-confirm-input"
           type="text"
-          class="mt-1 w-56 rounded-control border border-danger-line bg-surface px-2 py-1 text-sm text-fg"
+          class="brut-field mt-1 w-56 border-danger-line bg-card px-2 py-1 text-sm text-ink"
           :placeholder="pendingDelete.username"
           autocomplete="off"
         />
@@ -677,20 +650,14 @@ function totalTokens(user: AdminUser): number {
       <div class="mt-3 flex items-center gap-2">
         <button
           type="button"
-          class="rounded-control bg-danger px-3 py-1.5 text-sm text-on-accent disabled:opacity-50"
+          class="brut-btn brut-btn-danger"
           :disabled="!deleteAllowed"
           @click="onDelete(pendingDelete)"
         >
           {{ deleting ? '删除中…' : '确认删除' }}
         </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
-          @click="pendingDelete = null"
-        >
-          取消
-        </button>
+        <button type="button" class="brut-btn" @click="pendingDelete = null">取消</button>
       </div>
-    </div>
+    </section>
   </div>
 </template>

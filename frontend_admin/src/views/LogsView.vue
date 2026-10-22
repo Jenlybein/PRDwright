@@ -99,6 +99,19 @@ function rowClass(level: string): string {
   }
 }
 
+/** 级别 → 方块色，配合文字色一起用（只靠文字色在红底行上会糊） */
+function dotClass(level: string): string {
+  switch (level.toUpperCase()) {
+    case 'ERROR':
+    case 'CRITICAL':
+      return 'bg-danger'
+    case 'WARNING':
+      return 'bg-[var(--ui-warning-line)]'
+    default:
+      return 'bg-muted'
+  }
+}
+
 /**
  * 时间显示到毫秒，且**转成本地时区**。
  *
@@ -219,26 +232,33 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="space-y-5">
     <!-- 说明条：告诉人这个页面和「操作记录」不是一回事 -->
-    <div class="rounded-card border border-line bg-surface p-5 shadow-card">
-      <h1 class="text-base font-semibold text-fg">系统日志</h1>
-      <p class="mt-1 text-sm text-muted">
+    <header class="brut-card-lg p-5">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="min-w-0">
+          <p class="kicker">Logs / 排障</p>
+          <h1 class="page-title mt-2">系统日志</h1>
+        </div>
+        <span class="brut-tag brut-tag-sky">共 {{ total }} 条</span>
+      </div>
+      <p class="mt-3 max-w-3xl text-sm text-body">
         系统在说什么（排障用）。人为操作留下的痕迹在「操作记录」页，两者刻意分开——
         混在一起时，排查故障会被大量人为操作淹没。
       </p>
-    </div>
+    </header>
 
     <!-- 过滤条 -->
-    <div class="rounded-card border border-line bg-surface p-4">
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <section class="brut-card">
+      <header class="flex items-center justify-between border-b-2 border-brut px-4 py-2">
+        <h2 class="text-sm font-extrabold tracking-tight text-ink">筛选</h2>
+        <span class="kicker">默认最近 24 小时</span>
+      </header>
+
+      <div class="grid grid-cols-1 gap-3 px-4 py-3 sm:grid-cols-2 lg:grid-cols-4">
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">级别（含更高级）</span>
-          <select
-            v-model="filters.level"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
-            @change="applyFilters"
-          >
+          <span class="brut-label">级别（含更高级）</span>
+          <select v-model="filters.level" class="brut-field" @change="applyFilters">
             <option value="">全部</option>
             <option value="DEBUG">DEBUG</option>
             <option value="INFO">INFO</option>
@@ -249,208 +269,203 @@ onMounted(load)
         </label>
 
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">关键词（消息）</span>
+          <span class="brut-label">关键词（消息）</span>
           <input
             v-model="filters.keyword"
             type="text"
             placeholder="如：生成失败"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
+            class="brut-field"
             @keyup.enter="applyFilters"
           />
         </label>
 
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">事件名</span>
+          <span class="brut-label">事件名</span>
           <input
             v-model="filters.event"
             type="text"
             placeholder="如：job.failed"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
+            class="brut-field font-mono"
             @keyup.enter="applyFilters"
           />
         </label>
 
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">来源 logger（前缀）</span>
+          <span class="brut-label">来源 logger（前缀）</span>
           <input
             v-model="filters.loggerName"
             type="text"
             placeholder="如：backend.services"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
+            class="brut-field font-mono"
             @keyup.enter="applyFilters"
           />
         </label>
 
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">请求号（排障主路径）</span>
+          <span class="brut-label">请求号（排障主路径）</span>
           <input
             v-model="filters.requestId"
             type="text"
             placeholder="粘贴一个 request_id"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
+            class="brut-field font-mono"
             @keyup.enter="applyFilters"
           />
         </label>
 
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">用户 ID</span>
+          <span class="brut-label">用户 ID</span>
           <input
             v-model="filters.userId"
             type="number"
             placeholder="如：3"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
+            class="brut-field"
             @keyup.enter="applyFilters"
           />
         </label>
 
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">起始时间（本地时区）</span>
-          <input
-            v-model="filters.since"
-            type="datetime-local"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
-          />
+          <span class="brut-label">起始时间（本地时区）</span>
+          <input v-model="filters.since" type="datetime-local" class="brut-field" />
         </label>
 
         <label class="block">
-          <span class="mb-1 block text-xs text-subtle">结束时间（留空 = 不限）</span>
-          <input
-            v-model="filters.until"
-            type="datetime-local"
-            class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
-          />
+          <span class="brut-label">结束时间（留空 = 不限）</span>
+          <input v-model="filters.until" type="datetime-local" class="brut-field" />
         </label>
       </div>
 
-      <div class="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          class="rounded-control bg-accent px-3 py-1.5 text-sm font-medium text-on-accent"
-          @click="applyFilters"
-        >
+      <div class="flex flex-wrap items-center gap-1.5 border-t-2 border-brut px-4 py-2.5">
+        <button type="button" class="brut-btn brut-btn-primary brut-btn-xs" @click="applyFilters">
           查询
         </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
-          @click="resetFilters"
-        >
-          重置
-        </button>
+        <button type="button" class="brut-btn brut-btn-xs" @click="resetFilters">重置</button>
         <!-- 默认开：访问日志每个请求一条，不排掉的话一屏全是「请求完成」 -->
-        <label class="ml-2 flex items-center gap-1.5 text-sm text-body">
+        <label
+          class="ml-1 flex items-center gap-1.5 border-2 border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
+        >
           <input
             v-model="filters.businessOnly"
             type="checkbox"
-            class="h-3.5 w-3.5"
+            class="brut-check"
             @change="applyFilters"
           />
           只看业务事件
         </label>
-        <span class="ml-auto text-xs text-subtle">默认最近 24 小时，共 {{ total }} 条</span>
+        <span class="ml-auto text-xs text-subtle">点任意一行展开结构化字段与堆栈</span>
       </div>
-    </div>
+    </section>
 
-    <p
-      v-if="error"
-      class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg"
-    >
-      {{ error }}
-    </p>
+    <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 
     <!-- 结果表 -->
-    <div class="rounded-card border border-line bg-surface">
-      <div v-if="loading" class="px-4 py-6 text-sm text-subtle">加载中…</div>
+    <section class="brut-card-lg overflow-hidden">
+      <div v-if="loading" class="px-4 py-8 text-sm text-subtle">加载中…</div>
 
       <template v-else>
-        <table class="w-full text-sm">
-          <thead class="border-b border-line text-left text-xs text-subtle">
-            <tr>
-              <th class="w-44 px-4 py-2 font-medium">时间</th>
-              <th class="w-20 px-4 py-2 font-medium">级别</th>
-              <th class="px-4 py-2 font-medium">消息</th>
-              <th class="w-32 px-4 py-2 font-medium">事件</th>
-              <th class="w-32 px-4 py-2 font-medium">请求号</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template v-for="item in items" :key="item.id">
-              <tr
-                class="cursor-pointer border-b border-line last:border-0 hover:bg-surface-2"
-                :class="rowClass(item.level)"
-                @click="toggleDetail(item.id)"
-              >
-                <td class="px-4 py-2 font-mono text-xs text-muted">{{ formatTime(item.ts) }}</td>
-                <td class="px-4 py-2 text-xs font-medium" :class="levelClass(item.level)">
-                  {{ item.level }}
-                </td>
-                <td class="px-4 py-2 text-fg">{{ item.msg }}</td>
-                <td class="px-4 py-2 font-mono text-xs text-muted">{{ item.event || '—' }}</td>
-                <td class="px-4 py-2 font-mono text-xs">
-                  <!-- 点它 = 按这个请求号反查，是最常用的一步，所以做成可点的 -->
-                  <button
-                    v-if="item.request_id"
-                    type="button"
-                    class="text-accent underline-offset-2 hover:underline"
-                    @click.stop="drillIntoRequest(item.request_id)"
-                  >
-                    {{ item.request_id.slice(0, 8) }}…
-                  </button>
-                  <span v-else class="text-subtle">—</span>
+        <div class="overflow-x-auto">
+          <table class="brut-table min-w-[820px]">
+            <thead>
+              <tr>
+                <th class="w-52">时间</th>
+                <th class="w-24">级别</th>
+                <th>消息</th>
+                <th class="w-36">事件</th>
+                <th class="w-32">请求号</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template v-for="item in items" :key="item.id">
+                <tr
+                  class="cursor-pointer"
+                  :class="rowClass(item.level)"
+                  @click="toggleDetail(item.id)"
+                >
+                  <td class="tnum text-xs">{{ formatTime(item.ts) }}</td>
+                  <td>
+                    <span class="flex items-center gap-1.5">
+                      <span
+                        class="inline-block h-2 w-2 border border-brut"
+                        :class="dotClass(item.level)"
+                      ></span>
+                      <span class="font-mono text-[11px] font-bold" :class="levelClass(item.level)">
+                        {{ item.level }}
+                      </span>
+                    </span>
+                  </td>
+                  <td class="font-medium text-ink">{{ item.msg }}</td>
+                  <td class="font-mono text-xs">{{ item.event || '—' }}</td>
+                  <td class="font-mono text-xs">
+                    <!-- 点它 = 按这个请求号反查，是最常用的一步，所以做成可点的 -->
+                    <button
+                      v-if="item.request_id"
+                      type="button"
+                      class="underline decoration-2 underline-offset-2 hover:text-sky-deep"
+                      @click.stop="drillIntoRequest(item.request_id)"
+                    >
+                      {{ item.request_id.slice(0, 8) }}…
+                    </button>
+                    <span v-else class="text-subtle">—</span>
+                  </td>
+                </tr>
+
+                <!-- 详情：默认折叠，展开后显示全部结构化字段与 traceback -->
+                <tr v-if="expandedId === item.id" class="bg-slab">
+                  <td colspan="5" class="px-4 py-3">
+                    <dl class="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <dt class="kicker">来源</dt>
+                        <dd class="mt-1 font-mono text-xs text-ink">{{ item.logger }}</dd>
+                      </div>
+                      <div>
+                        <dt class="kicker">完整请求号</dt>
+                        <dd class="mt-1 font-mono text-xs text-ink">
+                          {{ item.request_id || '—（无请求来源）' }}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt class="kicker">归属用户</dt>
+                        <dd class="mt-1 font-mono text-xs text-ink">{{ item.user_id ?? '—' }}</dd>
+                      </div>
+                      <div v-if="extraText(item.extra)">
+                        <dt class="kicker">业务字段</dt>
+                        <dd>
+                          <pre
+                            class="mt-1 overflow-x-auto border-2 border-brut bg-card p-2 font-mono text-xs text-body"
+                          >{{ extraText(item.extra) }}</pre>
+                        </dd>
+                      </div>
+                      <div v-if="item.exc" class="sm:col-span-2">
+                        <dt class="kicker">异常堆栈</dt>
+                        <dd>
+                          <pre
+                            class="mt-1 overflow-x-auto border-2 border-danger-line bg-card p-2 font-mono text-xs text-danger-fg"
+                          >{{ item.exc }}</pre>
+                        </dd>
+                      </div>
+                    </dl>
+                  </td>
+                </tr>
+              </template>
+
+              <tr v-if="!items.length">
+                <td colspan="5" class="px-4 py-12 text-center text-sm text-subtle">
+                  这段时间内没有匹配的日志。试试放宽时间范围或清掉筛选条件。
                 </td>
               </tr>
-
-              <!-- 详情：默认折叠，展开后显示全部结构化字段与 traceback -->
-              <tr v-if="expandedId === item.id" class="border-b border-line bg-surface-2">
-                <td colspan="5" class="px-4 py-3">
-                  <dl class="space-y-2 text-xs">
-                    <div>
-                      <dt class="text-subtle">来源</dt>
-                      <dd class="font-mono text-body">{{ item.logger }}</dd>
-                    </div>
-                    <div>
-                      <dt class="text-subtle">完整请求号</dt>
-                      <dd class="font-mono text-body">{{ item.request_id || '—（无请求来源）' }}</dd>
-                    </div>
-                    <div>
-                      <dt class="text-subtle">归属用户</dt>
-                      <dd class="text-body">{{ item.user_id ?? '—' }}</dd>
-                    </div>
-                    <div v-if="extraText(item.extra)">
-                      <dt class="text-subtle">业务字段</dt>
-                      <dd>
-                        <pre class="mt-1 overflow-x-auto rounded-control bg-surface p-2 font-mono text-body">{{ extraText(item.extra) }}</pre>
-                      </dd>
-                    </div>
-                    <div v-if="item.exc">
-                      <dt class="text-subtle">异常堆栈</dt>
-                      <dd>
-                        <pre class="mt-1 overflow-x-auto rounded-control bg-surface p-2 font-mono text-danger-fg">{{ item.exc }}</pre>
-                      </dd>
-                    </div>
-                  </dl>
-                </td>
-              </tr>
-            </template>
-
-            <tr v-if="!items.length">
-              <td colspan="5" class="px-4 py-10 text-center text-sm text-subtle">
-                这段时间内没有匹配的日志。试试放宽时间范围或清掉筛选条件。
-              </td>
-            </tr>
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
 
         <!-- 分页 -->
         <div
           v-if="total > pageSize"
-          class="flex items-center justify-between border-t border-line px-4 py-3 text-sm"
+          class="flex items-center justify-between border-t-2 border-brut px-4 py-2.5 text-sm"
         >
-          <span class="text-subtle">第 {{ page }} / {{ totalPages }} 页</span>
+          <span class="tnum text-xs text-muted">第 {{ page }} / {{ totalPages }} 页</span>
           <div class="flex gap-2">
             <button
               type="button"
-              class="rounded-control border border-line px-2.5 py-1 text-body disabled:opacity-40"
+              class="brut-btn brut-btn-xs"
               :disabled="!hasPrev"
               @click="goto(page - 1)"
             >
@@ -458,7 +473,7 @@ onMounted(load)
             </button>
             <button
               type="button"
-              class="rounded-control border border-line px-2.5 py-1 text-body disabled:opacity-40"
+              class="brut-btn brut-btn-xs"
               :disabled="!hasNext"
               @click="goto(page + 1)"
             >
@@ -467,6 +482,6 @@ onMounted(load)
           </div>
         </div>
       </template>
-    </div>
+    </section>
   </div>
 </template>

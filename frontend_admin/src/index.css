@@ -3,24 +3,33 @@
 
 /*
  * ============================================================================
- * 设计令牌：与用户端 `frontend/src/index.css` **同一套**。
+ * 管理端视觉体系：Sky Brutalism（天蓝 · 现代粗野）
  * ----------------------------------------------------------------------------
- * 为什么复制而不是各自写一份：两个前端是同一个产品的两面，若色板各写一套，
- * 「亮/暗色下文字看不清」这类问题就得修两遍、还容易漏。
- * 这里只去掉了用户端的外壳几何变量（侧栏宽度、吸底操作栏高度）——
- * 管理员端没有那套外壳。
+ * 三条规则，改样式前先读：
  *
- * 对比度基线沿用用户端（WCAG AA）：正文 / 次要文字 >= 4.5:1，控件描边 >= 3:1。
- * 禁止用 slate-400 表达正文（实测 2.56:1）；文字层级统一走 --ui-muted / --ui-subtle。
+ * 1. **硬边**。描边一律 2px 实色（--ui-brut），圆角统一 2px，不用模糊阴影，
+ *    只用「实心偏移投影」（--shadow-brut-*）。少了这层偏移，块面就会塌回
+ *    普通后台那种一拍就散的卡片堆。
+ * 2. **块面优先**。信息靠「一块一块」分，不靠分隔线渐变。每个块必须是
+ *    「描边 + 底色 + 偏移投影」三件齐备，缺一个就显得脏。
+ * 3. **蓝只做强调，不做底**。天蓝出现在按钮、选中态、图表主角、状态点；
+ *    大面积底色仍是近白纸（--ui-paper）。蓝色铺满会让重点消失。
  *
- * ⚠️ Tailwind v4 的 @theme 解析器对块内注释敏感（会报 "Invalid declaration: name"），
- * 因此 @theme 块内部保持零注释。
+ * 对比度基线（WCAG AA）：正文 / 次要文字 >= 4.5:1，控件描边 >= 3:1。
+ * --ui-subtle 已是「页面上最淡的可读文字」，再淡就只能当装饰（--ui-line）。
+ *
+ * ⚠️ Tailwind v4 的 @theme 解析器对块内注释敏感（会报 "Invalid declaration"），
+ *    因此 @theme 块内部保持零注释。
  * ============================================================================
  */
 
-/* L1：原始色阶与视觉常量（与主题无关） */
 @theme {
-  --color-primary: #0ea5e9;
+  --font-sans: "Inter", "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular,
+    Menlo, Consolas, monospace;
+
+  --color-primary: #38bdf8;
   --color-primary-50: #f0f9ff;
   --color-primary-100: #e0f2fe;
   --color-primary-200: #bae6fd;
@@ -32,29 +41,35 @@
   --color-primary-800: #075985;
   --color-primary-900: #0c4a6e;
   --color-primary-950: #082f49;
-  --radius-card: 1rem;
-  --radius-control: 0.75rem;
-  --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 4px 12px -2px rgb(15 23 42 / 0.06);
-  --shadow-pop: 0 10px 30px -6px rgb(15 23 42 / 0.18);
-  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --radius-card: 0.125rem;
+  --radius-control: 0.125rem;
+
+  --shadow-brut-sm: 3px 3px 0 0 var(--brut-shadow);
+  --shadow-brut: 6px 6px 0 0 var(--brut-shadow);
+  --shadow-brut-lg: 10px 10px 0 0 var(--brut-shadow);
+  --shadow-brut-sky: 6px 6px 0 0 var(--ui-sky-deep);
+
+  --ease-snap: cubic-bezier(0.2, 0.9, 0.1, 1);
 }
 
-/* L2：语义令牌对外暴露为工具类（bg-surface / text-muted / border-line …） */
+/* 语义令牌 → 工具类（bg-paper / border-brut / text-ink …） */
 @theme inline {
-  --color-bg: var(--ui-bg);
-  --color-surface: var(--ui-surface);
-  --color-surface-2: var(--ui-surface-2);
+  --color-paper: var(--ui-paper);
+  --color-card: var(--ui-card);
+  --color-slab: var(--ui-slab);
   --color-field: var(--ui-field);
+  --color-brut: var(--ui-brut);
   --color-line: var(--ui-line);
-  --color-line-strong: var(--ui-line-strong);
-  --color-fg: var(--ui-fg);
+  --color-ink: var(--ui-ink);
   --color-body: var(--ui-body);
   --color-muted: var(--ui-muted);
   --color-subtle: var(--ui-subtle);
-  --color-on-accent: var(--ui-on-accent);
-  --color-accent: var(--ui-accent);
-  --color-accent-soft: var(--ui-accent-soft);
-  --color-accent-soft-line: var(--ui-accent-soft-line);
+  --color-sky: var(--ui-sky);
+  --color-sky-deep: var(--ui-sky-deep);
+  --color-sky-soft: var(--ui-sky-soft);
+  --color-on-sky: var(--ui-on-sky);
+  --color-side: var(--ui-side);
   --color-danger: var(--ui-danger);
   --color-danger-surface: var(--ui-danger-surface);
   --color-danger-line: var(--ui-danger-line);
@@ -65,62 +80,79 @@
   --color-success-surface: var(--ui-success-surface);
   --color-success-line: var(--ui-success-line);
   --color-success-fg: var(--ui-success-fg);
+
+  /* 旧名别名：改动其间残留的 bg-surface / text-fg 等仍按同一套取值渲染 */
+  --color-bg: var(--ui-paper);
+  --color-surface: var(--ui-card);
+  --color-surface-2: var(--ui-slab);
+  --color-line-strong: var(--ui-muted);
+  --color-fg: var(--ui-ink);
+  --color-accent: var(--ui-sky-deep);
+  --color-accent-soft: var(--ui-sky-soft);
+  --color-accent-soft-line: var(--ui-sky-deep);
+  --color-on-accent: #ffffff;
 }
 
-/* 亮色主题取值（默认）。.dark 段必须写在后面：两者权重同为 0,1,0，靠顺序决胜 */
+/* 亮色（默认）。.dark 段必须写在后面：权重同为 0,1,0，靠顺序决胜 */
 :root {
-  --ui-bg: #f8fafc;
-  --ui-surface: #ffffff;
-  --ui-surface-2: #f1f5f9;
+  --ui-paper: #eef6fd;
+  --ui-card: #ffffff;
+  --ui-slab: #e3eef9;
   --ui-field: #ffffff;
-  --ui-line: #e2e8f0;
-  --ui-line-strong: #94a3b8;
-  --ui-fg: #0f172a;
-  --ui-body: #334155;
-  --ui-muted: #475569;
-  --ui-subtle: #64748b;
-  --ui-on-accent: #ffffff;
-  --ui-accent: #0369a1;
-  --ui-accent-soft: #e0f2fe;
-  --ui-accent-soft-line: #7dd3fc;
+  --ui-brut: #0b1622;
+  --ui-line: #c4d9e9;
+  --ui-ink: #0b1622;
+  --ui-body: #1e3346;
+  --ui-muted: #46617a;
+  --ui-subtle: #5b7488;
+  --ui-sky: #38bdf8;
+  --ui-sky-deep: #0369a1;
+  --ui-sky-soft: #dcf0ff;
+  --ui-on-sky: #05202f;
+  --ui-side: #7dd3fc;
   --ui-danger: #dc2626;
-  --ui-danger-surface: #fef2f2;
-  --ui-danger-line: #fecaca;
-  --ui-danger-fg: #b91c1c;
-  --ui-warning-surface: #fffbeb;
-  --ui-warning-line: #fde68a;
-  --ui-warning-fg: #92400e;
-  --ui-success-surface: #ecfdf5;
-  --ui-success-line: #a7f3d0;
-  --ui-success-fg: #047857;
+  --ui-danger-surface: #ffe9e9;
+  --ui-danger-line: #e11d48;
+  --ui-danger-fg: #a5122c;
+  --ui-warning-surface: #fff4d6;
+  --ui-warning-line: #b45309;
+  --ui-warning-fg: #8a4b00;
+  --ui-success-surface: #dff7ec;
+  --ui-success-line: #047857;
+  --ui-success-fg: #04624a;
+  --brut-shadow: #0b1622;
+  --grid-line: rgb(11 22 34 / 0.055);
   color-scheme: light;
 }
 
 .dark {
-  --ui-bg: #020617;
-  --ui-surface: #0f172a;
-  --ui-surface-2: #1e293b;
-  --ui-field: #1e293b;
-  --ui-line: #1e293b;
-  --ui-line-strong: #475569;
-  --ui-fg: #f8fafc;
-  --ui-body: #e2e8f0;
-  --ui-muted: #cbd5e1;
-  --ui-subtle: #94a3b8;
-  --ui-on-accent: #ffffff;
-  --ui-accent: #7dd3fc;
-  --ui-accent-soft: rgb(56 189 248 / 0.16);
-  --ui-accent-soft-line: #0284c7;
-  --ui-danger: #dc2626;
-  --ui-danger-surface: rgb(127 29 29 / 0.3);
-  --ui-danger-line: #7f1d1d;
-  --ui-danger-fg: #fca5a5;
-  --ui-warning-surface: rgb(120 53 15 / 0.3);
-  --ui-warning-line: #92400e;
-  --ui-warning-fg: #fcd34d;
-  --ui-success-surface: rgb(6 78 59 / 0.3);
-  --ui-success-line: #065f46;
-  --ui-success-fg: #6ee7b7;
+  --ui-paper: #060d18;
+  --ui-card: #0d1a2a;
+  --ui-slab: #14263a;
+  --ui-field: #0a1523;
+  --ui-brut: #6fb6dc;
+  --ui-line: #24405a;
+  --ui-ink: #eaf6ff;
+  --ui-body: #cfe4f3;
+  --ui-muted: #a8c4d8;
+  --ui-subtle: #8dabc2;
+  --ui-sky: #38bdf8;
+  --ui-sky-deep: #7dd3fc;
+  --ui-sky-soft: rgb(56 189 248 / 0.16);
+  --ui-on-sky: #04121d;
+  --ui-side: #0b2033;
+  --ui-danger: #f43f5e;
+  --ui-danger-surface: rgb(159 18 57 / 0.24);
+  --ui-danger-line: #f43f5e;
+  --ui-danger-fg: #ffb3c1;
+  --ui-warning-surface: rgb(180 83 9 / 0.24);
+  --ui-warning-line: #f59e0b;
+  --ui-warning-fg: #ffd68a;
+  --ui-success-surface: rgb(4 120 87 / 0.24);
+  --ui-success-line: #10b981;
+  --ui-success-fg: #8bf0c8;
+  --brut-shadow: #01060d;
+  --grid-line: rgb(125 211 252 / 0.07);
   color-scheme: dark;
 }
 
@@ -132,10 +164,26 @@
     text-rendering: optimizeLegibility;
   }
   body {
-    @apply bg-bg text-body;
+    background-color: var(--ui-paper);
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 28px 28px;
+    @apply font-sans text-body;
   }
+  /* 粗野风的不靠柔光聚焦，用一条实心蓝线把焦点钉住 */
   :focus-visible {
-    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-bg;
+    outline: 3px solid var(--ui-sky-deep);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--ui-sky);
+    color: var(--ui-on-sky);
+  }
+  /* 滚动条也做成硬边的：默认的灰色胶囊在这套块面里很扎眼 */
+  * {
+    scrollbar-color: var(--ui-brut) transparent;
+    scrollbar-width: thin;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -146,6 +194,359 @@
       animation-iteration-count: 1 !important;
       transition-duration: 0.001ms !important;
       scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* ------------------------------------------------------------------ 块面 */
+
+  /* 三件齐备：描边 + 底色 + 偏移投影。管理端所有内容块都从这里来 */
+  .brut-card {
+    border: 2px solid var(--ui-brut);
+    background: var(--ui-card);
+    box-shadow: 3px 3px 0 0 var(--brut-shadow);
+  }
+  .brut-card-lg {
+    border: 2px solid var(--ui-brut);
+    background: var(--ui-card);
+    box-shadow: 6px 6px 0 0 var(--brut-shadow);
+  }
+  /* 蓝色实心块：只给「当前最重要的那一块」，一页最多两处 */
+  .brut-slab-sky {
+    border: 2px solid var(--ui-brut);
+    background: var(--ui-sky);
+    color: var(--ui-on-sky);
+    box-shadow: 6px 6px 0 0 var(--brut-shadow);
+  }
+  .brut-slab-ink {
+    border: 2px solid var(--ui-brut);
+    background: var(--ui-ink);
+    color: var(--ui-card);
+    box-shadow: 6px 6px 0 0 var(--brut-shadow);
+  }
+
+  /* ------------------------------------------------------------------ 文字 */
+
+  /* 小号等宽说明行：像印刷品的栏目名，用来给每个块贴标签 */
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    line-height: 1;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ui-muted);
+  }
+  .page-title {
+    font-size: clamp(1.6rem, 1.1rem + 1.6vw, 2.4rem);
+    line-height: 1.02;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--ui-ink);
+  }
+  /* 数字统一等宽 + 定宽数字，列表里的位数才对得上 */
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  /* ------------------------------------------------------------------ 按钮 */
+
+  .brut-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    border: 2px solid var(--ui-brut);
+    background: var(--ui-card);
+    color: var(--ui-ink);
+    border-radius: 2px;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    line-height: 1.15;
+    white-space: nowrap;
+    box-shadow: 3px 3px 0 0 var(--brut-shadow);
+    transition:
+      transform 0.11s var(--ease-snap),
+      box-shadow 0.11s var(--ease-snap),
+      background-color 0.11s linear;
+  }
+  .brut-btn:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: 4px 4px 0 0 var(--brut-shadow);
+  }
+  /* 按下时「压进纸面」：位移与投影同时收掉，比变色更像实体按键 */
+  .brut-btn:active:not(:disabled) {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 0 var(--brut-shadow);
+  }
+  .brut-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: 3px 3px 0 0 var(--brut-shadow);
+  }
+  .brut-btn-primary {
+    background: var(--ui-sky);
+    color: var(--ui-on-sky);
+  }
+  .brut-btn-ink {
+    background: var(--ui-ink);
+    color: var(--ui-card);
+  }
+  .brut-btn-danger {
+    background: var(--ui-danger);
+    color: #ffffff;
+  }
+  .brut-btn-sky-ghost {
+    background: var(--ui-sky-soft);
+    color: var(--ui-sky-deep);
+  }
+  /* 只有文字、没有投影：用在「取消」这类次要出口，避免和主操作抢重量 */
+  .brut-btn-bare {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--ui-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 2px;
+    text-decoration-color: var(--ui-line);
+  }
+  .brut-btn-bare:hover {
+    color: var(--ui-sky-deep);
+    text-decoration-color: var(--ui-sky-deep);
+  }
+  .brut-btn-xs {
+    padding: 0.25rem 0.45rem;
+    font-size: 0.6875rem;
+    box-shadow: 2px 2px 0 0 var(--brut-shadow);
+  }
+  .brut-btn-xs:hover:not(:disabled) {
+    box-shadow: 3px 3px 0 0 var(--brut-shadow);
+  }
+
+  /* 分段控件：联排、共用边框，选中项整块变墨色 */
+  .brut-seg {
+    display: inline-flex;
+    border: 2px solid var(--ui-brut);
+    box-shadow: 3px 3px 0 0 var(--brut-shadow);
+    background: var(--ui-card);
+  }
+  .brut-seg button {
+    padding: 0.35rem 0.65rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--ui-muted);
+    border-right: 2px solid var(--ui-brut);
+    transition:
+      background-color 0.1s linear,
+      color 0.1s linear;
+  }
+  .brut-seg button:last-child {
+    border-right: 0;
+  }
+  .brut-seg button:hover {
+    background: var(--ui-sky-soft);
+    color: var(--ui-sky-deep);
+  }
+  .brut-seg button[aria-pressed="true"] {
+    background: var(--ui-ink);
+    color: var(--ui-card);
+  }
+
+  /* ------------------------------------------------------------------ 表单 */
+
+  .brut-field {
+    width: 100%;
+    border: 2px solid var(--ui-brut);
+    border-radius: 2px;
+    background: var(--ui-field);
+    color: var(--ui-ink);
+    padding: 0.4rem 0.55rem;
+    font-size: 0.8125rem;
+    line-height: 1.3;
+  }
+  .brut-field::placeholder {
+    color: var(--ui-subtle);
+  }
+  .brut-field:focus {
+    outline: none;
+    box-shadow: 3px 3px 0 0 var(--ui-sky-deep);
+  }
+  select.brut-field {
+    appearance: none;
+    padding-right: 1.6rem;
+    background-image: linear-gradient(45deg, transparent 50%, var(--ui-ink) 50%),
+      linear-gradient(135deg, var(--ui-ink) 50%, transparent 50%);
+    background-position:
+      calc(100% - 12px) calc(50% + 1px),
+      calc(100% - 7px) calc(50% + 1px);
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+  input[type="checkbox"].brut-check {
+    width: 1rem;
+    height: 1rem;
+    accent-color: var(--ui-sky-deep);
+    border: 2px solid var(--ui-brut);
+  }
+  .brut-label {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ui-muted);
+    margin-bottom: 0.3rem;
+  }
+
+  /* ------------------------------------------------------------------ 标签 */
+
+  .brut-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    border: 1.5px solid var(--ui-brut);
+    border-radius: 2px;
+    padding: 0.1rem 0.35rem;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1.4;
+    background: var(--ui-card);
+    color: var(--ui-ink);
+  }
+  .brut-tag-sky {
+    background: var(--ui-sky);
+    color: var(--ui-on-sky);
+  }
+  .brut-tag-danger {
+    background: var(--ui-danger);
+    color: #ffffff;
+  }
+  .brut-tag-warn {
+    background: var(--ui-warning-surface);
+    color: var(--ui-warning-fg);
+    border-color: var(--ui-warning-line);
+  }
+  .brut-tag-ok {
+    background: var(--ui-success-surface);
+    color: var(--ui-success-fg);
+    border-color: var(--ui-success-line);
+  }
+  .brut-tag-slab {
+    background: var(--ui-slab);
+    color: var(--ui-muted);
+  }
+
+  /* ------------------------------------------------------------------ 表格 */
+
+  .brut-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.8125rem;
+  }
+  .brut-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--ui-slab);
+    border-bottom: 2px solid var(--ui-brut);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ui-muted);
+    white-space: nowrap;
+  }
+  .brut-table tbody td {
+    border-bottom: 1px solid var(--ui-line);
+    padding: 0.55rem 0.75rem;
+    vertical-align: top;
+    color: var(--ui-body);
+  }
+  .brut-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  .brut-table tbody tr:hover td {
+    background: color-mix(in srgb, var(--ui-sky-soft) 55%, transparent);
+  }
+
+  /* ------------------------------------------------------------------ 提示 */
+
+  /* 顶部横幅：左侧一条 6px 实色竖杠，比圆角+浅底更容易在滚动中被注意到 */
+  .brut-note {
+    border: 2px solid var(--ui-brut);
+    border-left-width: 8px;
+    background: var(--ui-card);
+    padding: 0.6rem 0.85rem;
+    font-size: 0.8125rem;
+    box-shadow: 3px 3px 0 0 var(--brut-shadow);
+  }
+  .brut-note-ok {
+    border-left-color: var(--ui-success-line);
+    color: var(--ui-success-fg);
+  }
+  .brut-note-fail {
+    border-left-color: var(--ui-danger);
+    color: var(--ui-danger-fg);
+  }
+  .brut-note-warn {
+    border-left-color: var(--ui-warning-line);
+    color: var(--ui-warning-fg);
+  }
+  .brut-note-info {
+    border-left-color: var(--ui-sky);
+    color: var(--ui-body);
+  }
+
+  /* 页脚那块斜纹：粗野风里唯一允许出现的图案，用来收住长页面 */
+  .brut-hatch {
+    background-image: repeating-linear-gradient(
+      45deg,
+      var(--grid-line) 0 6px,
+      transparent 6px 12px
+    );
+  }
+
+  /* -------------------------------------------------------------- 主题切换 */
+
+  /* 单按钮循环（自动 → 亮色 → 暗色）。形状走 .brut-btn，这里只收紧成图标 + 短标签 */
+  .theme-switch {
+    flex: none;
+    gap: 0.3rem;
+    padding: 0.34rem 0.5rem;
+  }
+  .theme-switch svg {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.9;
+    stroke-linecap: square;
+  }
+  /* 窄屏只留图标：顶栏还要塞「今天 / 在线 / 退出」，标签会把它们挤到换行。
+     图标同时放大一档——没有文字时，太小的图标会让点击区域只有二十几像素 */
+  @media (max-width: 39.999rem) {
+    .theme-switch .theme-switch-label {
+      display: none;
+    }
+    .theme-switch {
+      padding: 0.44rem 0.5rem;
+    }
+    .theme-switch svg {
+      width: 15px;
+      height: 15px;
     }
   }
 }

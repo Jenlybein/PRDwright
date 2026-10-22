@@ -140,10 +140,10 @@ const bars = computed<Bar[]>(() => {
           ? [
               { cls: 'bg-danger', height: (row.failed_count / total) * 100 },
               {
-                cls: 'bg-line-strong',
+                cls: 'bg-muted',
                 height: (other / total) * 100,
               },
-              { cls: 'bg-accent', height: (row.completed_count / total) * 100 },
+              { cls: 'bg-sky', height: (row.completed_count / total) * 100 },
             ].filter((seg) => seg.height > 0)
           : [],
         caption: `${row.day}：${total} 个（成功 ${row.completed_count}、失败 ${row.failed_count}）`,
@@ -161,7 +161,7 @@ const bars = computed<Bar[]>(() => {
         day: row.day,
         label: index % labelStep === 0 ? row.day.slice(5) : '',
         height: (total / max) * 100,
-        segments: total ? [{ cls: 'bg-accent', height: 100 }] : [],
+        segments: total ? [{ cls: 'bg-sky', height: 100 }] : [],
         caption: `${row.day}：${total.toLocaleString()} Token`,
         empty: total === 0,
       }
@@ -204,188 +204,245 @@ function totalTokens(row: AdminTopUser): number {
   return row.prompt_tokens + row.completion_tokens
 }
 
+function seq(index: number): string {
+  return String(index + 1).padStart(2, '0')
+}
+
 onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="rounded-card border border-line bg-surface p-5 shadow-card">
-      <h1 class="text-base font-semibold text-fg">平台概览</h1>
-      <p class="mt-1 text-sm text-muted">
-        Token 统计包含失败的任务——重试恰恰是最烧钱的部分，剔掉它们会让成本看起来偏低。
-        失败率不含主动取消与被新任务顶替的那些：它们在库里同样是 failed，但成因不是模型坏了。
-      </p>
-    </div>
-
-    <p
-      v-if="error"
-      class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg"
-    >
-      {{ error }}
-    </p>
-
-    <div v-else-if="loading" class="text-sm text-subtle">加载中…</div>
-
-    <template v-else>
-      <!-- 总量卡片 -->
-      <div v-if="stats" class="grid gap-3 sm:grid-cols-3">
-        <div
-          v-for="card in cards"
-          :key="card.key"
-          class="rounded-card border border-line bg-surface p-4"
-        >
-          <div class="text-xs text-subtle">{{ card.label }}</div>
-          <div class="mt-1 text-2xl font-semibold text-fg">
-            {{ stats[card.key].toLocaleString() }}
-          </div>
-          <div class="mt-0.5 text-xs text-subtle">{{ card.hint }}</div>
+  <div class="space-y-5">
+    <!-- 页头 -->
+    <header class="brut-card-lg p-5">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="min-w-0">
+          <p class="kicker">Overview / 平台</p>
+          <h1 class="page-title mt-2">平台概览</h1>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="brut-tag brut-tag-sky">累计口径</span>
+          <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
         </div>
       </div>
 
-      <!-- 趋势图 -->
-      <div class="rounded-card border border-line bg-surface p-4">
-        <div class="flex flex-wrap items-center gap-2">
-          <h2 class="text-sm font-medium text-fg">按日趋势</h2>
+      <div class="mt-4 grid gap-2 border-t-2 border-line pt-3 text-xs text-body sm:grid-cols-2">
+        <p>
+          Token 统计<b class="text-ink">包含失败的任务</b>——重试恰恰是最烧钱的部分，
+          剔掉它们会让成本看起来偏低。
+        </p>
+        <p>
+          失败率<b class="text-ink">不含主动取消与被新任务顶替</b>的那些：它们在库里同样是
+          failed，但成因不是模型坏了。
+        </p>
+      </div>
+    </header>
 
-          <!-- 指标切换 -->
-          <div class="ml-auto flex gap-1">
-            <button
-              v-for="item in METRICS"
-              :key="item.key"
-              type="button"
-              class="rounded-control px-2.5 py-1 text-xs"
-              :class="
-                metric === item.key
-                  ? 'bg-surface-2 font-medium text-fg'
-                  : 'text-body hover:bg-surface-2'
-              "
-              @click="metric = item.key"
-            >
-              {{ item.label }}
-            </button>
-          </div>
+    <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 
-          <!-- 天数切换 -->
-          <div class="flex gap-1">
-            <button
-              v-for="option in DAY_OPTIONS"
-              :key="option"
-              type="button"
-              class="rounded-control px-2 py-1 text-xs"
-              :class="
-                days === option
-                  ? 'bg-surface-2 font-medium text-fg'
-                  : 'text-body hover:bg-surface-2'
-              "
-              @click="days = option"
-            >
-              {{ option }} 天
-            </button>
+    <div v-else-if="loading" class="brut-card px-4 py-6 text-sm text-subtle">加载中…</div>
+
+    <template v-else>
+      <!-- 总量卡片：六格等宽，序号当装饰，数字用等宽体便于竖向比对 -->
+      <div v-if="stats" class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div
+          v-for="(card, index) in cards"
+          :key="card.key"
+          class="brut-card relative overflow-hidden p-4"
+        >
+          <span
+            class="absolute inset-x-0 top-0 h-1.5"
+            :class="index % 3 === 1 ? 'bg-ink' : 'bg-sky'"
+          ></span>
+          <div class="flex items-baseline justify-between gap-2">
+            <p class="kicker">{{ card.label }}</p>
+            <span class="tnum text-[10px] text-subtle">{{ seq(index) }}</span>
           </div>
+          <p class="tnum mt-2 text-3xl font-black leading-none text-ink">
+            {{ stats[card.key].toLocaleString() }}
+          </p>
+          <p class="mt-1.5 text-xs text-subtle">{{ card.hint }}</p>
         </div>
+      </div>
+
+      <!-- 趋势 -->
+      <section class="brut-card-lg">
+        <header
+          class="flex flex-wrap items-center justify-between gap-3 border-b-2 border-brut px-4 py-3"
+        >
+          <div>
+            <p class="kicker">Trend</p>
+            <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">按日趋势</h2>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <!-- 指标切换 -->
+            <div class="brut-seg">
+              <button
+                v-for="item in METRICS"
+                :key="item.key"
+                type="button"
+                :aria-pressed="metric === item.key"
+                @click="metric = item.key"
+              >
+                {{ item.label }}
+              </button>
+            </div>
+
+            <!-- 天数切换 -->
+            <div class="brut-seg">
+              <button
+                v-for="option in DAY_OPTIONS"
+                :key="option"
+                type="button"
+                :aria-pressed="days === option"
+                @click="days = option"
+              >
+                {{ option }} 天
+              </button>
+            </div>
+          </div>
+        </header>
 
         <!-- 空数据：给文案，不画一张什么都没有的图 -->
-        <div v-if="isEmpty" class="px-2 py-12 text-center text-sm text-subtle">
-          这段时间还没有生成记录。等有人开始用，这里会出现每天的趋势。
+        <div v-if="isEmpty" class="px-4 py-14 text-center">
+          <p class="text-sm font-bold text-ink">这段时间还没有生成记录</p>
+          <p class="mt-1 text-xs text-subtle">等有人开始用，这里会出现每天的趋势。</p>
         </div>
 
         <template v-else>
-          <!-- 汇总：图看趋势，这行看总量 -->
-          <div class="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted">
-            <span>生成 <b class="text-fg">{{ summary.tasks.toLocaleString() }}</b> 个</span>
-            <span>失败 <b class="text-fg">{{ summary.failed.toLocaleString() }}</b> 个</span>
-            <span>
-              失败率
-              <b class="text-fg">
+          <!-- 汇总：图看趋势，这一排看总量 -->
+          <div class="grid grid-cols-2 gap-px border-b-2 border-line bg-line sm:grid-cols-4">
+            <div class="bg-card px-4 py-3">
+              <p class="kicker">生成</p>
+              <p class="tnum mt-1 text-xl font-black text-ink">
+                {{ summary.tasks.toLocaleString() }}
+              </p>
+            </div>
+            <div class="bg-card px-4 py-3">
+              <p class="kicker">失败</p>
+              <p class="tnum mt-1 text-xl font-black text-ink">
+                {{ summary.failed.toLocaleString() }}
+              </p>
+            </div>
+            <div class="bg-card px-4 py-3">
+              <p class="kicker">失败率</p>
+              <p class="tnum mt-1 text-xl font-black text-ink">
                 {{ summary.rate === null ? '—' : summary.rate.toFixed(1) + '%' }}
-              </b>
-            </span>
-            <span>Token <b class="text-fg">{{ summary.tokens.toLocaleString() }}</b></span>
+              </p>
+            </div>
+            <div class="bg-card px-4 py-3">
+              <p class="kicker">Token</p>
+              <p class="tnum mt-1 text-xl font-black text-ink">
+                {{ summary.tokens.toLocaleString() }}
+              </p>
+            </div>
           </div>
 
           <!-- 柱状图：纯 CSS 高度百分比，天然自适应，不必算坐标 -->
-          <div
-            class="mt-3 flex h-44 items-end border-b border-line pb-0.5"
-            :class="days > 14 ? 'gap-px' : 'gap-1'"
-          >
+          <div class="px-4 pt-5">
             <div
-              v-for="bar in bars"
-              :key="bar.day"
-              class="group flex h-full flex-1 flex-col justify-end"
-              :title="bar.caption"
+              class="flex h-48 items-end border-b-2 border-brut"
+              :class="days > 14 ? 'gap-px' : 'gap-1.5'"
             >
               <div
-                v-if="!bar.empty"
-                class="flex w-full flex-col justify-end overflow-hidden rounded-t-sm"
-                :style="{ height: Math.max(bar.height, 1.5) + '%' }"
+                v-for="bar in bars"
+                :key="bar.day"
+                class="group flex h-full flex-1 flex-col justify-end"
+                :title="bar.caption"
               >
-                <!-- 分段自上而下（见 `bars` 里的顺序说明）：失败在顶、成功垫底 -->
                 <div
-                  v-for="(seg, index) in bar.segments"
-                  :key="index"
-                  :class="seg.cls"
-                  :style="{ height: seg.height + '%' }"
-                ></div>
+                  v-if="!bar.empty"
+                  class="flex w-full flex-col justify-end border-2 border-b-0 border-brut"
+                  :style="{ height: Math.max(bar.height, 1.5) + '%' }"
+                >
+                  <!-- 分段自上而下（见 `bars` 里的顺序说明）：失败在顶、成功垫底 -->
+                  <div
+                    v-for="(seg, index) in bar.segments"
+                    :key="index"
+                    :class="seg.cls"
+                    :style="{ height: seg.height + '%' }"
+                  ></div>
+                </div>
+                <!-- 空柱：画一条 2px 的浅色底，表示「这天有格子但值是 0 / 无」 -->
+                <div v-else class="w-full bg-line" style="height: 2px"></div>
               </div>
-              <!-- 空柱：画一条 2px 的浅色底，表示「这天有格子但值是 0 / 无」 -->
-              <div v-else class="w-full rounded-t-sm bg-line" style="height: 2px"></div>
+            </div>
+
+            <!-- 横轴 -->
+            <div class="mt-1.5 flex" :class="days > 14 ? 'gap-px' : 'gap-1.5'">
+              <div
+                v-for="bar in bars"
+                :key="bar.day"
+                class="flex-1 whitespace-nowrap text-center font-mono text-[10px] text-subtle"
+              >
+                {{ bar.label }}
+              </div>
             </div>
           </div>
 
-          <!-- 横轴 -->
-          <div class="mt-1 flex" :class="days > 14 ? 'gap-px' : 'gap-1'">
-            <div
-              v-for="bar in bars"
-              :key="bar.day"
-              class="flex-1 whitespace-nowrap text-center text-xs text-subtle"
-            >
-              {{ bar.label }}
-            </div>
+          <!-- 图例：不解释颜色，柱子里红蓝各是什么就得靠猜 -->
+          <div class="flex flex-wrap gap-4 px-4 py-3">
+            <span class="flex items-center gap-1.5 text-[11px] text-muted">
+              <span class="h-2.5 w-2.5 border border-brut bg-sky"></span>成功
+            </span>
+            <span class="flex items-center gap-1.5 text-[11px] text-muted">
+              <span class="h-2.5 w-2.5 border border-brut bg-danger"></span>失败
+            </span>
+            <span class="flex items-center gap-1.5 text-[11px] text-muted">
+              <span class="h-2.5 w-2.5 border border-brut bg-muted"></span>未收尾
+            </span>
           </div>
         </template>
-      </div>
+      </section>
 
       <!-- 用户排行 -->
-      <div class="rounded-card border border-line bg-surface">
-        <div class="border-b border-line px-4 py-3">
-          <h2 class="text-sm font-medium text-fg">用户用量排行</h2>
-          <p class="mt-0.5 text-xs text-subtle">
+      <section class="brut-card-lg">
+        <header class="flex flex-wrap items-end justify-between gap-2 border-b-2 border-brut px-4 py-3">
+          <div>
+            <p class="kicker">Ranking</p>
+            <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">用户用量排行</h2>
+          </div>
+          <p class="max-w-md text-xs text-subtle">
             只列生成过任务的账号。口径与「用户」页同源——两处各算一遍，迟早会给出两个数。
           </p>
-        </div>
+        </header>
 
-        <table class="w-full text-sm">
-          <thead class="border-b border-line text-left text-xs text-subtle">
-            <tr>
-              <th class="w-12 px-4 py-2 font-medium">#</th>
-              <th class="px-4 py-2 font-medium">用户</th>
-              <th class="px-4 py-2 font-medium">任务数</th>
-              <th class="px-4 py-2 font-medium">总 Token</th>
-              <th class="px-4 py-2 font-medium">状态</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="(row, index) in topUsers"
-              :key="row.id"
-              class="border-b border-line last:border-0"
-            >
-              <td class="px-4 py-2 text-subtle">{{ index + 1 }}</td>
-              <td class="px-4 py-2 font-medium text-fg">{{ row.username }}</td>
-              <td class="px-4 py-2 text-muted">{{ row.task_count.toLocaleString() }}</td>
-              <td class="px-4 py-2 text-muted">{{ totalTokens(row).toLocaleString() }}</td>
-              <td class="px-4 py-2 text-xs" :class="row.is_active ? 'text-muted' : 'text-danger-fg'">
-                {{ row.is_active ? '正常' : '已停用' }}
-              </td>
-            </tr>
-            <tr v-if="!topUsers.length">
-              <td colspan="5" class="px-4 py-8 text-center text-sm text-subtle">
-                还没有任何用户生成过任务。
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+        <div class="overflow-x-auto">
+          <table class="brut-table min-w-[560px]">
+            <thead>
+              <tr>
+                <th class="w-12">#</th>
+                <th>用户</th>
+                <th>任务数</th>
+                <th>总 Token</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, index) in topUsers" :key="row.id">
+                <td class="tnum text-xs text-subtle">{{ seq(index) }}</td>
+                <td class="font-bold text-ink">{{ row.username }}</td>
+                <td class="tnum">{{ row.task_count.toLocaleString() }}</td>
+                <td class="tnum">{{ totalTokens(row).toLocaleString() }}</td>
+                <td>
+                  <span
+                    class="brut-tag"
+                    :class="row.is_active ? 'brut-tag-ok' : 'brut-tag-danger'"
+                  >
+                    {{ row.is_active ? '正常' : '已停用' }}
+                  </span>
+                </td>
+              </tr>
+              <tr v-if="!topUsers.length">
+                <td colspan="5" class="px-4 py-10 text-center text-sm text-subtle">
+                  还没有任何用户生成过任务。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </template>
   </div>
 </template>

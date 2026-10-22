@@ -34,6 +34,11 @@ function actionText(action: string): string {
   return ACTION_LABELS[action] ?? action
 }
 
+/** 危险动作用红标签；其余用中性标签。扫一眼就知道「昨天那次删除」在哪一行 */
+function isDestructive(action: string): boolean {
+  return action === 'user.delete' || action === 'invite.delete'
+}
+
 /** 时间显示到秒：审计要能对上具体是哪一刻的操作 */
 function formatTime(value: string): string {
   return value ? value.replace('T', ' ').slice(0, 19) : '—'
@@ -55,50 +60,59 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="rounded-card border border-line bg-surface p-5 shadow-card">
-      <h1 class="text-base font-semibold text-fg">操作记录</h1>
-      <p class="mt-1 text-sm text-muted">
+  <div class="space-y-5">
+    <header class="brut-card-lg p-5">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="min-w-0">
+          <p class="kicker">Audit / 留痕</p>
+          <h1 class="page-title mt-2">操作记录</h1>
+        </div>
+        <span class="brut-tag brut-tag-slab">{{ items.length }} 条</span>
+      </div>
+      <p class="mt-3 max-w-3xl text-sm text-body">
         管理员的每一次写操作都会留痕。账号被删之后，记录仍在，操作者名字也保留。
       </p>
-    </div>
+    </header>
 
-    <p v-if="error" class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg">
-      {{ error }}
-    </p>
+    <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 
-    <div class="rounded-card border border-line bg-surface">
-      <div v-if="loading" class="px-4 py-6 text-sm text-subtle">加载中…</div>
+    <section class="brut-card-lg overflow-hidden">
+      <div v-if="loading" class="px-4 py-8 text-sm text-subtle">加载中…</div>
 
-      <table v-else class="w-full text-sm">
-        <thead class="border-b border-line text-left text-xs text-subtle">
-          <tr>
-            <th class="px-4 py-2 font-medium">时间</th>
-            <th class="px-4 py-2 font-medium">操作者</th>
-            <th class="px-4 py-2 font-medium">动作</th>
-            <th class="px-4 py-2 font-medium">对象</th>
-            <th class="px-4 py-2 font-medium">说明</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="item in items"
-            :key="item.id"
-            class="border-b border-line last:border-0"
-          >
-            <td class="px-4 py-3 text-muted">{{ formatTime(item.ts) }}</td>
-            <td class="px-4 py-3 font-medium text-fg">{{ item.actor_name }}</td>
-            <td class="px-4 py-3 text-muted">{{ actionText(item.action) }}</td>
-            <td class="px-4 py-3 text-muted">{{ item.target || '—' }}</td>
-            <td class="px-4 py-3 text-muted">{{ item.detail || '—' }}</td>
-          </tr>
-          <tr v-if="!items.length">
-            <td colspan="5" class="px-4 py-6 text-center text-sm text-subtle">
-              还没有任何操作记录
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+      <div v-else class="overflow-x-auto">
+        <table class="brut-table min-w-[680px]">
+          <thead>
+            <tr>
+              <th class="w-52">时间</th>
+              <th>操作者</th>
+              <th>动作</th>
+              <th>对象</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in items" :key="item.id">
+              <td class="tnum text-xs">{{ formatTime(item.ts) }}</td>
+              <td class="font-bold text-ink">{{ item.actor_name }}</td>
+              <td>
+                <span
+                  class="brut-tag"
+                  :class="isDestructive(item.action) ? 'brut-tag-danger' : 'brut-tag-slab'"
+                >
+                  {{ actionText(item.action) }}
+                </span>
+              </td>
+              <td class="font-mono text-xs">{{ item.target || '—' }}</td>
+              <td class="text-xs">{{ item.detail || '—' }}</td>
+            </tr>
+            <tr v-if="!items.length">
+              <td colspan="5" class="px-4 py-10 text-center text-sm text-subtle">
+                还没有任何操作记录
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </div>
 </template>

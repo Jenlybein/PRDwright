@@ -8,6 +8,7 @@
  */
 import { useRouter } from 'vue-router'
 
+import ThemeSwitch from '@/components/ThemeSwitch.vue'
 import { useSessionStore } from '@/stores/session'
 
 const router = useRouter()
@@ -20,27 +21,41 @@ async function switchAccount() {
 </script>
 
 <template>
-  <div class="flex min-h-[70vh] items-center justify-center px-4">
-    <div class="w-full max-w-md rounded-card border border-line bg-surface p-6 shadow-card">
-      <h1 class="text-lg font-semibold text-fg">当前账号没有访问权限</h1>
-      <p class="mt-2 text-sm text-body">
-        <template v-if="session.username">
-          已登录为
-          <span class="font-medium text-fg">{{ session.username }}</span>
-          ，但该账号不是平台管理员。
-        </template>
-        <template v-else> 该账号不是平台管理员。 </template>
-      </p>
-      <p class="mt-2 text-sm text-muted">
-        管理员身份需要由运维在服务端任命。若你认为这是误会，请联系系统管理员。
-      </p>
-      <button
-        type="button"
-        class="mt-4 rounded-control border border-line-strong px-3 py-2 text-sm text-fg"
-        @click="switchAccount"
-      >
-        换个账号登录
-      </button>
+  <div class="flex min-h-screen items-center justify-center p-4 pt-16 sm:p-6 sm:pt-20">
+    <!-- 无权限页同样不套后台外壳，主题切换只能自带一份 -->
+    <div class="fixed top-3 right-3 z-30">
+      <ThemeSwitch />
+    </div>
+
+    <div class="w-full max-w-lg">
+      <!-- 一个巨大的 403 牌：不靠文案先把性质说清 -->
+      <div class="brut-slab-ink flex items-end justify-between px-5 py-4">
+        <span class="font-mono text-5xl font-black leading-none tracking-tighter">403</span>
+        <span class="kicker text-card/70">Forbidden</span>
+      </div>
+
+      <div class="brut-card-lg mt-4 p-6">
+        <h1 class="text-2xl font-black tracking-tight text-ink">当前账号没有访问权限</h1>
+        <p class="mt-3 text-sm text-body">
+          <template v-if="session.username">
+            已登录为
+            <span class="font-mono font-bold text-ink">{{ session.username }}</span>
+            ，但该账号不是平台管理员。
+          </template>
+          <template v-else> 该账号不是平台管理员。 </template>
+        </p>
+        <p class="mt-2 text-sm text-muted">
+          管理员身份需要由运维在服务端任命。若你认为这是误会，请联系系统管理员。
+        </p>
+
+        <div class="mt-5 flex flex-wrap items-center gap-2">
+          <button type="button" class="brut-btn brut-btn-primary" @click="switchAccount">
+            换个账号登录
+          </button>
+        </div>
+      </div>
+
+      <p class="kicker mt-4 text-center">PRDwright · Admin Console</p>
     </div>
   </div>
 </template>

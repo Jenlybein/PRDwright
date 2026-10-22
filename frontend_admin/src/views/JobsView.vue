@@ -229,6 +229,14 @@ function statusClass(job: AdminJob): string {
   return 'text-danger-fg'
 }
 
+/** 状态小方块。方块比字符「●」更容易和这套硬边视觉对齐 */
+function dotClass(job: AdminJob): string {
+  if (job.status === 'running') return job.is_stuck ? 'bg-danger' : 'bg-[var(--ui-sky)]'
+  if (job.status === 'completed') return 'bg-muted'
+  if (job.error_code === 'CANCELLED' || job.error_code === 'SUPERSEDED') return 'bg-line'
+  return 'bg-danger'
+}
+
 function kindLabel(value: string): string {
   return KIND_LABELS[value] ?? value
 }
@@ -239,241 +247,213 @@ function totalTokens(job: AdminJob): string {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="rounded-card border border-line bg-surface p-5 shadow-card">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 class="text-base font-semibold text-fg">任务监控</h1>
-          <p class="mt-1 text-sm text-muted">
+  <div class="space-y-5">
+    <!-- 页头 + 全局动作 -->
+    <header class="brut-card-lg p-5">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="min-w-0">
+          <p class="kicker">Jobs / 现场</p>
+          <h1 class="page-title mt-2">任务监控</h1>
+          <p class="mt-3 max-w-2xl text-sm text-body">
             在飞任务超过 30 分钟没有更新会被标记为卡死。取消是协作式的：任务在下一个可中断点停下。
           </p>
         </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-            @click="load()"
-          >
-            刷新
-          </button>
-          <label class="flex items-center gap-1.5 text-xs text-muted">
-            <input
-              type="checkbox"
-              :checked="autoRefresh"
-              @change="onAutoRefreshChange"
-            />
-            自动刷新（10 秒）
-          </label>
-          <!-- 只在「在飞」页显示：失败页没有 running 数据，按钮会一直是（0），
-               反而让人以为「没有卡死任务」，而真正该清理的可能在别处 -->
-          <button
-            v-if="tab === 'running'"
-            type="button"
-            class="rounded-control border border-danger-line px-2.5 py-1 text-xs text-danger-fg disabled:opacity-50"
-            :disabled="bulkCancelling || stuckCount === 0"
-            @click="onCancelStuck"
-          >
-            {{ bulkCancelling ? '清理中…' : `取消全部卡死（${stuckCount}）` }}
-          </button>
+
+        <div class="flex flex-col items-start gap-2 sm:items-end">
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
+            <label
+              class="flex items-center gap-1.5 border-2 border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
+            >
+              <input
+                type="checkbox"
+                class="brut-check"
+                :checked="autoRefresh"
+                @change="onAutoRefreshChange"
+              />
+              自动刷新（10 秒）
+            </label>
+            <!-- 只在「在飞」页显示：失败页没有 running 数据，按钮会一直是（0），
+                 反而让人以为「没有卡死任务」，而真正该清理的可能在别处 -->
+            <button
+              v-if="tab === 'running'"
+              type="button"
+              class="brut-btn brut-btn-xs"
+              :class="stuckCount > 0 ? 'brut-btn-danger' : ''"
+              :disabled="bulkCancelling || stuckCount === 0"
+              @click="onCancelStuck"
+            >
+              {{ bulkCancelling ? '清理中…' : `取消全部卡死（${stuckCount}）` }}
+            </button>
+          </div>
+          <p class="kicker">卡死判定 = running 且 updated_at 超 30 分钟</p>
         </div>
       </div>
-    </div>
+    </header>
 
-    <p
-      v-if="notice"
-      class="rounded-card border border-success-line bg-success-surface px-4 py-3 text-sm text-success-fg"
-    >
-      {{ notice }}
-    </p>
-    <p
-      v-if="error"
-      class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg"
-    >
-      {{ error }}
-    </p>
+    <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
+    <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
 
     <!-- 筛选 + 标签页 -->
-    <div class="rounded-card border border-line bg-surface p-4">
-      <form class="flex flex-wrap items-end gap-2" @submit.prevent="applyFilters">
-        <label class="block">
-          <span class="text-xs text-subtle">用户名</span>
-          <input
-            v-model="username"
-            type="text"
-            class="mt-1 w-40 rounded-control border border-line bg-field px-3 py-1.5 text-sm text-fg"
-            placeholder="模糊匹配"
-          />
+    <section class="brut-card">
+      <form class="flex flex-wrap items-end gap-3 px-4 py-3" @submit.prevent="applyFilters">
+        <label class="block w-40">
+          <span class="brut-label">用户名</span>
+          <input v-model="username" type="text" class="brut-field" placeholder="模糊匹配" />
         </label>
-        <label class="block">
-          <span class="text-xs text-subtle">类型</span>
-          <select
-            v-model="kind"
-            class="mt-1 rounded-control border border-line bg-field px-3 py-1.5 text-sm text-fg"
-          >
+        <label class="block w-36">
+          <span class="brut-label">类型</span>
+          <select v-model="kind" class="brut-field">
             <option v-for="option in KIND_OPTIONS" :key="option.value" :value="option.value">
               {{ option.label }}
             </option>
           </select>
         </label>
-        <button
-          type="submit"
-          class="rounded-control bg-accent px-3 py-1.5 text-sm font-medium text-on-accent"
-        >
-          查询
-        </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
-          @click="resetFilters"
-        >
-          重置
-        </button>
+        <button type="submit" class="brut-btn brut-btn-primary">查询</button>
+        <button type="button" class="brut-btn" @click="resetFilters">重置</button>
+
+        <span class="ml-auto self-center font-mono text-xs text-subtle">共 {{ total }} 条</span>
       </form>
 
-      <div class="mt-3 flex flex-wrap items-center gap-1 border-t border-line pt-3">
-        <button
-          v-for="item in TABS"
-          :key="item.key"
-          type="button"
-          class="rounded-control px-2.5 py-1 text-sm"
-          :class="tab === item.key ? 'bg-surface-2 font-medium text-fg' : 'text-body hover:bg-surface-2'"
-          @click="selectTab(item.key)"
-        >
-          {{ item.label }}
-        </button>
-        <span class="ml-auto text-xs text-subtle">共 {{ total }} 条</span>
+      <div class="flex flex-wrap items-center gap-2 border-t-2 border-brut px-4 py-2.5">
+        <div class="brut-seg">
+          <button
+            v-for="item in TABS"
+            :key="item.key"
+            type="button"
+            :aria-pressed="tab === item.key"
+            @click="selectTab(item.key)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
+        <span v-if="stuckCount > 0" class="brut-tag brut-tag-danger">
+          {{ stuckCount }} 个卡死
+        </span>
       </div>
-    </div>
+    </section>
 
     <!-- 列表 -->
-    <div class="rounded-card border border-line bg-surface">
-      <div v-if="loading" class="px-4 py-6 text-sm text-subtle">加载中…</div>
+    <section class="brut-card-lg overflow-hidden">
+      <div v-if="loading" class="px-4 py-8 text-sm text-subtle">加载中…</div>
 
-      <table v-else class="w-full text-sm">
-        <thead class="border-b border-line text-left text-xs text-subtle">
-          <tr>
-            <th class="px-4 py-2 font-medium">状态</th>
-            <th class="px-4 py-2 font-medium">用户</th>
-            <th class="px-4 py-2 font-medium">类型</th>
-            <th class="px-4 py-2 font-medium">阶段</th>
-            <th class="px-4 py-2 font-medium">耗时</th>
-            <th class="px-4 py-2 font-medium">Token</th>
-            <th class="px-4 py-2 font-medium">最后更新</th>
-            <th class="px-4 py-2 font-medium">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <template v-for="job in jobs" :key="job.id">
-            <tr
-              class="border-b border-line last:border-0"
-              :class="job.is_stuck ? 'bg-danger-surface' : ''"
-            >
-              <td class="align-top px-4 py-3">
-                <span class="flex items-center gap-1.5">
-                  <span :class="statusClass(job)">●</span>
-                  <span :class="statusClass(job)" class="text-xs">
-                    {{ statusLabel(job) }}
+      <div v-else class="overflow-x-auto">
+        <table class="brut-table min-w-[860px]">
+          <thead>
+            <tr>
+              <th>状态</th>
+              <th>用户</th>
+              <th>类型</th>
+              <th>阶段</th>
+              <th>耗时</th>
+              <th>Token</th>
+              <th>最后更新</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="job in jobs" :key="job.id">
+              <tr :class="job.is_stuck ? 'bg-danger-surface' : ''">
+                <td>
+                  <span class="flex items-center gap-1.5">
+                    <span class="inline-block h-2.5 w-2.5 border border-brut" :class="dotClass(job)"></span>
+                    <span class="text-xs font-bold" :class="statusClass(job)">
+                      {{ statusLabel(job) }}
+                    </span>
                   </span>
-                </span>
-              </td>
-              <td class="align-top px-4 py-3 font-medium text-fg">{{ job.owner_name }}</td>
-              <td class="align-top px-4 py-3 text-muted">{{ kindLabel(job.kind) }}</td>
-              <td class="align-top px-4 py-3 text-muted">{{ job.phase || '—' }}</td>
-              <td class="align-top px-4 py-3 text-muted">{{ formatDuration(job.duration_seconds) }}</td>
-              <td class="align-top px-4 py-3 text-muted">{{ totalTokens(job) }}</td>
-              <td class="align-top px-4 py-3 text-muted">{{ formatTime(job.updated_at) }}</td>
-              <td class="align-top px-4 py-3">
-                <div class="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-                    @click="toggleDetail(job)"
-                  >
-                    {{ expandedId === job.id ? '收起' : '详情' }}
-                  </button>
-                  <button
-                    v-if="job.status === 'running'"
-                    type="button"
-                    class="rounded-control border border-danger-line px-2.5 py-1 text-xs text-danger-fg"
-                    @click="pendingCancel = job"
-                  >
-                    取消
-                  </button>
-                </div>
+                </td>
+                <td class="font-bold text-ink">{{ job.owner_name }}</td>
+                <td>
+                  <span class="brut-tag brut-tag-slab">{{ kindLabel(job.kind) }}</span>
+                </td>
+                <td class="font-mono text-xs">{{ job.phase || '—' }}</td>
+                <td class="tnum">{{ formatDuration(job.duration_seconds) }}</td>
+                <td class="tnum">{{ totalTokens(job) }}</td>
+                <td class="tnum text-xs">{{ formatTime(job.updated_at) }}</td>
+                <td>
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      class="brut-btn brut-btn-xs"
+                      @click="toggleDetail(job)"
+                    >
+                      {{ expandedId === job.id ? '收起' : '详情' }}
+                    </button>
+                    <button
+                      v-if="job.status === 'running'"
+                      type="button"
+                      class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
+                      @click="pendingCancel = job"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </td>
+              </tr>
+
+              <!-- 详情：错误原因 / 时间线 / Token 明细 -->
+              <tr v-if="expandedId === job.id" class="bg-slab">
+                <td colspan="8" class="px-4 py-3">
+                  <dl class="grid gap-x-6 gap-y-2 sm:grid-cols-2">
+                    <div class="flex gap-2">
+                      <dt class="kicker w-24 shrink-0 pt-0.5">任务 ID</dt>
+                      <dd class="tnum text-xs text-ink">#{{ job.id }}</dd>
+                    </div>
+                    <div class="flex gap-2">
+                      <dt class="kicker w-24 shrink-0 pt-0.5">创建时间</dt>
+                      <dd class="tnum text-xs text-ink">{{ formatTime(job.created_at) }}</dd>
+                    </div>
+                    <div class="flex gap-2">
+                      <dt class="kicker w-24 shrink-0 pt-0.5">输入 Token</dt>
+                      <dd class="tnum text-xs text-ink">{{ job.prompt_tokens.toLocaleString() }}</dd>
+                    </div>
+                    <div class="flex gap-2">
+                      <dt class="kicker w-24 shrink-0 pt-0.5">输出 Token</dt>
+                      <dd class="tnum text-xs text-ink">{{ job.completion_tokens.toLocaleString() }}</dd>
+                    </div>
+                    <div class="flex gap-2">
+                      <dt class="kicker w-24 shrink-0 pt-0.5">错误码</dt>
+                      <dd class="tnum text-xs text-ink">{{ job.error_code || '—' }}</dd>
+                    </div>
+                    <div class="flex gap-2">
+                      <dt class="kicker w-24 shrink-0 pt-0.5">错误说明</dt>
+                      <dd class="break-all text-xs text-ink">{{ job.error_message || '—' }}</dd>
+                    </div>
+                  </dl>
+                </td>
+              </tr>
+            </template>
+
+            <tr v-if="!jobs.length">
+              <td colspan="8" class="px-4 py-10 text-center text-sm text-subtle">
+                {{ emptyText }}
               </td>
             </tr>
-
-            <!-- 详情：错误原因 / 时间线 / Token 明细 -->
-            <tr v-if="expandedId === job.id" class="border-b border-line bg-surface-2">
-              <td colspan="8" class="px-4 py-3">
-                <dl class="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
-                  <div class="flex gap-2">
-                    <dt class="w-20 shrink-0 text-subtle">任务 ID</dt>
-                    <dd class="text-body">#{{ job.id }}</dd>
-                  </div>
-                  <div class="flex gap-2">
-                    <dt class="w-20 shrink-0 text-subtle">创建时间</dt>
-                    <dd class="text-body">{{ formatTime(job.created_at) }}</dd>
-                  </div>
-                  <div class="flex gap-2">
-                    <dt class="w-20 shrink-0 text-subtle">输入 Token</dt>
-                    <dd class="text-body">{{ job.prompt_tokens.toLocaleString() }}</dd>
-                  </div>
-                  <div class="flex gap-2">
-                    <dt class="w-20 shrink-0 text-subtle">输出 Token</dt>
-                    <dd class="text-body">{{ job.completion_tokens.toLocaleString() }}</dd>
-                  </div>
-                  <div class="flex gap-2">
-                    <dt class="w-20 shrink-0 text-subtle">错误码</dt>
-                    <dd class="text-body">{{ job.error_code || '—' }}</dd>
-                  </div>
-                  <div class="flex gap-2">
-                    <dt class="w-20 shrink-0 text-subtle">错误说明</dt>
-                    <dd class="break-all text-body">{{ job.error_message || '—' }}</dd>
-                  </div>
-                </dl>
-              </td>
-            </tr>
-          </template>
-
-          <tr v-if="!jobs.length">
-            <td colspan="8" class="px-4 py-6 text-center text-sm text-subtle">
-              {{ emptyText }}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- 取消确认。用面板而不是 confirm()：要说明「文档任务不保留半截正文」这个后果 -->
-    <div
-      v-if="pendingCancel"
-      class="rounded-card border border-danger-line bg-danger-surface p-4"
-    >
-      <p class="text-sm text-danger-fg">
+    <section v-if="pendingCancel" class="brut-note brut-note-fail border-2 border-danger-line">
+      <p class="text-sm font-bold">
         确定取消任务 #{{ pendingCancel.id }}（{{ pendingCancel.owner_name }} ·
         {{ kindLabel(pendingCancel.kind) }}）？
       </p>
-      <p class="mt-1 text-xs text-danger-fg">
+      <p class="mt-1 text-xs">
         任务会在下一个可中断点停下；文档任务不会保留半截正文，对话会保留已说出口的部分。
       </p>
       <div class="mt-3 flex items-center gap-2">
         <button
           type="button"
-          class="rounded-control bg-danger px-3 py-1.5 text-sm text-on-accent disabled:opacity-60"
+          class="brut-btn brut-btn-danger"
           :disabled="cancelling"
           @click="onConfirmCancel"
         >
           {{ cancelling ? '取消中…' : '确认取消' }}
         </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
-          @click="pendingCancel = null"
-        >
-          返回
-        </button>
+        <button type="button" class="brut-btn" @click="pendingCancel = null">返回</button>
       </div>
-    </div>
+    </section>
   </div>
 </template>

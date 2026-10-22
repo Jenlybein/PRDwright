@@ -12,7 +12,7 @@
  * 三步都过才说「已生效」。任何一步对不上，就明说「保存成功但未生效」，
  * 并给出下一步该查什么——而不是给一个让人安心的绿字。
  *
- * 另一个刻意的设计：**启动类配置不显示在这里**（日志级别、落库开关、db 路径等）。
+ * 另一个刻意的设计：**启动类配置不显示在这里**（日志级别、落库开关、库文件路径等）。
  * 它们改了必须重启，放进来只会制造「显示已保存、实际没变」的困惑。
  */
 import { computed, onMounted, ref } from 'vue'
@@ -341,155 +341,183 @@ function protocolOptionsLabel(value: string): string {
   return protocols.value.find((p) => p.value === value)?.label ?? value
 }
 
+/** 供应商状态：使用中 / 已停用 / 待命，三态各自带一个标签样式 */
+function providerState(p: Provider): { text: string; cls: string } {
+  if (p.active) return { text: '使用中', cls: 'brut-tag-sky' }
+  if (!p.enabled) return { text: '已停用', cls: 'brut-tag-slab' }
+  return { text: '待命', cls: 'brut-tag-ok' }
+}
+
 onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="rounded-card border border-line bg-surface p-5 shadow-card">
-      <h1 class="text-base font-semibold text-fg">系统配置</h1>
-      <p class="mt-1 text-sm text-muted">
-        改完保存即生效，<b class="text-fg">下一次生成</b>使用新值；正在跑的任务不受影响。
+  <div class="space-y-5">
+    <!-- 页头 -->
+    <header class="brut-card-lg p-5">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="min-w-0">
+          <p class="kicker">Config / 运行时</p>
+          <h1 class="page-title mt-2">系统配置</h1>
+        </div>
+        <span v-if="config" class="brut-tag brut-tag-slab">REV {{ config.revision }}</span>
+      </div>
+      <p class="mt-3 max-w-3xl text-sm text-body">
+        改完保存后立即作用于<b class="text-ink">下一次生成</b>；正在跑的任务不受影响。
         日志级别、落库开关这类「改了必须重启」的配置不在此页——它们改了不重启只会造成错觉。
       </p>
-    </div>
+    </header>
 
-    <p
-      v-if="error"
-      class="rounded-card border border-danger-line bg-danger-surface px-4 py-3 text-sm text-danger-fg"
-    >
-      {{ error }}
-    </p>
-    <p
-      v-if="notice"
-      class="rounded-card border border-success-line bg-success-surface px-4 py-3 text-sm text-success-fg"
-    >
-      {{ notice }}
-    </p>
+    <p v-if="error" class="brut-note brut-note-fail">{{ error }}</p>
+    <p v-if="notice" class="brut-note brut-note-ok">{{ notice }}</p>
 
-    <div v-if="loading" class="text-sm text-subtle">加载中…</div>
+    <div v-if="loading" class="brut-card px-4 py-8 text-sm text-subtle">加载中…</div>
 
     <template v-else-if="config">
-      <!-- 当前生效状态：这是排查「改了没生效」的第一眼 -->
-      <div class="rounded-card border border-line bg-surface p-4">
-        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
-          <span class="text-subtle">当前供应商</span>
-          <span class="font-medium text-fg">
-            {{ config.active_provider?.name || '（无）' }}
-            <span class="text-xs text-muted">
-              {{ config.active_provider?.protocol_label }} ·
+      <!-- 当前生效状态：排查「改了没生效」的第一眼就该落在这里 -->
+      <section class="brut-slab-sky p-4">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="kicker text-on-sky/75">当前供应商 · Active Provider</p>
+            <p class="mt-1 text-xl font-extrabold tracking-tight">
+              {{ config.active_provider?.name || '（无）' }}
+            </p>
+            <p class="mt-0.5 font-mono text-xs text-on-sky/80">
+              {{ config.active_provider?.protocol_label || '—' }} ·
               {{ config.active_provider?.default_model || '未填模型' }}
-            </span>
-          </span>
-          <span class="text-xs text-subtle">
-            配置来源：
-            {{ config.config_source === 'db' ? '数据库（含后台覆盖）' : config.config_source === 'env' ? '环境变量默认值' : '降级（表不可用）' }}
-            · 指纹 {{ config.revision }}
-          </span>
+            </p>
+          </div>
+
+          <div class="text-right">
+            <p class="kicker text-on-sky/75">配置来源</p>
+            <p class="mt-1 text-sm font-bold">
+              {{
+                config.config_source === 'db'
+                  ? '数据库（含后台覆盖）'
+                  : config.config_source === 'env'
+                    ? '环境变量默认值'
+                    : '降级（表不可用）'
+              }}
+            </p>
+          </div>
         </div>
-        <p v-if="config.missing_key" class="mt-2 text-sm text-danger-fg">
+
+        <p
+          v-if="config.missing_key"
+          class="mt-3 border-2 border-on-sky/50 bg-card px-3 py-2 text-xs font-bold text-danger-fg"
+        >
           ⚠ {{ config.missing_key }}
         </p>
-      </div>
+      </section>
 
       <!-- 供应商 -->
-      <div class="rounded-card border border-line bg-surface">
-        <div class="border-b border-line px-4 py-3">
-          <h2 class="text-sm font-medium text-fg">模型供应商</h2>
-          <p class="mt-0.5 text-xs text-subtle">
+      <section class="brut-card-lg">
+        <header class="flex flex-wrap items-end justify-between gap-2 border-b-2 border-brut px-4 py-3">
+          <div>
+            <p class="kicker">Providers</p>
+            <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">模型供应商</h2>
+          </div>
+          <p class="max-w-md text-xs text-subtle">
             密钥只按<b class="text-muted">变量名</b>登记，值留在 .env 里，不会进数据库。
             「测试连接」会真发一次最小调用（约 16 token）——填对参数与真的能用是两件事。
           </p>
+        </header>
+
+        <!-- 供应商卡片：一块一家，比表格多出的那一列正好放动作按钮 -->
+        <div class="grid gap-3 px-4 py-3 lg:grid-cols-2">
+          <article
+            v-for="p in providers"
+            :key="p.id"
+            class="brut-card flex flex-col p-3"
+            :class="p.active ? 'border-[3px] border-brut' : ''"
+          >
+            <div class="flex flex-wrap items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <h3 class="text-sm font-extrabold tracking-tight text-ink">{{ p.name }}</h3>
+                  <span class="brut-tag" :class="providerState(p).cls">
+                    {{ providerState(p).text }}
+                  </span>
+                  <span v-if="p.builtin" class="brut-tag brut-tag-slab">内置</span>
+                </div>
+                <p class="mt-0.5 font-mono text-[11px] text-subtle">{{ p.id }}</p>
+              </div>
+            </div>
+
+            <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+              <div>
+                <dt class="kicker">协议</dt>
+                <dd class="mt-0.5">{{ p.protocol_label }}</dd>
+              </div>
+              <div>
+                <dt class="kicker">默认模型</dt>
+                <dd class="mt-0.5 truncate font-mono text-[11px]">{{ p.default_model || '—' }}</dd>
+              </div>
+              <div class="col-span-2">
+                <dt class="kicker">密钥变量</dt>
+                <dd class="mt-0.5 font-mono text-[11px]">
+                  <span :class="p.key_present ? 'text-ink' : 'text-danger-fg'">
+                    {{ p.api_key_env_var || '—（无需）' }}
+                  </span>
+                  <span v-if="p.api_key_env_var && !p.key_present" class="ml-1 font-bold text-danger-fg">
+                    尚未配置
+                  </span>
+                </dd>
+              </div>
+            </dl>
+
+            <p
+              v-if="testResults[p.id]"
+              class="mt-2 border-l-4 pl-2 text-[11px] font-bold"
+              :class="
+                testResults[p.id]!.ok
+                  ? 'border-success-line text-success-fg'
+                  : 'border-danger-line text-danger-fg'
+              "
+            >
+              {{ testResults[p.id]!.ok ? '连通正常' : '连接失败' }} · {{ testResults[p.id]!.detail }}
+            </p>
+
+            <div class="mt-3 flex flex-wrap gap-1.5 border-t-2 border-line pt-2">
+              <button
+                v-if="!p.active"
+                type="button"
+                class="brut-btn brut-btn-xs"
+                :disabled="!p.enabled"
+                @click="pendingProvider = { action: 'activate', provider: p }"
+              >
+                激活
+              </button>
+              <button
+                type="button"
+                class="brut-btn brut-btn-xs"
+                :disabled="testingId === p.id"
+                @click="onTest(p)"
+              >
+                {{ testingId === p.id ? '测试中…' : '测试连接' }}
+              </button>
+              <button
+                type="button"
+                class="brut-btn brut-btn-xs"
+                @click="toggleEnabled(p)"
+              >
+                {{ p.enabled ? '停用' : '启用' }}
+              </button>
+              <button
+                v-if="!p.builtin && !p.active"
+                type="button"
+                class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
+                @click="pendingProvider = { action: 'delete', provider: p }"
+              >
+                删除
+              </button>
+            </div>
+          </article>
         </div>
 
-        <table class="w-full text-sm">
-          <thead class="border-b border-line text-left text-xs text-subtle">
-            <tr>
-              <th class="px-4 py-2 font-medium">名称</th>
-              <th class="px-4 py-2 font-medium">协议 / 模型</th>
-              <th class="px-4 py-2 font-medium">密钥变量</th>
-              <th class="px-4 py-2 font-medium">状态</th>
-              <th class="px-4 py-2 font-medium">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="p in providers"
-              :key="p.id"
-              class="border-b border-line last:border-0"
-              :class="p.active ? 'bg-accent-soft' : ''"
-            >
-              <td class="px-4 py-2">
-                <div class="font-medium text-fg">{{ p.name }}</div>
-                <div class="font-mono text-xs text-subtle">{{ p.id }}</div>
-              </td>
-              <td class="px-4 py-2 text-muted">
-                <div class="text-xs">{{ p.protocol_label }}</div>
-                <div class="font-mono text-xs text-subtle">{{ p.default_model || '—' }}</div>
-              </td>
-              <td class="px-4 py-2 font-mono text-xs">
-                <span :class="p.key_present ? 'text-muted' : 'text-danger-fg'">
-                  {{ p.api_key_env_var || '—（无需）' }}
-                </span>
-                <div v-if="p.api_key_env_var && !p.key_present" class="text-danger-fg">
-                  尚未配置
-                </div>
-              </td>
-              <td class="px-4 py-2 text-xs">
-                <span v-if="p.active" class="font-medium text-accent">使用中</span>
-                <span v-else-if="!p.enabled" class="text-subtle">已停用</span>
-                <span v-else class="text-muted">待命</span>
-                <div v-if="p.builtin" class="text-subtle">内置</div>
-                <div
-                  v-if="testResults[p.id]"
-                  :class="testResults[p.id]!.ok ? 'text-success-fg' : 'text-danger-fg'"
-                >
-                  {{ testResults[p.id]!.ok ? '连通正常' : '连接失败' }}
-                </div>
-              </td>
-              <td class="px-4 py-2">
-                <div class="flex flex-wrap gap-1">
-                  <button
-                    v-if="!p.active"
-                    type="button"
-                    class="rounded-control border border-line px-2 py-1 text-xs text-body"
-                    :disabled="!p.enabled"
-                    @click="pendingProvider = { action: 'activate', provider: p }"
-                  >
-                    激活
-                  </button>
-                  <button
-                    type="button"
-                    class="rounded-control border border-line px-2 py-1 text-xs text-body disabled:opacity-40"
-                    :disabled="testingId === p.id"
-                    @click="onTest(p)"
-                  >
-                    {{ testingId === p.id ? '测试中…' : '测试连接' }}
-                  </button>
-                  <button
-                    type="button"
-                    class="rounded-control border border-line px-2 py-1 text-xs text-body"
-                    @click="toggleEnabled(p)"
-                  >
-                    {{ p.enabled ? '停用' : '启用' }}
-                  </button>
-                  <button
-                    v-if="!p.builtin && !p.active"
-                    type="button"
-                    class="rounded-control border border-danger-line px-2 py-1 text-xs text-danger-fg"
-                    @click="pendingProvider = { action: 'delete', provider: p }"
-                  >
-                    删除
-                  </button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-
         <!-- 新增供应商 -->
-        <div class="border-t border-line p-4">
-          <h3 class="text-sm font-medium text-fg">新增供应商</h3>
+        <div class="border-t-2 border-brut px-4 py-4">
+          <h3 class="text-sm font-extrabold tracking-tight text-ink">新增供应商</h3>
           <p class="mt-0.5 text-xs text-subtle">
             绝大多数厂商都是 OpenAI 兼容：填对 <code class="font-mono">base_url</code> 即可接入，
             不需要装新依赖。地址会变，以官方文档为准。
@@ -497,9 +525,9 @@ onMounted(load)
 
           <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">从预设填充</span>
+              <span class="brut-label">从预设填充</span>
               <select
-                class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
+                class="brut-field"
                 @change="applyPreset(($event.target as HTMLSelectElement).value)"
               >
                 <option value="">（手动填写）</option>
@@ -510,21 +538,13 @@ onMounted(load)
             </label>
 
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">id（身份，创建后不可改）</span>
-              <input
-                v-model="form.id"
-                type="text"
-                placeholder="如 deepseek"
-                class="w-full rounded-control border border-line bg-field px-2 py-1.5 text-sm text-fg"
-              />
+              <span class="brut-label">id（身份，创建后不可改）</span>
+              <input v-model="form.id" type="text" placeholder="如 deepseek" class="brut-field font-mono" />
             </label>
 
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">协议</span>
-              <select
-                v-model="form.protocol"
-                class="w-full rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
-              >
+              <span class="brut-label">协议</span>
+              <select v-model="form.protocol" class="brut-field">
                 <option v-for="opt in protocols" :key="opt.value" :value="opt.value">
                   {{ opt.label }}
                 </option>
@@ -532,138 +552,127 @@ onMounted(load)
             </label>
 
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">展示名</span>
-              <input
-                v-model="form.name"
-                type="text"
-                placeholder="如 DeepSeek"
-                class="w-full rounded-control border border-line bg-field px-2 py-1.5 text-sm text-fg"
-              />
+              <span class="brut-label">展示名</span>
+              <input v-model="form.name" type="text" placeholder="如 DeepSeek" class="brut-field" />
             </label>
 
             <label class="block sm:col-span-2">
-              <span class="mb-1 block text-xs text-subtle">base_url（OpenAI 兼容类通常要带 /v1）</span>
+              <span class="brut-label">base_url（OpenAI 兼容类通常要带 /v1）</span>
               <input
                 v-model="form.base_url"
                 type="text"
                 placeholder="https://api.deepseek.com/v1"
-                class="w-full rounded-control border border-line bg-field px-2 py-1.5 font-mono text-sm text-fg"
+                class="brut-field font-mono"
               />
             </label>
 
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">密钥变量名（不是密钥本身）</span>
+              <span class="brut-label">密钥变量名（不是密钥本身）</span>
               <input
                 v-model="form.api_key_env_var"
                 type="text"
                 placeholder="DEEPSEEK_API_KEY"
-                class="w-full rounded-control border border-line bg-field px-2 py-1.5 font-mono text-sm text-fg"
+                class="brut-field font-mono"
               />
             </label>
 
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">默认模型</span>
+              <span class="brut-label">默认模型</span>
               <input
                 v-model="form.default_model"
                 type="text"
                 placeholder="deepseek-chat"
-                class="w-full rounded-control border border-line bg-field px-2 py-1.5 font-mono text-sm text-fg"
+                class="brut-field font-mono"
               />
             </label>
 
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">输出上限（max_tokens）</span>
-              <input
-                v-model.number="form.max_tokens"
-                type="number"
-                class="w-full rounded-control border border-line bg-field px-2 py-1.5 text-sm text-fg"
-              />
+              <span class="brut-label">输出上限（max_tokens）</span>
+              <input v-model.number="form.max_tokens" type="number" class="brut-field" />
             </label>
 
             <label class="block">
-              <span class="mb-1 block text-xs text-subtle">上下文窗口（0=用内置默认）</span>
-              <input
-                v-model.number="form.context_window"
-                type="number"
-                class="w-full rounded-control border border-line bg-field px-2 py-1.5 text-sm text-fg"
-              />
+              <span class="brut-label">上下文窗口（0=用内置默认）</span>
+              <input v-model.number="form.context_window" type="number" class="brut-field" />
             </label>
           </div>
 
-          <p class="mt-2 text-xs text-subtle">
-            自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
-          </p>
-
-          <button
-            type="button"
-            class="mt-3 rounded-control bg-accent px-3 py-1.5 text-sm font-medium text-on-accent disabled:opacity-60"
-            :disabled="creating"
-            @click="onCreate"
-          >
-            {{ creating ? '添加中…' : '添加供应商' }}
-          </button>
-        </div>
-      </div>
-
-      <!-- 三组配置 -->
-      <div v-for="group in groups" :key="group.key" class="rounded-card border border-line bg-surface p-4">
-        <div class="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <h2 class="text-sm font-medium text-fg">{{ group.label }}</h2>
-            <p class="mt-0.5 text-xs text-subtle">{{ group.help }}</p>
-          </div>
-          <div class="flex items-center gap-2">
+          <div class="mt-3 flex flex-wrap items-center gap-3">
             <button
               type="button"
-              class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
+              class="brut-btn brut-btn-primary"
+              :disabled="creating"
+              @click="onCreate"
+            >
+              {{ creating ? '添加中…' : '添加供应商' }}
+            </button>
+            <p class="text-xs text-subtle">
+              自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 配置分组 -->
+      <section v-for="group in groups" :key="group.key" class="brut-card-lg">
+        <header
+          class="flex flex-wrap items-start justify-between gap-3 border-b-2 border-brut px-4 py-3"
+        >
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <h2 class="text-base font-extrabold tracking-tight text-ink">{{ group.label }}</h2>
+              <span v-if="dirtyOf(group)" class="brut-tag brut-tag-warn">有未保存改动</span>
+            </div>
+            <p class="mt-0.5 text-xs text-subtle">{{ group.help }}</p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              class="brut-btn brut-btn-xs"
+              :disabled="!dirtyOf(group)"
               @click="discardGroup(group)"
             >
               撤销改动
             </button>
-            <button
-              type="button"
-              class="rounded-control border border-line px-2.5 py-1 text-xs text-body"
-              @click="restoreGroup(group)"
-            >
+            <button type="button" class="brut-btn brut-btn-xs" @click="restoreGroup(group)">
               恢复默认
             </button>
             <button
               type="button"
-              class="rounded-control bg-accent px-2.5 py-1 text-xs font-medium text-on-accent disabled:opacity-40"
+              class="brut-btn brut-btn-xs brut-btn-primary"
               :disabled="!dirtyOf(group) || savingGroup === group.key"
               @click="saveGroup(group)"
             >
               {{ savingGroup === group.key ? '保存中…' : '保存' }}
             </button>
           </div>
-        </div>
+        </header>
 
-        <div class="mt-3 space-y-3">
+        <div>
           <div
             v-for="item in group.items"
             :key="item.key"
-            class="grid grid-cols-1 gap-2 border-b border-line pb-3 last:border-0 last:pb-0 sm:grid-cols-3"
+            class="grid grid-cols-1 gap-2 border-b border-line px-4 py-3 last:border-b-0 sm:grid-cols-[minmax(0,0.85fr)_minmax(0,1.3fr)]"
           >
-            <div>
-              <div class="flex items-center gap-1.5 text-sm text-fg">
-                {{ item.label }}
-                <span
-                  v-if="item.danger"
-                  class="rounded-control bg-warning-surface px-1.5 py-0.5 text-xs text-warning-fg"
-                >
-                  危险
-                </span>
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-1.5">
+                <span class="text-sm font-bold text-ink">{{ item.label }}</span>
+                <span v-if="item.danger" class="brut-tag brut-tag-warn">危险</span>
               </div>
-              <div class="font-mono text-xs text-subtle">{{ item.key }}</div>
+              <div class="mt-0.5 font-mono text-[11px] text-subtle">{{ item.key }}</div>
             </div>
 
-            <div class="sm:col-span-2">
+            <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
                 <!-- 布尔 -->
-                <label v-if="item.type === 'bool'" class="flex items-center gap-2 text-sm text-body">
+                <label
+                  v-if="item.type === 'bool'"
+                  class="flex items-center gap-2 border-2 border-brut bg-field px-2.5 py-1.5 text-sm font-bold text-ink"
+                >
                   <input
                     type="checkbox"
-                    class="h-4 w-4"
+                    class="brut-check"
                     :checked="Boolean(draftOf(group, item))"
                     @change="setDraft(group, item, ($event.target as HTMLInputElement).checked)"
                   />
@@ -673,7 +682,7 @@ onMounted(load)
                 <!-- 枚举 -->
                 <select
                   v-else-if="item.type === 'enum'"
-                  class="rounded-control border border-line bg-surface px-2 py-1.5 text-sm text-fg"
+                  class="brut-field w-auto"
                   :value="String(draftOf(group, item))"
                   @change="setDraft(group, item, ($event.target as HTMLSelectElement).value)"
                 >
@@ -686,7 +695,7 @@ onMounted(load)
                 <input
                   v-else-if="item.type === 'number'"
                   type="number"
-                  class="w-32 rounded-control border border-line bg-field px-2 py-1.5 text-sm text-fg"
+                  class="brut-field w-32"
                   :value="draftOf(group, item)"
                   :min="item.min ?? undefined"
                   :max="item.max ?? undefined"
@@ -697,18 +706,18 @@ onMounted(load)
                 <input
                   v-else
                   type="text"
-                  class="w-full rounded-control border border-line bg-field px-2 py-1.5 font-mono text-sm text-fg"
+                  class="brut-field font-mono"
                   :value="String(draftOf(group, item) ?? '')"
                   @change="setDraft(group, item, ($event.target as HTMLInputElement).value)"
                 />
 
-                <span class="text-xs text-subtle">
-                  {{ sourceText(item) }}
+                <span class="brut-tag brut-tag-slab">{{ sourceText(item) }}</span>
+                <span class="text-[11px] text-subtle">
                   <template v-if="item.min !== null || item.max !== null">
-                    · 范围 {{ item.min ?? '−∞' }} ~ {{ item.max ?? '+∞' }}
+                    范围 {{ item.min ?? '−∞' }} ~ {{ item.max ?? '+∞' }}
                   </template>
                   <template v-if="item.min_exclusive !== null">
-                    · 需大于 {{ item.min_exclusive }}
+                    需大于 {{ item.min_exclusive }}
                   </template>
                 </span>
               </div>
@@ -716,70 +725,44 @@ onMounted(load)
             </div>
           </div>
         </div>
-      </div>
+      </section>
     </template>
 
     <!-- 危险项确认 -->
-    <div
-      v-if="pendingChange"
-      class="rounded-card border border-warning-line bg-warning-surface p-4"
-    >
-      <p class="text-sm text-warning-fg">
+    <section v-if="pendingChange" class="brut-note brut-note-warn">
+      <p class="text-sm font-bold">
         确定把「{{ pendingChange.label }}」改成 <b>{{ String(pendingChange.value) }}</b>？
       </p>
-      <p class="mt-1 text-xs text-warning-fg">
+      <p class="mt-1 text-xs">
         这项属于「改错了不明显、但影响很大」的一类。保存后下一次生成即生效。
       </p>
       <div class="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          class="rounded-control bg-accent px-3 py-1.5 text-sm font-medium text-on-accent"
-          @click="confirmPendingChange"
-        >
+        <button type="button" class="brut-btn brut-btn-primary" @click="confirmPendingChange">
           确认修改
         </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
-          @click="cancelPendingChange"
-        >
-          取消
-        </button>
+        <button type="button" class="brut-btn" @click="cancelPendingChange">取消</button>
       </div>
-    </div>
+    </section>
 
     <!-- 供应商操作确认 -->
-    <div
-      v-if="pendingProvider"
-      class="rounded-card border border-danger-line bg-danger-surface p-4"
-    >
+    <section v-if="pendingProvider" class="brut-note brut-note-fail">
       <template v-if="pendingProvider.action === 'activate'">
-        <p class="text-sm text-danger-fg">
+        <p class="text-sm font-bold">
           切换到「{{ pendingProvider.provider.name }}」？下一次生成起所有模型调用都会走这家。
         </p>
-        <p v-if="!pendingProvider.provider.key_present" class="mt-1 text-xs text-danger-fg">
+        <p v-if="!pendingProvider.provider.key_present" class="mt-1 text-xs">
           注意：{{ pendingProvider.provider.api_key_env_var }} 当前没有值，切过去后生成会直接报错。
         </p>
       </template>
-      <p v-else class="text-sm text-danger-fg">
+      <p v-else class="text-sm font-bold">
         确定删除「{{ pendingProvider.provider.name }}」？该配置将被移除。
       </p>
       <div class="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          class="rounded-control bg-danger px-3 py-1.5 text-sm text-on-accent"
-          @click="confirmProviderAction"
-        >
+        <button type="button" class="brut-btn brut-btn-danger" @click="confirmProviderAction">
           {{ pendingProvider.action === 'activate' ? '确认切换' : '确认删除' }}
         </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-3 py-1.5 text-sm text-body"
-          @click="pendingProvider = null"
-        >
-          取消
-        </button>
+        <button type="button" class="brut-btn" @click="pendingProvider = null">取消</button>
       </div>
-    </div>
+    </section>
   </div>
 </template>
