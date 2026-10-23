@@ -73,4 +73,8 @@ Thumbs.db
 Desktop.ini
 *.swp
 
+# 测试报告：`pytest --junit-xml` 的产物，每跑一次测试就重写（CI 里也是），不入库
+junit*.xml
+pytest-report.xml
+
 # 注意：uv.lock 与 .python-version 用于锁定依赖与解释器版本，必须提交到仓库

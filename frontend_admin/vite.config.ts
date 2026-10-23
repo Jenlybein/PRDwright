@@ -11,6 +11,13 @@ import tailwindcss from '@tailwindcss/vite'
 // `cors_origins` 白名单里写死了来源——顺延到别的端口，请求会被 CORS 拦掉，
 // 表现为「登录接口一直失败」而实际原因在端口上。
 export default defineConfig({
+  // 生产挂在 `/admin/` 子路径下（ADR-054）：产物里的 JS / CSS / favicon 全部带这个前缀。
+  //
+  // ⚠️ **dev 也用同一个 base**，不做「开发用 /、生产用 /admin/」的双轨。
+  // 代价是本地地址变成 `localhost:5174/admin/`；换来的是「挂子路径」这件事在本地就能验，
+  // 而不是等到部署当天才发现某处依赖了站点根。双轨最典型的坑是：
+  // 某个跳转/资源路径写死了 `/xxx`，dev 下看着正常，上线后全部 404——而那时是最贵的。
+  base: '/admin/',
   plugins: [tailwindcss(), vue()],
   resolve: {
     alias: {

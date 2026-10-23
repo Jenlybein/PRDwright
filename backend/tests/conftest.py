@@ -116,12 +116,16 @@ def isolated_db(tmp_path, monkeypatch):
     # 池子被占住不会立刻报错，只会让它慢慢变小，最后表现为「接口全部超时」。
     # 用 `engine_stats()` 而不是 `get_engine()`：后者会顺手建一个 Engine，
     # 让从未碰过数据库的用例也开一池连接，并把这条断言变成恒真。
+    #
+    # ⚠️ 只断 `in_use == 0`。v7 之前这里还有一条 `idle == size`，那是个**假守卫**：
+    # 当时 `idle` 是用 `size - in_use` 算的，而 `size` 是 `maxsize`（配置容量），
+    # 于是 `in_use == 0` 时 `idle == size` 恒成立——它什么都没守。现在 `idle` 取的是
+    # `checkedin()`（真的空闲条数），懒建的池本来就不满，`idle == size` 反而会误报。
     from backend.core.engine import engine_stats
 
     stats = engine_stats()
     if stats["opened"]:
         assert stats["in_use"] == 0, f"有用例借了连接没归还：{stats}"
-        assert stats["idle"] == stats["size"], f"连接池少了连接（不是没还就是补建失败）：{stats}"
 
     _reset_runtime_state()
 

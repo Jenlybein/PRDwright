@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.api.admin import router as admin_router
+from backend.api.admin_docs import router as admin_docs_router
 from backend.api.auth import router as auth_router
 from backend.api.config import router as config_router
 from backend.api.conversation import router as conversation_router
@@ -25,7 +26,7 @@ from backend.api.health import router as health_router
 from backend.api.jobs import router as jobs_router
 from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
-from backend.core.engine import get_engine
+from backend.core.engine import get_engine, warmup
 from backend.core.runtime_config import get_runtime_config, invalidate
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
 from backend.core.schema import prepare_schema
@@ -61,6 +62,23 @@ async def lifespan(_: FastAPI):
     logger.info(
         "数据库结构已就绪",
         extra={"event": "service.schema_ready", "revision": revision},
+    )
+    # ★ 建满连接池（ADR-084）。这一步不是优化，是 `max_overflow=0` 那条不变量的**前提**：
+    # 池是懒建的，不预热的话，连接会在「第一次真被借用」时才建；而本项目里有两个
+    # 借用者会并发（事件循环线程 + `log-store` 日志线程），第一处并发就发生在**启动期**——
+    # `install_log_persistence()` 起线程之后，主线程还要跑 ensure_bootstrap / reap_orphans /
+    # ensure_skills，两边可能同时首次建连接。而「多线程同时首次映射 WAL 的 `-shm`」
+    # 会返回 `SQLITE_READONLY`，`busy_timeout` 对它不生效（只对 `SQLITE_BUSY` 生效），
+    # 于是不重试、直接失败，报错还长得像「文件权限不对」。
+    #
+    # 位置有三条硬理由：
+    # 1. 在 `prepare_schema` 之后 —— 迁移借的那条先归还，预热才是「从头建满」；
+    # 2. 在 `install_log_persistence` 之前 —— 否则日志线程可能与预热并发建连接；
+    # 3. 在开始接请求之前 —— 让「池建不起来」表现为启动失败，而不是第一个用户遇到 500。
+    pool_size = warmup(get_engine())
+    logger.info(
+        "连接池已预热",
+        extra={"event": "service.pool_warmed", "size": pool_size},
     )
     # 迁移可能刚建好 `system_config` / `model_providers`，也可能刚播种了内置供应商。
     # 配置层的缓存若在迁移之前被建过（导入期、或某个模块级初始化），它会记住
@@ -134,6 +152,20 @@ app = FastAPI(
     description="PRDwright 后端服务",
     version="0.1.0",
     lifespan=lifespan,
+    # ⚠️ 公开的交互式文档一律**不注册**（ADR-085）。
+    #
+    # 框架默认会挂四条免登录路由：`/openapi.json`、`/docs`、
+    # `/docs/oauth2-redirect`、`/redoc`。它们暴露全部接口形状（含管理员接口的
+    # 参数结构），而本项目的鉴权是「默认拒绝 + 白名单放行」——把这四条留在白名单里，
+    # 等于给任何来访者一份完整清单。
+    #
+    # 需要查接口请走管理端「接口文档」页：`/api/admin/docs`（Swagger UI）、
+    # `/api/admin/redoc`、`/api/admin/openapi.json`，三条都挂 `require_admin`。
+    # 传三个 `None` 之后 `app.openapi()` 仍然可用（管理员那条路由正是靠它），
+    # 只是不再对外暴露路由本身。
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 # 中间件注册顺序：Starlette 的 add_middleware 是「后加的在外层」。
@@ -200,6 +232,9 @@ register_error_handlers(app)
 # 注册业务路由（各自在 Router 上声明了完整 prefix）
 # 管理员路由：整组由 `require_admin` 依赖守卫，未登录另有中间件拦成 401
 app.include_router(admin_router)
+# 管理员专属的接口文档（ADR-085）：公开的 `/docs` 等四条已在上面的 FastAPI(...) 里关掉，
+# 这三个入口逐条挂 `require_admin`。
+app.include_router(admin_docs_router)
 app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(config_router)

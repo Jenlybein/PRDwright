@@ -31,7 +31,15 @@ declare module 'vue-router' {
 }
 
 export const router = createRouter({
-  history: createWebHistory(),
+  // ⚠️ 必须显式传 `BASE_URL`，不能靠默认值。
+  //
+  // Vue Router 的 `normalizeBase()` 在**没传参**时读的是 HTML 里的 `<base>` 标签，
+  // 再兜底 `/`——它**不会**跟随 Vite 的 `base`。两个「base」是两件事：
+  // Vite 的 `base` 决定产物引用前缀，Vue Router 的 base 决定「地址栏里哪一段不算路由」。
+  // 不接上这一句，生产打开 `/admin/dashboard` 会把整段当路由 → 匹配不到 → 空白页。
+  //
+  // `BASE_URL` 由 Vite 的 `base` 注入（生产与 dev 都是 `/admin/`，见 vite.config.ts）。
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/', redirect: '/dashboard' },
     {
@@ -74,6 +82,12 @@ export const router = createRouter({
       path: '/logs',
       name: 'logs',
       component: () => import('@/views/LogsView.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/api-docs',
+      name: 'api-docs',
+      component: () => import('@/views/ApiDocsView.vue'),
       meta: { requiresAdmin: true },
     },
     {

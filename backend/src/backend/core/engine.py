@@ -256,19 +256,25 @@ def reset_engine() -> None:
 def engine_stats() -> dict[str, Any]:
     """连接池的当前状态（接性能面板）。
 
-    与旧 `Database.stats` 的字段名保持一致，避免面板那边跟着改：
-    `size` / `in_use` / `idle`。`wait_ms_*` 与 `replaced` 由 SQLAlchemy 内部维护，
-    这里不再统计（要拿得靠 pool 事件，等面板真的需要再加）。
+    ⚠️ **`idle` 不能用 `size - in_use` 算**：`QueuePool.size()` 返回的是
+    `maxsize`（配置的池容量），**不是当前池里有多少条连接**——它恒等于
+    `DB_POOL_SIZE`，与实际建了几条无关。用减法算出来的「空闲」会在「池是懒建的、
+    只建了 1 条」时报告「4 条空闲」，这正好把「预热没做」这个退化盖住。
+
+    现在 `idle` 取 `checkedin()`（队列里现成可用的条数）。于是：
+    - 预热之后：`idle == size`（建满了且都归还）；
+    - 没预热：`idle < size`，一眼能看出缺口。
     """
     engine = _engine
     if engine is None:
         return {"size": 0, "in_use": 0, "idle": 0, "opened": False}
     pool = engine.pool
-    size = int(pool.size())  # type: ignore[attr-defined]
+    size = int(pool.size())  # type: ignore[attr-defined]  # = maxsize
     in_use = int(pool.checkedout())  # type: ignore[attr-defined]
+    idle = int(pool.checkedin())  # type: ignore[attr-defined]  # 真的空闲条数
     return {
         "size": size,
         "in_use": in_use,
-        "idle": max(0, size - in_use),
+        "idle": idle,
         "opened": True,
     }
