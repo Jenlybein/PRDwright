@@ -33,10 +33,20 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# 测试用 SQLite 文件库，每个用例走 tmp_path 隔离，故不需要额外插件
+# 每个用例用 `tmp_path` 里的独立 SQLite 文件，进程间不共享任何路径，
+# 所以可以安全地按进程并行。
+#
+# 为什么默认并行：全量 867 例单进程要 **283 秒**，等于没人会随手跑；
+# 并行后 16 核机器 72 秒、CI 的 2 核机器自动降到 2 路。
+# 并行不改变用例集合与结果（逐条对拍过 867=867、0 差异）。
+#
+# 单文件调试时加 `-n0` 关掉并行：Windows 上并行启动固定多花约 4.5 秒，
+# 只跑十几个用例时那笔开销比省下的时间还多。
+addopts = "-n auto"
 
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
 ]

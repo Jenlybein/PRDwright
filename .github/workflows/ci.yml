@@ -6,9 +6,10 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
-    # 时长护栏（ADR-069）：362.7 秒是本项目当前唯一真实存在、且每天都在发生的性能问题。
-    # 先给一个宽松上限防止挂起吞掉 runner，ADR-066 提速完成后再下调到 5 分钟。
-    timeout-minutes: 15
+    # 时长护栏（ADR-069）：先给宽松上限防止挂起吞掉 runner，T04 提速完成后再下调。
+    # 现已下调到 5 分钟：全量默认按核数并行，本机 16 核 72 秒、CI 4 核约 2 分钟，
+    # 留一倍余量。超过 5 分钟基本只可能是挂起，不是"机器偶尔慢"。
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: backend
