@@ -125,14 +125,26 @@ def test_invite_code_consumption_is_atomic():
 
     这是「用一条 UPDATE 语句 + rowcount 判断」而不是「先 SELECT 再 UPDATE」的原因：
     后者在并发下必然超发。
+
+    ⚠️ **线程里的异常必须自己收回来再抛**：线程抛出的异常只会由 `threading.excepthook`
+    打到 stderr，用例本身照旧「通过」。也就是说，若 `consume` 在并发下抛了
+    `OperationalError: database is locked`，这个用例会以「成功 2 次」完美收官——
+    它守的恰好是并发，却对并发的失败完全免疫。因此这里把每个线程的结局都记账，
+    并断言「10 个线程都给出了结论」。
     """
     InviteCodeRepository.create("hot", max_uses=2, expires_at=None, note="并发抢购")
 
     results: list[bool] = []
+    errors: list[BaseException] = []
     lock = threading.Lock()
 
     def try_consume() -> None:
-        ok = InviteCodeRepository.consume("hot")
+        try:
+            ok = InviteCodeRepository.consume("hot")
+        except BaseException as exc:  # noqa: BLE001 —— 线程里什么都可能抛，全都要收回来
+            with lock:
+                errors.append(exc)
+            return
         with lock:
             results.append(ok)
 
@@ -142,6 +154,9 @@ def test_invite_code_consumption_is_atomic():
     for worker in workers:
         worker.join()
 
+    # 先看「有没有线程被异常吃掉」：漏这一步，下面那条断言在异常场景下照样是绿的
+    assert errors == [], f"核销线程抛出了异常：{errors!r}"
+    assert len(results) == 10, f"应当有 10 个线程给出结论，实际 {len(results)} 个"
     assert results.count(True) == 2, f"限量 2 次却成功核销了 {results.count(True)} 次"
 
 

@@ -6,6 +6,9 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # 时长护栏（ADR-069）：362.7 秒是本项目当前唯一真实存在、且每天都在发生的性能问题。
+    # 先给一个宽松上限防止挂起吞掉 runner，ADR-066 提速完成后再下调到 5 分钟。
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -29,4 +32,26 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run test:unit -- --run
+      - run: npm run build
+  # 管理端：与用户端完全独立的工程（ADR-039），有自己的一份依赖与 lock 文件。
+  # 这 114 个用例早就写好了且本地全绿，但此前从未在 CI 上跑过——资产闲置（ADR-068）。
+  frontend-admin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend_admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend_admin/package-lock.json
+      # --legacy-peer-deps：与本地安装保持同一套解析结果。
+      # 少了它，lock 里记录的 peer 解析可能与 CI 的行为不一致，表现为「本地绿、CI 红」。
+      - run: npm ci --legacy-peer-deps
+      # test:unit 本身就是 `vitest run`（不是 watch），无需再传 --run
+      - run: npm run test:unit
+      # build 里已含 type-check（run-p type-check build-only），一并兜住类型
       - run: npm run build

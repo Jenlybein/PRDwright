@@ -48,6 +48,30 @@ import { toState } from './support/solutionState'
  */
 const turnHarness = vi.hoisted(() => ({ items: [] as unknown[] }))
 
+/**
+ * 对话开场白的造数开关。
+ *
+ * 对话已经是一个**后端任务**（见 `useClarificationChat`）：「AI 说了什么」要分两步表达——
+ * 任务产出回复、服务端把它写成轮次，前端再靠 `fetchTurns` 读回来。因此这里只提供「这条
+ * 线程该说什么」这一个句柄，写入轮次那一步由 `defaultJobStream` 统一做（见下方 chat 分支），
+ * 免得每个用例各拼一份轮次、慢慢长歪。
+ *
+ * 默认为空 = 用那句通用的需求澄清开场白。
+ */
+const chatHarness = vi.hoisted(() => ({
+  /**
+   * 按任务载荷决定这条线程的开场白。
+   *
+   * 载荷里能拿到三件关键信息：`chatStage`（哪条线程）、`chatMode`（开场 / 续聊）、
+   * `formData`（文档澄清提交的正文与待确认清单）。部分用例还要让助手带上
+   * 结构化选择题（`asks`）——它就是服务端轮次上的那个字段。
+   */
+  opening: null as null | ((payload: Record<string, unknown>) => {
+    reply: string
+    asks?: unknown[]
+  }),
+}))
+
 const jobHarness = vi.hoisted(() => {
   const kinds = new Map<number, string>()
   let nextId = 1
@@ -72,6 +96,9 @@ const jobHarness = vi.hoisted(() => {
  * 是否按「先确认、后生成」的约定工作。
  */
 vi.mock('../services/api', () => ({
+  // ⚠️ 对话已经走任务通道（`createJob` + `readJobStream`），下面这两个裸流式接口
+  // 应用里已经没有任何调用点。仍然列出来是为了让 `import * as api` 的形状与真实模块一致，
+  // 同时也让「有没有人误用回旧通道」这件事可以被断言（`not.toHaveBeenCalled`）。
   startConversationStream: vi.fn(),
   continueConversationStream: vi.fn(),
   createJob: vi.fn(async (payload: { kind: string }) => ({
@@ -112,8 +139,16 @@ vi.mock('../services/solutionService', () => ({
     }
   },
   fetchSolutions: vi.fn(async () => []),
-  fetchTurns: vi.fn(async () => turnHarness.items),
-  clearTurns: vi.fn(async () => {}),
+  // ⚠️ 必须返回**新数组**（真实实现也是 `data.turns.map(...)`）：`setTurns` 是
+  // `messages.value = turns` 整体替换，若每次给同一个数组对象，这次赋值等于没变，
+  // 依赖 `store.messages` 的计算属性（「按澄清结果改写」是否可点）就不会重算
+  fetchTurns: vi.fn(async () => [...turnHarness.items]),
+  // 作废一条线程：服务端把那一轮的轮次删掉，前端随后重拉时才不会「删了又长回来」
+  clearTurns: vi.fn(async (_id: number, stage: string) => {
+    turnHarness.items = turnHarness.items.filter(
+      (item) => (item as { stage?: string }).stage !== stage,
+    )
+  }),
   fetchSolution: vi.fn(async () => {
     throw new Error('本测试不加载已有方案')
   }),
@@ -187,10 +222,32 @@ async function defaultJobStream(
     return { conversationId: '', reply: '优化后的内容', asks: [] }
   }
   if (kind === 'chat') {
-    const reply = '我先复述一下理解：你想做一个周报工具。'
+    const payload = jobPayload('chat')
+    const asRecord = (payload ?? {}) as unknown as Record<string, unknown>
+    const opening = chatHarness.opening?.(asRecord)
+    const reply = opening?.reply ?? '我先复述一下理解：你想做一个周报工具。'
+    const stage = payload?.chatStage ?? 'requirement'
     handlers.onChunk?.({ text: reply, sectionId: '', index: -1 })
+    // 续聊时服务端会先落一条「用户这一轮」的轮次（作答时它还带着 `answers`，界面据此
+    // 渲染回执卡），再落助手那条。两条都要造：前端不再自己拼消息，只读服务端轮次。
+    if (payload?.chatMode === 'continue') {
+      const toolResult = payload.toolResult as { answers?: unknown[] } | null | undefined
+      turnHarness.items.push({
+        id: turnHarness.items.length + 1,
+        role: 'user',
+        content: payload.content ?? '',
+        stage,
+        ...(toolResult?.answers?.length ? { answers: toolResult.answers } : {}),
+      })
+    }
     // 服务端在收尾时把这一轮写成轮次——前端随后靠 `fetchTurns` 读到它
-    turnHarness.items.push({ id: 2, role: 'assistant', content: reply, stage: 'requirement' })
+    turnHarness.items.push({
+      id: turnHarness.items.length + 1,
+      role: 'assistant',
+      content: reply,
+      stage,
+      ...(opening?.asks?.length ? { asks: opening.asks } : {}),
+    })
     return { conversationId: '', reply, asks: [] }
   }
   handlers.onChunk?.({ text: '# 产品需求文档\n', sectionId: '', index: -1 })
@@ -382,6 +439,10 @@ async function reachPrdReview(wrapper: VueWrapper): Promise<void> {
 beforeEach(() => {
   // 任务 id 从头开始，避免跨用例串号（登记表只在 `createJob` 成功时增长）
   jobHarness.reset()
+  // `turnHarness` 是**普通数组**，`vi.clearAllMocks()` 清不掉它（那只清 mock 的调用记录）：
+  // 不重置的话上一个用例产出的轮次会漏进下一个用例的对话里，表现为「单独跑通过、整文件跑挂」
+  turnHarness.items.length = 0
+  chatHarness.opening = null
   vi.clearAllMocks()
 
   // 默认：回填结果与当前摘要一致（无变更）
@@ -393,6 +454,15 @@ beforeEach(() => {
   mockJobStream()
   // 默认：没有还在跑的活跃任务（兜底查询落空，保持降级提示）
   vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
+  // 默认：轮次接口读的就是本用例造的那份轮次表。
+  // ⚠️ 必须**重新装实现**而不只是 `clearAllMocks()`——后者只清调用记录，动不了
+  // `mockResolvedValue`；某个用例一旦钉死返回值，后面所有用例都会读到它的对话
+  // （表现为「单独跑通过、整文件跑挂」的经典形状）。
+  vi.mocked(solutionApi.fetchTurns).mockImplementation(
+    async () => [...turnHarness.items] as ChatMessage[],
+  )
+  vi.mocked(api.startConversationStream).mockReset()
+  vi.mocked(api.continueConversationStream).mockReset()
 
   // 方案持久化：默认给一组无害实现，避免每挂载一次就真的发请求。
   // 需要「打开已有方案」的用例会各自覆盖 `fetchSolution`。
@@ -686,31 +756,26 @@ describe('AppV2 完整流程编排', () => {
   })
 
   it('澄清提问带结构化选项时渲染成选项卡，提交后作为一条用户消息发出、卡片随之消失', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.({ text: '你更倾向哪种做法？', sectionId: '', index: -1 })
-      return {
-        conversationId: 'conv-1',
-        reply: '你更倾向哪种做法？',
-        asks: [
-          {
-            id: 'ask-1',
-            question: '第一版要不要做离线同步？',
-            background: '你提到用户常在弱网环境使用。',
-            multiple: false,
-            options: [
-              { label: 'A', text: '第一版就做离线同步' },
-              { label: 'B', text: '第一版只做在线' },
+    // 选项卡来自**服务端轮次上的 `asks`**（`ChatMessage.asks`）：任务产出它、`fetchTurns`
+    // 把它读回来。只有开场那一轮带题目，作答之后助手那条不带，卡片因此整块消失。
+    chatHarness.opening = (payload) =>
+      payload.chatMode === 'start'
+        ? {
+            reply: '你更倾向哪种做法？',
+            asks: [
+              {
+                id: 'ask-1',
+                question: '第一版要不要做离线同步？',
+                background: '你提到用户常在弱网环境使用。',
+                multiple: false,
+                options: [
+                  { label: 'A', text: '第一版就做离线同步' },
+                  { label: 'B', text: '第一版只做在线' },
+                ],
+              },
             ],
-          },
-        ],
-      }
-    })
-    // 提交之后 AI 会回一句，于是那条带选项的消息不再是最后一条
-    vi.mocked(api.continueConversationStream).mockResolvedValue({
-      conversationId: 'conv-1',
-      reply: '好，那就先做离线草稿。',
-      asks: [],
-    })
+          }
+        : { reply: '好，那就先做离线草稿。' }
 
     const wrapper = await mountApp()
     await submitSampleForm(wrapper)
@@ -724,8 +789,13 @@ describe('AppV2 完整流程编排', () => {
     await flushPromises()
 
     // 提交走的是**普通发送链路**：载荷里就是一条用户消息（带题干，模型才知道答的是哪题）
-    const payload = vi.mocked(api.continueConversationStream).mock.calls[0]?.[0]
-    expect(payload?.content).toBe('1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步')
+    const continueCalls = vi
+      .mocked(api.createJob)
+      .mock.calls.filter((call) => call[0]?.chatMode === 'continue')
+    expect(continueCalls).toHaveLength(1)
+    expect(continueCalls[0]?.[0]?.content).toBe(
+      '1. 第一版要不要做离线同步？\n   答：A. 第一版就做离线同步',
+    )
 
     // 作答之后它不再是最后一条消息：卡片整块消失，而不是留下点不动的只读卡片
     const after = wrapper.findAll('button').find((item) => item.text().startsWith('A'))
@@ -733,32 +803,26 @@ describe('AppV2 完整流程编排', () => {
   })
 
   it('选项卡的作答沿 emit 链原样透传到接口的结构化 tool_result', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.({ text: '你更倾向哪种做法？', sectionId: '', index: -1 })
-      return {
-        conversationId: 'conv-1',
-        reply: '你更倾向哪种做法？',
-        asks: [
-          {
-            id: 'ask-1',
-            question: '第一版要不要做离线同步？',
-            background: '',
-            multiple: false,
-            options: [
-              { label: 'A', text: '第一版就做离线同步' },
-              { label: 'B', text: '第一版只做在线' },
+    chatHarness.opening = (payload) =>
+      payload.chatMode === 'start'
+        ? {
+            reply: '你更倾向哪种做法？',
+            asks: [
+              {
+                id: 'ask-1',
+                question: '第一版要不要做离线同步？',
+                background: '',
+                multiple: false,
+                options: [
+                  { label: 'A', text: '第一版就做离线同步' },
+                  { label: 'B', text: '第一版只做在线' },
+                ],
+                // 后端随 done 下发的来源工具调用 id
+                tool_call_id: 'call-1',
+              },
             ],
-            // 后端随 done 下发的来源工具调用 id
-            tool_call_id: 'call-1',
-          },
-        ],
-      }
-    })
-    vi.mocked(api.continueConversationStream).mockResolvedValue({
-      conversationId: 'conv-1',
-      reply: '好，那就先做离线草稿。',
-      asks: [],
-    })
+          }
+        : { reply: '好，那就先做离线草稿。' }
 
     const wrapper = await mountApp()
     await submitSampleForm(wrapper)
@@ -767,7 +831,9 @@ describe('AppV2 完整流程编排', () => {
     await clickButton(wrapper, '提交回答')
     await flushPromises()
 
-    const payload = vi.mocked(api.continueConversationStream).mock.calls[0]?.[0]
+    const payload = vi
+      .mocked(api.createJob)
+      .mock.calls.filter((call) => call[0]?.chatMode === 'continue')[0]?.[0]
     // 结构化作答：把答案对回当初提问的那次工具调用
     expect(payload?.toolResult).toEqual({
       tool_call_id: 'call-1',
@@ -794,10 +860,8 @@ describe('AppV2 完整流程编排', () => {
   })
 
   it('对话完成后可生成 PRD，并在生成完成时进入待确认阶段', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async (_payload, handlers) => {
-      handlers?.onChunk?.({ text: '已理解需求。', sectionId: '', index: -1 })
-      return { conversationId: 'conv-1', reply: '已理解需求。', asks: [] }
-    })
+    // 开场白由**任务 + 服务端轮次**两步表达（对话已经是一个任务）
+    chatHarness.opening = () => ({ reply: '已理解需求。' })
 
     const wrapper = await mountApp()
     await reachPrdReview(wrapper)
@@ -878,26 +942,23 @@ describe('AppV2 完整流程编排', () => {
       changed: false,
     }))
 
+    // 消息的真源是服务端 `chat_turns`（快照里那份 `messages` 已经不再恢复），
+    // 因此这里按新链路造数：两条轮次分别落在需求线程与 PRD 澄清线程上。
+    turnHarness.items.push(
+      { id: 1, role: 'assistant', content: '我先确认几个关键点', stage: 'requirement' },
+      { id: 2, role: 'assistant', content: '准备开始 P0 级问题的确认', stage: 'prd-clarify' },
+    )
+
     const wrapper = await mountExistingSolution(
       {
         viewState: 'chatting',
         entryMode: 'structured',
         summary: SAMPLE_SUMMARY,
-        messages: [
-          { role: 'assistant', content: '我先确认几个关键点', stage: 'requirement' },
-          { role: 'assistant', content: '准备开始 P0 级问题的确认', stage: 'document' },
-        ],
-        conversationId: '',
         quickInput: { productName: '', requirements: '' },
         debugPrdText: '',
         pastePairInput: { prd: '', apiDocs: '' },
         activeJobId: null,
         activeJobKind: null,
-        clarifyMessages: [],
-        clarifyConversationId: '',
-        clarifyTarget: null,
-        prdClarifyConversationId: '',
-        prdClarifying: false,
       },
       1,
     )
@@ -1025,11 +1086,7 @@ describe('AppV2 完整流程编排', () => {
   })
 
   it('「改需求」回到第一步，表单内容与对话记录都不丢', async () => {
-    vi.mocked(api.startConversationStream).mockImplementation(async () => ({
-      conversationId: 'conv-1',
-      reply: '已理解需求。',
-      asks: [],
-    }))
+    chatHarness.opening = () => ({ reply: '已理解需求。' })
 
     const wrapper = await mountApp()
     await submitSampleForm(wrapper)
@@ -1279,11 +1336,13 @@ describe('AppV2 完整流程编排', () => {
       })
       return { conversationId: '', reply: '断线前已经说出的一半', asks: [] }
     })
-    // ⚠️ 这个 mock 会**一直生效到后面的用例**（vitest 不自动 reset），所以不能返回空：
-    // 后面那些「提交表单 → 对话页出现『生成 PRD』」的用例要靠它拿到消息。
-    vi.mocked(solutionApi.fetchTurns).mockResolvedValue([
-      { id: 9, role: 'assistant', content: '断线前已经说出的一半', stage: 'requirement' },
-    ])
+    // 刷新后服务端轮次里已有这条回复（对话任务收尾时会重拉一次）
+    turnHarness.items.push({
+      id: 9,
+      role: 'assistant',
+      content: '断线前已经说出的一半',
+      stage: 'requirement',
+    })
 
     const wrapper = await mountExistingSolution({
       viewState: 'chatting',
@@ -1544,7 +1603,13 @@ describe('AppV2 完整流程编排', () => {
   })
 
   it('提交失败时保留错误提示，不进入空白对话页', async () => {
-    vi.mocked(api.startConversationStream).mockRejectedValue(new Error('后端不可用'))
+    // 失败来自**任务**：对话已经是一个任务，上游报错落在 `runs.preview.error` 上，
+    // 由对话页顶部的红条呈现（不是「一片空白，没有任何提示」）
+    mockJobStream({
+      chat: async () => {
+        throw new Error('后端不可用')
+      },
+    })
 
     const wrapper = await mountApp()
     await submitSampleForm(wrapper)
@@ -2282,15 +2347,21 @@ describe('AppV2 文档澄清', () => {
     await flushPromises()
   }
 
-  /** 造一个按「在哪份文档上澄清」回不同话术的开场 mock，便于区分各线程的消息 */
+  /**
+   * 造一个按「在哪份文档上澄清」回不同话术的开场，便于区分各线程的消息。
+   *
+   * 对话走任务通道：「AI 说了什么」由 `chatHarness` 决定，写入服务端轮次那一步在
+   * `defaultJobStream` 里统一做，前端再靠 `fetchTurns` 读回来。
+   */
   function mockOpeningByDocument(): void {
-    vi.mocked(api.startConversationStream).mockImplementation(async (payload, handlers) => {
-      const reply = String(payload.answers.document ?? '').startsWith('# 接口文档')
-        ? '接口那边先确认分页'
-        : '先问最关键的一个：分页上限取多少？'
-      handlers?.onChunk?.({ text: reply, sectionId: '', index: -1 })
-      return { conversationId: `conv-${reply.slice(0, 2)}`, reply, asks: [] }
-    })
+    chatHarness.opening = (payload) => {
+      const formData = payload.formData as { document?: string } | null | undefined
+      return {
+        reply: String(formData?.document ?? '').startsWith('# 接口文档')
+          ? '接口那边先确认分页'
+          : '先问最关键的一个：分页上限取多少？',
+      }
+    }
   }
 
   /** 打开一份「PRD 有待确认项」的方案，停在 PRD 审阅页 */
@@ -2324,11 +2395,13 @@ describe('AppV2 文档澄清', () => {
     // 回到的是**对话页**（标题切到 PRD 澄清），不是另开一个澄清页
     expect(wrapper.text()).toContain('PRD 待确认项澄清')
 
-    const payload = vi.mocked(api.startConversationStream).mock.calls[0]?.[0]
+    // 开场材料随**对话任务**下发（`formData`）：正文与清单都在里面
+    const payload = jobPayload('chat')
+    const formData = payload?.formData as { document?: string; pending_items?: string } | null
     // 前端只能点名场景：档案标识由后端解析成人设与开场白
     expect(payload?.profileKey).toBe('doc-clarification')
-    expect(payload?.answers.document).toContain('分页上限：待确认')
-    expect(payload?.answers.pending_items).toContain(
+    expect(formData?.document).toContain('分页上限：待确认')
+    expect(formData?.pending_items).toContain(
       '1. [P0] 分页上限取多少？（涉及章节：4.3；拍板人：产品负责人）',
     )
   })
@@ -2499,7 +2572,8 @@ describe('AppV2 文档澄清', () => {
 
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).not.toContain(CLARIFY_ENTRY_TEXT)
-    expect(api.startConversationStream).not.toHaveBeenCalled()
+    // 连一次对话任务都不该发起（点进去只能闲聊，那不如不给入口）
+    expect(jobCount('chat')).toBe(0)
   })
 
   it('澄清的消息落在那条线程上，需求线程一条不动', async () => {
@@ -2522,7 +2596,8 @@ describe('AppV2 文档澄清', () => {
     const wrapper = await mountReviewWithPending()
     const store = storeOf(wrapper)
     await openClarification(wrapper)
-    expect(vi.mocked(api.startConversationStream)).toHaveBeenCalledTimes(1)
+    // 开场是一次**对话任务**（不再是裸的流式请求）
+    expect(jobCount('chat')).toBe(1)
 
     // 回审阅页（澄清标签下没有「返回审阅」按钮，靠顶部进度条走回去）
     await clickStep(wrapper, 'PRD')
@@ -2532,7 +2607,7 @@ describe('AppV2 文档澄清', () => {
     // 再进来：开场请求不应重发，否则每次回来都被问候一遍
     await openClarification(wrapper)
 
-    expect(vi.mocked(api.startConversationStream)).toHaveBeenCalledTimes(1)
+    expect(jobCount('chat')).toBe(1)
     expect(store.chatTab).toBe('prd-clarify')
     // 聊天记录没有被清空
     expect(store.messages).toHaveLength(1)
@@ -2593,15 +2668,16 @@ describe('AppV2 对话页的子标签栏', () => {
     return wrapper.find('.shell-action-bar').findAll('button').map((item) => item.text())
   }
 
-  /** 造一个按「在哪份文档上澄清」回不同话术的开场 mock，便于区分各线程的消息 */
+  /** 造一个按「在哪份文档上澄清」回不同话术的开场（写入轮次由 `defaultJobStream` 统一做） */
   function mockOpeningByDocument(): void {
-    vi.mocked(api.startConversationStream).mockImplementation(async (payload, handlers) => {
-      const reply = String(payload.answers.document ?? '').startsWith('# 接口文档')
-        ? '接口那边先确认分页'
-        : 'PRD 那边先确认分页'
-      handlers?.onChunk?.({ text: reply, sectionId: '', index: -1 })
-      return { conversationId: `conv-${reply.slice(0, 2)}`, reply, asks: [] }
-    })
+    chatHarness.opening = (payload) => {
+      const formData = payload.formData as { document?: string } | null | undefined
+      return {
+        reply: String(formData?.document ?? '').startsWith('# 接口文档')
+          ? '接口那边先确认分页'
+          : 'PRD 那边先确认分页',
+      }
+    }
   }
 
   async function openPromptsAndPrdClarification(): Promise<VueWrapper> {
@@ -2719,20 +2795,16 @@ describe('AppV2 对话页的子标签栏', () => {
   })
 
   it('打开一份停在接口澄清的方案：落在对话页，并停回那条标签上', async () => {
+    // 标签随快照回来；**消息**归服务端轮次（`chat_turns`），不随快照回来——
+    // 因此这里按新链路造数：那条线程上的对话由 `fetchTurns` 读出来。
     const snapshot = {
       ...reviewSnapshot('chatting'),
       chatTab: 'api-docs-clarify',
-      conversationIds: {
-        requirement: '',
-        'prd-clarify': '',
-        'api-docs-clarify': 'conv-api',
-        'prompts-clarify': '',
-      },
-      messages: [
-        { role: 'user', content: '需求那边聊的' },
-        { role: 'user', content: '接口这边聊的', stage: 'api-docs-clarify' },
-      ],
     }
+    turnHarness.items.push(
+      { id: 1, role: 'user', content: '需求那边聊的', stage: 'requirement' },
+      { id: 2, role: 'user', content: '接口这边聊的', stage: 'api-docs-clarify' },
+    )
     const wrapper = await mountExistingSolution(snapshot, 1, [
       makeDocumentRecord('prd', '# 产品需求文档'),
       makeDocumentRecord('api-docs', '# 接口文档'),

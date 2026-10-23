@@ -6,6 +6,7 @@ import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
 import * as api from '@/services/api'
 import * as documentApi from '@/services/documentService'
+import { resetForTests as resetSubscriptions } from '@/services/runSubscriptions'
 import * as solutionApi from '@/services/solutionService'
 import { useDocumentsStore } from '@/stores/documents'
 import { useRunsStore } from '@/stores/runs'
@@ -44,6 +45,9 @@ vi.mock('@/services/solutionService', () => ({
   },
   fetchSolutions: vi.fn(async () => []),
   fetchSolution: vi.fn(),
+  // 对话轮次：对话任务收尾后要按方案 id 重拉一次，漏列就会在 `refreshTurns` 里抛错
+  fetchTurns: vi.fn(async () => []),
+  clearTurns: vi.fn(async () => {}),
   createSolution: vi.fn(),
   updateSolution: vi.fn(),
   deleteSolution: vi.fn(),
@@ -90,6 +94,8 @@ let documents: ReturnType<typeof useDocumentsStore>
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  // 订阅登记表是模块级的：不清会让上一个用例挂在同一 jobId 上的订阅挡掉这一次的订阅
+  resetSubscriptions()
 
   workflow = useWorkflowStore()
   solutions = useSolutionsStore()
@@ -154,9 +160,16 @@ describe('删除方案后迟到的回调', () => {
     expect(workflow.viewState).not.toBe('review-prd')
 
     // 5. 另一条迟到的写入路径：对话流把 assistant 回复 push 回 messages。
-    //    此时 `hasContent` 重新为真——这正是线上那个 Bug 的形状。
+    //    从前这会让 `hasContent` 重新为真，正是线上那个 Bug 的形状；现在对话轮次归服务端
+    //    `chat_turns`，它**不再**是 `hasContent` 的判据（见 `stores/workflow.ts` 的 docstring），
+    //    「有没有聊过」改由 `hasChat` 表达，而后者不参与「要不要建方案」。
     workflow.messages.push({ role: 'assistant', content: '迟到的回复', stage: 'requirement' })
     documents.markContentWritten()
+    expect(workflow.hasContent).toBe(false)
+
+    // 但「有内容」仍可能被别的迟到路径点亮（摘要 / 粘贴稿这类录入字段），
+    // 因此创建分支的最后一道闸必须照样拦得住——否则列表里还是会冒出「未命名方案」。
+    workflow.debugPrdText = '# 迟到的回调写进来的内容'
     expect(workflow.hasContent).toBe(true)
 
     await solutions.flushPendingSave()
@@ -511,6 +524,9 @@ describe('删除方案后迟到的回调', () => {
   it('删掉方案后重新选了入口，迟到的澄清回复也不落消息、不新建方案', async () => {
     // 这是同一个 Bug 的**第二条路径**：入口模式非空时，`saveNow` 那道
     // 「空壳方案」闸门拦不住，只能靠对话流自己按会话代次丢弃迟到的回复。
+    //
+    // ⚠️ 对话已经是一个**任务**（见 `useClarificationChat` 的说明）：在途的不是一条裸的
+    // `continue-stream`，而是 `createJob` + 订阅。这里按新链路造「回复还在路上」。
     workflow.chooseEntry('structured')
     workflow.summary = FULL_SUMMARY
     await solutions.flushPendingSave()
@@ -521,9 +537,10 @@ describe('删除方案后迟到的回调', () => {
       { stage: 'requirement' },
     )
 
-    // 让澄清回复「卡住」：模拟模型还在生成，请求已经在途
+    // 让澄清回复「卡住」：模拟模型还在生成，任务已经在途
     let releaseStream: (() => void) | undefined
-    vi.mocked(api.continueConversationStream).mockImplementation(async () => {
+    vi.mocked(api.createJob).mockResolvedValue({ jobId: 21, status: 'running' })
+    vi.mocked(api.readJobStream).mockImplementation(async () => {
       await new Promise<void>((resolve) => {
         releaseStream = resolve
       })
@@ -532,8 +549,9 @@ describe('删除方案后迟到的回调', () => {
 
     const chatting = chat.sendMessage('继续聊')
     await flushPromises()
-    expect(api.continueConversationStream).toHaveBeenCalledTimes(1)
-    // 用户消息是删除之前由用户自己发的，此时还在列表里
+    // 一条对话任务确实已经在途（这条链路的入口不再是裸的流式请求）
+    expect(api.readJobStream).toHaveBeenCalledTimes(1)
+    // 用户消息是删除之前由用户自己发的（乐观插入），此时还在列表里
     expect(workflow.messages.map((message) => message.content)).toContain('继续聊')
 
     // 1. 用户在回复途中删掉了当前方案

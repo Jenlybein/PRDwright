@@ -58,7 +58,8 @@ describe('身份与指针', () => {
 
     begin(runs, 12)
     expect(runs.hasRunning).toBe(true)
-    expect(runs.pointer).toEqual({ jobId: 12, jobKind: 'prd', docKind: 'prd' })
+    // 指针里还有「这轮回复记到哪条线程」那一项：文档任务没有线程，恒为 null
+    expect(runs.pointer).toEqual({ jobId: 12, jobKind: 'prd', docKind: 'prd', chatStage: null })
 
     expect(runs.settle(12)).toBe(true)
     // 收尾后不再给指针：凭一个已经结束的 jobId 去重连，页面会卡在永远不动地生成态

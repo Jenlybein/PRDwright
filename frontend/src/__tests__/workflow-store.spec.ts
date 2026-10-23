@@ -49,13 +49,22 @@ describe('useWorkflowStore', () => {
     expect(store.viewState).toBe('chatting')
 
     // 对话流式进行中照样能跳。从前这条会返回 false 并静默吞掉——
-    // 进度条、底栏「返回」因此全是死按钮（见 `stores/runs.ts` 顶部的复盘）
+    // 进度条、底栏「返回」因此全是死按钮（见 `stores/runs.ts` 顶部的复盘）。
+    // 「对话在跑」现在是一支带身份的运行态（`jobKind: 'chat'` + 线程），不再是一个全局布尔
+    useRunsStore().begin({
+      jobId: 5,
+      solutionId: 1,
+      jobKind: 'chat',
+      docKind: null,
+      chatStage: 'requirement',
+    })
     store.goTo('form')
     expect(store.viewState).toBe('form')
     // 「忙」仍是事实（界面要据此表现），只是不再兼任闸门
     expect(store.busy).toBe(true)
 
     // 文档生成在跑时同理
+    useRunsStore().clear()
     beginRun()
     store.goTo('review-prd')
     expect(store.viewState).toBe('review-prd')
@@ -98,7 +107,7 @@ describe('useWorkflowStore', () => {
     expect(store.contentTick).toBe(contentBefore)
   })
 
-  it('contentTick 跟着内容字段走：粘贴的材料与对话都算', async () => {
+  it('contentTick 只跟内容字段走：对话轮次归服务端，不算一次内容变更', async () => {
     const store = useWorkflowStore()
 
     const beforePaste = store.contentTick
@@ -106,10 +115,12 @@ describe('useWorkflowStore', () => {
     await nextTick()
     expect(store.contentTick).toBeGreaterThan(beforePaste)
 
+    // 对话轮次**不**推进内容时间：真源在服务端 `chat_turns`，它是被 `setTurns()` 整体灌进来的
+    // 一次读，不是用户本地改出来的「作品」。若把它也算上，每收一轮回复都会刷新列表时间。
     const beforeMessage = store.contentTick
     store.messages.push({ role: 'user', content: '再加一个登录', stage: 'requirement' })
     await nextTick()
-    expect(store.contentTick).toBeGreaterThan(beforeMessage)
+    expect(store.contentTick).toBe(beforeMessage)
   })
 
   it('运行态变化不触发 changeTick（不该被保存的状态）', () => {
@@ -214,6 +225,8 @@ describe('useWorkflowStore', () => {
       activeJobKind: null,
       // 目标产物：`optimize` / `clarify` 凭 kind 定不了它，重连时又要靠它知道改的是哪一份
       activeJobDocKind: null,
+      // 对话任务停在的线程：重连时靠它知道这轮回复该记到哪条线程（文档任务为 null）
+      activeChatStage: null,
     })
     // 运行态不在快照里
     expect('downgrade' in snapshot).toBe(false)
@@ -234,7 +247,7 @@ describe('useWorkflowStore', () => {
    * 否则刷新一次「我在跟 AI 澄清接口文档」这件事就丢了——用户会发现底栏忽然又能生成 PRD、
    * 或者自己的对话跑到了别的标签下。
    */
-  it('标签与各线程会话 id、消息的 stage 标记一起随快照往返', () => {
+  it('标签随快照往返；消息改由 setTurns 单独灌入（真源在服务端）', () => {
     const store = useWorkflowStore()
     store.messages.push({ role: 'user', content: '我想做一个记账工具', stage: 'requirement' })
     store.messages.push({ role: 'assistant', content: '好的，先确认几点', stage: 'requirement' })
@@ -251,7 +264,20 @@ describe('useWorkflowStore', () => {
     fresh.applySnapshot(snapshot, null)
 
     expect(fresh.chatTab).toBe('api-docs-clarify')
-    // 四条线程的消息都在同一条时间线里，顺序不变
+    // 快照落地时镜像先清空——上一份方案的对话不该在新方案里短暂出现（视觉上是「串稿」）
+    expect(fresh.messages).toEqual([])
+    // 灌入由调用方随后做（`solutions.openSolution` → `fetchTurns`）
+    fresh.setTurns([
+      { role: 'user', content: '我想做一个记账工具', stage: 'requirement' },
+      { role: 'assistant', content: '好的，先确认几点', stage: 'requirement' },
+      { role: 'assistant', content: '准备开始 P0 级确认', stage: 'api-docs-clarify' },
+    ])
+    // 四条线程的消息都在同一条时间线里，顺序不变，按 `stage` 分线
+    expect(fresh.messages.map((message) => message.stage)).toEqual([
+      'requirement',
+      'requirement',
+      'api-docs-clarify',
+    ])
     expect(
       fresh.messages.filter((message) => message.stage === 'api-docs-clarify'),
     ).toHaveLength(1)
@@ -322,8 +348,14 @@ describe('useWorkflowStore', () => {
     expect(store.viewState).toBe('form')
     expect(store.hasContent).toBe(false)
 
-    // 对话有了一条消息，就算有内容了
+    // 对话有了一条消息也**不算**「有内容」：对话轮次归服务端 `chat_turns`，
+    // 由 `setTurns()` 灌入镜像，它的真值判断是 `hasChat`（进度条第二格的依据），
+    // 而 `hasContent` 只回答「要不要为这份草稿建一份方案」——那件事发生在对话之前。
     store.messages.push({ role: 'user', content: 'hi' })
+    expect(store.hasContent).toBe(false)
+
+    // 真正算内容的仍是录入字段
+    store.quickInput.requirements = '记账'
     expect(store.hasContent).toBe(true)
   })
 

@@ -15,7 +15,7 @@ from conftest import register
 
 from backend.core.db import connect
 from backend.core.errors import AppError, ErrorCode
-from backend.core.migrations import MIGRATIONS, run_migrations
+from backend.core.migrations import run_migrations
 from backend.repositories.generation_job_repo import GenerationJobRepository
 from backend.services import admin_service, auth_service
 
@@ -42,16 +42,11 @@ def _as_admin(client, username: str = "root") -> None:
 
 # ---------------------------------------------------------------------------
 # 迁移
+#
+# 「迁移跑到清单末尾」那条不变式由 `test_config_tables.py` 覆盖（它在迁移专文件里，
+# 还带着 `_run_until` / `_run_rest` 那套造旧库的脚手架）。这里只保留「本次改动新增的
+# 表/列真的存在」这条，避免同一个断言在两个文件里各写一份、然后慢慢长歪。
 # ---------------------------------------------------------------------------
-
-
-def test_migrations_reach_latest_version():
-    """跑完迁移必须到清单末尾。
-
-    断言写成 `len(MIGRATIONS)` 而不是写死数字：写死的话将来每加一步迁移，
-    这条与本次改动毫无关系的用例都会红一次。
-    """
-    assert run_migrations() == len(MIGRATIONS)
 
 
 def test_migration_adds_token_columns_and_audit_table():

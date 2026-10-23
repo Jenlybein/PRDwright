@@ -103,6 +103,18 @@ def login(client, username="alice", password="password123"):
     return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
+def assert_requires_login(client, path, method="get", **kwargs):
+    """断言「未登录打这个端点」得到 **401 而不是 403**。
+
+    为什么两条都要分清楚、为什么值得抽公共：401 会让前端弹登录窗、403 会让它停在
+    「无权限」页——同样一个没登录的用户，看到哪一页完全取决于守卫挂在哪一层。
+    这个判断在后台的每个端点上都重复出现，各写一份就迟早有一份写反。
+    """
+    response = getattr(client, method)(path, **kwargs)
+    assert response.status_code == 401, f"{method.upper()} {path} 未登录应当 401：{response.text}"
+    assert response.json()["code"] == "UNAUTHORIZED"
+
+
 # ---------------------------------------------------------------------------
 # 技能包：注册表与 PRD 技能层的用例都要在临时目录里「造一个包」
 # ---------------------------------------------------------------------------

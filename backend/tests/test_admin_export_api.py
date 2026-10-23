@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import zipfile
 
 from conftest import login, register
@@ -292,3 +293,55 @@ def test_login_still_works_after_export(client) -> None:
     client.get(f"/api/admin/users/{_user_id('alice')}/export")
 
     assert login(client, "alice").status_code == 200
+
+
+def test_export_over_the_size_limit_is_413(client, monkeypatch) -> None:
+    """超过 `MAX_EXPORT_BYTES` 必须 413，且**不返回半截包**。
+
+    为什么这条值得单独钉：`_ZipBuilder` 把整个包攒在内存里，一个职业用户的历史
+    正文 + 对话 + 任务明细完全可能到几十上百 MB。没有这道闸，一次导出就可能把
+    进程的 RSS 顶穿（OOM 时表现是「整个服务挂了」，与「某个人导了一次数据」
+    在日志上几乎无法关联）。因此它必须**超限即拒**，而不是「慢慢攒完再说」。
+
+    上限是常量，这里用 monkeypatch 压到 4KB 来构造超限——真塞 51MB 只是把同一行
+    `if size > MAX_EXPORT_BYTES` 跑得更慢，验的不是别的东西。数据用随机十六进制
+    （压缩率接近 1），否则 deflate 会把重复文本压到上限以下，闸门就永远不触发。
+    """
+    from backend.services import export_service
+
+    register(client, "alice")
+    solution_id = _new_solution(client, "大方案")
+    owner_id = _user_id("alice")
+    document_store.commit_generated(
+        owner_id, solution_id, "prd", "# 大 PRD\n\n" + os.urandom(64 * 1024).hex()
+    )
+    _as_admin(client)
+
+    monkeypatch.setattr(export_service, "MAX_EXPORT_BYTES", 4 * 1024)
+
+    response = client.get(f"/api/admin/users/{owner_id}/export")
+
+    assert response.status_code == 413, response.text
+    assert "超过导出上限" in response.json()["detail"]
+    # 拒绝时不能漏出半截包：响应体是错误说明，不是 application/zip
+    assert not response.headers.get("content-type", "").startswith("application/zip")
+
+
+def test_export_just_under_the_limit_still_succeeds(client, monkeypatch) -> None:
+    """反向对照：上限之内的包必须照常返回。
+
+    没有这一条，把闸门写成 `if size >= 0: raise` 也能让上面那条绿——而那样一来
+    任何人都导不出东西。两条一起才说明「闸门是按体积判断的」。
+    """
+    from backend.services import export_service
+
+    register(client, "alice")
+    _new_solution(client, "小方案")
+    _as_admin(client)
+
+    monkeypatch.setattr(export_service, "MAX_EXPORT_BYTES", 4 * 1024)
+
+    response = client.get(f"/api/admin/users/{_user_id('alice')}/export")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/zip")

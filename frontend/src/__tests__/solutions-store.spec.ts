@@ -34,6 +34,10 @@ vi.mock('../services/solutionService', () => ({
   },
   fetchSolutions: vi.fn(),
   fetchSolution: vi.fn(),
+  // 对话轮次的读 / 写：`openSolution` 与对话收尾都会走它们（消息的真源是服务端 `chat_turns`），
+  // 漏列会让 `openSolution` 在 `fetchTurns` 上抛错、被 catch 吞成「打不开」
+  fetchTurns: vi.fn(async () => []),
+  clearTurns: vi.fn(async () => {}),
   createSolution: vi.fn(),
   updateSolution: vi.fn(),
   deleteSolution: vi.fn(),
@@ -233,9 +237,13 @@ describe('生成期间也保存', () => {
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
-    // 列表里的进度只认**产物**：此刻 PRD 还没生成出来，所以显示的是「填写需求」。
-    // 若这里又变回 `generating-prd`，说明退回成「跟着当前页走」了（回看旧文档就会倒退）。
-    expect(payload?.stage).toBe('form')
+    // 列表里的进度只认**产物**：此刻三份产物都还没生成出来。
+    // 但需求摘要已经提交过，所以停在「AI 对话」那一格，而不是退回「填写需求」——
+    // 判据是 `hasChat`（有轮次**或**已提交摘要），消息现在由服务端异步取回，
+    // 刚提交完表单时 `messages` 还是空的，只看消息会让进度莫名倒退一格。
+    // 若这里变回 `generating-prd`，说明退回成「跟着当前页走」了（回看旧文档就会倒退）。
+    expect(payload?.state.view_state).toBe('generating-prd')
+    expect(payload?.stage).toBe('chatting')
     // 任务指针随快照一起持久化——这正是「刷新后能静默重连」的落点
     expect(payload?.state.active_job_id).toBe(7)
     expect(payload?.state.active_job_kind).toBe('prd')
@@ -260,7 +268,8 @@ describe('生成期间也保存', () => {
 
     expect(solutionApi.updateSolution).toHaveBeenCalledTimes(1)
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
-    expect(JSON.stringify(payload?.state ?? {})).toContain('"activeJobId":9')
+    // 指针落在结构化状态列的 `active_job_id` 上（不再是整段 JSON 里的 camelCase）
+    expect(payload?.state.active_job_id).toBe(9)
   })
 
   it('生成结束进入 review 态时补上这次保存', async () => {
@@ -290,7 +299,7 @@ describe('生成期间也保存', () => {
     const payload = vi.mocked(solutionApi.updateSolution).mock.calls[0]?.[1]
     expect(payload?.stage).toBe('review-prd')
     // 任务已终态，指针不再留在快照里
-    expect(JSON.stringify(payload?.state ?? {})).toContain('"activeJobId":null')
+    expect(payload?.state.active_job_id).toBeNull()
   })
 })
 
@@ -655,13 +664,35 @@ describe('openSolution', () => {
     expect(onOpened).toHaveBeenCalledWith(null)
   })
 
-  it('快照内容损坏时不清空当前状态，只标记错误', async () => {
-    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({ ...summary(8), state: toState({}) })
+  it('快照字段脏时逐项退回默认值，整份状态照样恢复（不再整份作废）', async () => {
+    // ⚠️ 语义已变：状态从「一整段 JSON」变成结构化列之后，**整份快照损坏已经不可能发生**——
+    // `fromStatePayload` 永远产出对象（缺的字段按默认值补齐），`normalizeSessionSnapshot`
+    // 只在入参不是对象时才返回 null（见两处 docstring：「脏数据只会丢弃对应字段，
+    // 不会让整份状态失效」）。因此 `openSolution` 里那个『记录已损坏』的分支走不到了，
+    // 这里钉住取而代之的口径：脏字段逐个丢弃并回落到安全默认值，方案仍可打开。
+    vi.mocked(solutionApi.fetchSolution).mockResolvedValue({
+      ...summary(8),
+      state: {
+        ...toState({}),
+        view_state: '不是阶段',
+        chat_tab: '不是线程',
+        entry_mode: '不是入口',
+        active_job_id: 'x' as never,
+        summary: 'not-an-object' as never,
+      },
+    })
 
     const opened = await solutions.openSolution(8)
 
-    expect(opened).toBe(false)
-    expect(solutions.saveError).toContain('损坏')
+    expect(opened).toBe(true)
+    expect(solutions.currentId).toBe(8)
+    // 每个脏字段都退到默认值，而不是把整份方案判死
+    expect(workflow.viewState).toBe('entry')
+    expect(workflow.chatTab).toBe('requirement')
+    expect(workflow.entryMode).toBeNull()
+    expect(workflow.activeJobId).toBeNull()
+    expect(workflow.summary).toBeNull()
+    expect(solutions.saveError).toBe('')
   })
 
   it('打开另一份方案前，先把当前压着的改动落库', async () => {

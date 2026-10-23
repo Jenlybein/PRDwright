@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from conftest import login, register
+from conftest import assert_requires_login, login, register
 
 from backend.core import runtime_config as rc
 from backend.repositories.runtime_config_repo import (
@@ -111,7 +111,7 @@ def test_write_endpoints_reject_normal_user(client, method, path, body):
 @pytest.mark.parametrize("path", _GET_PATHS)
 def test_read_endpoints_require_login(client, path):
     """未登录 401（而不是 403）：401 让前端去登录，403 会停在无权限页。"""
-    assert client.get(path).status_code == 401
+    assert_requires_login(client, path)
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +302,34 @@ def test_reveal_key_returns_plaintext_and_audits(client):
     items = client.get("/api/admin/audit").json()["items"]
     assert any(i["action"] == "provider.reveal_key" for i in items)
     assert "sk-reveal-me" not in json.dumps(items, ensure_ascii=False)
+
+
+def test_reveal_key_is_admin_only(client):
+    """「能把密钥看回明文」的唯一入口，越权必须被挡在 401 / 403。
+
+    与 `test_providers_never_leak_secrets` 是一对：那条守「列表里不出现密钥」，
+    这条守「唯一能看明文的动作不是谁都能打」。少了这条，`require_admin` 一旦在
+    某次「顺手整理依赖」里从这条路由上被摘掉，任何登录用户都能拿到平台密钥——
+    而列表测试照样全绿，因为列表确实没泄漏。
+
+    未登录给 401、普通用户给 403：两者的前端处理完全不同（跳登录 vs 停在无权限页）。
+    """
+    # 先由管理员建一条带密钥的配置
+    _as_admin(client)
+    provider_id = _create(client, api_key="sk-must-not-leak")
+    client.post("/api/auth/logout")
+
+    # ① 未登录：401
+    anonymous = client.post(f"/api/admin/providers/{provider_id}/reveal-key")
+    assert_requires_login(client, f"/api/admin/providers/{provider_id}/reveal-key", "post")
+    assert "sk-must-not-leak" not in anonymous.text
+
+    # ② 已登录的普通用户：403
+    register(client)  # alice
+    forbidden = client.post(f"/api/admin/providers/{provider_id}/reveal-key")
+    assert forbidden.status_code == 403, forbidden.text
+    assert forbidden.json()["code"] == "FORBIDDEN"
+    assert "sk-must-not-leak" not in forbidden.text
 
 
 def test_presets_route_is_not_swallowed_by_provider_id(client):

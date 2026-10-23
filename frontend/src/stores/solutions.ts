@@ -507,18 +507,19 @@ export const useSolutionsStore = defineStore('solutions', () => {
       const parsed = normalizeSessionSnapshot(fromStatePayload(detail.state))
 
       currentId.value = detail.id
-      if (parsed) {
-        // 会话换人了：先退订本地的流、清掉运行态与预览，再自增代次。
-        // 顺序不能反——`applySnapshot` 会据新快照重建运行态，退订若放在它后面，
-        // 就会把刚重建的那一支也摘掉（表现是「切回来以后再也不重连」）。
-        detachActiveRun()
-        sessionEpoch.value += 1
-        workflow.applySnapshot(parsed.session, parsed.downgrade, detail.id)
-      } else {
-        // 快照坏掉（非法 JSON / 结构不符）时不清空当前内容，只标记错误让用户知道
-        saveError.value = '这份方案的记录已损坏，无法恢复'
-        return false
-      }
+      // 校验层只对「入参不是对象」返回 null（那三种情形由 `workflow.spec.ts` 的守用例覆盖），
+      // 而 `fromStatePayload` 恒返回对象——所以这一支在 `openSolution` 里走不到。
+      // 留着只为把类型收口；**不要**再往 `saveError` 写「记录已损坏」之类的话：
+      // 状态改成结构化列之后，脏字段是**逐项回落**、方案照样能打开（见
+      // `utils/workflow.ts::normalizeSessionSnapshot` 的说明），那句话说出口就是假的，
+      // 用户会以为「这份方案没了」，而其实只是退回默认页。
+      if (!parsed) return false
+      // 会话换人了：先退订本地的流、清掉运行态与预览，再自增代次。
+      // 顺序不能反——`applySnapshot` 会据新快照重建运行态，退订若放在它后面，
+      // 就会把刚重建的那一支也摘掉（表现是「切回来以后再也不重连」）。
+      detachActiveRun()
+      sessionEpoch.value += 1
+      workflow.applySnapshot(parsed.session, parsed.downgrade, detail.id)
       // 聊天记录单独取：它的真源是后端 `chat_turns`，状态列里没有它。
       // 取的是**全部线程**（一次往返），本地仍是合并数组、按 stage 过滤渲染。
       // 放在 `applySnapshot` 之后、`onOpened` 之前：前者刚把镜像清空，

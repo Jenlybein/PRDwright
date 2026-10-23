@@ -229,7 +229,13 @@ describe('回到原方案时重建运行态', () => {
     expect(workflow.viewState).toBe('generating-api-docs')
     expect(workflow.downgrade).toBeNull()
     expect(runs.activeRun?.jobId).toBe(42)
-    expect(runs.pointer).toEqual({ jobId: 42, jobKind: 'api-docs', docKind: 'api-docs' })
+    expect(runs.pointer).toEqual({
+      jobId: 42,
+      jobKind: 'api-docs',
+      docKind: 'api-docs',
+      // 文档任务不属于任何对话线程
+      chatStage: null,
+    })
     expect(runs.isRunningFor('api-docs')).toBe(true)
   })
 
@@ -242,7 +248,13 @@ describe('回到原方案时重建运行态', () => {
 
     await solutions.openSolution(1)
 
-    expect(runs.pointer).toEqual({ jobId: 42, jobKind: 'optimize', docKind: null })
+    expect(runs.pointer).toEqual({
+      jobId: 42,
+      jobKind: 'optimize',
+      docKind: null,
+      // 旧快照没有线程字段：推不出来就留 null，不要凭空编一条
+      chatStage: null,
+    })
 
     // 后端在 `snapshot` 帧里给出权威结论：拿它校正，而不是按阶段反推一个默认值
     runs.applySnapshot(42, jobSnapshot({ kind: 'optimize', docKind: 'prompts' }))

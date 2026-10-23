@@ -47,6 +47,33 @@ def test_register_sets_hardened_cookie(client):
     assert "Secure" not in set_cookie
 
 
+def test_cookie_becomes_secure_when_the_switch_is_on(client):
+    """`auth_cookie_secure=true` 时 `Set-Cookie` 必须带 `Secure`。
+
+    上面那条只守了「默认关着」的一半——而真正会在生产出事的是另一半：
+    开关打开了却没被读到（典型成因是签发时读了启动期的配置快照），
+    表现恰好是「本地全绿、线上把会话 token 明文发在 HTTP 上」。
+
+    因此这里走**热配置**（管理员在后台打开），既钉住「开关真的被读」，
+    也钉住它「下一次签发即生效」——`set_session_cookie` 必须在签发那一刻现读配置，
+    不能在启动时缓存。
+    """
+    # 起点是「关着」：本机 http 调试场景
+    assert "Secure" not in register(client, username="root").headers.get("set-cookie", "")
+
+    auth_service.set_admin("root", True)
+    patched = client.patch("/api/admin/config", json={"updates": {"auth_cookie_secure": True}})
+    assert patched.status_code == 200, patched.text
+
+    # 不需要重启，下一次登录签发的 Cookie 就得带上 Secure
+    set_cookie = login(client, "root").headers.get("set-cookie", "")
+    assert "Secure" in set_cookie
+    # 打开 secure 不能把另外三项保护弄丢
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=lax" in set_cookie
+    assert "Path=/" in set_cookie
+
+
 @pytest.mark.parametrize(
     ("username", "password", "invite_code", "expected"),
     [

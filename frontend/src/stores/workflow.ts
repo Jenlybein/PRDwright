@@ -200,7 +200,12 @@ export const useWorkflowStore = defineStore('workflow', () => {
    * 变了是什么时候」。把翻页也记成内容变更，那根时间轴就没有意义了
    * （见 `solutions.content_updated_at`）。
    *
-   * ⚠️ 它只覆盖**快照里**的内容字段（需求摘要、对话、粘贴的两份材料），见下方那个 watch。
+   * ⚠️ 它只覆盖**快照里**的内容字段（需求摘要、两段录入稿），见下方那个 watch。
+   *
+   * **对话轮次不在其中**：消息的真源是服务端 `chat_turns`，本地只是由 `setTurns()` 整体
+   * 灌入的只读镜像——那是「读」不是「写」，把它算成内容变更会让每收一轮回复都把列表
+   * 时间刷成「刚刚」。它的真值判断是 `hasChat`（进度条第二格的依据），只用于流程判断。
+   *
    * 三份产物的正文**不在快照里**（住在后端 `documents` 表），改写它们一个字段都不会动到本
    * store——那一路由 `stores/documents.ts` 的 `contentWriteTick` 单独记数，两者在
    * `stores/solutions.ts` 里合并成「这次要不要推进内容时间」。

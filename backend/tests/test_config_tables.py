@@ -64,9 +64,10 @@ def _run_rest() -> None:
 
 
 def test_migrations_reach_latest_version():
-    """断言写成 `len(MIGRATIONS)` 而不是写死数字。
+    """跑完迁移必须到清单末尾。
 
-    写死的话，将来每加一步迁移，这条与本次改动无关的用例都会红一次。
+    断言写成 `len(MIGRATIONS)` 而不是写死数字：写死的话，将来每加一步迁移，
+    这条与本次改动无关的用例都会红一次。
     """
     assert run_migrations() == len(MIGRATIONS)
 

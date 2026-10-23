@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -270,6 +271,11 @@ def db_file_path() -> Path:
     return path
 
 
+# 连接**引导**的串行化锁。它保护的只有「建连接 + 设那三条 PRAGMA」，不覆盖业务读写
+# （`yield` 在锁外）。为什么必须串行，见 `connect()` 的 docstring。
+_bootstrap_lock = threading.Lock()
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     """打开一个数据库连接，退出时自动关闭。
@@ -279,13 +285,32 @@ def connect() -> Iterator[sqlite3.Connection]:
     便于按列名取值。
 
     事务由调用方显式 `commit()`；本函数只负责连接的生命周期。
+
+    ## 为什么「建连接」这一步要加锁
+
+    不是为了省锁竞争，也不是并发量问题。实测（Windows，同一张表、同一条 UPDATE）：
+
+    - 多线程**同时**走本节（`sqlite3.connect` + `PRAGMA journal_mode=WAL`）时，
+      部分连接会拿到 `sqlite3.OperationalError: attempt to write a readonly database`
+      ——**2 路并发就必现一个**，与线程数几乎无关（4/6/10 路的错误数并没有跟着涨）；
+    - 把连接**提前建好**再并发写，10 路全干净、结果也完全正确。
+
+    也就是说炸的是「多线程首次映射 WAL 的 `-shm`」，不是写冲突。关键区别在于它报的是
+    `SQLITE_READONLY` 而**不是** `SQLITE_BUSY`：`busy_timeout` 只重试后者，所以把
+    `busy_timeout` 调大、把 `timeout` 调大**都不管用**（调试这个现象时很容易在这条
+    死胡同里耗掉半天）。
+
+    串行化引导是唯一的绕法，代价可以忽略：建连接是微秒级、每个操作一次。锁**只覆盖
+    引导**，`yield` 之后的事务与写仍然完全并发——`tests/test_db_concurrency.py` 里
+    「A 持写锁、B 排队等」的场景必须仍是真并发，那是另一件事（`busy_timeout` 的职责）。
     """
-    conn = sqlite3.connect(str(db_file_path()), timeout=10.0, check_same_thread=False)
-    try:
+    with _bootstrap_lock:
+        conn = sqlite3.connect(str(db_file_path()), timeout=10.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA foreign_keys=ON")
+    try:
         yield conn
     finally:
         conn.close()

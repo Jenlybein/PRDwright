@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from conftest import login, register
+from conftest import assert_requires_login, login, register
 
 from backend.core.db import connect, utc_now
 
@@ -368,4 +368,4 @@ def test_stats_endpoints_require_admin(client, path):
 @pytest.mark.parametrize("path", ["/api/admin/stats/daily", "/api/admin/stats/users"])
 def test_stats_endpoints_require_login(client, path):
     """未登录 401（而不是 403）：401 让前端去登录，403 会让它停在无权限页。"""
-    assert client.get(path).status_code == 401
+    assert_requires_login(client, path)

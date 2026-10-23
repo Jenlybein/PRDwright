@@ -788,8 +788,9 @@ def test_job_without_solution_does_not_write_document(client, monkeypatch):
 def test_regenerating_prd_keeps_downstream_documents(client, monkeypatch):
     """重新生成 PRD 后下游**保留**：它们是旧上游的产物，但不再被静默删除。
 
-    过期与否交给读取侧的 `stale` 标记（比较 `derived_from` 记录的内容指纹），
-    用户可以自己决定重新生成还是继续用——删除会让旧内容与澄清线程一起消失。
+    旧行为是「PRD 换版 → 删下游」，那样会把旧内容与澄清线程一起抹掉。现在过期与否
+    交给读取侧的 `stale` 标记（比较 `derived_from` 记录的内容指纹），用户可以自己
+    决定重新生成还是继续用——删除会让旧内容与澄清线程一起消失。
     """
     register(client)
     uid = _alice_id()

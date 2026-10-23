@@ -333,29 +333,9 @@ def test_optimize_does_not_invalidate_downstream(client, monkeypatch):
     assert kinds == {"prd", "api_docs", "prompts"}
 
 
-def test_regenerating_prd_keeps_downstream(client, monkeypatch):
-    """反过来也要守住：**整篇重生成** PRD 后，下游不再被删除。
-
-    旧行为是「PRD 换版 → 删下游」，但那样会把旧内容与澄清线程一起抹掉。
-    现在保留它们，由 `stale` 标记提示「基于旧版」，把选择权交给用户。
-    """
-    register(client)
-    uid = _alice_id()
-    solution_id = _create_solution(client)
-    document_store.save_document(uid, solution_id, "prd", "# 旧 PRD")
-    document_store.save_document(uid, solution_id, "api_docs", "# 旧接口文档")
-    document_store.save_document(uid, solution_id, "prompts", "# 旧提示词")
-
-    _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
-    _run_job(
-        uid,
-        solution_id,
-        "prd",
-        {"requirements": "做一个演示产品", "product_name": "演示产品"},
-    )
-
-    kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
-    assert kinds == {"prd", "api_docs", "prompts"}
+# 「整篇重生成 PRD 不删下游」那条不变式在 `test_generation_job.py::test_regenerating_prd_keeps_downstream_documents`，
+# 与它的姊妹用例（重生成接口文档）放在一起。此处不再重复一份：同一个断言写两遍，
+# 改的时候只改一处，另一处就会静默地继续验证旧行为。
 
 
 # ---------------------------------------------------------------------------

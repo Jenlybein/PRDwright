@@ -54,6 +54,48 @@ def _read_stream(client, job_id: int) -> str:
         return "".join(chunk for chunk in response.iter_text())
 
 
+def test_stream_response_carries_the_sse_headers(client):
+    """SSE 三件套必须挂在**真实响应**上：media type、禁缓存、禁 Nginx 缓冲。
+
+    这是「本地一切正常、生产必炸」的典型缺口，三条各有各的坏法：
+
+    - `Content-Type` 不是 `text/event-stream` → 浏览器不把它当事件流，`EventSource`
+      直接报错（前端表现为「对话没有任何回复」，而服务端日志一切正常）；
+    - 缺 `Cache-Control: no-cache` → 中间层把整段响应缓存起来，用户看到的是
+      「等很久，然后一次全出来」，看起来像流式坏了；
+    - 缺 `X-Accel-Buffering: no` → Nginx 默认缓冲上游响应，同样是「不流式」，
+      而**本地没有 Nginx**，所以这一条永远不可能在本地被测出来。
+
+    用户把集成测试整条推迟了，这三行是那批缺口里唯一保留的断言点，因此钉在
+    真实响应头（而不是 `SSE_HEADERS` 这个常量）上——常量对了、路由忘了用它，
+    才是真正会发生的错。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    created = client.post(
+        "/api/jobs",
+        json={
+            "kind": "chat",
+            "solution_id": solution_id,
+            "stage": "requirement",
+            "chat_mode": "start",
+            "form_data": {"product_name": "周报"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    job_id = int(created.json()["job_id"])
+
+    with client.stream("GET", f"/api/jobs/{job_id}/stream") as response:
+        assert response.status_code == 200
+        headers = {key.lower(): value for key, value in response.headers.items()}
+        assert headers["content-type"].startswith("text/event-stream")
+        assert headers["cache-control"] == "no-cache"
+        assert headers["x-accel-buffering"] == "no"
+        # 把流读完，别在生成器还开着的时候就断言完关连接（会让服务端报任务被取消）
+        for _ in response.iter_text():
+            pass
+
+
 def test_start_turn_survives_the_whole_http_chain(client):
     """开新会话：流里有回复，轮次接口能读到它，且角色是前端认识的形状。"""
     register(client)
