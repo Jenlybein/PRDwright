@@ -12,14 +12,21 @@
 
 from __future__ import annotations
 
-from conftest import login, register
+from conftest import login, register, users
 
+from backend.core.engine import session_scope
 from backend.services import admin_service, auth_service
-from backend.repositories import quota_repo
+from backend.repositories.quota_repo import QuotaRepository
 
+
+
+def _quota_columns(user_id: int) -> dict[str, int]:
+    """读三列覆盖值（仓库不再自己开连接，所以这里显式开一个事务）。"""
+    with session_scope() as session:
+        return QuotaRepository(session).quota_columns(user_id)
 
 def _user_id(username: str) -> int:
-    row = auth_service.UserRepository.get_by_username(username)
+    row = users.get_by_username(username)
     assert row is not None
     return int(row["id"])
 
@@ -72,7 +79,7 @@ def test_minus_one_restores_inheritance(client, isolated_db):  # noqa: ARG001
     assert response.status_code == 200
     assert response.json()["daily_task_source"] == "global"
     # 落库的也是 -1，而不是「把当前生效值写死」
-    assert quota_repo.quota_columns(uid)["daily_task_limit"] == -1
+    assert _quota_columns(uid)["daily_task_limit"] == -1
 
 
 def test_out_of_range_is_rejected(client, isolated_db):  # noqa: ARG001
@@ -88,7 +95,7 @@ def test_out_of_range_is_rejected(client, isolated_db):  # noqa: ARG001
     )
     assert response.status_code == 422
     # 没被写坏
-    assert quota_repo.quota_columns(uid)["daily_task_limit"] == -1
+    assert _quota_columns(uid)["daily_task_limit"] == -1
 
 
 def test_unknown_user_is_404(client, isolated_db):  # noqa: ARG001
@@ -146,8 +153,7 @@ def test_audit_records_before_and_after(client, isolated_db):  # noqa: ARG001
         json={"daily_task_limit": 4, "daily_token_limit": -1, "max_running": -1},
     )
 
-    from backend.repositories.admin_repo import AuditRepository
-
+    from conftest import audit_log as AuditRepository
     rows = AuditRepository.list_recent(limit=20)
     hits = [row for row in rows if row.get("action") == "user.quota"]
     assert hits, "没有记下 user.quota 审计"

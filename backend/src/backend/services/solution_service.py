@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from backend.core.engine import session_scope
 from backend.repositories.solution_repo import SolutionRepository
 
 # 标题长度上限。超长标题会把侧边栏撑坏，且它只是展示用的冗余值，
@@ -89,17 +90,16 @@ def create_solution(
     state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """新建方案，返回其摘要（不含状态列）。"""
-    solution_id = SolutionRepository.create(
-        owner_id=owner_id,
-        title=_clean(title, _TITLE_MAX),
-        mode=_clean(mode, _MODE_MAX),
-        stage=_clean(stage, _STAGE_MAX),
-        state=_state_from(state),
-    )
-    created = SolutionRepository.get(owner_id=owner_id, solution_id=solution_id)
-    if created is None:  # 刚插入就读不到，属于异常，不该静默返回半个对象
-        raise RuntimeError("方案创建失败，请稍后重试")
-    return _to_summary(created)
+    with session_scope() as session:
+        created = SolutionRepository(session).create(
+            owner_id=owner_id,
+            title=_clean(title, _TITLE_MAX),
+            mode=_clean(mode, _MODE_MAX),
+            stage=_clean(stage, _STAGE_MAX),
+            state=_state_from(state),
+        )
+        # 仓储返回模型对象；对外契约仍是 dict（路由用 `**row` 展开）。
+        return _to_summary(created.model_dump())
 
 
 def update_solution(
@@ -117,24 +117,27 @@ def update_solution(
     它的 `contentTick` 由「需求摘要 / 草稿 / 对话」的变更驱动，而「翻了一页」
     （`viewState`）不计入。让后端去猜只能靠 diff，那会把前端契约焊死在后端。
     """
-    ok = SolutionRepository.update(
-        owner_id=owner_id,
-        solution_id=solution_id,
-        title=_clean(title, _TITLE_MAX),
-        mode=_clean(mode, _MODE_MAX),
-        stage=_clean(stage, _STAGE_MAX),
-        state=_state_from(state),
-        content_changed=content_changed,
-    )
-    if not ok:
-        return None
-    return get_solution(owner_id, solution_id)
+    with session_scope() as session:
+        ok = SolutionRepository(session).update(
+            owner_id=owner_id,
+            solution_id=solution_id,
+            title=_clean(title, _TITLE_MAX),
+            mode=_clean(mode, _MODE_MAX),
+            stage=_clean(stage, _STAGE_MAX),
+            state=_state_from(state),
+            content_changed=content_changed,
+        )
+        if not ok:
+            return None
+        row = SolutionRepository(session).get(owner_id, solution_id)
+        return row.model_dump() if row else None
 
 
 def get_solution(owner_id: int, solution_id: int) -> dict[str, Any] | None:
     """读取方案详情（含状态列）；不存在或不属于当前用户时返回 None。"""
-    row = SolutionRepository.get(owner_id=owner_id, solution_id=solution_id)
-    return dict(row) if row else None
+    with session_scope() as session:
+        row = SolutionRepository(session).get(owner_id, solution_id)
+        return row.model_dump() if row else None
 
 
 def list_solutions(owner_id: int) -> list[dict[str, Any]]:
@@ -142,7 +145,9 @@ def list_solutions(owner_id: int) -> list[dict[str, Any]]:
 
     走 Repository 的摘要查询，**不读状态列与草稿列**。
     """
-    return [_to_summary(row) for row in SolutionRepository.list_by_owner(owner_id)]
+    with session_scope() as session:
+        rows = SolutionRepository(session).list_by_owner(owner_id)
+        return [_to_summary(row.model_dump()) for row in rows]
 
 
 def delete_solution(owner_id: int, solution_id: int) -> bool:
@@ -150,7 +155,8 @@ def delete_solution(owner_id: int, solution_id: int) -> bool:
 
     聊天轮次与会话 id 由库里的 `ON DELETE CASCADE` 一起带走。
     """
-    return SolutionRepository.delete(owner_id=owner_id, solution_id=solution_id)
+    with session_scope() as session:
+        return SolutionRepository(session).delete(owner_id, solution_id)
 
 
 def solution_exists(owner_id: int, solution_id: int) -> bool:
@@ -159,7 +165,8 @@ def solution_exists(owner_id: int, solution_id: int) -> bool:
     给文档接口用：它要在返回空列表之前区分「这份方案不属于你」（→404）与
     「它确实还没有文档」（→200 空列表）。路由层不直接碰仓储，所以在这里转一手。
     """
-    return SolutionRepository.exists(owner_id=owner_id, solution_id=solution_id)
+    with session_scope() as session:
+        return SolutionRepository(session).exists(owner_id, solution_id)
 
 
 def state_of(row: dict[str, Any]) -> dict[str, Any]:

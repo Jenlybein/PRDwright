@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import login, register
+from conftest import login, register, users
 
 # 一份最小的方案状态。字段与 `schemas.SolutionStatePayload` 对齐——
 # 聊天记录**不在这里**：它由服务端写进 `chat_turns`，只走轮次接口。
@@ -310,16 +310,19 @@ def test_deleting_user_removes_their_solutions(client):
 
     直接走服务层验证——没有「删号」的公开接口，那是运维 CLI 的能力。
     """
+    from backend.core.engine import session_scope
     from backend.repositories.solution_repo import SolutionRepository
     from backend.services import auth_service
 
     register(client)
     created = _create(client)
-    user = auth_service.UserRepository.get_by_username("alice")
+    user = users.get_by_username("alice")
     assert user is not None
 
     auth_service.delete_user("alice")
-    assert SolutionRepository.get(user["id"], created["id"]) is None
+    # v6：仓储是绑定 Session 的实例方法，直查要自己开一个作用域。
+    with session_scope() as session:
+        assert SolutionRepository(session).get(user["id"], created["id"]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +409,7 @@ def test_list_orders_by_content_time(client):
     这里让「只是被翻看过的那份」写库时间更新、内容时间更旧——按写库排会在前，
     按内容排必须在后。
     """
-    from backend.core.db import connect
+    from dbsupport import connect
 
     register(client)
     viewed = _create(client, title="只是被翻看过")

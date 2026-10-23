@@ -12,11 +12,8 @@ from __future__ import annotations
 import pytest
 
 from backend.core import crypto
-from backend.core.db import connect
-from backend.core.migrations import MIGRATIONS, run_migrations
-from backend.repositories.runtime_config_repo import ModelProviderRepository
-
-
+from dbsupport import connect
+from conftest import model_providers as ModelProviderRepository
 def test_encrypt_decrypt_roundtrip():
     token = crypto.encrypt_value("sk-test-123")
     assert token and token != "sk-test-123"
@@ -48,7 +45,6 @@ def test_missing_master_key_fails_with_actionable_message(tmp_path, monkeypatch)
 
 def test_model_providers_schema_uses_value_token():
     """迁移后表里只有 value_token，旧的环境变量名列已删除。"""
-    assert run_migrations() == len(MIGRATIONS)
     with connect() as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(model_providers)")}
     assert "value_token" in columns
@@ -57,7 +53,6 @@ def test_model_providers_schema_uses_value_token():
 
 def test_repository_stores_ciphertext_not_plaintext():
     """仓库层拿到什么就存什么；调用方传进来的必须是密文。"""
-    run_migrations()
     plain = "sk-never-in-db"
     ModelProviderRepository.create(
         provider_id="cfg_crypto001",

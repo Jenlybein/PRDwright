@@ -11,12 +11,11 @@
 from __future__ import annotations
 
 import pytest
-from conftest import register
+from conftest import register, users
 
-from backend.core.db import connect
+from dbsupport import connect
 from backend.core.errors import AppError, ErrorCode
-from backend.core.migrations import run_migrations
-from backend.repositories.generation_job_repo import GenerationJobRepository
+from conftest import job_create, job_fail, job_finish
 from backend.services import admin_service, auth_service
 
 # 与 conftest.register 的默认密码保持一致，避免被强度校验绊倒而掩盖真正的断言
@@ -29,7 +28,7 @@ _CODE_B = "BETA3"
 
 def _user_id(username: str) -> int:
     """按用户名取 id。"""
-    row = auth_service.UserRepository.get_by_username(username)
+    row = users.get_by_username(username)
     assert row is not None
     return int(row["id"])
 
@@ -55,7 +54,6 @@ def test_migration_adds_token_columns_and_audit_table():
     Token 列若缺失，后台统计要么报错、要么（更糟）悄悄退化成解析 JSON，
     而解析失败时可能返回 0——表现为「平台用量为零」而不是报错，最难发现。
     """
-    run_migrations()
 
     with connect() as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
@@ -128,8 +126,8 @@ def test_user_list_includes_usage_aggregated_by_sql(client):
     _as_admin(client, "alice")
     owner_id = _user_id("alice")
 
-    job_a = GenerationJobRepository.create(owner_id, "prd", None)
-    GenerationJobRepository.finish(
+    job_a = job_create(owner_id, "prd", None)
+    job_finish(
         owner_id,
         job_a,
         draft_content="",
@@ -137,8 +135,8 @@ def test_user_list_includes_usage_aggregated_by_sql(client):
         prompt_tokens=100,
         completion_tokens=20,
     )
-    job_b = GenerationJobRepository.create(owner_id, "prd", None)
-    GenerationJobRepository.fail(
+    job_b = job_create(owner_id, "prd", None)
+    job_fail(
         owner_id,
         job_b,
         error_code="INTERNAL_ERROR",
@@ -178,8 +176,8 @@ def test_platform_stats_counts_everyone(client):
     """
     _as_admin(client, "alice")
     owner_id = _user_id("alice")
-    job_id = GenerationJobRepository.create(owner_id, "prd", None)
-    GenerationJobRepository.finish(
+    job_id = job_create(owner_id, "prd", None)
+    job_finish(
         owner_id,
         job_id,
         draft_content="",
@@ -301,7 +299,7 @@ def test_second_admin_can_be_deactivated(client):
     # 两者必须分开，否则后台想「暂时禁止登录」就只能先撤权限，恢复时容易漏。
     with pytest.raises(auth_service.AuthError):
         auth_service.login("deputy", _PASSWORD)
-    assert auth_service.UserRepository.count_admins() == 2
+    assert users.count_admins() == 2
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +526,7 @@ def test_service_layer_enforces_rules_without_http():
 
     # 正路仍然通
     admin_service.delete_user(root, bob.id)
-    assert auth_service.UserRepository.get_by_username("bob") is None
+    assert users.get_by_username("bob") is None
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +544,7 @@ def test_admin_can_promote_another_user(client):
 
     assert response.status_code == 200
     assert response.json()["is_admin"] is True
-    assert auth_service.UserRepository.get_by_username("bob")["is_admin"] == 1
+    assert users.get_by_username("bob")["is_admin"] is True
 
 
 def test_admin_can_demote_another_admin(client):
@@ -576,7 +574,7 @@ def test_cannot_demote_last_admin(client):
 
     assert response.status_code == 403
     assert "最后一位管理员" in response.json()["detail"]
-    assert auth_service.UserRepository.get_by_username("alice")["is_admin"] == 1
+    assert users.get_by_username("alice")["is_admin"] is True
 
 
 def test_can_demote_self_when_another_admin_remains(client):
@@ -598,7 +596,7 @@ def test_can_demote_self_when_another_admin_remains(client):
     assert response.status_code == 200
     assert response.json()["is_admin"] is False
     # bob 接任，系统里仍有管理员
-    assert auth_service.UserRepository.count_admins() == 1
+    assert users.count_admins() == 1
 
 
 def test_promote_endpoint_requires_admin(client):
@@ -608,4 +606,4 @@ def test_promote_endpoint_requires_admin(client):
     response = client.patch(f"/api/admin/users/{_user_id('bob')}/admin", json={"is_admin": True})
 
     assert response.status_code == 403
-    assert auth_service.UserRepository.get_by_username("bob")["is_admin"] == 0
+    assert users.get_by_username("bob")["is_admin"] is False

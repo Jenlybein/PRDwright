@@ -19,7 +19,9 @@ import pytest
 
 from backend.core import logging_setup
 from backend.core.config import get_settings
-from backend.core.db import connect, utc_ms_text, utc_now, utc_now_ms_text
+from backend.core.clock import utc_ms_text, utc_now, utc_now_ms_text
+from dbsupport import connect
+from backend.core.engine import session_scope
 from backend.repositories.log_repo import LogRepository
 
 
@@ -64,6 +66,24 @@ def _row(**overrides) -> dict:
     return base
 
 
+def _insert_many(rows: list[dict]) -> int:
+    """写一批日志（仓库不再自己提交，事务由这里显式开）。"""
+    with session_scope() as session:
+        return LogRepository(session).insert_many(rows)
+
+
+def _count() -> int:
+    with session_scope() as session:
+        return LogRepository(session).count()
+
+
+def _prune(*, retention_days: int, max_rows: int) -> int:
+    with session_scope() as session:
+        return LogRepository(session).prune(
+            retention_days=retention_days, max_rows=max_rows
+        )
+
+
 def _rows() -> list[dict]:
     """读出表内全部日志行。
 
@@ -80,16 +100,12 @@ def _rows() -> list[dict]:
         ]
 
 
-def test_app_logs_table_exists_after_migration(isolated_db):  # noqa: ARG001
-    """迁移跑完后 `app_logs` 表与关键列都在。
+def test_app_logs_table_has_the_columns_it_needs(isolated_db):  # noqa: ARG001
+    """基线里 `app_logs` 的表与关键列都在。
 
-    版本号**不写死**（断言 `run_migrations() == len(MIGRATIONS)`），
-    否则将来每加一步迁移，这个与日志无关的用例都会红一次。
+    这些列不是「好看」：`event` 是分类检索的主维度，`request_id` 是反查一次请求
+    全过程的唯一线索，缺任何一个，日志页都会在数据量上来后变成「只能凭时间翻」。
     """
-    from backend.core.migrations import MIGRATIONS, run_migrations
-
-    assert run_migrations() == len(MIGRATIONS)
-
     with connect() as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(app_logs)")}
         # `index_list` 的第一列是序号，索引名在第二列
@@ -220,7 +236,7 @@ def test_write_failure_degrades_to_warning(log_env, monkeypatch, caplog):
     """写库失败只降级成一条 WARNING，绝不把异常抛回调用方。"""
     calls: list[int] = []
 
-    def boom(rows: list[dict]) -> int:
+    def boom(self, rows: list[dict]) -> int:
         calls.append(len(rows))
         raise RuntimeError("数据库不可用")
 
@@ -243,7 +259,7 @@ def test_prune_enforces_days_and_rows(isolated_db):  # noqa: ARG001
     """两个闸门各管一种失效模式：天数防「太旧还占着」，行数防「短时间爆炸」。"""
     stale = utc_ms_text(utc_now() - timedelta(days=30))
     fresh = utc_now_ms_text()
-    LogRepository.insert_many(
+    _insert_many(
         [
             _row(ts=stale, msg="旧 1"),
             _row(ts=stale, msg="旧 2"),
@@ -253,12 +269,12 @@ def test_prune_enforces_days_and_rows(isolated_db):  # noqa: ARG001
             _row(ts=fresh, msg="新 4"),
         ]
     )
-    assert LogRepository.count() == 6
+    assert _count() == 6
 
     # 保留 7 天 → 删掉 2 条旧的；上限 3 行 → 再从 4 条新的里删掉最旧的 1 条
-    deleted = LogRepository.prune(retention_days=7, max_rows=3)
+    deleted = _prune(retention_days=7, max_rows=3)
     assert deleted == 3
-    assert LogRepository.count() == 3
+    assert _count() == 3
 
     remaining = [row["msg"] for row in _rows()]
     assert remaining == ["新 2", "新 3", "新 4"], "裁剪必须保住最新的那批"
@@ -266,9 +282,9 @@ def test_prune_enforces_days_and_rows(isolated_db):  # noqa: ARG001
 
 def test_prune_is_noop_when_under_limits(isolated_db):  # noqa: ARG001
     """行数没超限时一条都不删——`id <= NULL` 的语义要真的成立。"""
-    LogRepository.insert_many([_row(), _row()])
-    assert LogRepository.prune(retention_days=7, max_rows=100) == 0
-    assert LogRepository.count() == 2
+    _insert_many([_row(), _row()])
+    assert _prune(retention_days=7, max_rows=100) == 0
+    assert _count() == 2
 
 
 def test_install_is_idempotent(log_env):

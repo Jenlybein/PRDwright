@@ -11,15 +11,13 @@
 
 from __future__ import annotations
 
-from conftest import login, register
+from conftest import login, register, users
 
 from backend.core.config import get_settings
 from backend.services import admin_service, auth_service
-from backend.repositories.auth_repo import AuthSessionRepository
-
-
+from conftest import auth_sessions as AuthSessionRepository
 def _user_id(username: str) -> int:
-    row = auth_service.UserRepository.get_by_username(username)
+    row = users.get_by_username(username)
     assert row is not None
     return int(row["id"])
 

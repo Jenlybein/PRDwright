@@ -25,10 +25,10 @@ from backend.api.health import router as health_router
 from backend.api.jobs import router as jobs_router
 from backend.api.solutions import router as solutions_router
 from backend.core.config import get_settings
+from backend.core.engine import get_engine
 from backend.core.runtime_config import get_runtime_config, invalidate
-from backend.core.db import init_schema
 from backend.core.errors import DEFAULT_STATUS, AppError, ErrorCode, error_payload
-from backend.core.migrations import run_migrations
+from backend.core.schema import prepare_schema
 from backend.core.logging_setup import (
     configure_logging,
     install_log_persistence,
@@ -54,11 +54,14 @@ async def lifespan(_: FastAPI):
     current = get_settings()
     configure_logging(level=current.log_level, fmt=current.log_format)
 
-    init_schema()
-    # 建表之后立刻补齐 schema 演进：`init_schema` 只保证基线表存在（`IF NOT EXISTS`
-    # 对已存在的表是空操作），新增的表与列一律由迁移补上。顺序不能颠倒——迁移可能
-    # 依赖基线表（例如把旧快照回填进新表）。
-    run_migrations()
+    # 建库 / 演进只有一条路（v6 / ADR-076）：`prepare_schema` 按库的当前状态决定
+    # 是「建全量」还是「增量 upgrade」。旧版本（v20 之前）的库不再自动升级——
+    # 它会在这里被拒绝启动并打印差异，而不是被悄悄 stamp 成最新。
+    revision = prepare_schema(get_engine())
+    logger.info(
+        "数据库结构已就绪",
+        extra={"event": "service.schema_ready", "revision": revision},
+    )
     # 迁移可能刚建好 `system_config` / `model_providers`，也可能刚播种了内置供应商。
     # 配置层的缓存若在迁移之前被建过（导入期、或某个模块级初始化），它会记住
     # 「表不存在 → 降级」那一份，并在恢复 TTL 内继续用降级值。这里主动失效一次，

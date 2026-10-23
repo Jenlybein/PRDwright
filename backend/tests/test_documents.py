@@ -14,54 +14,10 @@ from __future__ import annotations
 
 import json
 
-from backend.core.db import connect, utc_now_text
-from backend.core.migrations import MIGRATIONS, run_migrations
+from backend.core.clock import utc_now_text
+from dbsupport import connect
 from backend.services import document_store
 from conftest import register
-
-
-# ---------------------------------------------------------------------------
-# 造旧数据（迁移前）
-# ---------------------------------------------------------------------------
-
-
-def _seed_user(username: str = "legacy") -> int:
-    """直接插一个用户行——迁移用例不关心认证，只需要一个归属。"""
-    with connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
-            (username, "hash", b"salt", utc_now_text()),
-        )
-        conn.commit()
-        return int(cur.lastrowid or 0)
-
-
-def _seed_solution(owner_id: int, data: str) -> int:
-    """插入一份方案，`data` 即前端提交的 `SessionDataV2` JSON 文本。"""
-    now = utc_now_text()
-    with connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO solutions (user_id, title, mode, stage, data, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (owner_id, "旧方案", "structured", "review-prompts", data, now, now),
-        )
-        conn.commit()
-        return int(cur.lastrowid or 0)
-
-
-def _legacy_snapshot(**overrides) -> str:
-    """一份含三份正文与三份用量回执的旧快照（camelCase，与前端字段一致）。"""
-    snapshot: dict = {
-        "viewState": "review-prompts",
-        "prdContent": "# PRD 正文\n\n内容",
-        "apiDocsContent": "# 接口文档\n\n内容",
-        "promptsContent": "# 提示词\n\n内容",
-        "prdRunSummary": {"kind": "prd", "durationMs": 1234},
-        "apiDocsRunSummary": {"kind": "api_docs", "durationMs": 99},
-        "promptsRunSummary": {"kind": "prompts", "durationMs": 55},
-    }
-    snapshot.update(overrides)
-    return json.dumps(snapshot, ensure_ascii=False)
 
 
 def _documents(solution_id: int) -> dict[str, dict]:
@@ -107,11 +63,11 @@ def _user_id(username: str) -> int:
 
 
 def test_real_plan_creates_documents_table() -> None:
-    """真实的迁移清单跑完后，`documents` 与 `document_versions` 表就位（防止清单与建表语句脱节）。"""
-    # 与清单长度比而不是写死数字：新增一步迁移不该顺手改坏这两个用例，
-    # 而「清单没跑完」这件事仍然会被抓住
-    assert run_migrations() == len(MIGRATIONS)
+    """基线迁移建出 `documents` 与 `document_versions` 两张表。
 
+    这两张表是「正文只住版本表」的结构前提；缺了它们，写文档会在
+    `no such table` 上炸，而那时看起来像是业务代码的问题。
+    """
     with connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'documents'"
@@ -121,78 +77,6 @@ def test_real_plan_creates_documents_table() -> None:
         ).fetchone()
     assert row is not None
     assert versions is not None
-
-
-def test_backfill_moves_three_documents() -> None:
-    """旧快照里的三份正文各建一行，正文、指纹、清单占位与回执都到位。"""
-    owner = _seed_user()
-    solution_id = _seed_solution(owner, _legacy_snapshot())
-
-    run_migrations()
-
-    docs = _documents(solution_id)
-    assert set(docs) == {"prd", "api_docs", "prompts"}
-
-    assert docs["prd"]["content"] == "# PRD 正文\n\n内容"
-    assert len(docs["prd"]["content_sha"]) == 12
-    # 旧文档没有清单机制，一律是空清单
-    assert json.loads(docs["prd"]["pending_items"]) == []
-    # 旧回执原样搬过来（不解析、不改形状）
-    assert json.loads(docs["prd"]["last_run_summary"]) == {"kind": "prd", "durationMs": 1234}
-
-
-def test_backfill_keeps_legacy_snapshot_intact() -> None:
-    """回填是「复制」不是「搬走」：旧字段仍留在快照里，随时能回退。"""
-    owner = _seed_user()
-    solution_id = _seed_solution(owner, _legacy_snapshot())
-
-    run_migrations()
-
-    with connect() as conn:
-        row = conn.execute("SELECT data FROM solutions WHERE id = ?", (solution_id,)).fetchone()
-    assert json.loads(row["data"])["prdContent"] == "# PRD 正文\n\n内容"
-
-
-def test_backfill_skips_corrupt_row_and_continues() -> None:
-    """某一行 JSON 损坏只跳过它，不拦死迁移，也不丢原文。"""
-    owner = _seed_user()
-    broken = _seed_solution(owner, "{这不是合法 JSON")
-    good = _seed_solution(owner, _legacy_snapshot())
-
-    # 与清单长度比而不是写死数字：新增一步迁移不该顺手改坏这两个用例，
-    # 而「清单没跑完」这件事仍然会被抓住
-    assert run_migrations() == len(MIGRATIONS)
-
-    assert _documents(broken) == {}
-    assert set(_documents(good)) == {"prd", "api_docs", "prompts"}
-
-    with connect() as conn:
-        row = conn.execute("SELECT data FROM solutions WHERE id = ?", (broken,)).fetchone()
-    assert row["data"] == "{这不是合法 JSON"
-
-
-def test_backfill_skips_empty_and_non_string_content() -> None:
-    """空串、纯空白、非字符串一律不建行——不为「没有文档」凭空造文档。"""
-    owner = _seed_user()
-    solution_id = _seed_solution(
-        owner,
-        _legacy_snapshot(prdContent="   ", apiDocsContent=None, promptsContent=""),
-    )
-
-    run_migrations()
-
-    assert _documents(solution_id) == {}
-
-
-def test_backfill_is_idempotent() -> None:
-    """迁移跑第二次不会写重复行（版本号已推进，整步跳过）。"""
-    owner = _seed_user()
-    solution_id = _seed_solution(owner, _legacy_snapshot())
-
-    run_migrations()
-    run_migrations()
-
-    assert len(_documents(solution_id)) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +702,68 @@ def test_cannot_delete_the_only_remaining_version(client) -> None:
     # 只剩 v3（当前版本）——再删就是 400
     assert client.delete(f"/api/solutions/{solution_id}/documents/prd/versions/{by_no[3]}").status_code == 400
     assert [v["version_no"] for v in _versions(solution_id, "prd")] == [3]
+
+
+# ---------------------------------------------------------------------------
+# 跨表原子性（v6 / T16.7）
+#
+# `append_version` 的四步——删下游 → 保证文档行 → 插版本 → 回填指针——必须同生共死。
+# 旧实现把「保证文档行 / 插版本 / 回填指针」分成三次独立提交，中途失败会留下
+# 「指针指向没写进去的版本」的半成品；迁到 session_scope() 后整个操作是一个事务。
+# ---------------------------------------------------------------------------
+
+
+def test_append_version_is_atomic_when_failure_before_commit(client) -> None:
+    """提交前任何一步失败，指针与版本一起回滚——证明跨表原子真的成立。
+
+    仓储层**不 commit**：四步都在调用方的一个事务里跑。因此当版本已 flush、指针已回填、
+    但事务尚未提交时抛异常，三处写入必须一起消失（回滚到操作前的状态）。
+    """
+    import pytest
+
+    from backend.core.engine import session_scope
+    from backend.repositories.document_repo import DocumentRepository
+
+    register(client, username="alice")
+    solution_id = _new_solution(client)
+    owner = _user_id("alice")
+    document_store.commit_generated(owner, solution_id, "prd", "第一版")
+
+    before_versions = _versions(solution_id, "prd")
+    assert len(before_versions) == 1
+    with connect() as conn:
+        before_current = conn.execute(
+            "SELECT current_version_id FROM documents "
+            "WHERE solution_id = ? AND kind = 'prd'",
+            (solution_id,),
+        ).fetchone()["current_version_id"]
+
+    with pytest.raises(RuntimeError, match="模拟收尾阶段失败"):
+        with session_scope() as session:
+            DocumentRepository(session).append_version(
+                owner,
+                solution_id,
+                "prd",
+                content="第二版（应被回滚）",
+                content_sha="sha-rollback",
+                pending_items="[]",
+                last_run_summary=None,
+                source="test",
+            )
+            # 此刻四步都已执行并 flush，但事务尚未提交；抛异常让 session_scope 回滚。
+            raise RuntimeError("模拟收尾阶段失败")
+
+    after_versions = _versions(solution_id, "prd")
+    assert len(after_versions) == 1, "回滚后不该多出版本行"
+    assert [v["version_no"] for v in after_versions] == [1]
+    with connect() as conn:
+        after_current = conn.execute(
+            "SELECT current_version_id FROM documents "
+            "WHERE solution_id = ? AND kind = 'prd'",
+            (solution_id,),
+        ).fetchone()["current_version_id"]
+    assert after_current == before_current, "回滚后当前版本指针不该变化"
+
 
 
 def test_delete_unknown_version_returns_404(client) -> None:

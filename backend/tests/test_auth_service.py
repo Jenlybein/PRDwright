@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import sqlite3
+
+from sqlalchemy.exc import IntegrityError
 import threading
 from datetime import datetime
 
@@ -15,13 +17,8 @@ from fastapi.testclient import TestClient
 
 from backend.api.deps import acting_user
 from backend.core.config import get_settings
-from backend.core.db import init_schema
 from backend.main import register_error_handlers
-from backend.repositories.auth_repo import (
-    AuthSessionRepository,
-    InviteCodeRepository,
-    UserRepository,
-)
+from conftest import auth_sessions as AuthSessionRepository, invite_codes as InviteCodeRepository, users as UserRepository
 from backend.services import auth_service
 
 
@@ -319,7 +316,11 @@ def test_replace_for_user_is_atomic():
 
     alice_id = int(UserRepository.get_by_username("alice")["id"])  # type: ignore[index]
     # 拿 bob 的哈希去给 alice 换发 → 撞 `auth_sessions` 的主键
-    with pytest.raises(sqlite3.IntegrityError):
+    #
+    # ⚠️ 捕获的异常类型随数据层变了：SQLAlchemy 把 DBAPI 的 `sqlite3.IntegrityError`
+    # 包装成 `sqlalchemy.exc.IntegrityError`（`orig` 里才是原来那个）。
+    # 这条用例要守的是「插入失败时旧会话还在」，与异常来自哪一层无关。
+    with pytest.raises(IntegrityError):
         AuthSessionRepository.replace_for_user(
             auth_service._sha256(bob_token),  # noqa: SLF001
             alice_id,
@@ -341,7 +342,6 @@ def test_bootstrap_seeds_configured_invite_code(monkeypatch):
     """首次启动时自动播种 `.env` 里的邀请码，省去手工插库。"""
     monkeypatch.setenv("INVITE_CODE", "seed-me")
     get_settings.cache_clear()
-    init_schema()
     auth_service.ensure_bootstrap()
 
     assert InviteCodeRepository.get("seed-me") is not None
@@ -352,7 +352,6 @@ def test_bootstrap_creates_initial_admin_when_configured(monkeypatch):
     monkeypatch.setenv("INIT_ADMIN_USER", "root")
     monkeypatch.setenv("INIT_ADMIN_PASSWORD", "root-password")
     get_settings.cache_clear()
-    init_schema()
     auth_service.ensure_bootstrap()
 
     row = UserRepository.get_by_username("root")
@@ -369,7 +368,6 @@ def test_bootstrap_does_not_overwrite_existing_data(monkeypatch):
     再带着管理员配置启动第二次，此时不该凭空多出 root。
     """
     get_settings.cache_clear()
-    init_schema()
     auth_service.ensure_bootstrap()
 
     auth_service.register("alice", "password123", "test-invite")
@@ -409,7 +407,6 @@ def test_acting_user_falls_back_to_dev_when_auth_disabled(monkeypatch):
     """`AUTH_ENABLED=false` 时业务数据的归属落到 dev 用户，`user_id` 恒非空。"""
     monkeypatch.setenv("AUTH_ENABLED", "false")
     get_settings.cache_clear()
-    init_schema()
 
     probe = FastAPI()
 

@@ -22,12 +22,8 @@ import pytest
 
 from backend.core import runtime_config as rc
 from backend.core.config import get_settings
-from backend.core.db import connect
-from backend.core.migrations import run_migrations
-from backend.repositories.runtime_config_repo import (
-    ModelProviderRepository,
-    SystemConfigRepository,
-)
+from dbsupport import connect
+from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
 from backend.services import document_service, llm_factory
 
 
@@ -75,7 +71,6 @@ def test_section_review_llm_uses_its_own_token_limit(monkeypatch):
     `review_llm`（`doc_review_max_tokens`=2048）传给了 writer，于是
     `prd_section_review_max_tokens` 从未被读取——改它没有任何效果。
     """
-    run_migrations()
     _set(prd_section_review_max_tokens=1234)
 
     seen: list[dict] = []
@@ -96,7 +91,6 @@ def test_section_review_llm_uses_its_own_token_limit(monkeypatch):
 
 def test_whole_and_section_review_limits_are_independent(monkeypatch):
     """整篇审核与单章审核是两个独立配置，各管一处。"""
-    run_migrations()
     _set(doc_review_max_tokens=3000, prd_section_review_max_tokens=900)
 
     seen: list[int | None] = []
@@ -122,7 +116,6 @@ def test_whole_and_section_review_limits_are_independent(monkeypatch):
 
 def test_llm_instance_rebuilt_after_config_change(monkeypatch):
     """改配置 → 下一次取 `llm` 是新实例；同配置再取则复用（不白建客户端）。"""
-    run_migrations()
     calls: list[int] = []
 
     def _fake_get_llm(**kwargs):  # noqa: ANN003
@@ -147,7 +140,6 @@ def test_writer_rebuilds_llm_when_config_changes(monkeypatch):
     """`PrdSectionWriter` 的 llm 同样按指纹重建。"""
     from backend.services.prd_section_writer import PrdSectionWriter
 
-    run_migrations()
     calls: list[int] = []
 
     def _fake_get_llm(**kwargs):  # noqa: ANN003
@@ -181,7 +173,6 @@ def test_writer_reads_concurrency_at_use_time():
     """
     from backend.services.prd_section_writer import PrdSectionWriter
 
-    run_migrations()
     writer = PrdSectionWriter(llm=_FakeLLM())
     assert writer._concurrency == get_settings().prd_pipeline_concurrency  # noqa: SLF001
 
@@ -196,7 +187,6 @@ def test_writer_review_switch_is_live():
     """审核开关同样现读；但**调用方显式传入的覆盖**优先。"""
     from backend.services.prd_section_writer import PrdSectionWriter
 
-    run_migrations()
     writer = PrdSectionWriter(llm=_FakeLLM())
     default_on = get_settings().prd_section_review_enabled
     assert writer._review_enabled is default_on  # noqa: SLF001
@@ -222,7 +212,6 @@ def test_task_snapshot_does_not_drift():
     `dispatch` 取一份快照，`run_job` 用 `use_config` 冻进上下文。少了它，
     一次 20 分钟的生成跑到一半就会换参数——表现为章节乱序或正文重复。
     """
-    run_migrations()
     rc.invalidate()
     snapshot = rc.get_runtime_config()
     before = snapshot.settings.prd_pipeline_concurrency
@@ -244,7 +233,6 @@ def test_job_meter_uses_active_provider(monkeypatch):
     """
     from backend.services import job_service
 
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_claude01",
         name="Claude-测试",
@@ -310,7 +298,6 @@ def test_custom_provider_window_no_longer_falls_back_to_32k():
     自定义供应商（OpenAI 兼容 + 自己的模型名）在 `model_registry` 里查不到。
     不填这一列时它会落到 32k 兜底，症状是「换了个 128k 的模型，却老报输入超顶」。
     """
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_mylocal1",
         name="本地 vLLM",

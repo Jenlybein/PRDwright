@@ -50,6 +50,7 @@ from typing import Any, Annotated, Iterator
 from pydantic import TypeAdapter, ValidationError
 
 from backend.core.config import Settings, get_settings
+from backend.core.engine import session_scope
 from backend.core.model_registry import ModelLimits, input_ceiling
 from backend.core.providers import ProviderSpec, spec_from_row
 from backend.repositories.runtime_config_repo import (
@@ -231,7 +232,14 @@ def _resolve_active_provider(override_id: str | None) -> ProviderSpec | None:
     """
     rows: list[dict[str, Any]] = []
     try:
-        rows = ModelProviderRepository.list_all()
+        # 每次读配置开一个**短**作用域，不把 session 存进配置快照里：
+        # 快照是进程级单例（TTL 5 秒），让它持有一条池连接等于长期占用池子，
+        # 并发一上来就是「借不到连接 → 接口全超时」。
+        with session_scope() as session:
+            rows = [
+                row.model_dump()
+                for row in ModelProviderRepository(session).list_all()
+            ]
     except Exception:  # noqa: BLE001 - 表可能还不存在
         rows = []
 
@@ -294,7 +302,8 @@ def _load() -> RuntimeConfig:
     _loading = True
     try:
         try:
-            raw = SystemConfigRepository.get_all()
+            with session_scope() as session:
+                raw = SystemConfigRepository(session).get_all()
         except Exception:  # noqa: BLE001 - 表不存在 / 库不可用：降级而不是抛
             logger.warning(
                 "读取运行时配置失败，本次使用环境变量配置",

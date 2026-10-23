@@ -8,10 +8,10 @@
 
 两条纪律
 --------
-1. **SQL 只在这里**（`repositories/__init__.py` 的分层约定 + `tests/test_layering.py`）。
-2. **列清单显式写出、不用 `SELECT *`**：将来给表加列时，不该静默改变调用方拿到的形状。
-   这一条对 `model_providers` 尤其重要——它的返回值会直接进后台接口，
-   `SELECT *` 意味着「加一个内部字段就等于对外多暴露一个字段」。
+1. **事务边界不在这里**：两个类都绑定 `Session`，`commit()` 由 `session_scope()` 决定。
+2. **返回整行对象、由调用方决定暴露哪些字段**：`system_config` 的读取只取 `key/value`
+   （它是覆盖项表，别的列对上层无意义）；`model_providers` 返回整行，但**凭证只有密文**
+   （`value_token`），后台视图自己决定要不要带出去。
 
 密钥的处理
 ----------
@@ -24,66 +24,70 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from backend.core.db import connect, utc_now_text
+from sqlalchemy import delete, func, select
+from sqlalchemy import update as sa_update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlmodel import Session
 
-# `model_providers` 的显式列清单。凭证只暴露变量名，绝不暴露值。
-# `builtin` 不在其中：它是 v16 的遗留列，v19 起一律为 0，代码不再读取——
-# 留在 SELECT 里只会让人以为「还有内置/自定义之分」。
-_PROVIDER_COLUMNS = (
-    "id, name, protocol, base_url, value_token, default_model, max_tokens, "
-    "context_window, max_output, thinking_enabled, extra_json, "
-    "enabled, sort_order, created_at, updated_at"
-)
+from backend.core.clock import utc_now_text
+from backend.core.models import ModelProvider, SystemConfig
 
 
 class SystemConfigRepository:
     """`system_config`：**只存覆盖项**，没有某一行 = 用 env 或默认值。"""
 
-    @staticmethod
-    def get_all() -> dict[str, str]:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get_all(self) -> dict[str, str]:
         """读出全部覆盖项，返回 `key -> value(JSON 文本)`。
 
         value 保持 JSON 文本形态交给上层解码，而不是在这里 `json.loads`：
         解码要与「类型归一 + 约束校验」一起做（`runtime_config` 那侧），
         分两处解会让「一个坏值」在两个地方各有一套容错逻辑。
         """
-        with connect() as conn:
-            rows = conn.execute("SELECT key, value FROM system_config").fetchall()
-            return {str(row["key"]): str(row["value"]) for row in rows}
+        rows = self.session.execute(
+            select(SystemConfig.key, SystemConfig.value)
+        ).all()
+        return {str(row[0]): str(row[1]) for row in rows}
 
-    @staticmethod
-    def upsert_many(items: dict[str, str], *, updated_by: int | None = None) -> None:
+    def upsert_many(self, items: dict[str, str], *, updated_by: int | None = None) -> None:
         """批量写入覆盖项（存在则覆盖）。
 
         整批在一个事务里：配置是**一组语义**，写一半会让「并发度改了、审核开关没改」
         这种撕裂状态被读到。要么全生效，要么全不生效。
+
+        `ON CONFLICT(key) DO UPDATE` 而不是「先删后插」：后者在并发下会短暂出现
+        「这一行不存在」，而读配置是每个请求都要走的路径。
         """
         if not items:
             return
         now = utc_now_text()
-        with connect() as conn:
-            conn.executemany(
-                "INSERT INTO system_config (key, value, updated_at, updated_by) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET "
-                "value = excluded.value, updated_at = excluded.updated_at, "
-                "updated_by = excluded.updated_by",
-                [(key, value, now, updated_by) for key, value in items.items()],
+        statement = sqlite_insert(SystemConfig).values(
+            [
+                {"key": key, "value": value, "updated_at": now, "updated_by": updated_by}
+                for key, value in items.items()
+            ]
+        )
+        self.session.execute(
+            statement.on_conflict_do_update(
+                index_elements=["key"],
+                set_={
+                    "value": statement.excluded.value,
+                    "updated_at": statement.excluded.updated_at,
+                    "updated_by": statement.excluded.updated_by,
+                },
             )
-            conn.commit()
+        )
 
-    @staticmethod
-    def delete_many(keys: list[str]) -> int:
+    def delete_many(self, keys: list[str]) -> int:
         """删除覆盖项（= 恢复 env 默认），返回删除行数。"""
         if not keys:
             return 0
-        placeholders = ",".join("?" for _ in keys)
-        with connect() as conn:
-            cursor = conn.execute(
-                f"DELETE FROM system_config WHERE key IN ({placeholders})", tuple(keys)
-            )
-            conn.commit()
-            return int(cursor.rowcount or 0)
+        result = self.session.execute(
+            delete(SystemConfig).where(SystemConfig.key.in_(keys))
+        )
+        return int(result.rowcount or 0)
 
 
 class ModelProviderRepository:
@@ -93,8 +97,10 @@ class ModelProviderRepository:
     同一协议可以有多行，所以任何「按协议取唯一一行」的假设都不成立。
     """
 
-    @staticmethod
-    def list_all() -> list[dict[str, Any]]:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def list_all(self) -> list[ModelProvider]:
         """全部配置条目，按 `sort_order`、`created_at` 升序。
 
         不过滤 `enabled`：后台要能看见「已停用」的那些并重新启用；
@@ -103,25 +109,16 @@ class ModelProviderRepository:
         排序用 `created_at` 而不是 `id`：id 现在是随机后缀，按它排等于随机顺序，
         而「后加的在后面」才是管理员对列表的预期。
         """
-        with connect() as conn:
-            rows = conn.execute(
-                f"SELECT {_PROVIDER_COLUMNS} FROM model_providers "
-                "ORDER BY sort_order, created_at, id"
-            ).fetchall()
-            return [dict(row) for row in rows]
+        return list(self.session.execute(select(ModelProvider).order_by(
+                    ModelProvider.sort_order, ModelProvider.created_at, ModelProvider.id
+                )).scalars().all())
 
-    @staticmethod
-    def get(provider_id: str) -> dict[str, Any] | None:
+    def get(self, provider_id: str) -> ModelProvider | None:
         """按 id 取一条；不存在返回 `None`（由调用方决定 404 还是降级）。"""
-        with connect() as conn:
-            row = conn.execute(
-                f"SELECT {_PROVIDER_COLUMNS} FROM model_providers WHERE id = ?",
-                (provider_id,),
-            ).fetchone()
-            return dict(row) if row else None
+        return self.session.get(ModelProvider, provider_id)
 
-    @staticmethod
     def create(
+        self,
         *,
         provider_id: str,
         name: str,
@@ -142,43 +139,40 @@ class ModelProviderRepository:
         不再写死 100：那样同批创建的条目顺序取决于 id（现在是随机串），
         管理员会看到列表顺序莫名跳动。
 
-        id 冲突由调用方重试：这里让它直接抛 `sqlite3.IntegrityError`，
+        id 冲突由调用方重试：这里让它直接抛 `IntegrityError`，
         是为了让「生成 id 与写入之间」也有兜底，而不是静默覆盖别人的行。
+        注意需要 `flush()` 才会真的撞上约束——`add()` 只是把对象放进会话。
         """
         now = utc_now_text()
-        with connect() as conn:
-            if sort_order is None:
-                row = conn.execute(
-                    "SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM model_providers"
-                ).fetchone()
-                sort_order = int(row["n"]) if row else 1
-            conn.execute(
-                "INSERT INTO model_providers "
-                "(id, name, protocol, base_url, value_token, default_model, max_tokens, "
-                " context_window, max_output, thinking_enabled, extra_json, builtin, enabled, "
-                " sort_order, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)",
-                (
-                    provider_id,
-                    name,
-                    protocol,
-                    base_url,
-                    value_token,
-                    default_model,
-                    int(max_tokens),
-                    int(context_window),
-                    int(max_output),
-                    1 if thinking_enabled else 0,
-                    extra_json or "{}",
-                    int(sort_order),
-                    now,
-                    now,
-                ),
+        if sort_order is None:
+            current_max = self.session.execute(
+                select(func.coalesce(func.max(ModelProvider.sort_order), 0))
+            ).scalar_one()
+            sort_order = int(current_max or 0) + 1
+        self.session.add(
+            ModelProvider(
+                id=provider_id,
+                name=name,
+                protocol=protocol,
+                base_url=base_url,
+                value_token=value_token,
+                default_model=default_model,
+                max_tokens=int(max_tokens),
+                context_window=int(context_window),
+                max_output=int(max_output),
+                thinking_enabled=bool(thinking_enabled),
+                extra_json=extra_json or "{}",
+                enabled=True,
+                sort_order=int(sort_order),
+                created_at=now,
+                updated_at=now,
             )
-            conn.commit()
+        )
+        # ⚠️ 必须 flush：调用方靠捕获 `IntegrityError` 来重试新 id，
+        # 不 flush 的话冲突要到事务提交时才发现，那时已经出了重试循环。
+        self.session.flush()
 
-    @staticmethod
-    def update(provider_id: str, fields: dict[str, Any]) -> bool:
+    def update(self, provider_id: str, fields: dict[str, Any]) -> bool:
         """按字段更新一条配置，返回是否命中。
 
         `id` / `builtin` / **`protocol`** 不允许改：前两者是身份与遗留标记，
@@ -203,34 +197,30 @@ class ModelProviderRepository:
         patch = {key: value for key, value in fields.items() if key in allowed}
         if not patch:
             return False
-        assignments = ", ".join(f"{key} = ?" for key in patch)
-        params = [
-            int(value) if isinstance(value, bool) else value for value in patch.values()
-        ]
-        with connect() as conn:
-            cursor = conn.execute(
-                f"UPDATE model_providers SET {assignments}, updated_at = ? WHERE id = ?",
-                (*params, utc_now_text(), provider_id),
-            )
-            conn.commit()
-            return int(cursor.rowcount or 0) > 0
+        # 布尔列统一收成 0/1：调用方有的传 bool、有的传 int（表单解析结果），
+        # 都在这里归一，免得 SQLAlchemy 对 `1` 与 `True` 的处理差异漏到上层。
+        values = {key: int(value) if isinstance(value, bool) else value for key, value in patch.items()}
+        values["updated_at"] = utc_now_text()
 
-    @staticmethod
-    def delete(provider_id: str) -> bool:
+        result = self.session.execute(
+            sa_update(ModelProvider)
+            .where(ModelProvider.id == provider_id)
+            .values(**values)
+        )
+        return int(result.rowcount or 0) > 0
+
+    def delete(self, provider_id: str) -> bool:
         """删除一条配置。业务拦截（使用中的不能删）在服务层，这里不判断规则。"""
-        with connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM model_providers WHERE id = ?", (provider_id,)
-            )
-            conn.commit()
-            return int(cursor.rowcount or 0) > 0
+        result = self.session.execute(
+            delete(ModelProvider).where(ModelProvider.id == provider_id)
+        )
+        return int(result.rowcount or 0) > 0
 
-    @staticmethod
-    def count() -> int:
+    def count(self) -> int:
         """行数。给迁移播种的幂等用例与「表是不是空的」判断用。"""
-        with connect() as conn:
-            row = conn.execute("SELECT COUNT(*) AS n FROM model_providers").fetchone()
-            return int(row["n"]) if row else 0
+        return int(
+            self.session.execute(select(func.count()).select_from(ModelProvider)).scalar_one()
+        )
 
 
 def decode_extra(raw: str | None) -> dict[str, Any]:

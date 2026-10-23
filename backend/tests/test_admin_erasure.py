@@ -17,10 +17,12 @@
 from __future__ import annotations
 
 import pytest
-from conftest import login, register
+from conftest import login, register, users
 
 from backend.api import login_flow
-from backend.core.db import connect, utc_now
+from backend.core.clock import utc_now
+from dbsupport import connect
+from backend.core.engine import session_scope
 from backend.repositories.account_repo import AccountDataRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.services import auth_service, document_store, job_service
@@ -45,7 +47,7 @@ def _as_admin(client, username: str = "root") -> None:
 
 
 def _user_id(username: str) -> int:
-    row = auth_service.UserRepository.get_by_username(username)
+    row = users.get_by_username(username)
     assert row is not None
     return int(row["id"])
 
@@ -84,9 +86,10 @@ def _seed_alice(client) -> int:
     document_store.commit_generated(owner_id, solution_id, "prd", "# 第一版")
     document_store.commit_generated(owner_id, solution_id, "prd", "# 第二版")
     document_store.commit_generated(owner_id, solution_id, "prompts", "第一步：建表")
-    ChatTurnRepository.create(
-        owner_id, solution_id, stage="chat", role="user", content="要支持退款吗？"
-    )
+    with session_scope() as session:
+        ChatTurnRepository(session).create(
+            owner_id, solution_id, stage="chat", role="user", content="要支持退款吗？"
+        )
     _job(owner_id)
     return owner_id
 
@@ -152,7 +155,8 @@ def test_delete_removes_all_business_data(client) -> None:
 
     assert client.delete(f"/api/admin/users/{owner_id}").status_code == 200
 
-    counts = AccountDataRepository.counts(owner_id)
+    with session_scope() as session:
+        counts = AccountDataRepository(session).counts(owner_id)
     assert counts["solutions"] == 0
     assert counts["documents"] == 0
     assert counts["document_versions"] == 0
@@ -186,7 +190,7 @@ def test_delete_user_without_any_data_works(client) -> None:
     _as_admin(client)
 
     assert client.delete(f"/api/admin/users/{owner_id}").status_code == 200
-    assert auth_service.UserRepository.get_by_id(owner_id) is None
+    assert users.get_by_id(owner_id) is None
 
 
 def test_deleted_user_can_no_longer_login(client) -> None:

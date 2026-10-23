@@ -94,13 +94,7 @@ def _seed_provider(
     """
     from backend.core import runtime_config as rc
     from backend.core import crypto
-    from backend.core.migrations import run_migrations
-    from backend.repositories.runtime_config_repo import (
-        ModelProviderRepository,
-        SystemConfigRepository,
-    )
-
-    run_migrations()
+    from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
     provider_id = "cfg_health001"
     ModelProviderRepository.create(
         provider_id=provider_id,
@@ -240,7 +234,7 @@ def test_health_flags_unavailable_database(isolated_db, monkeypatch, tmp_path): 
     """数据库连不上要报出来。
 
     这里直接调探测函数而不是走 HTTP：把 `DB_PATH` 指到非法路径后，
-    连应用启动（`init_schema`）都会失败，根本到不了能发请求的状态——
+    连应用启动（`prepare_schema`）都会失败，根本到不了能发请求的状态——
     而「体检自己要能在这种时候给出结论」正是它的用途。
     """
     blocker = tmp_path / "not-a-directory"

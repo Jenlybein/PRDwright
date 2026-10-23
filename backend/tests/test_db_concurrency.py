@@ -22,10 +22,9 @@ from __future__ import annotations
 import threading
 import time
 
-from backend.core.db import connect, utc_now
-from backend.repositories.auth_repo import LoginFailureRepository
-
-
+from backend.core.clock import utc_now
+from dbsupport import connect
+from conftest import login_failures as LoginFailureRepository
 def _insert_failure(conn, username: str) -> None:
     """写一条登录失败记录（最小的、会拿写锁的业务写入）。"""
     conn.execute(

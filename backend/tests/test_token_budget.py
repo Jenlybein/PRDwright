@@ -253,13 +253,7 @@ def _seed_ark_provider() -> None:
     import json
 
     from backend.core import runtime_config as rc
-    from backend.core.migrations import run_migrations
-    from backend.repositories.runtime_config_repo import (
-        ModelProviderRepository,
-        SystemConfigRepository,
-    )
-
-    run_migrations()
+    from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
     provider_id = "cfg_budget001"
     ModelProviderRepository.create(
         provider_id=provider_id,

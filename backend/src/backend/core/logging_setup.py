@@ -47,7 +47,8 @@ from logging.handlers import RotatingFileHandler
 from typing import Any
 
 from backend.core.config import get_settings
-from backend.core.db import utc_ms_text
+from backend.core.clock import utc_ms_text
+from backend.core.engine import session_scope
 from backend.core.request_context import current_request_id
 from backend.repositories.log_repo import LogRepository
 
@@ -378,9 +379,14 @@ class LogStoreHandler(logging.Handler):
         return batch
 
     def _write(self, batch: list[dict[str, Any]]) -> None:
-        """写一批；失败只降级，绝不抛出（抛出会打断后台线程，此后日志全丢）。"""
+        """写一批；失败只降级，绝不抛出（抛出会打断后台线程，此后日志全丢）。
+
+        这里用 `session_scope()` 是安全的：本方法跑在日志后台线程里，是**同步**的，
+        块内没有 `await`。整批一个事务，要么全进库要么全不进。
+        """
         try:
-            LogRepository.insert_many(batch)
+            with session_scope() as session:
+                LogRepository(session).insert_many(batch)
         except Exception:  # noqa: BLE001 - 日志写入的任何失败都必须就地吞掉
             _module_logger.warning(
                 "日志落库失败，%d 条未入库（仍已写入日志文件）",
@@ -413,8 +419,8 @@ def _current_formatter(root: logging.Logger) -> logging.Formatter | None:
 def install_log_persistence() -> None:
     """把「日志留下来」的两路 handler 挂上：轮转文件（必开）+ 落库（可关）。
 
-    ⚠️ 调用时机必须在 `init_schema()` 与 `run_migrations()` **之后**——
-    否则 `app_logs` 表还不存在，服务启动那批日志会全部写失败并降级，
+    ⚠️ 调用时机必须在 `prepare_schema()` **之后**——否则 `app_logs` 表还不存在，
+    服务启动那批日志会全部写失败并降级，
     而「启动日志恰好没有」是最容易被忽略、也最影响排障的一种丢数据。
 
     幂等：重复调用不会挂第二个（日志翻倍）。这在 `--reload` 与测试里都可能发生。
@@ -466,10 +472,11 @@ def install_log_persistence() -> None:
     # 启动时裁一次：上次进程留下的过期日志不必留到运行时再慢慢淘汰。
     # 这里的异常同样要吞掉——裁剪失败只意味着「暂时多占点空间」，不值得拖住启动。
     try:
-        LogRepository.prune(
-            retention_days=settings.log_retention_days,
-            max_rows=settings.log_max_rows,
-        )
+        with session_scope() as session:
+            LogRepository(session).prune(
+                retention_days=settings.log_retention_days,
+                max_rows=settings.log_max_rows,
+            )
     except Exception:  # noqa: BLE001
         _module_logger.warning(
             "日志裁剪失败，将在下次启动时重试",

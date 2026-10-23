@@ -22,10 +22,11 @@ import logging
 from dataclasses import dataclass
 from datetime import timedelta
 
-from backend.core.db import utc_now
+from backend.core.clock import utc_now
+from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
-from backend.repositories import quota_repo
+from backend.repositories.quota_repo import QuotaRepository
 from backend.services.auth_service import User
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,13 @@ def resolve_from(raw: dict[str, int]) -> QuotaLimits:
 
 def resolve_limits(user_id: int) -> QuotaLimits:
     """算出该用户生效的三个上限：用户覆盖 > 全局默认。"""
-    return resolve_from(quota_repo.quota_columns(user_id))
+    return resolve_from(_quota_columns(user_id))
+
+
+def _quota_columns(user_id: int) -> dict[str, int]:
+    """读该用户的三列覆盖值（短事务：只包住这一次读）。"""
+    with session_scope() as session:
+        return QuotaRepository(session).quota_columns(user_id)
 
 
 def day_start_utc() -> str:
@@ -104,7 +111,8 @@ def day_start_utc() -> str:
 
 def usage_today(user_id: int) -> QuotaUsage:
     """该用户今天的用量。"""
-    raw = quota_repo.usage_since(user_id, day_start_utc())
+    with session_scope() as session:
+        raw = QuotaRepository(session).usage_since(user_id, day_start_utc())
     return QuotaUsage(tasks=raw["tasks"], tokens=raw["tokens"], running=raw["running"])
 
 
@@ -229,7 +237,7 @@ def describe(user_id: int) -> dict[str, object]:
     没有这一列，管理员看到「10」不知道是自己设的（要回去翻）还是继承来的（要算）。
     """
     limits = resolve_limits(user_id)
-    own = quota_repo.quota_columns(user_id)
+    own = _quota_columns(user_id)
     usage = usage_today(user_id)
     return {
         "daily_task_limit": limits.daily_tasks,

@@ -27,8 +27,9 @@ from conftest import login, register
 
 from backend.api import login_flow
 from backend.core.config import get_settings
-from backend.core.db import connect, utc_now
-from backend.repositories.auth_repo import AuthSessionRepository, LoginFailureRepository, UserRepository
+from backend.core.clock import utc_now
+from dbsupport import connect
+from conftest import auth_sessions as AuthSessionRepository, login_failures as LoginFailureRepository, users as UserRepository
 from backend.services import auth_service
 
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "PRDwright 后端服务"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.16.0",
     "arkruntime>=0.8.0",
     # 主密钥加密（Fernet）。原本作为 langchain 的传递依赖已装，这里显式声明：
     # `core/crypto.py` 直接 import 它，不能把「能不能起服务」押在别人的依赖树上。
@@ -22,6 +23,12 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
+    # 数据层（v6 / ADR-074）。三个包的分工：
+    # - sqlmodel：表模型（同时是 Pydantic 模型），结构真源只有一份；
+    # - sqlalchemy：Engine / Session / 连接池 / 事务，取代 444 行自建池；
+    # - alembic：迁移链，取代 `PRAGMA user_version` 的 20 步手写清单。
+    "sqlalchemy>=2.0.36",
+    "sqlmodel>=0.0.31",
 ]
 
 [project.scripts]

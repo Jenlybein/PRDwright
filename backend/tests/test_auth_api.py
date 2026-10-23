@@ -102,8 +102,7 @@ def test_register_does_not_consume_invite_code_on_duplicate(client):
     顺序必须是「先查重、再核销」；反过来实现的话，用户会因为打错一个字
     而损失一次邀请机会。用一个限量码来暴露这个顺序问题。
     """
-    from backend.repositories.auth_repo import InviteCodeRepository
-
+    from conftest import invite_codes as InviteCodeRepository
     # 先用一个不受限的码建好 alice，再拿限量码去撞重名——
     # 这样撞的确实是一次「重名」而不是「额度用尽」，才能验证先后顺序
     assert register(client, username="alice").status_code == 200

@@ -41,6 +41,8 @@ htmlcov/
 # pytest 报告（--junit-xml 的产物；沙箱下靠它判成败，但本身是生成物，不入库）
 *.pytest-junit.xml
 *.pytest-report.xml
+# 手动命名的 junit 报告（如 junit_v6_t0.xml），同样是生成物，不入库
+junit*.xml
 
 # Jupyter
 .ipynb_checkpoints/

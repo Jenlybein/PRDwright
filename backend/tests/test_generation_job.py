@@ -18,10 +18,19 @@ import asyncio
 import json
 
 import pytest
-from conftest import login, register
+from conftest import login, register, users
 
 from backend.core.contracts import StreamEvent
-from backend.repositories.generation_job_repo import GenerationJobRepository
+from conftest import (
+    job_cancel_running,
+    job_create,
+    job_fail,
+    job_find_active,
+    job_finish,
+    job_get,
+    job_list_by_owner,
+    job_persist_progress,
+)
 from backend.services import (
     document_service,
     document_store,
@@ -49,13 +58,7 @@ def _seed_provider() -> str:
     都得先把配置落下来——这不是用例啰嗦，是真实前提。
     """
     from backend.core import runtime_config as rc
-    from backend.core.migrations import run_migrations
-    from backend.repositories.runtime_config_repo import (
-        ModelProviderRepository,
-        SystemConfigRepository,
-    )
-
-    run_migrations()
+    from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
     provider_id = "cfg_jobtest01"
     ModelProviderRepository.create(
         provider_id=provider_id,
@@ -101,7 +104,7 @@ def _alice_id() -> int:
     """取已注册用户 alice 的 id（generation_jobs.owner_id 有外键，必须是真实用户）。"""
     from backend.services import auth_service
 
-    user = auth_service.UserRepository.get_by_username("alice")
+    user = users.get_by_username("alice")
     assert user is not None
     return int(user["id"])
 
@@ -241,7 +244,7 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     assert sum(step["calls"] for step in data["steps"]) == data["total_calls"]
 
     # 落库：完成态 + 正文与 part 拼接一致
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row is not None
     assert row["status"] == "completed"
     assert row["draft_content"] == "".join(part.data["text"] for part in parts)
@@ -353,7 +356,7 @@ def test_failure_event_marks_job_failed_and_keeps_partial(alice, monkeypatch):
     assert events[-1].type == "run_summary"
     assert events[-1].data["status"] == "failed"
 
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row is not None
     assert row["status"] == "failed"
     assert row["error_code"] == "LLM_UPSTREAM_ERROR"
@@ -443,7 +446,7 @@ def test_offline_zero_token(alice, monkeypatch):
 
     job_id = _run(scenario())
     assert calls["count"] == 0
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row is not None and row["status"] == "completed"
 
 
@@ -458,7 +461,7 @@ def test_new_job_supersedes_previous_running(alice):
     new = job_service.create_job(owner_id=alice, solution_id=3, kind="prd")
 
     assert old != new
-    old_row = GenerationJobRepository.get(alice, old)
+    old_row = job_get(alice, old)
     assert old_row is not None
     assert old_row["status"] == "failed"
     # 有明确原因，不是笼统的 INTERNAL_ERROR：这个任务没出错，是被人接手了
@@ -466,7 +469,7 @@ def test_new_job_supersedes_previous_running(alice):
     assert old_row["error_message"] == "被新任务取代"
 
     # 新建的是 running
-    assert GenerationJobRepository.get(alice, new)["status"] == "running"
+    assert job_get(alice, new)["status"] == "running"
 
 
 def test_superseded_job_does_not_write_document(client, alice, monkeypatch):
@@ -494,7 +497,7 @@ def test_superseded_job_does_not_write_document(client, alice, monkeypatch):
 
     job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
 
-    row = GenerationJobRepository.get(alice, old)
+    row = job_get(alice, old)
     assert row is not None
     assert row["status"] == "failed"
     assert row["error_code"] == "SUPERSEDED"
@@ -505,23 +508,23 @@ def test_superseded_job_does_not_write_document(client, alice, monkeypatch):
 def test_find_active_ignores_other_solution_and_kind(alice):
     """`find_active` 精确匹配 owner + solution + kind，且只认 running。"""
     job_service.create_job(owner_id=alice, solution_id=1, kind="prd")
-    assert GenerationJobRepository.find_active(alice, solution_id=1, kind="prd") is not None
-    assert GenerationJobRepository.find_active(alice, solution_id=2, kind="prd") is None
-    assert GenerationJobRepository.find_active(alice, solution_id=1, kind="prompts") is None
+    assert job_find_active(alice, solution_id=1, kind="prd") is not None
+    assert job_find_active(alice, solution_id=2, kind="prd") is None
+    assert job_find_active(alice, solution_id=1, kind="prompts") is None
     # solution_id=None 的匹配
     none_job = job_service.create_job(owner_id=alice, solution_id=None, kind="prompts")
-    active = GenerationJobRepository.find_active(alice, solution_id=None, kind="prompts")
+    active = job_find_active(alice, solution_id=None, kind="prompts")
     assert active is not None and active["id"] == none_job
 
 
 def test_reap_orphans_marks_running_as_failed(alice):
     """启动回收：上次残留的 running 全部置 failed。"""
-    job_id = GenerationJobRepository.create(alice, "prd", None)
-    assert GenerationJobRepository.get(alice, job_id)["status"] == "running"
+    job_id = job_create(alice, "prd", None)
+    assert job_get(alice, job_id)["status"] == "running"
 
     job_service.reap_orphans()
 
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row["status"] == "failed"
     assert row["error_code"] == "INTERNAL_ERROR"
     assert row["error_message"] == "服务重启，任务已中断"
@@ -529,9 +532,9 @@ def test_reap_orphans_marks_running_as_failed(alice):
 
 def test_owner_isolation_in_repository(alice):
     """仓储层归属隔离：别人的任务等同不存在。"""
-    job_id = GenerationJobRepository.create(alice, "prd", None)
-    assert GenerationJobRepository.get(alice + 999, job_id) is None
-    assert GenerationJobRepository.list_by_owner(alice + 999) == []
+    job_id = job_create(alice, "prd", None)
+    assert job_get(alice + 999, job_id) is None
+    assert job_list_by_owner(alice + 999) == []
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +557,7 @@ def test_create_job_returns_201_and_persists(client, monkeypatch):
     assert body["job_id"] > 0
     assert body["status"] == "running"
 
-    row = GenerationJobRepository.get(uid, body["job_id"])
+    row = job_get(uid, body["job_id"])
     assert row is not None
     assert row["kind"] == "prd"
     # prd 任务会计算并落输入指纹（供后续续传 / 缓存判断输入是否变化）
@@ -604,7 +607,7 @@ def test_get_job_status(client):
     """GET /api/jobs/{id} 返回状态摘要，且不含 draft_content。"""
     register(client)
     uid = _alice_id()
-    job_id = GenerationJobRepository.create(uid, "prompts", None)
+    job_id = job_create(uid, "prompts", None)
 
     response = client.get(f"/api/jobs/{job_id}")
     assert response.status_code == 200
@@ -619,7 +622,7 @@ def test_missing_and_cross_owner_jobs_return_404(client):
     """越权与不存在一律 404，两者不可区分。"""
     register(client, username="alice")
     uid = _alice_id()
-    alice_job = GenerationJobRepository.create(uid, "prd", None)
+    alice_job = job_create(uid, "prd", None)
     client.post("/api/auth/logout")
 
     register(client, username="bob")
@@ -635,10 +638,10 @@ def test_list_jobs_filters_by_status_and_kind(client):
     register(client)
     uid = _alice_id()
 
-    running_prd = GenerationJobRepository.create(uid, "prd", None)
-    running_prompts = GenerationJobRepository.create(uid, "prompts", None)
-    finished = GenerationJobRepository.create(uid, "prd", None)
-    GenerationJobRepository.finish(
+    running_prd = job_create(uid, "prd", None)
+    running_prompts = job_create(uid, "prompts", None)
+    finished = job_create(uid, "prd", None)
+    job_finish(
         uid, finished, draft_content="正文", completed_sections=[]
     )
 
@@ -661,7 +664,7 @@ def test_create_job_without_solution_id_is_allowed(client):
 
     response = client.post("/api/jobs", json={"kind": "prompts", "prd_content": "# PRD"})
     assert response.status_code == 201
-    row = GenerationJobRepository.get(uid, response.json()["job_id"])
+    row = job_get(uid, response.json()["job_id"])
     assert row is not None
     assert row["solution_id"] is None
 
@@ -782,7 +785,7 @@ def test_job_without_solution_does_not_write_document(client, monkeypatch):
     job_id, events = _run_job(uid, None, "prompts", {"prd_content": "# PRD"})
 
     assert events[-1].data["status"] == "completed"
-    assert GenerationJobRepository.get(uid, job_id)["status"] == "completed"
+    assert job_get(uid, job_id)["status"] == "completed"
 
 
 def test_regenerating_prd_keeps_downstream_documents(client, monkeypatch):
@@ -905,7 +908,7 @@ def test_create_job_persists_doc_kind_from_request(alice):
         kind="optimize",
         request={"doc_kind": "api_docs"},
     )
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row is not None
     assert row["doc_kind"] == "api_docs"
 
@@ -913,7 +916,7 @@ def test_create_job_persists_doc_kind_from_request(alice):
     prd_id = job_service.create_job(
         owner_id=alice, solution_id=None, kind="prd", request={"requirements": "x"}
     )
-    assert GenerationJobRepository.get(alice, prd_id)["doc_kind"] == "prd"
+    assert job_get(alice, prd_id)["doc_kind"] == "prd"
 
 
 def test_snapshot_events_carry_doc_kind():
@@ -939,13 +942,13 @@ def test_snapshot_events_carry_doc_kind():
 
 def test_db_snapshot_event_carries_doc_kind(alice):
     """DB 兜底快照同样带 `doc_kind`；旧行（空串）退化成 `None`。"""
-    job_id = GenerationJobRepository.create(alice, "prompts", None, doc_kind="prompts")
-    row = GenerationJobRepository.get(alice, job_id)
+    job_id = job_create(alice, "prompts", None, doc_kind="prompts")
+    row = job_get(alice, job_id)
     assert row is not None
     assert job_service._db_snapshot_event(row).data["doc_kind"] == "prompts"  # noqa: SLF001
 
-    legacy = GenerationJobRepository.create(alice, "optimize", None)
-    row = GenerationJobRepository.get(alice, legacy)
+    legacy = job_create(alice, "optimize", None)
+    row = job_get(alice, legacy)
     assert row is not None
     assert job_service._db_snapshot_event(row).data["doc_kind"] is None  # noqa: SLF001
 
@@ -1073,8 +1076,8 @@ def _sample_items() -> list[dict[str, Any]]:
 def test_persist_progress_writes_pending_items(alice):
     """合并写把待确认清单落进 generation_jobs.pending_items。"""
     items = _sample_items()
-    job_id = GenerationJobRepository.create(alice, "api_docs", None)
-    GenerationJobRepository.persist_progress(
+    job_id = job_create(alice, "api_docs", None)
+    job_persist_progress(
         alice,
         job_id,
         draft_content="正文",
@@ -1082,22 +1085,22 @@ def test_persist_progress_writes_pending_items(alice):
         phase="writing",
         pending_items=items,
     )
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert json.loads(row["pending_items"]) == items
 
 
 def test_finish_writes_pending_items(alice):
     """成功收尾把待确认清单与终态一并落库。"""
     items = _sample_items()
-    job_id = GenerationJobRepository.create(alice, "prompts", None)
-    GenerationJobRepository.finish(
+    job_id = job_create(alice, "prompts", None)
+    job_finish(
         alice,
         job_id,
         draft_content="正文",
         completed_sections=[],
         pending_items=items,
     )
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row["status"] == "completed"
     assert json.loads(row["pending_items"]) == items
 
@@ -1105,8 +1108,8 @@ def test_finish_writes_pending_items(alice):
 def test_fail_writes_pending_items(alice):
     """失败收尾同样落清单：失败的任务也产出了待确认项，不该丢掉。"""
     items = _sample_items()
-    job_id = GenerationJobRepository.create(alice, "prompts", None)
-    GenerationJobRepository.fail(
+    job_id = job_create(alice, "prompts", None)
+    job_fail(
         alice,
         job_id,
         error_code="LLM_UPSTREAM_ERROR",
@@ -1115,7 +1118,7 @@ def test_fail_writes_pending_items(alice):
         completed_sections=[],
         pending_items=items,
     )
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row["status"] == "failed"
     assert json.loads(row["pending_items"]) == items
 
@@ -1123,8 +1126,8 @@ def test_fail_writes_pending_items(alice):
 def test_db_snapshot_event_carries_pending_items(alice):
     """DB 兜底快照（`_db_snapshot_event`）携带待确认清单，刷新重连后前端直接展示。"""
     items = _sample_items()
-    job_id = GenerationJobRepository.create(alice, "api_docs", None)
-    GenerationJobRepository.persist_progress(
+    job_id = job_create(alice, "api_docs", None)
+    job_persist_progress(
         alice,
         job_id,
         draft_content="正文",
@@ -1132,7 +1135,7 @@ def test_db_snapshot_event_carries_pending_items(alice):
         phase="writing",
         pending_items=items,
     )
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 测内部快照构造
     assert snapshot.data["pending_items"] == items
 
@@ -1202,8 +1205,8 @@ def test_stage_chunk_never_leaks_into_draft_text():
 
 def test_db_snapshot_event_has_empty_stage_text(alice):
     """DB 兜底快照（进程重启后）没有阶段输出：显式给空串，不让前端拿到 `undefined`。"""
-    job_id = GenerationJobRepository.create(alice, "api_docs", None)
-    row = GenerationJobRepository.get(alice, job_id)
+    job_id = job_create(alice, "api_docs", None)
+    row = job_get(alice, job_id)
     snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 测内部快照构造
     assert snapshot.data["stage_text"] == ""
 
@@ -1244,7 +1247,7 @@ def test_generation_flows_pending_items_into_job_and_document(client, monkeypatc
     assert "<!-- PENDING" not in done.data["reply"]
 
     # 任务记录与文档都存了同一份清单（同一次收尾写入）
-    row = GenerationJobRepository.get(uid, job_id)
+    row = job_get(uid, job_id)
     assert json.loads(row["pending_items"]) == items
     doc = document_store.get_document(uid, solution_id, "api_docs")
     assert doc is not None
@@ -1262,31 +1265,31 @@ def test_generation_flows_pending_items_into_job_and_document(client, monkeypatc
 
 def test_cancel_running_only_targets_owner_and_solution(client, alice):
     """`cancel_running` 只动该 owner + 方案下的 running，不波及别的方案与已终态任务。"""
-    target = GenerationJobRepository.create(alice, "prd", 11)
-    other_solution = GenerationJobRepository.create(alice, "prd", 12)
-    finished = GenerationJobRepository.create(alice, "prd", 11)
-    GenerationJobRepository.finish(alice, finished, draft_content="正文", completed_sections=[])
+    target = job_create(alice, "prd", 11)
+    other_solution = job_create(alice, "prd", 12)
+    finished = job_create(alice, "prd", 11)
+    job_finish(alice, finished, draft_content="正文", completed_sections=[])
 
     # 另一个 owner 恰好也有一个挂在同一个 solution_id 上的任务
     register(client, username="bob")
     from backend.services import auth_service
 
-    bob = auth_service.UserRepository.get_by_username("bob")
+    bob = users.get_by_username("bob")
     assert bob is not None
-    bob_job = GenerationJobRepository.create(int(bob["id"]), "prd", 11)
+    bob_job = job_create(int(bob["id"]), "prd", 11)
 
-    affected = GenerationJobRepository.cancel_running(alice, solution_id=11)
+    affected = job_cancel_running(alice, solution_id=11)
 
     assert affected == 1
-    cancelled = GenerationJobRepository.get(alice, target)
+    cancelled = job_get(alice, target)
     assert cancelled["status"] == "failed"
     assert cancelled["error_code"] == "CANCELLED"
     assert cancelled["error_message"] == "方案已删除，任务已取消"
 
     # 别的方案、别的 owner、已经结束的任务都不动
-    assert GenerationJobRepository.get(alice, other_solution)["status"] == "running"
-    assert GenerationJobRepository.get(int(bob["id"]), bob_job)["status"] == "running"
-    assert GenerationJobRepository.get(alice, finished)["status"] == "completed"
+    assert job_get(alice, other_solution)["status"] == "running"
+    assert job_get(int(bob["id"]), bob_job)["status"] == "running"
+    assert job_get(alice, finished)["status"] == "completed"
 
 
 def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
@@ -1298,7 +1301,7 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
-    job_id = GenerationJobRepository.create(uid, "prd", solution_id)
+    job_id = job_create(uid, "prd", solution_id)
     runtime = job_service.JobRuntime(
         job_id=job_id,
         owner_id=uid,
@@ -1319,7 +1322,7 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
 
     assert written == [], "方案已删除时不该再往 documents 里写"
     assert runtime.status == "failed"
-    row = GenerationJobRepository.get(uid, job_id)
+    row = job_get(uid, job_id)
     assert row is not None
     assert row["status"] == "failed"
     assert row["error_code"] == "CANCELLED"
@@ -1328,7 +1331,7 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
 
 def test_run_job_stops_consuming_events_after_cancel(alice, monkeypatch):
     """运行时被标记取消后，下一个事件就不再消费（假事件流证明后续事件没被取走）。"""
-    job_id = GenerationJobRepository.create(alice, "prd", None)
+    job_id = job_create(alice, "prd", None)
     runtime = job_service.JobRuntime(
         job_id=job_id, owner_id=alice, solution_id=None, kind="prd"
     )
@@ -1353,7 +1356,7 @@ def test_run_job_stops_consuming_events_after_cancel(alice, monkeypatch):
     assert runtime.live_buffer == "第一段"
     assert runtime.final_reply == ""
 
-    row = GenerationJobRepository.get(alice, job_id)
+    row = job_get(alice, job_id)
     assert row is not None
     assert row["status"] == "failed"
     assert row["error_code"] == "CANCELLED"
@@ -1366,16 +1369,16 @@ def test_delete_solution_endpoint_cancels_its_jobs(client):
     uid = _alice_id()
     solution_id = _create_solution(client)
     other_id = _create_solution(client)
-    doomed = GenerationJobRepository.create(uid, "prd", solution_id)
-    untouched = GenerationJobRepository.create(uid, "api_docs", other_id)
+    doomed = job_create(uid, "prd", solution_id)
+    untouched = job_create(uid, "api_docs", other_id)
 
     assert client.delete(f"/api/solutions/{solution_id}").status_code == 200
 
-    row = GenerationJobRepository.get(uid, doomed)
+    row = job_get(uid, doomed)
     assert row is not None
     assert row["status"] == "failed"
     assert row["error_code"] == "CANCELLED"
-    assert GenerationJobRepository.get(uid, untouched)["status"] == "running"
+    assert job_get(uid, untouched)["status"] == "running"
 
 
 # ---------------------------------------------------------------------------

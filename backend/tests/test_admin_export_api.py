@@ -19,11 +19,19 @@ import json
 import os
 import zipfile
 
-from conftest import login, register
+from conftest import login, register, users
 
-from backend.core.db import connect, utc_now
+from backend.core.clock import utc_now
+from dbsupport import connect
+from backend.core.engine import session_scope
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.services import auth_service, document_store
+
+
+def _create_turn(*args, **kwargs) -> int:
+    """写一条对话轮次（仓库不再自己提交，事务由这里显式开）。"""
+    with session_scope() as session:
+        return ChatTurnRepository(session).create(*args, **kwargs)
 
 
 def _as_admin(client, username: str = "root") -> None:
@@ -34,7 +42,7 @@ def _as_admin(client, username: str = "root") -> None:
 
 
 def _user_id(username: str) -> int:
-    row = auth_service.UserRepository.get_by_username(username)
+    row = users.get_by_username(username)
     assert row is not None
     return int(row["id"])
 
@@ -81,10 +89,10 @@ def _seed_alice(client) -> tuple[int, int]:
     owner_id = _user_id("alice")
     document_store.commit_generated(owner_id, solution_id, "prd", "# 支付 PRD\n\n正文内容")
     document_store.commit_generated(owner_id, solution_id, "prompts", "第一步：建表")
-    ChatTurnRepository.create(
+    _create_turn(
         owner_id, solution_id, stage="chat", role="user", content="这个方案要不要支持退款？"
     )
-    ChatTurnRepository.create(
+    _create_turn(
         owner_id, solution_id, stage="chat", role="assistant", content="建议支持，理由如下……"
     )
     _job(owner_id)
@@ -188,7 +196,7 @@ def test_export_renders_clarification_asks_with_choice(client) -> None:
         }
     ]
     answers = [{"ask_id": "ask-1", "labels": ["B"], "question": "退款要走审批流吗？", "texts": ["不审批"]}]
-    ChatTurnRepository.create(
+    _create_turn(
         owner_id,
         solution_id,
         stage="chat",

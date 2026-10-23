@@ -19,6 +19,12 @@
   就地改当前版本，不新增条目、不删下游；但正文 + 清单 + 回执仍是同批替换——
   它们产自同一次模型调用栈，分开写就会各自漂移。
 - `checkpoint` / `restore`：用户主动「存为新版本」/「恢复某一版」。两者都**追加新版本**。
+
+## 事务（v6 / T16.7）
+
+每个对外函数用**一个** `session_scope()` 包住整次操作：读写落在同一个 session 里，
+不再出现「写完关连接、再开连接读回」的中间态。仓储返回模型对象/投影，
+本层把它们翻成对外的 `dict`（路由与前端契约不变）。
 """
 
 from __future__ import annotations
@@ -28,7 +34,13 @@ import logging
 from typing import Any, Literal
 
 from backend.core.digest import content_fingerprint
-from backend.repositories.document_repo import DocumentRepository
+from backend.core.engine import session_scope
+from backend.repositories.document_repo import (
+    DocumentRepository,
+    DocumentRow,
+    VersionDetail,
+    VersionSummary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +64,20 @@ DOWNSTREAM_KINDS: dict[str, tuple[str, ...]] = {
 DeleteVersionOutcome = Literal["ok", "missing", "is_current"]
 
 
+def _read_document(
+    session: Any, owner_id: int, solution_id: int, kind: str
+) -> dict[str, Any] | None:
+    """在同一 session 里读回一份文档（列表 + 裁剪），供写操作收尾复用。
+
+    单取一份也走 `list_by_solution`：`stale` 判定需要**全部**三份的当前指纹，
+    只查一份拿不到上游的内容指纹。
+    """
+    rows = DocumentRepository(session).list_by_solution(owner_id, solution_id)
+    sha_by_kind = {row.kind: (row.content_sha or "") for row in rows}
+    row = next((item for item in rows if item.kind == kind), None)
+    return _to_item(row, sha_by_kind) if row else None
+
+
 # ---------------------------------------------------------------------------
 # 读：当前文档
 # ---------------------------------------------------------------------------
@@ -63,17 +89,16 @@ def list_documents(owner_id: int, solution_id: int) -> list[dict[str, Any]]:
     先取全部三份的当前 `content_sha` 建映射，再逐条算 `stale`：下游是否过期取决于
     **上游现在的内容**，单看一行无法判断。
     """
-    rows = DocumentRepository.list_by_solution(owner_id, solution_id)
-    sha_by_kind = {row["kind"]: (row.get("content_sha") or "") for row in rows}
-    return [_to_item(row, sha_by_kind) for row in rows]
+    with session_scope() as session:
+        rows = DocumentRepository(session).list_by_solution(owner_id, solution_id)
+        sha_by_kind = {row.kind: (row.content_sha or "") for row in rows}
+        return [_to_item(row, sha_by_kind) for row in rows]
 
 
 def get_document(owner_id: int, solution_id: int, kind: str) -> dict[str, Any] | None:
     """读取一份文档；不存在或不属于该用户时返回 None（由路由层翻成 404）。"""
-    rows = DocumentRepository.list_by_solution(owner_id, solution_id)
-    sha_by_kind = {row["kind"]: (row.get("content_sha") or "") for row in rows}
-    row = next((item for item in rows if item["kind"] == kind), None)
-    return _to_item(row, sha_by_kind) if row else None
+    with session_scope() as session:
+        return _read_document(session, owner_id, solution_id, kind)
 
 
 def current_version_meta(owner_id: int, solution_id: int, kind: str) -> dict[str, Any] | None:
@@ -82,12 +107,13 @@ def current_version_meta(owner_id: int, solution_id: int, kind: str) -> dict[str
     只读两个字段：调用方（生成收尾）不需要正文本身，只需要一个能在日后比较的锚点。
     文档不存在时返回 None，调用方据此不写 `derived_from`（而不是写一个空锚点）。
     """
-    row = DocumentRepository.get(owner_id, solution_id, kind)
+    with session_scope() as session:
+        row = DocumentRepository(session).get(owner_id, solution_id, kind)
     if not row:
         return None
     return {
-        "version_no": int(row.get("version_no") or 0),
-        "content_sha": row.get("content_sha") or "",
+        "version_no": int(row.version_no or 0),
+        "content_sha": row.content_sha or "",
     }
 
 
@@ -100,16 +126,17 @@ def save_document(
     owner_id: int, solution_id: int, kind: str, content: str
 ) -> dict[str, Any] | None:
     """保存用户手改后的正文（就地改当前版本），返回更新后的文档；方案不可见时返回 None。"""
-    ok = DocumentRepository.update_current_version(
-        owner_id=owner_id,
-        solution_id=solution_id,
-        kind=kind,
-        content=content,
-        content_sha=content_fingerprint(content),
-    )
-    if not ok:
-        return None
-    return get_document(owner_id, solution_id, kind)
+    with session_scope() as session:
+        ok = DocumentRepository(session).update_current_version(
+            owner_id=owner_id,
+            solution_id=solution_id,
+            kind=kind,
+            content=content,
+            content_sha=content_fingerprint(content),
+        )
+        if not ok:
+            return None
+        return _read_document(session, owner_id, solution_id, kind)
 
 
 def commit_generated(
@@ -149,9 +176,9 @@ def commit_generated(
     metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata is not None else "{}"
     content_sha = content_fingerprint(content)
 
-    if append_version:
-        ok = (
-            DocumentRepository.append_version(
+    with session_scope() as session:
+        if append_version:
+            version = DocumentRepository(session).append_version(
                 owner_id=owner_id,
                 solution_id=solution_id,
                 kind=kind,
@@ -164,22 +191,21 @@ def commit_generated(
                 # 下游不再删除：上游换版后下游保留，由读取侧的 `stale` 提示用户。
                 invalidate=(),
             )
-            is not None
-        )
-    else:
-        ok = DocumentRepository.replace_current_version(
-            owner_id=owner_id,
-            solution_id=solution_id,
-            kind=kind,
-            content=content,
-            content_sha=content_sha,
-            pending_items=pending_json,
-            last_run_summary=summary_json,
-            source=source,
-        )
-    if not ok:
-        return None
-    return get_document(owner_id, solution_id, kind)
+            ok = version is not None
+        else:
+            ok = DocumentRepository(session).replace_current_version(
+                owner_id=owner_id,
+                solution_id=solution_id,
+                kind=kind,
+                content=content,
+                content_sha=content_sha,
+                pending_items=pending_json,
+                last_run_summary=summary_json,
+                source=source,
+            )
+        if not ok:
+            return None
+        return _read_document(session, owner_id, solution_id, kind)
 
 
 # ---------------------------------------------------------------------------
@@ -189,18 +215,18 @@ def commit_generated(
 
 def list_versions(owner_id: int, solution_id: int, kind: str) -> list[dict[str, Any]]:
     """列出某文档的全部版本摘要（不含正文），从新到旧。方案不可见时返回空列表。"""
-    return [
-        _to_version_item(row)
-        for row in DocumentRepository.list_versions(owner_id, solution_id, kind)
-    ]
+    with session_scope() as session:
+        rows = DocumentRepository(session).list_versions(owner_id, solution_id, kind)
+        return [_to_version_item(row) for row in rows]
 
 
 def get_version(
     owner_id: int, solution_id: int, kind: str, version_id: int
 ) -> dict[str, Any] | None:
     """读取一条版本的完整内容；版本不存在或不属于该用户时返回 None（路由翻 404）。"""
-    row = DocumentRepository.get_version(owner_id, solution_id, kind, version_id)
-    return _to_version_detail(row) if row else None
+    with session_scope() as session:
+        row = DocumentRepository(session).get_version(owner_id, solution_id, kind, version_id)
+        return _to_version_detail(row) if row else None
 
 
 def checkpoint(
@@ -216,23 +242,24 @@ def checkpoint(
     丢掉它）；清单与回执从**当前版本**继承——打里程碑不改变「这份文档还差哪些问题没敲定」
     这一事实。方案不可见时返回 None。
     """
-    current = DocumentRepository.get(owner_id, solution_id, kind)
-    pending = (current or {}).get("pending_items")
-    summary = (current or {}).get("last_run_summary")
-    version_id = DocumentRepository.append_version(
-        owner_id=owner_id,
-        solution_id=solution_id,
-        kind=kind,
-        content=content,
-        content_sha=content_fingerprint(content),
-        pending_items=pending if isinstance(pending, str) and pending else "[]",
-        last_run_summary=summary if isinstance(summary, str) and summary else None,
-        source="checkpoint",
-        note=note,
-    )
-    if version_id is None:
-        return None
-    return get_document(owner_id, solution_id, kind)
+    with session_scope() as session:
+        current = DocumentRepository(session).get(owner_id, solution_id, kind)
+        pending = current.pending_items if current else None
+        summary = current.last_run_summary if current else None
+        version = DocumentRepository(session).append_version(
+            owner_id=owner_id,
+            solution_id=solution_id,
+            kind=kind,
+            content=content,
+            content_sha=content_fingerprint(content),
+            pending_items=pending if isinstance(pending, str) and pending else "[]",
+            last_run_summary=summary if isinstance(summary, str) and summary else None,
+            source="checkpoint",
+            note=note,
+        )
+        if version is None:
+            return None
+        return _read_document(session, owner_id, solution_id, kind)
 
 
 def restore(
@@ -246,24 +273,27 @@ def restore(
     恢复的正文、清单、回执都取源版本——「把当时那一版（连同它的待办清单）原样搬回来」。
     源版本不存在或不属于该用户时返回 None（路由翻 404）。
     """
-    source = DocumentRepository.get_version(owner_id, solution_id, kind, version_id)
-    if source is None:
-        return None
-    new_id = DocumentRepository.append_version(
-        owner_id=owner_id,
-        solution_id=solution_id,
-        kind=kind,
-        content=source["content"] or "",
-        content_sha=source["content_sha"] or "",
-        pending_items=source["pending_items"] or "[]",
-        last_run_summary=source["last_run_summary"],
-        source="restore",
-        note="",
-        metadata=json.dumps({"restored_from": source["version_no"]}, ensure_ascii=False),
-    )
-    if new_id is None:
-        return None
-    return get_document(owner_id, solution_id, kind)
+    with session_scope() as session:
+        source = DocumentRepository(session).get_version(
+            owner_id, solution_id, kind, version_id
+        )
+        if source is None:
+            return None
+        version = DocumentRepository(session).append_version(
+            owner_id=owner_id,
+            solution_id=solution_id,
+            kind=kind,
+            content=source.content or "",
+            content_sha=source.content_sha or "",
+            pending_items=source.pending_items or "[]",
+            last_run_summary=source.last_run_summary,
+            source="restore",
+            note="",
+            metadata=json.dumps({"restored_from": source.version_no}, ensure_ascii=False),
+        )
+        if version is None:
+            return None
+        return _read_document(session, owner_id, solution_id, kind)
 
 
 # ---------------------------------------------------------------------------
@@ -285,13 +315,18 @@ def delete_version(
     带了「必须不是当前版本」），因此这两步之间的时间窗不会放进一次非法删除——
     最坏情况是返回 `missing`（那条在此期间已经变了），不会误删。
     """
-    row = DocumentRepository.get_version(owner_id, solution_id, kind, version_id)
-    if row is None:
-        return "missing"
-    if row["is_current"]:
-        return "is_current"
-    deleted = DocumentRepository.delete_version(owner_id, solution_id, kind, version_id)
-    return "ok" if deleted else "missing"
+    with session_scope() as session:
+        row = DocumentRepository(session).get_version(
+            owner_id, solution_id, kind, version_id
+        )
+        if row is None:
+            return "missing"
+        if row.is_current:
+            return "is_current"
+        deleted = DocumentRepository(session).delete_version(
+            owner_id, solution_id, kind, version_id
+        )
+        return "ok" if deleted else "missing"
 
 
 # ---------------------------------------------------------------------------
@@ -299,24 +334,24 @@ def delete_version(
 # ---------------------------------------------------------------------------
 
 
-def _to_item(row: dict[str, Any], sha_by_kind: dict[str, str] | None = None) -> dict[str, Any]:
-    """把「文档行 + 当前版本行」的合并行裁成对外结构，并把两个 JSON 文本列解成对象。
+def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dict[str, Any]:
+    """把「文档行 + 当前版本行」的合并投影裁成对外结构，并把两个 JSON 文本列解成对象。
 
     解析一律容错（脏数据退化为空清单 / 空回执）：这两个列是**展示用**的附加信息，
     读不动它不该让整份文档读不出来——正文才是主角。
     `stale` 由 `metadata.derived_from` 记录的上游指纹与上游**当前**指纹比较得出：
     相等即同源，不等即“上游改过了”。没有记录（旧数据、PRD 本身）恒为 false。
     """
-    metadata = _load_json(row.get("metadata"), dict, {})
+    metadata = _load_json(row.metadata, dict, {})
     derived = metadata.get("derived_from") if isinstance(metadata, dict) else None
     if not isinstance(derived, dict):
         derived = None
     return {
-        "kind": row["kind"],
-        "content": row["content"] or "",
-        "pending_items": _load_json(row["pending_items"], list, []),
-        "last_run_summary": _load_json(row["last_run_summary"], dict, None),
-        "updated_at": row["updated_at"],
+        "kind": row.kind,
+        "content": row.content or "",
+        "pending_items": _load_json(row.pending_items, list, []),
+        "last_run_summary": _load_json(row.last_run_summary, dict, None),
+        "updated_at": row.updated_at,
         "derived_from": derived,
         "stale": _is_stale(derived, sha_by_kind or {}),
     }
@@ -337,33 +372,33 @@ def _is_stale(derived: dict[str, Any] | None, sha_by_kind: dict[str, str]) -> bo
     return False
 
 
-def _to_version_item(row: dict[str, Any]) -> dict[str, Any]:
+def _to_version_item(row: VersionSummary) -> dict[str, Any]:
     """版本摘要的对外结构（**不含正文**）。"""
     return {
-        "version_id": int(row["version_id"]),
-        "version_no": int(row["version_no"]),
-        "source": row["source"],
-        "note": row["note"] or "",
-        "content_sha": row["content_sha"] or "",
-        "content_length": int(row["content_length"] or 0),
-        "created_at": row["created_at"],
-        "is_current": bool(row["is_current"]),
+        "version_id": int(row.version_id),
+        "version_no": int(row.version_no),
+        "source": row.source,
+        "note": row.note or "",
+        "content_sha": row.content_sha or "",
+        "content_length": int(row.content_length or 0),
+        "created_at": row.created_at,
+        "is_current": bool(row.is_current),
     }
 
 
-def _to_version_detail(row: dict[str, Any]) -> dict[str, Any]:
+def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
     """版本详情的对外结构（含正文 / 清单 / 回执）。"""
     return {
-        "version_id": int(row["version_id"]),
-        "version_no": int(row["version_no"]),
-        "content": row["content"] or "",
-        "pending_items": _load_json(row["pending_items"], list, []),
-        "last_run_summary": _load_json(row["last_run_summary"], dict, None),
-        "source": row["source"],
-        "note": row["note"] or "",
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "is_current": bool(row["is_current"]),
+        "version_id": int(row.version_id),
+        "version_no": int(row.version_no),
+        "content": row.content or "",
+        "pending_items": _load_json(row.pending_items, list, []),
+        "last_run_summary": _load_json(row.last_run_summary, dict, None),
+        "source": row.source,
+        "note": row.note or "",
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "is_current": bool(row.is_current),
     }
 
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from conftest import register
+from conftest import register, users
 
 from backend.services import document_service, document_store, job_service, llm_factory, prd_section_writer
 from backend.services.job_bus import job_bus
@@ -61,7 +61,7 @@ def _alice_id() -> int:
     """取已注册用户 alice 的 id（`generation_jobs.owner_id` 有外键）。"""
     from backend.services import auth_service
 
-    user = auth_service.UserRepository.get_by_username("alice")
+    user = users.get_by_username("alice")
     assert user is not None
     return int(user["id"])
 

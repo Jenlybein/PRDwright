@@ -30,10 +30,13 @@ import io
 import json
 import re
 import zipfile
+from dataclasses import asdict
 from typing import Any
 
-from backend.core.db import utc_ms_text, utc_now
+from backend.core.clock import utc_ms_text, utc_now
+from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
+from backend.core.models import ChatTurn
 from backend.repositories.account_repo import AccountDataRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.repositories.document_repo import DocumentRepository
@@ -148,7 +151,7 @@ def _render_asks(asks: list[Any], answers: list[Any]) -> list[str]:
     return lines
 
 
-def _render_stage(title: str, turns: list[dict[str, Any]]) -> str:
+def _render_stage(title: str, turns: list[ChatTurn]) -> str:
     """把一个线程的全部轮次渲染成一份可读的 markdown。"""
     lines = [f"# {title}", ""]
     if not turns:
@@ -156,26 +159,24 @@ def _render_stage(title: str, turns: list[dict[str, Any]]) -> str:
         return "\n".join(lines) + "\n"
 
     for turn in turns:
-        role = str(turn.get("role") or "")
+        role = str(turn.role or "")
         speaker = {"user": "用户", "assistant": "助手", "tool": "工具回执", "system": "系统"}.get(
             role, role or "未知"
         )
-        moment = str(turn.get("created_at") or "")
+        moment = str(turn.created_at or "")
         flags: list[str] = []
-        if int(turn.get("interrupted") or 0) == 1:
+        if turn.interrupted:
             flags.append("已停止")
         suffix = f"（{'、'.join(flags)}）" if flags else ""
 
         lines.append(f"## {speaker}{suffix}")
         if moment:
             lines.append(f"_{moment}（UTC）_")
-        content = str(turn.get("content") or "").strip()
+        content = str(turn.content or "").strip()
         if content:
             lines.append("")
             lines.append(content)
-        ask_lines = _render_asks(
-            _decode_list(turn.get("asks")), _decode_list(turn.get("answers"))
-        )
+        ask_lines = _render_asks(_decode_list(turn.asks), _decode_list(turn.answers))
         if ask_lines:
             lines.append("")
             lines.append("**请你确认：**")
@@ -227,7 +228,8 @@ def build_zip(user: dict[str, Any], *, exported_by: str) -> tuple[bytes, str, in
     """
     user_id = int(user["id"])
     username = str(user["username"])
-    counts = AccountDataRepository.counts(user_id)
+    with session_scope() as session:
+        counts = AccountDataRepository(session).counts(user_id)
     builder = _ZipBuilder()
 
     # —— 账号信息 ——
@@ -255,7 +257,12 @@ def build_zip(user: dict[str, Any], *, exported_by: str) -> tuple[bytes, str, in
     )
 
     # —— 方案 / 文档 / 对话 ——
-    solutions = SolutionRepository.list_by_owner(user_id)
+    # 仓储返回模型对象；导出是「顺着字段往下拼文件」的扁平逻辑，这里在边界上转成
+    # dict / 投影的 asdict，下面的拼装代码保持原样（`solution["id"]` / `document.get(...)`）。
+    with session_scope() as session:
+        solutions = [
+            item.model_dump() for item in SolutionRepository(session).list_by_owner(user_id)
+        ]
     solution_summary: list[dict[str, Any]] = []
 
     for index, solution in enumerate(solutions, start=1):
@@ -264,7 +271,13 @@ def build_zip(user: dict[str, Any], *, exported_by: str) -> tuple[bytes, str, in
         # 序号前缀顺带保证目录名唯一：两份同名方案不会互相覆盖
         folder = f"{index:02d}-{_safe_name(title, f'solution-{solution_id}')}"
 
-        documents = DocumentRepository.list_by_solution(user_id, solution_id)
+        with session_scope() as session:
+            documents = [
+                asdict(item)
+                for item in DocumentRepository(session).list_by_solution(
+                    user_id, solution_id
+                )
+            ]
         doc_meta: list[dict[str, Any]] = []
         for document in documents:
             kind = str(document.get("kind") or "")
@@ -281,17 +294,22 @@ def build_zip(user: dict[str, Any], *, exported_by: str) -> tuple[bytes, str, in
                 }
             )
 
-        turns = ChatTurnRepository.list_all(user_id, solution_id)
-        stage_names: list[str] = []
-        # 按出现顺序分组，不排序：线程顺序本身就是用户看到的顺序
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for turn in turns:
-            grouped.setdefault(str(turn.get("stage") or ""), []).append(turn)
-        for stage, stage_turns in grouped.items():
+        with session_scope() as session:
+            turns = ChatTurnRepository(session).list_all(user_id, solution_id)
+            stage_names: list[str] = []
+            # 按出现顺序分组，不排序：线程顺序本身就是用户看到的顺序
+            grouped: dict[str, list[ChatTurn]] = {}
+            for turn in turns:
+                grouped.setdefault(str(turn.stage or ""), []).append(turn)
+            rendered = {
+                stage: _render_stage(_STAGE_TITLES.get(stage, stage or "对话"), stage_turns)
+                for stage, stage_turns in grouped.items()
+            }
+        for stage, content_of_stage in rendered.items():
             title_of_stage = _STAGE_TITLES.get(stage, stage or "对话")
             stage_names.append(title_of_stage)
             chat_file = f"chats/{folder}/{_safe_name(title_of_stage, 'chat')}.md"
-            builder.add_text(chat_file, _render_stage(title_of_stage, stage_turns))
+            builder.add_text(chat_file, content_of_stage)
 
         solution_summary.append(
             {
@@ -330,8 +348,12 @@ def build_zip(user: dict[str, Any], *, exported_by: str) -> tuple[bytes, str, in
     ]
     writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
-    for job in AccountDataRepository.export_jobs(user_id):
-        writer.writerow(job)
+    with session_scope() as session:
+        jobs = AccountDataRepository(session).export_jobs(user_id)
+        # 模型 → 一行 CSV：`extrasaction="ignore"` 负责丢掉 `fields` 之外的列
+        # （`draft_content` 这类正文缓冲不该进导出包）。
+        for job in jobs:
+            writer.writerow(job.model_dump())
     builder.add_text("jobs.csv", "\ufeff" + buffer.getvalue())
 
     # —— 清单 ——

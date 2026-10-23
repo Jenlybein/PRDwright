@@ -18,7 +18,7 @@ import pytest
 from conftest import register
 
 from backend.api import login_flow
-from backend.repositories.auth_repo import LoginFailureRepository, UserRepository
+from conftest import login_failures as LoginFailureRepository, users as UserRepository
 from backend.services import auth_service
 
 NOT_ADMIN_DETAIL = "账号不存在"

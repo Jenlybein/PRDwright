@@ -16,9 +16,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from backend.core.clock import utc_now
 from backend.core.config import get_settings
-from backend.core.db import utc_now
+from backend.core.engine import session_scope
 from backend.core.errors import ErrorCode
+from backend.core.models import User as UserModel
 from backend.core.runtime_config import get_runtime_config
 from backend.repositories.auth_repo import (
     AuthSessionRepository,
@@ -199,24 +201,30 @@ class OpaqueSessionIssuer:
     def issue(self, user_id: int) -> tuple[str, datetime]:
         token = secrets.token_urlsafe(32)
         expires_at = utc_now() + self.ttl()
-        AuthSessionRepository.create(_sha256(token), user_id, expires_at)
+        with session_scope() as session:
+            AuthSessionRepository(session).create(_sha256(token), user_id, expires_at)
         return token, expires_at
 
     def replace(self, user_id: int) -> tuple[str, datetime]:
         token = secrets.token_urlsafe(32)
         expires_at = utc_now() + self.ttl()
-        AuthSessionRepository.replace_for_user(_sha256(token), user_id, expires_at)
+        with session_scope() as session:
+            AuthSessionRepository(session).replace_for_user(
+                _sha256(token), user_id, expires_at
+            )
         return token, expires_at
 
     def verify(self, credential: str) -> int | None:
         if not credential:
             return None
-        row = AuthSessionRepository.fetch_valid(_sha256(credential))
-        return int(row["user_id"]) if row else None
+        with session_scope() as session:
+            row = AuthSessionRepository(session).fetch_valid(_sha256(credential))
+            return int(row.user_id) if row else None
 
     def revoke(self, credential: str) -> None:
         if credential:
-            AuthSessionRepository.delete(_sha256(credential))
+            with session_scope() as session:
+                AuthSessionRepository(session).delete(_sha256(credential))
 
 
 _issuer: TokenIssuer | None = None
@@ -239,14 +247,18 @@ def get_token_issuer() -> TokenIssuer:
 # ---------------------------------------------------------------------------
 
 
-def _to_user(row: dict[str, object]) -> User:
-    """把库里的行转成领域对象。"""
+def _to_user(row: UserModel) -> User:
+    """把库里的行转成领域对象。
+
+    领域对象（本模块的 `User`）刻意只带「业务用得到」的字段，凭据类字段
+    （`password_hash` / `salt`）在转换这一步就被拦下——它对上层不存在。
+    """
     return User(
-        id=int(row["id"]),  # type: ignore[arg-type]
-        username=str(row["username"]),
-        is_active=bool(row["is_active"]),
-        created_at=str(row.get("created_at", "")),
-        is_admin=bool(row.get("is_admin", 0)),
+        id=int(row.id or 0),
+        username=row.username,
+        is_active=bool(row.is_active),
+        created_at=row.created_at or "",
+        is_admin=bool(row.is_admin),
     )
 
 
@@ -277,19 +289,26 @@ def register(username: str, password: str, invite_code: str) -> User:
     if not invite_code.strip():
         raise AuthError("请填写邀请码")
 
-    if UserRepository.get_by_username(username) is not None:
-        raise AuthError("该用户名已被注册")
-
-    # 原子核销：限量码并发注册时只有一个请求能抢到额度
-    if not InviteCodeRepository.consume(invite_code.strip()):
-        raise AuthError("邀请码无效或已用完")
-
+    # scrypt 派生要 ~16MB 内存、几十毫秒，**放在事务外**：事务里持着一条池连接做纯计算，
+    # 会把连接白白占住，并发注册时直接表现为「池被借空、接口超时」。
     password_hash, salt = hash_password(password)
-    user_id = UserRepository.create(username, password_hash, salt)
-    row = UserRepository.get_by_id(user_id)
-    if row is None:  # 理论上不会发生，兜底避免返回空用户
-        raise AuthError("注册失败，请稍后重试")
-    return _to_user(row)
+
+    # 查重 → 核销邀请码 → 建号，三步**一个事务**：
+    # - 顺序仍是「先查重、再核销」，否则用户白亏一次邀请额度（见上面的说明）；
+    # - 任何一步抛异常整笔回滚，邀请码额度自动退回。原先三次独立提交时，
+    #   「核销成功、建号失败」会真实地吃掉一个额度，而这一点不会报错。
+    with session_scope() as session:
+        users = UserRepository(session)
+        if users.get_by_username(username) is not None:
+            raise AuthError("该用户名已被注册")
+
+        # 原子核销：限量码并发注册时只有一个请求能抢到额度
+        if not InviteCodeRepository(session).consume(invite_code.strip()):
+            raise AuthError("邀请码无效或已用完")
+
+        created = users.create(username, password_hash, salt)
+
+    return _to_user(created)
 
 
 def create_user_direct(username: str, password: str) -> User:
@@ -299,15 +318,15 @@ def create_user_direct(username: str, password: str) -> User:
     用户名 / 密码的强度校验与重名检查完全一致——否则脚本就成了绕过安全策略的后门。
     """
     username = _validate_new_account(username, password)
-    if UserRepository.get_by_username(username) is not None:
-        raise AuthError("该用户名已被注册")
-
     password_hash, salt = hash_password(password)
-    user_id = UserRepository.create(username, password_hash, salt)
-    row = UserRepository.get_by_id(user_id)
-    if row is None:  # 理论上不会发生，兜底避免返回空用户
-        raise AuthError("创建用户失败，请稍后重试")
-    return _to_user(row)
+
+    with session_scope() as session:
+        users = UserRepository(session)
+        if users.get_by_username(username) is not None:
+            raise AuthError("该用户名已被注册")
+        created = users.create(username, password_hash, salt)
+
+    return _to_user(created)
 
 
 def get_user(user_id: int) -> User | None:
@@ -316,13 +335,15 @@ def get_user(user_id: int) -> User | None:
     管理员后台按 id 操作账号（列表给的也是 id），需要一个公开入口——
     否则调用方只能自己去碰 `UserRepository` 或 `_to_user`，分层就散了。
     """
-    row = UserRepository.get_by_id(user_id)
-    return _to_user(row) if row else None
+    with session_scope() as session:
+        row = UserRepository(session).get_by_id(user_id)
+        return _to_user(row) if row else None
 
 
 def list_users() -> list[dict]:
     """列出全部用户，供运维工具查看（不含任何凭据字段）。"""
-    return UserRepository.list_all()
+    with session_scope() as session:
+        return [item.as_dict() for item in UserRepository(session).list_all()]
 
 
 def delete_user(username: str) -> None:
@@ -334,10 +355,12 @@ def delete_user(username: str) -> None:
     Raises:
         AuthError: 用户不存在。
     """
-    row = UserRepository.get_by_username(username.strip())
-    if row is None:
-        raise AuthError("该用户不存在")
-    UserRepository.delete(int(row["id"]))
+    with session_scope() as session:
+        users = UserRepository(session)
+        row = users.get_by_username(username.strip())
+        if row is None:
+            raise AuthError("该用户不存在")
+        users.delete(int(row.id or 0))
 
 
 def reset_password(username: str, password: str) -> None:
@@ -349,13 +372,18 @@ def reset_password(username: str, password: str) -> None:
         AuthError: 用户不存在，或新密码不合要求。
     """
     username = username.strip()
-    row = UserRepository.get_by_username(username)
-    if row is None:
-        raise AuthError("该用户不存在")
+    # 先确认人存在（错误优先级与旧实现一致：不存在优先于密码不合规），
+    # 再把慢的 scrypt 放到事务外。
+    with session_scope() as session:
+        row = UserRepository(session).get_by_username(username)
+        if row is None:
+            raise AuthError("该用户不存在")
+        user_id = int(row.id or 0)
 
     _validate_new_account(username, password)
     password_hash, salt = hash_password(password)
-    UserRepository.update_password(int(row["id"]), password_hash, salt)
+    with session_scope() as session:
+        UserRepository(session).update_password(user_id, password_hash, salt)
 
 
 def set_admin(username: str, is_admin: bool) -> User:
@@ -366,21 +394,34 @@ def set_admin(username: str, is_admin: bool) -> User:
     任命管理员本身需要管理员权限，只能靠运维直接改库。
     宁可拒绝这次操作并把原因说清楚。
 
+    「数管理员人数」与「改标记」放在**同一个事务**里：拆开的话，两个管理员同时
+    互相撤销，各自都能读到「还有 2 位」，于是双双通过——管理员被清零。
+
     Raises:
         AuthError: 用户不存在，或这是最后一位管理员。
     """
-    row = UserRepository.get_by_username(username.strip())
-    if row is None:
-        raise AuthError("该用户不存在")
+    with session_scope() as session:
+        users = UserRepository(session)
+        row = users.get_by_username(username.strip())
+        if row is None:
+            raise AuthError("该用户不存在")
 
-    user_id = int(row["id"])
-    # 只有「本来是管理员 + 要撤销 + 撤完就没了」这才拦；任命与重复任命都不受影响
-    if not is_admin and bool(row.get("is_admin")) and UserRepository.count_admins() <= 1:
-        raise AuthError("这是最后一位管理员，不能撤销——至少保留一位，否则无人能进后台")
+        user_id = int(row.id or 0)
+        # 只有「本来是管理员 + 要撤销 + 撤完就没了」这才拦；任命与重复任命都不受影响
+        if not is_admin and bool(row.is_admin) and users.count_admins() <= 1:
+            raise AuthError("这是最后一位管理员，不能撤销——至少保留一位，否则无人能进后台")
 
-    UserRepository.set_is_admin(user_id, is_admin)
-    updated = UserRepository.get_by_id(user_id)
-    return _to_user(updated) if updated else _to_user(row)
+        users.set_is_admin(user_id, is_admin)
+        # 用「已知的新值 + 旧行的其余字段」构造返回值，而不是再查一次：
+        # 批量 UPDATE 不保证把新值同步回身份映射里的那个对象，回读可能拿到旧值。
+        result = User(
+            id=user_id,
+            username=row.username,
+            is_active=bool(row.is_active),
+            created_at=row.created_at or "",
+            is_admin=is_admin,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +457,8 @@ def clear_login_failures(username: str) -> int:
     归一化走 `_attempt_key`，与写计数时同一个键——否则删的时候清的是另一种拼写，
     行还留着。
     """
-    return LoginFailureRepository.clear(_attempt_key(username))
+    with session_scope() as session:
+        return LoginFailureRepository(session).clear(_attempt_key(username))
 
 
 def _window_start() -> str:
@@ -457,15 +499,24 @@ def login_delay(username: str) -> float:
     limit = get_runtime_config().settings.login_max_attempts
     if limit <= 0:
         return 0.0
-    failures = LoginFailureRepository.count_since(_attempt_key(username), _window_start())
+    with session_scope() as session:
+        failures = LoginFailureRepository(session).count_since(
+            _attempt_key(username), _window_start()
+        )
     if failures < limit:
         return 0.0
     return float(min(2 ** (failures - limit + 1), _LOGIN_DELAY_CAP_SECONDS))
 
 
 def _record_failure(username: str, ip: str) -> None:
-    """记一次登录失败。"""
-    LoginFailureRepository.record(_attempt_key(username), ip)
+    """记一次登录失败。
+
+    自己一笔独立事务：调用方是「密码不对」的分支，紧接着就要抛 `AuthError`。
+    若把它塞进上层那个事务里，抛异常会把这次计数一起回滚——攻击者反而永远
+    攒不到阈值。失败的账必须**先落定**，再报错。
+    """
+    with session_scope() as session:
+        LoginFailureRepository(session).record(_attempt_key(username), ip)
 
 
 def _on_login_success(username: str) -> None:
@@ -477,10 +528,14 @@ def _on_login_success(username: str) -> None:
     3. 清掉过期会话。`AuthSessionRepository.delete_expired` 之前**从来没被调用过**
        （定义了但没人调，属于死代码），会话表只增不减；挂在登录成功这条必经且低频的
        路径上，不需要额外的定时任务。
+
+    三件事收进**一个事务**：它们是「这次登录成功之后要做的收尾」，拆开提交的话，
+    中途失败会留下「账清了一半、过期会话还在」的半成品，而后续每次登录都要再撞一次。
     """
-    LoginFailureRepository.clear(_attempt_key(username))
-    LoginFailureRepository.purge_before(_window_start())
-    AuthSessionRepository.delete_expired()
+    with session_scope() as session:
+        LoginFailureRepository(session).clear(_attempt_key(username))
+        LoginFailureRepository(session).purge_before(_window_start())
+        AuthSessionRepository(session).delete_expired()
 
 
 def login(
@@ -521,7 +576,8 @@ def login(
         AuthError: 账号或密码错误、账号已停用、账号不是管理员。
     """
     username = username.strip()
-    row = UserRepository.get_by_username(username)
+    with session_scope() as session:
+        row = UserRepository(session).get_by_username(username)
 
     if row is None:
         # 用固定 salt 做一次等价运算，抹平与「用户存在」时的耗时差异
@@ -529,13 +585,13 @@ def login(
         _record_failure(username, ip)
         raise AuthError("用户名或密码错误")
 
-    if not verify_password(password, str(row["password_hash"]), bytes(row["salt"])):
+    if not verify_password(password, row.password_hash, row.salt):
         _record_failure(username, ip)
         raise AuthError("用户名或密码错误")
-    if not row["is_active"]:
+    if not row.is_active:
         # 密码是对的，只是账号被停用：这不是一次「猜错」，不计入失败次数
         raise AuthError("该账号已被停用")
-    if require_admin and not bool(row.get("is_admin")):
+    if require_admin and not row.is_admin:
         # 密码是对的，但不是管理员。**必须查完密码再说这句话**，理由有两条：
         #
         # 1. 反过来（先查 is_admin）会让「这个用户名是不是管理员」在不知道密码的情况下
@@ -563,8 +619,7 @@ def current_user(credential: str) -> User | None:
     user_id = get_token_issuer().verify(credential)
     if user_id is None:
         return None
-    row = UserRepository.get_by_id(user_id)
-    return _to_user(row) if row else None
+    return get_user(user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -582,19 +637,22 @@ def ensure_bootstrap() -> None:
     """
     settings = get_settings()
 
-    if InviteCodeRepository.count() == 0 and settings.invite_code:
-        InviteCodeRepository.create(
-            settings.invite_code,
-            max_uses=0,
-            expires_at=None,
-            note="初始邀请码（由 INVITE_CODE 自动播种）",
-        )
+    with session_scope() as session:
+        invites = InviteCodeRepository(session)
+        if invites.count() == 0 and settings.invite_code:
+            invites.create(
+                settings.invite_code,
+                max_uses=0,
+                expires_at=None,
+                note="初始邀请码（由 INVITE_CODE 自动播种）",
+            )
 
-    if UserRepository.count() == 0 and settings.init_admin_user and settings.init_admin_password:
-        password_hash, salt = hash_password(settings.init_admin_password)
-        # 自举出来的首个账号**直接是管理员**：否则全新部署后没有任何人能进后台，
-        # 而任命管理员本身又需要管理员权限——那是个死锁。
-        UserRepository.create(settings.init_admin_user, password_hash, salt, is_admin=True)
+        users = UserRepository(session)
+        if users.count() == 0 and settings.init_admin_user and settings.init_admin_password:
+            password_hash, salt = hash_password(settings.init_admin_password)
+            # 自举出来的首个账号**直接是管理员**：否则全新部署后没有任何人能进后台，
+            # 而任命管理员本身又需要管理员权限——那是个死锁。
+            users.create(settings.init_admin_user, password_hash, salt, is_admin=True)
 
 
 def ensure_dev_user() -> User:
@@ -604,11 +662,11 @@ def ensure_dev_user() -> User:
     这样数据模型始终一致（user_id 恒 NOT NULL），将来开启鉴权时不需要迁移或补数据。
     该用户密码是随机值，无法用于登录。
     """
-    row = UserRepository.get_by_username(_DEV_USERNAME)
-    if row is not None:
-        return _to_user(row)
+    with session_scope() as session:
+        users = UserRepository(session)
+        row = users.get_by_username(_DEV_USERNAME)
+        if row is not None:
+            return _to_user(row)
 
-    password_hash, salt = hash_password(secrets.token_urlsafe(32))
-    user_id = UserRepository.create(_DEV_USERNAME, password_hash, salt)
-    created = UserRepository.get_by_id(user_id)
-    return _to_user(created) if created else User(id=user_id, username=_DEV_USERNAME, is_active=True)
+        password_hash, salt = hash_password(secrets.token_urlsafe(32))
+        return _to_user(users.create(_DEV_USERNAME, password_hash, salt))

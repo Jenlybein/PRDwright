@@ -11,8 +11,7 @@ import pytest
 from conftest import register
 
 from backend.core.config import get_settings
-from backend.core.db import connect, init_schema
-from backend.core.migrations import MIGRATIONS, run_migrations
+from dbsupport import connect
 from backend.services import auth_service
 
 
@@ -21,26 +20,23 @@ from backend.services import auth_service
 # ---------------------------------------------------------------------------
 
 
-def test_migration_adds_is_admin_column():
-    """v12 给 `users` 加 `is_admin`。
+def test_schema_has_is_admin_column():
+    """基线里 `users` 必须有 `is_admin` 列。
 
-    断言写成 `len(MIGRATIONS)` 而不是写死 12：写死的话，将来每加一步迁移
-    这条无关用例都会跟着红一次，而它跟那些迁移毫无关系。
+    列名写错（例如 `is_admin_user`）不会报错，只会让整条权限链读到 `None`，
+    表现是「管理员登进去也看不见后台」。这条用 PRAGMA 直接问库，不问模型。
     """
-    assert run_migrations() == len(MIGRATIONS)
-
     with connect() as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
     assert "is_admin" in columns
 
 
-def test_migration_does_not_promote_existing_users():
-    """升级**不能**把存量账号集体提权——默认值必须是 0。
+def test_new_account_is_not_admin_by_default():
+    """新建账号默认不是管理员（列默认值必须是 0）。
 
-    这条守的是「悄悄扩大权限面」：若默认值为 1，一次版本升级之后所有老用户
-    都能进后台，而且整个过程没有任何报错、没有任何人点过确认。
+    这条守的是「悄悄扩大权限面」：若默认值为 1，每个新注册的人都能进后台，
+    而且整个过程没有任何报错、没有任何人点过确认。
     """
-    run_migrations()
     auth_service.create_user_direct("alice", "password123")
 
     assert auth_service.login("alice", "password123")[0].is_admin is False
@@ -101,7 +97,6 @@ def test_bootstrap_marks_the_initial_account_as_admin(monkeypatch):
     monkeypatch.setenv("INIT_ADMIN_USER", "root")
     monkeypatch.setenv("INIT_ADMIN_PASSWORD", "root-password")
     get_settings.cache_clear()
-    init_schema()
     auth_service.ensure_bootstrap()
 
     assert auth_service.login("root", "root-password")[0].is_admin is True

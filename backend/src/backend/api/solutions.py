@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, status
 from backend.api import schemas
 from backend.api.deps import acting_user
 from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
+from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_display_turn
@@ -138,14 +139,19 @@ async def list_turns(
         )
     if not solution_service.solution_exists(user.id, solution_id):
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
-    rows = (
-        ChatTurnRepository.list_thread(user.id, solution_id, stage)
-        if stage is not None
-        else ChatTurnRepository.list_all(user.id, solution_id)
-    )
-    return schemas.ChatTurnListResponse(
-        turns=[schemas.ChatTurn(**to_display_turn(row)) for row in rows]
-    )
+    # `with` 块里没有 `await`：池只有 size 条连接，握着它去等 LLM 会把整条池子占住。
+    # 所以只把「读数据库」这一小段包进来，不包住任何流式调用。
+    with session_scope() as session:
+        repository = ChatTurnRepository(session)
+        rows = (
+            repository.list_thread(user.id, solution_id, stage)
+            if stage is not None
+            else repository.list_all(user.id, solution_id)
+        )
+        turns = [schemas.ChatTurn(**to_display_turn(row)) for row in rows]
+    # 模型对象出了 `session_scope()` 仍然可读（`expire_on_commit=False`），
+    # 但投影放在块内做更稳妥：以后有人给 `to_display_turn` 加一个惰性关系就炸不到这里。
+    return schemas.ChatTurnListResponse(turns=turns)
 
 
 @router.delete(
@@ -177,8 +183,11 @@ async def clear_turns(
         )
     if not solution_service.solution_exists(user.id, solution_id):
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
-    ChatTurnRepository.delete_thread(user.id, solution_id, stage)
-    ChatSessionRepository.set(user.id, solution_id, stage, "")
+    # 两件事必须**同一个事务**：删了轮次却留下会话 id，等于把上下文从中间截断——
+    # 模型会在一个「记得旧文档」的会话上接着聊，而且不报错。
+    with session_scope() as session:
+        ChatTurnRepository(session).delete_thread(user.id, solution_id, stage)
+        ChatSessionRepository(session).set(user.id, solution_id, stage, "")
     return schemas.SolutionDeleteResponse(ok=True)
 
 
@@ -199,12 +208,11 @@ async def delete_solution(
     **删除成功后要取消挂在这份方案上正在跑的任务**：方案没了，任务再跑完也没地方落正文，
     继续跑只是白烧 token，收尾时还会去写一份注定被丢弃的文档。
 
-    ⚠️ 这段编排**放在 api 层而不是 service 层**：`job_service` 已经依赖
-    `solution_service`（收尾前要确认方案还在），若让 `solution_service` 反向调用
-    `job_service`，两个服务就互相 import 成环。路由层本来就知道「删方案」这件事的
-    完整语义，放在这里既不引入环，也让两条服务各自保持单向依赖。
+    ⚠️ 这两件事由 `job_service.delete_solution_and_cancel_jobs` 在**一个事务**里完成。
+    编排放在 `job_service` 而不是本层，是因为在途任务的协作式取消标记住在那里，
+    而它已经依赖 `solution_service`——反过来 import 会成环。路由层因此只剩一次调用：
+    分两次调（先删后取消）曾留下过「方案已删、取消没跑成」的孤儿任务。
     """
-    if not solution_service.delete_solution(user.id, solution_id):
+    if not job_service.delete_solution_and_cancel_jobs(user.id, solution_id):
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
-    job_service.cancel_for_solution(user.id, solution_id)
     return schemas.SolutionDeleteResponse(ok=True)

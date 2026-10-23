@@ -24,11 +24,11 @@ import json
 import logging
 
 import pytest
-from conftest import register
+from conftest import register, users
 
 from backend.core import logging_setup
 from backend.core.config import get_settings
-from backend.core.db import connect
+from dbsupport import connect
 from backend.core.request_context import reset_request_id, set_request_id
 from backend.services import (
     document_service,
@@ -94,7 +94,7 @@ def _rows() -> list[dict]:
 def _alice_id() -> int:
     from backend.services import auth_service
 
-    user = auth_service.UserRepository.get_by_username("alice")
+    user = users.get_by_username("alice")
     assert user is not None
     return int(user["id"])
 

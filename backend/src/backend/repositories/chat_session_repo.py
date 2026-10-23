@@ -18,59 +18,102 @@
 服务重启后内存里的会话记录会全部丢失，此时 id 仍然有效（它只是一个键），
 下一次续聊会拿到 `SESSION_NOT_FOUND`，由对话服务降级为「用历史重建上下文」——
 与本表无关，那是对话服务自己的容错。
+
+## 形态（v6 / T16.6）
+
+绑定 `Session` 的实例方法；**本类不 commit / rollback / close**。
 """
 
 from __future__ import annotations
 
-from backend.core.db import connect, utc_now_text
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlmodel import Session
+
+from backend.core.clock import utc_now_text
+from backend.core.models import ChatSession
 
 
 class ChatSessionRepository:
-    """`chat_sessions` 的读写。所有方法强制带 `owner_id`。"""
+    """`chat_sessions` 的读写（绑定一个 `Session`）。所有方法强制带 `owner_id`。"""
 
-    @staticmethod
-    def get(owner_id: int, solution_id: int, stage: str) -> str:
-        """读取某条线程的会话 id；没有则返回空串（调用方据此走无状态模式）。"""
-        with connect() as conn:
-            row = conn.execute(
-                "SELECT conversation_id FROM chat_sessions "
-                "WHERE solution_id = ? AND user_id = ? AND stage = ?",
-                (solution_id, owner_id, stage),
-            ).fetchone()
-            return str(row[0]) if row and row[0] else ""
+    def __init__(self, session: Session) -> None:
+        self.session = session
 
-    @staticmethod
-    def set(owner_id: int, solution_id: int, stage: str, conversation_id: str) -> None:
+    def get(self, owner_id: int, solution_id: int, stage: str) -> str:
+        """读取某条线程的会话 id；没有则返回空串（调用方据此走无状态模式）。
+
+        Args:
+            owner_id: 归属用户。
+            solution_id: 方案 id。
+            stage: 线程名（四条澄清线程之一）。
+        """
+        value = (
+            self.session.execute(
+                select(ChatSession.conversation_id).where(
+                    ChatSession.solution_id == solution_id,
+                    ChatSession.user_id == owner_id,
+                    ChatSession.stage == stage,
+                )
+            )
+            .scalars()
+            .first()
+        )
+        return str(value) if value else ""
+
+    def set(self, owner_id: int, solution_id: int, stage: str, conversation_id: str) -> None:
         """写入 / 覆盖某条线程的会话 id（`(solution_id, stage)` 唯一，故用 UPSERT）。
 
         空串表示「这条线程还没有会话」——此时**删除这一行**而不是存一个空串：
         留下空行会让「有没有会话」多一种表示法，读取侧就得同时判空串与判无行。
-        """
-        with connect() as conn:
-            if not conversation_id:
-                conn.execute(
-                    "DELETE FROM chat_sessions WHERE solution_id = ? AND user_id = ? "
-                    "AND stage = ?",
-                    (solution_id, owner_id, stage),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO chat_sessions "
-                    "(user_id, solution_id, stage, conversation_id, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(solution_id, stage) DO UPDATE SET "
-                    "conversation_id = excluded.conversation_id, "
-                    "updated_at = excluded.updated_at",
-                    (owner_id, solution_id, stage, conversation_id, utc_now_text()),
-                )
-            conn.commit()
 
-    @staticmethod
-    def clear_for_solution(owner_id: int, solution_id: int) -> None:
-        """清掉某方案下全部会话 id（「整份重开」时用）。"""
-        with connect() as conn:
-            conn.execute(
-                "DELETE FROM chat_sessions WHERE solution_id = ? AND user_id = ?",
-                (solution_id, owner_id),
+        Args:
+            owner_id: 归属用户。
+            solution_id: 方案 id。
+            stage: 线程名。
+            conversation_id: 会话 id；空串表示删除该行。
+        """
+        if not conversation_id:
+            self.session.execute(
+                delete(ChatSession).where(
+                    ChatSession.solution_id == solution_id,
+                    ChatSession.user_id == owner_id,
+                    ChatSession.stage == stage,
+                )
             )
-            conn.commit()
+            return
+
+        # ⚠️ 刻意用「一条 UPSERT」而不是「先查再写」：拆成两步之后，
+        # 「两条线程同时写同一行」就成了「两个都查到没有 → 两个都插入」，
+        # 唯一索引会把第二条变成 IntegrityError，而那不是业务错误。
+        # 冲突目标是唯一索引 `ux_chat_sessions_thread (solution_id, stage)`。
+        now = utc_now_text()
+        statement = (
+            sqlite_insert(ChatSession)
+            .values(
+                user_id=owner_id,
+                solution_id=solution_id,
+                stage=stage,
+                conversation_id=conversation_id,
+                updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["solution_id", "stage"],
+                set_={"conversation_id": conversation_id, "updated_at": now},
+            )
+        )
+        self.session.execute(statement)
+
+    def clear_for_solution(self, owner_id: int, solution_id: int) -> None:
+        """清掉某方案下全部会话 id（「整份重开」时用）。
+
+        Args:
+            owner_id: 归属用户。
+            solution_id: 方案 id。
+        """
+        self.session.execute(
+            delete(ChatSession).where(
+                ChatSession.solution_id == solution_id,
+                ChatSession.user_id == owner_id,
+            )
+        )

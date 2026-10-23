@@ -24,10 +24,7 @@ import pytest
 from conftest import assert_requires_login, login, register
 
 from backend.core import runtime_config as rc
-from backend.repositories.runtime_config_repo import (
-    ModelProviderRepository,
-    SystemConfigRepository,
-)
+from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
 from backend.services import admin_config_service, auth_service
 
 # 全部新增端点。参数化比逐条写更值：这张表本身就是「该挂守卫的端点清单」。

@@ -28,10 +28,10 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from backend.core.db import utc_now
+from backend.core.clock import utc_now
+from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
-from backend.repositories import quota_repo
 from backend.repositories.account_repo import AccountDataRepository
 from backend.repositories.admin_repo import AdminStatsRepository, AuditRepository
 from backend.repositories.auth_repo import (
@@ -41,6 +41,7 @@ from backend.repositories.auth_repo import (
 )
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.log_repo import LogRepository
+from backend.repositories.quota_repo import QuotaRepository
 from backend.services import auth_service, export_service, job_service, quota_service
 from backend.services.auth_service import User
 
@@ -64,14 +65,15 @@ def record_audit(actor: User, action: str, target: str = "", detail: str = "") -
     `detail` 里**绝不写密码**：审计表是给人翻的，不是保险箱。
     """
     try:
-        AuditRepository.record(
-            actor_id=actor.id,
-            actor_name=actor.username,
-            action=action,
-            target=target,
-            detail=detail,
-            request_id=current_request_id() or None,
-        )
+        with session_scope() as session:
+            AuditRepository(session).record(
+                actor_id=actor.id,
+                actor_name=actor.username,
+                action=action,
+                target=target,
+                detail=detail,
+                request_id=current_request_id() or None,
+            )
     except Exception:  # noqa: BLE001 - 审计失败不能连累业务操作
         logger.warning(
             "管理员操作审计写入失败",
@@ -87,7 +89,8 @@ _audit = record_audit
 
 def list_audit(limit: int = 100) -> list[dict[str, Any]]:
     """最近的管理员操作，倒序。"""
-    return AuditRepository.list_recent(limit)
+    with session_scope() as session:
+        return [row.model_dump() for row in AuditRepository(session).list_recent(limit)]
 
 
 # ----------------------------------------------------------------------
@@ -96,11 +99,26 @@ def list_audit(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def _row_or_404(user_id: int) -> dict[str, Any]:
-    """按 id 取用户行，不存在抛 404。"""
-    row = UserRepository.get_by_id(user_id)
-    if row is None:
-        raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该用户不存在")
-    return row
+    """按 id 取用户行（**不含凭据字段**），不存在抛 404。
+
+    投影在仓储层就已经是「除 `password_hash` / `salt` 之外的全部列」——
+    这一行会流到导出包里（`export_service.build_zip` 要读额度三列），
+    所以既不能少字段、也绝不能把哈希带出去。
+    """
+    with session_scope() as session:
+        user = UserRepository(session).get_by_id(user_id)
+        if user is None:
+            raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该用户不存在")
+        return {
+            "id": int(user.id or 0),
+            "username": user.username,
+            "created_at": user.created_at,
+            "is_active": bool(user.is_active),
+            "is_admin": bool(user.is_admin),
+            "daily_task_limit": user.daily_task_limit,
+            "daily_token_limit": user.daily_token_limit,
+            "max_running": user.max_running,
+        }
 
 
 def _reject_locking_out(actor: User, row: dict[str, Any], verb: str) -> None:
@@ -120,7 +138,9 @@ def _reject_locking_out(actor: User, row: dict[str, Any], verb: str) -> None:
     """
     if int(row["id"]) == actor.id:
         raise AppError(ErrorCode.FORBIDDEN, f"不能{verb}自己的账号")
-    if bool(row.get("is_admin")) and UserRepository.count_admins() <= 1:
+    with session_scope() as session:
+        admin_count = UserRepository(session).count_admins()
+    if bool(row.get("is_admin")) and admin_count <= 1:
         raise AppError(
             ErrorCode.FORBIDDEN,
             f"这是最后一位管理员，不能{verb}——至少保留一位，否则无人能进后台",
@@ -142,14 +162,16 @@ def list_users() -> list[dict[str, Any]]:
     两个聚合的维度不同（累计 vs 今日），塞进同一条 SQL 会互相放大计数
     （多表 JOIN 后聚合相乘，是这类统计最经典的错法）。
     """
-    rows = AdminStatsRepository.user_usage()
+    with session_scope() as session:
+        rows = [row.as_dict() for row in AdminStatsRepository(session).user_usage()]
     if not rows:
         return []
 
     # 当日用量：一次 GROUP BY 拿全，而不是每行一次查询
-    today = quota_repo.usage_today_by_users(
-        [int(row["id"]) for row in rows], quota_service.day_start_utc()
-    )
+    with session_scope() as session:
+        today = QuotaRepository(session).usage_today_by_users(
+            [int(row["id"]) for row in rows], quota_service.day_start_utc()
+        )
 
     merged: list[dict[str, Any]] = []
     for row in rows:
@@ -213,12 +235,14 @@ def set_user_quota(
             )
 
     before = quota_service.describe(user_id)
-    if not quota_repo.set_quota(
-        user_id,
-        daily_task_limit=daily_task_limit,
-        daily_token_limit=daily_token_limit,
-        max_running=max_running,
-    ):
+    with session_scope() as session:
+        hit = QuotaRepository(session).set_quota(
+            user_id,
+            daily_task_limit=daily_task_limit,
+            daily_token_limit=daily_token_limit,
+            max_running=max_running,
+        )
+    if not hit:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "用户不存在", status_code=404)
 
     # 审计写「改前 → 改后」，只记**有变化的**项：三项全记会让日志里塞满
@@ -243,7 +267,8 @@ def set_user_quota(
 
 def platform_stats() -> dict[str, Any]:
     """平台总量：用户数、管理员数、任务数、成功数、Token 合计。"""
-    return AdminStatsRepository.platform_usage()
+    with session_scope() as session:
+        return AdminStatsRepository(session).platform_usage().as_dict()
 
 
 def daily_stats(days: int = 7, tz_offset_minutes: int = 0) -> dict[str, Any]:
@@ -256,7 +281,13 @@ def daily_stats(days: int = 7, tz_offset_minutes: int = 0) -> dict[str, Any]:
     就等于同一套口径实现了两次。两处一旦有一处改了口径（比如以后把「运行中」
     也算进分母），页面上的日线和汇总行就会互相矛盾，而没人知道该信哪个。
     """
-    items = AdminStatsRepository.daily(days=days, tz_offset_minutes=tz_offset_minutes)
+    with session_scope() as session:
+        items = [
+            row.as_dict()
+            for row in AdminStatsRepository(session).daily(
+                days=days, tz_offset_minutes=tz_offset_minutes
+            )
+        ]
 
     def _sum(key: str) -> int:
         return sum(int(row[key]) for row in items)
@@ -281,14 +312,16 @@ def daily_stats(days: int = 7, tz_offset_minutes: int = 0) -> dict[str, Any]:
 
 def top_users(limit: int = 10) -> list[dict[str, Any]]:
     """用量最高的用户（只含真的生成过任务的人）。"""
-    return AdminStatsRepository.top_users(limit=limit)
+    with session_scope() as session:
+        return [row.as_dict() for row in AdminStatsRepository(session).top_users(limit=limit)]
 
 
 def create_user(actor: User, username: str, password: str, *, is_admin: bool = False) -> User:
     """新建账号。用户名与密码强度复用注册那一套，后台不开后门。"""
     user = auth_service.create_user_direct(username, password)
     if is_admin:
-        UserRepository.set_is_admin(user.id, True)
+        with session_scope() as session:
+            UserRepository(session).set_is_admin(user.id, True)
         user = auth_service.get_user(user.id) or user
 
     _audit(
@@ -309,7 +342,8 @@ def set_active(actor: User, user_id: int, is_active: bool) -> User:
     if not is_active:
         _reject_locking_out(actor, row, "停用")
 
-    UserRepository.set_active(user_id, is_active)
+    with session_scope() as session:
+        UserRepository(session).set_active(user_id, is_active)
     user = auth_service.get_user(user_id) or User(
         id=user_id,
         username=str(row["username"]),
@@ -359,7 +393,8 @@ def revoke_sessions(actor: User, user_id: int) -> int:
     """
     row = _row_or_404(user_id)
     username = str(row["username"])
-    revoked = AuthSessionRepository.delete_by_user(user_id)
+    with session_scope() as session:
+        revoked = AuthSessionRepository(session).delete_by_user(user_id)
     _audit(actor, "user.revoke_sessions", target=username, detail=f"吊销 {revoked} 条会话")
     return revoked
 
@@ -415,7 +450,8 @@ def deletion_preview(user_id: int) -> dict[str, Any]:
         AppError: 用户不存在（404）。
     """
     row = _row_or_404(user_id)
-    counts = AccountDataRepository.counts(user_id)
+    with session_scope() as session:
+        counts = AccountDataRepository(session).counts(user_id)
     return {"user_id": int(row["id"]), "username": str(row["username"]), **counts}
 
 
@@ -466,7 +502,8 @@ def delete_user(actor: User, user_id: int) -> None:
 
     username = str(row["username"])
     cancelled = job_service.cancel_for_user(user_id)
-    UserRepository.delete(user_id)
+    with session_scope() as session:
+        UserRepository(session).delete(user_id)
     cleared = auth_service.clear_login_failures(username)
     _audit(
         actor,
@@ -483,7 +520,8 @@ def delete_user(actor: User, user_id: int) -> None:
 
 def list_invites() -> list[dict[str, Any]]:
     """全部邀请码及使用情况。"""
-    return InviteCodeRepository.list_all()
+    with session_scope() as session:
+        return [row.model_dump() for row in InviteCodeRepository(session).list_all()]
 
 
 def _normalize_code(code: str) -> str:
@@ -524,8 +562,6 @@ def create_invite(
     cleaned = _normalize_code(code)
     if max_uses < 0:
         raise AppError(ErrorCode.INVALID_REQUEST, "使用次数不能为负数", status_code=400)
-    if InviteCodeRepository.get(cleaned) is not None:
-        raise AppError(ErrorCode.INVALID_REQUEST, "该邀请码已存在", status_code=400)
 
     moment: datetime | None = None
     if expires_at:
@@ -536,7 +572,15 @@ def create_invite(
                 ErrorCode.INVALID_REQUEST, "过期时间格式不正确，请用 ISO 8601", status_code=400
             ) from exc
 
-    InviteCodeRepository.create(cleaned, max_uses=max_uses, expires_at=moment, note=note.strip())
+    # 「查重 + 写入」一个事务：拆开的话，两个管理员同时建同一个码，
+    # 都能查到「不存在」，于是第二个请求会撞在唯一约束上变成 500，
+    # 而不是得到那句本该给的「该邀请码已存在」。
+    with session_scope() as session:
+        invites = InviteCodeRepository(session)
+        if invites.get(cleaned) is not None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "该邀请码已存在", status_code=400)
+        invites.create(cleaned, max_uses=max_uses, expires_at=moment, note=note.strip())
+
     _audit(
         actor,
         "invite.create",
@@ -552,7 +596,9 @@ def delete_invite(actor: User, code: str) -> None:
     只删码本身，不影响已注册的用户：那些账号是靠码进来的，但进来之后就与码无关了。
     """
     cleaned = code.strip()
-    if not InviteCodeRepository.delete(cleaned):
+    with session_scope() as session:
+        deleted = InviteCodeRepository(session).delete(cleaned)
+    if not deleted:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该邀请码不存在")
     _audit(actor, "invite.delete", target=cleaned, detail="已删除")
 
@@ -601,33 +647,35 @@ def list_logs(
     """
     safe_page = max(1, int(page))
     safe_size = max(1, min(int(page_size), 500))
-    rows, total = LogRepository.search(
-        level=level or None,
-        since=since or None,
-        until=until or None,
-        logger_name=logger_name or None,
-        event=event or None,
-        request_id=request_id or None,
-        user_id=user_id,
-        keyword=keyword or None,
-        exclude_event=exclude_event or None,
-        limit=safe_size,
-        offset=(safe_page - 1) * safe_size,
-    )
-
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        extra: Any = {}
-        raw_extra = row.get("extra_json") or ""
-        if raw_extra:
-            try:
-                parsed = json.loads(raw_extra)
-                # 只接受对象：历史上有过把数组写进去的可能，非对象一律当空，
-                # 免得前端拿到一个数组还要判断类型。
-                extra = parsed if isinstance(parsed, dict) else {}
-            except (ValueError, TypeError):
-                extra = {}
-        items.append({**row, "extra": extra})
+    with session_scope() as session:
+        rows, total = LogRepository(session).search(
+            level=level or None,
+            since=since or None,
+            until=until or None,
+            logger_name=logger_name or None,
+            event=event or None,
+            request_id=request_id or None,
+            user_id=user_id,
+            keyword=keyword or None,
+            exclude_event=exclude_event or None,
+            limit=safe_size,
+            offset=(safe_page - 1) * safe_size,
+        )
+        # 出了 scope 再读属性也是安全的（`expire_on_commit=False`），但 `extra` 的
+        # 解析要逐行做，放在块内可以少一次「对象过期」的意外。
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            extra: Any = {}
+            raw_extra = row.extra_json or ""
+            if raw_extra:
+                try:
+                    parsed = json.loads(raw_extra)
+                    # 只接受对象：历史上有过把数组写进去的可能，非对象一律当空，
+                    # 免得前端拿到一个数组还要判断类型。
+                    extra = parsed if isinstance(parsed, dict) else {}
+                except (ValueError, TypeError):
+                    extra = {}
+            items.append({**row.model_dump(), "extra": extra})
 
     return {"items": items, "total": total, "page": safe_page, "page_size": safe_size}
 
@@ -710,19 +758,21 @@ def list_jobs(
     safe_limit = max(1, min(int(limit), 500))
     safe_offset = max(0, int(offset))
     clean_username = username.strip() or None
-    rows = GenerationJobRepository.admin_list(
-        status=status or None,
-        username=clean_username,
-        kind=kind or None,
-        limit=safe_limit,
-        offset=safe_offset,
-    )
-    total = GenerationJobRepository.admin_count(
-        status=status or None,
-        username=clean_username,
-        kind=kind or None,
-    )
-    return {"items": [_job_view(row) for row in rows], "total": total}
+    with session_scope() as session:
+        rows = GenerationJobRepository(session).admin_list(
+            status=status or None,
+            username=clean_username,
+            kind=kind or None,
+            limit=safe_limit,
+            offset=safe_offset,
+        )
+        total = GenerationJobRepository(session).admin_count(
+            status=status or None,
+            username=clean_username,
+            kind=kind or None,
+        )
+        items = [_job_view(row.as_dict()) for row in rows]
+    return {"items": items, "total": total}
 
 
 def cancel_job_as_admin(actor: User, job_id: int) -> bool:
@@ -738,7 +788,9 @@ def cancel_job_as_admin(actor: User, job_id: int) -> bool:
     ⚠️ 取消是**协作式**的，不是强杀：卡在纯同步阻塞调用上的任务不会立刻退出。
     但库里已是终态，重启后不会再显示「生成中」——卡死最多是临时的。
     """
-    row = GenerationJobRepository.get_for_admin(job_id)
+    with session_scope() as session:
+        admin_job = GenerationJobRepository(session).get_for_admin(job_id)
+        row = admin_job.as_dict() if admin_job else None
     if row is None:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该任务不存在", status_code=404)
 
@@ -764,8 +816,9 @@ def cancel_stuck_jobs(actor: User) -> int:
     """
     # running 按 created_at 升序，卡死（最久）的必然排在最前；500 条足够覆盖
     # 单机在飞任务的实际量级。
-    rows = GenerationJobRepository.admin_list(status=STATUS_RUNNING, limit=500)
-    views = [_job_view(row) for row in rows]
+    with session_scope() as session:
+        rows = GenerationJobRepository(session).admin_list(status=STATUS_RUNNING, limit=500)
+        views = [_job_view(row.as_dict()) for row in rows]
     stuck = [view for view in views if view["is_stuck"]]
     if not stuck:
         return 0

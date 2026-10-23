@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from typing import Any
+
+from sqlalchemy.exc import IntegrityError
 
 from backend.core import crypto
 from backend.core import runtime_config as rc
 from backend.core.config import Settings, get_settings
+from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.core.providers import (
     PRESETS,
@@ -363,10 +365,11 @@ def update_config(actor: User, updates: dict[str, Any]) -> dict[str, Any]:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), status_code=400) from exc
 
     before = rc.get_runtime_config().overrides
-    SystemConfigRepository.upsert_many(
-        {key: json.dumps(value, ensure_ascii=False) for key, value in validated.items()},
-        updated_by=actor.id,
-    )
+    with session_scope() as session:
+        SystemConfigRepository(session).upsert_many(
+            {key: json.dumps(value, ensure_ascii=False) for key, value in validated.items()},
+            updated_by=actor.id,
+        )
     rc.invalidate()
 
     record_audit(
@@ -389,7 +392,8 @@ def reset_config(actor: User, keys: list[str] | None = None) -> dict[str, Any]:
             status_code=400,
         )
 
-    deleted = SystemConfigRepository.delete_many(targets)
+    with session_scope() as session:
+        deleted = SystemConfigRepository(session).delete_many(targets)
     rc.invalidate()
     record_audit(
         actor,
@@ -416,7 +420,9 @@ def list_providers() -> dict[str, Any]:
     config = rc.get_runtime_config()
     active_id = config.active_provider.id if config.active_provider else ""
     providers = []
-    for row in ModelProviderRepository.list_all():
+    with session_scope() as session:
+        rows = [row.model_dump() for row in ModelProviderRepository(session).list_all()]
+    for row in rows:
         extra = decode_extra(row.get("extra_json"))
         providers.append(
             {
@@ -449,11 +455,13 @@ def list_providers() -> dict[str, Any]:
 
 
 def _provider_or_404(provider_id: str) -> dict[str, Any]:
-    row = ModelProviderRepository.get(provider_id)
-    if row is None:
+    with session_scope() as session:
+        row = ModelProviderRepository(session).get(provider_id)
+        data = row.model_dump() if row is not None else None
+    if data is None:
         # 沿用既有口径：错误码只有 9 个，「找不到」统一用 SOLUTION_NOT_FOUND（404）
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该配置不存在")
-    return row
+    return data
 
 
 def _active_pointer_id() -> str:
@@ -465,7 +473,8 @@ def _active_pointer_id() -> str:
     此后每次读配置都刷一条 WARN，而后台「当前供应商」与列表对不上。
     """
     try:
-        raw = SystemConfigRepository.get_all().get(rc.ACTIVE_PROVIDER_KEY)
+        with session_scope() as session:
+            raw = SystemConfigRepository(session).get_all().get(rc.ACTIVE_PROVIDER_KEY)
     except Exception:  # noqa: BLE001 - 表不可用时按「没有指针」处理
         return ""
     if not raw:
@@ -540,12 +549,16 @@ def create_provider(actor: User, payload: dict[str, Any]) -> dict[str, Any]:
 
     # 生成 id 与写入之间存在碰撞窗口：撞了就换一个重试，而不是先查后写
     # （「先查再写」有竞态，两个并发请求都能查到「不存在」）。
+    #
+    # ⚠️ 冲突现在是 `sqlalchemy.exc.IntegrityError`（SQLAlchemy 对 DBAPI 异常的包装），
+    # 不再是裸的 `sqlite3.IntegrityError`——照旧捕后者会漏掉，表现是「偶发 500」。
     provider_id = ""
     for _ in range(_ID_ATTEMPTS):
         candidate = new_config_id()
         try:
-            ModelProviderRepository.create(provider_id=candidate, **fields)
-        except sqlite3.IntegrityError:
+            with session_scope() as session:
+                ModelProviderRepository(session).create(provider_id=candidate, **fields)
+        except IntegrityError:
             continue
         provider_id = candidate
         break
@@ -560,12 +573,16 @@ def create_provider(actor: User, payload: dict[str, Any]) -> dict[str, Any]:
     # 而一旦忘了点，就会得到「配好了却生成说没有配置」的困惑——排查还得先懂
     # 「指针」这个概念。已有指针时**不抢**：新建第二条不该把正在用的那条顶掉。
     activated = False
-    known_ids = {str(row["id"]) for row in ModelProviderRepository.list_all()}
+    with session_scope() as session:
+        known_ids = {
+            str(row.id) for row in ModelProviderRepository(session).list_all()
+        }
     pointer = _active_pointer_id()
     if not pointer or pointer not in known_ids:
-        SystemConfigRepository.upsert_many(
-            {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=actor.id
-        )
+        with session_scope() as session:
+            SystemConfigRepository(session).upsert_many(
+                {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=actor.id
+            )
         activated = True
 
     rc.invalidate()
@@ -634,7 +651,8 @@ def update_provider(actor: User, provider_id: str, payload: dict[str, Any]) -> d
         return list_providers()
 
     before = {key: row.get(key) for key in fields}
-    ModelProviderRepository.update(provider_id, fields)
+    with session_scope() as session:
+        ModelProviderRepository(session).update(provider_id, fields)
     rc.invalidate()
     record_audit(
         actor,
@@ -664,7 +682,8 @@ def delete_provider(actor: User, provider_id: str) -> dict[str, Any]:
             status_code=403,
         )
 
-    ModelProviderRepository.delete(provider_id)
+    with session_scope() as session:
+        ModelProviderRepository(session).delete(provider_id)
     rc.invalidate()
     record_audit(actor, "provider.delete", target=provider_id, detail="已删除")
     return list_providers()
@@ -683,9 +702,10 @@ def activate_provider(actor: User, provider_id: str) -> dict[str, Any]:
             ErrorCode.INVALID_REQUEST, "这条配置已停用，请先启用再切换", status_code=400
         )
 
-    SystemConfigRepository.upsert_many(
-        {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=actor.id
-    )
+    with session_scope() as session:
+        SystemConfigRepository(session).upsert_many(
+            {rc.ACTIVE_PROVIDER_KEY: json.dumps(provider_id)}, updated_by=actor.id
+        )
     rc.invalidate()
 
     record_audit(

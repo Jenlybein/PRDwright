@@ -24,8 +24,9 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter
+from sqlalchemy import text
 
-from backend.core.db import connect
+from backend.core.engine import get_engine
 from backend.core.runtime_config import get_runtime_config, provider_key_present
 from backend.services.skill_registry import audit_skills, describe_manifest, skills_root
 
@@ -41,8 +42,10 @@ def _check_database() -> dict:
     而是权限、目录、WAL 文件被占用这类只有连上去才会暴露的情况。
     """
     try:
-        with connect() as conn:
-            conn.execute("SELECT 1")
+        # 走 Engine 的池：与业务请求借同一条通路，才能测出「业务真的会用不了的」那种故障。
+        # 直接 `sqlite3.connect(文件)` 会绕过池与 PRAGMA 事件，探活绿着、业务却挂。
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001 - 体检要兜住任何异常，否则「探活」自己就 500 了
         logger.warning(
             "健康检查：数据库不可用",

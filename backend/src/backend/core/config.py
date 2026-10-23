@@ -370,6 +370,13 @@ class Settings(BaseSettings):
         default="",
         description="SQLite 数据库文件路径；留空则使用后端项目根目录下的 prdwright.db。",
     )
+    db_pool_size: int = Field(
+        default=4,
+        ge=1,
+        description="连接池里**固定的**连接条数（T15）。运行期不扩容——"
+        "连接只在启动时一次性建满，这样「多线程同时首次映射 WAL -shm」没有发生的时机。"
+        "调大它只在「借不到连接（见 stats.wait_ms_max）」时才有意义。",
+    )
 
     # --- 服务配置 ------------------------------------------------------------
     cors_origins: str = Field(

@@ -20,15 +20,9 @@ import pytest
 
 from backend.core import runtime_config as rc
 from backend.core.config import get_settings
-from backend.core.db import connect
-from backend.core.migrations import run_migrations
+from dbsupport import connect
 from backend.core.secrets import reset_cache as reset_secret_cache
-from backend.repositories.runtime_config_repo import (
-    ModelProviderRepository,
-    SystemConfigRepository,
-)
-
-
+from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
 @pytest.fixture(autouse=True)
 def fresh_config(monkeypatch):
     """每个用例都从「没有缓存、没有真实 .env 干扰」开始。
@@ -66,7 +60,6 @@ def test_whitelisted_keys_match_env_when_no_overrides():
     这是「升级后行为零变化」的核心断言。`model_copy(update={})` 看似无害，
     但只要哪个键被错误地补了个默认值，参数就会整体漂移。
     """
-    run_migrations()
     config = rc.get_runtime_config()
     base = get_settings()
 
@@ -78,7 +71,6 @@ def test_whitelisted_keys_match_env_when_no_overrides():
 
 def test_override_applies_and_changes_revision():
     """写入覆盖项后立即生效，且指纹变化（前端据此判断「真的换了一份」）。"""
-    run_migrations()
     before = rc.get_runtime_config()
     assert before.settings.prd_pipeline_concurrency == 3
 
@@ -93,7 +85,6 @@ def test_override_applies_and_changes_revision():
 
 def test_delete_override_restores_default():
     """删掉覆盖行 = 恢复 env 默认（「恢复默认」按钮的语义）。"""
-    run_migrations()
     _set(llm_max_retries=4)
     rc.invalidate()
     assert rc.get_runtime_config().settings.llm_max_retries == 4
@@ -121,7 +112,6 @@ def test_rejects_keys_outside_whitelist(key):
 
 def test_unknown_rows_in_table_are_ignored():
     """表里出现白名单外的行时：不生效，也不抛。"""
-    run_migrations()
     SystemConfigRepository.upsert_many({"db_path": '"/tmp/hacked.db"', "log_level": '"DEBUG"'})
     rc.invalidate()
     config = rc.get_runtime_config()
@@ -132,7 +122,6 @@ def test_unknown_rows_in_table_are_ignored():
 
 def test_out_of_range_override_falls_back_to_env():
     """越界的值跳过该键，其余键照常生效（单个坏值不拖垮整份配置）。"""
-    run_migrations()
     SystemConfigRepository.upsert_many(
         {"prd_pipeline_concurrency": "99", "llm_max_retries": "3"}
     )
@@ -213,7 +202,6 @@ def test_input_ceiling_never_recurses():
     就会「连库取配置 → 配置决定连哪个库」。这里在已经打开的连接里取配置，
     能过就说明没有递归。
     """
-    run_migrations()
     with connect() as conn:
         conn.execute("SELECT 1").fetchone()
         config = rc.get_runtime_config()
@@ -232,7 +220,6 @@ def test_unactivated_config_uses_first_enabled_entry():
     只有一条可用时，「哪条在用」本来就没有歧义，让用户再点一次「设为使用中」
     只是仪式。多条时按 `sort_order` 取最早建的那条，结果稳定可预期。
     """
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_first001",
         name="先建的那条",
@@ -259,7 +246,6 @@ def test_no_config_at_all_means_none():
     这是「彻底迁入后台面板」的必然结果：装完就是空的，生成必须明确报
     「还没有任何模型配置」，而不是拿 env 里某个默认值把它撑起来。
     """
-    run_migrations()
     rc.invalidate()
 
     assert rc.get_runtime_config().active_provider is None
@@ -267,7 +253,6 @@ def test_no_config_at_all_means_none():
 
 def test_activate_switches_to_a_config_entry():
     """写 `active_provider_id`（配置条目 id）后生效。"""
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_claude01",
         name="Claude",
@@ -289,7 +274,6 @@ def test_dangling_pointer_falls_back_to_an_existing_entry():
     指针悬空是删配置的正常残留（也见过手工改库）。此时**不能**返回 None 了事：
     库里明明有一条能用的配置，却对用户说「还没有任何配置」，比直接用它更糟。
     """
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_alive001", name="还活着的", protocol="ark", default_model="m1"
     )
@@ -303,7 +287,6 @@ def test_dangling_pointer_falls_back_to_an_existing_entry():
 
 def test_disabled_config_falls_back_to_another_entry():
     """使用中的那条被停用后回退到另一条启用中的配置。"""
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_used0001", name="在用的", protocol="openai_compatible", default_model="m1"
     )
@@ -321,7 +304,6 @@ def test_disabled_config_falls_back_to_another_entry():
 
 def test_provider_missing_key_points_to_admin_panel():
     """缺密钥的提示必须告诉人去哪儿配——现在密钥只在管理后台录入。"""
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_nokey001",
         name="没配密钥的",
@@ -348,7 +330,6 @@ def test_env_context_window_is_gone(monkeypatch):
 
     assert not hasattr(get_settings(), "llm_context_window")
 
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_bigwin01", name="大窗口", protocol="ark", default_model="m"
     )
@@ -365,7 +346,6 @@ def test_model_limits_use_provider_row_when_filled():
     自定义供应商（OpenAI 兼容 + 自己的模型名）在注册表里查不到，会落到 32k
     兜底——对 128k 的模型等于把正常请求误判成超顶。所以这一列必须有优先级。
     """
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_window01", name="本地大窗口", protocol="ark", default_model="local-m"
     )
@@ -394,7 +374,6 @@ def test_config_id_never_reaches_provider_defaults(monkeypatch):
         seen.append(provider)
         return original(provider, model)
 
-    run_migrations()
     ModelProviderRepository.create(
         provider_id="cfg_window02", name="方舟", protocol="ark", default_model="doubao"
     )
@@ -426,7 +405,6 @@ def test_use_config_freezes_snapshot_for_task():
     这正是「改了下次生成生效、跑到一半不漂移」的实现。少了它，
     一次 20 分钟的生成中途 TTL 到点就会换参数，表现为章节乱序或正文重复。
     """
-    run_migrations()
     rc.invalidate()
     frozen = rc.get_runtime_config()
     assert frozen.settings.prd_pipeline_concurrency == 3
@@ -448,7 +426,6 @@ def test_invalidate_drops_cache():
     写配置后若不失效，本进程还会用旧快照最多 5 秒——「保存成功、立刻试还是老行为」
     是最容易让人误判的一种。
     """
-    run_migrations()
     rc.invalidate()
     assert rc.get_runtime_config().settings.llm_max_retries == get_settings().llm_max_retries
 
@@ -508,7 +485,6 @@ def test_get_llm_without_any_config_says_build_one_first():
     """
     from backend.services.llm_factory import get_llm
 
-    run_migrations()
     rc.invalidate()
 
     with pytest.raises(RuntimeError) as excinfo:

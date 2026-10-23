@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 import zipfile
 
-from backend.core.db import connect
+from dbsupport import connect
 from backend.services import document_store
 from conftest import login, register
 

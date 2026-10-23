@@ -19,9 +19,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.core import runtime_config as rc
-from backend.core.db import connect, utc_now, utc_now_text
-from backend.repositories import quota_repo
-from backend.repositories.runtime_config_repo import SystemConfigRepository
+from backend.core.clock import utc_now, utc_now_text
+from dbsupport import connect
+from backend.core.engine import session_scope
+from backend.repositories.quota_repo import QuotaRepository
+from conftest import system_config as SystemConfigRepository
 from backend.services import quota_service
 from backend.services.auth_service import User
 
@@ -174,6 +176,12 @@ def test_running_ignores_day_boundary(isolated_db):  # noqa: ARG001
     assert quota_service.usage_today(1).tasks == 0
 
 
+
+def _set_quota(user_id: int, **kwargs) -> bool:
+    """写用户额度覆盖值（仓库不再自己提交，所以这里显式开一个事务）。"""
+    with session_scope() as session:
+        return QuotaRepository(session).set_quota(user_id, **kwargs)
+
 # ---------------------------------------------------------------------------
 # 三态与拦截
 # ---------------------------------------------------------------------------
@@ -183,7 +191,7 @@ def test_user_zero_overrides_global_limit(isolated_db):  # noqa: ARG001
     """用户级 `0` 必须能盖掉全局上限——那是「给可信账号开口子」的唯一手段。"""
     _set_global(quota_daily_task_limit=1)
     _job(1, status="completed")
-    assert quota_repo.set_quota(1, daily_task_limit=0, daily_token_limit=-1, max_running=-1)
+    assert _set_quota(1, daily_task_limit=0, daily_token_limit=-1, max_running=-1)
 
     # 已用 1 次、全局上限 1，但该用户显式不限 → 放行
     quota_service.check(_user(), "prd")
@@ -194,7 +202,7 @@ def test_user_zero_overrides_global_limit(isolated_db):  # noqa: ARG001
 def test_minus_one_follows_global(isolated_db):  # noqa: ARG001
     """`-1` 跟随全局：全局改了，用户的值跟着动。"""
     _set_global(quota_daily_task_limit=7)
-    quota_repo.set_quota(1, daily_task_limit=-1, daily_token_limit=-1, max_running=-1)
+    _set_quota(1, daily_task_limit=-1, daily_token_limit=-1, max_running=-1)
     assert quota_service.resolve_limits(1).daily_tasks == 7
     assert quota_service.source_of(-1) == "global"
 
@@ -308,7 +316,7 @@ def test_api_rejects_without_creating_a_job_row(client: TestClient, isolated_db)
     user_id = int(me["id"])
 
     # 额度设成 0 次（显式不限是 0，所以用「上限 1 且有 1 条已收尾」来卡）
-    quota_repo.set_quota(user_id, daily_task_limit=1, daily_token_limit=-1, max_running=-1)
+    _set_quota(user_id, daily_task_limit=1, daily_token_limit=-1, max_running=-1)
     _job(user_id, status="completed")
 
     before = client.get("/api/jobs").json()["jobs"]

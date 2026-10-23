@@ -18,9 +18,10 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from conftest import assert_requires_login, login, register
+from conftest import assert_requires_login, login, register, users
 
-from backend.core.db import connect, utc_now
+from backend.core.clock import utc_now
+from dbsupport import connect
 
 
 def _as_admin(client, username: str = "root") -> None:
@@ -34,7 +35,7 @@ def _as_admin(client, username: str = "root") -> None:
 def _user_id(username: str) -> int:
     from backend.services import auth_service
 
-    row = auth_service.UserRepository.get_by_username(username)
+    row = users.get_by_username(username)
     assert row is not None
     return int(row["id"])
 

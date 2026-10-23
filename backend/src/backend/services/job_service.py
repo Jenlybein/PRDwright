@@ -38,13 +38,15 @@ from typing import Any, AsyncIterator
 
 from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
-from backend.core.db import utc_now
+from backend.core.clock import utc_now
+from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config, use_config
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
+from backend.repositories.solution_repo import SolutionRepository
 from backend.services import conversation_service, document_service, document_store, solution_service
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import RunMeter, use_meter
@@ -206,12 +208,17 @@ def create_job(
     if kind == "chat":
         return _create_chat_job(owner_id, solution_id, request)
 
-    GenerationJobRepository.supersede_active(owner_id, solution_id=solution_id, kind=kind)
+    with session_scope() as session:
+        GenerationJobRepository(session).supersede_active(
+            owner_id, solution_id=solution_id, kind=kind
+        )
     _mark_superseded(owner_id, solution_id=solution_id, kind=kind)
     doc_kind = _target_product_kind(kind, request) or ""
-    return GenerationJobRepository.create(
-        owner_id, kind, solution_id, input_fingerprint, doc_kind=doc_kind
-    )
+    with session_scope() as session:
+        job = GenerationJobRepository(session).create(
+            owner_id, kind, solution_id, input_fingerprint, doc_kind=doc_kind
+        )
+        return int(job.id or 0)
 
 
 def _create_chat_job(owner_id: int, solution_id: int | None, request: dict[str, Any]) -> int:
@@ -254,12 +261,11 @@ def _create_chat_job(owner_id: int, solution_id: int | None, request: dict[str, 
                 ErrorCode.INVALID_REQUEST,
                 "这条对话还在生成中，等它说完或先点停止",
             )
-    if (
-        GenerationJobRepository.find_active(
+    with session_scope() as session:
+        active = GenerationJobRepository(session).find_active(
             owner_id, solution_id=solution_id, kind="chat", chat_stage=stage
         )
-        is not None
-    ):
+    if active is not None:
         raise AppError(ErrorCode.INVALID_REQUEST, "这条对话还在生成中，等它说完或先点停止")
 
     chat_mode = str(request.get("chat_mode") or "continue")
@@ -267,25 +273,30 @@ def _create_chat_job(owner_id: int, solution_id: int | None, request: dict[str, 
     tool_result = request.get("tool_result")
     tool_result = tool_result if isinstance(tool_result, dict) else None
 
-    job_id = GenerationJobRepository.create(
-        owner_id, "chat", solution_id, None, doc_kind="", chat_stage=stage
-    )
+    with session_scope() as session:
+        job = GenerationJobRepository(session).create(
+            owner_id, "chat", solution_id, None, doc_kind="", chat_stage=stage
+        )
+        job_id = int(job.id or 0)
 
     # 「开新会话」没有用户输入（用户提交的是表单，界面上只显示 AI 的第一句）；
     # 「续聊」一定有一句用户输入。两种都落在同一条 `user`/`tool` 轮次上。
     if chat_mode != "start" and (content.strip() or tool_result is not None):
         role = "tool" if tool_result is not None else "user"
-        request["input_turn_id"] = ChatTurnRepository.create(
-            owner_id,
-            solution_id,
-            stage=stage,
-            role=role,
-            content=content,
-            job_id=job_id,
-            tool_call_id=str((tool_result or {}).get("tool_call_id") or ""),
-            tool_result=tool_result,
-            answers=(tool_result or {}).get("answers") if tool_result else None,
-        )
+        # 只包住「写这一条轮次」，不包住创建任务前后的其它调用：
+        # 事务越窄，撞锁的窗口越小，出错时也越好定位。
+        with session_scope() as session:
+            request["input_turn_id"] = ChatTurnRepository(session).create(
+                owner_id,
+                solution_id,
+                stage=stage,
+                role=role,
+                content=content,
+                job_id=job_id,
+                tool_call_id=str((tool_result or {}).get("tool_call_id") or ""),
+                tool_result=tool_result,
+                answers=(tool_result or {}).get("answers") if tool_result else None,
+            )
     request["job_id"] = job_id
     # 事件流只拿得到 `request`（`_build_event_stream(kind, request)`），
     # 而拼历史与写轮次都要 owner / 方案。放进来而不是另开参数：
@@ -323,7 +334,10 @@ def cancel_job(owner_id: int, job_id: int, *, message: str = "用户停止了生
             if runtime.kind == "chat":
                 runtime.chat_interrupted = True
             marked = True
-    persisted = GenerationJobRepository.cancel_one(owner_id, job_id, message=message)
+    with session_scope() as session:
+        persisted = GenerationJobRepository(session).cancel_one(
+            owner_id, job_id, message=message
+        )
     return marked or persisted
 
 
@@ -362,11 +376,52 @@ def cancel_for_solution(owner_id: int, solution_id: int) -> int:
     返回值取落库的受影响条数：那是「有多少任务确实从 running 变成 failed」的权威口径；
     内存标记的数量可能与之不同（运行时可能已经结束，只是行还没被读到）。
     """
-    affected = GenerationJobRepository.cancel_running(owner_id, solution_id=solution_id)
+    with session_scope() as session:
+        affected = GenerationJobRepository(session).cancel_running(
+            owner_id, solution_id=solution_id
+        )
     for runtime in _RUNTIMES.values():
         if runtime.owner_id == owner_id and runtime.solution_id == solution_id:
             runtime.cancelled = True
     return affected
+
+
+def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
+    """删除方案，并在**同一个事务**里把挂在它上面的在飞任务收成终态。
+
+    为什么合成一个函数
+    ------------------
+    「删方案」与「取消它的任务」原先由路由层分两次调用（各自一个事务），于是存在
+    一个真实的坏中间态：方案行已删掉、取消却没跑成——库里留下一批 `running` 的孤儿任务，
+    它们既没有归属可写正文，又会在重启后被 `reap_orphans` 当成「进程崩了」再报一次失败。
+
+    现在两件事同生共死：要么方案没了且任务已收，要么两件都没发生。
+    事务内先删再取消——顺序不影响原子性，但先判「方案在不在」能顺带挡掉
+    「方案不存在却把它的任务改成 failed」这种越界写。
+
+    为什么放在 `job_service` 而不是 `solution_service`
+    -------------------------------------------------
+    在途任务的协作式取消标记（`_RUNTIMES`）住在本模块；而本模块已经依赖
+    `solution_service`（收尾前要确认方案还在），让 `solution_service` 反向 import
+    就会成环。这里直接用仓储——`repositories` 是更下一层，不构成环。
+
+    Returns:
+        方案是否存在并被删除。`False` 表示不存在或不属于该用户（路由翻 404）。
+    """
+    with session_scope() as session:
+        # 同一条事务里**先删再取消**：事务内的顺序不影响原子性，但先判「方案在不在」
+        # 可以避免「方案不存在却把它的任务改成 failed」这种越界写。
+        deleted = SolutionRepository(session).delete(owner_id, solution_id)
+        if not deleted:
+            return False
+        GenerationJobRepository(session).cancel_running(owner_id, solution_id=solution_id)
+
+    # 落库之后才置内存标记：事务失败时不会留下「协程停了、库里还在跑」的错位。
+    # 这一刻到协程下一个事件点之间的窗口由 `_finalize` 的「方案不存在就不写文档」兜住。
+    for runtime in _RUNTIMES.values():
+        if runtime.owner_id == owner_id and runtime.solution_id == solution_id:
+            runtime.cancelled = True
+    return True
 
 
 def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务已取消") -> int:
@@ -384,7 +439,10 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
     与 `cancel_job`（单条）和 `cancel_for_solution`（单方案）同一套机制，区别只有
     过滤维度是 `owner_id`。
     """
-    affected = GenerationJobRepository.cancel_running_for_owner(owner_id, message=message)
+    with session_scope() as session:
+        affected = GenerationJobRepository(session).cancel_running_for_owner(
+            owner_id, message=message
+        )
     for runtime in _RUNTIMES.values():
         if runtime.owner_id == owner_id and runtime.status == STATUS_RUNNING:
             runtime.cancelled = True
@@ -615,7 +673,9 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
     """
     runtime = _RUNTIMES.get(job_id)
     if runtime is None or runtime.owner_id != owner_id:
-        row = GenerationJobRepository.get(owner_id, job_id)
+        with session_scope() as session:
+            job = GenerationJobRepository(session).get(owner_id, job_id)
+            row = job.model_dump() if job else None
         if row is None:
             return
         yield _db_snapshot_event(row)
@@ -652,7 +712,9 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
 
 def get_job(owner_id: int, job_id: int) -> dict[str, Any] | None:
     """读取单条任务（含全列）；不存在或越权返回 None。"""
-    return GenerationJobRepository.get(owner_id, job_id)
+    with session_scope() as session:
+        job = GenerationJobRepository(session).get(owner_id, job_id)
+        return job.model_dump() if job else None
 
 
 def list_jobs(
@@ -663,17 +725,20 @@ def list_jobs(
     status: str | None = None,
 ) -> list[dict[str, Any]]:
     """列出该 owner 的任务，可选按 solution_id / kind / status 过滤。"""
-    return GenerationJobRepository.list_by_owner(
-        owner_id,
-        status=status,
-        solution_id=solution_id,
-        kind=kind,
-    )
+    with session_scope() as session:
+        jobs = GenerationJobRepository(session).list_by_owner(
+            owner_id,
+            status=status,
+            solution_id=solution_id,
+            kind=kind,
+        )
+        return [job.model_dump() for job in jobs]
 
 
 def reap_orphans() -> None:
     """启动时回收上次残留的 running 任务（进程重启后运行时已丢失）。"""
-    GenerationJobRepository.reap_running()
+    with session_scope() as session:
+        GenerationJobRepository(session).reap_running()
 
 
 # ----------------------------------------------------------------------------
@@ -891,14 +956,15 @@ def _maybe_flush(runtime: JobRuntime) -> None:
     now = time.monotonic()
     grew = _live_len(runtime) - runtime.flushed_len
     if grew >= _FLUSH_BYTES or (now - runtime.last_flush_at) >= _FLUSH_INTERVAL_SECONDS:
-        GenerationJobRepository.persist_progress(
-            runtime.owner_id,
-            runtime.job_id,
-            draft_content=_draft(runtime),
-            completed_sections=runtime.completed_sections,
-            phase=runtime.phase,
-            pending_items=runtime.pending_items,
-        )
+        with session_scope() as session:
+            GenerationJobRepository(session).persist_progress(
+                runtime.owner_id,
+                runtime.job_id,
+                draft_content=_draft(runtime),
+                completed_sections=runtime.completed_sections,
+                phase=runtime.phase,
+                pending_items=runtime.pending_items,
+            )
         runtime.last_flush_at = now
         runtime.flushed_len = _live_len(runtime)
 
@@ -1023,33 +1089,35 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
         "provider_model": str(summary.get("model") or ""),
     }
     if status == "completed":
-        GenerationJobRepository.finish(
-            runtime.owner_id,
-            runtime.job_id,
-            draft_content=draft,
-            completed_sections=runtime.completed_sections,
-            usage=usage,
-            pending_items=runtime.pending_items,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            provider=provider_snapshot,
-        )
+        with session_scope() as session:
+            GenerationJobRepository(session).finish(
+                runtime.owner_id,
+                runtime.job_id,
+                draft_content=draft,
+                completed_sections=runtime.completed_sections,
+                usage=usage,
+                pending_items=runtime.pending_items,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                provider=provider_snapshot,
+            )
         _write_document(runtime, summary)
     else:
-        GenerationJobRepository.fail(
-            runtime.owner_id,
-            runtime.job_id,
-            error_code=runtime.error_code or ErrorCode.INTERNAL_ERROR.value,
-            error_message=runtime.error_message or "生成失败",
-            draft_content=draft,
-            completed_sections=runtime.completed_sections,
-            # 失败的任务同样烧了 token，用量一并落库——不然「这次为什么这么贵」无从追溯
-            usage=usage,
-            pending_items=runtime.pending_items,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            provider=provider_snapshot,
-        )
+        with session_scope() as session:
+            GenerationJobRepository(session).fail(
+                runtime.owner_id,
+                runtime.job_id,
+                error_code=runtime.error_code or ErrorCode.INTERNAL_ERROR.value,
+                error_message=runtime.error_message or "生成失败",
+                draft_content=draft,
+                completed_sections=runtime.completed_sections,
+                # 失败的任务同样烧了 token，用量一并落库——不然「这次为什么这么贵」无从追溯
+                usage=usage,
+                pending_items=runtime.pending_items,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                provider=provider_snapshot,
+            )
 
     # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`
     # 后会去拉轮次表，晚一步就会拉到「还没有这一轮」的空列表，表现为
@@ -1087,26 +1155,30 @@ def _write_chat_turn(runtime: JobRuntime) -> None:
     if not content:
         return
     try:
-        ChatTurnRepository.create(
-            runtime.owner_id,
-            runtime.solution_id,
-            stage=runtime.chat_stage,
-            role="assistant",
-            content=content,
-            job_id=runtime.job_id,
-            asks=runtime.chat_asks or None,
-            tool_calls=runtime.chat_tool_calls or None,
-            interrupted=bool(runtime.chat_interrupted),
-        )
-        # 会话 id 随收尾落库：下一轮续聊直接命中内存记录，省一次历史重放。
-        # 它只是加速器——命中不了会自动降级，丢了也不影响正确性。
-        if runtime.chat_conversation_id:
-            ChatSessionRepository.set(
+        # 轮次与会话 id 必须在**同一个事务**里写：只落轮次而没落会话 id，
+        # 下一轮续聊就会重放历史（正确但慢）；反之只落会话 id 而没落轮次，
+        # 上下文里会缺一条助手回复——那是不报错的错。
+        with session_scope() as session:
+            ChatTurnRepository(session).create(
                 runtime.owner_id,
                 runtime.solution_id,
-                runtime.chat_stage,
-                runtime.chat_conversation_id,
+                stage=runtime.chat_stage,
+                role="assistant",
+                content=content,
+                job_id=runtime.job_id,
+                asks=runtime.chat_asks or None,
+                tool_calls=runtime.chat_tool_calls or None,
+                interrupted=bool(runtime.chat_interrupted),
             )
+            # 会话 id 随收尾落库：下一轮续聊直接命中内存记录，省一次历史重放。
+            # 它只是加速器——命中不了会自动降级，丢了也不影响正确性。
+            if runtime.chat_conversation_id:
+                ChatSessionRepository(session).set(
+                    runtime.owner_id,
+                    runtime.solution_id,
+                    runtime.chat_stage,
+                    runtime.chat_conversation_id,
+                )
     except Exception:  # noqa: BLE001 - 落库失败不该让已经成功的一轮变成失败
         logger.exception(
             "写入对话轮次失败",
@@ -1484,16 +1556,21 @@ async def _chat_events(request: dict[str, Any]) -> AsyncIterator[StreamEvent]:
         form_data = form_data if isinstance(form_data, dict) else {}
 
         def _persist_opening(text: str) -> None:
-            """把开场白落成 `system` 轮次（不展示，只作为后续轮次的上下文）。"""
+            """把开场白落成 `system` 轮次（不展示，只作为后续轮次的上下文）。
+
+            本函数是**同步**的，`with` 块里没有 `await`——它是流里的一个回调，
+            数据库那几行写完就归还连接，不会握着池连接去等模型输出。
+            """
             if solution_id and text.strip():
-                ChatTurnRepository.create(
-                    owner_id,
-                    solution_id,
-                    stage=stage,
-                    role="system",
-                    content=text,
-                    job_id=int(request.get("job_id") or 0) or None,
-                )
+                with session_scope() as session:
+                    ChatTurnRepository(session).create(
+                        owner_id,
+                        solution_id,
+                        stage=stage,
+                        role="system",
+                        content=text,
+                        job_id=int(request.get("job_id") or 0) or None,
+                    )
 
         async for event in service.start_conversation_stream(
             form_data,
@@ -1505,18 +1582,22 @@ async def _chat_events(request: dict[str, Any]) -> AsyncIterator[StreamEvent]:
         return
 
     input_turn_id = int(request.get("input_turn_id") or 0)
-    rows = (
-        ChatTurnRepository.list_history(
-            owner_id, solution_id, stage, before_id=input_turn_id
-        )
-        if input_turn_id
-        else []
-    )
-    history = [to_history_item(row) for row in rows]
+    # 历史、会话 id 各开一次短会话：两次读之间没有一致性要求（会话 id 变了，
+    # 下一轮本来就会因为 `SESSION_NOT_FOUND` 降级重放历史），而把两次读塞进
+    # 一个事务会让这段代码在流开始之前多持有一条连接。
+    if input_turn_id:
+        with session_scope() as session:
+            rows = ChatTurnRepository(session).list_history(
+                owner_id, solution_id, stage, before_id=input_turn_id
+            )
+            history = [to_history_item(row) for row in rows]
+    else:
+        history = []
     content = str(request.get("content") or "")
     tool_result = request.get("tool_result")
     tool_result = tool_result if isinstance(tool_result, dict) else None
-    conversation_id = ChatSessionRepository.get(owner_id, solution_id, stage)
+    with session_scope() as session:
+        conversation_id = ChatSessionRepository(session).get(owner_id, solution_id, stage)
 
     def _stream(cid: str) -> AsyncIterator[StreamEvent]:
         return service.continue_conversation_stream(
@@ -1547,4 +1628,6 @@ async def _chat_events(request: dict[str, Any]) -> AsyncIterator[StreamEvent]:
         # 只重试一次——再失败就是真的失败，无限重试会把一次故障放大成一次风暴。
         retried = True
         cid = ""
-        ChatSessionRepository.set(owner_id, solution_id, stage, "")
+        # 清掉失效的会话 id：短事务，块内没有 `await`。
+        with session_scope() as session:
+            ChatSessionRepository(session).set(owner_id, solution_id, stage, "")

@@ -17,9 +17,13 @@ import asyncio
 import json
 
 import pytest
-from conftest import register
+from conftest import register, users
 
+from sqlalchemy import func, select
+
+from backend.core.engine import session_scope
 from backend.core.errors import AppError
+from backend.core.models import ChatTurn
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.services import conversation_service, job_service
 from fakes import ScriptedLLM
@@ -41,7 +45,7 @@ def alice(client):
     register(client)
     from backend.services import auth_service
 
-    user = auth_service.UserRepository.get_by_username("alice")
+    user = users.get_by_username("alice")
     assert user is not None
     created = client.post("/api/solutions", json={"title": "对话方案"})
     assert created.status_code == 201, created.text
@@ -95,8 +99,10 @@ def _run(owner_id: int, solution_id: int, request: dict) -> tuple[int, list, dic
     return asyncio.run(scenario())
 
 
-def _turns(owner_id: int, solution_id: int, stage: str = "requirement") -> list[dict]:
-    return ChatTurnRepository.list_thread(owner_id, solution_id, stage)
+def _turns(owner_id: int, solution_id: int, stage: str = "requirement"):
+    """读某条线程的全部轮次（返回 `ChatTurn` 模型对象）。"""
+    with session_scope() as session:
+        return ChatTurnRepository(session).list_thread(owner_id, solution_id, stage)
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +123,11 @@ def test_start_writes_opening_and_assistant_turns(client, alice, monkeypatch):
 
     assert any(event.type == "done" for event in events)
     turns = _turns(owner_id, solution_id)
-    assert [turn["role"] for turn in turns] == ["system", "assistant"]
+    assert [turn.role for turn in turns] == ["system", "assistant"]
     # 开场白是「喂给模型但不展示给用户」的那部分上下文：不存它，第二轮模型就只看到
     # 自己上一句话，完全不知道用户提交过什么
-    assert turns[0]["content"].strip() != ""
-    assert turns[1]["content"] == "你好，我先问三个问题。"
+    assert turns[0].content.strip() != ""
+    assert turns[1].content == "你好，我先问三个问题。"
 
 
 def test_continue_appends_user_and_assistant_turns(client, alice, monkeypatch):
@@ -143,9 +149,9 @@ def test_continue_appends_user_and_assistant_turns(client, alice, monkeypatch):
 
     assert any(event.type == "done" for event in events)
     turns = _turns(owner_id, solution_id)
-    assert [turn["role"] for turn in turns] == ["system", "assistant", "user", "assistant"]
-    assert turns[-2]["content"] == "再说细一点"
-    assert turns[-2]["job_id"] == request["job_id"]
+    assert [turn.role for turn in turns] == ["system", "assistant", "user", "assistant"]
+    assert turns[-2].content == "再说细一点"
+    assert turns[-2].job_id == request["job_id"]
 
 
 def test_history_comes_from_turns_not_from_request(client, alice, monkeypatch):
@@ -280,12 +286,12 @@ def test_cancel_stops_and_keeps_partial_reply(client, alice, monkeypatch):
 
     job_id, _ = asyncio.run(scenario())
 
-    turns = [turn for turn in _turns(owner_id, solution_id) if turn["role"] == "assistant"]
+    turns = [turn for turn in _turns(owner_id, solution_id) if turn.role == "assistant"]
     assert len(turns) == 1
-    assert turns[0]["interrupted"] == 1
+    assert turns[0].interrupted is True
     # 已经说出口的话要留下——用户按停止通常是「够了」，不是「不要了」
-    assert "很长的一段" in turns[0]["content"]
-    assert turns[0]["job_id"] == job_id
+    assert "很长的一段" in turns[0].content
+    assert turns[0].job_id == job_id
 
 
 def test_cancel_finished_job_reports_false(client, alice, monkeypatch):
@@ -325,8 +331,8 @@ def test_tool_answer_is_stored_as_tool_but_served_as_user(client, alice, monkeyp
     )
 
     stored = _turns(owner_id, solution_id)
-    assert stored[0]["role"] == "tool"
-    assert stored[0]["tool_call_id"] == "call-1"
+    assert stored[0].role == "tool"
+    assert stored[0].tool_call_id == "call-1"
 
     response = client.get(
         f"/api/solutions/{solution_id}/turns", params={"stage": "requirement"}
@@ -413,8 +419,62 @@ def test_done_carries_clarification_asks_into_the_turn(monkeypatch, client, alic
     )
     js._write_chat_turn(runtime)  # noqa: SLF001
 
-    assistant = [t for t in _turns(owner_id, solution_id) if t["role"] == "assistant"]
+    assistant = [t for t in _turns(owner_id, solution_id) if t.role == "assistant"]
     assert len(assistant) == 1
-    stored = json.loads(assistant[0]["asks"])
+    stored = json.loads(assistant[0].asks)
     assert len(stored) == 1
     assert stored[0]["question"] == "目标用户是谁？"
+
+
+def test_duplicate_turn_is_idempotent_even_without_the_precheck(alice, monkeypatch):
+    """预检漏掉时，唯一索引 `ux_chat_turns_job_role` + SAVEPOINT 必须兜住幂等写。
+
+    这是 v6 重写里最容易悄悄坏掉的一段。旧实现是 `INSERT OR IGNORE` + 回查——
+    一行 SQL 自带幂等；新实现是「先查 → 没有才插」，于是「两个请求同时查到没有」
+    这个窗口就只剩唯一索引一道门。
+
+    兜不住的症状不是报错，而是三种更难查的形态：撞成 500、flush 失败把**整个**外层
+    事务带塌（同一事务里已经写好的东西一起丢）、或者安静地多写一条让对话出现重复。
+
+    这里把第一次预检人为改成「没查到」来复现那个窗口，不做真并发（真并发只能靠
+    撞运气，而守卫不能靠运气）。
+    """
+    owner_id, solution_id = alice
+    with session_scope() as session:
+        first = ChatTurnRepository(session).create(
+            owner_id,
+            solution_id,
+            stage="requirement",
+            role="assistant",
+            content="第一句",
+            job_id=42,
+        )
+    assert first > 0
+
+    real_find = ChatTurnRepository._find_id_by_job_role  # noqa: SLF001 - 刻意替换私有实现
+    calls = {"n": 0}
+
+    def fake_find(self, job_id: int, role: str) -> int | None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # 模拟「并发的另一边还没提交」
+        return real_find(self, job_id, role)
+
+    monkeypatch.setattr(ChatTurnRepository, "_find_id_by_job_role", fake_find)
+
+    with session_scope() as session:
+        again = ChatTurnRepository(session).create(
+            owner_id,
+            solution_id,
+            stage="requirement",
+            role="assistant",
+            content="第二句",
+            job_id=42,
+        )
+        count = session.execute(
+            select(func.count()).select_from(ChatTurn).where(ChatTurn.job_id == 42)
+        ).scalar_one()
+
+    assert calls["n"] == 2, "应当先预检一次、撞索引后再回查一次"
+    assert again == first, "撞唯一索引后必须回查到同一条，而不是 0 或新 id"
+    assert count == 1, "只该有一行：幂等写不许留下第二条"

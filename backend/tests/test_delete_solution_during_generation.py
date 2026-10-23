@@ -27,9 +27,9 @@ import threading
 import time
 from typing import Any, AsyncIterator
 
-from conftest import register
+from conftest import register, users
 
-from backend.repositories.generation_job_repo import GenerationJobRepository
+from conftest import job_get
 from backend.services import auth_service, document_service, document_store
 from fakes import ScriptedLLM
 
@@ -69,7 +69,7 @@ def _install_doc_service(monkeypatch, gate: threading.Event) -> _GatedLLM:
 
 
 def _owner_id() -> int:
-    user = auth_service.UserRepository.get_by_username("alice")
+    user = users.get_by_username("alice")
     assert user is not None
     return int(user["id"])
 
@@ -95,10 +95,10 @@ def _start_prd_job(client, solution_id: int) -> int:
 def _wait_settled(owner_id: int, job_id: int) -> dict[str, Any]:
     """轮询任务终态；超时就让用例失败（把最后一行带出去便于排查）。"""
     deadline = time.monotonic() + _SETTLE_TIMEOUT_SECONDS
-    row = GenerationJobRepository.get(owner_id, job_id)
+    row = job_get(owner_id, job_id)
     while row is not None and row["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.02)
-        row = GenerationJobRepository.get(owner_id, job_id)
+        row = job_get(owner_id, job_id)
     assert row is not None, "任务行被删掉了：用量审计要靠它，必须保留"
     assert row["status"] != "running", f"任务没有收尾：{row}"
     return row
@@ -144,7 +144,7 @@ def test_delete_solution_mid_generation_leaves_no_document(client, monkeypatch):
     job_id = _start_prd_job(client, solution_id)
 
     # 任务此刻真的在跑（模型调用被闸住），并且一次都还没产出
-    running = GenerationJobRepository.get(owner_id, job_id)
+    running = job_get(owner_id, job_id)
     assert running is not None
     assert running["status"] == "running"
     assert llm.calls == []
@@ -163,7 +163,7 @@ def test_delete_solution_mid_generation_leaves_no_document(client, monkeypatch):
     assert row["status"] == "failed"
     assert row["error_code"] == "CANCELLED"
     # 4. 任务行仍在：用完量审计要能查到「这次烧了 token 但没产出」
-    assert GenerationJobRepository.get(owner_id, job_id) is not None
+    assert job_get(owner_id, job_id) is not None
 
 
 def test_delete_solution_mid_generation_does_not_touch_other_solutions(client, monkeypatch):

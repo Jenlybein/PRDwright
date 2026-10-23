@@ -22,7 +22,8 @@ import json
 import pytest
 from conftest import register
 
-from backend.core.db import utc_ms_text, utc_now
+from backend.core.clock import utc_ms_text, utc_now
+from backend.core.engine import session_scope
 from backend.repositories.log_repo import LogRepository
 
 
@@ -32,6 +33,12 @@ def _as_admin(client, username: str = "root") -> None:
 
     register(client, username)
     auth_service.set_admin(username, True)
+
+
+def _insert_many(rows: list[dict]) -> int:
+    """写一批日志（仓库不再自己提交，事务由这里显式开）。"""
+    with session_scope() as session:
+        return LogRepository(session).insert_many(rows)
 
 
 def _row(**overrides) -> dict:
@@ -89,7 +96,7 @@ def _no_async_log_writes(isolated_db, monkeypatch):  # noqa: ARG001
 def test_logs_endpoint_returns_items_and_total(client):
     """基本形状：返回一页日志与**命中总数**。"""
     _as_admin(client)
-    LogRepository.insert_many(
+    _insert_many(
         [
             _row(msg="第一条", event="job.started", extra_json=json.dumps({"job_id": 1})),
             _row(msg="第二条", level="ERROR", event="job.failed"),
@@ -116,7 +123,7 @@ def test_level_filter_includes_higher_levels(client):
     而「出事了先看有哪些异常」正是他打开这个页面的原因。
     """
     _as_admin(client)
-    LogRepository.insert_many(
+    _insert_many(
         [
             _row(msg="普通", level="INFO"),
             _row(msg="警告", level="WARNING"),
@@ -135,7 +142,7 @@ def test_level_filter_includes_higher_levels(client):
 def test_request_id_lookup_returns_whole_trace(client):
     """粘一个请求号，拉出该请求的**全部**日志（排障主路径）。"""
     _as_admin(client)
-    LogRepository.insert_many(
+    _insert_many(
         [
             _row(msg="这次请求的 1", request_id="req-abc", event="job.started"),
             _row(msg="这次请求的 2", request_id="req-abc", event="job.stage"),
@@ -160,7 +167,7 @@ def test_request_id_lookup_returns_whole_trace(client):
 def test_pagination_reports_total_not_page_size(client):
     """`total` 是命中总数，`items` 只是当前页——否则前端算不出页数。"""
     _as_admin(client)
-    LogRepository.insert_many([_row(msg=f"日志 {index}") for index in range(25)])
+    _insert_many([_row(msg=f"日志 {index}") for index in range(25)])
 
     first = client.get("/api/admin/logs", params={"page": 1, "page_size": 10})
     assert first.status_code == 200, first.text
@@ -184,7 +191,7 @@ def test_keyword_percent_is_literal_not_wildcard(client):
     而他不会想到是通配符在作祟。
     """
     _as_admin(client)
-    LogRepository.insert_many(
+    _insert_many(
         [
             _row(msg="完成度 50% 左右"),
             _row(msg="完全无关的一条"),
@@ -201,7 +208,7 @@ def test_keyword_percent_is_literal_not_wildcard(client):
 def test_event_and_user_filters(client):
     """按 event 精确筛、按 user_id 归属筛。"""
     _as_admin(client)
-    LogRepository.insert_many(
+    _insert_many(
         [
             _row(msg="A", event="job.started", user_id=7),
             _row(msg="B", event="job.failed", user_id=7),
@@ -224,7 +231,7 @@ def test_exclude_event_hides_access_logs_but_keeps_null_events(client):
     启动日志、迁移日志这类最该看得见的东西，且丢掉时不报错、只是「少了几行」。
     """
     _as_admin(client)
-    LogRepository.insert_many(
+    _insert_many(
         [
             _row(msg="业务起点", event="job.started"),
             _row(msg="访问日志 1", event="request.completed"),
@@ -250,7 +257,7 @@ def test_broken_extra_json_degrades_to_empty_object(client):
     一条格式异常的旧日志不该让整个列表 500（那时管理员恰恰最需要看到列表）。
     """
     _as_admin(client)
-    LogRepository.insert_many([_row(msg="坏 JSON", extra_json="{不是合法 JSON")])
+    _insert_many([_row(msg="坏 JSON", extra_json="{不是合法 JSON")])
 
     response = client.get("/api/admin/logs")
     assert response.status_code == 200, response.text

@@ -8,6 +8,13 @@
 - `AdminStatsRepository`：**只读**，把「每个用户用了多少」变成一条 SQL。
 - `AuditRepository`：**只追加**，管理员每次写操作落一行。
 
+为什么聚合结果用 `@dataclass` 而不是裸 `dict`
+-------------------------------------------
+`GROUP BY` 的结果不是任何一张表的行，没有对应的模型类；但裸 dict 会把「有哪些字段」
+变成运行期才知道的事，调用方写错一个键要到用户点开后台才报 500。这里用**不可变投影**
+（frozen dataclass）把形状钉死：少一个字段是导入期就能发现的 `TypeError`，
+而不是线上的一条 KeyError。
+
 审计为什么不加外键
 ------------------
 `actor_id` 指向 `users(id)` 但**刻意不设外键约束**：管理员账号被删之后，
@@ -17,10 +24,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from backend.core.db import connect, utc_now, utc_now_text
+from sqlalchemy import and_, case, func, select
+from sqlmodel import Session
+
+from backend.core.clock import utc_now, utc_now_text
+from backend.core.models import AdminAuditLog, GenerationJob, User
 
 # 审计一次最多返回多少行。它是给人翻的，不是给机器导的：
 # 真要做全量导出应该另开口子，而不是把这里的上限调到无穷大。
@@ -33,20 +45,120 @@ _AUDIT_MAX_ROWS = 500
 # 正是最不该被污染的一个判断。
 _NOT_REAL_FAILURE = ("CANCELLED", "SUPERSEDED")
 
-# 用户用量的聚合表达式。**只写一份**：用户列表、排行、平台总量三处都引它，
-# 否则「这个用户用了多少」迟早会出现两个数，而没人知道该信哪个。
-_USER_USAGE_SELECT = (
-    "       COUNT(j.id)                               AS task_count, "
-    "       COALESCE(SUM(j.prompt_tokens), 0)            AS prompt_tokens, "
-    "       COALESCE(SUM(j.completion_tokens), 0)        AS completion_tokens "
-)
+
+@dataclass(frozen=True, slots=True)
+class UserUsage:
+    """用户列表的一行：账号基本信息 + 累计用量 + 额度覆盖值。"""
+
+    id: int
+    username: str
+    created_at: str
+    is_active: bool
+    is_admin: bool
+    # 额度覆盖原值（v17）。生效值要靠这三列与全局默认换算——换算规则只在
+    # `quota_service.resolve_from` 一处实现，这里只负责把原值带出来。
+    daily_task_limit: int
+    daily_token_limit: int
+    max_running: int
+    task_count: int
+    prompt_tokens: int
+    completion_tokens: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "username": self.username,
+            "created_at": self.created_at,
+            "is_active": self.is_active,
+            "is_admin": self.is_admin,
+            "daily_task_limit": self.daily_task_limit,
+            "daily_token_limit": self.daily_token_limit,
+            "max_running": self.max_running,
+            "task_count": self.task_count,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TopUser:
+    """排行榜的一行（只列真的生成过任务的人）。"""
+
+    id: int
+    username: str
+    is_active: bool
+    task_count: int
+    prompt_tokens: int
+    completion_tokens: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "username": self.username,
+            "is_active": self.is_active,
+            "task_count": self.task_count,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformUsage:
+    """平台总量。"""
+
+    user_count: int
+    admin_count: int
+    task_count: int
+    completed_count: int
+    prompt_tokens: int
+    completion_tokens: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "user_count": self.user_count,
+            "admin_count": self.admin_count,
+            "task_count": self.task_count,
+            "completed_count": self.completed_count,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DailyUsage:
+    """按本地日期聚合的一天。`failure_rate` 为 None 表示那天没有已收尾任务。"""
+
+    day: str
+    task_count: int
+    completed_count: int
+    failed_count: int
+    cancelled_count: int
+    running_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    failure_rate: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "day": self.day,
+            "task_count": self.task_count,
+            "completed_count": self.completed_count,
+            "failed_count": self.failed_count,
+            "cancelled_count": self.cancelled_count,
+            "running_count": self.running_count,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "failure_rate": self.failure_rate,
+        }
 
 
 class AdminStatsRepository:
     """管理员后台的统计查询。全部只读，不产生任何副作用。"""
 
-    @staticmethod
-    def user_usage() -> list[dict[str, Any]]:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def user_usage(self) -> list[UserUsage]:
         """每个用户的任务数与 Token 合计。
 
         用 `LEFT JOIN` 而不是先查用户再逐个统计：**没有生成过任务的用户也要出现**
@@ -56,45 +168,82 @@ class AdminStatsRepository:
         Token 读的是迁移 v14 加的两列，不是解析 `usage` 的 JSON——
         后者要把每一行取回 Python，量一大就跑不动。
         """
-        with connect() as conn:
-            rows = conn.execute(
-                "SELECT u.id, u.username, u.created_at, u.is_active, u.is_admin, "
-                # 额度覆盖值（v17）。列表要显示「生效上限」，而生效值要靠这三列
-                # 与全局默认换算——不在 SQL 里算，是因为规则（-1/0/N）只在
-                # `quota_service.resolve_from` 一处实现，SQL 里再写一遍必然漂移。
-                "       u.daily_task_limit, u.daily_token_limit, u.max_running, "
-                + _USER_USAGE_SELECT
-                + "FROM users u "
-                "LEFT JOIN generation_jobs j ON j.owner_id = u.id "
-                "GROUP BY u.id "
-                "ORDER BY u.id"
-            ).fetchall()
-            return [dict(row) for row in rows]
+        stmt = (
+            select(
+                User.id,
+                User.username,
+                User.created_at,
+                User.is_active,
+                User.is_admin,
+                User.daily_task_limit,
+                User.daily_token_limit,
+                User.max_running,
+                func.count(GenerationJob.id).label("task_count"),
+                func.coalesce(func.sum(GenerationJob.prompt_tokens), 0).label("prompt_tokens"),
+                func.coalesce(func.sum(GenerationJob.completion_tokens), 0).label(
+                    "completion_tokens"
+                ),
+            )
+            .select_from(User)
+            .join(GenerationJob, GenerationJob.owner_id == User.id, isouter=True)
+            .group_by(User.id)
+            .order_by(User.id)
+        )
+        return [
+            UserUsage(
+                id=int(row[0] or 0),
+                username=str(row[1]),
+                created_at=str(row[2] or ""),
+                is_active=bool(row[3]),
+                is_admin=bool(row[4]),
+                daily_task_limit=int(row[5]),
+                daily_token_limit=int(row[6]),
+                max_running=int(row[7]),
+                task_count=int(row[8]),
+                prompt_tokens=int(row[9]),
+                completion_tokens=int(row[10]),
+            )
+            for row in self.session.execute(stmt).all()
+        ]
 
-    @staticmethod
-    def platform_usage() -> dict[str, Any]:
+    def platform_usage(self) -> PlatformUsage:
         """平台总量：用户数、任务数、Token 合计。
 
-        单独一条 SQL 而不是把 `user_usage()` 的结果在 Python 里加总——
+        单独一条查询而不是把 `user_usage()` 的结果在 Python 里加总——
         列表为了展示可能分页或裁剪，拿它算总量会悄悄算少。
         """
-        with connect() as conn:
-            row = conn.execute(
-                "SELECT "
-                "  (SELECT COUNT(*) FROM users)                          AS user_count, "
-                "  (SELECT COUNT(*) FROM users WHERE is_admin = 1)       AS admin_count, "
-                "  (SELECT COUNT(*) FROM generation_jobs)                AS task_count, "
-                "  (SELECT COUNT(*) FROM generation_jobs "
-                "     WHERE status = 'completed')                        AS completed_count, "
-                "  (SELECT COALESCE(SUM(prompt_tokens), 0) "
-                "     FROM generation_jobs)                              AS prompt_tokens, "
-                "  (SELECT COALESCE(SUM(completion_tokens), 0) "
-                "     FROM generation_jobs)                              AS completion_tokens"
-            ).fetchone()
-            return dict(row) if row else {}
 
-    @staticmethod
-    def daily(days: int, tz_offset_minutes: int) -> list[dict[str, Any]]:
+        def _count(from_clause: Any, *where: Any) -> Any:
+            stmt = select(func.count()).select_from(from_clause)
+            for clause in where:
+                stmt = stmt.where(clause)
+            return stmt.scalar_subquery()
+
+        def _sum(column: Any) -> Any:
+            return select(func.coalesce(func.sum(column), 0)).scalar_subquery()
+
+        row = self.session.execute(
+            select(
+                _count(User).label("user_count"),
+                _count(User, User.is_admin.is_(True)).label("admin_count"),
+                _count(GenerationJob).label("task_count"),
+                _count(GenerationJob, GenerationJob.status == "completed").label(
+                    "completed_count"
+                ),
+                _sum(GenerationJob.prompt_tokens).label("prompt_tokens"),
+                _sum(GenerationJob.completion_tokens).label("completion_tokens"),
+            )
+        ).one()
+        return PlatformUsage(
+            user_count=int(row[0] or 0),
+            admin_count=int(row[1] or 0),
+            task_count=int(row[2] or 0),
+            completed_count=int(row[3] or 0),
+            prompt_tokens=int(row[4] or 0),
+            completion_tokens=int(row[5] or 0),
+        )
+
+    def daily(self, days: int, tz_offset_minutes: int) -> list[DailyUsage]:
         """按**本地日期**聚合最近 `days` 天（含今天），缺数据的日子补 0。
 
         为什么按本地日期而不是 UTC 日期
@@ -124,7 +273,7 @@ class AdminStatsRepository:
             tz_offset_minutes: 相对 UTC 的分钟偏移（东八区为 480）。
 
         Returns:
-            按日期升序的每一天，字段见下方 `day_row`。
+            按日期升序的每一天。
         """
         safe_days = max(1, min(int(days), 365))
         offset = f"{int(tz_offset_minutes):+d} minutes"
@@ -133,86 +282,136 @@ class AdminStatsRepository:
         # 再在结果集里换时区。多留一天余量：时区换算会让「本地窗口的第一天」
         # 落在 UTC 的再前一天，卡得太紧会把边界那几条默默漏掉。
         cutoff = (utc_now() - timedelta(days=safe_days + 1)).isoformat()
-        with connect() as conn:
-            rows = conn.execute(
-                "SELECT substr(datetime(created_at, ?), 1, 10) AS day, "
-                "       COUNT(*)                                  AS task_count, "
-                "       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count, "
-                "       SUM(CASE WHEN status = 'failed' "
-                "                 AND error_code NOT IN (?, ?) THEN 1 ELSE 0 END) AS failed_count, "
-                "       SUM(CASE WHEN status = 'failed' "
-                "                 AND error_code IN (?, ?) THEN 1 ELSE 0 END)     AS cancelled_count, "
-                "       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END)    AS running_count, "
-                "       COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens, "
-                "       COALESCE(SUM(completion_tokens), 0) AS completion_tokens "
-                "FROM generation_jobs "
-                "WHERE created_at >= ? "
-                "GROUP BY day "
-                "ORDER BY day",
-                (offset, *_NOT_REAL_FAILURE, *_NOT_REAL_FAILURE, cutoff),
-            ).fetchall()
 
-        by_day = {row["day"]: dict(row) for row in rows}
+        day_of = func.substr(func.datetime(GenerationJob.created_at, offset), 1, 10)
+        status_is = lambda value: GenerationJob.status == value  # noqa: E731
+        real_failure = and_(
+            status_is("failed"), GenerationJob.error_code.notin_(_NOT_REAL_FAILURE)
+        )
+        not_real_failure = and_(
+            status_is("failed"), GenerationJob.error_code.in_(_NOT_REAL_FAILURE)
+        )
+
+        stmt = (
+            select(
+                day_of.label("day"),
+                func.count().label("task_count"),
+                func.sum(case((status_is("completed"), 1), else_=0)).label("completed_count"),
+                func.sum(case((real_failure, 1), else_=0)).label("failed_count"),
+                func.sum(case((not_real_failure, 1), else_=0)).label("cancelled_count"),
+                func.sum(case((status_is("running"), 1), else_=0)).label("running_count"),
+                func.coalesce(func.sum(GenerationJob.prompt_tokens), 0).label("prompt_tokens"),
+                func.coalesce(func.sum(GenerationJob.completion_tokens), 0).label(
+                    "completion_tokens"
+                ),
+            )
+            .where(GenerationJob.created_at >= cutoff)
+            .group_by(day_of)
+            .order_by(day_of)
+        )
+
+        by_day: dict[str, dict[str, Any]] = {
+            str(row[0]): {
+                "task_count": int(row[1] or 0),
+                "completed_count": int(row[2] or 0),
+                "failed_count": int(row[3] or 0),
+                "cancelled_count": int(row[4] or 0),
+                "running_count": int(row[5] or 0),
+                "prompt_tokens": int(row[6] or 0),
+                "completion_tokens": int(row[7] or 0),
+            }
+            for row in self.session.execute(stmt).all()
+        }
 
         # 补齐日期：从「本地今天」往前倒推 days-1 天
         today = (utc_now() + timedelta(minutes=int(tz_offset_minutes))).date()
-        result: list[dict[str, Any]] = []
+        result: list[DailyUsage] = []
         for i in range(safe_days - 1, -1, -1):
             day = (today - timedelta(days=i)).isoformat()
-            row = by_day.get(day)
-            if row is None:
-                row = {
-                    "day": day,
-                    "task_count": 0,
-                    "completed_count": 0,
-                    "failed_count": 0,
-                    "cancelled_count": 0,
-                    "running_count": 0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                }
+            row = by_day.get(day) or {
+                "task_count": 0,
+                "completed_count": 0,
+                "failed_count": 0,
+                "cancelled_count": 0,
+                "running_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            }
             # 失败率由后端算好：前端各算一遍就会与这里漂移
             finished = int(row["completed_count"]) + int(row["failed_count"])
-            row["failure_rate"] = (
-                round(int(row["failed_count"]) / finished, 4) if finished else None
+            result.append(
+                DailyUsage(
+                    day=day,
+                    task_count=int(row["task_count"]),
+                    completed_count=int(row["completed_count"]),
+                    failed_count=int(row["failed_count"]),
+                    cancelled_count=int(row["cancelled_count"]),
+                    running_count=int(row["running_count"]),
+                    prompt_tokens=int(row["prompt_tokens"]),
+                    completion_tokens=int(row["completion_tokens"]),
+                    failure_rate=(
+                        round(int(row["failed_count"]) / finished, 4) if finished else None
+                    ),
+                )
             )
-            result.append(row)
         return result
 
-    @staticmethod
-    def top_users(limit: int = 10) -> list[dict[str, Any]]:
+    def top_users(self, limit: int = 10) -> list[TopUser]:
         """用量最高的用户。
 
-        与 `user_usage()` 共用同一段聚合表达式（`_USER_USAGE_SELECT`）：
-        「这个用户用了多少」只能有一个算法，否则用户列表与排行榜会给出两个数。
+        「这个用户用了多少」只能有一个算法，否则用户列表与排行榜会给出两个数
+        ——两边都按同一组聚合列来数。
 
         只列**真的生成过任务**的人：排行榜里塞一堆 0 没有意义，还会把真用户挤下去。
         排序先按任务数、再按总 Token——任务数相同的人里，烧得多的那个更值得注意。
         """
         safe_limit = max(1, min(int(limit), 100))
-        with connect() as conn:
-            rows = conn.execute(
-                "SELECT u.id, u.username, u.is_active, "
-                + _USER_USAGE_SELECT
-                + "FROM users u "
-                "JOIN generation_jobs j ON j.owner_id = u.id "
-                "GROUP BY u.id "
-                "HAVING COUNT(j.id) > 0 "
-                "ORDER BY task_count DESC, "
-                "         (COALESCE(SUM(j.prompt_tokens), 0) + "
-                "          COALESCE(SUM(j.completion_tokens), 0)) DESC, "
-                "         u.id ASC "
-                "LIMIT ?",
-                (safe_limit,),
-            ).fetchall()
-            return [dict(row) for row in rows]
+        total_tokens = func.coalesce(func.sum(GenerationJob.prompt_tokens), 0) + func.coalesce(
+            func.sum(GenerationJob.completion_tokens), 0
+        )
+        stmt = (
+            select(
+                User.id,
+                User.username,
+                User.is_active,
+                func.count(GenerationJob.id).label("task_count"),
+                func.coalesce(func.sum(GenerationJob.prompt_tokens), 0).label("prompt_tokens"),
+                func.coalesce(func.sum(GenerationJob.completion_tokens), 0).label(
+                    "completion_tokens"
+                ),
+            )
+            .select_from(User)
+            .join(GenerationJob, GenerationJob.owner_id == User.id)
+            .group_by(User.id)
+            .having(func.count(GenerationJob.id) > 0)
+            .order_by(
+                func.count(GenerationJob.id).desc(),
+                total_tokens.desc(),
+                User.id.asc(),
+            )
+            .limit(safe_limit)
+        )
+        return [
+            TopUser(
+                id=int(row[0] or 0),
+                username=str(row[1]),
+                is_active=bool(row[2]),
+                task_count=int(row[3]),
+                prompt_tokens=int(row[4]),
+                completion_tokens=int(row[5]),
+            )
+            for row in self.session.execute(stmt).all()
+        ]
 
 
 class AuditRepository:
     """管理员操作审计。只追加，不更新、不删除。"""
 
-    @staticmethod
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
     def record(
+        self,
         *,
         actor_id: int | None,
         actor_name: str,
@@ -232,34 +431,23 @@ class AuditRepository:
                 不是保险箱，写进去等于给下一个读到它的人一份明文口令。
             request_id: 与当次请求的日志对得上，便于顺着一条线追到底。
 
-        写失败只记警告、不抛：审计是**旁路**，一次写不动不该让管理员的删除操作
-        整笔失败——但也不能静默吞掉，否则表空了还以为没人操作过。
+        写失败由调用方（`admin_service.record_audit`）记警告、不抛：审计是**旁路**，
+        一次写不动不该让管理员的删除操作整笔失败——但也不能静默吞掉，
+        否则表空了还以为没人操作过。
         """
-        with connect() as conn:
-            conn.execute(
-                "INSERT INTO admin_audit_log "
-                "(actor_id, actor_name, action, target, detail, request_id, ts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    actor_id,
-                    actor_name,
-                    action,
-                    target,
-                    detail,
-                    request_id,
-                    utc_now_text(),
-                ),
+        self.session.add(
+            AdminAuditLog(
+                actor_id=actor_id,
+                actor_name=actor_name,
+                action=action,
+                target=target,
+                detail=detail,
+                request_id=request_id,
+                ts=utc_now_text(),
             )
-            conn.commit()
+        )
 
-    @staticmethod
-    def list_recent(limit: int = 100) -> list[dict[str, Any]]:
+    def list_recent(self, limit: int = 100) -> list[AdminAuditLog]:
         """最近的操作，倒序。上限由 `_AUDIT_MAX_ROWS` 兜住。"""
         safe_limit = max(1, min(int(limit), _AUDIT_MAX_ROWS))
-        with connect() as conn:
-            rows = conn.execute(
-                "SELECT id, actor_id, actor_name, action, target, detail, request_id, ts "
-                "FROM admin_audit_log ORDER BY id DESC LIMIT ?",
-                (safe_limit,),
-            ).fetchall()
-            return [dict(row) for row in rows]
+        return list(self.session.execute(select(AdminAuditLog).order_by(AdminAuditLog.id.desc()).limit(safe_limit)).scalars().all())
