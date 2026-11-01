@@ -50,6 +50,10 @@
 `chunk` 带 `section_id` 只解决「字归哪一章」，不解决「这一章要不要重来」：
 重来的信号是 `stage`，两者缺一不可。
 
+并行车道的实现拆在 `services/prd_section_parallel.py`：`_stream_parallel()` 只做
+输入归一与分发，三车道、失败降级与收尾都在那边的 `ParallelSectionRun` 里；
+两条链路共用的输入归一收在本模块的 `_prepare_inputs()`（原先是各写一遍的重复块）。
+
 文档头由代码生成，不交给模型：产品名取自结构化摘要、日期取服务器当天，都是确定的事实
 （模板明确要求「无法确定当天日期时写『待确认』，禁止编造日期」，交给模型反而容易编）。
 
@@ -67,7 +71,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -77,10 +80,8 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import StreamEvent
-from backend.core.errors import AppError
 from backend.core.runtime_config import get_runtime_config
 from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
-from backend.services.llm_meter import use_step
 from backend.services.llm_utils import extract_json_object
 from backend.services.pending_items import (
     PendingBlockSuppressor,
@@ -346,27 +347,24 @@ class SectionReview:
         return first or "审核发现需要调整的问题"
 
 
-@dataclass
-class _SectionState:
-    """并行链路里单章的运行态（只活在本次 `stream()` 的闭包里）。"""
+@dataclass(frozen=True)
+class _PreparedInputs:
+    """一次生成用的「固定输入」：两条链路（串行 / 并行）拿到的是同一份。
 
-    index: int
-    section: PrdSection
-    status: str = "pending"  # pending / writing / reviewing / rewriting / done / failed
-    draft: str = ""
-    part: str = ""
-    failed: bool = False
-    reason: str = ""
-    review: SectionReview | None = None
-    pending_items: list[dict[str, Any]] = field(default_factory=list)
+    它把原先 `_stream_linear` 与 `_stream_parallel` 各写一遍的 33 行初始化块
+    收成一处（含「需求输入原样给审核、字段契约走压缩清单」两条口径）——
+    只改一边、另一条链路静默沿用旧口径，正是那段重复最容易出的事故。
+    """
 
-
-def _failed_placeholder(section: PrdSection, reason: str) -> str:
-    """生成失败的章节占位：保留标题结构，并明确写出失败原因。"""
-    return (
-        f"{section.heading}\n\n"
-        f"> 本章生成失败：{reason}。请稍后重新生成本章以补齐本节。\n\n"
-    )
+    # 已归一的需求文本（结构化摘要 → 清单，或自由文本 → 原样）
+    requirements_text: str
+    # 文档头用的产品名（摘要里的优先）
+    name: str
+    writing_rules: str
+    system_prompt: str
+    conversation: str
+    template_sections: dict[str, str]
+    field_contract: str
 
 
 # ----------------------------------------------------------------------------
@@ -502,22 +500,87 @@ class PrdSectionWriter:
         并发度为 1 时走原来的串行链路（回滚开关）；大于 1 时走三车道并行。
         两条链路产出同一套 `StreamEvent` 契约，`document_service` 无需分支。
         """
-        if self._concurrency <= 1:
-            async for event in self._stream_linear(
+        lane = (
+            self._stream_linear(
                 summary=summary,
                 requirements=requirements,
                 product_name=product_name,
                 history=history,
-            ):
+            )
+            if self._concurrency <= 1
+            else self._stream_parallel(
+                summary=summary,
+                requirements=requirements,
+                product_name=product_name,
+                history=history,
+            )
+        )
+        try:
+            async for event in lane:
                 yield event
-            return
-        async for event in self._stream_parallel(
-            summary=summary,
-            requirements=requirements,
-            product_name=product_name,
-            history=history,
-        ):
-            yield event
+        finally:
+            # `async for` 不会自动关闭被迭代的异步生成器：消费者提前断开（`aclose()`）
+            # 时必须显式把它关下去，否则车道的清理要等 GC 才发生——那段时间后台任务
+            # 还在跑（并行链路尤其明显：六个章节的模型调用都还挂着）。
+            await lane.aclose()
+
+    def _prepare_inputs(
+        self,
+        *,
+        summary: dict[str, Any] | None,
+        requirements: str,
+        product_name: str,
+        history: list[dict[str, Any]] | None,
+    ) -> _PreparedInputs:
+        """把两种需求输入归一成两条链路共用的 `_PreparedInputs`。
+
+        这段初始化从前在串行 / 并行两条链路里**各写了一遍**（33 行完全重复）：
+        技能资源 → 需求文本 → 提示词 → 模板切片 → 字段契约。现在只有这一份，
+        改口径时不可能只改一边。
+
+        Args:
+            summary: 结构化需求摘要；给出时优先于 `requirements`。
+            requirements: 自由文本需求；仅在 `summary` 为空时使用。
+            product_name: 产品名称，仅用于文档头；摘要里已有名称时以摘要为准。
+            history: 补充对话记录（`{role, content}` 列表），可为空。
+
+        Raises:
+            RuntimeError: 技能资源不可用（调用方据此降级为整篇生成）。
+            ValueError: 两种需求输入都为空——没有需求就不该产出文档，宁可报错也不编。
+        """
+        artifacts = load_prd_skill_artifacts()
+        if artifacts is None:
+            raise RuntimeError("PRD 技能资源不可用，无法分章节生成")
+
+        if summary:
+            requirements_text = format_summary_as_requirements(summary)
+            name = str(summary.get("product_name") or "").strip() or product_name
+        elif requirements.strip():
+            requirements_text = format_freeform_requirements(requirements, product_name)
+            name = product_name
+        else:
+            raise ValueError("summary 与 requirements 至少需要提供一个")
+
+        writing_rules = artifacts["writing_rules"]
+        # 需求输入**原样**交给审核，不做骨架化。
+        #
+        # 骨架器是为 Markdown 正文设计的，遇到代码块只留围栏首行、块体整块丢。而结构化
+        # 摘要整篇就是一个 ```json 块，压完只剩 `'```json'` 七个字符——审核的「唯一事实
+        # 来源」成了空壳，于是正文里任何具体内容都会被判成编造。
+        # 骨架化真正要治的是 `prior_sections` 的平方增长（见 `_join_prior`）；需求输入
+        # 每章都一样、大小固定，不属于那个问题，不该一起压。
+        #
+        # 字段契约则相反：整份 JSON Schema 有 8.6KB，而撰写只需要「哪些必填、每字段是什么、
+        # 枚举取值」，压成几行清单（`format_field_contract`）。它是六章都要付一遍的重复输入。
+        return _PreparedInputs(
+            requirements_text=requirements_text,
+            name=name,
+            writing_rules=writing_rules,
+            system_prompt=build_prd_system_prompt(writing_rules),
+            conversation=format_conversation(history or []),
+            template_sections=split_template_by_section(artifacts["prd_template"]),
+            field_contract=format_field_contract(artifacts["field_schema"]),
+        )
 
     async def _stream_linear(
         self,
@@ -551,34 +614,19 @@ class PrdSectionWriter:
         Raises:
             ValueError: 两种需求输入都为空——没有需求就不该产出文档，宁可报错也不编。
         """
-        artifacts = load_prd_skill_artifacts()
-        if artifacts is None:
-            raise RuntimeError("PRD 技能资源不可用，无法分章节生成")
-
-        if summary:
-            requirements_text = format_summary_as_requirements(summary)
-            name = str(summary.get("product_name") or "").strip() or product_name
-        elif requirements.strip():
-            requirements_text = format_freeform_requirements(requirements, product_name)
-            name = product_name
-        else:
-            raise ValueError("summary 与 requirements 至少需要提供一个")
-
-        writing_rules = artifacts["writing_rules"]
-        system_prompt = build_prd_system_prompt(writing_rules)
-        conversation = format_conversation(history or [])
-        template_sections = split_template_by_section(artifacts["prd_template"])
-        # 需求输入**原样**交给审核，不做骨架化。
-        #
-        # 骨架器是为 Markdown 正文设计的，遇到代码块只留围栏首行、块体整块丢。而结构化
-        # 摘要整篇就是一个 ```json 块，压完只剩 `'```json'` 七个字符——审核的「唯一事实
-        # 来源」成了空壳，于是正文里任何具体内容都会被判成编造。
-        # 骨架化真正要治的是 `prior_sections` 的平方增长（见 `_join_prior`）；需求输入
-        # 每章都一样、大小固定，不属于那个问题，不该一起压。
-        #
-        # 字段契约则相反：整份 JSON Schema 有 8.6KB，而撰写只需要「哪些必填、每字段是什么、
-        # 枚举取值」，压成几行清单（`format_field_contract`）。它是六章都要付一遍的重复输入。
-        field_contract = format_field_contract(artifacts["field_schema"])
+        prepared = self._prepare_inputs(
+            summary=summary,
+            requirements=requirements,
+            product_name=product_name,
+            history=history,
+        )
+        requirements_text = prepared.requirements_text
+        name = prepared.name
+        writing_rules = prepared.writing_rules
+        system_prompt = prepared.system_prompt
+        conversation = prepared.conversation
+        template_sections = prepared.template_sections
+        field_contract = prepared.field_contract
 
         total = len(PRD_SECTIONS)
         yield StreamEvent(
@@ -726,372 +774,33 @@ class PrdSectionWriter:
     ) -> AsyncIterator[StreamEvent]:
         """三车道并行：撰写严格按章序，审核 / 改写以章节任务并发执行。
 
-        与串行版的关键差异：
+        与串行版的关键差异（完整契约见 `services/prd_section_parallel.py`）：
 
-        - **`chunk` 必须带章节归属**：多章同时吐字，没有 `section_id` 的增量前端
-          只能整批丢弃（那就是「PRD 不流式」的成因）。带标签后各章各长各的，不串字。
-          重试会重吐本章，因此每次尝试都**重报一次 `writing`**，前端据此清该章缓冲。
-        - **`part` 可乱序到达**：每段带 `index`，`done.reply` 由本方法按 index 装配；
-          前端按 same index 归位，因此顺序不因到达先后而错乱。
-        - **单章失败不终止全篇**：写占位继续，最后用 `partial` + `failed_sections` 标记。
-        - **所有模型调用共用一个信号量**：并发上限来自 `PRD_PIPELINE_CONCURRENCY`，
-          计量用 `use_step` 归因，避免多路互相污染。
+        - `chunk` 必须带章节归属，且**每次尝试都重报一次 `writing`**（重试会重吐本章）；
+        - `part` 可乱序到达、每段带 `index`，`done.reply` 由并行车道按 index 装配；
+        - **单章失败不终止全篇**：写占位继续，最后用 `partial` + `failed_sections` 标记；
+        - 所有模型调用共用一个信号量，计量用 `use_step` 归因。
+
+        376 行的闭包集合已拆进 `ParallelSectionRun`（车道 / 撰写 / 审核重试 / 改写 / 收尾
+        各占一个方法），本方法只做输入归一与分发——失败规则不再埋在一串嵌套函数里。
         """
-        artifacts = load_prd_skill_artifacts()
-        if artifacts is None:
-            raise RuntimeError("PRD 技能资源不可用，无法分章节生成")
-
-        if summary:
-            requirements_text = format_summary_as_requirements(summary)
-            name = str(summary.get("product_name") or "").strip() or product_name
-        elif requirements.strip():
-            requirements_text = format_freeform_requirements(requirements, product_name)
-            name = product_name
-        else:
-            raise ValueError("summary 与 requirements 至少需要提供一个")
-
-        writing_rules = artifacts["writing_rules"]
-        system_prompt = build_prd_system_prompt(writing_rules)
-        conversation = format_conversation(history or [])
-        template_sections = split_template_by_section(artifacts["prd_template"])
-        # 需求输入**原样**交给审核，不做骨架化。
-        #
-        # 骨架器是为 Markdown 正文设计的，遇到代码块只留围栏首行、块体整块丢。而结构化
-        # 摘要整篇就是一个 ```json 块，压完只剩 `'```json'` 七个字符——审核的「唯一事实
-        # 来源」成了空壳，于是正文里任何具体内容都会被判成编造。
-        # 骨架化真正要治的是 `prior_sections` 的平方增长（见 `_join_prior`）；需求输入
-        # 每章都一样、大小固定，不属于那个问题，不该一起压。
-        #
-        # 字段契约则相反：整份 JSON Schema 有 8.6KB，而撰写只需要「哪些必填、每字段是什么、
-        # 枚举取值」，压成几行清单（`format_field_contract`）。它是六章都要付一遍的重复输入。
-        field_contract = format_field_contract(artifacts["field_schema"])
-
-        total = len(PRD_SECTIONS)
-        yield StreamEvent(
-            type="status",
-            content=f"正在并行生成 {total} 章 PRD…",
-            data={"doc_type": "prd", "total_sections": total, "parallel": True},
+        prepared = self._prepare_inputs(
+            summary=summary,
+            requirements=requirements,
+            product_name=product_name,
+            history=history,
         )
+        # 延迟导入：`prd_section_parallel` 反向依赖本模块的共享契约（事件构造、
+        # 消息组装、`SectionReview` 等），模块级导入会成环。
+        from backend.services.prd_section_parallel import ParallelSectionRun
 
-        header = build_document_header(name)
-        yield _part_event(header)
-        parts: dict[int, str] = {-1: header}
-        drafts: list[str] = [""] * total
-        states = [_SectionState(index=i, section=s) for i, s in enumerate(PRD_SECTIONS)]
-
-        queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
-        sem = asyncio.Semaphore(self._concurrency)
-        tasks: set[asyncio.Task[None]] = set()
-
-        async def put(event: StreamEvent) -> None:
-            await queue.put(event)
-
-        async def stream_section_text(
-            messages: list[BaseMessage], step: str, section: PrdSection, index: int
-        ) -> str:
-            """流式产出某一章：边吐字边打章节标签，返回整章原文。
-
-            与串行链路用同一套抑制器（`PendingBlockSuppressor`）：待确认块一旦
-            开始，后面的字就要先扣住，否则用户会看见它一闪一闪地跳。
-
-            吐出去的是**模型原始输出**，不是定稿正文——补标题、补章间空行都
-            发生在定稿时。所以前端只把它当「过程中的显示」，`part` 一到就覆盖。
-            """
-            buffer: list[str] = []
-            suppressor = PendingBlockSuppressor()
-            # ⚠️ 信号量只包一次模型调用：持有它再等别的章节任务会死锁。
-            # 循环里唯一的 await 是 `queue.put`（无界队列，永不阻塞），所以安全。
-            async with sem:
-                with use_step(step):
-                    async for delta in self._stream_text(messages):
-                        buffer.append(delta)
-                        clean = suppressor.feed(delta)
-                        if clean:
-                            await put(_section_chunk_event(clean, section, index))
-                    trailing = suppressor.flush()
-                    if trailing:
-                        await put(_section_chunk_event(trailing, section, index))
-            return "".join(buffer)
-
-        async def review_with_retry(
-            section: PrdSection, section_text: str, prior_sections: str
-        ) -> SectionReview | None:
-            for attempt in range(self._max_retries + 1):
-                try:
-                    async with sem:
-                        with use_step("reviewing"):
-                            return await self._review(
-                                section=section,
-                                section_text=section_text,
-                                writing_rules=writing_rules,
-                                requirements=requirements_text,
-                                prior_sections=prior_sections,
-                            )
-                except AppError:
-                    # 预算超顶 / 墙钟硬顶：重来多少次都一样，直接走致命路径
-                    raise
-                except Exception:  # noqa: BLE001 - 单章审核失败可重试
-                    if attempt >= self._max_retries:
-                        logger.warning(
-                            "章节 %s 审核连续失败，保留正文不判失败",
-                            section.id,
-                            exc_info=True,
-                            extra={"event": "prd.review_exhausted"},
-                        )
-                        return None
-                    # 审核中间失败此前静默：补一条，让「哪一章审了几次才放弃」可查。
-                    logger.warning(
-                        "章节 %s 审核失败，将重试（第 %d 次）",
-                        section.id,
-                        attempt + 1,
-                        extra={"event": "prd.review_retry"},
-                    )
-            return None
-
-        async def section_task(idx: int, draft: str, prior: str) -> None:
-            # 与串行链路同口径：审一次 → 至多改一次，**改写后不再复审**。
-            st = states[idx]
-            review: SectionReview | None = None
-            if self._review_enabled:
-                st.status = "reviewing"
-                await put(_section_stage_event("reviewing", st.section, idx, total))
-                review = await review_with_retry(st.section, draft, prior)
-                st.review = review
-                # `max_rewrites` 为 0 时仍是「只审不改」的有效开关；> 0 时最多改一次
-                if (
-                    review is not None
-                    and self._max_rewrites >= 1
-                    and review.triggers_rewrite(self._rewrite_min_severity)
-                ):
-                    st.status = "rewriting"
-                    await put(
-                        _section_stage_event(
-                            "rewriting",
-                            st.section,
-                            idx,
-                            total,
-                            note=review.summary(),
-                            issues=review.issues,
-                        )
-                    )
-                    try:
-                        new_draft = await stream_section_text(
-                            self._rewrite_messages(
-                                section=st.section,
-                                section_text=draft,
-                                system_prompt=system_prompt,
-                                writing_rules=writing_rules,
-                                requirements=requirements_text,
-                                prior_sections=prior,
-                                review=review,
-                            ),
-                            "rewriting",
-                            st.section,
-                            idx,
-                        )
-                    except AppError:
-                        raise
-                    except Exception:  # noqa: BLE001 - 改写失败保留改写前版本
-                        logger.warning(
-                            "章节 %s 改写失败，保留改写前版本",
-                            st.section.id,
-                            exc_info=True,
-                            extra={"event": "prd.rewrite_failed"},
-                        )
-                        new_draft = ""
-                    if new_draft and new_draft.strip():
-                        draft = new_draft
-
-            text = _ensure_heading(draft, st.section.heading)
-            clean_text, items = extract(text, id_prefix=st.section.id)
-            st.pending_items = items
-            if clean_text:
-                st.status = "done"
-                st.part = f"{clean_text}\n\n"
-            else:
-                st.status = "failed"
-                st.failed = True
-                st.reason = "正文为空"
-                st.part = _failed_placeholder(st.section, st.reason)
-            parts[idx] = st.part
-            await put(
-                _part_event(
-                    st.part,
-                    section=st.section,
-                    index=idx,
-                    total=total,
-                    failed=st.failed,
-                )
-            )
-
-        async def generation_lane() -> None:
-            try:
-                for idx, section in enumerate(PRD_SECTIONS):
-                    st = states[idx]
-                    st.status = "writing"
-                    prior = _join_prior([draft for draft in drafts[:idx] if draft])
-
-                    draft = ""
-                    last_exc: Exception | None = None
-                    for attempt in range(self._max_retries + 1):
-                        # ⚠️ `writing` 每次尝试都要重报，不能只在循环外报一次：
-                        # 重试会从头把本章重吐一遍，前端**收到 `writing` 才清掉**
-                        # 上一轮已吐出的半截。少报一次，两轮的字就在卡片里叠着。
-                        await put(_section_stage_event("writing", section, idx, total))
-                        try:
-                            draft = await stream_section_text(
-                                self._section_messages(
-                                    section=section,
-                                    section_template=template_sections.get(section.heading, ""),
-                                    system_prompt=system_prompt,
-                                    requirements=requirements_text,
-                                    conversation=conversation,
-                                    field_contract=field_contract,
-                                    prior_sections=prior,
-                                ),
-                                "writing",
-                                section,
-                                idx,
-                            )
-                            break
-                        except AppError:
-                            raise
-                        except Exception as exc:  # noqa: BLE001 - 单章撰写失败可重试
-                            last_exc = exc
-                            if attempt >= self._max_retries:
-                                break
-                            # 中间失败此前完全静默：重试发生在模型调用层（stream_reply 已记），
-                            # 但「哪一章、第几次」的归属只有这里知道，补一条补上这条链。
-                            logger.warning(
-                                "章节 %s 撰写失败，将重试（第 %d 次）",
-                                section.id,
-                                attempt + 1,
-                                extra={"event": "prd.section_write_retry"},
-                            )
-
-                    if not draft.strip():
-                        st.status = "failed"
-                        st.failed = True
-                        st.reason = (
-                            f"撰写连续失败：{last_exc}" if last_exc else "撰写结果为空"
-                        )
-                        st.part = _failed_placeholder(section, st.reason)
-                        parts[idx] = st.part
-                        await put(
-                            _section_stage_event(
-                                "failed", section, idx, total, note=st.reason
-                            )
-                        )
-                        await put(
-                            _part_event(
-                                st.part,
-                                section=section,
-                                index=idx,
-                                total=total,
-                                failed=True,
-                            )
-                        )
-                        continue
-
-                    drafts[idx] = draft
-                    st.draft = draft
-                    task = asyncio.create_task(section_task(idx, draft, prior))
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
-
-                if tasks:
-                    await asyncio.gather(*list(tasks))
-
-                failed_sections = [
-                    {
-                        "section_id": st.section.id,
-                        "title": st.section.title,
-                        "index": st.index,
-                        "reason": st.reason,
-                    }
-                    for st in states
-                    if st.failed
-                ]
-                if len(failed_sections) == total:
-                    raise RuntimeError("全部章节生成失败")
-
-                issues: list[dict[str, Any]] = []
-                for st in states:
-                    if st.review and st.review.needs_revision:
-                        for issue in st.review.issues:
-                            issues.append(
-                                {
-                                    "section_id": st.section.id,
-                                    "section_title": st.section.title,
-                                    "severity": str(issue.get("severity") or "medium"),
-                                    "detail": str(issue.get("detail") or ""),
-                                }
-                            )
-                # 没开审核就不发结论：这一轮没有任何章节被核对过，报一句
-                # 「0 个待处理问题」会被读成「审过了、没问题」，那是假的。
-                if self._review_enabled:
-                    verdict = "revise" if issues else "pass"
-                    conclusion = (
-                        f"{total - len(failed_sections)} 章完成，{len(issues)} 个待处理问题"
-                    )
-                    await put(
-                        StreamEvent(
-                            type="review",
-                            content=conclusion,
-                            data={
-                                "kind": "prd",
-                                "verdict": verdict,
-                                "summary": conclusion,
-                                "issues": issues,
-                                "rewritten": False,
-                                "failed_sections": failed_sections,
-                            },
-                        )
-                    )
-
-                pending_items = [item for st in states for item in st.pending_items]
-                reply = (
-                    parts[-1]
-                    + "".join(parts[i] for i in sorted(parts) if i >= 0)
-                ).strip()
-                await put(
-                    StreamEvent(
-                        type="stage",
-                        content="PRD 已生成",
-                        data={"stage": "done", "index": total, "total": total},
-                    )
-                )
-                await put(
-                    StreamEvent(
-                        type="done",
-                        content="",
-                        data={
-                            "doc_type": "prd",
-                            "reply": reply,
-                            "pending_items": pending_items,
-                            "partial": bool(failed_sections),
-                            "failed_sections": failed_sections,
-                        },
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - 致命失败统一转 error 事件
-                await put(error_event(exc))
-            finally:
-                await queue.put(None)
-
-        driver = asyncio.create_task(generation_lane())
+        lane = ParallelSectionRun(self, prepared).stream()
         try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
+            async for event in lane:
                 yield event
         finally:
-            if not driver.done():
-                driver.cancel()
-            for task in list(tasks):
-                task.cancel()
-            await asyncio.gather(driver, *list(tasks), return_exceptions=True)
+            # 同上：断开时立刻关下去，车道的 `finally` 才会取消在途任务。
+            await lane.aclose()
 
     # ------------------------------------------------------------------
     # 消息组装

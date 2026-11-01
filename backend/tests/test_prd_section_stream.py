@@ -44,7 +44,11 @@ class FakeLLM:
     顺带覆盖「增量拼接」这条路径。
     """
 
-    def __init__(self, section_replies: list[str], review_replies: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        section_replies: list[str | BaseException],
+        review_replies: list[str | BaseException] | None = None,
+    ) -> None:
         self._sections = list(section_replies)
         self._reviews = list(review_replies or [])
         self.section_calls = 0
@@ -52,7 +56,7 @@ class FakeLLM:
         # 每次调用的**用户消息**：供「改写提示词里装了什么 / 没装什么」这类断言
         self.user_messages: list[str] = []
 
-    def _pick(self, pool: list[str], count: int) -> str:
+    def _pick(self, pool: list[str | BaseException], count: int) -> str | BaseException:
         """取第 `count` 条回复；预设用完后一直复用最后一条。"""
         if not pool:
             return ""
@@ -67,6 +71,9 @@ class FakeLLM:
         else:
             text = self._pick(self._sections, self.section_calls)
             self.section_calls += 1
+        # 预设成异常时在**吐第一个字之前**失败：这正是「调用失败」分支的形态
+        if isinstance(text, BaseException):
+            raise text
 
         middle = len(text) // 2
         for piece in (text[:middle], text[middle:]):
@@ -74,16 +81,13 @@ class FakeLLM:
                 yield AIMessageChunk(content=piece)
 
 
-def _collect(writer: PrdSectionWriter) -> list[StreamEvent]:
+def _collect(writer: PrdSectionWriter, **request: Any) -> list[StreamEvent]:
     """同步跑完一次生成，收集全部事件。"""
+    request.setdefault("requirements", "做一个演示产品")
+    request.setdefault("product_name", "演示产品")
 
     async def drain() -> list[StreamEvent]:
-        return [
-            event
-            async for event in writer.stream(
-                requirements="做一个演示产品", product_name="演示产品"
-            )
-        ]
+        return [event async for event in writer.stream(**request)]
 
     return asyncio.run(drain())
 
@@ -419,3 +423,174 @@ def test_generation_prompt_carries_compacted_field_contract() -> None:
         # 整份 JSON Schema 的校验细节不该再出现
         assert '"$schema"' not in message
         assert "x_normalization_rules" not in message
+
+
+# ---------------------------------------------------------------------------
+# 分支补全：串行链路里此前没有用例走到的失败 / 降级 / 边界分支
+# ---------------------------------------------------------------------------
+#
+# 这些用例是重写前的**行为基线**：结构会变，事件序列与降级口径不能变。
+
+
+def test_serial_rejects_empty_input_and_missing_skill_assets(monkeypatch) -> None:
+    """两处「根本没有可写的东西」：输入为空 → `ValueError`；技能资源缺失 → `RuntimeError`。
+
+    两者都必须**明确失败**而不是产出一份空文档——空文档比报错更难被发现。
+    """
+    with pytest.raises(ValueError):
+        _collect(PrdSectionWriter(llm=FakeLLM([]), review_enabled=False), requirements="")
+
+    from backend.services import prd_section_writer as module
+
+    monkeypatch.setattr(module, "load_prd_skill_artifacts", lambda: None)
+    with pytest.raises(RuntimeError):
+        _collect(PrdSectionWriter(llm=FakeLLM([]), review_enabled=False))
+
+
+def test_serial_write_failure_emits_error_and_stops() -> None:
+    """串行链路里单章撰写失败是**致命**的：发 `error` 即止，绝不发 `done`。
+
+    这是与并行链路「单章失败不终止全篇」的分野，也是最容易被重写顺手抹掉的差异。
+    """
+    events = _collect(PrdSectionWriter(llm=FakeLLM([ValueError("撰写失败")]), review_enabled=False))
+
+    assert any(event.type == "error" for event in events)
+    assert not any(event.type == "done" for event in events)
+    # 有问题的章没有 `part`：正文永远不会带着「半截草稿」定稿
+    assert not [part for part in _parts(events) if part.data.get("section_id")]
+
+
+def test_serial_rewrite_failure_emits_error_and_stops() -> None:
+    """改写失败同样是致命的：此时该章还没有 `part`，不能把初稿当定稿发出去。"""
+    revise = json.dumps(
+        {"verdict": "revise", "issues": [{"severity": "high", "detail": "编造了指标"}]},
+        ensure_ascii=False,
+    )
+    llm = FakeLLM(section_replies=["初稿内容", ValueError("改写失败")], review_replies=[revise])
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert "rewriting" in [event.data["stage"] for event in events if event.type == "stage"]
+    assert any(event.type == "error" for event in events)
+    assert not any(event.type == "done" for event in events)
+    assert not [part for part in _parts(events) if part.data.get("section_id")]
+
+
+def test_serial_review_failure_degrades_to_pass() -> None:
+    """审核调用失败只降级不致命：正文照发、`done` 照发，不产生 `error`。
+
+    审核是锦上添花的一步，它自己挂了不该把整篇生成拖垮。
+    """
+    llm = FakeLLM(section_replies=["本章正文"], review_replies=[ValueError("审核挂了")])
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert not any(event.type == "error" for event in events)
+    done = next(event for event in events if event.type == "done")
+    for section in PRD_SECTIONS:
+        assert section.heading in done.data["reply"]
+    # 每章都真的走了审核（失败也计数），改写一次都没发生
+    assert llm.review_calls == len(PRD_SECTIONS)
+    assert "rewriting" not in [event.data["stage"] for event in events if event.type == "stage"]
+
+
+def test_serial_skips_part_when_the_model_returns_nothing() -> None:
+    """模型一字未吐时**不发该章的 `part`**：空串补上标题就成了假完成。"""
+    events = _collect(PrdSectionWriter(llm=FakeLLM([""]), review_enabled=False))
+
+    parts = _parts(events)
+    assert len(parts) == 1, "只有文档头这一个 part"
+    done = next(event for event in events if event.type == "done")
+    assert done.data["reply"] == parts[0].data["text"].strip()
+
+
+def test_serial_part_keeps_the_heading_the_model_wrote_once() -> None:
+    """模型自己写了标题时不再重复补一遍——`_ensure_heading` 必须幂等。"""
+    heading = PRD_SECTIONS[0].heading
+    events = _collect(
+        PrdSectionWriter(llm=FakeLLM([f"{heading}\n\n正文内容"]), review_enabled=False)
+    )
+
+    first = next(part for part in _parts(events) if part.data.get("section_id"))
+    assert first.data["text"].startswith(heading)
+    assert first.data["text"].count(heading) == 1
+
+
+def test_serial_pending_block_is_stripped_and_collected_per_section() -> None:
+    """待确认块只进 `done.pending_items`，绝不进 `part`（正文与过程字不能混）。"""
+    item = json.dumps(
+        {
+            "question": "MVP 功能清单未提供",
+            "sections": ["2.1"],
+            "decider": "产品负责人",
+            "importance": "P0",
+        },
+        ensure_ascii=False,
+    )
+    block = f"<!-- PENDING:BEGIN -->\n[{item}]\n<!-- PENDING:END -->"
+    events = _collect(
+        PrdSectionWriter(
+            llm=FakeLLM([f"{PRD_SECTIONS[0].heading}\n\n正文内容\n\n{block}"]),
+            review_enabled=False,
+        )
+    )
+
+    first = next(part for part in _parts(events) if part.data.get("section_id"))
+    assert "PENDING" not in first.data["text"]
+    assert first.data["text"] == f"{PRD_SECTIONS[0].heading}\n\n正文内容\n\n"
+    done = next(event for event in events if event.type == "done")
+    assert [item["id"] for item in done.data["pending_items"]] == [
+        f"{section.id}-1" for section in PRD_SECTIONS
+    ]
+
+
+def test_revise_with_instruction_only_still_triggers_rewrite() -> None:
+    """只给修改指令、不给逐条问题时也要动笔，且改写提示词里有占位说明。
+
+    「没有 severity 就无从按门槛筛选」按原口径放行；`issues_text()` 空清单时
+    给一句明确说明，而不是留白让模型以为漏读了问题。
+    """
+    review = json.dumps({"verdict": "revise", "instruction": "删掉编造的指标"}, ensure_ascii=False)
+    rewritten = "改后稿：已删掉编造的指标与竞品数据，只保留输入里给出的事实。"
+    llm = FakeLLM(section_replies=["初稿内容", rewritten], review_replies=[review])
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert "rewriting" in [event.data["stage"] for event in events if event.type == "stage"]
+    rewrite_message = next(msg for msg in llm.user_messages if "审核发现的问题" in msg)
+    assert "删掉编造的指标" in rewrite_message
+    assert "（审核未给出具体问题）" in rewrite_message
+    # 改写稿同样逐字流出去过（串行也是「过程字 + 权威段」两条轨）
+    streamed = "".join(event.content for event in events if event.type == "chunk")
+    assert "改后稿：已删掉编造的指标" in streamed
+    first = next(part for part in _parts(events) if part.data.get("section_id"))
+    assert "改后稿" in first.data["text"]
+
+
+def test_unknown_verdict_is_inferred_from_issues() -> None:
+    """判定词不合法时按「有没有问题」推断：一个词毁掉整段审核输出不值得。"""
+    review = json.dumps(
+        {
+            "verdict": "later",
+            "issues": [{"severity": "high", "detail": "缺少关键内容"}],
+        },
+        ensure_ascii=False,
+    )
+    llm = FakeLLM(section_replies=["初稿内容", "改后稿"], review_replies=[review])
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert "rewriting" in [event.data["stage"] for event in events if event.type == "stage"]
+
+
+def test_is_available_is_false_without_assets_or_matching_headings(monkeypatch) -> None:
+    """资源缺失、或模板里找不到全部一级标题时，`is_available()` 必须为假（由上层降级）。"""
+    from backend.services import prd_section_writer as module
+
+    monkeypatch.setattr(module, "load_prd_skill_artifacts", lambda: None)
+    assert module.is_available() is False
+
+    # 模板只剩一个一级标题：其余章节切不出来，分章节生成会产残章
+    monkeypatch.setattr(
+        module,
+        "load_prd_skill_artifacts",
+        lambda: {"prd_template": f"{PRD_SECTIONS[0].heading}\n\n正文"},
+    )
+    assert module.is_available() is False
+
