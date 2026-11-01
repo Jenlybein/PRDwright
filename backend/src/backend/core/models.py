@@ -197,8 +197,8 @@ class LoginFailure(SQLModel, table=True):
 class Solution(SQLModel, table=True):
     """方案：一份完整会话的全量快照。
 
-    `data` 是 `SessionDataV2` 的 JSON 文本，后端**不解析其内容**（保持「不透明快照」）。
-    `title` / `mode` / `stage` 等是前端随快照提交的冗余摘要，让方案列表不必反序列化大 JSON。
+    方案状态已拆成标量列；`title` / `mode` / `stage` 等只是给列表用的摘要，
+    列表查询不再需要反序列化大 JSON。旧的整份 `SessionDataV2` 快照列已在 v8 删除（ADR-096）。
     """
 
     __tablename__ = "solutions"
@@ -223,10 +223,6 @@ class Solution(SQLModel, table=True):
     stage: str = Field(
         default="", sa_column=Column(Text, nullable=False)
     )
-    # ⚠️ 这一列**已退役**：`solution_repo.create` 写空串、`update` 刻意不碰它
-    # （见该文件 docstring「`data` 已退役」）。保留列是为了不重建表；挂 MEDIUMTEXT
-    # 只是"别再为它改一次基线"，不代表它还会长大——60KB 的闸门不覆盖它。
-    data: str = Field(sa_column=Column(_BIG_TEXT, nullable=False))
     created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     # 「内容真正变过」的时间（v7）：列表排序用它与 updated_at 分开的两条时间轴

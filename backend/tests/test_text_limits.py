@@ -106,7 +106,6 @@ def test_append_version_rejects_oversized_content(client):
             title="超长用例",
             mode="prd",
             stage="draft",
-            data="",
             created_at=now,
             updated_at=now,
             content_updated_at=now,

@@ -20,8 +20,8 @@
 - **聊天** → `chat_turns`（只追加，服务端单写者）；
 - **会话 id** → `chat_sessions`（按方案 + 线程唯一）。
 
-`data` 列保留但**不再写也不再读**：它是旧快照的最后一份副本，留着当历史备份；
-新行写空串（该列 `NOT NULL`），运行期没有任何代码读它。
+拆完之后 `data` 先退役（不再写、不再读），再于 v8 按 ADR-096 **直接删列**：
+新库没有这一列；旧库的旧快照只能从删除前的备份里取（ADR-057：回滚用备份，不用 downgrade）。
 
 ## 形态（v6 / T16.7）
 
@@ -106,9 +106,6 @@ class SolutionRepository:
         """新建方案并返回**模型对象**（已 `flush`，`id` 可用）。
 
         方案是**有内容了才建**的，所以创建这一刻内容必然非空：两根时间轴都从此刻起步。
-
-        `data` 写空串：这一列已退役。`NOT NULL` 是历史约束，给空串比给一份
-        「看起来像快照、其实没人读」的 JSON 更诚实。
         """
         now = utc_now_text()
         solution = Solution(
@@ -116,7 +113,6 @@ class SolutionRepository:
             title=title,
             mode=mode,
             stage=stage,
-            data="",
             created_at=now,
             updated_at=now,
             content_updated_at=now,
@@ -147,8 +143,6 @@ class SolutionRepository:
 
         `updated_at` 照旧每次都写：它回答的是「这份记录最近一次被写是什么时候」，
         这件事确实刚刚发生过。
-
-        ⚠️ **不写 `data`**：那一列已退役，保持旧值当历史备份。新行由 `create` 写空串。
         """
         now = utc_now_text()
         values = _state_values(state)
