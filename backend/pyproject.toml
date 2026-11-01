@@ -33,7 +33,10 @@ dependencies = [
 ]
 
 [project.scripts]
-backend = "backend:main"
+# 入口点必须指向**真实存在**的属性：`backend.main:app`（模块 `backend.main` 的 `app`）。
+# 旧值 `backend:main` 指向包里不存在的属性（`backend` 是命名空间根，`main` 是子模块
+# 而不是它的属性），只有真的按脚本启动时才会炸 `AttributeError`，于是长期没人碰。
+backend = "backend.main:app"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
