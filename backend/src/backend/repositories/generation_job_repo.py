@@ -29,6 +29,7 @@ from sqlalchemy import func, select, update
 from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
+from backend.core.limits import ensure_text_within_limit
 from backend.core.models import GenerationJob, User
 
 # 任务状态：running / completed / failed（本层不做枚举约束，取值由服务层保证）
@@ -45,6 +46,20 @@ def _dump_sections(sections: list[dict[str, Any]]) -> str:
 def _dump_pending_items(items: list[dict[str, Any]] | None) -> str:
     """把待确认清单序列化成 JSON 文本（中文不转义）。`None` 视为空清单。"""
     return json.dumps(items or [], ensure_ascii=False)
+
+
+def _ensure_progress_texts(draft_content: str, sections_text: str) -> None:
+    """草稿与章节清单的 60KB 闸门（v8）。
+
+    这两列都是**渐进增长**的（分章生成时一章一章追加），所以超上限通常意味着
+    「这份 PRD 比预期长」，而不是「某个字段填错了」。文案因此指向"精简或拆分"，
+    而不是"请求非法"。
+
+    ⚠️ 它会在 `persist_progress`（每 300ms 一次）里被调用，所以
+    `ensure_text_within_limit` 的快速路径很重要——见 `core/limits.py` 的说明。
+    """
+    ensure_text_within_limit(draft_content, field="草稿正文")
+    ensure_text_within_limit(sections_text, field="章节清单")
 
 
 # 供应商快照的四列，顺序与写入列一一对应。
@@ -146,14 +161,16 @@ class GenerationJobRepository:
         """合并写一次进度（正文 / 章节 / 阶段 / 待确认清单）。WHERE 含 owner_id，改不到别人的任务。
 
         高频写（≤300ms / 增量 4KB）：**每次调用仍应是一个短事务**（调用方每次一个
-        `session_scope()`），不要与其它写合并——长事务会持锁，把生成链路卡住。
+        `session_scope()`），不要与其它写合并——        长事务会持锁，把生成链路卡住。
         """
+        sections_text = _dump_sections(completed_sections)
+        _ensure_progress_texts(draft_content, sections_text)
         self.session.execute(
             update(GenerationJob)
             .where(GenerationJob.id == job_id, GenerationJob.owner_id == owner_id)
             .values(
                 draft_content=draft_content,
-                completed_sections=_dump_sections(completed_sections),
+                completed_sections=sections_text,
                 phase=phase,
                 pending_items=_dump_pending_items(pending_items),
                 updated_at=utc_now_text(),
@@ -182,13 +199,15 @@ class GenerationJobRepository:
         `provider` 收的是一个字典，而不是四个位置参数：它们总是同时有值、同时为空，
         拆成四个参数只会让调用点写四行 `''` 兜底。
         """
+        sections_text = _dump_sections(completed_sections)
+        _ensure_progress_texts(draft_content, sections_text)
         self.session.execute(
             update(GenerationJob)
             .where(GenerationJob.id == job_id, GenerationJob.owner_id == owner_id)
             .values(
                 status=STATUS_COMPLETED,
                 draft_content=draft_content,
-                completed_sections=_dump_sections(completed_sections),
+                completed_sections=sections_text,
                 usage=usage,
                 error_code="",
                 error_message="",
@@ -221,6 +240,8 @@ class GenerationJobRepository:
         只记成功那次等于把最贵的失败藏起来。两个 token 列与供应商四列同理一并写：
         成本统计若跳过失败任务，「这次为什么这么贵」永远查不出来。
         """
+        sections_text = _dump_sections(completed_sections)
+        _ensure_progress_texts(draft_content, sections_text)
         self.session.execute(
             update(GenerationJob)
             .where(GenerationJob.id == job_id, GenerationJob.owner_id == owner_id)
@@ -229,7 +250,7 @@ class GenerationJobRepository:
                 error_code=error_code,
                 error_message=error_message,
                 draft_content=draft_content,
-                completed_sections=_dump_sections(completed_sections),
+                completed_sections=sections_text,
                 usage=usage,
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,

@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy import and_, case, func, select
@@ -33,6 +33,22 @@ from sqlmodel import Session
 
 from backend.core.clock import utc_now, utc_now_text
 from backend.core.models import AdminAuditLog, GenerationJob, User
+
+
+def _utc_day_bounds(day: date, shift: timedelta) -> tuple[str, str]:
+    """把「本地日」换成一对 UTC 边界（左闭右开），形态与 `utc_now_text()` 一致。
+
+    ⚠️ 边界必须用 `isoformat()` 的**最短**形态（微秒为 0 时省略）。库里存的是
+    `...T12:34:56.789012`；若边界写成 `...T16:00:00.000000`，字典序会让库里
+    **整点**的旧值 `...T16:00:00`（更短、更小）落到区间之外——少算一条，且不报错。
+    偏移是整分钟，所以“本地零点”的微秒必然是 0，`isoformat()` 会省掉那一段。
+
+    ⚠️ 不能假设偏移是整小时：`tz_offset_minutes` 可以是 330（+5:30）。那种情况下
+    「按整小时分组再在应用层合并」会错——整小时桶会横跨两个本地日。
+    """
+    start_utc = datetime.combine(day, time.min) - shift
+    end_utc = start_utc + timedelta(days=1)
+    return start_utc.isoformat(), end_utc.isoformat()
 
 # 审计一次最多返回多少行。它是给人翻的，不是给机器导的：
 # 真要做全量导出应该另开口子，而不是把这里的上限调到无穷大。
@@ -250,8 +266,20 @@ class AdminStatsRepository:
         ------------------------------
         `created_at` 存的是 UTC。东八区管理员在本地 23:30 生成的任务，UTC 已经是次日
         00:30——按 UTC 分组会把它算到「明天」，于是「昨晚用的」出现在「今天」那一格。
-        管理员看的是本地时间，分组也必须按本地时间。换算交给 SQLite：
-        `datetime(created_at, '+480 minutes')`（实测能正确解析微秒级 ISO 串）。
+        管理员看的是本地时间，分组也必须按本地时间。
+
+        为什么换算在应用层做（v8 / D5）
+        ------------------------------
+        旧实现让 SQLite 做换算：`datetime(created_at, '+480 minutes')`。那是全项目
+        唯一一处既依赖方言函数、又没有优雅分支的查询（MySQL 的 `DATE_ADD`、PostgreSQL
+        的 `::timestamp + interval` 连参数形态都不一样，没法用一层适配抹平）。
+        现在改成 **Python 先算出每个本地日对应的 UTC 区间，SQL 只做范围判断**。
+
+        代价是查询次数从 1 次变成 `days` 次，这是**有意的**取舍：区间互不重叠，总扫描量
+        不变；每次都是纯列比较、能走 `created_at` 索引（旧实现的 `GROUP BY datetime(...)`
+        是对函数分组，排序用不上索引）。换来的是一条不含任何库函数的 SQL，且对任意
+        分钟偏移都精确。用 `case` 一次查完也能做到，但列数会膨胀成 `天数 × 6`，
+        可读性代价远大于这点往返开销。
 
         为什么缺的日子要补 0 行
         ----------------------
@@ -276,14 +304,32 @@ class AdminStatsRepository:
             按日期升序的每一天。
         """
         safe_days = max(1, min(int(days), 365))
-        offset = f"{int(tz_offset_minutes):+d} minutes"
+        shift = timedelta(minutes=int(tz_offset_minutes))
+        today = (utc_now() + shift).date()
 
-        # 先用 `created_at >= ?` 粗筛走索引（时间串的字典序与时间序一致），
-        # 再在结果集里换时区。多留一天余量：时区换算会让「本地窗口的第一天」
-        # 落在 UTC 的再前一天，卡得太紧会把边界那几条默默漏掉。
-        cutoff = (utc_now() - timedelta(days=safe_days + 1)).isoformat()
+        result: list[DailyUsage] = []
+        for back in range(safe_days - 1, -1, -1):
+            day = today - timedelta(days=back)
+            counts = self._count_one_day(*_utc_day_bounds(day, shift))
+            finished = counts["completed_count"] + counts["failed_count"]
+            # 失败率由后端算好：前端各算一遍就会与这里漂移
+            result.append(
+                DailyUsage(
+                    day=day.isoformat(),
+                    failure_rate=(
+                        round(counts["failed_count"] / finished, 4) if finished else None
+                    ),
+                    **counts,
+                )
+            )
+        return result
 
-        day_of = func.substr(func.datetime(GenerationJob.created_at, offset), 1, 10)
+    def _count_one_day(self, start: str, end: str) -> dict[str, int]:
+        """统计 `[start, end)` 内的六项指标。
+
+        区间**左闭右开**：`end` 那一刻的任务属于下一天，两边都算会把边界值数两遍。
+        无行时 `func.sum` 返回 NULL，统一折成 0——`None` 会让调用方的加法直接炸。
+        """
         status_is = lambda value: GenerationJob.status == value  # noqa: E731
         real_failure = and_(
             status_is("failed"), GenerationJob.error_code.notin_(_NOT_REAL_FAILURE)
@@ -291,70 +337,29 @@ class AdminStatsRepository:
         not_real_failure = and_(
             status_is("failed"), GenerationJob.error_code.in_(_NOT_REAL_FAILURE)
         )
-
-        stmt = (
+        row = self.session.execute(
             select(
-                day_of.label("day"),
-                func.count().label("task_count"),
-                func.sum(case((status_is("completed"), 1), else_=0)).label("completed_count"),
-                func.sum(case((real_failure, 1), else_=0)).label("failed_count"),
-                func.sum(case((not_real_failure, 1), else_=0)).label("cancelled_count"),
-                func.sum(case((status_is("running"), 1), else_=0)).label("running_count"),
-                func.coalesce(func.sum(GenerationJob.prompt_tokens), 0).label("prompt_tokens"),
-                func.coalesce(func.sum(GenerationJob.completion_tokens), 0).label(
-                    "completion_tokens"
-                ),
+                func.count(),
+                func.sum(case((status_is("completed"), 1), else_=0)),
+                func.sum(case((real_failure, 1), else_=0)),
+                func.sum(case((not_real_failure, 1), else_=0)),
+                func.sum(case((status_is("running"), 1), else_=0)),
+                func.sum(GenerationJob.prompt_tokens),
+                func.sum(GenerationJob.completion_tokens),
+            ).where(
+                GenerationJob.created_at >= start,
+                GenerationJob.created_at < end,
             )
-            .where(GenerationJob.created_at >= cutoff)
-            .group_by(day_of)
-            .order_by(day_of)
-        )
-
-        by_day: dict[str, dict[str, Any]] = {
-            str(row[0]): {
-                "task_count": int(row[1] or 0),
-                "completed_count": int(row[2] or 0),
-                "failed_count": int(row[3] or 0),
-                "cancelled_count": int(row[4] or 0),
-                "running_count": int(row[5] or 0),
-                "prompt_tokens": int(row[6] or 0),
-                "completion_tokens": int(row[7] or 0),
-            }
-            for row in self.session.execute(stmt).all()
+        ).one()
+        return {
+            "task_count": int(row[0] or 0),
+            "completed_count": int(row[1] or 0),
+            "failed_count": int(row[2] or 0),
+            "cancelled_count": int(row[3] or 0),
+            "running_count": int(row[4] or 0),
+            "prompt_tokens": int(row[5] or 0),
+            "completion_tokens": int(row[6] or 0),
         }
-
-        # 补齐日期：从「本地今天」往前倒推 days-1 天
-        today = (utc_now() + timedelta(minutes=int(tz_offset_minutes))).date()
-        result: list[DailyUsage] = []
-        for i in range(safe_days - 1, -1, -1):
-            day = (today - timedelta(days=i)).isoformat()
-            row = by_day.get(day) or {
-                "task_count": 0,
-                "completed_count": 0,
-                "failed_count": 0,
-                "cancelled_count": 0,
-                "running_count": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-            }
-            # 失败率由后端算好：前端各算一遍就会与这里漂移
-            finished = int(row["completed_count"]) + int(row["failed_count"])
-            result.append(
-                DailyUsage(
-                    day=day,
-                    task_count=int(row["task_count"]),
-                    completed_count=int(row["completed_count"]),
-                    failed_count=int(row["failed_count"]),
-                    cancelled_count=int(row["cancelled_count"]),
-                    running_count=int(row["running_count"]),
-                    prompt_tokens=int(row["prompt_tokens"]),
-                    completion_tokens=int(row["completion_tokens"]),
-                    failure_rate=(
-                        round(int(row["failed_count"]) / finished, 4) if finished else None
-                    ),
-                )
-            )
-        return result
 
     def top_users(self, limit: int = 10) -> list[TopUser]:
         """用量最高的用户。

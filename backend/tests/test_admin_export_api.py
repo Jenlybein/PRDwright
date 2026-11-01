@@ -64,10 +64,11 @@ def _job(owner_id: int, *, status: str = "completed", prompt_tokens: int = 10) -
         conn.execute(
             "INSERT INTO generation_jobs "
             "(owner_id, solution_id, kind, doc_kind, chat_stage, status, phase, "
-            " draft_content, completed_sections, input_fingerprint, usage, "
+            " draft_content, completed_sections, pending_items, input_fingerprint, usage, "
             " max_provider_switches, error_code, error_message, "
+            " provider_protocol, provider_config_id, provider_name, provider_model, "
             " prompt_tokens, completion_tokens, created_at, updated_at) "
-            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', NULL, NULL, 2, '', '', ?, 7, ?, ?)",
+            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', ?, 7, ?, ?)",
             (owner_id, status, prompt_tokens, moment, moment),
         )
         conn.commit()
@@ -320,8 +321,12 @@ def test_export_over_the_size_limit_is_413(client, monkeypatch) -> None:
     register(client, "alice")
     solution_id = _new_solution(client, "大方案")
     owner_id = _user_id("alice")
+    # ⚠️ 正文受 60KB 闸门约束（v8 / `core/limits.py`）：原先用 64KB 随机字节，
+    # hex 之后是 128KB 文本，会被拦在写入那一刻。降到 20KB（hex 后 40KB）——
+    # 导出闸门已被 monkeypatch 压到 4KB，这个体积仍然足以触发，
+    # 而随机 hex 的压缩率接近 1 这一点没有变。
     document_store.commit_generated(
-        owner_id, solution_id, "prd", "# 大 PRD\n\n" + os.urandom(64 * 1024).hex()
+        owner_id, solution_id, "prd", "# 大 PRD\n\n" + os.urandom(20 * 1024).hex()
     )
     _as_admin(client)
 

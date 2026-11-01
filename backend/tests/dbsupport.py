@@ -35,4 +35,51 @@ def connect() -> Iterator[sqlite3.Connection]:
         raw.close()
 
 
-__all__ = ["connect"]
+def insert_job(
+    owner_id: int,
+    *,
+    kind: str = "prd",
+    status: str = "completed",
+    phase: str = "",
+    error_code: str = "",
+    created_at: str | None = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> None:
+    """直接插一行任务（绕开仓储的 running-only 建法）。
+
+    为什么集中在这里：这行 INSERT 原先在 7 个测试文件里各写了一份，列清单互相抄。
+    v8 删掉 `doc_kind` 等列的 `server_default`（MySQL 的 TEXT 不接受字面量默认值）之后，
+    7 个文件同时红——那说明重复的是"表结构知识"，而它只该有一个副本。
+
+    列清单的原则：**把 NOT NULL 且无默认值的列全部显式写出来**。表结构再变时只改这里。
+    """
+    from backend.core.clock import utc_now_text
+
+    moment = created_at or utc_now_text()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO generation_jobs ("
+            "owner_id, solution_id, kind, doc_kind, chat_stage, status, phase, "
+            "draft_content, completed_sections, pending_items, "
+            "input_fingerprint, usage, max_provider_switches, "
+            "error_code, error_message, prompt_tokens, completion_tokens, "
+            "provider_protocol, provider_config_id, provider_name, provider_model, "
+            "created_at, updated_at"
+            ") VALUES (?, NULL, ?, '', '', ?, ?, '', '[]', '[]', NULL, NULL, 2, ?, '', ?, ?, '', '', '', '', ?, ?)",
+            (
+                owner_id,
+                kind,
+                status,
+                phase,
+                error_code,
+                prompt_tokens,
+                completion_tokens,
+                moment,
+                moment,
+            ),
+        )
+        conn.commit()
+
+
+__all__ = ["connect", "insert_job"]

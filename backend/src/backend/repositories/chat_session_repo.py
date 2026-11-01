@@ -27,10 +27,10 @@
 from __future__ import annotations
 
 from sqlalchemy import delete, select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
+from backend.core.dialect import upsert_values
 from backend.core.models import ChatSession
 
 
@@ -86,23 +86,21 @@ class ChatSessionRepository:
         # ⚠️ 刻意用「一条 UPSERT」而不是「先查再写」：拆成两步之后，
         # 「两条线程同时写同一行」就成了「两个都查到没有 → 两个都插入」，
         # 唯一索引会把第二条变成 IntegrityError，而那不是业务错误。
-        # 冲突目标是唯一索引 `ux_chat_sessions_thread (solution_id, stage)`。
-        now = utc_now_text()
-        statement = (
-            sqlite_insert(ChatSession)
-            .values(
-                user_id=owner_id,
-                solution_id=solution_id,
-                stage=stage,
-                conversation_id=conversation_id,
-                updated_at=now,
-            )
-            .on_conflict_do_update(
-                index_elements=["solution_id", "stage"],
-                set_={"conversation_id": conversation_id, "updated_at": now},
-            )
+        # 冲突目标是唯一索引 `ux_chat_sessions_thread (solution_id, stage)`——
+        # 该表只有这一个唯一约束，满足方言适配层的契约 C-D1（ADR-088）。
+        upsert_values(
+            self.session,
+            ChatSession,
+            {
+                "user_id": owner_id,
+                "solution_id": solution_id,
+                "stage": stage,
+                "conversation_id": conversation_id,
+                "updated_at": utc_now_text(),
+            },
+            conflict_cols=["solution_id", "stage"],
+            update_cols=["conversation_id", "updated_at"],
         )
-        self.session.execute(statement)
 
     def clear_for_solution(self, owner_id: int, solution_id: int) -> None:
         """清掉某方案下全部会话 id（「整份重开」时用）。

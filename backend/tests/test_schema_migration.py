@@ -24,6 +24,7 @@ from sqlalchemy import create_engine
 from backend.core.schema import (
     SchemaMismatchError,
     current_revision,
+    head_revision,
     prepare_schema,
 )
 from backend.core.schema_snapshot import schema_snapshot
@@ -63,8 +64,10 @@ def test_empty_db_gets_baseline(tmp_path):
     engine = create_engine(f"sqlite+pysqlite:///{path}")
     try:
         revision = prepare_schema(engine)
-        assert revision == "0001"
-        assert current_revision(engine) == "0001"
+        # 不写死 "0001"：这条用例要表达的是「到最新」，不是「到第 1 步」。
+        # 写死之后每加一条迁移都要回来改一次，而改的过程最容易把断言改成恒真。
+        assert revision == head_revision()
+        assert current_revision(engine) == head_revision()
 
         tables = {
             row[0]
@@ -97,13 +100,14 @@ def test_existing_current_db_is_stamped_without_any_ddl(isolated_db):  # noqa: A
 
     revision = prepare_schema(get_engine())
 
-    assert revision == "0001"
+    assert revision == head_revision()
     assert schema_snapshot(_db_path()) == before, "stamp 路径执行了 DDL：结构被改了"
 
     conn = _connect()
     try:
         assert conn.execute("SELECT COUNT(*) FROM users WHERE username='keep-me'").fetchone()[0] == 1
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0001"
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert version == head_revision()
     finally:
         conn.close()
 

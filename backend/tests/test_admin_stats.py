@@ -55,10 +55,11 @@ def _job(
         conn.execute(
             "INSERT INTO generation_jobs "
             "(owner_id, solution_id, kind, doc_kind, chat_stage, status, phase, "
-            " draft_content, completed_sections, input_fingerprint, usage, "
+            " draft_content, completed_sections, pending_items, input_fingerprint, usage, "
             " max_provider_switches, error_code, error_message, "
+            " provider_protocol, provider_config_id, provider_name, provider_model, "
             " prompt_tokens, completion_tokens, created_at, updated_at) "
-            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', NULL, NULL, 2, ?, '', ?, ?, ?, ?)",
+            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', '[]', NULL, NULL, 2, ?, '', '', '', '', '', ?, ?, ?, ?)",
             (
                 owner_id,
                 status,

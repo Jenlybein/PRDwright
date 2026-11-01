@@ -32,148 +32,70 @@ import logging
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import QueuePool
 # ⚠️ 必须用 SQLModel 的 `Session`，不能用 `sqlalchemy.orm.Session`：
 # 仓库层要靠 `session.exec(select(...))` / `session.get(...)` 这套 SQLModel 扩展方法，
 # 原生 Session 上没有 `exec`（只有 `execute`+`scalars`），绑定错了会在第一次查询时
 # 抛 `AttributeError: 'Session' object has no attribute 'exec'`。
 from sqlmodel import Session
 
-from backend.core.config import get_settings
-from backend.core.paths import default_db_file
+# 建引擎与连接级配置归 `core/database.py`（v8 / ADR-097）。
+# 这里**再导出**是为了让 `from backend.core.engine import build_engine, warmup`
+# 这类既有 import 一行都不用改——迁移期最重要的是"公开路径不变"。
+from backend.core.database import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_POOL_TIMEOUT,
+    build_engine,
+    database_url,
+    warmup,
+)
 
 logger = logging.getLogger(__name__)
 
-# 借不到连接时最多等多久。**必须有界**：没有它，池被借空时请求会无限挂起，
-# 表现是「接口没有响应、也没有报错」，比抛异常难查得多。
-DEFAULT_POOL_TIMEOUT = 5.0
-
-# 建连接的 DBAPI 超时（秒）。写冲突时先等，而不是立刻抛 `database is locked`。
-DEFAULT_CONNECT_TIMEOUT = 10.0
-
-
-def _on_connect(dbapi_connection: Any, _record: Any) -> None:
-    """每条新连接建立后立刻设置三条 PRAGMA。
-
-    做成事件而不是「在某个函数里记得加」：连接可能在池扩容、故障替换等路径上产生，
-    「每条都记得设」是不可靠的，而事件是结构性的。
-
-    - `journal_mode=WAL`：读写不再互斥；
-    - `busy_timeout=5000`：写冲突时等 5 秒（**只对 `SQLITE_BUSY` 有效**，
-      `SQLITE_READONLY` 不在其列——那正是要靠在启动期建满连接来避免的那种错误）；
-    - `foreign_keys=ON`：SQLite 默认关闭外键，不显式打开则级联删除不会发生。
-    """
-    cursor = dbapi_connection.cursor()
-    try:
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.execute("PRAGMA foreign_keys=ON")
-    finally:
-        cursor.close()
-
-
-def build_engine(
-    path: Path | str | None = None,
-    *,
-    size: int | None = None,
-    pool_timeout: float = DEFAULT_POOL_TIMEOUT,
-) -> Engine:
-    """创建一个 Engine。**不建连接**（连接在第一次借用时才建）。
-
-    Args:
-        path: 数据库文件路径；缺省读当前配置。
-        size: 连接池大小；缺省读 `DB_POOL_SIZE`。
-        pool_timeout: 借不到连接时最多等多久（秒）。测试里调小，避免用例为了等超时
-            白等 5 秒。
-
-    Returns:
-        配好 PRAGMA 事件与固定池的 Engine。
-    """
-    target = Path(path) if path is not None else default_db_file()
-    pool_size = int(size if size is not None else get_settings().db_pool_size)
-
-    engine = create_engine(
-        f"sqlite+pysqlite:///{target}",
-        # ⚠️ 固定池：`max_overflow=0` 不许运行期扩容。理由见模块 docstring。
-        poolclass=QueuePool,
-        pool_size=max(1, pool_size),
-        max_overflow=0,
-        pool_timeout=float(pool_timeout),
-        # 连接可跨线程复用（同一时刻只属于一个借用者）。
-        # SQLite 的 `timeout` 是写锁等待，与 `busy_timeout` 同源但作用于 DBAPI 层。
-        connect_args={
-            "timeout": DEFAULT_CONNECT_TIMEOUT,
-            "check_same_thread": False,
-        },
-        future=True,
-    )
-    event.listen(engine, "connect", _on_connect)
-    return engine
-
-
-def warmup(engine: Engine, size: int | None = None) -> int:
-    """在**启动期单线程**把池建满，之后运行期不再新建连接。
-
-    SQLAlchemy 的连接池是懒建的（第一次借用才建）。如果放任它懒建，那么并发请求
-    到来时就是「多线程同时建连接」——正是要避免的那个竞态。所以这里显式建满。
-
-    Args:
-        engine: 目标 Engine。
-        size: 建几条；缺省读 `DB_POOL_SIZE`。
-
-    Returns:
-        实际建好的连接数。
-    """
-    count = int(size if size is not None else get_settings().db_pool_size)
-    held = [engine.raw_connection() for _ in range(max(1, count))]
-    for connection in held:
-        connection.close()
-    logger.debug("连接池已预热：path=%s size=%d", engine.url.database, count)
-    return len(held)
-
 
 # ---------------------------------------------------------------------------
-# 进程级单例：按「当前配置的库路径」取
+# 进程级单例：按「当前配置的库地址」取
 # ---------------------------------------------------------------------------
 
 _init_lock = threading.Lock()
 _engine: Engine | None = None
-_engine_path: Path | None = None
+_engine_url: str | None = None
 _session_factory: sessionmaker[Session] | None = None
 
 
 def get_engine() -> Engine:
-    """取当前库的 Engine；路径变了就 dispose 旧的再建一个新的。
+    """取当前库的 Engine；地址变了就 dispose 旧的再建一个新的。
 
-    为什么按路径区分：`default_db_file()` 每次调用都读配置，所以路径可以在运行期变化
-    （测试装置每个用例换一个临时库）。不比对路径的话，切库之后拿到的还是旧库的 Engine，
-    症状是「新用例看见了上一个用例的数据」。
+    为什么按**地址**而不是按文件路径区分：`database_url()` 每次调用都读配置，所以
+    地址可以在运行期变化（测试装置每个用例换一个临时库；将来接 MySQL 之后也可能是
+    别的形态）。不比对地址的话，切库之后拿到的还是旧库的 Engine，症状是
+    「新用例看见了上一个用例的数据」。
 
-    快路径**不持锁**（每个操作都会走到这里）；只有「首次创建 / 换路径」才拿初始化锁。
+    用完整 URL 做键而不是 `Path`：URL 是「连哪个库」的完整表达（含驱动与连接参数），
+    文件路径只是它的一个特例。
+
+    快路径**不持锁**（每个操作都会走到这里）；只有「首次创建 / 换地址」才拿初始化锁。
     """
-    global _engine, _engine_path, _session_factory
+    global _engine, _engine_url, _session_factory
 
-    target = default_db_file()
+    target = database_url()
     current = _engine
-    if current is not None and _engine_path == target:
+    if current is not None and _engine_url == target:
         return current
 
     with _init_lock:
         # 双检：等锁期间可能已经有人建好了
         current = _engine
-        if current is not None and _engine_path == target:
+        if current is not None and _engine_url == target:
             return current
         if current is not None:
             current.dispose()
         fresh = build_engine(target)
         _engine = fresh
-        _engine_path = target
+        _engine_url = target
         _session_factory = sessionmaker(
             bind=fresh,
             class_=Session,
@@ -244,12 +166,12 @@ def reset_engine() -> None:
     生产启动路径不需要它；测试里每个用例换库，靠它把上一份的连接**立刻**关掉，
     否则会在 Windows 上一直握着临时库的文件句柄。
     """
-    global _engine, _engine_path, _session_factory
+    global _engine, _engine_url, _session_factory
     with _init_lock:
         if _engine is not None:
             _engine.dispose()
         _engine = None
-        _engine_path = None
+        _engine_url = None
         _session_factory = None
 
 

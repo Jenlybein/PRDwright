@@ -32,6 +32,8 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 # 导入模型 = 把所有表注册进 `SQLModel.metadata`。少了这一句，autogenerate 会认为
 # 「模型是空的」，从而生成一份「删掉所有表」的迁移——这是最危险的空白。
@@ -109,8 +111,17 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """在线模式：连库并执行。"""
     url = _database_url()
-    # 明确打印目标库：迁移是「不可逆的写操作」，任何时候都要能一眼看出改的是哪个文件。
-    logger.info("迁移目标库：%s", url)
+    # 明确打印目标库：迁移是「不可逆的写操作」，任何时候都要能一眼看出改的是哪个库。
+    #
+    # ⚠️ 必须脱敏。`_database_url()` 目前只产出 SQLite 文件路径（没有密码），但换到
+    # 有密码的库之后它会带凭据，而这个 logger 的输出会进轮转文件与 `app_logs` 表。
+    # 现在就把口子堵上，比换库那天再想起来可靠。
+    try:
+        shown = make_url(url).render_as_string(hide_password=True)
+    except ArgumentError:
+        # 地址解析不了时宁可少打一段，也不要为了格式化让迁移起不来
+        shown = "<无法解析的数据库地址>"
+    logger.info("迁移目标库：%s", shown)
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = url
 

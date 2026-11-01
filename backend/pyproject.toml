@@ -21,6 +21,7 @@ dependencies = [
     "langchain-nvidia-ai-endpoints>=1.1.0",
     "langchain-openai>=1.6.7",
     "pydantic-settings>=2.15.0",
+    "pymysql>=1.1.0",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
     # 数据层（v6 / ADR-074）。三个包的分工：

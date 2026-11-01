@@ -64,7 +64,35 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects import mysql
 from sqlmodel import Field, SQLModel
+
+# 列类型策略统一走 `core/types.py`（v8 / ADR-097）。本文件**不给索引列声明裸 Text**：
+# 索引列一旦没有长度上限，MySQL 建索引会失败，而 SQLite 上完全正常——那种错误只有
+# 到换库那天才暴露，所以由 `assert_metadata_is_portable` 在 import 时统一拦。
+from backend.core.types import (
+    assert_metadata_is_portable,
+    long_text,
+    short_text,
+    timestamp_text,
+)
+
+# 大段文本（SQLite TEXT / MySQL MEDIUMTEXT）。容量不是业务约束——60KB 由
+# `core/limits.py` 在写入前拦（ADR-095）。
+_BIG_TEXT = long_text()
+
+# 用户名：**大小写敏感**的唯一键（v8 / ADR-089）。
+#
+# 不能写 `mysql_collate=...`（SQLAlchemy 2.0 已移除），也不能用
+# `String(32, collation=...)`——类型级 collation 会无条件写进 DDL，SQLite 会收到
+# `VARCHAR(32) COLLATE utf8mb4_0900_as_cs` 并报 "no such collation"。
+# `with_variant` 是唯一只影响目标方言的写法。
+#
+# 长度 32 与 `auth_service._USERNAME_MAX`（=32）对齐：校验与列宽必须是同一个数，
+# 否则会出现「能注册但存不进去」或「列比校验宽一倍」这类不一致。
+_USERNAME_TEXT = short_text(32).with_variant(
+    mysql.VARCHAR(32, collation="utf8mb4_0900_as_cs"), "mysql"
+)
 
 # ---------------------------------------------------------------------------
 # 用户与会话
@@ -78,10 +106,12 @@ class User(SQLModel, table=True):
     __table_args__ = {"sqlite_autoincrement": True}
 
     id: int | None = Field(default=None, primary_key=True)
-    username: str = Field(sa_column=Column(Text, nullable=False, unique=True))
+    username: str = Field(
+        sa_column=Column(_USERNAME_TEXT, nullable=False, unique=True)
+    )
     password_hash: str = Field(sa_column=Column(Text, nullable=False))
     salt: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     is_active: bool = Field(
         default=True, sa_column=Column(Boolean, nullable=False, server_default=text("1"))
     )
@@ -110,12 +140,12 @@ class AuthSession(SQLModel, table=True):
     )
 
     # 主键是 token 哈希本身，不是自增 id → 不能声明 sqlite_autoincrement
-    token_hash: str = Field(sa_column=Column(Text, primary_key=True))
+    token_hash: str = Field(sa_column=Column(short_text(64), primary_key=True))
     user_id: int = Field(
         sa_column=Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     )
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
-    expires_at: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    expires_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 class InviteCode(SQLModel, table=True):
@@ -123,15 +153,15 @@ class InviteCode(SQLModel, table=True):
 
     __tablename__ = "invite_codes"
 
-    code: str = Field(sa_column=Column(Text, primary_key=True))
+    code: str = Field(sa_column=Column(short_text(64), primary_key=True))
     max_uses: int = Field(
         default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
     )
     used_count: int = Field(
         default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
     )
-    expires_at: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
+    expires_at: str | None = Field(default=None, sa_column=Column(timestamp_text(), nullable=True))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     note: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
 
@@ -152,11 +182,11 @@ class LoginFailure(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
-    username: str = Field(sa_column=Column(Text, nullable=False))
+    username: str = Field(sa_column=Column(short_text(32), nullable=False))
     ip: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 # ---------------------------------------------------------------------------
@@ -185,55 +215,57 @@ class Solution(SQLModel, table=True):
         sa_column=Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     )
     title: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     mode: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     stage: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
-    # 后端不解析的不透明快照：保持 TEXT（见模块 docstring ①/④）
-    data: str = Field(sa_column=Column(Text, nullable=False))
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
-    updated_at: str = Field(sa_column=Column(Text, nullable=False))
+    # ⚠️ 这一列**已退役**：`solution_repo.create` 写空串、`update` 刻意不碰它
+    # （见该文件 docstring「`data` 已退役」）。保留列是为了不重建表；挂 MEDIUMTEXT
+    # 只是"别再为它改一次基线"，不代表它还会长大——60KB 的闸门不覆盖它。
+    data: str = Field(sa_column=Column(_BIG_TEXT, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     # 「内容真正变过」的时间（v7）：列表排序用它与 updated_at 分开的两条时间轴
     content_updated_at: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(timestamp_text(), nullable=False, server_default=text("''"))
     )
     # 以下为前端状态回填（迁移 v9 / v10 追加），一律 TEXT + 空串默认
     view_state: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     entry_mode: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     chat_tab: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     summary_json: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     quick_product_name: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     quick_requirements: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     draft_prd_text: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     paste_prd_text: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     paste_api_docs_text: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     active_job_kind: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     active_job_doc_kind: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     active_job_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
 
@@ -259,9 +291,9 @@ class Document(SQLModel, table=True):
     solution_id: int = Field(
         sa_column=Column(Integer, ForeignKey("solutions.id", ondelete="CASCADE"), nullable=False)
     )
-    kind: str = Field(sa_column=Column(Text, nullable=False))
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
-    updated_at: str = Field(sa_column=Column(Text, nullable=False))
+    kind: str = Field(sa_column=Column(short_text(32), nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     current_version_id: int | None = Field(
         default=None,
         sa_column=Column(
@@ -284,30 +316,32 @@ class DocumentVersion(SQLModel, table=True):
         sa_column=Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     )
     version_no: int = Field(sa_column=Column(Integer, nullable=False))
-    content: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
-    )
+    # 一整篇 PRD：勘察实测 11,566 字 = 24,534 字节，已占 MySQL `TEXT` 的 37%。
+    # ⚠️ 不设 `server_default`：MySQL 的 TEXT/MEDIUMTEXT 不接受字面量默认值
+    # （会报 can't have a default value）。ORM 插入总是显式带值，裸 SQL 省略该列
+    # 应该失败——那是显式错误，比静默的空串好。
+    content: str = Field(default="", sa_column=Column(_BIG_TEXT, nullable=False))
     content_sha: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     pending_items: str = Field(
-        default="[]", sa_column=Column(Text, nullable=False, server_default=text("'[]'"))
+        default="[]", sa_column=Column(Text, nullable=False)
     )
     last_run_summary: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     source: str = Field(
         default="generated",
-        sa_column=Column(Text, nullable=False, server_default=text("'generated'")),
+        sa_column=Column(Text, nullable=False),
     )
     note: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     # ⚠️ 属性名是 `meta`、列名是 `metadata`：后者与 `Base.metadata` 撞名（见模块 docstring ③）
     meta: str = Field(
         default="{}",
-        sa_column=Column("metadata", Text, nullable=False, server_default=text("'{}'")),
+        sa_column=Column("metadata", Text, nullable=False),
     )
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
-    updated_at: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 # ---------------------------------------------------------------------------
@@ -336,31 +370,26 @@ class GenerationJob(SQLModel, table=True):
     )
     solution_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     # kind = 「做了什么」（prd / api_docs / prompts / optimize / chat）
-    kind: str = Field(sa_column=Column(Text, nullable=False))
+    kind: str = Field(sa_column=Column(short_text(32), nullable=False))
     # doc_kind = 「写到哪一份产物」；`optimize` / `clarify` 凭 kind 定不了产物
-    doc_kind: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
-    )
+    doc_kind: str = Field(default="", sa_column=Column(Text, nullable=False))
     # chat_stage = 对话任务属于哪条线程；并发判重与重连都要它
-    chat_stage: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
-    )
+    chat_stage: str = Field(default="", sa_column=Column(Text, nullable=False))
     status: str = Field(
         default="running",
-        sa_column=Column(Text, nullable=False, server_default=text("'running'")),
+        sa_column=Column(short_text(32), nullable=False),
     )
-    phase: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
-    )
-    # 进程重启后的兜底恢复用；快照读内存运行时而非本列
-    draft_content: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
-    )
+    phase: str = Field(default="", sa_column=Column(Text, nullable=False))
+    # 进程重启后的兜底恢复用；快照读内存运行时而非本列。
+    # 勘察实测 26,957 字 = 36,919 字节：已占 MySQL `TEXT` 的 56%，必须 MEDIUMTEXT。
+    # ⚠️ 不设 server_default：MEDIUMTEXT 在 MySQL 下不接受字面量默认值。
+    draft_content: str = Field(default="", sa_column=Column(_BIG_TEXT, nullable=False))
+    # 分章完成清单（JSON 数组），实测 15,777 字节，贴着 16KB 线，留一档余量
     completed_sections: str = Field(
-        default="[]", sa_column=Column(Text, nullable=False, server_default=text("'[]'"))
+        default="[]", sa_column=Column(_BIG_TEXT, nullable=False)
     )
     pending_items: str = Field(
-        default="[]", sa_column=Column(Text, nullable=False, server_default=text("'[]'"))
+        default="[]", sa_column=Column(Text, nullable=False)
     )
     input_fingerprint: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     usage: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
@@ -368,10 +397,10 @@ class GenerationJob(SQLModel, table=True):
         default=2, sa_column=Column(Integer, nullable=False, server_default=text("2"))
     )
     error_code: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     error_message: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     # Token 用量冗余成列：后台「按用户 / 按日」统计只查列，不解析 JSON
     prompt_tokens: int = Field(
@@ -383,19 +412,19 @@ class GenerationJob(SQLModel, table=True):
     # 供应商快照（从 usage JSON 派生的副本，不设外键：配置条目会被删、会被改，
     # 回查等于让历史账单跟着今天的状态变）
     provider_protocol: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     provider_config_id: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     provider_name: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     provider_model: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
-    updated_at: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 # ---------------------------------------------------------------------------
@@ -422,11 +451,11 @@ class ChatSession(SQLModel, table=True):
     solution_id: int = Field(
         sa_column=Column(Integer, ForeignKey("solutions.id", ondelete="CASCADE"), nullable=False)
     )
-    stage: str = Field(sa_column=Column(Text, nullable=False))
+    stage: str = Field(sa_column=Column(short_text(32), nullable=False))
     conversation_id: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
-    updated_at: str = Field(sa_column=Column(Text, nullable=False))
+    updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 class ChatTurn(SQLModel, table=True):
@@ -457,31 +486,31 @@ class ChatTurn(SQLModel, table=True):
     solution_id: int = Field(
         sa_column=Column(Integer, ForeignKey("solutions.id", ondelete="CASCADE"), nullable=False)
     )
-    stage: str = Field(sa_column=Column(Text, nullable=False))
-    role: str = Field(sa_column=Column(Text, nullable=False))
+    stage: str = Field(sa_column=Column(short_text(32), nullable=False))
+    role: str = Field(sa_column=Column(short_text(32), nullable=False))
     content: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     tool_call_id: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     tool_result: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     asks: str = Field(
-        default="[]", sa_column=Column(Text, nullable=False, server_default=text("'[]'"))
+        default="[]", sa_column=Column(Text, nullable=False)
     )
     answers: str = Field(
-        default="[]", sa_column=Column(Text, nullable=False, server_default=text("'[]'"))
+        default="[]", sa_column=Column(Text, nullable=False)
     )
     tool_calls: str = Field(
-        default="[]", sa_column=Column(Text, nullable=False, server_default=text("'[]'"))
+        default="[]", sa_column=Column(Text, nullable=False)
     )
     interrupted: bool = Field(
         default=False, sa_column=Column(Boolean, nullable=False, server_default=text("0"))
     )
     job_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 # ---------------------------------------------------------------------------
@@ -504,15 +533,17 @@ class AppLog(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
-    ts: str = Field(sa_column=Column(Text, nullable=False))
-    level: str = Field(sa_column=Column(Text, nullable=False))
+    ts: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    level: str = Field(sa_column=Column(short_text(32), nullable=False))
     logger: str = Field(sa_column=Column(Text, nullable=False))
     msg: str = Field(sa_column=Column(Text, nullable=False))
-    request_id: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    request_id: str | None = Field(
+        default=None, sa_column=Column(short_text(64), nullable=True)
+    )
     user_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     event: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     extra_json: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     exc: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
@@ -530,17 +561,17 @@ class AdminAuditLog(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     actor_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     actor_name: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     action: str = Field(sa_column=Column(Text, nullable=False))
     target: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     detail: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     request_id: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
-    ts: str = Field(sa_column=Column(Text, nullable=False))
+    ts: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 # ---------------------------------------------------------------------------
@@ -558,22 +589,22 @@ class ModelProvider(SQLModel, table=True):
 
     __tablename__ = "model_providers"
 
-    id: str = Field(sa_column=Column(Text, primary_key=True))
+    id: str = Field(sa_column=Column(short_text(64), primary_key=True))
     name: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     protocol: str = Field(
         default="openai_compatible",
-        sa_column=Column(Text, nullable=False, server_default=text("'openai_compatible'")),
+        sa_column=Column(Text, nullable=False),
     )
     base_url: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     value_token: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     default_model: str = Field(
-        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+        default="", sa_column=Column(Text, nullable=False)
     )
     max_tokens: int = Field(
         default=4096, sa_column=Column(Integer, nullable=False, server_default=text("4096"))
@@ -588,7 +619,7 @@ class ModelProvider(SQLModel, table=True):
         default=False, sa_column=Column(Boolean, nullable=False, server_default=text("0"))
     )
     extra_json: str = Field(
-        default="{}", sa_column=Column(Text, nullable=False, server_default=text("'{}'"))
+        default="{}", sa_column=Column(Text, nullable=False)
     )
     # 遗留列：v19 起一律为 0，**代码不再读取**（保留是为了不重建表）
     builtin: bool = Field(
@@ -600,8 +631,8 @@ class ModelProvider(SQLModel, table=True):
     sort_order: int = Field(
         default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
     )
-    created_at: str = Field(sa_column=Column(Text, nullable=False))
-    updated_at: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
 class SystemConfig(SQLModel, table=True):
@@ -613,9 +644,9 @@ class SystemConfig(SQLModel, table=True):
     __tablename__ = "system_config"
 
     # ⚠️ `key` 是列名也是属性名：SQLAlchemy 允许（与 `metadata` 不同）
-    key: str = Field(sa_column=Column(Text, primary_key=True))
+    key: str = Field(sa_column=Column(short_text(64), primary_key=True))
     value: str = Field(sa_column=Column(Text, nullable=False))
-    updated_at: str = Field(sa_column=Column(Text, nullable=False))
+    updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     # 管理员 id；删号后置空，故不加外键
     updated_by: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
 
@@ -640,6 +671,11 @@ BOOLEAN_COLUMNS: frozenset[tuple[str, str]] = frozenset(
 
 
 # 供 alembic 与测试引用的全部表模型（顺序与建表无关，SQLAlchemy 自己按外键排序）
+#
+# ⚠️ 自检放在**最后**：所有表都注册进 metadata 之后才能扫。
+# 它拦的是"在 SQLite 上完全正常、到 MySQL 才炸"的两类写法，让错误发生在 import 时。
+assert_metadata_is_portable(SQLModel.metadata)
+
 __all__ = [
     "BOOLEAN_COLUMNS",
     "AdminAuditLog",

@@ -26,10 +26,10 @@ from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy import update as sa_update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
+from backend.core.dialect import upsert_values
 from backend.core.models import ModelProvider, SystemConfig
 
 
@@ -63,21 +63,15 @@ class SystemConfigRepository:
         if not items:
             return
         now = utc_now_text()
-        statement = sqlite_insert(SystemConfig).values(
+        upsert_values(
+            self.session,
+            SystemConfig,
             [
                 {"key": key, "value": value, "updated_at": now, "updated_by": updated_by}
                 for key, value in items.items()
-            ]
-        )
-        self.session.execute(
-            statement.on_conflict_do_update(
-                index_elements=["key"],
-                set_={
-                    "value": statement.excluded.value,
-                    "updated_at": statement.excluded.updated_at,
-                    "updated_by": statement.excluded.updated_by,
-                },
-            )
+            ],
+            conflict_cols=["key"],
+            update_cols=["value", "updated_at", "updated_by"],
         )
 
     def delete_many(self, keys: list[str]) -> int:

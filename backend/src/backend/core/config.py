@@ -366,9 +366,21 @@ class Settings(BaseSettings):
     )
 
     # --- 数据库 --------------------------------------------------------------
+    database_url: str = Field(
+        default="",
+        description=(
+            "数据库地址（v8 / ADR-097）。例如 "
+            "sqlite:////var/lib/prdwright/prdwright.db 或 "
+            "mysql+pymysql://user:pass@host:3306/prdwright?charset=utf8mb4。"
+            "留空时回落到 DB_PATH（兼容糖，见 core/database.py::database_url）。"
+        ),
+    )
     db_path: str = Field(
         default="",
-        description="SQLite 数据库文件路径；留空则使用后端项目根目录下的 prdwright.db。",
+        description=(
+            "【兼容糖】SQLite 数据库文件路径；留空则使用后端项目根目录下的 prdwright.db。"
+            "新部署请用 DATABASE_URL——这一项是为已有部署与测试装置保留的。"
+        ),
     )
     db_pool_size: int = Field(
         default=4,

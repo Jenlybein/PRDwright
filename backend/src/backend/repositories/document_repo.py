@@ -34,10 +34,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import delete, func, literal, select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
+from backend.core.dialect import upsert_select
+from backend.core.limits import ensure_text_within_limit
 from backend.core.models import Document, DocumentVersion, Solution
 
 
@@ -328,6 +329,11 @@ class DocumentRepository:
         """
         now = utc_now_text()
 
+        # 上限闸门（v8）：60KB 字节，放在最前面。
+        # 放在第一步之后也不算错（异常会让 `session_scope` 回滚，下游删了也会回来），
+        # 但提前拦住可以少做一次无谓的删除，且报错时数据库里什么都没动过。
+        ensure_text_within_limit(content, field="文档正文")
+
         # 第一步：删下游（同事务；归属条件防止改到别人的方案）
         if invalidate:
             owned_solution_ids = select(Solution.id).where(
@@ -445,11 +451,16 @@ class DocumentRepository:
     ) -> Document | None:
         """确保 `documents` 行存在并返回它；方案不属于该用户时返回 None。
 
-        用 `INSERT ... SELECT ... WHERE s.user_id = ? ON CONFLICT DO NOTHING`：归属条件
+        用 `INSERT ... SELECT ... WHERE s.user_id = ?` + 冲突忽略：归属条件
         写在 SELECT 里，因此**归属不通过时一行都插不进去**，不需要「先查一次再写」
         这种两次往返、留下窗口的写法。随后再查一次既拿模型对象又当归属校验的第二道闸。
+
+        冲突处理走方言适配层（v8 / ADR-088）：调用方只说「冲突就跳过」，
+        不关心是 `ON CONFLICT DO NOTHING` 还是 MySQL 的主键 no-op 更新。
         """
-        insert_from_owned = sqlite_insert(Document).from_select(
+        upsert_select(
+            self.session,
+            Document,
             ["solution_id", "kind", "created_at", "updated_at"],
             select(
                 Solution.id,
@@ -457,11 +468,7 @@ class DocumentRepository:
                 literal(now),
                 literal(now),
             ).where(Solution.id == solution_id, Solution.user_id == owner_id),
-        )
-        self.session.execute(
-            insert_from_owned.on_conflict_do_nothing(
-                index_elements=["solution_id", "kind"]
-            )
+            conflict_cols=["solution_id", "kind"],
         )
         return (
             self.session.execute(

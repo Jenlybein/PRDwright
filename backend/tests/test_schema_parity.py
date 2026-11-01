@@ -25,9 +25,13 @@ from backend.core.schema_snapshot import (
     schema_snapshot,
 )
 
-# 允许出现在库里的列类型。**不含 VARCHAR**：那是裸 `str` 字段的产物，
-# 与现有库的 TEXT 在 SQLite 里行为相同、类型名不同，会让 alembic 产生幻影迁移。
-_ALLOWED_TYPES = {"TEXT", "INTEGER", "BOOLEAN", "BLOB", "LARGEBINARY"}
+# 允许出现在库里的列类型。
+#
+# v8 之前这里**不含** VARCHAR：那时裸 `str` 字段会生成它，与现有库的 TEXT 在 SQLite
+# 里行为相同、类型名不同，会让 alembic 产生幻影迁移。
+# v8 之后 VARCHAR 是**故意**的：索引列在 MySQL 上必须有长度（ADR-097），
+# 所以判据从「不许 VARCHAR」改成「不许**没有长度**的 String」——那才是裸 str 的特征。
+_ALLOWED_TYPES = {"TEXT", "INTEGER", "BOOLEAN", "BLOB", "LARGEBINARY", "STRING"}
 
 # 有自增主键的表（`AUTOINCREMENT`）。其余表的主键是 TEXT，不需要
 _AUTOINCREMENT_TABLES = {
@@ -85,19 +89,29 @@ def test_every_table_is_modelled(isolated_db, tmp_path):
 
 
 def test_no_bare_str_columns():
-    """没有 VARCHAR 列：所有字符串都必须显式 `Column(Text)`。
+    """字符串列必须要么有长度（`short_text`），要么是显式 `Text`（长文本）。
 
-    裸 `str` 字段会生成 `VARCHAR`。它在 SQLite 里与 `TEXT` 亲和性相同、行为一致，
-    但类型名不同 → 结构对拍与 `alembic check` 会全表报漂移。
+    这条守的是「裸 `str` 字段」——SQLModel 会把它映射成**没有长度**的 `VARCHAR`，
+    在 SQLite 里与 `TEXT` 亲和性相同、行为一致，但类型名不同 → 结构对拍与
+    `alembic check` 会全表报漂移。
+
+    v8 之后多了 `String(n)` 这种**合法**形态（索引列必须有长度，ADR-097），
+    所以判据从「不许 VARCHAR」细化成「不许**没有长度**的 String」。
     """
     from backend.core import models  # noqa: F401
 
     offenders: list[str] = []
     for table in SQLModel.metadata.tables.values():
         for column in table.columns:
-            type_name = type(column.type).__name__.upper()
+            # 剥掉 `with_variant` 的外壳：`long_text()` 在 SQLite 下就是 Text
+            impl = getattr(column.type, "impl", column.type)
+            type_name = type(impl).__name__.upper()
             if type_name not in _ALLOWED_TYPES:
                 offenders.append(f"{table.name}.{column.name} → {type_name}")
+            elif type_name == "STRING" and not getattr(impl, "length", None):
+                offenders.append(
+                    f"{table.name}.{column.name} → String 没有长度（裸 str 的特征）"
+                )
     assert offenders == [], "这些列的类型不在允许集合内：\n  " + "\n  ".join(offenders)
 
 

@@ -39,11 +39,11 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel
 
-from backend.core.paths import default_db_file
 from backend.core.schema_snapshot import diff_snapshots, schema_snapshot
 
 logger = logging.getLogger(__name__)
@@ -72,16 +72,32 @@ def _alembic_config(url: str) -> Config:
     """
     cfg = Config()
     cfg.set_main_option("script_location", str(_BACKEND_ROOT / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", url)
+    # ⚠️ `%` 必须转义成 `%%`。
+    #
+    # Alembic 的 Config 背后是 configparser，默认开启 BasicInterpolation，把 `%` 当
+    # 语法字符。而 `render_as_string()` 会按 URL 规范把路径里的 `:`、`\` 编码成
+    # `%3A`、`%5C`——Windows 上**必然**发生。不转义的话 `set_main_option` 直接抛
+    # `ValueError: invalid interpolation syntax`，而且报错位置指向 configparser，
+    # 完全看不出是"路径里有盘符"导致的。
+    #
+    # 读回来时 configparser 会把 `%%` 还原成 `%`，所以 `migrations/env.py` 拿到的
+    # 仍是可用的地址。这是 Alembic 官方文档 "Escaping Special Characters" 的做法。
+    cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     return cfg
 
 
 def _database_url(engine: Engine) -> str:
-    """从 Engine 反推数据库地址（保证迁移与服务指向同一个库）。"""
-    database = engine.url.database
-    if not database:
-        return f"sqlite+pysqlite:///{default_db_file()}"
-    return f"sqlite+pysqlite:///{database}"
+    """从 Engine 反推数据库地址（保证迁移与服务指向同一个库）。
+
+    不手拼 `sqlite+pysqlite:///`：那等于把方言写死在这一行里。换成别的库之后，
+    手拼的结果既不是 SQLite 也不是目标库的地址，而 Alembic 会照着它去连一个
+    不存在的库——报错信息指向"库不存在"，真因是这里拼错了。
+
+    `render_as_string(hide_password=False)` 是官方的逆序列化方式，任何方言都对。
+    ⚠️ `hide_password` 必须显式给 `False`：默认会渲染成 `***`，迁移连不上。
+    正因为这个返回值带密码，`migrations/env.py` 打印目标库时必须单独做脱敏。
+    """
+    return engine.url.render_as_string(hide_password=False)
 
 
 def _has_alembic_version(engine: Engine) -> bool:
@@ -89,9 +105,14 @@ def _has_alembic_version(engine: Engine) -> bool:
 
 
 def _is_empty(engine: Engine) -> bool:
-    """库里除了 SQLite 自己的表之外一张表都没有。"""
+    """库里一张业务表都没有（Alembic 自己的账本不算）。
+
+    不判 `sqlite_sequence`：那是 SQLite `AUTOINCREMENT` 的副产物，只有 SQLite 才有，
+    换库后这个集合永远为空，判断会静默变成"永远非空"。改成只排除迁移账本——
+    「有没有 `alembic_version`」在任何库上的含义都一样。
+    """
     names = set(inspect(engine).get_table_names())
-    return not (names - {"sqlite_sequence"})
+    return not (names - {"alembic_version"})
 
 
 _MODELS_SNAPSHOT: dict | None = None
@@ -174,3 +195,18 @@ def current_revision(engine: Engine) -> str | None:
         return None
     with engine.connect() as conn:
         return conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+
+
+def head_revision() -> str | None:
+    """代码里迁移链的 head（**不连库**）。
+
+    两个用途：
+
+    - 测试断言「库的版本 == 代码的 head」，而不是写死 `"0001"`——写死的用例
+      每加一条迁移就要改一次，而它本该表达的是「是否到最新」；
+    - `/readyz` 的就绪判定：`alembic_version != head` 说明迁移还没跑完，
+      此时库是通的但业务会因缺列而 500。
+    """
+    cfg = Config()
+    cfg.set_main_option("script_location", str(_BACKEND_ROOT / "migrations"))
+    return ScriptDirectory.from_config(cfg).get_current_head()

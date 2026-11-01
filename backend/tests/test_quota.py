@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from backend.core import runtime_config as rc
 from backend.core.clock import utc_now, utc_now_text
-from dbsupport import connect
+from dbsupport import connect, insert_job
 from backend.core.engine import session_scope
 from backend.repositories.quota_repo import QuotaRepository
 from conftest import system_config as SystemConfigRepository
@@ -57,16 +57,20 @@ def _ensure_user(user_id: int) -> None:
 
 def _job(owner_id: int, *, status: str = "completed", prompt: int = 0, completion: int = 0,
          error_code: str = "", created_at: str | None = None) -> None:
-    """直接写一行任务，用于构造统计口径。"""
+    """直接写一行任务，用于构造统计口径。
+
+    列清单已收敛到 `dbsupport.insert_job`：v8 删掉一批列的 `server_default` 之后
+    （MySQL 的 TEXT 不接受字面量默认值），在这里手抄列名会随每次改结构而失效。
+    """
     _ensure_user(owner_id)
-    moment = created_at or utc_now_text()
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO generation_jobs (owner_id, kind, status, error_code, prompt_tokens,"
-            " completion_tokens, created_at, updated_at) VALUES (?, 'prd', ?, ?, ?, ?, ?, ?)",
-            (owner_id, status, error_code, prompt, completion, moment, moment),
-        )
-        conn.commit()
+    insert_job(
+        owner_id,
+        status=status,
+        error_code=error_code,
+        created_at=created_at,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+    )
 
 
 def _set_global(**values: int | bool) -> None:
