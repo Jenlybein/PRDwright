@@ -11,7 +11,7 @@
 
 与 `test_generation_job.py` 里那几条的区别：那几条分别只验「仓储置终态」
 「收尾不写文档」「事件循环看到标记就 break」；这里验的是**它们接在一起**
-——路由里的 `cancel_for_solution` 确实与内存运行时、收尾逻辑串上了。
+——路由里的 `delete_solution_and_cancel_jobs` 确实与内存运行时、收尾逻辑串上了。
 
 ⚠️ 断言里刻意包含「一个事件都没被消费」（`draft_content` 为空）：只看「文档没写」
 是不够的——`_finalize` 里那道「方案还在不在」的兜底也能让文档不写。真正要钉住的是
@@ -123,7 +123,7 @@ def test_delete_solution_mid_generation_leaves_no_document(client, monkeypatch):
 
     同时用「模型调用次数」证明任务**在途中**就被中止了，而不只是收尾时判了个失败：
     `_finalize` 里那道「方案还在不在」的兜底也能让文档不写，若只用「文档没写」做断言，
-    路由漏调 `cancel_for_solution` 这个回归就测不出来。
+    路由漏调 `delete_solution_and_cancel_jobs` 这个回归就测不出来。
     """
     register(client)
     owner_id = _owner_id()
