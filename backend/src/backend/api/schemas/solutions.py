@@ -76,7 +76,7 @@ class SolutionSaveRequest(BaseModel):
 
 
 class SolutionSummary(BaseModel):
-    """方案摘要，用于左侧列表。刻意**不含** `data`。"""
+    """方案摘要，用于左侧列表：只含标量摘要，不含正文与聊天记录。"""
 
     id: int = Field(description="方案 ID")
     title: str = Field(description="方案标题；未取到产品名时由前端给出默认标题")
