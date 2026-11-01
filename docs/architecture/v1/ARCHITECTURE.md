@@ -3,7 +3,7 @@
 > 本文按 git 提交反推 v1 期**当时的架构设计**：先写目标与范围，再写怎么落地。
 > v1 期没有留下任何架构文档（收尾提交 `1c65e94` 时 `README.md` 为空），
 > 因此以下内容是从 `1c65e94` 的代码树与各提交信息还原的设计全貌。
-> 时间线与方法见 `../evolution-truth.md`。
+> 时间线与已核实的阶段数字见 `../README.md`；本层特有的事实（真实产物、本期不做、定位）见本文附录 A。
 
 ---
 
@@ -149,3 +149,54 @@ SSE 的三处工程细节（v1 就定下，沿用至今）：
 
 `1c65e94 "V1版本开发结束"`（2026-10-10）：17 个提交，44 files，+5891 / −470。
 目标内的四项能力全部跑通，目标外的六项按计划未启动——**它们是 v2 的需求来源**。
+
+> ⚠️ **规模数字不可复核**：`17 个提交` 可复现（`git rev-list --count`）；但 `44 files / +5891 / −470`
+> 用三种算法都对不上——空树→`1c65e94` 实测 `50 files / +13133 / −0`，逐提交累加 `131 / +14423 / −1290`，
+> 剔除 lockfile `47 / +5593 / −0`；且 v1 期**没有任何删除**，`−470` 无从产生。
+> 该数字来源已不可考，按「历史旧账」处理，不要拿它做任何统计。见 `../README.md` §「已确认的失真」。
+
+---
+
+## 附录 A：v1 真相（按 git 反推）
+
+> 迁自已删除的 `docs/architecture/evolution-truth.md` 第 3 节，**内容逐字保留**。
+> v1 期没有留下任何架构文档，本文件正文与本附录都是按 git 提交反推出来的。
+
+### A.1 真实产物（`1c65e94` 时的文件树）
+
+```text
+backend/src/backend/
+  main.py
+  api/{config,conversation}.py        # 只有两个 router
+  core/{config.py, question_config.json}
+  services/{ark_llm, conversation_service, document_service,
+            llm_factory, prompts, stream_guard}.py
+frontend/src/
+  App.vue                             # 单体，全部流程在这里
+  components/{ChatInput, DocumentReview, FormStep, MessageList}.vue
+  services/api.ts  types/index.ts  utils/{download, markdown}.ts
+```
+
+接口共 **9 条，全部集中在一个 `api/conversation.py` 里**：
+`GET /questions` + 7 条 SSE（start-stream / continue-stream / generate-prd-stream /
+generate-api-docs-stream / generate-prompts-stream / optimize-document-stream）+ 1 条 config。
+
+### A.2 本期不做的部分（范围决策，不是遗漏）
+
+| 能力 | v1 的决定 | 何时纳入 |
+| --- | --- | --- |
+| 数据库 / `repositories/` / `core/db.py` | 本期不做：会话在服务端内存 | v2，10-13 `4e78a89` |
+| 登录鉴权 | 本期不做：没有用户概念 | v2，10-13 `4e78a89` |
+| 技能包 `skills/prd-generator/` | 本期不做：提示词集中在 `prompts.py` | v2，10-12 `bad6d54` |
+| 分章节生成 | 本期不做：整篇一次生成 | v2，10-13 `1636eaf` |
+| 自动化测试 | 本期不做：手工验证主链路 | 后端 10-13 `4e78a89`；前端 10-12 `26f2b49` |
+| CI | 本期不做 | v2 收尾，10-14 `874d21f` |
+| 机器可读错误码 | 本期不做：错误以中文文案表达 | v2，10-14 `7be5989` |
+| 架构文档 | 本期未产出（`README.md` 是空文件） | 由本文件按 git 反推补全 |
+| Pinia / vue-router | 依赖已装，状态仍留在组件内 | 真正启用在 10-12 / 10-13 |
+
+### A.3 v1 的定位
+
+**一次性流程原型**：能问（问卷）、能聊（SSE 澄清）、能出三份文档（PRD / 接口文档 / 提示词）、
+能流式看结果。会话随服务端进程结束、进度靠前端快照恢复——这就是「一次性」的含义，
+也是它把全部复杂度押在「验证主链路」上的直接结果。

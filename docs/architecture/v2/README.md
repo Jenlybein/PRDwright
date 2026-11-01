@@ -3,10 +3,10 @@
 > **一句话**：一个能注册登录、能把需求变成 PRD / 接口文档 / 提示词、能存方案、改坏了有 CI 拦着的产品。
 >
 > **下层**：`../v1/`（一次性流程原型）　**上层**：`../v3/`（放心用，进行中）
-> 时间线真源：**`../evolution-truth.md`**（按 git 提交还原，含「文档断言 vs git 事实」失真清单）
+> 时间线真源：**`../README.md`**（按 git 提交还原，含「文档断言 vs git 事实」失真清单）
 >
-> **本层常青文档只有两份**：`ARCHITECTURE.md`（v2 是什么）+ `ADR.md`（为什么这么选）。
-> 其余是**已完工的施工留档**，收在 `archive/`，不代表当前状态。
+> **本层常青文档只有一份**：`ARCHITECTURE.md`（v2 是什么，末尾附录 A~D 逐字收着四份施工留档）。
+> 「为什么这么选」已按条入库：ADR-001 ~ 015 见 `../../adr/README.md`。附录里的四份施工留档**已完工，不代表当前状态**。
 
 ## 交付清单
 
@@ -35,22 +35,21 @@
 
 | 文件 | 性质 | 内容 |
 | --- | --- | --- |
-| `ARCHITECTURE.md` | **常青** | v2 架构文档：目标与范围、分层总览、后端 / 前端设计、关键契约、设计取舍 |
-| `ADR.md` | **常青**（append-only，v3 继续追加 016+） | ADR-001 ~ 015 **全卷**：**全部成文于 v2 期**（2026-10-12 ~ 10-14），文件头部有「成文时间 vs 落地时间」对照表 |
-| `archive/` | **留档**（已完工，不代表现状） | 四份施工快照，见下 |
+| `ARCHITECTURE.md` | **常青** | v2 架构文档：目标与范围、分层总览、后端 / 前端设计、关键契约、设计取舍；末尾附录 A~D 逐字保留四份施工留档 |
+| `../../adr/` | **常青**（append-only，跨层共用） | ADR-001 ~ 015 **全卷**：**全部成文于 v2 期**（2026-10-12 ~ 10-14），已按条入库，索引见 `../../adr/README.md` |
 
-### `archive/` · 施工留档
+### 附录 A~D · 施工留档（已并入 `ARCHITECTURE.md`）
 
-这些文件是**一次性施工单据**，结论已进 ADR，实现以 `ARCHITECTURE.md` 为准。保留只为回溯「当时为什么这么拆」。
+这些内容是**一次性施工单据**，结论已进 ADR，实现以 `ARCHITECTURE.md` 为准。原文件已删除，正文逐字并入本层 `ARCHITECTURE.md` 末尾；保留只为回溯「当时为什么这么拆」。
 
-| 文件 | 内容 |
-| --- | --- |
-| `system_design.md` | R0-T5 错误契约机器码化的增量设计与任务分解（含任务依赖图）→ 结论见 ADR-012 |
-| `class-diagram.mermaid` | 上者的配套类图（只覆盖 `ErrorCode` / `AppError` / `error_payload`） |
-| `sequence-diagram.mermaid` | 上者的配套时序图（SSE `error` 事件带 `code` 的流转） |
-| `ui-redesign-plan.md` | 前端 UI 评审与重构**提案**（10-13）→ 已落地部分见 ADR-014 / ADR-015 |
+| 附录 | 原文件 | 内容 |
+| --- | --- | --- |
+| ARCHITECTURE.md（附录 A） | `archive/system_design.md` | R0-T5 错误契约机器码化的增量设计与任务分解（含任务依赖图）→ 结论见 ADR-012 |
+| ARCHITECTURE.md（附录 B） | `archive/ui-redesign-plan.md` | 前端 UI 评审与重构**提案**（10-13）→ 已落地部分见 ADR-014 / ADR-015 |
+| ARCHITECTURE.md（附录 C） | `archive/class-diagram.mermaid` | 附录 A 的配套类图（只覆盖 `ErrorCode` / `AppError` / `error_payload`） |
+| ARCHITECTURE.md（附录 D） | `archive/sequence-diagram.mermaid` | 附录 A 的配套时序图（SSE `error` 事件带 `code` 的流转） |
 
-⚠️ `ui-redesign-plan.md` 是**提案且与实际落地有偏差**：它提的是 `brand-*` / `primary-*` 令牌，
+⚠️ 附录 B（原 `archive/ui-redesign-plan.md`）是**提案且与实际落地有偏差**：它提的是 `brand-*` / `primary-*` 令牌，
 最终落地的是三层语义令牌（ADR-014）。拿它当现状读会被误导。
 
 ## v2 是怎么走过来的（七波，按 git 提交）

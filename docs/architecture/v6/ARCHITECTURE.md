@@ -542,4 +542,4 @@ lifespan 关闭
 | `core/db.py::SCHEMA_SQL` / `init_schema()` | **已删除**（随旧链一起，ADR-083）。旧库不再自动升级，会拒绝启动 |
 | `core/db.py` 时间工具（`utc_now` 等） | **已搬到** `core/clock.py` |
 | `core/migrations.py` / `core/legacy_migrations.py` | **已删除**（v6.1 / ADR-083）；守卫 C9 守着它们不许回来 |
-| `T15-data-access-layer.md` | 保留为历史记录，顶部加「已被 v6 取代」指针 |
+| `T15-data-access-layer.md` | 已**逐字**并入 `../v5/ARCHITECTURE.md` 附录 B，保留为历史记录 |

@@ -5,7 +5,7 @@
 >
 > **下层**：`../v6/`（数据层重构，已完成）。本层不改业务能力，只回答
 > 「这些东西怎么搬到公网上、怎么长期活着」。
-> 时间线真源：**`../evolution-truth.md`**
+> 时间线真源：**`../README.md`**
 
 ---
 
@@ -889,3 +889,455 @@ v7 **不改** v6 已定型的任何业务能力与数据层契约：
 
 v7 的后端改动只有四处，全部列在 `README.md` 的「与 v6 的关系」一节，且每一条都对应
 一个 ADR 编号。除此之外，v7 只新增脚本与配置模板——**部署不是一个功能，它是一次搬动**。
+
+---
+
+## 附录：部署形态与发布流程（原 DEPLOYMENT.md）
+
+> 迁自 `DEPLOYMENT.md`（原文件已删除，内容逐字保留）。
+
+# PRDwright v7 部署手册
+
+> 范围：单台腾讯云轻量应用服务器（Ubuntu 22.04）、裸机部署（systemd + Nginx），最小上线形态。
+> 形态要点：**单域名 + 路径前缀**（`/` 用户端、`/admin/` 管理端、`/api/` 后端）；后端只听 `127.0.0.1:8000`，Nginx 是唯一对外入口；**单 worker 是硬约束**；SQLite（WAL）单机文件库。
+> 适用场景：个人/学习项目、单台机器。需要横向扩展时（多 worker、多机）需换 Postgres + 反向代理编排，不在本手册范围。
+
+---
+
+## 0. 前置约定
+
+| 项 | 值 | 说明 |
+|----|----|----|
+| 服务器 | 腾讯云轻量应用服务器，Ubuntu 22.04 | 系统自带 Python 3.10，**不满足** `requires-python>=3.12`，须用 uv 另装 3.12 |
+| 运维用户 | `deploy`（加入 `sudo` 组） | 日常操作与运行后端都用它，**不用 root 长期操作** |
+| 防火墙 | **只用腾讯云控制台**，不装 ufw | 两层防火墙只管控制台一层即可，少一处配错 |
+| 代码根 | `/opt/prdwright` | monorepo：含 `backend/`、`frontend/`、`frontend_admin/`、`skills/` |
+| 后端运行 | systemd 服务 `prdwright` | `deploy` 身份、`--workers 1` |
+| 域名（正式） | 如 `gentlybeing.cn` | 仅 HTTPS 方案需要；域名不可用时可临时用 IP + HTTP（见第 8 节） |
+
+**三条铁律（踩过坑）**：
+1. 服务器上装依赖**必须 `sudo -u deploy` 切身份跑 uv / npm**，绝不用 `sudo uv` / `sudo npm`（会变 root 属主，导致后端服务读不到，报 `203/EXEC`）。
+2. 别碰 `backend/secrets/master.key` 和 `backend/.env`：这俩在 `.gitignore`，`git pull` 不覆盖，但手动误删会让后端起不来或模型密钥全解不开。
+3. 环境变量 `PRDWRIGHT_MASTER_KEY_PATH` 是 `os.environ` 直读，**写进 `.env` 无效**，只能靠 systemd `EnvironmentFile` 注入。
+
+---
+
+## 1. 系统基线
+
+```bash
+# 登录（密钥登录，配置见下方「SSH 配置」）
+ssh prdwright
+
+# 确认系统版本与磁盘（22.04 需后续装 Python 3.12）
+cat /etc/os-release | grep VERSION_ID
+df -h / && free -h
+
+# 打补丁
+sudo apt update && sudo apt -y upgrade
+# 若提示需重启：sudo reboot，再 ssh 回来
+
+# 建运维用户
+sudo adduser deploy          # 设密码，其余信息直接回车，最后 Y
+sudo usermod -aG sudo deploy
+
+# 装基础工具（不含 ufw）
+sudo apt -y install curl git ca-certificates
+
+# 收尾确认
+python3 --version            # 3.10.x（确认）
+which git curl
+```
+
+### SSH 配置（本机 `~/.ssh/config`）
+```
+Host prdwright
+    HostName 106.53.184.85
+    User ubuntu              # 或 root，按镜像默认用户
+    Port 22
+    IdentityFile ~/.ssh/prdwright_key.pem
+    IdentitiesOnly yes
+```
+私钥权限（Windows PowerShell）：`icacls "C:\Users\Jen\.ssh\prdwright_key.pem" /inheritance:r /grant:r "Jen":"R"`。
+
+---
+
+## 2. 装 uv + Python 3.12
+
+```bash
+# 装 uv（全局，所有用户可用）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo cp $HOME/.local/bin/uv /usr/local/bin/uv
+uv --version
+
+# 用 uv 装 Python 3.12（不动系统 3.10）
+sudo -u deploy -i
+uv python install 3.12
+uv python list | grep 3.12     # 应见 cpython-3.12.x
+exit
+```
+
+---
+
+## 3. 拉取代码到 `/opt/prdwright`
+
+**方式 A（有远程仓库）**，在 `deploy` 身份下：
+```bash
+sudo -u deploy git clone <HTTPS地址> /opt/prdwright
+# 私有仓库用 用户名 + Personal Access Token 当密码
+```
+
+**方式 B（本机直传）**，本机 Git Bash：
+```bash
+tar czf prdwright.tar.gz -C /c/StudyProjects/HarnessPRD \
+  --exclude=node_modules --exclude='.git' --exclude=dist --exclude='*.pyc' .
+scp prdwright.tar.gz prdwright:/tmp/
+```
+服务器：
+```bash
+sudo mkdir -p /opt/prdwright
+sudo tar xzf /tmp/prdwright.tar.gz -C /opt/prdwright
+sudo chown -R deploy:deploy /opt/prdwright
+```
+
+**验证关键目录都在**（否则 `prepare_schema` 会崩）：
+```bash
+ls /opt/prdwright/backend/migrations/versions   # 应有迁移文件
+ls /opt/prdwright/skills                         # api-docs-generator / prd-generator / prompts-generator
+```
+
+---
+
+## 4. 后端：依赖 + 主密钥 + `.env` + systemd
+
+> 全部以 `deploy` 身份操作（`sudo -u deploy`），除非标了 `sudo`。
+
+### 4.1 装后端依赖
+```bash
+cd /opt/prdwright/backend
+sudo -u deploy uv sync --frozen --no-dev     # 生成 backend/.venv
+```
+> 若报 lock 文件不匹配，改 `sudo -u deploy uv sync --no-dev` 重新解析。
+
+### 4.2 生成主密钥
+```bash
+sudo -u deploy uv run python ../scripts/keygen/generate_keys.py
+ls -l secrets/master.key     # 应 -rw------- deploy deploy
+```
+主密钥决定所有模型密钥能否解开，**丢了全完**；备份时不要与数据库放同一个包。
+
+### 4.3 写 `.env`
+新建 `/opt/prdwright/backend/.env`：
+```bash
+sudo -u deploy tee /opt/prdwright/backend/.env >/dev/null <<'EOF'
+AUTH_ENABLED=true
+INVITE_CODE=改成你的邀请码
+INIT_ADMIN_USER=admin
+INIT_ADMIN_PASSWORD=改成强密码
+DB_PATH=/opt/prdwright/backend/prdwright.db
+LOG_DIR=/opt/prdwright/backend/logs
+LOG_LEVEL=INFO
+LOG_FORMAT=json
+PRDWRIGHT_SKILLS_STRICT=true
+AUTH_COOKIE_SECURE=true
+HOST=127.0.0.1
+PORT=8000
+CORS_ORIGINS=https://你的域名
+EOF
+sudo chmod 600 /opt/prdwright/backend/.env
+sudo -u deploy mkdir -p /opt/prdwright/backend/logs
+```
+> ⚠️ **变量名是 `DB_PATH`**（不是某 `.env.example` 里可能出现过的笔误 `DB_OIXO`）。`DB_PATH` 留空时默认落库位置恰好也是 `backend/prdwright.db`，但应显式写对。
+> `AUTH_COOKIE_SECURE=true`：HTTPS 方案下强制会话 Cookie 仅走 HTTPS；若临时用 IP+HTTP 方案，须改为 `false`（见第 8 节）。
+
+### 4.4 systemd 单元 + 主密钥 EnvironmentFile
+主密钥路径**不能**写进 `.env`（代码只认真实环境变量），单独放一个 EnvironmentFile：
+```bash
+echo "PRDWRIGHT_MASTER_KEY_PATH=/opt/prdwright/backend/secrets/master.key" \
+  | sudo -u deploy tee /opt/prdwright/backend/secrets/env >/dev/null
+sudo chmod 600 /opt/prdwright/backend/secrets/env
+```
+
+服务单元 `/etc/systemd/system/prdwright.service`：
+```ini
+[Unit]
+Description=PRDwright Backend
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/prdwright/backend
+ExecStart=/opt/prdwright/backend/.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+EnvironmentFile=/opt/prdwright/backend/secrets/env
+Restart=on-failure
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+> 三个硬约束：`--workers 1`（JobBus/`_RUNTIMES` 是进程内单例，多 worker 冲突）；`PrivateTmp=yes`（`prepare_schema` 建库分支需临时目录）；`EnvironmentFile` 注入主密钥路径。`ExecStart` 用 `python -m uvicorn` 比直接用 uvicorn 脚本更稳（绕开 shebang 解析问题）。
+
+### 4.5 启用并启动
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now prdwright
+sudo systemctl status prdwright --no-pager     # 应 active (running)
+curl -s http://127.0.0.1:8000/health; echo      # 重点：llm 项不应是"未配置密钥"
+```
+
+---
+
+## 5. 前端：服务器就地构建
+
+```bash
+# 装 Node 22（系统自带 node 太旧）
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node --version
+
+# 用户端
+cd /opt/prdwright/frontend
+sudo -u deploy npm install
+sudo -u deploy npm run build
+
+# 管理端（必须 --legacy-peer-deps）
+cd /opt/prdwright/frontend_admin
+sudo -u deploy npm install --legacy-peer-deps
+sudo -u deploy npm run build
+```
+> 两个前端都是**同源设计**（API 请求相对 `/api/...`，不写死 localhost），生产环境**零改码**。
+> 若 `npm run build` 卡在 `vue-tsc` 类型检查，改用 `sudo -u deploy npm run build-only`（仅 vite build）。
+> 产物：用户端 `frontend/dist/`、管理端 `frontend_admin/dist/`（资源在 `admin/assets/` 下，因 base 为 `/admin/`）。
+> 构建后 `node_modules` 可删（`sudo rm -rf .../node_modules`）瘦身。
+
+---
+
+## 6. Nginx 反代 + 域名 HTTPS（正式方案）
+
+### 6.1 控制台防火墙 + DNS（certbot 前置）
+- 腾讯云控制台防火墙：放行 TCP `80`/`443`/`22`（`22` 来源建议限定自己 IP）；**删除 `3389`**；**收紧** `3306/3307/6379/8123/9000/9200/19092`（这些数据库/服务端口绝不对公网开，本地访问即可）。
+- DNS：A 记录 `你的域名` → 服务器 IP，生效后再继续（`dig +short 你的域名` 返回该 IP）。
+
+### 6.2 装 Nginx + certbot
+```bash
+sudo apt-get update
+sudo apt-get install -y nginx certbot
+sudo systemctl enable --now nginx
+```
+
+### 6.3 最小 80 配置拿证书
+```bash
+sudo mkdir -p /var/www/letsencrypt
+sudo tee /etc/nginx/sites-available/prdwright >/dev/null <<'EOF'
+server {
+    listen 80;
+    server_name 你的域名;
+    location /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+    location / { return 301 https://$host$request_uri; }
+}
+EOF
+sudo ln -sf /etc/nginx/sites-available/prdwright /etc/nginx/sites-enabled/prdwright
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+
+sudo certbot certonly --webroot -w /var/www/letsencrypt -d 你的域名 \
+  --agree-tos -m 你的邮箱@example.com --non-interactive
+# 成功显示证书路径 /etc/letsencrypt/live/你的域名/fullchain.pem
+```
+
+### 6.4 完整 HTTPS 配置
+```bash
+sudo tee /etc/nginx/sites-available/prdwright >/dev/null <<'EOF'
+server {
+    listen 80;
+    server_name 你的域名;
+    location /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    server_name 你的域名;
+
+    ssl_certificate     /etc/letsencrypt/live/你的域名/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/你的域名/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location / {
+        root /opt/prdwright/frontend/dist;
+        try_files $uri $uri/ /index.html;
+        index index.html;
+    }
+    location /admin/ {
+        alias /opt/prdwright/frontend_admin/dist/;
+        try_files $uri $uri/ /admin/index.html;
+        index index.html;
+    }
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;        # SSE 必须关缓冲
+        proxy_cache off;
+        proxy_read_timeout 1800s;   # 长任务流式输出
+        gzip off;
+    }
+    location /assets/ {
+        root /opt/prdwright/frontend/dist;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+    location = /index.html {
+        root /opt/prdwright/frontend/dist;
+        add_header Cache-Control "no-store";
+    }
+    location = /admin/index.html {
+        alias /opt/prdwright/frontend_admin/dist/index.html;
+        add_header Cache-Control "no-store";
+    }
+}
+EOF
+sudo nginx -t && sudo systemctl reload nginx
+```
+> certbot 自带续期定时器，90 天内自动续，无需手动。
+
+### 6.5 验证
+```bash
+curl -sI https://你的域名/health     # 200，走 HTTPS
+curl -sI https://你的域名/
+curl -sI https://你的域名/admin/
+```
+浏览器打开 `https://你的域名/` 与 `https://你的域名/admin/`，分别用普通用户和管理员（`admin`/你设的密码）登录。
+
+---
+
+## 7. 上线后必做
+
+- **配置 LLM 模型**：登录管理后台「配置」加一条模型（否则 `/health` 的 `llm` 项一直为未配置，生成任务会因为没有可用模型而失败）。
+- **改强密码**：`INIT_ADMIN_PASSWORD` 首次启动已播种管理员账户；若需改密码，在后台修改或重置数据库后重启。
+- **可选优化**：让后端识别外部 HTTPS，在 `ExecStart` 的 uvicorn 后加 `--forwarded-allow-ips 127.0.0.1`，再 `daemon-reload && restart`。
+
+---
+
+## 8. 域名不可用时的临时方案（IP + HTTP）
+
+Let's Encrypt **不给裸 IP 发证书**，所以域名不可用期间改用 `http://服务器IP` 临时访问。
+
+### 8.1 Nginx 改为 IP 版（去掉域名与 301 跳 HTTPS）
+```bash
+sudo tee /etc/nginx/sites-available/prdwright >/dev/null <<'EOF'
+server {
+    listen 80 default_server;
+    server_name _;
+
+    location / {
+        root /opt/prdwright/frontend/dist;
+        try_files $uri $uri/ /index.html;
+        index index.html;
+    }
+    location /admin/ {
+        alias /opt/prdwright/frontend_admin/dist/;
+        try_files $uri $uri/ /admin/index.html;
+        index index.html;
+    }
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1800s;
+        gzip off;
+    }
+    location /assets/ {
+        root /opt/prdwright/frontend/dist;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+    location = /index.html {
+        root /opt/prdwright/frontend/dist;
+        add_header Cache-Control "no-store";
+    }
+    location = /admin/index.html {
+        alias /opt/prdwright/frontend_admin/dist/index.html;
+        add_header Cache-Control "no-store";
+    }
+}
+EOF
+sudo ln -sf /etc/nginx/sites-available/prdwright /etc/nginx/sites-enabled/prdwright
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 8.2 `.env` 两处必须改（否则跨域被拦 / 登录失败）
+```bash
+sudo -u deploy sed -i 's#^CORS_ORIGINS=.*#CORS_ORIGINS=http://服务器IP#' /opt/prdwright/backend/.env
+sudo -u deploy sed -i 's#^AUTH_COOKIE_SECURE=.*#AUTH_COOKIE_SECURE=false#' /opt/prdwright/backend/.env
+sudo systemctl restart prdwright
+```
+> `AUTH_COOKIE_SECURE=false`：纯 HTTP 下若仍为 true，会话 Cookie 写不进去，登录永远失败。
+
+### 8.3 安全前提
+控制台防火墙把 `80` 端口**来源限定为自己 IP**（仅自己能 HTTP 访问），避免明文被公网嗅探。等域名可用再放开。
+
+### 8.4 域名恢复后切回 HTTPS 清单
+1. 控制台防火墙：`80` 来源改 `0.0.0.0/0`（certbot 验证需要），`443` 放开。
+2. DNS A 记录指向服务器 IP，生效。
+3. 跑 certbot 拿证书（见 6.3）。
+4. Nginx 换完整 HTTPS 版（见 6.4），reload。
+5. `.env` 改回 `CORS_ORIGINS=https://你的域名`、`AUTH_COOKIE_SECURE=true`，重启后端。
+
+---
+
+## 9. 关键路径与配置速查
+
+| 项 | 定位方式 | 备注 |
+|----|----------|------|
+| `migrations/` | `core/schema.py` 用 `Path(__file__).resolve().parents[3]` = `backend/` 再拼 `migrations`，**不靠 CWD** | 启动 `prepare_schema` 自动跑 Alembic |
+| `skills/` | `skill_registry.py` 从自身文件向上逐级找祖先 `skills/` 目录 = `/opt/prdwright/skills` | **无需设 `PRDWRIGHT_SKILLS_DIR`** |
+| 数据库 | `DB_PATH` 指定；留空默认 `backend/prdwright.db` | SQLite WAL |
+| CORS 白名单 | `backend/src/backend/core/config.py` 默认 `http://localhost:5173,http://localhost:5174`；生产须设域名/IP | 前端同源，不写死后端地址 |
+| 主密钥 | `PRDWRIGHT_MASTER_KEY_PATH`（os.environ 直读）→ `secrets/master.key` | 不进 `.env` |
+
+---
+
+## 10. 后续代码更新 / 发布流程
+
+> 每次改完代码重新部署都走这套。仓库是干净部署副本，`git pull` 即可。
+
+1. **发布前**：确认无进行中的生成任务（单 worker，restart 会中断）；改了 DB schema 前先备份数据库（手工 `VACUUM INTO`）。
+2. **拉代码**：`cd /opt/prdwright && sudo -u deploy git pull`。
+3. **后端**（有后端改动时）：
+   ```bash
+   cd /opt/prdwright/backend
+   sudo -u deploy uv sync --frozen --no-dev   # 依赖变才需；锁不匹配改 --no-dev
+   sudo systemctl restart prdwright           # 必做：加载新代码 + 跑迁移
+   sudo systemctl status prdwright --no-pager
+   curl -s http://127.0.0.1:8000/health; echo
+   ```
+   仅改 Python 代码未改依赖时，`uv sync` 可跳过，但 `restart` 必做。
+4. **前端**（有前端改动时）：
+   ```bash
+   cd /opt/prdwright/frontend && sudo -u deploy npm install && sudo -u deploy npm run build
+   cd /opt/prdwright/frontend_admin && sudo -u deploy npm install --legacy-peer-deps && sudo -u deploy npm run build
+   ```
+   Nginx 指向同一 `dist/`，无需 reload；浏览器硬刷新（`Ctrl+Shift+R`）拿新版。
+5. **验证**：浏览器硬刷新访问 `/` 与 `/admin/`。
+
+---
+
+## 11. 已知限制与排障
+
+- **SSE 服务端 `: ping` 心跳未实现**（v7 TODO）：长连接靠 Nginx `proxy_read_timeout 1800s` 兜底，不阻塞部署，但极端网络下长任务可能断流。
+- **`status=203/EXEC`（Permission denied）**：几乎都是 `sudo uv sync` 把 venv 建成 root 属主、python 软链接藏到 `/root` 导致 `deploy` 进不去。修法：删 `.venv` → `sudo -u deploy` 重建。见第 0 节铁律 1。
+- **迁移失败后端起不来**：`journalctl -u prdwright` 看真实报错，常因迁移文件未随 `pull` 下来或 `master.key` 权限不对。
+- **`/health` 的 `llm` 项 `ok:false`**：
+  - 详情"未配置密钥" → `PRDWRIGHT_MASTER_KEY_PATH` 没注入（EnvironmentFile 路径错或未重读）。
+  - 详情"还没有任何模型配置" → 正常，去后台加一条模型即可。
+- **重启 = 跑迁移**：发布新代码若有 Alembic 迁移，`restart` 会自动执行；迁移不可逆，发布前备份。

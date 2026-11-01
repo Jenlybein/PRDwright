@@ -375,7 +375,7 @@ def test_indexes_and_constraints_parity(tmp_path):
 | --- | --- |
 | 响应形态对拍 | 逐接口比对 `is_admin`/`is_active` 为 `true`/`false`、时间戳仍带 `T`、JSON 字段结构不变 |
 | 数据对拍 | 用同一份种子数据，分别经旧/新代码跑关键读接口，响应逐字段 diff |
-| 文档 | `v6/README.md` 加「已完成」与最终数字；`T15-data-access-layer.md` 顶部加取代指针；`MEMORY.md` 更新铁律 |
+| 文档 | `v6/README.md` 加「已完成」与最终数字；`../v5/ARCHITECTURE.md` 附录 B 顶部加「已被 v6 取代」指针；`MEMORY.md` 更新铁律 |
 
 **验收**
 

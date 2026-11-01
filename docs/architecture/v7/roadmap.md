@@ -1,6 +1,6 @@
 # v7 路线图：部署与上线
 
-> 排期真源本文件；架构依据见 `ARCHITECTURE.md`；决策依据见 `ADR.md`。
+> 排期真源本文件；架构依据见 `ARCHITECTURE.md`；决策依据见 `../../adr/README.md`。
 > 任务编号用于日常排期（T17.x），版本号用于对外收口（v7.x，对照见 `README.md`）。
 
 ---
@@ -350,7 +350,7 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 ## 与仓库外 v5 部署素材的对照
 
 > 素材位置：仓库外（`C:\Users\Jen\Desktop\v5\`，四份：README / ARCHITECTURE / ADR / roadmap）。
-> 它**从未提交进本仓库**（`git log --all -- 'docs/architecture/v5/*'` 零命中，见 `../v5/ADR.md` 的 ADR-070）。
+> 它**从未提交进本仓库**（`git log --all -- 'docs/architecture/v5/*'` 零命中，见 `../../adr/README.md` 的 ADR-070）。
 > v7 是参考其结构、按 v6 之后的实际重判，**不是照抄**。
 
 | # | v5 素材的写法 | v7 的结论 | 原因 |

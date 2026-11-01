@@ -4,10 +4,10 @@
 > 依据：2026-10-13 代码库实测（后端 5676 行 / 26 模块；前端 14652 行 / 46 文件；后端 78 用例、前端 209 用例）。
 > ⚠️ 注：这些测试**全部是 v2 期补齐的**（后端测试首现 10-13 `4e78a89`，前端首现 10-12 `26f2b49`），v1 期为零测试。
 > 本文件位于 `v3/` 层：它是**剩余工作**的路线图（含 v1–v2 的历史盘点）；v2 的交付清单见 `../v2/README.md`。
-> 配套文档：`../v2/ADR.md`（ADR-001 ~ 015 **全卷**，含双闸门 ADR-011、错误契约 ADR-012、统一流式编排 ADR-013、前端设计体系 ADR-014 / ADR-015）；
+> 配套文档：`../../adr/README.md`（ADR-001 ~ 015 **全卷**，含双闸门 ADR-011、错误契约 ADR-012、统一流式编排 ADR-013、前端设计体系 ADR-014 / ADR-015）；
 > **v3 的完整设计另见本层 `./ARCHITECTURE.md`**（目标 → 范围 → Job 骨架 → 后端/前端 → 契约 → 取舍 → 与源文档《完整开发流程》的差异裁决）；
 > v3.0（R1）的实现细节见 `./ARCHITECTURE.md` 第 4.6 节。
-> 时间线真源 `../evolution-truth.md`（按 git 提交还原：v1 界碑 `1c65e94`、v2 界碑 tag `v2.0.0`）。
+> 时间线真源 `../README.md`（按 git 提交还原：v1 界碑 `1c65e94`、v2 界碑 tag `v2.0.0`）。
 > 前提交代：终局是**少量人 + 简单登录**，该目标已通过 owner 过滤 + 登录系统提前兑现；本版聚焦「把剩下的可靠性与部署补齐」。
 >
 > **2026-10-14 进度更新**：R0-T1 CI ✅（`.github/workflows/ci.yml`，云端双 job 已跑绿）、
@@ -101,7 +101,7 @@
 | P4 登录 | ✅ | `api/auth.py` + `auth_service` + `auth_repo` + 纯 ASGI 默认拒绝中间件 + 前端 `AuthDialog`/`UserMenu` + `scripts/auth_cli.py` |
 | **R0-T1 CI** | ✅ 2026-10-14 | `.github/workflows/ci.yml`：backend（uv + pytest）/ frontend（npm ci + vitest `--run` + build）双 job 并行，云端已跑绿 |
 | **R0-T5 错误码化** | ✅ `7be5989` | `core/errors.py`（`ErrorCode` 8 码）+ `main.py::register_error_handlers` + 前端 `services/errors.ts`；前后端码值一致由不变量测试守卫 |
-| ADR-007/008/009/010 | ✅ 已决已落地 | 见 `../v2/ADR.md` |
+| ADR-007/008/009/010 | ✅ 已决已落地 | 见 `../../adr/README.md` |
 
 ### 1.2 路线图外、期间新增的能力（非债务，但影响部署与文档）
 

@@ -272,7 +272,7 @@ backend 全量 863 例耗时 362.7 秒。怀疑主因是 `tests/conftest.py` 的
 > 每用例净增 147 ms（`init_schema` 被调两次 51.6 + `run_migrations` 25.2 +
 > 关日志线程 50.6 + 其余 13.7）。因此**没有改 conftest**，改为默认并行执行：
 > 全量从 283 秒降到 **72 秒**，收集数与逐条结果均与单进程一致。
-> 详见 `ADR.md` 的 ADR-071。
+> 详见 `../../adr/README.md` 的 ADR-071。
 
 ### 5.2 测量先行：改任何东西之前必做的两条命令
 
@@ -567,5 +567,852 @@ frontend 的 43.2 秒）。想要并行时才做，否则不做。
   其配套测试在本期 T06 补齐——v4 期 `c5dee02` 一笔提交动了 19 个测试文件，
   说明这类横切关注点缺少收口的守卫。
 
-> 与 v6 的交接有两条待办，已在本层挂号（详见 `ADR.md` ADR-062 与 ADR-070）：
+> 与 v6 的交接有两条待办，已在本层挂号（详见 `../../adr/README.md` ADR-062 与 ADR-070）：
 > v6 期重评 e2e、v6 期按原号重建部署 ADR。
+
+---
+
+## 附录 A：性能面板（原 T14）
+
+> 迁自 `T14-performance-panel.md`（原文件已删除，内容逐字保留）。
+
+# T14 · 接口性能监测面板（管理员端）
+
+> **一句话**：让管理员在后台直接看到「哪个接口慢、错多少、数据到底可信到什么程度」——
+> 复用已有的访问日志做纯查询，**不新增采集、不新增一次写放大**。
+>
+> 上层：`README.md`（本层索引）、`roadmap.md` 的 T14 节（排期与验收）、`../../adr/README.md`（决策）
+> 关联：`ARCHITECTURE.md` 第 7 节（SSE 传输契约）——本面板正是要把
+> `duration_ms` 对 SSE 的语义讲清楚的那一页。
+
+---
+
+## 1. 目标与范围
+
+### 1.1 三句话目标
+
+1. **看得见**：不必再去日志页一条条翻，就能看到按接口聚合的耗时分布与错误率。
+2. **不骗人**：`duration_ms` 对 SSE 只是建流耗时、日志窗口受保留策略约束、队列满会丢日志 ——
+   这三件事必须让读者在不读源码的前提下不会误读。
+3. **不添债**：不新增采集、不新增表、不给日志写入路径加常驻成本。
+
+### 1.2 本期范围（In）
+
+| # | 内容 |
+| --- | --- |
+| I1 | `GET /api/admin/metrics/endpoints`：按 `path` + `method` 聚合，出分位数、错误率、覆盖信息 |
+| I2 | 普通接口与流式接口**分开两张表**，流式表不出现耗时数字 |
+| I3 | 数据窗口卡：实际覆盖区间、行数、是否被保留策略截断、落库开关状态、丢弃下界 |
+| I4 | 样本不足单列区：不给分位数、不参与排行 |
+| I5 | `frontend_admin` 新增 `/performance` 页与侧栏导航项 |
+| I6 | SSE 路径清单守卫测试（防止流式接口混进耗时排行） |
+
+### 1.3 本期不做（Out）
+
+| 不做 | 理由 |
+| --- | --- |
+| 实时推送 / SSE | 低频手动查看，刷新 + 切窗口足够。更重要的是：**SSE 正是本页要解释的那个陷阱的源头**，在讲陷阱的页面上再用一条 SSE 通道，是把解释成本和实现成本叠在一起 |
+| 时间序列曲线 / `bucket` 分桶 | 时间趋势已有 `/api/admin/stats/daily`，再做一条就是两个入口看同一件事 |
+| 历史指标快照（新聚合表 + 定时任务） | 日志本身已是 7 天滚动窗口；另存一份 = 双份保留策略 + 双份裁剪逻辑。真需要长期趋势，应先问「是不是该延长 `log_retention_days`」 |
+| 告警阈值 / 通知 | 无通知渠道；做一半的告警比没有更危险 |
+| 分布直方图 / 火焰图 | 直方图要额外分桶聚合，信息量低于「排行 + 分位数」；火焰图需要 tracing 基础设施，仓库里没有 |
+| 按用户 / IP 排行 | `user_id` 在 `_row()` 里是「尽力带出，带不出就 NULL」，覆盖率不完整；按有空值的列排行，榜首会是一堆 `NULL` 归并成的假组 |
+| 新增 `app_logs` 列 | `extra_json` 就是设计好的扩展位，`logging_setup._row()` 的注释明说「不为它们各开一列」 |
+| 采样 | 量小（≤5 万行），采样只会让分位数失真 |
+
+---
+
+## 2. 口径速查表
+
+**实现与评审逐条核对。每一条都是一次「最容易做错、且做错了不会报错」的判定。**
+
+| # | 判定 | 正确做法 | 做错的样子 |
+| --- | --- | --- | --- |
+| 1 | `duration_ms` 对 SSE 的语义 | 只是**建流**耗时。流式接口单独成表，字段名 `setup_*_ms`，表里**不出现任何耗时数字**，只给「见任务监控 →」链接 | 流式接口带着 40ms 混进耗时排行，读者以为一次 3 分钟的生成本来就这么快 |
+| 2 | 错误率 | **拆两个字段**：`server_error_rate`（5xx）与 `client_error_rate`（4xx）。**只有 5xx 染色** | 合并成 `status >= 400` —— 登录页输错密码（401）被报成故障 |
+| 3 | p50 门槛 | `n ≥ 5`，否则返回 **`null`** | n=2 也出一个「中位数」 |
+| 4 | p95 门槛 | `n ≥ 20`，否则返回 **`null`** | n=2 时 p95 其实就是 max，却叫它 p95 |
+| 5 | p99 门槛 | `n ≥ 100`，否则返回 **`null`** | n<100 时 `ceil(n×0.99) ≡ n`，p99 恒等于 max |
+| 6 | 不达标时返回什么 | **`null`** + 可读原因（如 `"n < 100"`） | 返回 `0` 或 `-1` —— 会渲染成一个看起来正常的数字 |
+| 7 | 排行收录条件 | 只收 **`n ≥ 20`** 的组 | 让只调过 2 次的冷门接口霸榜，高频接口的真实劣化被挤下去 |
+| 8 | `dropped` 的语义 | **下界 + 稀疏打点**（累计量，每约 100 条打一次）。`≥2` 条事件取 `MAX-MIN`；**1 条返 `null` 不返 `0`**；文案写「**至少**丢弃 N 条（粒度约 100）」 | ① 求和 —— `SUM` 会**高估**（事件累计 101/201/301 求和 604，实际 301）；② 1 条时返 `0`（坏消息显示成好消息）；③ 写「共丢弃 N 条」 |
+| 9 | 空态 | **五种**，按 `coverage` 分派；其中「没有慢接口」用**成功绿** | 四种合成一个灰框 —— 分不清「系统健康」与「监控没跑」，而这两者的后续动作完全相反 |
+| 10 | 时间窗被截断 | `truncated_by_retention` 为真时在顶部提示「实际只覆盖 {oldest} 起」 | 让读者以为「7 天前的数据是 0」 |
+
+---
+
+## 3. 事实核对
+
+全部实测核对，无一处偏差。
+
+| 事实 | 核对结果 |
+| --- | --- |
+| 访问日志写 `duration_ms` / `method` / `path` / `status`，`event='request.completed'` | 正确，`api/deps.py::_log_request()` |
+| `app_logs` 十列结构 | 正确，`core/db.py:153-164` |
+| 只有三个索引 | 正确，`db.py:167-171`：`idx_app_logs_ts(ts)`、`idx_app_logs_level(level, ts)`、`idx_app_logs_request(request_id)` |
+| SQLite JSON1 可用 | 正确，`json_extract` 正常 |
+| 迁移已到 v20，新迁移从 v21 起 | 正确 |
+| `duration_ms` 语义是「收到请求 → 开始回响应」 | 正确。`_log_request` docstring 原文即写明，并明确说「否则看日志的人会以为一次 PRD 生成只花了 40 毫秒」 |
+
+三条补充事实，直接影响设计：
+
+1. **`method` / `path` / `status` / `duration_ms` 都在 `extra_json` 里，不是独立列。**
+   `logging_setup._row()` 只把 `event` 与 `user_id` 提升成列，其余原样进 `extra_json`
+   （注释明说「业务字段会不断新增，表结构不该跟着每次新增都迁移一次」）。所以聚合必须走 `json_extract`。
+2. **日志会丢。** `log_db_queue_size` 默认 5000，满了**直接丢弃新日志**并记一条
+   `event='log.db_backlog_dropped'`（带 `dropped` 累计数）。所以「库里有多少行」是**下界**。
+3. **两个保留闸门独立生效**：`log_retention_days=7` 与 `log_max_rows=50000`，谁先触发谁生效；
+   `log_db_enabled` 默认 True。
+
+分层落点：已有 `repositories/log_repo.py`（`insert_many` / `prune` / `count` / `search`）与
+`services/admin_service.py::list_logs`，新代码照这条链走，**不新建层**。
+
+---
+
+## 4. 接口契约
+
+`GET /api/admin/metrics/endpoints`（`require_admin`）
+
+### 4.1 请求参数
+
+| 参数 | 类型 | 默认 | 取值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `since` | ISO8601 | `until - 24h` | 任意 | 起始时间（UTC） |
+| `until` | ISO8601 | 现在 | 任意 | 结束时间 |
+| `top` | int | 15 | 1–50 | 每个表返回多少行 |
+| `slow_ms` | float | 800 | 1–60000 | 「慢」的判定线，**只用于计数，不用于排行** |
+| `include_stream` | bool | true | — | 关掉就只查普通接口 |
+
+> 没有 `bucket`：本期只出「窗口内聚合排行」，不出时间序列。理由见 1.3。
+
+### 4.2 响应结构
+
+```json
+{
+  "window": { "since": "2026-10-22T06:59:00.000Z", "until": "2026-10-23T06:59:00.000Z" },
+  "coverage": {
+    "log_db_enabled": true,
+    "oldest_ts": "2026-10-18T02:11:07.412Z",
+    "newest_ts": "2026-10-23T06:58:51.003Z",
+    "total_rows": 41112,
+    "window_request_rows": 1204,
+    "retention_days": 7,
+    "max_rows": 50000,
+    "truncated_by_retention": true,
+    "truncated_by_max_rows": false,
+    "dropped_by_queue_at_least": 0
+  },
+  "thresholds": { "slow_ms": 800.0, "min_n_p50": 5, "min_n_p95": 20, "min_n_p99": 100 },
+  "http_endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/admin/stats",
+      "count": 42,
+      "p50_ms": 38.0,
+      "p95_ms": 210.5,
+      "p99_ms": null,
+      "max_ms": 512.0,
+      "server_error_rate": 0.0,
+      "client_error_rate": 0.0714,
+      "slow_count": 1,
+      "p99_unavailable_reason": "n < 100"
+    }
+  ],
+  "stream_endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/conversation/generate-prd-stream",
+      "count": 17,
+      "setup_p50_ms": 41.2,
+      "setup_p95_ms": 88.0,
+      "server_error_rate": 0.0,
+      "client_error_rate": 0.0
+    }
+  ],
+  "insufficient_samples": [
+    { "method": "GET", "path": "/api/health", "count": 2, "reason": "n < 5，连中位数都不成立" }
+  ],
+  "elapsed_ms": 87.4
+}
+```
+
+### 4.3 字段口径
+
+| 字段 | 单位 | 口径 |
+| --- | --- | --- |
+| `coverage.total_rows` | 行 | `app_logs` 全表行数（不限窗口），用于判断「有没有数据」 |
+| `coverage.window_request_rows` | 行 | 窗口内 `event='request.completed'` 行数，用于区分「窗口空」与「表空」 |
+| `coverage.oldest_ts` / `newest_ts` | UTC | 全表最早/最晚，用于说明「数据实际只覆盖到这里」 |
+| `truncated_by_retention` | bool | `oldest_ts > since` ⇒ 窗口起点早于数据起点 |
+| `truncated_by_max_rows` | bool | `total_rows >= max_rows` ⇒ 已达行数上限，正在滚动淘汰 |
+| `dropped_by_queue_at_least` | 条 / null | 按窗口内事件数分派（详见 6.3）：0 条 → `0`；1 条 → `null`；≥2 条 → `MAX(dropped) - MIN(dropped)`。**下界，粒度约 100 条** |
+| `server_error_rate` | 0–1 | `5xx / count` |
+| `client_error_rate` | 0–1 | `4xx / count` |
+| `stream_endpoints[].setup_p50_ms` | ms | **建流耗时**，字段名刻意不叫 `p50_ms` |
+| `elapsed_ms` | ms | 本次查询自身耗时。**它让「要不要加索引」变成数据问题**（见 6.2） |
+
+两处刻意的命名选择，都是为了不让人误读：
+
+- 流式接口的耗时字段叫 `setup_*_ms`，不叫 `p50_ms` —— 字段名本身就说清了它是建流。
+- 错误率拆成两个字段，**没有**笼统的 `error_rate`。理由见 5.1。
+
+---
+
+## 5. SQL 与聚合思路
+
+### 5.1 错误率必须拆 4xx / 5xx
+
+`deps.py` 的 docstring 明确写「记在最外层中间件里，所以**被认证拦掉的 401 也有这一条**」，
+并举了「用户说打不开」时要先确认请求到没到过后端。**也就是说 401 / 403 是被有意记录的正常流量。**
+
+若按 `status >= 400` 算「错误率」：
+
+- 登录页每输错一次密码 → 401 → 错误率上升 → 面板把**正常的鉴权拒绝报成故障**；
+- 500（真故障）与 401（正常拒绝）在同一个分子里，权重相同。
+
+所以拆两个字段，且**告警色只跟 5xx 走**，4xx 作为参考量平铺显示、不染色。
+
+### 5.2 分位数：`ROW_NUMBER()` + 最近秩法
+
+| 方案 | 取舍 | 结论 |
+| --- | --- | --- |
+| `NTILE(100)` | n<100 时桶为空或每桶不足一行，p95 直接退化；等分桶的边界不对齐你要的百分位 | 否决 |
+| `PERCENTILE_CONT` / `PERCENTILE_DISC` | SQLite 没有这两个函数 | 否决 |
+| `ROW_NUMBER()` + 取第 ⌈n·p⌉ 行 | 精确、任意 n 都成立、与延迟 SLO 的通行口径一致（它回答「最慢那 5% 从多少毫秒起步」） | **采用** |
+
+```sql
+WITH win AS (
+  SELECT
+    json_extract(extra_json, '$.method')                       AS method,
+    json_extract(extra_json, '$.path')                         AS path,
+    CAST(json_extract(extra_json, '$.status')      AS INTEGER) AS status,
+    CAST(json_extract(extra_json, '$.duration_ms') AS REAL)    AS dur
+  FROM app_logs
+  WHERE event = 'request.completed'
+    AND ts >= :since AND ts <= :until
+    AND json_extract(extra_json, '$.duration_ms') IS NOT NULL
+),
+ranked AS (
+  SELECT *,
+         ROW_NUMBER() OVER (PARTITION BY path, method ORDER BY dur) AS rn,
+         COUNT(*)     OVER (PARTITION BY path, method)              AS n
+  FROM win
+)
+SELECT
+  method, path, n,
+  AVG(dur) AS avg_ms,
+  MAX(dur) AS max_ms,
+  MAX(CASE WHEN rn = (n * 50 + 99) / 100 THEN dur END) AS p50_ms,
+  MAX(CASE WHEN rn = (n * 95 + 99) / 100 THEN dur END) AS p95_ms,
+  MAX(CASE WHEN rn = (n * 99 + 99) / 100 THEN dur END) AS p99_ms,
+  SUM(CASE WHEN status >= 500              THEN 1 ELSE 0 END) AS n_5xx,
+  SUM(CASE WHEN status BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS n_4xx,
+  SUM(CASE WHEN dur >= :slow_ms            THEN 1 ELSE 0 END) AS slow_count
+FROM ranked
+GROUP BY path, method
+ORDER BY p95_ms DESC;
+```
+
+两个实现细节：
+
+- **`ceil` 用整数除法实现**：`(n*95 + 99) / 100`。SQLite 的 `/` 在整数间是截断除法，
+  该式正好给出 `ceil(n*0.95)`，不依赖 `ceil()` 是否存在（3.35+ 才有）。
+  验算：n=100 → (9500+99)/100 = 95；n=2 → (190+99)/100 = 2（第 2 个，即最大值）。
+- **`n` 是分组内常量**，写进 `MAX(CASE WHEN ...)` 是安全的（SQLite 允许非聚合列出现在聚合
+  表达式里，任取一行结果相同）。想要更干净，可在 `ranked` 里预计算 `rn50` / `rn95` / `rn99` 再外层取。
+
+组装顺序：`log_repo` 返回分组明细 → `admin_service` 算比率、套阈值、按流式/普通分流、拼 `coverage`。
+
+### 5.3 小样本：三档硬门槛
+
+| 统计量 | 最小 n | 为什么不能再低 |
+| --- | --- | --- |
+| p50 | 5 | n<5 时中位数只是两三个数的中间值，任何一次抖动就改写它 |
+| p95 | 20 | n=20 时 `ceil(20×0.95)=19`，取的是第 19/20 个，**已紧贴极值**；n 更小时直接退化成 `max` |
+| p99 | 100 | n<100 时 `ceil(n×0.99) ≡ n`，**p99 恒等于 max**；叫它 p99 会让人以为「99% 都在这以内」 |
+
+**这三档是硬门槛，不是显示优化。** 具体做法：
+
+1. 不达门槛返回 `null` + 可读原因，**绝不返回 `0` / `-1`**。
+2. **排行只收 `n ≥ 20` 的组。** 否则榜首永远是冷门接口（它们的最小样本里偶然有一次慢请求），
+   而高频接口上稳定的劣化被挤下去。
+3. `n < 5` 的组整组移入 `insufficient_samples`，只给 `count` 与原因，**不给任何分位数**。
+4. 前端把 n 直接显示在次数列，**不藏进 tooltip** —— n 是判断整张表可不可信的第一手信息。
+
+---
+
+## 6. 索引评估
+
+### 6.1 结论：v21 不加索引
+
+**① `ts` 范围过滤已有索引，这一刀砍得最大。** `idx_app_logs_ts(ts)` 覆盖
+`ts >= :since AND ts <= :until`，把扫描范围从全表收窄到窗口。这是最有价值的一步，且已经在。
+
+**② `extra_json` 无法索引，但量级可控。** `event='request.completed'` 与 `json_extract(...)`
+退化成「在已收窄的行上逐行解析 JSON」。但 `log_max_rows` 硬上限 50000 行 —— 窗口扫描是万级行，
+JSON 解析万级小文档在 SQLite 上是几十到几百毫秒。对**管理员手动打开**的看板可接受。
+
+**③ 真正的反对理由在写路径，不在读路径。** 日志写入是「异步批量 + 队列满即丢」
+（`log_db_queue_size=5000`），项目对它的硬要求是「绝不阻塞主流程」。给 `app_logs` 加
+**表达式索引**（`json_extract(extra_json,'$.path')`）或**生成列索引**，会让**每一条日志的
+INSERT** 都多一次 JSON 解析 + 索引维护。
+
+> 为了一个手动查看的面板，去加重整个应用唯一的日志旁路 —— 代价不对等。
+>
+> 而且这条旁路已被设计成「可以牺牲的那一半」（`log_db_enabled` 的 description 原文：
+> 「落库是可被牺牲的那一半，文件不是」）。在可牺牲的一侧加常驻写成本，方向是反的。
+
+### 6.2 将来若测出来慢：按这个阶梯加，不要跳步
+
+| 顺序 | 动作 | 写入代价 | 何时才做 |
+| --- | --- | --- | --- |
+| 0 | **先量**（响应里已带 `elapsed_ms` 与 `window_request_rows`） | 0 | 现在就做 |
+| 1 | **部分索引**：`CREATE INDEX IF NOT EXISTS idx_app_logs_req_ts ON app_logs(ts) WHERE event = 'request.completed';` | 近 0（索引里只有 `ts`，插入时多一次字符串比较，**不含 JSON**） | `elapsed_ms > 1000` 且 `window_request_rows` 接近 5 万 |
+| 2 | `extra_json` 表达式索引或生成列 | **高**（每次 INSERT 解析 JSON） | 第 1 步之后仍不达标 |
+| 3 | 提高 `log_max_rows` 之前必须回到第 2 步重新评估 | — | — |
+
+第 1 步是第一根杠杆：它把扫描面从「全窗口所有日志」缩到「全窗口的请求日志」
+（请求日志只是其中一类，生成过程的逐章日志通常多得多），而写入代价几乎为零。
+
+> `elapsed_ms` 进响应的意义就在这里：让「要不要加索引」以后能用数据回答，而不是靠谁猜。
+
+### 6.3 丢弃数的口径：`SUM` 是错的，必须用 `MAX - MIN`
+
+`LogStoreHandler` 的两个事实决定了这里的算法（`core/logging_setup.py:279/296/299/304`）：
+
+```python
+self._dropped = 0                            # 279：累计计数器
+self._dropped += 1                           # 296：只增不减
+if self._dropped % 100 == 1:                 # 299：只在 1, 101, 201, 301… 打点
+    ... extra={"dropped": self._dropped}     # 304：存的是当时的累计数
+```
+
+1. 事件里存的是**累计值**，不是「本次丢了多少」；
+2. 打点是**稀疏的** —— 每约 100 条才记一次。
+
+所以 **`SUM` 会高估**：三件事件（累计 101 / 201 / 301）求和 = 604，而实际只丢了 301 ——
+高估近一倍，且事件越多偏得越远。
+
+**三档口径，按窗口内事件数分派：**
+
+| 窗口内事件数 | 取值 | 文案 |
+| --- | --- | --- |
+| **0 条** | `0` | 「无丢弃」—— **这是可信的真零**（没溢出就不会打点） |
+| **1 条** | `null` | 「有丢弃记录，但窗口内不足以估算」 |
+| **≥2 条** | `MAX(dropped) - MIN(dropped)` | 「至少丢弃 N 条（记录粒度约 100 条）」 |
+
+三条理由：
+
+- **`MAX - MIN` 才是窗口内的增量**：`MAX` 是最后一次打点时的累计数、`MIN` 是第一次的，
+  相减抵掉了窗口之前的历史。直接取 `MAX` 会把开服以来的总量算进这个窗口。
+- **1 条时必须返回 `null` 而不是 `0`**：只有一条打点时 `MAX - MIN = 0`，但实际可能已丢过
+  99 条。返回 `0` 会被读成「没有丢弃」—— 这是最坏的一种错，因为它是**坏消息被显示成好消息**。
+  与「没有慢接口」必须用成功绿是同一条原则：`0` 与 `null` 在这个字段上绝不能互换。
+- **必须写出「粒度约 100 条」**：打点间隔约 100 条，所以「至少 100 条」与「至少 199 条」在库里
+  长得一样。不写粒度，这个数字看起来比它实际的精度高一个数量级。
+
+> 不建议写成 `MAX - MIN + 1` 去「补那一条」：粒度是 100，±1 毫无意义，反而让人以为它精确到条。
+> 精度靠文案说清，不靠公式假装。
+
+这类把下界说成真值的小错，会让整块看板一起失去可信度 —— 而这块看板存在的意义
+恰恰是让人相信它给的数字。
+
+---
+
+## 7. 前端页结构
+
+### 7.1 路由与导航
+
+- 路由：`/performance`，name `performance`，`meta.requiresAdmin: true`，
+  `component: () => import('@/views/PerformanceView.vue')`（懒加载，与既有页一致）。
+- 导航：加到 `nav.ts` 的 `sys` 组，**排在 `logs` 之后**：
+  `{ name: 'performance', label: '接口性能', code: 'LATENCY' }`
+  理由：它和「系统日志」同类（排障视角的只读页），放一起比塞进 `ops` 组更顺。
+
+### 7.2 五块内容
+
+**① `PageHeader`**：`kicker`「Performance / 接口」，`title`「接口性能」；
+`actions` 槽放时间窗切换（24 小时 / 7 天）+ 刷新；`desc` 槽一句话说清 `duration_ms` 定义。
+
+**② 常驻口径带（关键，不是小字）**
+
+一条整宽的 `.brut` 带，紧贴页头下方，**不折叠、不缩小字号**：
+
+> 本页的耗时是「收到请求 → 开始回响应」。流式接口的**生成时长不在这里** ——
+> 一次 PRD 生成可能要 3 分钟，这里只记 40 毫秒。真实生成耗时请到任务监控看。
+> 　[　去任务监控　]
+
+三条让「不只是加一句小字」成立的做法：
+
+1. 它占**独立一块**，有边框与底色，和内容卡同级；
+2. 它**带跳转按钮**指向 `/jobs`（那里有 `run_summary` 的口径）——给了出口，用户才不会拿着 40 毫秒下结论；
+3. **流式接口单独一张表**，表里根本不给叫「耗时」的列 —— 见 ④。
+   数字带上误导性标签，加多少小字都救不回来；**不给那个数字，才是不误读的保证。**
+
+**③ 数据窗口卡**（把 `coverage` 摊成四个等宽硬边小块）
+
+| 块 | 内容 | 状态色 |
+| --- | --- | --- |
+| 数据范围 | `oldest_ts` ~ `newest_ts`（本地时间，日期粒度） | 若 `truncated_by_retention` → 警示黄 |
+| 日志行数 | `total_rows / max_rows`（如 `41,112 / 50,000`） | 若 `truncated_by_max_rows` → 警示黄 |
+| 窗口内请求 | `window_request_rows` | 中性 |
+| 落库状态 | 开启 / 关闭；开启时附「至少丢弃 N 条」（有丢弃才显示） | 关闭 → 警示黄；有丢弃 → 警示黄 |
+
+**④ 两张表**
+
+普通接口表（按 p95 降序，只含 `n ≥ 20`）：
+
+| 列 | 说明 |
+| --- | --- |
+| 方法 | `GET` / `POST`，等宽小字 |
+| 路径 | `font-mono`，过长中间省略，悬停出全文 |
+| 次数 | n，**直接显示不隐藏** |
+| p50 / p95 / p99 | 右对齐；`null` 显示 `—`，悬停给原因 |
+| 5xx 率 | **唯一染色的比率列** |
+| 4xx 次数 | 纯数字，不染色 |
+| 慢请求 | `slow_count`（≥ `slow_ms` 的条数） |
+
+流式接口表（单独一张，标题下方即口径提示）：
+
+| 列 | 说明 |
+| --- | --- |
+| 方法 / 路径 / 次数 | 同上 |
+| **建流**（p50 / p95） | 列头就写「建流」，不叫「耗时」 |
+| 5xx 率 / 4xx 次数 | 同上 |
+| 生成耗时 | **不是数字**，固定显示「见任务监控 →」链接 |
+
+最后那一列是「不给数字」的具体实现：流式行里**任何一个像耗时的数字都不出现**，只出现一个出口。
+
+**⑤ 样本不足区**：只两列（路径 / 原因，如「n=2 < 5，连中位数都不成立」）。
+不给分位数、不参与排序，并明确标注「数据不足，**不代表这些接口快**」——
+否则读者会默认「没进排行的就是好的」，那正好是反的。
+
+### 7.3 五种空态（其中一态是好消息）
+
+空态不能只有一种，必须按 `coverage` 分派：
+
+| # | 判定条件 | 显示 | 语气 |
+| --- | --- | --- | --- |
+| 1 | `log_db_enabled == false` | 「日志落库已关闭 —— 本页没有任何数据可算」+「去配置页开启」 | **警示黄**（配置选择，不是故障） |
+| 2 | `total_rows == 0` | 「还没有任何请求日志」（刚部署 / 刚开开关） | 中性 |
+| 3 | `window_request_rows == 0` 且 `total_rows > 0` | 「这个时间窗内没有接口请求。当前数据实际覆盖 {oldest} ~ {newest}」+「切到 7 天」 | 中性 |
+| 4 | `window_request_rows > 0` 但排行表无行（全部 < `n ≥ 20`） | 「窗口内 {N} 次请求，样本都不足以算分位数」 | 中性 |
+| 5 | 有行且 `slow_count == 0` | 「**{N} 次请求，没有慢接口**」+ 成功色勾标 | **成功绿（正面）** |
+
+第 5 态是要害：**「没有慢请求」是好消息，绝不能和「没有数据」共用同一套灰色空态。**
+四态合一的结果是运维看到灰框，分不清「系统很健康」还是「监控根本没跑」——
+而这两种判断的后续动作完全相反。
+
+`truncated_by_retention` 为真时另在顶部加提示：「时间窗早于日志保留范围，本页实际只覆盖
+{oldest} 起」。默认 7 天保留 + 面板默认 24 小时不会触发，但用户切到 7 天时正好卡在边界，
+不说清就会以为「7 天前的数据是 0」。
+
+### 7.4 视觉约束（Sky Brutalism）
+
+- 只用既有令牌与类：`page-head` / `brut-card` / `brut-card-lg` / `.dark` 覆盖，**不新造类**。
+- 数字列用 `font-mono` 并右对齐 —— 等宽是为让小数点对齐后能竖着扫。
+- 状态色只用既有 `--color-success-*` / `--color-warning-*` / `--color-danger-*`。
+- `--radius-card: 0.125rem` 是硬边，不加圆角。
+- 行内钻取用 `AdminModal.vue`：点行 → 弹窗列出该接口最近 N 条慢请求
+  （`ts` / `status` / `duration_ms` / `request_id`），`request_id` 可点，跳 `/logs?request_id=…`
+  复用既有日志检索。若 `LogsView` 目前不读 `request_id` query，就在 T14.4 顺手补上
+  —— 这是现成排障路径的闭合，不是新功能。
+
+---
+
+## 8. 取舍与不做
+
+| 议题 | 取 | 舍 | 记录 |
+| --- | --- | --- | --- |
+| 数据来源 | 复用 `app_logs` 纯查询 | 新增采集链路 | 本节 3 |
+| 流式接口的耗时 | 单独成表、字段名 `setup_*`、不给数字 | 与普通接口同列排行 | 本节 2-1 |
+| 错误率 | 拆 4xx / 5xx，只 5xx 染色 | 一个笼统 `error_rate` | 本节 5.1 |
+| 索引 | v21 不加，留三级阶梯 | 现在就加表达式索引 | 本节 6 |
+| 时间维度 | 只有窗口内聚合 | 时间序列曲线 / 分桶 | 本节 1.3 |
+| 历史 | 只读日志窗口 | 另存指标快照 | 本节 1.3 |
+| 空态 | 五态分派，其一是成功绿 | 统一灰色空态 | 本节 7.3 |
+
+---
+
+## 9. 任务拆分
+
+| 编号 | 内容 | 涉及文件 | 依赖 | 验收 |
+| --- | --- | --- | --- | --- |
+| **T14.1** | 契约：Pydantic 模型与路由骨架 | `api/schemas.py`（`EndpointMetricsResponse` / `EndpointRow` / `StreamEndpointRow` / `MetricsCoverage` / `MetricsThresholds`）、`api/admin.py`（`GET /metrics/endpoints`，套 `require_admin`） | — | OpenAPI 可见；非管理员 403；`top` 越界与时间倒置返回 400 |
+| **T14.2** | 聚合查询 | `repositories/log_repo.py`（`aggregate_endpoints` / `aggregate_stream_endpoints` / `coverage` / `dropped_count_since`） | T14.1 | 单测：空表返回空；1 条不出分位数；`n=20` 时 p95 取第 19 个（钉住最近秩算法）。**丢弃数三情形各一条**：0 条事件 → `0`、1 条 → `null`、≥2 条 → `MAX-MIN`。并做**反向验证**：把实现临时改成 `SUM`，「≥2 条」那条必须转红 —— 否则守卫是假的 |
+| **T14.3** | 编排：SSE 分类、阈值套用、coverage 组装、错误率拆分 | `services/admin_service.py`（`endpoint_metrics()`） | T14.2 | 5xx / 4xx 分别算出；流式行只有 `setup_*` 字段；`insufficient_samples` 里没有任何分位数字段 |
+| **T14.4** | 前端页面与导航 | `frontend_admin/src/services/adminService.ts`（`fetchEndpointMetrics`）、`src/views/PerformanceView.vue`（新建）、`src/router.ts`、`src/nav.ts`、`src/views/LogsView.vue`（读 `request_id` query，若尚未支持） | T14.3 | 五种空态各自可复现；流式表里不出现耗时数字；`npm run build` 与 `type-check` 通过 |
+| **T14.5** | 测试与守卫 | `frontend_admin/src/__tests__/performance.spec.ts`、`backend/tests/test_admin_metrics_api.py`、`backend/tests/test_sse_path_guard.py`（均新建） | T14.3 | 五种空态各有用例；小样本分位数用例；**SSE 路径守卫**：断言「代码里的 SSE 路径清单」与「实际分流出的流式路径」完全一致，并配自检用例证明守卫没瞎 |
+| **T14.6** | （可选）v21 迁移 | `core/migrations.py` + `core/db.py` | T14.2 实测 | **默认不做**。仅当 `elapsed_ms > 1000` 且 `window_request_rows` 接近上限时才按 6.2 第 1 步加部分索引；若加，**两处都要改**（`migrations.py` 与 `db.py` 的 `SCHEMA_SQL`），否则新库老库分叉 |
+
+**为什么 T14.5 必须有「SSE 路径清单守卫」**：`setup_*` 与 `p50_*` 的分流靠「路径是不是流式」
+这个判断。它一旦漏判，症状是**流式接口被当成普通接口、带着 40 毫秒混进耗时排行** ——
+正是本任务最想避免的那个误读，而且**它不会报错，只会安静地给出错数字**。
+所以这条判断要有守卫钉住，沿用仓库既有的 `test_layering.py` 写法（含 `is_not_vacuous` 自检）。
+
+---
+
+## 10. 与 v5 其它部分的关系
+
+- **不改任何产品行为**：只新增一条只读管理端点与一个只读页面。
+- **与 `ARCHITECTURE.md` 第 7 节（SSE 传输契约）呼应**：那节讲「SSE 的分帧与响应头本身是契约」，
+  本节讲「SSE 的 `duration_ms` 不是生成耗时」。两者合起来才是 SSE 在可观测性上的完整口径。
+- **与 ADR-066（测量先行）同一条纪律**：`elapsed_ms` 进响应，就是不让「要不要加索引」靠猜。
+- **不引入新依赖**：前端不需要图表库（没有曲线），后端不需要额外包（JSON1 内置）。
+
+---
+
+## 附录 B：数据访问层收口（原 T15）
+
+> 迁自 `T15-data-access-layer.md`（原文件已删除，内容逐字保留）。
+
+# T15 · 数据访问层：`Database` 对象 + 单元事务
+
+> 状态：**已被 v6 取代，且 v6 已完成**（2026-10-23，1001 例全绿）。对应决策见 `../../adr/README.md` 的 ADR-072。
+> ⚠️ 本文描述的 444 行自建连接池、`lease()` / `owned` 闸门、手写 `SCHEMA_SQL` 与
+> `PRAGMA user_version` 迁移链，在 **v6（`docs/architecture/v6/`，ADR-073~082）** 中
+> 全部交由 SQLModel + SQLAlchemy + Alembic 承担。最终落地状态：`core/database.py`、
+> `core/db.py` 的 `connect`/`lease` 已删除；`SCHEMA_SQL` 与 `init_schema()` 作为冻结链的
+> v0 起点搬进 `core/migrations.py`，生产启动只走 `prepare_schema`（守卫 C9）。
+> T15.3 冻结在 batch A 的那 5 个文件已在 T16.6 完成迁移。
+> 本文保留为历史记录：**它记录了「为什么当时的做法是对的」，这个判断在 2026-10 之前一直成立。**
+> 读本文时请把「目标形态」当作历史方案，不要照着实现。
+
+## 1. 目标与范围
+
+三句话目标：
+
+1. 让「多线程同时首次映射 WAL `-shm`」这个故障**在结构上不可能发生**，而不是靠一把锁把它挡住；
+2. 把事务边界从「一个仓库函数」上移到「**一次业务操作**」，让跨仓库写入具有原子性；
+3. 把「用例之间的数据库隔离」从「改全局环境变量 + 清一堆缓存」变成「**换一个 `Database` 实例**」。
+
+### 本期做
+
+| # | 内容 |
+| --- | --- |
+| 1 | 新增 `core/database.py`：`Database` 对象 + 固定连接的连接池 |
+| 2 | `db.connect()` 改为委托 `Database.acquire()`（对外签名不变） |
+| 3 | 归还连接时强制回滚未提交事务，并计入统计 |
+| 4 | 仓库函数支持「传入连接」，服务层据此拥有事务边界 |
+| 5 | 删除 `db._bootstrap_lock`，改由「连接只在 open 时创建」保证不变量 |
+| 6 | 五条确定性守卫（见第 6 节） |
+
+### 本期不做
+
+| 不做 | 理由 |
+| --- | --- |
+| 换 SQLAlchemy / 换 Postgres | SQLite 单写者是本项目的既定边界；换存储是另一个量级的事，不属于「访问层封装」 |
+| 异步驱动（aiosqlite） | 现有调用链全是同步函数（服务层在 `run_in_threadpool`/任务线程里跑），换异步驱动要改调用方语义，收益不明 |
+| 拆 `repositories/` 目录 | 目录结构不是本期的痛点，事务边界才是 |
+| 改 lifespan 的 `init_schema + run_migrations` | 生产上本来就只跑一次；测试侧的开销属于测试装置问题（T04 已用并行解决），不为此改生产启动路径 |
+| 连接池动态伸缩 | 见 3.2：**连接数恒定**是「竞态不可能发生」的前提 |
+
+## 2. 现状事实（均已实测，不是推断）
+
+| 事实 | 数值 / 位置 |
+| --- | --- |
+| `with connect()` 使用点 | **92 处**：`repositories/` 89、`core/` 2、`api/` 1 |
+| 直接开事务的公共仓库函数 | **89 个**（88 公共 + 1 私有）；公共里 **43 写 / 45 只读**。写函数里共 44 处 `.commit()`、2 处 `rollback()`（全在 `document_repo`） |
+| 仓库内显式 `.commit()` | **44 处**（auth 16、generation_job 9、runtime_config 5、其余 14） |
+| 共用的 `connect()` 实现 | `core/db.py:279`，每次操作新建连接 + 3 条 PRAGMA，`yield` 后关闭 |
+| 单次 `connect + SELECT 1 + close` | **1.98 ms**（p50 1.93，300 次；预热后） |
+| 路径解析 | `db_file_path()` **每次调用**读 `get_settings()`，所以路径可在运行期变化 |
+| 测试隔离方式 | `conftest.py:39` 每个用例 `DB_PATH = tmp_path/test.db` |
+| 已有的正确做法 | `document_repo.append_version`（`repositories/document_repo.py:171`）在一个 `with connect()` 里完成四步写入，并把 `conn` 传给 `_ensure_document(conn, ...)` |
+| 事务边界止步于 | 仓库函数：服务层调两个仓库 = 两个事务 |
+
+**最后两行是本期设计的前提**：连接注入（`conn` 作为参数往下传）在本项目里**已经是局部惯例**，本期只是把它提升为全局约定。
+
+## 3. 设计
+
+### 3.1 组件关系
+
+```
+services/            ← 拥有事务边界：with db.transaction() as tx
+   │                    一次业务操作 = 一个事务（可跨多个仓库）
+repositories/        ← 只写 SQL；函数接受 tx（缺省自己开）
+   │
+core/database.py     ← Database：持有连接池、路径、PRAGMA、生命周期、统计
+   │
+sqlite3              ← WAL
+```
+
+`db.connect()` 保留为兼容入口（92 处调用点一行不用改），内部改为委托：
+
+```python
+@contextmanager
+def connect() -> Iterator[sqlite3.Connection]:
+    with get_database().acquire() as conn:
+        yield conn
+```
+
+### 3.2 连接池：数量恒定、只在 open 时创建
+
+这是整个方案的核心决策，也是「可以删锁」的**唯一**依据。
+
+```
+Database(path, size=4)   # 可用 DB_POOL_SIZE 覆盖
+  .open()      ← 启动期、单线程：一次性建满 size 条连接（WAL -shm 只映射这一次）
+  .acquire()   ← 借出 / 归还，期间不创建任何新连接
+  .dispose()   ← 全部关闭（路径切换、测试 teardown）
+```
+
+三条不变量：
+
+1. **连接总数恒定**（`size` 条），运行期不扩容、不新建；
+2. 因此「多线程同时首次映射 `-shm`」**没有发生的时机**——竞态消失，而不是被锁挡住；
+3. 连接以 `check_same_thread=False` 创建（现状已如此），借出期间**独占**，不允许多人同时用同一条。
+
+为什么不做动态伸缩：一旦允许运行期扩容，扩容那一刻就是「多线程建连接」，又把竞态请回来了；要么给扩容加锁（等于锁没删），要么预建满。预建 4 条 SQLite 连接的代价可以忽略，所以选预建（默认 `DB_POOL_SIZE=4`）。
+
+连接损坏（磁盘错误导致连接不可用）时的替换是唯一例外：走 `_replace_locked()`，拿一把只在故障路径上的窄锁。这条路径不在热路径上，且会被记进 `stats["replaced"]`。
+
+#### 两条实现约束（否则守卫会假绿）
+
+1. **`connect()` 必须作为可注入的工厂参数**：`Database(path, size=..., connect_factory=sqlite3.connect)`。
+   测试靠它注入计数器。⚠️ **`core/database.py` 里禁止写 `from sqlite3 import connect`**——那样
+   monkeypatch 会落空、计数恒为 0，而 `0 != size` 恰好"看起来通过"，是最难发现的假绿。
+
+2. **`open()` 必须先于任何 `connect()` 发生**。启动链路里 `init_schema()` 与
+   `logging_setup.install_log_persistence()` 内的 `LogRepository.prune()` 都会走 `connect()`，
+   任何一个先跑，就会触发"第一次借用时才建连接"，直接破坏「只在 open 时创建」这条唯一依据。
+   做法：让 `get_database()` 在创建实例时**立即 `open()`**（在初始化锁内完成），
+   这样"谁先谁后"不再依赖调用顺序。
+
+#### `dispose()` 的语义（必须写死，否则必偶发）
+
+`dispose()` 置 `closed` 标志 → 关闭池内空闲连接 → **不等待在途借用**。配套三条：
+
+| 场景 | 行为 |
+| --- | --- |
+| 在途连接归还到已 `closed` 的池 | 直接 `conn.close()`，**不 put 回池**（否则池被复活） |
+| `closed` 之后调用 `acquire()` | 抛 `PoolClosed`（不是 `PoolExhausted`、更不是自动重开） |
+| teardown 撞上后台日志线程仍在借用 | 不阻塞等待；该连接在归还时按上一条直接关闭 |
+
+#### 另外三处实现细节（文档原先没写，实现时需要）
+
+1. **`open()` / `dispose()` 自带生命周期锁**。因为「未打开时借用」这条兜底路径（见下）可能被
+   多线程同时撞上；没有锁就会出现两个线程各建 `size` 条、后一批在 `put_nowait` 上撞 `queue.Full`。
+2. **`Database.closed` 属性**：G-DB3 要断言"旧池已 dispose"，靠 `stats["idle"] == 0` +
+   `closed` 两处才说得清。
+3. **路径解析放在 `database.default_db_file()`**，`db.db_file_path()` 委托它。
+   依赖方向是 `db → database`，反过来 import 会成环；对外签名、返回值与 `mkdir` 副作用不变。
+
+#### `acquire()` 在池未打开时怎么办
+
+**抛 `PoolClosed`，不要「补一次 `open()`」**。理由：
+
+- 那会让 `dispose()` 之后仍能被静默复活——`reset_database()` 做完、若还有后台线程调用
+  `connect()`，就会为**已删除的临时库**重新建 4 条连接并重建文件，测试清理随之失效；
+- 生产路径不受影响：`get_database()` 一定先 `open()`。
+
+> 注意：**加了生命周期锁不等于可以不删这条兜底**。锁只解决"并发建两份"，
+> 不解决"关闭后又被复活"。守卫 G-DB3 与 `test_acquire_on_closed_pool_raises` 各守一头。
+
+#### 已知行为变化（不是缺陷，但要写进 `connect()` 的 docstring）
+
+池化之后 `with connect() as conn:` **不再在退出时关闭连接**（改为归还）。因此
+"在 `with` 块外继续使用 `conn`" 不会再立刻抛 `sqlite3.ProgrammingError(closed)`，
+而是可能读到一条已归还、正被他人使用的连接。全量对拍 0 差异说明现有调用点不依赖旧语义，
+但这是一个**悄悄变宽松**的地方，必须在 docstring 里写明。
+
+### 3.3 借出与归还
+
+```
+acquire():
+    conn = pool.get(timeout=acquire_timeout)      # 池空则等待，超时抛 PoolExhausted
+    broken = False
+    try:
+        yield conn
+    except sqlite3.Error:                          # 连接可能已坏（磁盘 / 句柄）
+        broken = True
+        raise
+    finally:                                       # ⚠️ 必须 finally，不能 else
+        if conn.in_transaction:                    # 调用方漏了 commit / 抛了异常
+            conn.rollback()
+            stats["rolled_back"] += 1
+        if 池已关闭 or 代次不符:
+            conn.close()                           # 绝不放进新池
+        elif broken:
+            _replace_locked(conn)                  # 故障路径，窄锁补一条
+        else:
+            pool.put(conn)
+```
+
+⚠️ **必须是 `try/finally`，不能写 `try/except/else`**：块里抛出的异常若不是 `sqlite3.Error`
+（`ValueError` / `KeyError` / `CancelledError`…），`except` 不匹配、`else` 也不执行 ——
+**连接一次都不会归还**。实测：`size=1` 时抛 1 次 `ValueError` 就 `in_use=1 / idle=0`，
+下一次借用立刻 `PoolExhausted`；默认 `size=4` 意味着 **4 次普通异常之后全站不可用**。
+这是本模块最容易写错、也最难从症状反查的一处。
+
+**不做归还时的 `SELECT 1` 探针**：那会给每次操作加一次往返（约 0.1ms × 全部 DB 操作），
+而它能发现的故障（连接损坏）在"使用中抛 `sqlite3.Error`"这一条上已经能捕获，代价却是常驻的。
+
+**归还前回滚是硬要求**，不是优化项：
+
+- 现状是「每次新建连接」，所以「漏 commit」的影响被限制在一次调用内；
+- 池化复用后，未提交事务会跟着连接回到池里，下一个借用者可能看到脏数据、或持锁不放。
+
+### 3.4 事务边界：`UnitOfWork`
+
+```python
+# services/ 里
+with db.transaction() as tx:          # 一个连接 + 一个事务
+    job_repo.finish(tx, job_id, ...)
+    document_store.commit_generated(tx, ...)
+```
+
+仓库函数统一改成「可传入连接」：
+
+```python
+def append_version(..., conn: sqlite3.Connection | None = None) -> int | None:
+    with lease(conn) as (c, owned):   # 传了就用传入的；没传就自己开（旧调用点不受影响）
+        ...
+        if owned:                     # 自己开的连接 = 提交由自己负责
+            c.commit()
+```
+
+`lease()` 是新建的小工具（`core/db.py`）：`yield (conn, owned)`。传了 `conn` 就 `owned=False`
+——**不提交、不回滚**，事务边界归外层；没传就 `owned=True`，调用方写完之后自己 `commit()`。
+
+为什么用 `owned` 布尔量而不是「传没传连接再判一次」：后者在函数中途被重新赋值之后就不可靠，
+读代码的人还得回头找默认值才知道这一段在不在事务里。而 `if owned:` 是可以被 AST 静态守卫的
+（`tests/test_database_pool.py::test_every_repo_commit_is_guarded_by_owned`），
+「漏改一处」不再依赖人工过一遍。
+
+**只读函数也要接受 `conn`**：不只是为了将来可能加写操作。`finish` 写完 → `get` 读回来，
+若后者另开连接，WAL 下会读到**提交前**的旧值（WAL 的隔离是连接的隔离，不是进程的）。
+「刚生成完就查不到正文」这类故障最难查，所以 45 个只读函数一并迁移。
+
+这样 89 个仓库函数（43 写 + 45 只读 + 1 私有）可以**逐个迁移**，不必一次性改完；
+未迁移的继续走「自开事务」，行为不变。
+
+### 3.5 错误映射与重试
+
+| `sqlite3` 错误 | 语义 | 处理 |
+| --- | --- | --- |
+| `SQLITE_BUSY` | 短暂争用 | 有界重试（上限 3 次，10/20/40ms 退避）；超限抛 `DatabaseBusy` |
+| `SQLITE_READONLY` | IO / 部署错误，重试无用 | **不重试**，立即抛 `DatabaseReadOnly` |
+| 其余 `OperationalError` | 未知 | 原样上抛，不吞 |
+
+现状的问题正是这两类被混在一起看，才让「调大 `busy_timeout` 完全没用」这件事看起来像谜。
+
+### 3.6 可观测性
+
+`get_database().stats` 暴露：
+
+| 字段 | 用途 |
+| --- | --- |
+| `size` / `in_use` / `idle` | 池是否被打满 |
+| `wait_ms_total` / `wait_ms_max` | 借不到连接的时间（真实瓶颈信号） |
+| `rolled_back` | 调用方漏提交的次数——**这是个告警指标**，正常应恒为 0 |
+| `replaced` | 连接损坏替换次数 |
+| `pool_exhausted` | 超时次数 |
+
+这些字段后续接进 T14 的接口性能面板，让「池该多大」变成数据问题。
+
+## 4. 关键取舍
+
+| 决策 | 选择 | 否决的方案与理由 |
+| --- | --- | --- |
+| 连接数 | **open 时预建满、运行期恒定** | 动态伸缩：扩容那一刻重新引入竞态，等于锁没删 |
+| 池实现 | 自研（`queue.LifoQueue`） | SQLAlchemy `QueuePool`：为 4 条 SQLite 连接引入一个 ORM 生态，依赖与心智成本都不对等 |
+| 事务 API | `db.transaction()` 上下文管理器 | 装饰器式 `@transactional`：无法表达「在事务里传连接」这一层 |
+| 仓库兼容 | `conn=None` 缺省自开 | 一次性改签名：92 处调用点全断，且无法分批验收 |
+| 归还策略 | 强制 `rollback` | 只清理 `commit` 成功的：漏提交正是要防的那种 |
+| 锁的去留 | **删掉**，由恒定连接数保证 | 保留锁 + 池：锁已经没有保护对象，留着会让人误以为并发引导仍可能发生 |
+
+## 5. 落地顺序
+
+每一步独立可验收，**上一次全绿才做下一步**。
+
+| 编号 | 内容 | 落点 | 依赖 |
+| --- | --- | --- | --- |
+| **T15.1** | `Database` + 池 + `connect()` 委托 + **同一步删锁**；守卫 G-DB1 / G-DB3 / G-DB5；`conftest` 接入 `database.reset()` 与 teardown 断言 | 新增 `core/database.py`；改 `core/db.py`、`tests/conftest.py`；新增 `tests/test_database_pool.py` | — |
+| **T15.2** | 归还回滚 + 统计；守卫 G-DB2 | `core/database.py` | T15.1 |
+| **T15.3** | 仓库改「可传连接」（**89 个**函数：43 写 + 45 只读 + 1 私有；分批 A/B/C） | `repositories/*.py` | T15.2 |
+| **T15.4** | 服务层事务收口（跨仓库原子）+ 跨仓库回滚用例 | `services/job_service.py`、`services/document_store.py` 等 | T15.3 |
+| **T15.5** | 静态守卫 G-DB4 + 全量对拍收口；**并记录「删锁前后 `PytestUnhandledThreadExceptionWarning` 出现次数」各一次** —— 作为「那把锁到底有没有用」的观测证据（**观测，不是判据**） | `tests/test_database_pool.py` | T15.4 |
+| **T15.6** | 文档与记忆同步 | `docs/architecture/v5/*`、`../../adr/README.md` | T15.5 |
+
+> 顺序的红线不是「锁必须最后删」，而是**「删锁」与「连接只在 `open()` 时创建」必须在同一步完成**。
+> T15.1 建池的那一刻，锁就已经没有保护对象了；把它留到后面四步，是一段**没人调用的死代码**，
+> 比删掉更危险（后来者会以为并发引导仍可能发生，从而在别处重复加锁）。
+>
+> 另一条红线：**T15.2 必须先于 T15.3**。没有「归还即回滚」，池复用就会把未提交事务
+> 传给下一个借用者——那比偶发 500 更难查。
+
+## 6. 验收标准
+
+### 6.1 功能与回归
+
+| 项 | 要求 |
+| --- | --- |
+| 收集数 | 与 T04 基线一致（**867 + 本期新增**） |
+| pass / fail 集合 | 与基线逐条一致（`--junit-xml` 对拍，不认总数） |
+| 全量耗时 | ≤150 秒（T04 的验收线不得回退） |
+| 前端 / 管理端 | 不受影响，但提交前各跑一次确认 |
+
+### 6.2 五条确定性守卫
+
+都不依赖「复现那个 READONLY」，只守我们选择依赖的不变量。
+
+| # | 用例 | 断言 | 反向验证 |
+| --- | --- | --- | --- |
+| G-DB1 | `test_bootstrap_happens_only_at_open` | **分两段计数**：① `open()` 阶段建的条数 == `size`；② 清零后 10 线程各借 50 次，新建条数 == **0** | 改成懒建 → 第 ② 段计数 > 0 → 红 |
+| G-DB2 | `test_checkout_rolls_back_leaked_transaction` | 借连接 INSERT 不提交就归还；下一位借用者读不到该行，且 `stats["rolled_back"] == 1` | 去掉归还回滚 → 读到脏行 → 红 |
+| G-DB3 | `test_pool_is_keyed_by_db_path` | 切 `DB_PATH` 后借到的是新库的连接，旧库行不可见 | 去掉路径比对 → 读到旧库 → 红 |
+| G-DB4 | `test_no_connection_held_across_await` | AST 扫描 `src/backend`：`async def` 体内出现 `with connect()` / `with transaction()` 的数量为 **0** | 在某个 async 函数里塞一个 → 红 |
+| G-DB5 | `test_pool_exhaustion_times_out` | `size=1, acquire_timeout=0`，借走唯一连接后再借 → **立即**抛 `PoolExhausted` | 去掉超时 → 用例挂住（需 `pytest-timeout` 兜底） |
+
+落点：G-DB1 / G-DB3 / G-DB5 随 T15.1（建池当步交付），G-DB2 随 T15.2，
+G-DB4 随 T15.5。**每条守卫都必须与它所守的那一步同批落地**，不留「后面补」。
+
+⚠️ G-DB1 **绝不能**写成「全局 `connect` 总数 == `size`」。两个理由：
+① 故障路径 `_replace_locked()` 会补连接，总数必然可能 > `size`；
+② 更致命的是它守的是**总数**而不是**时机**——「池空且未满时才建」这种实现最终创建数
+仍然恰好是 `size`，改坏了也照绿。**要守的是第 ② 段「并发借用阶段一条都不建」。**
+
+⚠️ G-DB5 的时间依赖必须是 **0**（`acquire_timeout=0`）。本环境**没装 `pytest-timeout`**，
+用非零超时写「要能快速失败」会在慢机器上偶发；而反向验证「去掉超时」会**挂死**而不是转红——
+挂死会把整个 CI job 拖死，比红更糟。
+
+⚠️ **G-DB4 的优先级要提到 P0，不再是「低成本静态红线」。** 池化把它从"局部报错"变成
+"全站不可用"：从前在 `async def` 里跨 `await` 持有连接，最坏是这条连接用不了；
+现在则是**长时间占住一条池连接**——4 条池被 4 个协程各占一条，第 5 个请求就 `PoolExhausted`。
+一次 LLM 流式可能持续数分钟，这个窗口足够把池锁死。
+
+G-DB1 是原来那把锁的使命继承者：**锁守的是「不要并发引导」，它守的是「引导只发生一次」，后者更强也更可测。**
+
+### 6.3 新增的行为用例
+
+| # | 用例 | 断言 |
+| --- | --- | --- |
+| 1 | 跨仓库原子性 | 注入「第二个仓库写入失败」，第一个仓库的写入必须**不存在** |
+| 2 | 池复用不串味 | 连续 50 次借还，每次写入的行互不可见（除非已提交） |
+| 3 | 日志线程与请求线程共用池 | 两者并发写不出现 `database is locked`，也不互相阻塞超过阈值 |
+| 4 | `dispose()` 撞上在途借用 | 两个线程各持一条连接并阻塞；`dispose()` 后释放：两线程不抛异常、`in_use` 归 0、后续 `acquire()` 抛 `PoolClosed`（**池不许被复活**） |
+| 5 | 启动顺序 | 启动链路里 `init_schema()` 与 `LogRepository.prune()` 借连接时，`stats["size"]` 已等于 `size`（即已 `open()`），不是懒建 |
+
+> 第 4 条防的是"换路径 / teardown 撞上后台日志线程"时的偶发 500；第 5 条防的是
+> 「`prune()` 先于 `open()` 跑，于是第一次借用触发了懒建」——这种破坏**只看连接总数发现不了**，
+> 必须由启动顺序来守。
+
+### 6.4 测试装置的两处硬要求
+
+1. `conftest._reset_runtime_state()` 里补 `database.reset()`（dispose + 清实例缓存）。
+   否则每个用例都会留下一个装着 `size` 条打开连接的池，指向已删除的临时库。
+2. `isolated_db` 的 teardown 里加断言：`stats["in_use"] == 0` 且 `idle == size`。
+   这样**每一个用例都在守「没有连接被泄漏」**，覆盖面比一条专门用例大三个数量级。
+
+## 7. 风险与回滚
+
+| 风险 | 缓解 |
+| --- | --- |
+| 池复用导致跨请求事务串味 | 归还强制回滚（T15.2）+ G-DB2 守卫；T15.2 必须先于 T15.3 |
+| 路径切换时旧连接仍被借出 | `get_database()` 比对路径并 `dispose()`；G-DB3 守卫 |
+| 池过小导致请求排队 | `wait_ms_max` 进统计；默认 4（`DB_POOL_SIZE` 可调）；耗尽超时可观测（G-DB5） |
+| 仓库批量改签名引入回归 | 分批改 + `conn=None` 缺省；每批跑全量对拍 |
+| 改造期系统处于「半池化」 | 允许：`connect()` 委托后，未迁移的仓库照旧走自开事务，语义完全一致 |
+
+回滚方式：逐个提交可独立回退（T15.1–T15.5 各自一个 commit）。**不采用**「一次性大提交」，否则回滚只能整体撤销。

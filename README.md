@@ -17,7 +17,8 @@
 | `frontend_admin/` | Vue 3 · Vite | 5174 | 管理端：用户 / 邀请码 / 审计 / 任务监控 / 模型配置 |
 | `skills/` | —— | —— | 生成管线使用的技能包（`prd-generator` 等） |
 | `scripts/keygen/` | Python | —— | 主密钥生成与轮换脚本 |
-| `docs/architecture/` | Markdown | —— | 架构说明与决策记录（ADR） |
+| `docs/architecture/` | Markdown | —— | 分层架构说明（v1 ~ v8）与时间线真源 |
+| `docs/adr/` | Markdown | —— | 决策记录 ADR-001 ~ ADR-097（含 ADR-053 密钥加密入库） |
 
 ---
 
@@ -112,10 +113,20 @@ cd frontend_admin && npm run test:unit
 
 ## 文档
 
-- 架构总览：`docs/architecture/v4/ARCHITECTURE.md`
-- 决策记录（ADR，含 ADR-053 密钥加密入库）：`docs/architecture/v4/ADR.md`
-- 路线图：`docs/architecture/v4/roadmap.md`
-- 历史版本：`docs/architecture/v1` ~ `v3`
+给**人**看的：
+
+- 架构总览：`docs/architecture/v8/ARCHITECTURE.md`（当前层；历史层 `v1` ~ `v7` 各留一套）
+- 决策记录（ADR-001 ~ ADR-097，一条一文件 + 索引）：[`docs/adr/`](./docs/adr/README.md)
+- 路线图：`docs/architecture/v8/roadmap.md`
+- 阶段总表与已确认的失真（按 git 实测）：`docs/architecture/README.md`
+
+给 **agent** 看的（入口是 [`AGENTS.md`](./AGENTS.md)）：
+
+- 术语准绳：[`GLOSSARY.md`](./GLOSSARY.md)
+- 工程约定与已知的坑：[`docs/agents/conventions.md`](./docs/agents/conventions.md)
+- 领域文档怎么读、issue 怎么记：[`docs/agents/`](./docs/agents/)
+
+历史档案（旧工具工作区迁入，仅存档）：`docs/journal/`。施工单与截图两类已在本轮清理中删除，不留副本。
 
 ---
 
