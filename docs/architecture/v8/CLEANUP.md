@@ -30,7 +30,7 @@
 | # | 项 | 证据 | 处置 | 可逆 |
 |---|---|---|---|---|
 | **A1** | `solutions.data` 列 | `models.py:229`；`solution_repo.py:119` 写空串、`update` 不写；`solution_service` 文件头写「不再写、不再读」 | Alembic `drop_column` + 删模型字段 | **否** |
-| **A2** | `model_providers.builtin` 列 | `models.py:625-627`「v19 起一律为 0，代码不再读取」；全仓零查询 | 同上 | **否** |
+| **A2** | `model_providers.builtin` 列 | `models.py:625-627`「v19 起一律为 0，代码不再读取」；全仓零查询 | Alembic `drop_column` + 删模型字段 · **已完成（#9）** | **否** |
 | **A3** | `frontend/src/components/ui/AppToast.vue` | 全仓 `grep AppToast` 零命中（含 kebab-case 与全局注册两条逃逸路径） | 删文件 | 是 |
 | **A4** | `frontend/src/components/ui/AppEmpty.vue` | 同上，零命中 | 删文件 | 是 |
 | **A5** | `frontend/src/components/ui/AppInput.vue` | **原清单漏项**。零 importer；`src` 内唯一命中是 `fieldStyles.ts:9` 的**注释** | 删文件 | 是 |

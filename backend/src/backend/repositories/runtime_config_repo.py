@@ -169,7 +169,7 @@ class ModelProviderRepository:
     def update(self, provider_id: str, fields: dict[str, Any]) -> bool:
         """按字段更新一条配置，返回是否命中。
 
-        `id` / `builtin` / **`protocol`** 不允许改：前两者是身份与遗留标记，
+        `id` / **`protocol`** 不允许改：前者是身份，
         后者是这条配置的**本质**（换协议等于换一家厂商，参数语义全变：
         `max_tokens` 在 ark 与 anthropic 下的含义不同、`thinking_enabled`
         只有 ark 有语义）。规则写在这里，接口层与服务层都不必各自记得。

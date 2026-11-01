@@ -617,10 +617,6 @@ class ModelProvider(SQLModel, table=True):
     extra_json: str = Field(
         default="{}", sa_column=Column(Text, nullable=False)
     )
-    # 遗留列：v19 起一律为 0，**代码不再读取**（保留是为了不重建表）
-    builtin: bool = Field(
-        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("0"))
-    )
     enabled: bool = Field(
         default=True, sa_column=Column(Boolean, nullable=False, server_default=text("1"))
     )
@@ -658,7 +654,6 @@ BOOLEAN_COLUMNS: frozenset[tuple[str, str]] = frozenset(
     {
         ("users", "is_active"),
         ("users", "is_admin"),
-        ("model_providers", "builtin"),
         ("model_providers", "enabled"),
         ("model_providers", "thinking_enabled"),
         ("chat_turns", "interrupted"),

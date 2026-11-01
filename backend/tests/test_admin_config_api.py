@@ -284,7 +284,6 @@ def test_providers_never_leak_secrets(client):
     row = _providers(client)["providers"][0]
     assert row["key_present"] is True
     assert "value_token" not in row
-    assert "builtin" not in row
 
 
 def test_reveal_key_returns_plaintext_and_audits(client):
