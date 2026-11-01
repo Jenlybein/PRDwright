@@ -37,6 +37,9 @@
 
 - 已接线：`AppButton` 在 **12** 处业务组件使用，`AppActionBar` 在 **12** 处使用。
 - **未接线**：`AppDialog` / `AppToast` / `AppEmpty` / `AppInput` 目前**零外部引用**——`AuthDialog.vue` 仍手写 Teleport，表单输入仍是 `RequirementsForm` 自绘。组件库处于「已建、部分接线」状态，这四个是 v3 的收敛项。
+
+> **现状注（v8 / #2 之后）**：上面点名的三项 `AppToast` / `AppEmpty` / `AppInput` 已于 #2 删除（`grep` 零命中）；`AppDialog` 实际仍被审阅页引用，故保留——「零外部引用」这句对它不成立。逐项证据见 `docs/architecture/v8/CLEANUP.md` 的 A3~A5 与 §8 偏差记录。
+
 - ⚠️ 底栏读子组件句柄有个坑：**模板 ref 在首次渲染之后才赋值**，首帧读到 null 要兜底；测试断言状态前必须 `await nextTick()`。
 
 ### Consequences

@@ -114,6 +114,8 @@ SQL 只出现在 `repositories/`；`schemas.py` 集中契约。这条规则从 v
 | 契约 | `types/index.ts` 是准绳，后端迁就前端字段名 |
 | 错误 | `services/errors.ts` 独立成文件（`ApiError` / `isApiError`），避免被测试里的模块级 mock 替换 |
 
+> **现状（v8 之后）**：上表「`ui/` 11 个基础件」是 v2 时的口径——`AppToast` / `AppEmpty` / `AppInput` 已于 #2 删除，`AppDialog` 实际仍被审阅页引用；三个孤儿资源、两个零引用函数与一个死类型也已清理。逐项见 `docs/architecture/v8/CLEANUP.md` 的 A3~A5 / A10。
+
 **保存策略**：严格「有内容了才建」——无 id 时 `POST` 后 `router.replace('/v2/{id}')`，有 id 时 `PUT` 整份覆盖；
 `generating-*` 阶段不触发保存（避免把半截文档写进去）。
 

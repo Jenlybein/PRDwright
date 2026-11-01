@@ -29,14 +29,14 @@
 
 | # | 项 | 证据 | 处置 | 可逆 |
 |---|---|---|---|---|
-| **A1** | `solutions.data` 列 | `models.py:229`；`solution_repo.py:119` 写空串、`update` 不写；`solution_service` 文件头写「不再写、不再读」 | Alembic `drop_column` + 删模型字段 | **否** |
+| **A1** | `solutions.data` 列 | `models.py:229`；`solution_repo.py:119` 写空串、`update` 不写；`solution_service` 文件头写「不再写、不再读」 | Alembic `drop_column` + 删模型字段 · **已完成（#8）** | **否** |
 | **A2** | `model_providers.builtin` 列 | `models.py:625-627`「v19 起一律为 0，代码不再读取」；全仓零查询 | Alembic `drop_column` + 删模型字段 · **已完成（#9）** | **否** |
 | **A3** | `frontend/src/components/ui/AppToast.vue` | 全仓 `grep AppToast` 零命中（含 kebab-case 与全局注册两条逃逸路径） | 删文件 | 是 |
 | **A4** | `frontend/src/components/ui/AppEmpty.vue` | 同上，零命中 | 删文件 | 是 |
 | **A5** | `frontend/src/components/ui/AppInput.vue` | **原清单漏项**。零 importer；`src` 内唯一命中是 `fieldStyles.ts:9` 的**注释** | 删文件 | 是 |
 | **A6** | `services/job_service.py:363 cancel_for_solution` | **原清单漏项**。零调用；`delete_solution_and_cancel_jobs`（`:411-424`）把同样三步内联重写了一遍；ADR-036 与 3 处注释仍写「删除方案时必须走这里」 | 删函数 + 同步 ADR-036 指向 | 是 |
 | **A7** | 10 个零提及的符号 | `normalize_stage`、`is_valid_role`（`core/chat_kinds.py:44/59`）、`master_key_exists`（`core/crypto.py:51`）、`is_present`（`core/secrets.py:119`）、`current_engine`（`core/engine.py:154`）、`config_service_window`、`input_ceiling_for`（`core/runtime_config.py:465/500`）、`ClearForSolution.clear_for_solution`（`chat_session_repo.py:105`）、`ChatTurnRepository.has_turns`（`chat_turn_repo.py:219`）、`_PLACEHOLDER_URL`（`core/schema.py:53`） | 删 | 是 |
-| **A8** | 8 条未使用 import（ruff F401 已确认真无消费者） | `api/conversation.py:11`、`api/schemas.py:19/22`、`core/engine.py:49/50`、`core/runtime_config.py:54`、`repositories/document_repo.py:34`、`services/conversation_service.py:42` | 删 | 是 |
+| **A8** | 8 条未使用 import（ruff F401 已确认真无消费者） | `api/conversation.py:11`、`api/schemas/`（拆分前为单文件 19/22 行）、`core/engine.py:49/50`、`core/runtime_config.py:54`、`repositories/document_repo.py:34`、`services/conversation_service.py:42` | 删 | 是 |
 | **A9** | `backend/src/backend/__init__.py` 的第二个 FastAPI app + `pyproject.toml:36` 坏入口点 | `__init__.py:1-7` 建了 `app` 与 `/health`，全仓 `from backend import app` 零命中；真 app 在 `main.py`、`/health` 在 `api/health.py:144`；`pyproject.toml:36` 的 `backend = "backend:main"` 指向不存在的属性（`hasattr(backend,'main')` 实测 False） | 删 app 代码块 + 改入口点为 `backend.main:app` | 是 |
 | **A10** | 前端 6 项：3 个孤儿资源 + 2 个零引用函数 + 1 个死类型 | `assets/main.css`（0 importer）、`assets/base.css`（仅被 main.css 引用 → 级联死）、`assets/logo.svg`（0 命中，注意 `grep logo` 会命中 `logout` 是假阳性）、`api.ts:123 getQuestions()`、`api.ts:887 generatePrdStream()`、`types/index.ts:457 SessionData`（**不是** `:1155` 的 `SessionDataV2`，那个活着） | 删 | 是 |
 
@@ -118,9 +118,9 @@
 
 | # | 文件 | 行数 | 备注 |
 |---|---|---|---|
-| W1 | `backend/src/backend/services/job_service.py` | 1633 | 最长函数 `_apply_event` 157 行 |
-| W2 | `backend/src/backend/services/prd_section_writer.py` | 1420 | 最长方法 `_stream_parallel` 376 行 |
-| W3 | `backend/src/backend/api/schemas.py` | 1321 | 无函数，纯 Pydantic 模型，属"按领域拆模块"而非拆函数 |
+| W1 | `backend/src/backend/services/job_service.py` | 792 | **已完成（#5）**。按职责拆到 `backend/src/backend/services/job_runtime.py` / `job_runtime_events.py` / `job_finalize.py` 等子模块；`_apply_event` 已随迁 |
+| W2 | `backend/src/backend/services/prd_section_writer.py` | 1129 | **已完成（#6）**。并行车道拆进新模块 `backend/src/backend/services/prd_section_parallel.py`（474 行） |
+| W3 | `backend/src/backend/api/schemas/` | 9 个模块，最大 358 | **已完成（#7）**。无函数，纯 Pydantic 模型，按领域拆模块 |
 
 临界区不入列（`document_service.py` 1144、`prompts.py` 918、`conversation_service.py` 913、
 `adminService.ts` 873、`admin.py` 842、`admin_service.py` 835、`admin_config_service.py` 812）。
@@ -167,6 +167,34 @@
 | 4 | 前端两个工程仍能构建 | `npm run build`（用户端 + 管理端） |
 | 5 | 文档里写出的路径都真实存在 | 逐条 `ls` |
 | 6 | 库结构里没有"模型没有、库里还在"的表 | `alembic check` 无差异 |
+
+---
+
+## 8 本轮接受的偏差（记录用）
+
+这一节只记录**与既定口径不一致、但有意保留**的地方——不是待办，也不是辩解；写下来是为了
+下一轮 review 不必重新判断「这是漏了还是已经决定过」。
+
+- **新增 3 个守卫测试文件 + `test_layering.py` 的棘轮/冻结点**（`backend/tests/test_entrypoint.py`、`backend/tests/test_cleanup_dead_code.py`、`frontend/src/__tests__/dead-code.spec.ts`）：偏离「零新增接缝」，理由是它们钉住的是「删掉的东西不许回流」与「契约形状」，属于仓库既有的**架构守卫**范式，不是新的测试接缝。
+- **#2 多删 3 个级联类型**（`GeneratePrdStreamPayload` / `QuestionsConfig` / `QuestionConfig`）、**#3 多删 2 个常量**（`DEFAULT_CHAT_STAGE` / `TURN_ROLES`）：前者的唯一消费者是被删的 `getQuestions` / `generatePrdStream`，后者口径已并入 `backend/src/backend/core/chat_kinds.py` 的 docstring——都是删干净而不是留下「有类型没函数」的空壳。
+- **#6 两处行为校准**（失败任务不再被 `done_callback` 摘除 → 恢复「出错只发 error 不发 done」；断开时 `lane.aclose()` 立即取消在途调用）：两处都有新用例覆盖，不是顺手改行为。
+- **`prd_section_parallel` 与 `prd_section_writer` 存在双向依赖**（函数内延迟 import），且并行模块会调 writer 的若干私有方法：记录为已知的边界代价——本轮重写只搬不改，拆成两个模块仍比留一个 1129 行的单模块可读。
+- **`job_service` 用 `noqa` 再导出 25 个名字（其中 23 个私有名）**：是为保住既有测试的 `import` 面（`js._finalize` / `js._RUNTIMES` 这类直触），与 `api/schemas/__init__.py` 的再导出是同一种范式。
+
+---
+
+## 9 删列的备份窗口（演练记录）
+
+删列不可逆（ADR-057 / ADR-096），窗口内三步必须齐：`VACUUM INTO` 备份 + 自检 → 跑迁移 → 全量用例。
+A1（`solutions.data`）删除时实际做过一遍自检，记录如下（据 #8 报告）：
+
+1. 临时库先建到 `0002`（删列前的最新结构）；
+2. `VACUUM INTO` 生成备份；
+3. 三条断言：`PRAGMA integrity_check` = `ok`；备份内 `alembic_version` = `0002`；备份含 `data` 列；
+4. 备份 180,224 字节，sha256 `bb1cd19205dc532c163789c8547158d9c84e3e6d9b9e72ccfe1e4b1347b0c20a`；
+5. **三条断言通过之后**才执行迁移。
+
+同一窗口内的处置对 #9（`model_providers.builtin`）同样适用。
 
 ---
 

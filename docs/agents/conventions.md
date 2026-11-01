@@ -19,7 +19,7 @@
 ## 2. 后端分层与数据层
 
 - `api/` 只解析 / 校验 / 封装 → `services/` 业务 → `repositories/`（唯一碰模型与查询的地方）。
-- Pydantic 模型集中 `api/schemas.py`，被引用的模型必须先定义；Router 各自带完整 prefix，`main.py` 不叠加。
+- Pydantic 模型集中 `api/schemas/`（按领域拆成 9 个子模块，`__init__.py` 是唯一出口；ADR-099），被引用的模型必须先定义；Router 各自带完整 prefix，`main.py` 不叠加。
 - 仓储返回模型对象或 frozen dataclass 投影，不返回裸 dict（ADR-078）。
 - 仓库是绑定 `Session` 的实例方法：不许 `import sqlite3`、不许 `.commit()` / `.rollback()`、不许 SQL 字符串字面量（守卫 C1/C2/C3）。
 - 事务边界唯一落点是 `session_scope()`（正常提交 / 异常回滚 / 必定关闭）：仓库只管翻译，服务层负责「一个业务操作 = 一个事务」；不许在 `async def` 里跨 `await` 持有（C4）。
