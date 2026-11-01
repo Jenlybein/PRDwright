@@ -16,6 +16,16 @@
 ⚠️ 命名口径：前端用连字符（`api-docs-clarify`），这里也用连字符。历史原因，
 `generation_jobs.kind` 那边的文档种类用下划线（`api_docs`），两套口径的转换收口在
 `api/jobs.py`，不要在数据库里混用。
+
+两条**只留在本 docstring、不再有常量承载**的口径（原本的 `DEFAULT_CHAT_STAGE` /
+`TURN_ROLES` 两个常量在 #3 清理中删掉了，因为已经没有代码读它们）：
+
+- **旧快照的落点**：取不到线程标识时，旧快照（`messages` 还没有 `stage` 字段的那个年代）
+  一律按需求澄清处理；但**新请求缺 `stage` 应当报 400**，不要静默落到需求澄清。
+- **`tool` 是存储形状，不是展示形状**：结构化选择题的作答，在上游 API 里必须以
+  `ToolMessage` 回给当初发起调用的 assistant，否则历史里留下「调了工具却没人应答」，
+  上游直接报错。前端从不接收这个角色（`ChatMessage.role` 刻意不含它），
+  读接口会把 `tool` 投影成用户气泡。
 """
 
 from __future__ import annotations
@@ -28,17 +38,9 @@ CHAT_STAGES: tuple[str, ...] = (
     "prompts-clarify",
 )
 
-# 取不到线程标识时的落点：旧快照（`messages` 没有 `stage` 字段的那个年代）一律属需求澄清。
-# **只用于迁移与兼容旧数据**，新请求缺 `stage` 时应当报 400，而不是静默落到这里。
-DEFAULT_CHAT_STAGE = "requirement"
-
-# 轮次角色。
-#
-# `tool` 是**存储形状**而不是展示形状：结构化选择题的作答，在上游 API 里必须以
-# `ToolMessage` 回给当初发起调用的 assistant，否则历史里留下「调了工具却没人应答」，
-# 上游直接报错。前端从不接收这个角色（`ChatMessage.role` 刻意不含它），读接口会把
-# `tool` 投影成用户气泡。
-TURN_ROLES: tuple[str, ...] = ("user", "assistant", "system", "tool")
+# 取不到线程标识时的落点（旧快照默认属需求澄清）与轮次角色的存储口径，见本模块 docstring。
+# 这里刻意不再放 `DEFAULT_CHAT_STAGE` / `TURN_ROLES` 两个常量：它们在全仓已无读者，
+# 而它们承载的知识是「口径」而不是「取值」，留在 docstring 里比留一个没人读的元组更可靠。
 
 
 def is_valid_stage(value: object) -> bool:

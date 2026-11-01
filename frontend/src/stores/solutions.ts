@@ -584,9 +584,9 @@ export const useSolutionsStore = defineStore('solutions', () => {
    * 后端那边也有一半责任（删除时取消挂在方案上的任务），但前端不能指望它：
    * 回调可能已经在本地队列里排着了。
    *
-   * 本地订阅同样要摘（`detachActiveRun`）：后端 `cancel_for_solution` 会在收尾时关掉
-   * 总线，但那是**异步**的，而前端这一刻已经开始渲染新方案的空会话了。留着订阅，
-   * 关总线之前那几帧事件就会写进新方案的预览。
+   * 本地订阅同样要摘（`detachActiveRun`）：后端的删除链路会取消挂在方案上的任务、并把
+   * 那些运行时置为已取消，但取消是**异步**的，而前端这一刻已经开始渲染新方案的空会话了。
+   * 留着订阅，取消真正生效之前那几帧事件就会写进新方案的预览。
    */
   async function remove(id: number): Promise<void> {
     try {
