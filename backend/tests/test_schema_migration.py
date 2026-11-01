@@ -59,7 +59,10 @@ def _forget_alembic_adoption() -> None:
 
 
 def test_empty_db_gets_baseline(tmp_path):
-    """空库 → `upgrade head` → 14 张表 + `alembic_version = 0001`。"""
+    """空库 → `upgrade head` → 14 张业务表 + `alembic_version` = 当前 head。
+
+    不写死版本号：这条用例要表达的是「到最新」，不是「到某一号迁移」。
+    """
     path = tmp_path / "empty.db"
     engine = create_engine(f"sqlite+pysqlite:///{path}")
     try:

@@ -292,9 +292,10 @@ def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
 
     为什么放在 `job_service` 而不是 `solution_service`
     -------------------------------------------------
-    在途任务的协作式取消标记（`_RUNTIMES`）住在本模块；而本模块已经依赖
-    `solution_service`（收尾前要确认方案还在），让 `solution_service` 反向 import
-    就会成环。这里直接用仓储——`repositories` 是更下一层，不构成环。
+    在途任务的协作式取消标记（`_RUNTIMES`）住在同目录的 `job_runtime.py`（#5 拆模块时迁出，
+    本模块只再导出）；而本模块已经依赖 `solution_service`（收尾前要确认方案还在），
+    让 `solution_service` 反向 import 就会成环。这里直接用仓储——`repositories` 是更下一层，
+    不构成环。
 
     Returns:
         方案是否存在并被删除。`False` 表示不存在或不属于该用户（路由翻 404）。

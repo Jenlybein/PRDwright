@@ -46,12 +46,12 @@ BYTE_THRESHOLDS = (65536, 16777216)
 #
 # 这里抄一份而不是 import：勘察脚本要能在一台只放了源码树、没装项目依赖的
 # 服务器上直接跑（`python backend/scripts/schema_survey.py --db ...`）。
-# 两边不一致时 `tests/test_schema_parity.py` 会先转红，不会等到勘察报告出错才发现。
+# 两份清单**靠人工对齐**：`tests/test_schema_parity.py` 只对拍「模型 ↔ 库」，
+# 不读本脚本，所以删改布尔列时必须同时改这里（#9 删 `builtin` 时这份副本就落后过一拍）。
 BOOLEAN_COLUMNS: frozenset[tuple[str, str]] = frozenset(
     {
         ("users", "is_active"),
         ("users", "is_admin"),
-        ("model_providers", "builtin"),
         ("model_providers", "enabled"),
         ("model_providers", "thinking_enabled"),
         ("chat_turns", "interrupted"),
