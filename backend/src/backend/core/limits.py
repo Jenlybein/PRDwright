@@ -2,9 +2,13 @@
 
 ## 约束的是什么
 
-四列大文本：`document_versions.content`（整篇 PRD）、`generation_jobs.draft_content`
-（分章草稿）、`generation_jobs.completed_sections`（章节清单 JSON）、`solutions.data`
-（会话快照 JSON）。
+三列大文本：`document_versions.content`（整篇 PRD）、`generation_jobs.draft_content`
+（分章草稿）、`generation_jobs.completed_sections`（章节清单 JSON）。
+
+> 历史上还有第四列 `solutions.data`（会话快照 JSON），但它退役之后就**没有接进这道
+> 闸门**：`solution_repo.create` 只写空串、`update` 刻意不碰它，
+> `ensure_text_within_limit` 对它零调用。把「受约束的四列」写成事实是一句自相矛盾的
+> 注释——没有读者会因它超长而失败。该列已在 v8 按 ADR-096 删除，这里只留三列。
 
 它们的上限是 **60 × 1024 字节**，不是字符。理由是中文的字节数是字符数的 3 倍：
 「6 万字」听起来不多，按 UTF-8 是 180KB。按字符设限会让同一条规则在中文与英文上
