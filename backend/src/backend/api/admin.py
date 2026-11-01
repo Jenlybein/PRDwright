@@ -747,7 +747,7 @@ async def update_provider(
 ) -> schemas.AdminProviderListResponse:
     """只改传入的字段。
 
-    `id` / `builtin` 由仓储层过滤；**`protocol` 改了会 400**——换协议等于换一家
+    `id` 由仓储层过滤；**`protocol` 改了会 400**——换协议等于换一家
     厂商，参数语义全变，只能新建一条。
     """
     return schemas.AdminProviderListResponse(

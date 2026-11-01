@@ -414,8 +414,6 @@ def list_providers() -> dict[str, Any]:
 
     `key_present` 只回布尔：界面要能提示「这条还没配密钥」，
     但绝不能把密钥值本身带到前端。
-
-    `builtin` 不再返回：v19 起所有条目一视同仁（只有「使用中」的不能直删）。
     """
     config = rc.get_runtime_config()
     active_id = config.active_provider.id if config.active_provider else ""
@@ -605,7 +603,7 @@ def create_provider(actor: User, payload: dict[str, Any]) -> dict[str, Any]:
 def update_provider(actor: User, provider_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """编辑一条配置。
 
-    `id` 与 `builtin` 不可改（仓储层也会过滤）；**`protocol` 同样不可改**：
+    `id` 不可改（仓储层也会过滤）；**`protocol` 同样不可改**：
     换协议等于换一家厂商，`max_tokens` / `thinking_enabled` / `extra` 的语义全都变了。
     就地改会留下「半新半旧」的字段，而错误要到某次生成时才以「参数不认」的形式出现。
     所以这里**显式报 400**，而不是让 pydantic 或仓储层静默丢掉这个字段——

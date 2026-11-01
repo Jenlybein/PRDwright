@@ -279,19 +279,6 @@ def _dump_all(rows):
     return [row.model_dump() for row in rows]
 
 
-def _provider_dict(row):
-    """`model_providers` 的行 → 字典。
-
-    去掉 `builtin`：它是遗留列，旧的显式列清单（`_PROVIDER_COLUMNS`）从不返回它，
-    用例据此断言过「返回形状里没有这一列」。模型现在有这一列，形状要在这里对齐。
-    """
-    if row is None:
-        return None
-    data = row.model_dump()
-    data.pop("builtin", None)
-    return data
-
-
 class _UserRepoAdapter:
     """`UserRepository` 的用例侧适配器（读写都开短事务）。"""
 
@@ -469,12 +456,12 @@ class _ModelProviderRepoAdapter:
     def list_all(self):
         scope, repo = _scoped(_model_provider_repo())
         with scope as session:
-            return [_provider_dict(row) for row in repo(session).list_all()]
+            return [_dump(row) for row in repo(session).list_all()]
 
     def get(self, *args, **kwargs):
         scope, repo = _scoped(_model_provider_repo())
         with scope as session:
-            return _provider_dict(repo(session).get(*args, **kwargs))
+            return _dump(repo(session).get(*args, **kwargs))
 
     def create(self, *args, **kwargs):
         scope, repo = _scoped(_model_provider_repo())

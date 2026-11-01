@@ -102,7 +102,7 @@ def test_config_upsert_is_all_or_nothing():
 
 
 def test_provider_update_ignores_identity_fields():
-    """`id` / `builtin` / **`protocol`** 不允许通过 update 改。
+    """`id` / **`protocol`** 不允许通过 update 改。
 
     规则写在仓储一处，接口层不必各自记得过滤；否则将来多一个调用点就可能
     把 id 或协议改掉——前者让激活指针凭空失效，后者让构造器用错分支
@@ -116,7 +116,7 @@ def test_provider_update_ignores_identity_fields():
     )
     assert ModelProviderRepository.update(
         "cfg_test0001",
-        {"base_url": "https://x/api/v3", "id": "hacked", "builtin": 1, "protocol": "anthropic"},
+        {"base_url": "https://x/api/v3", "id": "hacked", "protocol": "anthropic"},
     )
     row = ModelProviderRepository.get("cfg_test0001")
     assert row["id"] == "cfg_test0001"
@@ -135,8 +135,6 @@ def test_provider_delete_and_count():
         default_model="deepseek-chat",
     )
     assert ModelProviderRepository.count() == before + 1
-    # builtin 已从投影里移除：这条捷径没了，代码就不再有「内置/自定义」之分
-    assert "builtin" not in ModelProviderRepository.get("cfg_test0002")
 
     assert ModelProviderRepository.delete("cfg_test0002")
     assert ModelProviderRepository.get("cfg_test0002") is None
