@@ -23,8 +23,13 @@ describe('死代码清理', () => {
     expect(names).not.toContain('AppInput.vue')
   })
 
-  it('assets 下不再有孤儿资源', () => {
-    expect(Object.keys(import.meta.glob('../assets/*'))).toEqual([])
+  it('被删的三个孤儿资源不得回流', () => {
+    // 只钉住本轮删掉的那三个：原断言是「assets 目录为空」，任何新增资源都会红，
+    // 那是把「清理结论」写成了「目录永远不许有新文件」。
+    const assets = Object.keys(import.meta.glob('../assets/*')).map((path) => path.split('/').pop())
+    expect(assets).not.toContain('main.css')
+    expect(assets).not.toContain('base.css')
+    expect(assets).not.toContain('logo.svg')
   })
 
   it('API 客户端不再导出零引用的函数', () => {

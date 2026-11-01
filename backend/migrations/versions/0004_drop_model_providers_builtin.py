@@ -16,12 +16,13 @@ SQLite 的 `ALTER TABLE` 不支持 `DROP COLUMN`（3.35 起有语法，但仍有
 等限制）。`migrations/env.py` 已开 `render_as_batch=True`，这里仍显式写
 `batch_alter_table`：这条迁移只做一件事，把「重建表」这个昂贵动作写在明面上。
 
-## 为什么仍声明 `sqlite_autoincrement`
+## 为什么不声明 `sqlite_autoincrement`
 
 batch 重建 = 建新表 + 拷数据 + 换名，建表语句尾部的表选项要按原样声明回来。
-`model_providers` 的主键 `id` 是 `VARCHAR(64)`（业务生成的 `cfg_xxx`），不是自增整数，
-因此 `AUTOINCREMENT` 在这张表上**不会**被写进 DDL——声明它只为与 `0003` 的 batch 重建
-保持同一处置：同一类动作只有一种写法，review 时不必逐票判断「这张表要不要漏一项」。
+但 `model_providers` 的主键 `id` 是 `VARCHAR(64)`（业务生成的 `cfg_xxx`），
+**不是** `INTEGER PRIMARY KEY`——`AUTOINCREMENT` 在 SQLite 上只对自增整数主键有意义，
+写在这张表上不会进 DDL，只是给 review 制造「这张表也有自增 id」的错觉。
+`0002_typed_columns.py::_AUTOINCREMENT_TABLES` 同样没有登记这张表，这里跟随同一处置。
 
 ## 回滚
 
@@ -48,30 +49,21 @@ down_revision: Union[str, None] = "0003"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# `model_providers` 有主键；batch 重建时把表选项显式声明回来（见模块 docstring）。
-_TABLE_KWARGS = {"sqlite_autoincrement": True}
-
 
 def upgrade() -> None:
     """删掉退役列 `builtin`。"""
-    with op.batch_alter_table(
-        "model_providers", schema=None, table_kwargs=_TABLE_KWARGS
-    ) as batch_op:
+    with op.batch_alter_table("model_providers", schema=None) as batch_op:
         batch_op.drop_column("builtin")
 
 
 def downgrade() -> None:
     """反操作：把 `builtin` 补回成 `0001` 的 `BOOLEAN NOT NULL DEFAULT 0`。"""
-    with op.batch_alter_table(
-        "model_providers", schema=None, table_kwargs=_TABLE_KWARGS
-    ) as batch_op:
+    with op.batch_alter_table("model_providers", schema=None) as batch_op:
         batch_op.add_column(sa.Column("builtin", sa.Boolean(), nullable=True))
 
     op.execute("UPDATE model_providers SET builtin = 0 WHERE builtin IS NULL")
 
-    with op.batch_alter_table(
-        "model_providers", schema=None, table_kwargs=_TABLE_KWARGS
-    ) as batch_op:
+    with op.batch_alter_table("model_providers", schema=None) as batch_op:
         batch_op.alter_column(
             "builtin",
             existing_type=sa.Boolean(),

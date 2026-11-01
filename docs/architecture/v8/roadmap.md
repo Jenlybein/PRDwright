@@ -33,7 +33,7 @@
 | T18.5 | v8.5 | 镜像与编排：两个 Dockerfile、`compose.yaml`、`.dockerignore` | T18.1、T18.2 | 新增文件 |
 | T18.6 | v8.6 | 健康检查与启停：`/healthz`、`/readyz`、排空、grace period | T18.5 | 改代码 + 配置 |
 | T18.7 | v8.7 | 卷与备份：备份脚本进容器、首次启动迁移、回滚演练 | T18.5 | 脚本 + 演练 |
-| T18.8 | v8.8 | 死代码与退役内容清理：删两个退役列、两个未引用组件、处置 v7 悬空模板 | — | 改代码 + 迁移 |
+| T18.8 | v8.8 | 死代码与退役内容清理：删两个退役列、三个未引用组件与孤儿资源、处置 v7 悬空模板 | — | 改代码 + 迁移 |
 
 ```text
 第一阶段：容器化 + 接口收敛
@@ -216,7 +216,7 @@ SELECT 里，改写时必须保留这个形状。改成「先查归属再插入�
 |---|---|---|---|
 | 1 | 删 `solutions.data` 列 | 一条 Alembic 迁移 + `models.Solution` 删字段 | `grep -rn "\.data\b" backend/src` 只剩注释；结构对拍绿 |
 | 2 | 删 `model_providers.builtin` 列 | 同一条迁移（或独立一条） | `grep builtin` 只剩历史迁移与注释 |
-| 3 | 删两个未引用组件 | `frontend/src/components/ui/{AppToast,AppEmpty}.vue` | 全仓 `grep` 零命中；两个前端仍能 `npm run build` |
+| 3 | 删三个未引用组件 + 三个孤儿资源 + 两个零引用函数 + 一个死类型 | `ui/{AppToast,AppEmpty,AppInput}.vue`、`assets/{main.css,base.css,logo.svg}`、`api.ts` 的 `getQuestions` / `generatePrdStream`、`types/index.ts` 的 `SessionData`（逐项证据见 `CLEANUP.md` A3~A5 / A10） | 全仓 `grep` 零命中；两个前端仍能 `npm run build` |
 | 4 | 处置 v7 悬空模板 | `../v7/` 文档加注（推荐废弃，不补） | 文档里出现的每个 `deploy/...` 路径，`ls` 都能看见 |
 | 5 | 工具扫描记录 | `CLEANUP.md` 附录补实测结果 | `ruff F401/F811`、`vulture`、`knip` 各跑一次，结论落纸 |
 
