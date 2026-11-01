@@ -14,7 +14,6 @@ import type {
   DocumentKind,
   JobSnapshot,
   PendingItem,
-  QuestionsConfig,
   RequirementAnswers,
   RequirementsSummary,
   ReviewConclusion,
@@ -115,15 +114,6 @@ http.interceptors.response.use(
     return Promise.reject(error)
   },
 )
-
-/**
- * 获取需求澄清问卷配置。
- * 对应后端 `GET /api/conversation/questions`。
- */
-export async function getQuestions(): Promise<QuestionsConfig> {
-  const { data } = await http.get<QuestionsConfig>('/api/conversation/questions')
-  return data
-}
 
 // ============================================================================
 // 流式对话（SSE）
@@ -879,25 +869,6 @@ export interface GeneratePrdFromSummaryPayload {
 
 /** 文档流式生成的结果：仅关心完整正文，会话 ID 恒为空串 */
 export type DocumentStreamResult = StreamResult
-
-/**
- * 根据对话生成 PRD，SSE 流式接收正文。
- * 对应后端 `POST /api/conversation/generate-prd-stream`。
- */
-export function generatePrdStream(
-  payload: GeneratePrdStreamPayload,
-  handlers?: StreamHandlers,
-): Promise<DocumentStreamResult> {
-  return readStream(
-    '/api/conversation/generate-prd-stream',
-    {
-      requirements: payload.requirements,
-      // 只保留后端认识的 role / content 两个字段
-      history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
-    },
-    handlers,
-  )
-}
 
 /**
  * 由**需求**生成 PRD，SSE 流式接收正文。
