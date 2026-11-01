@@ -835,13 +835,6 @@ export async function syncSummaryFromConversation(payload: {
 // 文档流式生成（SSE）
 // ============================================================================
 
-/** 文档流式生成的请求体，字段与后端 schemas 的对应请求模型一致 */
-export interface GeneratePrdStreamPayload {
-  /** 需求澄清结果（问卷答案整理成的文本） */
-  requirements: string
-  /** 补充对话记录；为空则按无对话处理 */
-  history?: ChatMessage[]
-}
 
 /**
  * 生成 PRD 的请求体（需求输入二选一）。
