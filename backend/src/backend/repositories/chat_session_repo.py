@@ -101,17 +101,3 @@ class ChatSessionRepository:
             conflict_cols=["solution_id", "stage"],
             update_cols=["conversation_id", "updated_at"],
         )
-
-    def clear_for_solution(self, owner_id: int, solution_id: int) -> None:
-        """清掉某方案下全部会话 id（「整份重开」时用）。
-
-        Args:
-            owner_id: 归属用户。
-            solution_id: 方案 id。
-        """
-        self.session.execute(
-            delete(ChatSession).where(
-                ChatSession.solution_id == solution_id,
-                ChatSession.user_id == owner_id,
-            )
-        )

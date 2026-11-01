@@ -10,16 +10,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-# 这些契约（StreamEvent / QuestionConfig / QuestionsConfig / StepUsage / RunSummary）
-# 已下沉到 `core/contracts.py`，此处 re-export 以保持 API 层引用不变：
+# 这些契约（StreamEvent / QuestionsConfig / RunSummary）已下沉到 `core/contracts.py`，
+# 此处 re-export 以保持 API 层引用不变：
 # `from backend.api.schemas import StreamEvent / QuestionsConfig` 继续可用。
 # `RunSummary` 同时是 `run_summary` 事件与 `generation_jobs.usage` 的**同一份结构**。
 from backend.core.contracts import (
     DocumentKind,
-    QuestionConfig,
     QuestionsConfig,
     RunSummary,
-    StepUsage,
     StreamEvent,
 )
 

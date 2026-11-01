@@ -116,11 +116,6 @@ def lookup_env(name: str) -> str:
     return env_file_values().get(name, "")
 
 
-def is_present(name: str) -> bool:
-    """这个变量是否有非空值。给后台显示 `key_present` 用——只回布尔，不回值。"""
-    return bool(lookup_env(name))
-
-
 def reset_cache() -> None:
     """清掉 `.env` 快照。测试改完文件后调用；生产代码不需要（mtime 会自己变）。"""
     _cache.clear()

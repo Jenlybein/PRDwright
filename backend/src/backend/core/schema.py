@@ -48,10 +48,6 @@ from backend.core.schema_snapshot import diff_snapshots, schema_snapshot
 
 logger = logging.getLogger(__name__)
 
-# `alembic.ini` 里的占位地址。程序化调用时我们会把真实地址塞进 Config，
-# 这个占位串只用于判断「配置里有没有真的设过地址」。
-_PLACEHOLDER_URL = "driver://user:pass@localhost/dbname"
-
 # `migrations/` 目录：`src/backend/core/schema.py` → 上溯到 `backend/`
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 

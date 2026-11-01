@@ -39,7 +39,7 @@ from backend.services.prompts import (
     ConversationProfile,
     resolve_profile,
 )
-from backend.services.stream_reply import iter_reply_events, iter_reply_events_with_tools
+from backend.services.stream_reply import iter_reply_events_with_tools
 
 logger = logging.getLogger(__name__)
 
