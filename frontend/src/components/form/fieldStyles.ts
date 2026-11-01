@@ -6,7 +6,7 @@
  * 的视觉与配色完全一致（含暗色模式）。
  *
  * 配色一律走语义令牌（bg-surface-2 / text-fg / border-line / focus:ring-accent-soft-line …），
- * 与 ui/AppInput 同一套口径；错误态用 danger 令牌，不再手写 dark: 变体。
+ * 与其它表单控件同一套口径；错误态用 danger 令牌，不再手写 dark: 变体。
  */
 
 /**

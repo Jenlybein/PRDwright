@@ -1,23 +1,3 @@
-/** 单个问题的配置结构 */
-export interface QuestionConfig {
-  /** 字段名称，作为提交答案时的 key */
-  name: string
-  /** 展示给用户的标题 */
-  label: string
-  /** 题型：单行文本 / 多行文本 / 下拉选择 / 单选 */
-  type: 'text' | 'textarea' | 'select' | 'radio'
-  /** 是否必填 */
-  required?: boolean
-  /** 选择类题型的选项列表 */
-  options?: string[]
-}
-
-/** 问卷配置：分为基础问题与进阶问题两组 */
-export interface QuestionsConfig {
-  base_questions: QuestionConfig[]
-  advanced_questions: QuestionConfig[]
-}
-
 /**
  * 一条消息属于哪条澄清线程；同时也是对话页子标签栏的标识。
  *
@@ -451,27 +431,8 @@ export interface PastePairInput {
 }
 
 /**
- * 一份完整会话的持久化快照，用于刷新 / 关闭页面后整体恢复。
- * 覆盖当前阶段、对话、会话 ID、问卷答案与三份文档正文。
+ * 顶部进度条展示的步骤（生成中状态不单独占一步，而是归并到对应文档的确认步骤）
  */
-export interface SessionData {
-  /** 当前所处阶段 */
-  viewState: ViewState
-  /** 已固化的聊天消息 */
-  messages: ChatMessage[]
-  /** 后端会话 ID（可为空，接续时退化无状态模式） */
-  conversationId: string
-  /** 问卷答案（字段名 → 答案文本） */
-  formData: Record<string, string>
-  /** PRD 正文 */
-  prdContent: string
-  /** 接口文档正文 */
-  apiDocsContent: string
-  /** 提示词套件正文 */
-  promptsContent: string
-}
-
-/** 顶部进度条展示的步骤（生成中状态不单独占一步，而是归并到对应文档的确认步骤） */
 export const STEPS = [
   { id: 'form', label: '描述产品' },
   { id: 'chatting', label: 'AI 对话' },
