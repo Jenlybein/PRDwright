@@ -197,8 +197,8 @@ class LoginFailure(SQLModel, table=True):
 class Solution(SQLModel, table=True):
     """方案：一份完整会话的全量快照。
 
-    整份 `SessionDataV2` 快照的 `data` 列已在 v8 删除（ADR-096）：方案状态拆成标量列，
-    `title` / `mode` / `stage` 等只是给列表用的摘要，列表查询不再需要反序列化大 JSON。
+    方案状态已拆成标量列；`title` / `mode` / `stage` 等只是给列表用的摘要，
+    列表查询不再需要反序列化大 JSON。旧的整份 `SessionDataV2` 快照列已在 v8 删除（ADR-096）。
     """
 
     __tablename__ = "solutions"
