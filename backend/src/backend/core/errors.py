@@ -8,7 +8,7 @@
 新增 `code`（机器可读，给前端分支判断用）。`detail` 一字不改是向后兼容的前提——
 现有测试与前端兜底文案都按原文断言，改一个字就会静默失效。
 
-SSE 流内的 `error` 事件同样带 `code`（见 `api/schemas.py` 的 `StreamEvent.code`）。
+SSE 流内的 `error` 事件同样带 `code`（见 `core/contracts.py` 的 `StreamEvent.code`）。
 这一点是本次改造的核心：像「会话不存在」这类错误发生在 HTTP 200 的流里，
 前端拿不到状态码，只能靠 `code` 判断。
 """

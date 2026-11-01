@@ -2,7 +2,7 @@
 
 这里存放 services 与 api 共享的数据契约，放在 core 是为了避免 services
 反向依赖 api：`services/` 只应依赖 `core/`，不应回头 import `api/`。
-`api/schemas.py` 从这里 re-export 这些模型，因此 API 层对外的引用
+`api/schemas`（按领域拆分的包）从这里 re-export 这些模型，因此 API 层对外的引用
 （`from backend.api.schemas import StreamEvent / QuestionsConfig`）保持不变。
 
 本模块只允许依赖 `pydantic` / `typing`，**不得 import `backend.api.*`**——

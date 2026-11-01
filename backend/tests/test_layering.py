@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
+from pydantic import BaseModel
 
 # 仓库根 → 后端源码目录
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -140,3 +142,180 @@ def test_only_adapters_import_vendor_sdk():
     assert offenders == [], (
         "业务层出现供应商 SDK 直连（应经 `llm_factory.get_llm()`）：" + "；".join(offenders)
     )
+
+# ---------------------------------------------------------------------------
+# API 契约模块（#7）：按领域拆包，对外导出面逐字冻结
+# ---------------------------------------------------------------------------
+#
+# `backend.api.schemas` 曾是 1321 行的单文件（ADR-099 重写清单的 W3）。按领域拆成
+# 一个包之后，新增契约落进对应的领域模块，不必再在一千三百多行里找位置。
+#
+# 但拆的是**模块边界**，不是契约本身：下面这张表是拆分前 dump 出来的对外形状。
+# 「顺手改个字段」「挪模型时漏了一个」都会在这里转红；要改契约，就显式改这张表。
+
+_CONTRACT_DIR = _BACKEND_SRC / "api" / "schemas"
+
+# ADR-099：单文件重写阈值。
+_CONTRACT_LINE_LIMIT = 1200
+
+# 领域模块清单。新增一个领域时在这里登记，并在包的 `__init__.py` 里加一行再导出。
+_CONTRACT_MODULES = (
+    "admin",
+    "admin_config",
+    "auth",
+    "conversation",
+    "documents",
+    "jobs",
+    "solutions",
+    "streams",
+)
+
+# 拆分后 `backend.api.schemas` 必须暴露的模型名（86 个，含 5 个从 `core.contracts`
+# 再导出的共享契约）。值是各模型的字段集合。
+_EXPECTED_SCHEMAS_FIELDS = {
+    "AdminActiveProvider": {"base_url", "context_window", "default_model", "id", "max_output", "max_tokens", "name", "protocol", "protocol_label", "thinking_enabled"},
+    "AdminAuditItem": {"action", "actor_id", "actor_name", "detail", "id", "request_id", "target", "ts"},
+    "AdminAuditListResponse": {"items"},
+    "AdminCancelJobResponse": {"cancelled"},
+    "AdminCancelStuckResponse": {"cancelled"},
+    "AdminConfigGroup": {"help", "items", "key", "label"},
+    "AdminConfigItem": {"danger", "default", "help", "key", "label", "max", "min", "min_exclusive", "options", "source", "type", "value"},
+    "AdminConfigResponse": {"active_provider", "active_provider_id", "config_source", "groups", "missing_key", "revision"},
+    "AdminCreateInviteRequest": {"code", "expires_at", "max_uses", "note"},
+    "AdminCreateProviderRequest": {"api_key", "base_url", "context_window", "default_model", "extra", "max_output", "max_tokens", "name", "protocol", "sort_order", "thinking_enabled"},
+    "AdminCreateUserRequest": {"is_admin", "password", "username"},
+    "AdminDailyStat": {"cancelled_count", "completed_count", "completion_tokens", "day", "failed_count", "failure_rate", "prompt_tokens", "running_count", "task_count"},
+    "AdminDailyStatsResponse": {"days", "items", "summary"},
+    "AdminDeletionPreview": {"chat_turns", "completion_tokens", "document_versions", "documents", "jobs", "prompt_tokens", "retained_audit", "retained_logs", "running_jobs", "sessions", "solutions", "user_id", "username"},
+    "AdminInviteItem": {"code", "created_at", "expires_at", "max_uses", "note", "used_count"},
+    "AdminInviteListResponse": {"invites"},
+    "AdminInviteResponse": {"code"},
+    "AdminJobItem": {"completion_tokens", "created_at", "duration_seconds", "error_code", "error_message", "id", "is_stuck", "kind", "owner_id", "owner_name", "phase", "prompt_tokens", "status", "stuck_minutes", "updated_at"},
+    "AdminJobListResponse": {"items", "total"},
+    "AdminLogItem": {"event", "exc", "extra", "id", "level", "logger", "msg", "request_id", "ts", "user_id"},
+    "AdminLogListResponse": {"items", "page", "page_size", "total"},
+    "AdminMeResponse": {"id", "is_admin", "username"},
+    "AdminOkResponse": {"ok"},
+    "AdminProtocolOption": {"label", "value"},
+    "AdminProviderItem": {"active", "base_url", "context_window", "default_model", "enabled", "extra", "id", "key_present", "max_output", "max_tokens", "name", "protocol", "protocol_label", "sort_order", "thinking_enabled"},
+    "AdminProviderKeyResponse": {"api_key"},
+    "AdminProviderListResponse": {"active_provider_id", "presets", "protocols", "providers", "warning"},
+    "AdminProviderPreset": {"base_url", "default_model", "key", "name", "protocol"},
+    "AdminProviderTestResponse": {"detail", "latency_ms", "ok"},
+    "AdminResetConfigRequest": {"keys"},
+    "AdminResetPasswordRequest": {"password"},
+    "AdminRevokeSessionsResponse": {"revoked"},
+    "AdminSetActiveRequest": {"is_active"},
+    "AdminSetAdminRequest": {"is_admin"},
+    "AdminSetQuotaRequest": {"daily_task_limit", "daily_token_limit", "max_running"},
+    "AdminStatsResponse": {"admin_count", "completed_count", "completion_tokens", "prompt_tokens", "task_count", "user_count"},
+    "AdminTopUserItem": {"completion_tokens", "id", "is_active", "prompt_tokens", "task_count", "username"},
+    "AdminTopUsersResponse": {"users"},
+    "AdminUpdateConfigRequest": {"updates"},
+    "AdminUpdateProviderRequest": {"api_key", "base_url", "clear_key", "context_window", "default_model", "enabled", "extra", "max_output", "max_tokens", "name", "protocol", "sort_order", "thinking_enabled"},
+    "AdminUserItem": {"completion_tokens", "created_at", "daily_task_limit", "daily_task_source", "daily_token_limit", "daily_token_source", "id", "is_active", "is_admin", "max_running", "max_running_source", "prompt_tokens", "task_count", "usage_tasks_today", "usage_tokens_today", "username"},
+    "AdminUserListResponse": {"users"},
+    "AdminUserResponse": {"id", "is_active", "is_admin", "username"},
+    "AuthUserResponse": {"id", "username"},
+    "ChatTurn": {"answers", "asks", "content", "created_at", "id", "interrupted", "role", "stage", "tool_calls"},
+    "ChatTurnListResponse": {"turns"},
+    "ClarificationAnswerItem": {"ask_id", "labels", "question", "texts"},
+    "ConversationContinueRequest": {"content", "conversation_id", "history", "profile_key", "tool_result"},
+    "ConversationCreateRequest": {"answers", "profile_key", "title"},
+    "DocumentCheckpointRequest": {"content", "note"},
+    "DocumentItem": {"content", "derived_from", "kind", "last_run_summary", "pending_items", "stale", "updated_at"},
+    "DocumentListResponse": {"documents"},
+    "DocumentRestoreRequest": {"version_id"},
+    "DocumentSaveRequest": {"content"},
+    "DocumentVersionDeleteResponse": {"ok", "version_id"},
+    "DocumentVersionDetail": {"content", "created_at", "is_current", "last_run_summary", "note", "pending_items", "source", "updated_at", "version_id", "version_no"},
+    "DocumentVersionItem": {"content_length", "content_sha", "created_at", "is_current", "note", "source", "version_id", "version_no"},
+    "DocumentVersionListResponse": {"versions"},
+    "GenerateApiDocsStreamRequest": {"prd_content"},
+    "GeneratePrdFromSummaryStreamRequest": {"history", "product_name", "requirements", "summary"},
+    "GeneratePrdStreamRequest": {"history", "requirements"},
+    "GeneratePromptsStreamRequest": {"prd_content"},
+    "JobCancelResponse": {"cancelled", "ok"},
+    "JobCreateRequest": {"api_docs_content", "chat_mode", "content", "doc_kind", "document", "form_data", "history", "instruction", "kind", "pending_items", "prd_content", "product_name", "profile_key", "requirements", "review_enabled", "solution_id", "stage", "summary", "tool_result"},
+    "JobCreated": {"job_id", "status"},
+    "JobListResponse": {"jobs"},
+    "JobStatus": {"chat_stage", "created_at", "doc_kind", "error_code", "error_message", "id", "kind", "partial", "phase", "solution_id", "status", "updated_at", "usage"},
+    "LoginRequest": {"password", "username"},
+    "LogoutResponse": {"ok"},
+    "MessageItem": {"content", "role", "tool_call_id", "tool_calls", "tool_result"},
+    "OptimizeDocumentStreamRequest": {"document", "instruction"},
+    "QuestionConfig": {"label", "name", "options", "required", "type"},
+    "QuestionsConfig": {"advanced_questions", "base_questions"},
+    "RegisterRequest": {"invite_code", "password", "username"},
+    "RunSummary": {"completion_tokens", "duration_ms", "failed_calls", "failed_sections", "injected_skills", "kind", "model", "partial", "prompt_tokens", "protocol", "provider_config_id", "provider_name", "request_id", "status", "steps", "total_calls", "warnings"},
+    "SolutionDeleteResponse": {"ok"},
+    "SolutionDetail": {"content_updated_at", "created_at", "id", "mode", "stage", "state", "title", "updated_at"},
+    "SolutionListResponse": {"solutions"},
+    "SolutionSaveRequest": {"content_changed", "mode", "stage", "state", "title"},
+    "SolutionStatePayload": {"active_job_doc_kind", "active_job_id", "active_job_kind", "chat_tab", "draft_prd_text", "entry_mode", "paste_api_docs_text", "paste_prd_text", "quick_product_name", "quick_requirements", "summary", "view_state"},
+    "SolutionSummary": {"content_updated_at", "created_at", "id", "mode", "stage", "title", "updated_at"},
+    "StepUsage": {"calls", "completion_tokens", "duration_ms", "failed_calls", "prompt_tokens", "step"},
+    "StreamEvent": {"code", "content", "data", "type"},
+    "SummarySyncRequest": {"history", "summary"},
+    "SummarySyncResponse": {"changed", "summary"},
+    "ToolResultPayload": {"answers", "tool_call_id"},
+}
+
+# 两个类型别名不是模型，但同样是调用方可见的契约。
+_EXPECTED_JOB_KINDS = ("prd", "api_docs", "prompts", "optimize", "clarify", "auto_clarify", "chat")
+_EXPECTED_DOCUMENT_KINDS = ("prd", "api_docs", "prompts")
+
+
+def test_contract_module_is_split_and_below_line_limit():
+    """契约模块按领域拆成包，且每一份都在 ADR-099 的 1200 行阈值以内。
+
+    双判据：既要有领域模块，也不能出现「拆完之后又长回 1200 行」的单文件。
+    """
+    assert _CONTRACT_DIR.is_dir(), "backend.api.schemas 应当是按领域拆分的包目录"
+
+    missing = [
+        name for name in _CONTRACT_MODULES if not (_CONTRACT_DIR / f"{name}.py").is_file()
+    ]
+    assert missing == [], f"缺少领域模块：{missing}"
+
+    oversized = [
+        f"{path.name}（{len(path.read_text(encoding='utf-8').splitlines())} 行）"
+        for path in sorted(_CONTRACT_DIR.glob("*.py"))
+        if len(path.read_text(encoding="utf-8").splitlines()) > _CONTRACT_LINE_LIMIT
+    ]
+    assert oversized == [], f"契约模块仍有超过 {_CONTRACT_LINE_LIMIT} 行的文件：{oversized}"
+
+
+def test_api_schema_surface_is_frozen():
+    """对外可见的模型名与字段集合逐字冻结：拆分只许搬家，不许动契约。
+
+    两种调用形态都由包内 `__init__` 的再导出保证：
+    `from backend.api import schemas` + `schemas.XxxModel`，以及
+    `from backend.api.schemas import XxxModel`。这里从包入口读一遍：
+    任何一个模型消失、改名，或字段集合变化，都会转红。
+    """
+    import backend.api.schemas as schemas
+
+    actual_models = {
+        name
+        for name in dir(schemas)
+        if not name.startswith("_")
+        and isinstance(getattr(schemas, name), type)
+        and issubclass(getattr(schemas, name), BaseModel)
+        and getattr(schemas, name) is not BaseModel
+    }
+    assert actual_models == set(_EXPECTED_SCHEMAS_FIELDS), (
+        "对外模型名集合变了：多出 "
+        f"{sorted(actual_models - set(_EXPECTED_SCHEMAS_FIELDS))}，"
+        f"少了 {sorted(set(_EXPECTED_SCHEMAS_FIELDS) - actual_models)}"
+    )
+
+    drifted = {
+        name: sorted(set(getattr(schemas, name).model_fields) ^ fields)
+        for name, fields in _EXPECTED_SCHEMAS_FIELDS.items()
+        if set(getattr(schemas, name).model_fields) != fields
+    }
+    assert drifted == {}, f"对外字段集合变了（模型: 差异字段）：{drifted}"
+
+    assert get_args(schemas.JobKind) == _EXPECTED_JOB_KINDS
+    assert get_args(schemas.DocumentKind) == _EXPECTED_DOCUMENT_KINDS
