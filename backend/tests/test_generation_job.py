@@ -1340,7 +1340,7 @@ def test_run_job_stops_consuming_events_after_cancel(alice, monkeypatch):
     async def stream():
         produced.append("第一段")
         yield StreamEvent(type="chunk", content="第一段", data={})
-        # 第一个事件处理完之后，用户删除了方案（`cancel_for_solution` 会置这一位）
+        # 第一个事件处理完之后，用户删除了方案（`delete_solution_and_cancel_jobs` 会置这一位）
         runtime.cancelled = True
         produced.append("第二段")
         yield StreamEvent(type="chunk", content="第二段", data={})

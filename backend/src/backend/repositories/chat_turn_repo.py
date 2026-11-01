@@ -216,23 +216,6 @@ class ChatTurnRepository:
             .all()
         )
 
-    def has_turns(self, owner_id: int, solution_id: int, stage: str) -> bool:
-        """该线程是否已经有内容（「开新会话是否清空历史」的判据之一）。"""
-        found = (
-            self.session.execute(
-                select(ChatTurn.id)
-                .where(
-                    ChatTurn.solution_id == solution_id,
-                    ChatTurn.user_id == owner_id,
-                    ChatTurn.stage == stage,
-                )
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        return found is not None
-
     def delete_thread(self, owner_id: int, solution_id: int, stage: str) -> int:
         """清空某条线程的轮次，返回删除条数。
 

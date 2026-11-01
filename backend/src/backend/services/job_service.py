@@ -146,7 +146,7 @@ class JobRuntime:
     # 与正文同源、同一次收尾落库，因此「换了正文却忘了重算清单」没有结构落脚点。
     pending_items: list[dict[str, Any]] = field(default_factory=list)
     # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
-    # 收尾也**不写**文档——见 `cancel_for_solution` / `_finalize`。
+    # 收尾也**不写**文档——见 `delete_solution_and_cancel_jobs` / `_finalize`。
     cancelled: bool = False
     # 是否已被**同一份文档的新任务**顶替（`create_job` 在建新任务时置位）。
     #
@@ -360,32 +360,6 @@ def _mark_superseded(owner_id: int, *, solution_id: int | None, kind: str) -> in
     return marked
 
 
-def cancel_for_solution(owner_id: int, solution_id: int) -> int:
-    """取消某方案下正在跑的全部任务，返回被取消（落库）的条数。
-
-    删除方案时必须走这里：方案没了，任务再跑完也没有地方落正文，继续跑只是白烧 token，
-    并且会在收尾那一刻去写一份注定被丢弃的文档。
-
-    两件事都要做，缺一不可：
-
-    - **标记内存运行时**（`cancelled`）：`run_job` 在消费下一个事件前会看到它并跳出循环，
-      真正让在途的 LLM 调用不再往文档里写东西；
-    - **落库终态**：进程重启后运行时已丢失，库里那些 `running` 必须一并收掉，
-      否则刷新页面会看到一个永远「生成中」的任务。
-
-    返回值取落库的受影响条数：那是「有多少任务确实从 running 变成 failed」的权威口径；
-    内存标记的数量可能与之不同（运行时可能已经结束，只是行还没被读到）。
-    """
-    with session_scope() as session:
-        affected = GenerationJobRepository(session).cancel_running(
-            owner_id, solution_id=solution_id
-        )
-    for runtime in _RUNTIMES.values():
-        if runtime.owner_id == owner_id and runtime.solution_id == solution_id:
-            runtime.cancelled = True
-    return affected
-
-
 def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
     """删除方案，并在**同一个事务**里把挂在它上面的在飞任务收成终态。
 
@@ -436,7 +410,7 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
     `_finalize` 里确实有一道兜底（方案不存在就不写文档），但那只是**不写坏数据**，
     并不省钱。真正让它停下的只有内存运行时上的 `cancelled` 标记。
 
-    与 `cancel_job`（单条）和 `cancel_for_solution`（单方案）同一套机制，区别只有
+    与 `cancel_job`（单条）和 `delete_solution_and_cancel_jobs`（单方案）同一套机制，区别只有
     过滤维度是 `owner_id`。
     """
     with session_scope() as session:
@@ -1008,9 +982,10 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     写完之后长什么样」只在这一处决定，前端只负责读与提交用户变更。
     """
     # —— 删除与收尾可能赛跑，两道防御都留着 ——
-    # 时间窗：用户点删除的那一刻，任务可能正好走到收尾。`cancel_for_solution` 先置
-    # `cancelled` 再落库，但收尾可能已经越过了「检查标记」那一行；反过来，运行时也可能
-    # 在进程重启后丢失（标记无处可置），此时只剩「方案还在不在」这一条事实可查。
+    # 时间窗：用户点删除的那一刻，任务可能正好走到收尾。`delete_solution_and_cancel_jobs`
+    # 在事务里先把任务写成终态（`CANCELLED`），提交后才置内存里的 `cancelled`，但收尾可能
+    # 已经越过了「检查标记」那一行；反过来，运行时也可能在进程重启后丢失（标记无处可置），
+    # 此时只剩「方案还在不在」这一条事实可查。
     # 两道判断覆盖的正是这两个方向，缺任何一道都会留下一条「方案已删、文档却写进去了」
     # 的路径（正文写进一个不存在的 solution_id，前端下次打开就是幽灵文档）。
     if status == "completed":

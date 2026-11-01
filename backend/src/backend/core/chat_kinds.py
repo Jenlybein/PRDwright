@@ -41,21 +41,6 @@ DEFAULT_CHAT_STAGE = "requirement"
 TURN_ROLES: tuple[str, ...] = ("user", "assistant", "system", "tool")
 
 
-def normalize_stage(value: object) -> str:
-    """把任意来源的线程标识收敛成合法取值；认不出时退回需求澄清。
-
-    仅用于**读旧数据**。新请求请用 `is_valid_stage` 显式校验并拒绝非法值——
-    「猜一个默认值」在写入路径上等于把 A 线程的对话记到 B 线程头上。
-    """
-    stage = str(value or "")
-    return stage if stage in CHAT_STAGES else DEFAULT_CHAT_STAGE
-
-
 def is_valid_stage(value: object) -> bool:
     """是否为合法的线程标识（写入路径用它做准入判断）。"""
     return str(value or "") in CHAT_STAGES
-
-
-def is_valid_role(value: object) -> bool:
-    """是否为合法的轮次角色。"""
-    return str(value or "") in TURN_ROLES

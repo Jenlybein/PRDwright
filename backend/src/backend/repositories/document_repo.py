@@ -31,7 +31,6 @@ dataclass 做投影，字段与列一一对应，既拿到属性访问与类型�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from sqlalchemy import delete, func, literal, select
 from sqlmodel import Session

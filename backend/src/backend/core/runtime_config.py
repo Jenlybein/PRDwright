@@ -51,7 +51,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from backend.core.config import Settings, get_settings
 from backend.core.engine import session_scope
-from backend.core.model_registry import ModelLimits, input_ceiling
+from backend.core.model_registry import ModelLimits
 from backend.core.providers import ProviderSpec, spec_from_row
 from backend.repositories.runtime_config_repo import (
     ModelProviderRepository,
@@ -462,11 +462,6 @@ def current_input_ceiling(override: int = 0) -> int:
     return max(window - limits.max_output, 1_000)
 
 
-def config_service_window() -> int:
-    """给预算检查用的窗口值（`token_budget.evaluate` 的入口）。"""
-    return current_input_ceiling()
-
-
 def provider_key_present(spec: ProviderSpec | None = None) -> bool:
     """该供应商的密钥是否**可用**（非空且能被当前主密钥解开）。只回布尔，绝不回值。"""
     target = spec or active_provider()
@@ -495,13 +490,3 @@ def lookup_provider_key(spec: ProviderSpec) -> str:
     if not value:
         raise RuntimeError(spec.key_hint)
     return value
-
-
-def input_ceiling_for(spec: ProviderSpec) -> int:
-    """某个 spec 的输入上限（构造预算检查时用，避免二次取快照）。"""
-    from backend.core.model_registry import resolve_limits
-
-    base = resolve_limits(spec.protocol, spec.model)
-    window = spec.context_window or base.context_window
-    max_output = spec.max_output or base.max_output
-    return max(window - max_output, 1_000)

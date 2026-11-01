@@ -46,8 +46,6 @@ from sqlmodel import Session
 # 这里**再导出**是为了让 `from backend.core.engine import build_engine, warmup`
 # 这类既有 import 一行都不用改——迁移期最重要的是"公开路径不变"。
 from backend.core.database import (
-    DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_POOL_TIMEOUT,
     build_engine,
     database_url,
     warmup,
@@ -149,15 +147,6 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         db.close()
-
-
-def current_engine() -> Engine | None:
-    """当前已经建好的 Engine；**没建过就返回 None，不会顺手建一个**。
-
-    `get_engine()` 会「没有就开一个」，所以不能拿它做收尾检查——那会让从未碰过数据库的
-    用例也白开一池连接，并把「池里有没有泄漏」这件事变成恒真。
-    """
-    return _engine
 
 
 def reset_engine() -> None:

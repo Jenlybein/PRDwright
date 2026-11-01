@@ -48,10 +48,6 @@ def master_key_path() -> Path:
     return Path(BACKEND_ROOT) / "secrets" / "master.key"
 
 
-def master_key_exists() -> bool:
-    return master_key_path().is_file()
-
-
 def _fernet() -> Fernet:
     """取当前主密钥对应的 Fernet 实例（按 mtime 缓存）。
 
