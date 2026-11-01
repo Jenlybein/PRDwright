@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 from conftest import login, register, users
 
 from backend.core.contracts import StreamEvent
+from backend.core.errors import AppError, ErrorCode
 from conftest import (
     job_cancel_running,
     job_create,
@@ -1530,3 +1532,308 @@ def test_db_snapshot_has_no_live_by_section():
     snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 待测行为
 
     assert snapshot.data["live_by_section"] == []
+
+# ---------------------------------------------------------------------------
+# 收尾与终态：被中止的三条路、以及「落库失败不等于任务失败」
+#
+# 这一组盯的是「一次任务走到终点时，哪些情况算失败、哪些只是不写」。
+# 原先只覆盖了「方案已删」与「被顶替」两条；取消/落库异常几条分支没有用例。
+# ---------------------------------------------------------------------------
+
+
+def _collect(owner_id: int, job_id: int) -> list:
+    """订阅一个任务直到流结束，返回全部事件。"""
+
+    async def scenario() -> list:
+        return [event async for event in job_service.open_stream(owner_id, job_id)]
+
+    return _run(scenario())
+
+
+def _terminal_runtime(
+    owner_id: int, *, status: str, code: str = "", message: str = ""
+) -> job_service.JobRuntime:
+    """摆一支「已收尾但还在内存里」的运行时。
+
+    真实窗口：`_finalize` 置终态之后、`run_job` 的 `finally` 摘掉运行时之前，
+    这段时间里来的订阅者命中内存运行时，而不是 DB 兜底路径。
+    """
+    runtime = job_service.JobRuntime(
+        job_id=91001,
+        owner_id=owner_id,
+        solution_id=None,
+        kind="prd",
+        status=status,
+        error_code=code,
+        error_message=message,
+    )
+    runtime.started_at = time.monotonic()
+    job_service._RUNTIMES[runtime.job_id] = runtime  # noqa: SLF001 - 摆一支在途运行时
+    return runtime
+
+
+def test_open_stream_replays_a_terminal_runtime_and_its_summary(alice):
+    """运行时已收尾但还没被摘掉：快照 + `error` + `run_summary`，随后立即结束。
+
+    少这条，重连的订阅者会挂在队列上等一个永远不会再来的事件（任务已经跑完），
+    而「为什么失败」也就漏掉了。
+    """
+    _terminal_runtime(alice, status="failed", code="LLM_UPSTREAM_ERROR", message="上游中断")
+
+    events = _collect(alice, 91001)
+
+    assert [event.type for event in events] == ["snapshot", "error", "run_summary"]
+    assert events[0].data["status"] == "failed"
+    assert events[1].code == "LLM_UPSTREAM_ERROR"
+    assert "上游中断" in events[1].content
+    assert events[2].data["status"] == "failed"
+
+
+def test_open_stream_does_not_replay_an_abort_as_an_error(alice):
+    """取消 / 被顶替同样落 failed，但补发时**不**发 `error`：那不是错误。
+
+    否则用户自己按的停止会被渲染成红色的「生成失败」（与 `_finalize` 的 `_ABORT_CODES`
+    是同一条口径，两处必须一致）。
+    """
+    _terminal_runtime(alice, status="failed", code="CANCELLED", message="方案已删除，任务已取消")
+
+    events = _collect(alice, 91001)
+
+    assert [event.type for event in events] == ["snapshot", "run_summary"]
+    assert events[0].data["error_code"] == "CANCELLED"
+    assert events[1].data["status"] == "failed"
+
+
+def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
+    """删方案时**内存里的运行时也要标记**：只改库的话协程照旧烧 token 直到跑完。
+
+    这是「协作式取消」的全部机制：库里那一行只是事后记录，真正让它停下的是这一位。
+    """
+    other_solution = _create_solution(client)
+    doomed_solution = _create_solution(client)
+
+    doomed = job_service.JobRuntime(
+        job_id=92001, owner_id=alice, solution_id=doomed_solution, kind="prd"
+    )
+    untouched = job_service.JobRuntime(
+        job_id=92002, owner_id=alice, solution_id=other_solution, kind="api_docs"
+    )
+    job_service._RUNTIMES[92001] = doomed  # noqa: SLF001
+    job_service._RUNTIMES[92002] = untouched  # noqa: SLF001
+
+    assert job_service.delete_solution_and_cancel_jobs(alice, doomed_solution) is True
+
+    assert doomed.cancelled is True
+    assert untouched.cancelled is False, "别的方案上的任务一个字都不该动"
+
+
+def test_skill_registry_failure_degrades_visibility_not_the_job(client, alice, monkeypatch):
+    """技能包身份读不出来时：回执里**如实为空**，任务照常跑完。
+
+    降级要看得见（债务 D8）：读盘出意外属于「该起的自检没拦住」，不能让一次具体的
+    生成请求无缘无故失败，也不能报一个与实际注入不符的包。
+    """
+
+    def _boom(kind: str) -> dict:
+        raise RuntimeError("考核点：读技能包元数据时出错")
+
+    monkeypatch.setattr(job_service, "describe_kind", _boom)
+    _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
+    solution_id = _create_solution(client)
+
+    job_id, events = _run_job(
+        alice, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"}
+    )
+
+    summary = events[-1].data
+    assert summary["status"] == "completed"
+    assert summary["injected_skills"] == []
+    assert job_get(alice, job_id)["status"] == "completed"
+
+
+def test_pipeline_app_error_keeps_its_own_code(alice, monkeypatch):
+    """管线自己抛的 `AppError`：用它自带的码，不笼统记成「上游故障」。
+
+    预算超顶是 `INVALID_REQUEST`（重试也没用）；记成 `LLM_UPSTREAM_ERROR` 会让前端
+    去做无意义的重试，把一次确定的超顶放大成一串调用。
+    """
+
+    async def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AppError(ErrorCode.INVALID_REQUEST, "输入超出模型窗口")
+        yield  # pragma: no cover - 有 yield 才是 async generator
+
+    monkeypatch.setattr(document_service, "generate_prd_from_summary_stream", _boom)
+
+    job_id, events = _run_job(alice, None, "prd", {"requirements": "做一个演示产品"})
+
+    row = job_get(alice, job_id)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_code"] == "INVALID_REQUEST"
+    assert row["error_message"] == "输入超出模型窗口"
+    error = next(event for event in events if event.type == "error")
+    assert error.code == "INVALID_REQUEST"
+
+
+def test_replace_part_wipes_every_section_buffer():
+    """`part{replace}` 是**整篇覆盖**：所有章节的半成品一并作废。
+
+    若不清，改写稿会与初稿的半截字并排长在同一张卡片里——两条轨（过程字 / 权威正文）
+    混起来正是「PRD 不流式」与「重复正文」两类事故的同一个根。
+    """
+    runtime = _runtime_with_sections()
+    job_service._apply_event(runtime, _header_part("# 文档头\n\n"))  # noqa: SLF001
+    job_service._apply_event(runtime, _chunk("甲半截", "overview", 0))  # noqa: SLF001
+    job_service._apply_event(runtime, _chunk("乙半截", "features", 1))  # noqa: SLF001
+    job_service._apply_event(  # noqa: SLF001
+        runtime,
+        StreamEvent(type="part", content="", data={"text": "# 新版全文", "replace": True}),
+    )
+
+    assert runtime.finalized_parts == ["# 新版全文"]
+    assert runtime.parts_by_index == {}
+    assert runtime.live_by_index == {}
+    assert runtime.live_buffer == ""
+    assert job_service._draft(runtime) == "# 新版全文"  # noqa: SLF001
+
+
+def test_write_document_skips_an_empty_reply(client, alice, monkeypatch):
+    """定稿正文为空时不写文档：宁可这次不落库，也不要拿空稿顶掉上一版。"""
+    solution_id = _create_solution(client)
+    runtime = job_service.JobRuntime(
+        job_id=93001,
+        owner_id=alice,
+        solution_id=solution_id,
+        kind="prd",
+        final_reply="   \n\t",
+    )
+    written: list = []
+    monkeypatch.setattr(
+        document_store, "commit_generated", lambda *a, **k: written.append((a, k))
+    )
+
+    job_service._write_document(runtime, {})  # noqa: SLF001 - 测落点本身
+
+    assert written == []
+
+
+def test_document_write_failure_keeps_the_job_successful(client, alice, monkeypatch):
+    """写 documents 时库出错：任务**仍然算成功**，正文留在 `draft_content` 里。
+
+    正文已经在任务记录里有一份；把整个任务判失败，等于让一次成功的生成看起来像失败。
+    """
+    solution_id = _create_solution(client)
+    job_id = job_create(alice, "prd", solution_id)
+    runtime = job_service.JobRuntime(
+        job_id=job_id, owner_id=alice, solution_id=solution_id, kind="prd", final_reply="# 正文"
+    )
+    # `draft_content` 取的是「已定稿 + 实时缓冲」，不是 `final_reply`（后者只喂 documents）
+    runtime.finalized_parts = ["# 正文"]
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("考核点：写 documents 时库出错")
+
+    monkeypatch.setattr(document_store, "commit_generated", _boom)
+
+    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
+
+    assert runtime.status == "completed"
+    row = job_get(alice, job_id)
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["draft_content"] == "# 正文"
+    assert document_store.get_document(alice, solution_id, "prd") is None
+
+
+def test_document_write_skip_is_not_a_failure(client, alice, monkeypatch):
+    """`commit_generated` 返回 `None`（方案不可见 / 归属不符）也不算失败：只是没地方落。"""
+    solution_id = _create_solution(client)
+    job_id = job_create(alice, "prd", solution_id)
+    runtime = job_service.JobRuntime(
+        job_id=job_id, owner_id=alice, solution_id=solution_id, kind="prd", final_reply="# 正文"
+    )
+    monkeypatch.setattr(document_store, "commit_generated", lambda *a, **k: None)
+
+    job_service._finalize(runtime, "completed")  # noqa: SLF001
+
+    assert runtime.status == "completed"
+    row = job_get(alice, job_id)
+    assert row is not None and row["status"] == "completed"
+    assert document_store.get_document(alice, solution_id, "prd") is None
+
+
+def test_prompts_version_records_both_upstreams(client, monkeypatch):
+    """提示词是 PRD + 接口文档的下游：两条锚点都要记，否则「哪一份上游改过」查不出来。
+
+    `derived_from` 是读取侧 `stale` 的唯一判据；少记一条，那份上游换了版也不会亮黄条，
+    用户会拿着一份基于旧接口文档的提示词继续干活。
+    """
+    register(client)
+    uid = _alice_id()
+    solution_id = _create_solution(client)
+    document_store.save_document(uid, solution_id, "prd", "# PRD 正文")
+    document_store.save_document(uid, solution_id, "api_docs", "# 接口文档正文")
+    _fake_service(monkeypatch, ScriptedLLM(["提示词正文"]))
+
+    _run_job(
+        uid,
+        solution_id,
+        "prompts",
+        {"prd_content": "# PRD 正文", "api_docs_content": "# 接口文档正文"},
+    )
+
+    doc = document_store.get_document(uid, solution_id, "prompts")
+    assert doc is not None
+    derived = doc["derived_from"]
+    assert set(derived) == {"prd", "api_docs"}
+    assert derived["prd"]["content_sha"]
+    assert derived["api_docs"]["version_no"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 读旧数据：坏 JSON / 未知类型都不许炸
+# ---------------------------------------------------------------------------
+
+
+def test_usage_parsing_tolerates_legacy_and_broken_values():
+    """`generation_jobs.usage` 的容错口径：只认对象，读不出来返回 `None`。
+
+    这一列早年恒为 `NULL`、将来也可能改结构；读不出来时正确反应是「这条任务没有
+    用量可展示」，而不是让整个任务列表 500。
+    """
+    assert job_service.parse_usage(None) is None
+    assert job_service.parse_usage("") is None
+    assert job_service.parse_usage({"total_calls": 3}) == {"total_calls": 3}
+    assert job_service.parse_usage('{"total_calls": 4}') == {"total_calls": 4}
+    assert job_service.parse_usage("[1, 2]") is None
+    assert job_service.parse_usage("{坏掉的 JSON") is None
+
+
+def test_db_snapshot_tolerates_corrupt_columns():
+    """DB 兜底快照遇到坏 JSON / 旧行：逐字段退化为空值，不整条炸掉。"""
+    snapshot = job_service._db_snapshot_event(  # noqa: SLF001 - 测快照构造
+        {
+            "id": 94001,
+            "kind": "prd",
+            "doc_kind": "prd",
+            "status": "failed",
+            "error_code": "LLM_UPSTREAM_ERROR",
+            "draft_content": "半截正文",
+            "completed_sections": "{坏掉的 JSON",
+            "usage": "{坏掉的 JSON",
+            "pending_items": "{坏掉的 JSON",
+        }
+    )
+
+    assert snapshot.data["completed_sections"] == []
+    assert snapshot.data["pending_items"] == []
+    assert snapshot.data["partial"] is False
+    assert snapshot.data["failed_sections"] == []
+
+
+def test_unknown_kind_is_rejected_by_the_stream_builder():
+    """未知任务类型必须在构造事件流时就抛：静默返回空流等于「生成成功但没内容」。"""
+    with pytest.raises(ValueError) as raised:
+        job_service._build_event_stream("nope", {})  # noqa: SLF001
+
+    assert "未知的生成任务类型" in str(raised.value)

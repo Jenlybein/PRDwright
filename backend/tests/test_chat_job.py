@@ -17,15 +17,16 @@ import asyncio
 import json
 
 import pytest
-from conftest import register, users
+from conftest import job_get, register, users
 
 from sqlalchemy import func, select
 
+from backend.core.contracts import StreamEvent
 from backend.core.engine import session_scope
 from backend.core.errors import AppError
 from backend.core.models import ChatTurn
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.services import conversation_service, job_service
+from backend.services import conversation_service, job_service, solution_service
 from fakes import ScriptedLLM
 
 
@@ -478,3 +479,186 @@ def test_duplicate_turn_is_idempotent_even_without_the_precheck(alice, monkeypat
     assert calls["n"] == 2, "应当先预检一次、撞索引后再回查一次"
     assert again == first, "撞唯一索引后必须回查到同一条，而不是 0 或新 id"
     assert count == 1, "只该有一行：幂等写不许留下第二条"
+
+# ---------------------------------------------------------------------------
+# 建任务的边界：没有方案 / 方案不是自己的 / 内存里已有一轮在跑
+#
+# 三条都是「不满足前置条件就直接拒」的分支，原先只有库那一路被覆盖；
+# 内存那一路才是权威——进程内的 `_RUNTIMES` 见过一轮时，库里的行可能还没落定。
+# ---------------------------------------------------------------------------
+
+
+def test_in_memory_running_turn_blocks_a_second_one(client, alice):
+    """内存里的在途运行时**先于库**被查到：它是权威，库只是重启后的残留证据。
+
+    只靠库的话，须等第一轮落库才能拦住第二轮；而运行时的登记发生在建任务之后、
+    任何 `await` 之前，正是「协程还没起来、库也没写完」的那个窗口里唯一的判据。
+    少了这一路，同一线程会同时跑两轮，历史被重放一遍。
+    """
+    owner_id, solution_id = alice
+    # 只摆运行时、不建库行：这样唯一可能拦住的只有内存这一路
+    job_service._RUNTIMES[90001] = job_service.JobRuntime(  # noqa: SLF001
+        job_id=90001,
+        owner_id=owner_id,
+        solution_id=solution_id,
+        kind="chat",
+        chat_stage="requirement",
+    )
+
+    with pytest.raises(AppError) as raised:
+        _create(
+            owner_id,
+            solution_id,
+            {"stage": "requirement", "chat_mode": "continue", "content": "第二轮"},
+        )
+    assert "还在生成中" in str(raised.value)
+
+
+def test_chat_job_requires_a_solution(client, alice):
+    """对话必须挂在具体方案上：没有方案就没有「这轮回复记到谁头上」。"""
+    owner_id, _ = alice
+
+    with pytest.raises(AppError) as raised:
+        _create(
+            owner_id,
+            None,
+            {"stage": "requirement", "chat_mode": "continue", "content": "说点什么"},
+        )
+    assert raised.value.code.value == "INVALID_REQUEST"
+    assert "必须关联一份方案" in str(raised.value)
+
+
+def test_chat_job_rejects_a_solution_that_is_not_yours(client, alice):
+    """方案不属于本人时按「不存在」拒（不泄露别人的方案是否存在）。"""
+    owner_id, solution_id = alice
+
+    with pytest.raises(AppError) as raised:
+        _create(
+            owner_id,
+            solution_id + 999,
+            {"stage": "requirement", "chat_mode": "continue", "content": "说点什么"},
+        )
+    assert raised.value.code.value == "SOLUTION_NOT_FOUND"
+    assert "方案不存在" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# 轮次落点：什么时候**不**写、写失败时任务算不算失败
+# ---------------------------------------------------------------------------
+
+
+def test_chat_turn_is_skipped_when_there_is_nothing_to_write(client, alice):
+    """没有线程、或正文一个字都没有时不写轮次：空气泡比没有更糟。
+
+    这两个早退是「对话只追加」的另一半——追加的前提是**确实有东西**。
+    """
+    owner_id, solution_id = alice
+
+    # ① 不是对话任务（没有线程）→ 不写
+    job_service._write_chat_turn(  # noqa: SLF001 - 测落点本身
+        job_service.JobRuntime(
+            job_id=1, owner_id=owner_id, solution_id=solution_id, kind="prompts"
+        )
+    )
+    assert _turns(owner_id, solution_id) == []
+
+    # ② 线程在，但定稿正文全是空白 → 不写
+    job_service._write_chat_turn(  # noqa: SLF001
+        job_service.JobRuntime(
+            job_id=2,
+            owner_id=owner_id,
+            solution_id=solution_id,
+            kind="chat",
+            chat_stage="requirement",
+            final_reply="  \n\t",
+        )
+    )
+    assert _turns(owner_id, solution_id) == []
+
+
+def test_chat_turn_is_skipped_after_the_solution_is_gone(client, alice):
+    """方案已删除时对话收尾也不写轮次：写进一个不存在的方案等于造幽灵数据。"""
+    owner_id, solution_id = alice
+    assert solution_service.delete_solution(owner_id, solution_id) is True
+
+    job_service._write_chat_turn(  # noqa: SLF001 - 测落点本身
+        job_service.JobRuntime(
+            job_id=3,
+            owner_id=owner_id,
+            solution_id=solution_id,
+            kind="chat",
+            chat_stage="requirement",
+            final_reply="已经说完了",
+        )
+    )
+    assert _turns(owner_id, solution_id) == []
+
+
+def test_failed_turn_write_does_not_turn_a_finished_chat_into_a_failure(
+    client, alice, monkeypatch
+):
+    """写轮次时库出错只记日志：正文已经在 `generation_jobs.draft_content` 里存了一份。
+
+    与文档落库同一口径——「升格成轮次」这一步失败，不该把已经成功的一轮判成失败，
+    更不该让用户看到「生成失败」而其实内容都在。
+    """
+    owner_id, solution_id = alice
+    request = {"stage": "requirement", "chat_mode": "continue", "content": "你好"}
+    job_id = _create(owner_id, solution_id, request)
+    runtime = job_service.JobRuntime(
+        job_id=job_id,
+        owner_id=owner_id,
+        solution_id=solution_id,
+        kind="chat",
+        chat_stage="requirement",
+        final_reply="这一轮的回复",
+        # 真实对话运行时里增量也进了整篇缓冲：`_draft` 取的是它，不是 `final_reply`
+        live_buffer="这一轮的回复",
+    )
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("考核点：写轮次时库出错")
+
+    monkeypatch.setattr(ChatTurnRepository, "create", _boom)
+
+    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
+
+    assert runtime.status == "completed"
+    row = job_get(owner_id, job_id)
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["draft_content"] == "这一轮的回复"
+    assert [turn for turn in _turns(owner_id, solution_id) if turn.role == "assistant"] == []
+
+
+# ---------------------------------------------------------------------------
+# 没有输入轮次时的历史
+# ---------------------------------------------------------------------------
+
+
+def test_empty_continue_does_not_replay_the_whole_thread(client, alice, monkeypatch):
+    """空消息续聊没有输入轮次，历史因此为空：不把整条线程重放给模型。
+
+    「历史从 `chat_turns` 拼」的取数基准是输入轮次的 id。没有输入轮次时若退化成
+    「取全部历史」，模型会把上一轮的回复再当成上下文重放一遍——用户看到的是
+    它把自己的话又复述了一次，而日志里一切正常。
+    """
+    owner_id, solution_id = alice
+    llm = ScriptedLLM(["开场白就先说到这儿"])
+    _use_llm(monkeypatch, llm)
+    _run(
+        owner_id,
+        solution_id,
+        {"stage": "requirement", "chat_mode": "start", "form_data": {}},
+    )
+
+    llm2 = ScriptedLLM(["好的"])
+    _use_llm(monkeypatch, llm2)
+    _run(
+        owner_id,
+        solution_id,
+        {"stage": "requirement", "chat_mode": "continue", "content": ""},
+    )
+
+    joined = "\n".join(str(message.content) for message in llm2.calls[0])
+    assert "开场白就先说到这儿" not in joined
