@@ -159,6 +159,35 @@ def test_writer_rebuilds_llm_when_config_changes(monkeypatch):
     assert len(calls) == 2
 
 
+def test_writer_review_llm_rebuilds_when_the_window_changes(monkeypatch):
+    """审核实例的窗口是**可配的**：只改 `prd_section_review_max_tokens` 也要换实例。
+
+    它与撰写实例按同一份指纹重建，只是 `max_tokens` 换成审核窗口——
+    少了这一步，「后台把审核窗口调小」会静默不生效（仍用旧实例的旧上限）。
+    """
+    from backend.services.prd_section_writer import PrdSectionWriter
+
+    windows: list[int | None] = []
+
+    def _fake_get_llm(**kwargs):  # noqa: ANN003
+        windows.append(kwargs.get("max_tokens"))
+        return _FakeLLM(f"mt={kwargs.get('max_tokens')}")
+
+    monkeypatch.setattr(
+        "backend.services.prd_section_writer.get_llm", _fake_get_llm, raising=False
+    )
+
+    writer = PrdSectionWriter(llm=None, review_llm=None)
+    first = writer.review_llm
+    assert windows == [get_settings().prd_section_review_max_tokens]
+    # 配置没变就不重建
+    assert writer.review_llm is first
+
+    _set(prd_section_review_max_tokens=get_settings().prd_section_review_max_tokens + 100)
+    assert writer.review_llm is not first
+    assert len(windows) == 2
+
+
 # ---------------------------------------------------------------------------
 # 3. 构造期快照已拆除
 # ---------------------------------------------------------------------------

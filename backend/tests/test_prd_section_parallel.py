@@ -16,6 +16,7 @@ import pytest
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
 from backend.core.config import get_settings
+from backend.core.errors import AppError, ErrorCode
 from backend.services.prd_section_writer import PRD_SECTIONS, PrdSectionWriter
 
 REVIEW_MARKER = "产品文档评审员"
@@ -44,6 +45,12 @@ class RoutingLLM:
         review_delays: dict[str, float] | None = None,
         revise_headings: set[str] | None = None,
         revise_severity: str = "high",
+        review_errors: dict[str, BaseException] | None = None,
+        write_errors: dict[str, BaseException] | None = None,
+        empty_headings: set[str] | None = None,
+        rewrite_errors: dict[str, BaseException] | None = None,
+        blank_rewrites: set[str] | None = None,
+        trailing: dict[str, str] | None = None,
     ) -> None:
         self._fail = set(fail_headings or set())
         self._review_delays = review_delays or {}
@@ -51,7 +58,17 @@ class RoutingLLM:
         self._revise = set(revise_headings or set())
         # 触发改写时报告的严重度：用来验证「只有 high 才改」
         self._severity = revise_severity
+        # 各阶段的失败注入：审核抛错、撰写抛错、改写抛错
+        self._review_errors = dict(review_errors or {})
+        self._write_errors = dict(write_errors or {})
+        self._empty = set(empty_headings or set())
+        self._rewrite_errors = dict(rewrite_errors or {})
+        # 改写吐空白：用来覆盖「改写结果为空 → 保留改写前版本」
+        self._blank_rewrites = set(blank_rewrites or set())
+        # 撰写结尾追加的尾巴（用来验证抑制器在流结束时把「疑似哨兵前缀」吐回来）
+        self._trailing = dict(trailing or {})
         self.calls: list[str] = []
+        self.review_calls: list[str] = []
         self.rewrite_calls: list[str] = []
         self.max_in_flight = 0
         self._in_flight = 0
@@ -75,9 +92,13 @@ class RoutingLLM:
             heading = self._heading(user)
 
             if REVIEW_MARKER in system:
+                self.review_calls.append(heading)
                 delay = self._review_delays.get(heading, 0.0)
                 if delay:
                     await asyncio.sleep(delay)
+                error = self._review_errors.get(heading)
+                if error is not None:
+                    raise error
                 if heading in self._revise:
                     yield AIMessageChunk(
                         content=json.dumps(
@@ -101,28 +122,38 @@ class RoutingLLM:
             # 改写调用与撰写调用的人设相同，只能靠用户消息区分
             if "审核发现的问题" in user:
                 self.rewrite_calls.append(heading)
+                error = self._rewrite_errors.get(heading)
+                if error is not None:
+                    raise error
                 await asyncio.sleep(0.01)
+                if heading in self._blank_rewrites:
+                    return
                 yield AIMessageChunk(content=f"\n\n改后-{heading}\n\n")
                 return
 
             self.calls.append(heading)
+            error = self._write_errors.get(heading)
+            if error is not None:
+                raise error
             if heading in self._fail:
                 raise ConnectionError("章节生成失败")
             # 让出控制权，制造真实的并发窗口
             await asyncio.sleep(0.01)
-            yield AIMessageChunk(content=f"\n\n正文-{heading}\n\n")
+            if heading in self._empty:
+                # 只有空白：章节层的 `strip()` 之后就是空正文
+                yield AIMessageChunk(content="   ")
+                return
+            yield AIMessageChunk(content=f"\n\n正文-{heading}\n\n{self._trailing.get(heading, '')}")
         finally:
             self._in_flight -= 1
 
 
-def _collect(writer: PrdSectionWriter):
+def _collect(writer: PrdSectionWriter, **request):
+    request.setdefault("requirements", "做一个演示产品")
+    request.setdefault("product_name", "演示产品")
+
     async def drain():
-        return [
-            event
-            async for event in writer.stream(
-                requirements="做一个演示产品", product_name="演示产品"
-            )
-        ]
+        return [event async for event in writer.stream(**request)]
 
     return asyncio.run(drain())
 
@@ -369,3 +400,214 @@ def test_retry_reannounces_writing_so_the_half_written_text_is_dropped(monkeypat
         and event.data.get("section_id") != target.id
     ]
     assert len(others) == len(PRD_SECTIONS) - 1
+
+
+# ---------------------------------------------------------------------------
+# 分支补全：并行链路里此前没有用例走到的失败 / 降级 / 边界分支
+# ---------------------------------------------------------------------------
+#
+# 这些用例是重写前的**行为基线**：结构会变（376 行的方法要拆开），
+# 「单章失败不终止全篇」「审核/改写失败各自怎么降级」不能变。
+
+
+def test_parallel_rejects_empty_input_and_missing_skill_assets(monkeypatch) -> None:
+    """并行链路的两种「没有可写的东西」：输入为空 → `ValueError`；资源缺失 → `RuntimeError`。"""
+    with pytest.raises(ValueError):
+        _collect(PrdSectionWriter(llm=RoutingLLM(), review_enabled=False), requirements="")
+
+    from backend.services import prd_section_writer as module
+
+    monkeypatch.setattr(module, "load_prd_skill_artifacts", lambda: None)
+    with pytest.raises(RuntimeError):
+        _collect(PrdSectionWriter(llm=RoutingLLM(), review_enabled=False))
+
+
+def test_parallel_summary_input_takes_the_product_name_from_the_summary() -> None:
+    """并行链路的**结构化摘要**入口（此前只有串行链路有摘要用例）。
+
+    摘要里的产品名优先于调用方传入的 `product_name`——两条入口共用同一套口径。
+    """
+    summary = {
+        "product_name": "问卷星Plus",
+        "product_goal": "让产品团队自助收集需求问卷",
+        "target_users": ["产品经理"],
+        "platform": "Web",
+        "mvp_features": [],
+        "v2_features": [],
+        "ui_pages": [],
+    }
+    events = _collect(
+        PrdSectionWriter(llm=RoutingLLM(), review_enabled=False),
+        requirements="",
+        product_name="另一个名字",
+        summary=summary,
+    )
+
+    header = next(event for event in events if event.type == "part")
+    assert "问卷星Plus" in header.data["text"]
+    assert "另一个名字" not in header.data["text"]
+    done = next(event for event in events if event.type == "done")
+    for section in PRD_SECTIONS:
+        assert section.heading in done.data["reply"]
+
+
+def test_review_retry_exhaustion_keeps_the_body() -> None:
+    """审核连续失败用尽重试后**保留正文**，该章不判失败、整篇不中断。"""
+    target = PRD_SECTIONS[1]
+    llm = RoutingLLM(review_errors={target.heading: ValueError("审核一直失败")})
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    done = next(event for event in events if event.type == "done")
+    assert done.data["partial"] is False
+    target_part = next(
+        event
+        for event in events
+        if event.type == "part" and event.data.get("section_id") == target.id
+    )
+    assert f"正文-{target.heading}" in target_part.data["text"]
+    # 审核层重试 max_retries+1 次后放弃：1 + 1
+    assert llm.review_calls.count(target.heading) == 2
+    # 没开「审出问题」的章节仍照常汇总结论（这章按通过处理）
+    review = next(event for event in events if event.type == "review")
+    assert review.data["verdict"] == "pass"
+
+
+def test_review_app_error_is_fatal() -> None:
+    """审核抛出 `AppError`（预算超顶 / 墙钟硬顶）不重试，直接走致命路径。
+
+    这条同时守着一个**曾经存在的竞态**：章节任务若在 `gather` 之前就失败并被摘出
+    任务集，异常就无人回收（`Task exception was never retrieved`），整篇会在没有
+    任何告警的情况下产出一份缺章的文档。
+    """
+    target = PRD_SECTIONS[1]
+    llm = RoutingLLM(
+        review_errors={target.heading: AppError(ErrorCode.INVALID_REQUEST, "预算超顶")}
+    )
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert any(event.type == "error" for event in events)
+    assert not any(event.type == "done" for event in events)
+
+
+def test_write_app_error_is_fatal() -> None:
+    """撰写阶段的 `AppError` 同样不重试、不写占位：重来多少次结果都一样。"""
+    target = PRD_SECTIONS[1]
+    llm = RoutingLLM(write_errors={target.heading: AppError(ErrorCode.INVALID_REQUEST, "预算超顶")})
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=False))
+
+    assert any(event.type == "error" for event in events)
+    assert not any(event.type == "done" for event in events)
+    assert not [
+        event
+        for event in events
+        if event.type == "part" and event.data.get("section_id") == target.id
+    ]
+
+
+def test_empty_draft_fails_only_that_section() -> None:
+    """模型吐了空白：该章落失败占位，其余章照常完成，`partial=true`。"""
+    target = PRD_SECTIONS[3]
+    llm = RoutingLLM(empty_headings={target.heading})
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=False))
+
+    done = next(event for event in events if event.type == "done")
+    assert done.data["partial"] is True
+    assert done.data["failed_sections"][0]["reason"] == "撰写结果为空"
+
+    failed_part = next(
+        event
+        for event in events
+        if event.type == "part" and event.data.get("section_id") == target.id
+    )
+    assert failed_part.data.get("failed") is True
+    assert failed_part.data["text"].startswith(target.heading)
+    assert "本章生成失败" in failed_part.data["text"]
+    # 占位仍按 index 归位，且只有这一章是占位
+    assert failed_part.data["index"] == PRD_SECTIONS.index(target)
+    assert sum(1 for event in events if event.type == "part" and event.data.get("failed")) == 1
+
+
+def test_rewrite_failure_and_blank_rewrite_keep_the_pre_rewrite_draft() -> None:
+    """改写抛错或只吐空白时保留**改写前版本**，不判失败、不丢正文。"""
+    raised, blank = PRD_SECTIONS[1], PRD_SECTIONS[2]
+    llm = RoutingLLM(
+        revise_headings={raised.heading, blank.heading},
+        rewrite_errors={raised.heading: ValueError("改写挂了")},
+        blank_rewrites={blank.heading},
+    )
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    parts = {
+        event.data["section_id"]: event.data
+        for event in events
+        if event.type == "part" and event.data.get("section_id")
+    }
+    # 抛错的那章：仍是初稿，且没被标成失败
+    assert f"正文-{raised.heading}" in parts[raised.id]["text"]
+    assert "改后-" not in parts[raised.id]["text"]
+    assert parts[raised.id].get("failed") is not True
+    # 吐空白的那章：同样保留初稿
+    assert f"正文-{blank.heading}" in parts[blank.id]["text"]
+    assert parts[blank.id].get("failed") is not True
+    assert llm.rewrite_calls == [raised.heading, blank.heading]
+
+
+def test_rewrite_app_error_is_fatal() -> None:
+    """改写阶段的 `AppError` 与审核同口径：不吞、不保留旧稿，直接走致命路径。"""
+    target = PRD_SECTIONS[1]
+    llm = RoutingLLM(
+        revise_headings={target.heading},
+        rewrite_errors={target.heading: AppError(ErrorCode.INVALID_REQUEST, "预算超顶")},
+    )
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=True, max_rewrites=1))
+
+    assert any(event.type == "error" for event in events)
+    assert not any(event.type == "done" for event in events)
+
+
+def test_trailing_looks_like_a_sentinel_is_flushed_not_dropped() -> None:
+    """流结束时若尾部像「被切断的哨兵前缀」，抑制器要把暂存原样吐回来。
+
+    这条守的是「一个字都不能吞」：抑制器为了不把半截哨兵漏给用户，会把末尾
+    `carry_len` 个字符先扣住；流结束时它必须原样交还有效正文，否则正文尾部
+    会被静默吃掉（而且只在「结尾恰好像哨兵」时才发生，极难复现）。
+    """
+    target = PRD_SECTIONS[0]
+    tail = "<!-- PENDING:BEG"
+    llm = RoutingLLM(trailing={target.heading: tail})
+    events = _collect(PrdSectionWriter(llm=llm, review_enabled=False))
+
+    streamed = "".join(
+        event.content
+        for event in events
+        if event.type == "chunk" and event.data.get("section_id") == target.id
+    )
+    # 扣住的尾部最终仍然流了出去（没有静默截断）
+    assert streamed == f"\n\n正文-{target.heading}\n\n{tail}"
+    assert any(
+        event.type == "chunk"
+        and event.data.get("section_id") == target.id
+        and "PENDING:BEG" in event.content
+        for event in events
+    )
+
+
+def test_closing_the_stream_mid_flight_cancels_the_lane() -> None:
+    """消费者提前断开（生成器被 `aclose()`）时，车道与派生任务必须被取消、不报错。
+
+    这是「客户端滑走」的路径：不清理就会留下后台还在烧 token 的任务。
+    """
+
+    async def scenario():
+        writer = PrdSectionWriter(llm=RoutingLLM(), review_enabled=False)
+        stream = writer.stream(requirements="做一个演示产品")
+        first = await stream.__anext__()
+        # 继续取到「车道已经开跑、且已有章节在流」之后再看断开：此时 `finally` 里有活要收
+        for _ in range(3):
+            await stream.__anext__()
+        await stream.aclose()
+        return first
+
+    first = asyncio.run(scenario())
+    assert first.type == "status"
+
