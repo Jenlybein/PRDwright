@@ -1,0 +1,166 @@
+# ---------------------------------------------------------------------------
+# PRDwright v9 编排：一份文件，Linux 与 Windows 通用
+#
+#   cd deploy
+#   cp .env.example .env        # Windows: Copy-Item .env.example .env
+#   docker compose up -d --build
+#
+# 读取顺序：本文件同目录下的 `.env`（compose 自己用来做变量插值，也经 `env_file`
+# 注入 api 容器）。缺 `.env` 时 compose 会直接报「env file not found」——这是有意
+# 的：宁可起不来，也不要拿默认邀请码 123456 悄悄跑起来。
+#
+# ## 只开一个端口
+#
+# 宿主机只发布 web 的 80；api 的 8000 只 `expose`，在宿主机上不可达，只能被 web
+# 通过内部网络访问（v7 的「后端只听回环」在容器里的等价形式）。
+#
+# ## 为什么全用命名卷、不挂宿主目录（这不是配置问题，是语义问题）
+#
+# 容器里的 SQLite 需要的不是「一个能读写的目录」，而是**文件锁与共享内存映射**：
+# WAL 模式要在库文件旁建 `-wal` / `-shm`，而 `-shm` 是 mmap 的共享内存。
+# Windows 上的宿主目录挂载走 grpc-fuse / 9p，不支持这两样——症状不是「挂载错了」，
+# 而是随机 `disk I/O error`、`database is locked`，或者容器重启后看见一个
+# 「少了最近几分钟写入」的库。命名卷在虚拟机内部是原生文件系统，语义与裸机一致。
+# 代价是实时库不能双击查看，这份可见性由备份产物（deploy/backups/）补上。
+#
+# 因为持久化全在卷里，「哪些目录要持久化、怎么挂」这份知识只写一次，
+# 所以**不需要 Windows 专用 override 文件**，两个平台是同一条命令。
+#
+# ## 网络
+#
+# nginx 的上游写死 `api:8000`，并用 Docker 内嵌 DNS（127.0.0.11）**按请求**解析。
+# 这要求两个服务在同一个**用户自定义网络**上（默认 bridge 没有内嵌 DNS），
+# 所以这里把默认网络显式命名。绝不能用 `network_mode: host`：那会让 api 的
+# 8000 直接暴露在宿主上，也会让上面的服务名失效。
+# ---------------------------------------------------------------------------
+
+# 项目名钉死：卷名因此稳定为 prdwright_data / prdwright_logs / prdwright_secrets，
+# 与目录名无关。README 里的主密钥生成命令、#18 的备份/恢复都按这个卷名写。
+name: prdwright
+
+services:
+  # =========================================================================
+  # 应用（API + 技能包）：唯一的业务进程，单 worker
+  # =========================================================================
+  api:
+    image: prdwright-api:${PRDWRIGHT_IMAGE_TAG:-local}
+    build:
+      # 构建上下文是**仓库根**：api.Dockerfile 要同时看见 backend/、skills/、
+      # scripts/keygen/ 与 deploy/docker/api-entrypoint.sh。
+      context: ..
+      dockerfile: deploy/docker/api.Dockerfile
+      args:
+        # 只影响启动脚本报错文案里那条「生成主密钥」的命令能否直接粘贴。
+        IMAGE_REF: prdwright-api:${PRDWRIGHT_IMAGE_TAG:-local}
+
+    # `.env` 里的变量原样进容器（后端认得的那些）。镜像 ENV 已有部署默认值
+    # （DATABASE_URL / LOG_DIR / PRDWRIGHT_MASTER_KEY_PATH / PRDWRIGHT_SKILLS_*），
+    # 这里不重复声明；`.env.example` 把那些默认值写成注释，供核对。
+    env_file:
+      - .env
+
+    environment:
+      # 容器内时区固定 UTC，不继承宿主机：项目本来就按 UTC 存时间，
+      # 继承宿主时区只会让日志与库里的时间差 8 小时。
+      TZ: UTC
+
+    volumes:
+      # 三个命名卷 = 三层持久化。只有密钥卷只读——应用永远不该改主密钥。
+      - data:/var/lib/prdwright
+      - logs:/var/log/prdwright
+      - secrets:/secrets:ro
+
+    # 只声明容器内端口，不 publish：宿主机上不可达，入口只有 web。
+    expose:
+      - "8000"
+
+    # 就绪探针，不是生死探针：它查「库可写 + 技能包可加载」。
+    # 用 /healthz 做 healthcheck 等于没配（恒 200，库坏了也说健康）。
+    # 探针失败不会让 docker 重启容器（restart 策略只管进程退出），
+    # 这正合适：库坏了重启治不好，只会反复杀掉还能看日志的进程。
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request as u; u.urlopen('http://127.0.0.1:8000/readyz', timeout=3)
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      # 首次启动要跑迁移（lifespan 里一次），给足冷启动时间再判不健康。
+      start_period: 30s
+
+    # 必须**大于**排空窗口（PRDWRIGHT_DRAIN_TIMEOUT，默认 30 秒）。
+    # 排空走完就自然退出；只有排空卡住时才会用到这里剩下的 15 秒余量。
+    # 小于 30 秒的后果：进程在写终态之前被 SIGKILL，任务又变回 running 的尸体。
+    stop_grace_period: 45s
+
+    restart: unless-stopped
+
+  # =========================================================================
+  # 静态站点 + 反向代理：唯一对外的入口（宿主 80）
+  # =========================================================================
+  web:
+    image: prdwright-web:${PRDWRIGHT_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/docker/web.Dockerfile
+
+    ports:
+      # 默认 80。只有「80 被占用」或 CI 需要避开特权端口时才改 `.env` 里的
+      # PRDWRIGHT_HTTP_PORT；对外仍然只有这一个端口。
+      - "${PRDWRIGHT_HTTP_PORT:-80}:80"
+
+    # 让 api 先被创建。注意这是「启动顺序」，不是「等它健康」：
+    # api 因缺主密钥起不来时，web 照样会起来并继续服务静态页（nginx 用变量式
+    # proxy_pass 按请求解析上游），不会跟着进重启循环。
+    depends_on:
+      - api
+
+    restart: unless-stopped
+
+  # =========================================================================
+  # 数据库服务：**默认关闭**（profile），v9 不使用，见 v10
+  # =========================================================================
+  # v9 的数据库仍是 SQLite 文件库，住在 data 卷里；这个服务现在没有任何调用方，
+  # api 的 DATABASE_URL 也不会指向它。留在这里只为下一版接 PostgreSQL 时
+  # 不必重写整份编排（端口、卷、健康检查、依赖位都已经就位）。
+  #
+  # 它不会随 `docker compose up -d` 启动。真要看一眼：
+  #   docker compose --profile db up -d db
+  # 但下一版之前不要这么做——它不会让当前应用改用 PG。
+  db:
+    profiles: ["db"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-prdwright}
+      POSTGRES_USER: ${POSTGRES_USER:-prdwright}
+      # v9 不使用；下一版务必改成强口令。`$$` 是 compose 的转义，容器里拿到的是 $。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-before-v10}
+      TZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  # SQLite 库（含 WAL 的 -wal / -shm 边车）。丢了 = 业务数据全丢。
+  data:
+  # 轮转日志文件。丢了只丢历史日志（app_logs 表里还有一份派生数据）。
+  logs:
+  # 只读挂进 api 的 master.key。丢了 = 库里所有模型密钥都解不开。
+  secrets:
+  # 仅 db profile 使用；v9 不启动 db，所以这个卷不会出现在 `docker volume ls`。
+  pgdata:
+
+networks:
+  # 显式命名默认网络：容器内的服务名解析（api → 容器 IP）由 Docker 内嵌 DNS
+  # 提供，而内嵌 DNS 只在用户自定义网络上生效。名字钉死，方便排查与下一版复用。
+  default:
+    name: prdwright_net
