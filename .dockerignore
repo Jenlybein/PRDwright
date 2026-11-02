@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# 构建上下文排除表（上下文 = 仓库根；两个镜像共用这一份）
+#
+# 两个 Dockerfile 都从仓库根构建：`web.Dockerfile` 要同时看见 `frontend/` 与
+# `frontend_admin/`，api 镜像要看见 `backend/`、`backend/migrations/`、`skills/`。
+# 所以这份表按「谁需要什么」来收，而不是只按前端镜像的需要来收 ——
+# 排掉的东西必须是**两个镜像都不需要**的。
+#
+# 用 `docker build -f <某个 Dockerfile> .` 时，本文件自动生效（不需要额外参数）。
+# ---------------------------------------------------------------------------
+
+# 版本历史：体积，且镜像与上下文里都不该带历史
+.git/
+.github/
+
+# 依赖树：本仓库的两个 node_modules 是宿主机 junction，跟着进上下文会把上下文从
+# 几十 MB 抬到 GB 级；镜像里自己 `npm ci` / `uv sync`，架构与路径才对得上。
+**/node_modules/
+**/.venv/
+**/venv/
+
+# 构建产物：镜像里自己构建。带上宿主机的 dist 会让「这份产物是哪台机器、哪份源码出的」不可查。
+**/dist/
+**/dist-ssr/
+**/.vite/
+**/*.tsbuildinfo
+
+# 本地数据、上传与日志：绝不能进镜像（开发数据 / 真实库内容 / 宿主日志）。
+# 容器里的落点是命名卷或挂载目录，不是镜像层。
+data/
+deploy/data/
+backend/data/
+logs/
+deploy/logs/
+backend/logs/
+deploy/backups/
+uploads/
+backend/uploads/
+**/*.sqlite3
+**/*.sqlite
+**/*.db
+**/*.db-wal
+**/*.db-shm
+
+# 配置与密钥：泄露面最大的一类。镜像内的配置一律来自运行期环境变量。
+.env
+.env.*
+!**/.env.example
+backend/.env
+backend/secrets/
+deploy/secrets/
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# Python 缓存：无效层，还可能夹带宿主机的绝对路径
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.uv/
+
+# 测试与工具产物
+**/coverage/
+**/htmlcov/
+**/__screenshots__/
+**/test-results/
+**/playwright-report/
+**/.workbuddy/
+
+# 编辑器与操作系统
+.vscode/
+.idea/
+**/.DS_Store
+**/Thumbs.db
+**/Desktop.ini
+**/*.log
