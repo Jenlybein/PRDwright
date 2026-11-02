@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 import pytest
@@ -32,10 +33,12 @@ from conftest import (
     job_get,
     job_list_by_owner,
     job_persist_progress,
+    write_skill_package,
 )
 from backend.services import (
     document_service,
     document_store,
+    job_drain,
     job_service,
     llm_factory,
     prd_section_writer,
@@ -92,14 +95,20 @@ def no_real_llm(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def clean_job_state():
-    """每个用例前后清空进程内运行时与任务集合，避免用例互相污染。"""
+    """每个用例前后清空进程内运行时与任务集合，避免用例互相污染。
+
+    排空标志一并复位：它是**进程内单例**，上一个用例排空完之后若不复位，
+    下一个用例的就绪探针会继承那个 503——那是「测试顺序污染」，不是被测行为。
+    """
     job_service._RUNTIMES.clear()  # noqa: SLF001
     job_service._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
+    job_drain.drain_controller.reset()
     yield
     job_service._RUNTIMES.clear()  # noqa: SLF001
     job_service._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
+    job_drain.drain_controller.reset()
 
 
 def _alice_id() -> int:
@@ -1837,3 +1846,339 @@ def test_unknown_kind_is_rejected_by_the_stream_builder():
         job_service._build_event_stream("nope", {})  # noqa: SLF001
 
     assert "未知的生成任务类型" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# 排空（issue #13）：摘流 → 等上限 → 超时取消落终态
+# ---------------------------------------------------------------------------
+#
+# 排空是一个**可以直接调用的单元**（`job_drain.drain_controller`）：用例直接调它，
+# 不起子进程、不发真信号。信号只是这个单元的薄适配层（`main.py` 的 lifespan 里挂），
+# 因此下面每一条都在毫秒级完成，且断言的是外部可观察的事实——就绪探针的 503、
+# 任务行落成什么终态、订阅者收到哪个事件——而不是内部的哪个标志位、哪次循环。
+
+
+def test_drain_returns_at_once_when_nothing_is_in_flight(client):
+    """无在途任务：排空立刻完成，**不空等**到上限。
+
+    这条守的是「等待是上限不是必等」：30 秒是天花板，不是睡眠时长。写成
+    `await asyncio.sleep(30)` 也能让别的用例全绿，只是每次重启白等半分钟。
+    """
+    assert job_drain.drain_controller.is_draining() is False
+
+    async def scenario() -> tuple[job_drain.DrainReport, float]:
+        started = time.monotonic()
+        report = await job_drain.drain_controller.drain(timeout=30)
+        return report, time.monotonic() - started
+
+    report, elapsed = _run(scenario())
+
+    assert report.in_flight == 0
+    assert report.cancelled == 0
+    assert report.hit_deadline is False
+    assert elapsed < 1.0, f"没有在途任务时不该等满窗口（实测等了 {elapsed:.2f} 秒）"
+    # 排空一开始就摘流：就绪探针在这之后必须说「没好」（见下一条用例）
+    assert job_drain.drain_controller.is_draining() is True
+
+
+def test_drain_waits_for_a_job_that_finishes_within_the_window(client, alice, monkeypatch):
+    """有在途任务且能在窗口内跑完：等它跑完，任务落**正常终态**，一个都不取消。
+
+    反面写法（曾经很诱人）：收到信号就把所有在途任务一律取消。它同样「留不下
+    `running` 尸体」，但用户看到的是「生成到一半被打断」——明明再等两秒就能拿到
+    完整的 PRD。排空的价值恰恰在前半句：**先让能跑完的跑完**。
+    """
+    release = asyncio.Event()
+
+    async def stream():
+        yield StreamEvent(type="chunk", content="第一段", data={})
+        await release.wait()  # 模拟「模型还在吐字」：任务确实在途，不是还没开始
+        yield StreamEvent(type="done", content="", data={"reply": "完整正文"})
+
+    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
+
+    async def scenario() -> tuple[int, job_drain.DrainReport]:
+        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
+        job_service.dispatch(
+            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        )
+        # 等第一个 chunk 被消费：这样断言的是「排空在等一个真的在跑的任务」
+        for _ in range(200):
+            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
+            if runtime is not None and runtime.live_buffer:
+                break
+            await asyncio.sleep(0.005)
+
+        draining = asyncio.create_task(job_drain.drain_controller.drain(timeout=5))
+        await asyncio.sleep(0.05)
+        assert not draining.done(), "任务还在跑，排空不该提前结束"
+        release.set()
+        return job_id, await draining
+
+    job_id, report = _run(scenario())
+
+    assert report.in_flight == 1
+    assert report.finished == 1, "在窗口内跑完的任务不该被算作取消"
+    assert report.cancelled == 0
+    assert report.hit_deadline is False
+    row = job_get(alice, job_id)
+    assert row is not None
+    assert row["status"] == "completed", "排空只负责等；终态仍由任务自己收尾"
+    assert row["error_code"] == ""
+
+
+def test_drain_cancels_a_job_that_outlives_the_window(client, alice, monkeypatch):
+    """超过窗口仍在跑的任务：**标成已取消、落终态**，订阅者收到 error 事件。
+
+    这条是整张票的承重点。三件事必须同时成立，缺一条用户就没有确定结论：
+
+    1. 库里那一行是终态（`failed` + `CANCELLED`），不是 `running`——否则下次启动
+       的 `reap_orphans()` 会把它再收一次失败，用户看到两次「生成失败」；
+    2. 订阅者收到**错误**事件（还带原因），不是静默结束、也不是「完成」——
+       「流正常结束 + 正文为空」在前端会被当成一次成功（历史 bug 的同一个坑）；
+    3. 订阅者不会永远挂着：收哨兵必须有，否则前端停在一个再也不会更新的转圈上。
+    """
+    never = asyncio.Event()  # 永不 set：任务卡在「模型调用」里，自己走不出来
+
+    async def stream():
+        yield StreamEvent(type="chunk", content="第一段", data={})
+        await never.wait()
+        yield StreamEvent(type="done", content="", data={"reply": "完整正文"})
+
+    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
+
+    async def scenario() -> tuple[int, job_drain.DrainReport, list]:
+        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
+        job_service.dispatch(
+            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        )
+
+        # 订阅者先挂上：真实场景是「浏览器正连着这个任务，然后运维重启了容器」
+        events: list = []
+
+        async def consume() -> None:
+            async for event in job_service.open_stream(alice, job_id):
+                events.append(event)
+
+        watcher = asyncio.create_task(consume())
+        for _ in range(200):
+            if any(event.type == "chunk" for event in events):
+                break
+            await asyncio.sleep(0.005)
+
+        # 窗口给 0.2 秒：用例不该为了验证「等 30 秒」真的等 30 秒
+        report = await job_drain.drain_controller.drain(timeout=0.2)
+        # 订阅者必须能自己读完（哨兵），不是被用例硬 cancel 掉
+        await asyncio.wait_for(watcher, timeout=5)
+        return job_id, report, events
+
+    job_id, report, events = _run(scenario())
+
+    assert report.in_flight == 1
+    assert report.cancelled == 1, "超过窗口的任务必须被取消"
+    assert report.finished == 0
+    assert report.hit_deadline is True
+    assert report.waited_seconds >= 0.15, "至少要让窗口走完，不能提前取消"
+
+    row = job_get(alice, job_id)
+    assert row is not None
+    assert row["status"] == "failed", "超时任务必须落终态，不能留 running"
+    assert row["error_code"] == "CANCELLED"
+    assert "重启" in row["error_message"]
+
+    error = next((event for event in events if event.type == "error"), None)
+    assert error is not None, "订阅者必须收到 error 事件，否则「流结束 + 空正文」会被当成成功"
+    assert error.code == "CANCELLED"
+    assert "重启" in error.content
+
+    summary = [event for event in events if event.type == "run_summary"]
+    assert summary and summary[-1].data["status"] == "failed"
+    assert not [
+        event
+        for event in events
+        if event.type == "run_summary" and event.data.get("status") == "completed"
+    ], "被取消的任务不能以「完成」收尾"
+
+
+def test_readyz_returns_503_while_draining(client, temp_skills_root):
+    """排空期间就绪探针返回 503——这是编排器/反代「摘流」的唯一信号。
+
+    为什么不满足于「日志里写一句在排空」：编排器不读日志，它只看探针。探针在此期间
+    仍说 200，反代会继续把新请求送进来，于是「停止接收新任务」这句承诺当场失效。
+
+    同时钉住另一面：`/healthz` 照旧 200。排空中的进程**是活着的**，让生死探针失败
+    会招来一次重启——那正好把这次体面的排空变成一次硬杀。
+    """
+    write_skill_package(temp_skills_root, "prd-generator")
+    assert client.get("/readyz").status_code == 200, "先确认它在排空之前是就绪的"
+
+    job_drain.drain_controller.begin()
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    # 失败原因要能指出来：只说「没好」的探针，人和编排器都无从判断
+    assert body["checks"]["draining"]["ok"] is False
+    assert "重启" in body["checks"]["draining"]["detail"]
+    assert client.get("/healthz").status_code == 200, "排空中的进程还活着，生死探针不该失败"
+    # 详情端点契约不变（它恒 200，是给人看的体检报告）
+    assert client.get("/health").status_code == 200
+
+
+def test_drain_logs_how_many_jobs_it_cancelled(client, alice, monkeypatch, caplog):
+    """汇总日志里写明「本次排空取消了几个任务」。
+
+    运维在 `docker compose logs` 里要能一眼看出影响面，而不是去翻每一条任务的终态。
+    断言分两层：结构化字段（供日志检索/告警）与渲染后的正文（供人眼），
+    两者都指向同一个数——只测其中一层，另一层写错了不会有人发现。
+    """
+    never = asyncio.Event()
+
+    async def stream():
+        yield StreamEvent(type="chunk", content="第一段", data={})
+        await never.wait()
+
+    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
+
+    async def scenario() -> job_drain.DrainReport:
+        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
+        job_service.dispatch(
+            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        )
+        for _ in range(200):
+            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
+            if runtime is not None and runtime.live_buffer:
+                break
+            await asyncio.sleep(0.005)
+        return await job_drain.drain_controller.drain(timeout=0.1)
+
+    with caplog.at_level(logging.WARNING, logger="backend.services.job_drain"):
+        report = _run(scenario())
+
+    assert report.cancelled == 1
+    finished = [r for r in caplog.records if getattr(r, "event", "") == "service.drain_finished"]
+    assert finished, "排空必须落一行汇总（事件名 service.drain_finished）"
+    record = finished[-1]
+    assert record.cancelled_jobs == 1
+    assert record.in_flight == 1
+    assert "取消 1 个" in record.getMessage(), record.getMessage()
+
+
+def test_shutdown_returns_a_success_exit_code_after_draining(client, alice, monkeypatch):
+    """排空结束后进程以**成功**状态退出：退出码 0，不是被信号打断的 128+15。
+
+    为什么值得单独钉：`docker compose restart` 之后容器若以非零码退出，编排器会把一次
+    **计划内**的重启记成崩溃（重启计数、告警、自动回滚的判据都会跟着错）。用例不启动
+    子进程、不发真信号，所以断言的是那个单元交出的退出码——`main.py` 的信号处理拿到
+    它之后才结束进程（`os._exit(code)`，见那里的说明）。
+
+    即便这次排空不得不取消一个任务，退出码仍然是 0：取消是**排空成功的一部分**，
+    不是排空失败。
+    """
+    never = asyncio.Event()
+
+    async def stream():
+        yield StreamEvent(type="chunk", content="第一段", data={})
+        await never.wait()
+
+    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
+
+    async def scenario() -> int:
+        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
+        job_service.dispatch(
+            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        )
+        for _ in range(200):
+            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
+            if runtime is not None and runtime.live_buffer:
+                break
+            await asyncio.sleep(0.005)
+        return await job_drain.drain_controller.shutdown(timeout=0.1)
+
+    code = _run(scenario())
+
+    assert code == 0, "排空走完是正常收尾，退出码必须是 0"
+    assert isinstance(code, int)
+    assert job_drain.drain_controller.is_draining() is True
+
+
+def test_signal_handler_installation_never_breaks_startup(client):
+    """装不上信号处理器时安静地返回 False，**不许把启动搞崩**。
+
+    两个真实场景：Windows 的 Proactor 事件循环没有 `add_signal_handler`
+    （直接抛 `NotImplementedError`），以及应用跑在非主线程（`ValueError`，用例里的
+    TestClient 正是这样）。排空本身不依赖信号——它与信号是两个单元，信号只是调用方；
+    所以在这些环境里，兜底是 lifespan 关闭阶段的那次排空。
+    """
+    # 同步用例里没有运行中的事件循环：这一句必须安静地返回 False，而不是抛异常
+    assert job_drain.drain_controller.install_signal_handlers() is False
+
+
+def test_draining_refuses_new_jobs(client):
+    """排空期间创建任务返回 503：请求不能被排进一个马上要死的队列。
+
+    只靠就绪探针不够：反代的摘流有几秒延迟，而生成请求是用户点出来的。此时把它
+    塞进队列，得到的是「任务起来了、进程随后死了、下次启动才告诉它失败」——
+    用户等了三分钟才看到一句「生成失败」。直接说不收，用户立刻知道该重试。
+    """
+    register(client)
+    job_drain.drain_controller.begin()
+
+    response = client.post(
+        "/api/jobs",
+        json={"kind": "prd", "requirements": "做一个演示产品", "product_name": "演示"},
+    )
+
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert "重启" in body["detail"]
+    # 不新增错误码：错误码是前后端共享契约（前端有一份逐字镜像的枚举），
+    # 这里用既有的 INTERNAL_ERROR 承载「服务端暂时不可用」，靠状态码 503 表达「稍后重试」。
+    assert body["code"] == "INTERNAL_ERROR"
+
+
+def test_drain_window_comes_from_the_environment(client, alice, monkeypatch):
+    """等待上限是**可配的环境变量**（`PRDWRIGHT_DRAIN_TIMEOUT`，默认 30 秒）。
+
+    为什么不做成常量：30 秒是给容器 `stop_grace_period` 留余量的经验值，而部署形态、
+    任务长度、宿主差异都会让这个经验值需要调。做成常量的话，调它就得改代码、重打镜像；
+    做成配置则部署与用例各取所需——**用例正因此能在毫秒级验证超时那条路径**。
+
+    这条不只是读一遍配置：它把环境变量调到 0.05 秒，然后**不传 timeout** 去排空一个
+    卡住的任务，证明 `drain()` 真的按配置走（而不是只在文档里可配）。
+    """
+    from backend.core.config import get_settings
+
+    assert get_settings().drain_timeout_seconds == 30.0, "默认值必须是 30 秒"
+
+    monkeypatch.setenv("PRDWRIGHT_DRAIN_TIMEOUT", "0.05")
+    get_settings.cache_clear()
+    assert get_settings().drain_timeout_seconds == 0.05
+
+    never = asyncio.Event()
+
+    async def stream():
+        yield StreamEvent(type="chunk", content="第一段", data={})
+        await never.wait()
+
+    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
+
+    async def scenario() -> job_drain.DrainReport:
+        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
+        job_service.dispatch(
+            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        )
+        for _ in range(200):
+            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
+            if runtime is not None and runtime.live_buffer:
+                break
+            await asyncio.sleep(0.005)
+        # 不传 timeout：窗口必须来自环境变量
+        return await job_drain.drain_controller.drain()
+
+    report = _run(scenario())
+
+    assert report.cancelled == 1
+    assert report.waited_seconds < 5, "窗口应当从配置读（0.05 秒），不是写死的 30 秒"

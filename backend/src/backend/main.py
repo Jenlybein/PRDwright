@@ -3,6 +3,11 @@
 本地启动（在 backend/ 目录下执行）：
 
     uv run uvicorn backend.main:app --reload
+
+退出不是「立刻消失」：收到 `SIGTERM` / `SIGINT` 后先排空（就绪探针转 503 → 等在途
+任务最多 `PRDWRIGHT_DRAIN_TIMEOUT` 秒 → 超时者标成已取消并落终态 → 以 0 退出），
+见 `services/job_drain.py`。信号只在 POSIX 主线程上挂得上；装不上时由 lifespan 的
+关闭阶段兜底排空。
 """
 
 from contextlib import asynccontextmanager
@@ -36,6 +41,7 @@ from backend.core.logging_setup import (
     shutdown_log_persistence,
 )
 from backend.services import auth_service, job_service
+from backend.services.job_drain import drain_controller
 from backend.services.skill_registry import ensure_skills
 
 logger = logging.getLogger(__name__)
@@ -127,8 +133,30 @@ async def lifespan(_: FastAPI):
             or "未发现技能包（生成将退回内置提示词）",
         },
     )
+    # 排空（issue #13）：把终止信号接到「摘流 → 等在途任务 → 超时取消 → 退出」上。
+    #
+    # 位置在启动的最后一步——信号一到就要真的执行收尾，所以库、技能、日志、运行时
+    # 登记表必须都已经就绪；早一步挂上，早期的信号会走进一个还没准备好的进程。
+    #
+    # `reset()` 先把状态清回「未排空」：同一个进程里可能起多次应用（用例的 TestClient、
+    # `--reload`），不清的话第二个应用会继承上一次排空的 503。
+    drain_controller.reset()
+    if not drain_controller.install_signal_handlers():
+        # 不是错误：Windows 的事件循环没有信号、非主线程也装不了。那些环境里
+        # 「不留 running 尸体」由下面关闭阶段的那次排空兜底。
+        logger.info(
+            "本次进程未接管终止信号，排空将在关闭阶段兜底执行",
+            extra={"event": "service.drain_signals_unavailable"},
+        )
     yield
 
+    # 关闭阶段的兜底排空：正常路径上信号已经排空过，这里再调一次是空转，所以先用
+    # 「还有没有在途任务」挡一道——没有就不必为每个用例/每次重启的关闭流程都留一行
+    # 「开始排空」的告警。有的话（Windows 没信号、uvicorn 自己的收尾、应用被直接关掉），
+    # 它就是这些环境下「不留 running 尸体」的唯一保障。顺序必须在
+    # `shutdown_log_persistence()` 之前——排空的汇总日志也要进日志库。
+    if drain_controller.in_flight():
+        await drain_controller.drain()
     # 退出前 flush：最后一批日志还可能在内存队列里，而它们往往正好是
     # 「服务为什么退出」的那几行。
     shutdown_log_persistence()

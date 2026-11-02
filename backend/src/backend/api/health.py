@@ -17,6 +17,9 @@
 请求，而探针会被高频触发（理由见下面对供应商一项的说明）。已知边界：供应商配置坏了，
 `/readyz` 仍然说「就绪」，那是 `/health` 的职责。
 
+另有一条例外：**排空期间**（进程收到终止信号、正在等在途任务收尾）`/readyz` 一律 503，
+连两项检查都不跑——那时结论已经定了，见 `services/job_drain.py`。
+
 ## `/health`：给人看的体检报告
 
 **它回答的问题**：这次「用不了」是哪一类？——不是「服务活着吗」（活着但没法用是常态）。
@@ -47,6 +50,7 @@ from sqlalchemy import text
 
 from backend.core.engine import get_engine
 from backend.core.runtime_config import get_runtime_config, provider_key_present
+from backend.services.job_drain import drain_controller
 from backend.services.skill_registry import (
     audit_skills,
     describe_manifest,
@@ -281,7 +285,27 @@ async def readyz(response: Response) -> dict:
 
     `status` 用 `ready` / `not_ready` 而不是详情端点那套 `ok` / `degraded`：
     两条端点的结论语义不同，字段名一样反而容易被混着用。
+
+    **排空期间一律 503**（issue #13）。这一句不是「顺手加的一条判断」：收到终止信号
+    之后，进程还能活最多 30 秒（等任务跑完），这段时间里它**不能再接新活**。编排器
+    不读日志，它只看这条探针——探针此时若还说「就绪」，反代会继续把生成请求送进来，
+    「停止接收新任务」当场失效。
+
+    排空期间**不再跑那两项依赖检查**：它们各要借一次连接、读一遍技能包，而此刻的
+    结论已经定了（503）。少做一次写探针也顺带少一次「退出前把库锁住」的机会。
     """
+    if drain_controller.is_draining():
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {
+            "status": "not_ready",
+            "checks": {
+                "draining": {
+                    "ok": False,
+                    "detail": "服务正在重启（排空），不再接收新任务",
+                }
+            },
+        }
+
     checks = {
         "database": _check_database_writable(),
         "skills": _check_skills_loadable(),
