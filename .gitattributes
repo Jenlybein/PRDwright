@@ -1,0 +1,6 @@
+# 换行符归一：脚本与配置里的 LF 是语义要求，不是风格偏好。
+# Windows 检出若把 .sh 变成 CRLF，容器里会得到「解释器不存在」。
+*.sh text eol=lf
+*.conf text eol=lf
+*Dockerfile text eol=lf
+*.Dockerfile text eol=lf
