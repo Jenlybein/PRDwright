@@ -200,8 +200,10 @@ def head_revision() -> str | None:
 
     - 测试断言「库的版本 == 代码的 head」，而不是写死 `"0001"`——写死的用例
       每加一条迁移就要改一次，而它本该表达的是「是否到最新」；
-    - `/readyz` 的就绪判定：`alembic_version != head` 说明迁移还没跑完，
-      此时库是通的但业务会因缺列而 500。
+    - 判断「迁移跑完没有」：`alembic_version != head` 说明迁移还没跑完，
+      此时库是通的但业务会因缺列而 500。⚠️ v9 的就绪探针 `/readyz` **没有**用它——
+      那里只查「库可写 + 技能包可加载」两件事，迁移由启动期的 `prepare_schema` 保证；
+      将来若要把「迁移未完成」也纳入摘流判据，入口就是这里。
     """
     cfg = Config()
     cfg.set_main_option("script_location", str(_BACKEND_ROOT / "migrations"))
