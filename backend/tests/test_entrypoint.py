@@ -16,16 +16,24 @@
 - 两条 `/health` 的语义不同（一条只回 `{"status":"ok"}`），若哪天有人把公开路径指到
   那一条，探活看似正常但三项体检全丢。
 
-所以把它们变成每次 `pytest` 都会亮的红灯（issue #4）。
+第二层坑在修完之后才浮出来：把入口点改成 `backend.main:app`，属性确实存在了，但
+console script 会**零参调用**它，而 FastAPI 对象的 `__call__(scope, receive, send)`
+要三个参数，于是 `uv run backend` 变成 `TypeError`。根因不是值写错，而是**把 web 应用
+当成了可执行命令**——所以最终把那块声明整个删掉，由下面的用例钉住「别再把它加回来」，
+并对任何新命令做一次零参可调用性检查。
+
+所以把它们变成每次 `pytest` 都会亮的红灯（issue #4、后续收口）。
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import inspect
 import pathlib
 import tomllib
 
+import pytest
 from fastapi import FastAPI
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -37,10 +45,10 @@ _ROUTE_DECORATORS = frozenset({"get", "post", "put", "patch", "delete", "head", 
 _HEALTH_PATH = "/health"
 
 
-def _console_entry_point(name: str = "backend") -> str:
-    """读打包入口点声明（`[project.scripts]` 是「怎么启动」的唯一真源）。"""
+def _declared_scripts() -> dict[str, str]:
+    """读打包声明的命令（`[project.scripts]`）。可能整块不存在，返回空表。"""
     data = tomllib.loads((_BACKEND_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    return data["project"]["scripts"][name]
+    return dict(data.get("project", {}).get("scripts", {}))
 
 
 def _resolve_entry_point(target: str) -> object:
@@ -51,27 +59,49 @@ def _resolve_entry_point(target: str) -> object:
 
 
 # ---------------------------------------------------------------------------
-# 切片一 · 打包入口点必须解析到真实存在的应用
+# 切片一 · 不要把「web 应用」声明成「可执行命令」
 # ---------------------------------------------------------------------------
 
 
-def test_console_entry_point_resolves_to_the_real_application() -> None:
-    """`[project.scripts]` 指向的属性必须真的存在，且就是被 uvicorn 加载的那个 app。
+def test_no_console_script_declared_for_the_backend() -> None:
+    """`[project.scripts]` 里不该有 `backend`。
 
-    只断言「字符串等于某个值」是空的：把入口点改对之后它一样可能是另一个对象。
-    这里真的按 `模块:属性` 解析一遍，再与 `backend.main:app` 比同一性——
-    「启动哪个应用」从此只有一个答案。
+    这里连着踩过两次坑，值得记全：
+
+    1. 值曾是 `backend:main`——包里不存在那个属性，真按脚本启动才炸 `AttributeError`；
+    2. 改成 `backend.main:app` 之后**解析**通了，但 console script 会零参调用它，而
+       FastAPI 对象的 `__call__(scope, receive, send)` 要三个参数 → `TypeError`。
+
+    根因不是「值写错」，是**把 ASGI 应用当成了可执行命令**。应用只由服务器加载
+    （`uvicorn backend.main:app`）。删掉声明是唯一不会误导人的收法——留着它，下一个人
+    （或下一个 agent）照 `pyproject.toml` 敲命令，就会得到一个莫名其妙的报错。
     """
-    target = _console_entry_point()
+    scripts = _declared_scripts()
 
-    assert ":" in target, f"入口点必须写成 模块:属性 才能被 console_scripts 解析：{target!r}"
-    resolved = _resolve_entry_point(target)
+    assert "backend" not in scripts, (
+        f"`[project.scripts]` 不该声明 backend 命令（当前 {scripts.get('backend')!r}）："
+        "FastAPI 应用不是零参可调用对象，启动请用 `uvicorn backend.main:app`"
+    )
 
-    assert isinstance(resolved, FastAPI), f"入口点 {target!r} 解析到 {type(resolved).__name__}，不是 ASGI 应用"
 
-    from backend.main import app as running_app
+def test_any_declared_script_is_actually_invocable() -> None:
+    """若将来确实要声明命令，它必须能被零参调用——否则又是一条死命令。
 
-    assert resolved is running_app, f"入口点 {target!r} 解析到的不是 backend.main:app"
+    这条不是「断言现在是空的」（那样一有合法命令就红），而是**对所有现存命令生效**：
+    解析 `模块:属性` 之后用 `signature().bind()` 试一次零参绑定。
+    它同时覆盖了旧坑（属性不存在 → `AttributeError`）和新坑（ASGI 应用 → `TypeError`）。
+    """
+    for name, target in _declared_scripts().items():
+        assert ":" in target, f"命令 {name!r} 必须写成 模块:属性 才能被 console_scripts 解析：{target!r}"
+        resolved = _resolve_entry_point(target)
+
+        try:
+            inspect.signature(resolved).bind()
+        except TypeError as exc:  # 需要参数 = 不能被当成命令
+            pytest.fail(
+                f"命令 {name!r} 指向 {target!r}，但它不能零参调用（{exc}）："
+                "console script 会直接调用它，这条命令一敲就报错"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -37,8 +37,25 @@
 | **A6** | `services/job_service.py:363 cancel_for_solution` | **原清单漏项**。零调用；`delete_solution_and_cancel_jobs`（`:411-424`）把同样三步内联重写了一遍；ADR-036 与 3 处注释仍写「删除方案时必须走这里」 | 删函数 + 同步 ADR-036 指向 | 是 |
 | **A7** | 10 个零提及的符号 | `normalize_stage`、`is_valid_role`（`core/chat_kinds.py:44/59`）、`master_key_exists`（`core/crypto.py:51`）、`is_present`（`core/secrets.py:119`）、`current_engine`（`core/engine.py:154`）、`config_service_window`、`input_ceiling_for`（`core/runtime_config.py:465/500`）、`ClearForSolution.clear_for_solution`（`chat_session_repo.py:105`）、`ChatTurnRepository.has_turns`（`chat_turn_repo.py:219`）、`_PLACEHOLDER_URL`（`core/schema.py:53`） | 删 | 是 |
 | **A8** | 8 条未使用 import（ruff F401 已确认真无消费者） | `api/conversation.py:11`、`api/schemas/`（拆分前为单文件 19/22 行）、`core/engine.py:49/50`、`core/runtime_config.py:54`、`repositories/document_repo.py:34`、`services/conversation_service.py:42` | 删 | 是 |
-| **A9** | `backend/src/backend/__init__.py` 的第二个 FastAPI app + `pyproject.toml:36` 坏入口点 | `__init__.py:1-7` 建了 `app` 与 `/health`，全仓 `from backend import app` 零命中；真 app 在 `main.py`、`/health` 在 `api/health.py:144`；`pyproject.toml:36` 的 `backend = "backend:main"` 指向不存在的属性（`hasattr(backend,'main')` 实测 False） | 删 app 代码块 + 改入口点为 `backend.main:app` | 是 |
+| **A9** | `backend/src/backend/__init__.py` 的第二个 FastAPI app + `pyproject.toml:36` 坏入口点 | `__init__.py:1-7` 建了 `app` 与 `/health`，全仓 `from backend import app` 零命中；真 app 在 `main.py`、`/health` 在 `api/health.py:144`；`pyproject.toml:36` 的 `backend = "backend:main"` 指向不存在的属性（`hasattr(backend,'main')` 实测 False） | 删 app 代码块；入口点最终**整块删除**（见下方补记） | 是 |
 | **A10** | 前端 6 项：3 个孤儿资源 + 2 个零引用函数 + 1 个死类型 | `assets/main.css`（0 importer）、`assets/base.css`（仅被 main.css 引用 → 级联死）、`assets/logo.svg`（0 命中，注意 `grep logo` 会命中 `logout` 是假阳性）、`api.ts:123 getQuestions()`、`api.ts:887 generatePrdStream()`、`types/index.ts:457 SessionData`（**不是** `:1155` 的 `SessionDataV2`，那个活着） | 删 | 是 |
+
+### A9 补记：入口点不是改对值就完事，它有两层坑
+
+层一（本次执行中修掉）：`backend = "backend:main"` 指向包里不存在的属性 —— 只有真按脚本
+启动才炸 `AttributeError`，所以长期没人碰。
+
+层二（#4 收口之后才浮出来）：把值改成 `backend.main:app`，属性**确实解析得到**了，票面验收
+「指向真实存在的属性」达成；但 console script 是**零参调用**入口对象，而 FastAPI 实例的
+`__call__(scope, receive, send)` 要服务器递来的三个参数，于是 `uv run backend` 变成
+`TypeError: FastAPI.__call__() missing 3 required positional arguments`。
+
+根因不是「值写错」，是**把 web 应用当成了可执行命令**。应用只由服务器加载
+（`uvicorn backend.main:app`，README / 部署 / CI 一直走这条）。最终处置：**把
+`[project.scripts]` 整块删除**——全仓零使用者，留着它等于给下一个人（或下一个 agent）
+留一个照 `pyproject.toml` 一敲就报错的陷阱；不包 `serve()` 是因为那会让「怎么启动」
+多出第二种说法。守卫落在 `tests/test_entrypoint.py`：一条钉住「别再声明 backend 命令」，
+一条对**任何**现存命令做 `signature().bind()` 零参可调用性检查（同时覆盖旧坑与新坑）。
 
 ### A1 / A2 的删除障碍（必须一起改）
 

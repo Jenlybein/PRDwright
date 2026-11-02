@@ -32,11 +32,16 @@ dependencies = [
     "sqlmodel>=0.0.31",
 ]
 
-[project.scripts]
-# 入口点必须指向**真实存在**的属性：`backend.main:app`（模块 `backend.main` 的 `app`）。
-# 旧值 `backend:main` 指向包里不存在的属性（`backend` 是命名空间根，`main` 是子模块
-# 而不是它的属性），只有真的按脚本启动时才会炸 `AttributeError`，于是长期没人碰。
-backend = "backend.main:app"
+# 这里**故意不再声明 `[project.scripts]`**。
+#
+# 曾经有一条 `backend = "backend.main:app"`：它能把属性解析出来（模块 `backend.main` 的
+# `app` 确实存在），但 console script 会把它**零参调用**，而 FastAPI 对象的
+# `__call__(scope, receive, send)` 要的是服务器递来的三个参数 —— 真敲 `uv run backend`
+# 立刻 `TypeError`。它指向的是「web 应用」，不是「可执行命令」；要跑就用服务器：
+# `uvicorn backend.main:app`（README / 部署 / CI 一直走这一条）。
+#
+# 删掉而不是包一层 `serve()`：全仓零使用者，多一条命令就多一种「怎么启动」的说法。
+# 守卫见 `tests/test_entrypoint.py`——它同时钉住「别把 ASGI 应用声明成命令」。
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
