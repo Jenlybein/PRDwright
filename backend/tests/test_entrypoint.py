@@ -23,11 +23,19 @@ console script 会**零参调用**它，而 FastAPI 对象的 `__call__(scope, r
 并对任何新命令做一次零参可调用性检查。
 
 所以把它们变成每次 `pytest` 都会亮的红灯（issue #4、后续收口）。
+
+## 切片四为什么也在这里
+
+探针是「启动路径」的延伸：容器起没起来、现在能不能接活，是同一件事的两个阶段。
+而且它们的失效方式与前面的坑同源——**看起来有探针，其实没有判断力**：
+`/health` 三项体检全红也恒返回 200，编排器拿它当探针等于永远健康。
+所以「生死恒 200 / 就绪不 ok 就 503」这条分工由本文件守（issue #12）。
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
 import inspect
 import pathlib
@@ -35,6 +43,11 @@ import tomllib
 
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import create_engine
+
+from backend.core.config import get_settings
+
+from conftest import write_skill_package
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _SRC = _BACKEND_ROOT / "src" / "backend"
@@ -180,3 +193,156 @@ def test_health_route_is_registered_exactly_once() -> None:
 
     assert len(hits) == 1, f"`/health` 应有且仅有一处定义，实际 {len(hits)} 处：{hits}"
     assert hits[0].startswith("api/health.py:"), f"`/health` 应在 api/health.py 定义，实际在 {hits[0]}"
+
+
+# ---------------------------------------------------------------------------
+# 切片四 · 两条探针：生死恒 200，就绪不 ok 就 503
+# ---------------------------------------------------------------------------
+
+
+def _read_only_engine(db_file: pathlib.Path):
+    """造一个「连得上、读得出、写不进」的 Engine。
+
+    用 SQLite 的 `mode=ro` URI 打开同一个库文件，故障就精确落在**写**这一步：
+    连接成功、查询成功，只有写会报 `attempt to write a readonly database`。
+    这正是「库可写」这一项要抓的状态——「连不上」与「读得挺好、一写就废」是两种病，
+    前者详情端点已经在报，后者只有写一次才知道。
+
+    直接 `create_engine` 而不走 `build_engine`：后者会按 URI 里的 `file:` 前缀去推算
+    目录（那是生产路径该管的事），这里只需要一条读得动、写不进的连接。
+    """
+    url = f"sqlite+pysqlite:///file:{db_file.as_posix()}?mode=ro&uri=true"
+    return create_engine(url, connect_args={"timeout": 10, "check_same_thread": False})
+
+
+@contextlib.contextmanager
+def _fake_read_only_database(monkeypatch):
+    """把探针用的 Engine 换成只读库，退出时还原。
+
+    替换的是**依赖本身**（库），不是探针逻辑：探针照常借连接、照常执行写语句，
+    失败来自 SQLite 真实的只读拒绝。
+    """
+    from backend.api import health
+
+    engine = _read_only_engine(get_settings().db_file)
+    monkeypatch.setattr(health, "get_engine", lambda: engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def test_healthz_always_returns_200(client):
+    """生死探针只表示「进程活着」：固定 200 + 固定响应体，不查任何依赖。"""
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_healthz_stays_200_while_dependencies_are_broken(client, monkeypatch, tmp_path):
+    """依赖坏到「接不了活」时，生死探针仍然 200——这就是它存在的意义。
+
+    同时断言就绪探针在同一时刻说「没好」（503）：两条探针的分工正是这一对断言，
+    只测其中一条会让「改错了却仍然绿」变得可能（例如有人把依赖检查搬进生死探针）。
+    """
+    # 技能目录指到一个不存在的目录：部署漏打包 skills/ 的现场
+    monkeypatch.setenv("PRDWRIGHT_SKILLS_DIR", str(tmp_path / "no-skills-here"))
+
+    with _fake_read_only_database(monkeypatch):
+        live = client.get("/healthz")
+        ready = client.get("/readyz")
+
+    assert live.status_code == 200, "生死探针不许因为依赖坏了就返回非 200"
+    assert live.json() == {"ok": True}
+    assert ready.status_code == 503, "依赖坏掉时就绪探针必须说「没好」"
+
+
+def test_readyz_returns_200_when_database_is_writable_and_skills_load(temp_skills_root, client):
+    """两项都正常时就绪探针 200。
+
+    夹具顺序有意义：`temp_skills_root` 先把技能根目录指到临时目录，
+    `client` 才会带着这份配置走进 lifespan。
+    """
+    write_skill_package(temp_skills_root, "prd-generator")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert set(body["checks"]) == {"database", "skills"}
+    assert body["checks"]["database"]["ok"] is True
+    assert body["checks"]["skills"]["ok"] is True
+    # 就绪探针刻意不查模型供应商：那一项要发外部请求，不适合被高频触发的探针（见 api/health.py）
+    assert "llm" not in body["checks"]
+
+
+def test_readyz_flags_unavailable_skills(temp_skills_root, client):
+    """技能包不在位时 503，且响应体指出失败的是**技能**这一项、原因是「一个包都没有」。
+
+    `temp_skills_root` 只把根目录指到空目录、不往里放包——正是「部署时漏打包 skills/」
+    的现场。此时数据库那一项仍然通过，所以这条断言同时证明了「分开报」。
+    """
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    assert body["checks"]["skills"]["ok"] is False
+    assert "未发现任何技能包" in body["checks"]["skills"]["detail"]
+    assert body["checks"]["database"]["ok"] is True
+
+
+def test_readyz_flags_unwritable_database(temp_skills_root, client, monkeypatch):
+    """库读得出来、写不进去时 503，且响应体指出失败的是**数据库**这一项。
+
+    这一项与详情端点的 `SELECT 1` 不是一回事：只读库在 `SELECT 1` 下完全健康，
+    但它存不了方案、也写不了任务——「能不能接活」必须问写。
+    """
+    write_skill_package(temp_skills_root, "prd-generator")
+
+    with _fake_read_only_database(monkeypatch):
+        response = client.get("/readyz")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["checks"]["database"]["ok"] is False
+    # 公开路径只给异常类型，不吐路径等内部细节（与 /health 同一条纪律）
+    assert "不可写" in body["checks"]["database"]["detail"]
+    # 技能这一项是好的：失败项必须能被指出来，否则探针只等于一句「没好」
+    assert body["checks"]["skills"]["ok"] is True
+
+
+def test_probe_endpoints_do_not_require_login(temp_skills_root, client):
+    """两条探针都在免登录白名单里：没有 Cookie 也能拿到结论。
+
+    探针被鉴权拦成 401 时，编排器会把它读成「服务不可用」——一个「配了探针比没配还糟」
+    的现场。所以这里既发真实请求（无登录态），也直接查白名单函数：
+    请求断言守着行为，白名单断言让「谁把它挪出白名单」在 diff 里显形。
+    """
+    from backend.api.deps import is_public_path
+
+    write_skill_package(temp_skills_root, "prd-generator")
+
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/readyz").status_code == 200
+
+    assert is_public_path("/healthz")
+    assert is_public_path("/readyz")
+
+
+def test_detail_health_endpoint_contract_is_unchanged(temp_skills_root, client):
+    """详情端点的契约一个字都没变：三项体检、恒 200、`status` 两档。
+
+    技能目录空着（本用例没放包）正好用来钉住「降级也照样 200」：把状态码打成失败会让
+    编排器踢掉一个其实还能降级运行的容器——那件事现在归 `/readyz`，不归这里。
+    """
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"status", "checks"}
+    assert set(body["checks"]) == {"database", "llm", "skills"}
+    assert body["checks"]["skills"]["ok"] is False
+    assert body["status"] == "degraded"

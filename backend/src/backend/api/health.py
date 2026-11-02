@@ -1,4 +1,23 @@
-"""健康检查路由。
+"""健康检查路由：一个详情端点 + 两条探针。
+
+**三个端点，三种读者**——先把这个分工写死，混用会出事故：
+
+| 端点 | 回答的问题 | 读者 | 状态码 |
+| --- | --- | --- | --- |
+| `GET /health` | 这次「用不了」是哪一类？ | 人（排障、后台面板） | **恒 200** |
+| `GET /healthz` | 这个进程还活着吗？ | 编排器 liveness | 恒 200 |
+| `GET /readyz` | 现在能接活吗？ | 编排器 readiness | 200 / 503 |
+
+`/health` 与 `/readyz` 的差别不是「谁查得多」，而是**读者不同**：体检报告是给人看的，
+它的价值在于说清「哪一类不可用」，所以它是三档细节、恒 200；编排器只认两档结论——
+200 就调度、503 就摘流或重启。把详情端点当探针用，等于让编排器去读一份「三项全红也恒
+200」的报告，那和没配探针是一样的（v8 之前正是这个状态，见 issue #12）。
+
+`/readyz` 只查两件事：**库可写**、**技能包可加载**。刻意不查模型供应商——那一项要发外部
+请求，而探针会被高频触发（理由见下面对供应商一项的说明）。已知边界：供应商配置坏了，
+`/readyz` 仍然说「就绪」，那是 `/health` 的职责。
+
+## `/health`：给人看的体检报告
 
 **它回答的问题**：这次「用不了」是哪一类？——不是「服务活着吗」（活着但没法用是常态）。
 
@@ -23,12 +42,17 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
 from backend.core.engine import get_engine
 from backend.core.runtime_config import get_runtime_config, provider_key_present
-from backend.services.skill_registry import audit_skills, describe_manifest, skills_root
+from backend.services.skill_registry import (
+    audit_skills,
+    describe_manifest,
+    read_text_cached,
+    skills_root,
+)
 
 router = APIRouter(tags=["system"])
 
@@ -157,3 +181,112 @@ async def health() -> dict:
     }
     status = "ok" if all(item["ok"] for item in checks.values()) else "degraded"
     return {"status": status, "checks": checks}
+
+
+# ---------------------------------------------------------------------------
+# 探针：生死只管「活着」，就绪只管「能接活」
+# ---------------------------------------------------------------------------
+#
+# 两条探针的判据刻意**互不重叠**，也不要互相复用：
+# 生死探针一旦开始查依赖，库一坏编排器就会重启容器——而重启治不了坏库，只会把
+# 一个还能降级服务、还能让人登进去看日志的进程反复杀掉。反过来，就绪探针一旦只查
+# 「进程活着」，它就退化成了一句口语，摘流与放量都没有依据。
+
+
+def _check_database_writable() -> dict:
+    """探测「库现在能不能写」：借一条连接，建一张探针表再删掉，全程回滚。
+
+    为什么不是 `SELECT 1`：只读的库（文件权限、只读挂载、磁盘满后的半只读状态）
+    读得出来、写不进去，而「现在能接活」恰恰要求写得进去——存不了方案的服务，
+    「健康」二字没有意义。这就是它与 `_check_database()`（只探「可连接」）的分工：
+    详情端点回答「库通不通」，就绪探针回答「写不写得进去」。
+
+    为什么敢建表：整段包在一个事务里，结尾**无条件回滚**。SQLite 支持事务内的 DDL 回滚；
+    换到 MySQL 时 DDL 会隐式提交，但探针表建完就删，落库的东西同样是零。
+    代价只是一次极短的写锁，在这个探针的触发频率下可以忽略。
+    """
+    try:
+        with get_engine().connect() as conn:
+            transaction = conn.begin()
+            try:
+                # 走 Engine 的池：与业务请求借同一条通路，才能测出「业务会写不进去」的那种故障。
+                conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS __readyz_probe (id INTEGER)")
+                conn.exec_driver_sql("DROP TABLE IF EXISTS __readyz_probe")
+            finally:
+                transaction.rollback()
+    except Exception as exc:  # noqa: BLE001 - 探针要兜住任何异常，否则它自己就 500 了
+        logger.warning(
+            "就绪探针：数据库不可写",
+            extra={"event": "readyz.database_unwritable", "error_type": type(exc).__name__},
+            exc_info=True,
+        )
+        # 只留异常类型：探针和 `/health` 一样是公开路径，不往外吐路径等内部细节
+        return {"ok": False, "detail": f"数据库不可写（{type(exc).__name__}）"}
+    return {"ok": True, "detail": "可写（探针临时表已回滚）"}
+
+
+def _check_skills_loadable() -> dict:
+    """探测「技能包现在能不能被生成管线加载」。
+
+    与 `_check_skills()` 的区别是**读者不同**，不是详略之别：那边报的是「加载了哪些包、
+    各自服务哪些产物」（一份给人看的清单），这边只回答「能不能加载」，并且
+    **真的把资源内容读一遍**——`audit_skills()` 只查文件在不在，而编码坏了、文件被占住、
+    内容读不动这些情况只有在读的时候才会暴露。探针回答的是「现在能不能接活」，
+    不是「目录摆得对不对」。
+    """
+    try:
+        manifests, problems = audit_skills()
+        if problems:
+            return {
+                "ok": False,
+                "detail": "；".join(f"{item.skill} {item.reason}" for item in problems),
+            }
+        if not manifests:
+            # 一个包都没扫到：多为部署时漏打包 skills/ 目录，或本地没配 PRDWRIGHT_SKILLS_DIR
+            return {
+                "ok": False,
+                "detail": f"未发现任何技能包（skills 根目录 {skills_root()} 为空或未打包）",
+            }
+        for manifest in manifests:
+            for key in manifest.artifacts:
+                read_text_cached(manifest.artifact_path(key))
+    except Exception as exc:  # noqa: BLE001 - 同上：探针不许自己 500
+        logger.warning(
+            "就绪探针：技能包加载失败",
+            extra={"event": "readyz.skills_unloadable", "error_type": type(exc).__name__},
+            exc_info=True,
+        )
+        return {"ok": False, "detail": f"技能包加载失败（{type(exc).__name__}）"}
+
+    return {
+        "ok": True,
+        "detail": "可加载：" + "、".join(f"{item.name} v{item.version}" for item in manifests),
+    }
+
+
+@router.get("/healthz", summary="生死探针")
+async def healthz() -> dict:
+    """恒 200：只表示「进程活着、事件循环还能应答」。
+
+    **不查任何依赖**。库坏了、技能包丢了、模型没配，这里照样 200——那不是它该回答的问题
+    （见模块文档里的三端点分工）。响应体刻意只有 `{"ok": true}`：它被编排器高频调用，
+    每多一个字段就多一次「有人拿它判断业务」的机会。
+    """
+    return {"ok": True}
+
+
+@router.get("/readyz", summary="就绪探针", responses={503: {"description": "有依赖不可用"}})
+async def readyz(response: Response) -> dict:
+    """两项都正常返回 200；任一失败返回 503，并在 `checks` 里指出是哪一项、为什么。
+
+    `status` 用 `ready` / `not_ready` 而不是详情端点那套 `ok` / `degraded`：
+    两条端点的结论语义不同，字段名一样反而容易被混着用。
+    """
+    checks = {
+        "database": _check_database_writable(),
+        "skills": _check_skills_loadable(),
+    }
+    ready = all(item["ok"] for item in checks.values())
+    if not ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {"status": "ready" if ready else "not_ready", "checks": checks}
