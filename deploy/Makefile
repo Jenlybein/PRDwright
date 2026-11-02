@@ -20,7 +20,7 @@ help:
 	@echo "make shell    进 api 容器"
 	@echo "make volumes  列出本项目的命名卷"
 	@echo "make config   打印展开后的完整编排"
-	@echo "make backup   备份（脚本见 issue #18，尚未合入）"
+	@echo "make backup   备份数据库（VACUUM INTO + sha256，产物落 backups/）"
 
 build:
 	$(COMPOSE) build
@@ -56,8 +56,8 @@ volumes:
 config:
 	$(COMPOSE) config
 
-# 占位：备份脚本由 issue #18 提供。合入后把这里换成对脚本的调用。
-# 在那之前，README §6.2 给了两条临时命令（VACUUM INTO + docker cp）。
+# 备份：产出 backups/prdwright-<日期>.db 与同名 .sha256（VACUUM INTO + 自检）。
+# 脚本本体跑在宿主的项目 uv 环境里；库的读写发生在一次性容器里，
+# 所以栈起着或停着都能备份。前置条件是 api 镜像已构建（make build 或 make up）。
 backup:
-	@echo "备份脚本见 issue #18，尚未合入。临时命令见 README §6.2。"
-	@exit 1
+	uv run --project ../backend python backup.py
