@@ -56,3 +56,89 @@ jobs:
       - run: npm run test:unit
       # build 里已含 type-check（run-p type-check build-only），一并兜住类型
       - run: npm run build
+  # ---------------------------------------------------------------------------
+  # 镜像构建：证明两个镜像**还构建得出来**（否则它们会在无人察觉的情况下坏掉）。
+  #
+  # 只构建、不推送：产物留在 runner 上，任务结束即丢弃，不进任何仓库。
+  # tag 取 `git describe`，让「这个镜像对应哪份提交」可查；这需要完整历史与 tag，
+  # 所以 checkout 用 fetch-depth: 0。拿不到 tag 时 `--always` 会退化成短 SHA，
+  # 再兜一层 $GITHUB_SHA，浅克隆/无 tag 的检出也不会让这一步失败。
+  #
+  # 缓存走 BuildKit 的 GHA 后端：Dockerfile 里 `uv sync` 与两次 `npm ci` 各自成层，
+  # lock 文件不变时直接复用，不必每次从网上重装整棵依赖树。
+  # ---------------------------------------------------------------------------
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      # 两个镜像互不依赖：一个坏了也要看到另一个的构建结果，而不是被矩阵取消。
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: deploy/docker/api.Dockerfile
+          - name: web
+            dockerfile: deploy/docker/web.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 计算镜像 tag（git describe，缺 tag 时回退到提交 SHA）
+        id: tag
+        run: |
+          tag="$(git describe --tags --always 2>/dev/null || true)"
+          [ -n "$tag" ] || tag="${GITHUB_SHA::12}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "镜像 tag：$tag"
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建 ${{ matrix.name }} 镜像（不推送）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          tags: prdwright-${{ matrix.name }}:${{ steps.tag.outputs.tag }}
+          # 不推送到任何仓库：只需「构建成功」这一个结论
+          push: false
+          load: false
+          cache-from: type=gha,scope=prdwright-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=prdwright-${{ matrix.name }}
+  # ---------------------------------------------------------------------------
+  # 整栈冒烟：真的把 compose 起起来，只验主链路可达——不跑登录与生成，
+  # 那需要真实模型密钥，会让 CI 依赖外部服务（#10 的验收边界）。
+  #
+  # 就绪判据是响应体里的 `status == "ready"`，**不是 HTTP 200**：
+  # 用户端 SPA 对未知路径也回 200（nginx 的 try_files 兜底到 index.html），
+  # 只看状态码会让「探针根本没被反代到 api」这种故障变成假绿（#16 的要求）。
+  #
+  # 具体判断（起栈、轮询、主链路断言、失败转储日志、拆栈）写在
+  # scripts/deploy/smoke.sh 里，本 job 只负责给它端口与 tag：
+  # 那段逻辑有顺序、有失败路径，内联进 YAML 会难读；更要紧的是本机必须能跑
+  # **同一份代码**——否则「我在本机等价跑过」不能当作 CI 会绿的证据。
+  #
+  # 这个 job 不读取 images job 的产物：没有镜像仓库就没有跨 job 的镜像传递
+  # （不推送是本票的硬约束），所以它自己 `--build`，与 images job 各自独立。
+  # ---------------------------------------------------------------------------
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 计算镜像 tag（与 images job 同口径）
+        id: tag
+        run: |
+          tag="$(git describe --tags --always 2>/dev/null || true)"
+          [ -n "$tag" ] || tag="${GITHUB_SHA::12}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "镜像 tag：$tag"
+      - name: 整栈冒烟（起栈 → 就绪 → 主链路断言 → 拆栈）
+        env:
+          # CI 避开特权端口 80：compose 的默认值仍是 80，这里只覆盖本次运行
+          PRDWRIGHT_HTTP_PORT: "8080"
+          PRDWRIGHT_IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: bash scripts/deploy/smoke.sh
