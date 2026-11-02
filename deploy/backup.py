@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PRDwright v9 备份脚本：按后端分派，产出带 sha256 的**可验证**备份。
+"""PRDwright v9 备份脚本：唯一后端是 SQLite，产出带 sha256 的**可验证**备份。
 
 用法（仓库根）::
 
@@ -41,18 +41,17 @@ SQLite 自己的读事务，把当前可见的完整内容（含 WAL 里未 chec
 读得到 `alembic_version`（说明这是一份已迁移的 PRDwright 库，不是空文件）。
 任一项失败即以非零状态退出，并且**不留下一个看起来可用的产物**。
 
-## 后端分派
+## 后端
 
-SQLite 是 v9 唯一在跑的后端。PostgreSQL 只留分派位：v9 的 `db` 服务是默认关闭的
-profile，接入在 v10；这里**不臆造**未演练的 `pg_dump` 实现，而是明确报「未启用」并
-非零退出。MySQL 在 v9 已不是一等后端，同样明确拒绝。
+本项目固定使用 SQLite，唯一支持的后端就是它。任何其它后端（PostgreSQL、MySQL……）
+都在前置检查里明确拒绝并以非零状态退出——不猜、不降级。
 
 ## 退出码
 
 =====  ================================================================
 0      成功
 1      未归类失败（例如容器内出现未预期的异常）
-2      前置检查失败：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 后端分派
+2      前置检查失败：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 后端判定
 3      在线备份失败（`VACUUM INTO`）
 4      自检失败（打不开、`integrity_check` 不为 ok、读不到 `alembic_version`）
 5      写盘或校验失败（拷贝到宿主目录、宿主 sha256 与容器内不一致）
@@ -202,17 +201,13 @@ def _env_file_value(name: str) -> str | None:
 
 
 def _url_backend(url: str) -> str:
-    """SQLAlchemy URL → 后端名（`sqlite+pysqlite` 这类取 `+` 前那段）。"""
+    """SQLAlchemy URL → 后端名（`sqlite+pysqlite` 这类取 `+` 前那段）。
+
+    这里只做名字归一，不做别名表：本项目只认 SQLite，其它名字一律交给
+    `_do_on_host` 的统一拒绝分支，不在解析层给它们留位置。
+    """
     scheme = url.split("://", 1)[0].strip().lower().split("+", 1)[0]
-    aliases = {
-        "sqlite": "sqlite",
-        "sqlite3": "sqlite",
-        "postgres": "postgresql",
-        "postgresql": "postgresql",
-        "mysql": "mysql",
-        "mariadb": "mysql",
-    }
-    return aliases.get(scheme, scheme or "unknown")
+    return "sqlite" if scheme == "sqlite3" else scheme or "unknown"
 
 
 def _sqlite_absolute_path(url: str) -> str | None:
@@ -334,27 +329,13 @@ def _force_remove_container(name: str) -> None:
 def _do_on_host(args: argparse.Namespace) -> None:
     backend = _resolve_backend(args)
 
-    if backend == "postgresql":
-        raise BackupError(
-            EXIT_PRECHECK,
-            "PostgreSQL 备份在 v9 未启用：compose 里的 db 服务是默认关闭的 profile，"
-            "api 的库仍是 SQLite 文件库。",
-            "这里只保留了分派位置，没有写未经演练的 pg_dump 流程；"
-            "PostgreSQL 接入是 v10 的范围（接上之后按 docs/architecture/v9/ARCHITECTURE.md "
-            "§6.2 的约定补 pg_dump -Fc 与 pg_restore --list 自检）。"
-            "现在请备份 SQLite：去掉 .env 里的 DATABASE_URL，或加 --backend sqlite。",
-        )
-    if backend == "mysql":
-        raise BackupError(
-            EXIT_PRECHECK,
-            "MySQL 不是 v9 的部署后端（v8 已把它从一等后端降级）。",
-            "v9 只有 SQLite 在跑；换库见 v10。用 --backend sqlite 备份当前库。",
-        )
     if backend != "sqlite":
         raise BackupError(
             EXIT_PRECHECK,
-            f"不认识的数据库后端：{backend}",
-            "v9 只支持 sqlite（PostgreSQL 见 v10）。检查 .env 里的 DATABASE_URL。",
+            f"本项目固定使用 SQLite，不支持其它后端；收到的是「{backend}」。",
+            "这不是「暂时没接」：换数据库后端已明确不在计划里。"
+            "用 --backend sqlite 备份当前库，并检查 .env 里的 DATABASE_URL "
+            "是否是 SQLite 绝对路径。",
         )
 
     db_path = _resolve_db_path(args, backend)
@@ -716,9 +697,9 @@ def _do_in_container(args: argparse.Namespace) -> dict[str, object]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "PRDwright v9 备份：按后端分派。SQLite 走 VACUUM INTO + "
+            "PRDwright v9 备份：唯一后端是 SQLite。走 VACUUM INTO + "
             "integrity_check + alembic_version 自检，产物落 deploy/backups/ 并带同名 "
-            ".sha256。PostgreSQL 在 v9 未启用（只留分派位）。"
+            ".sha256。其它后端一律明确拒绝。"
         ),
         epilog=(
             "示例：uv run --project backend python deploy/backup.py\n"
@@ -727,8 +708,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=["sqlite", "postgresql", "mysql"],
-        help="数据库后端；默认按 deploy/.env 的 DATABASE_URL 判断，没有则 sqlite。",
+        help="数据库后端；唯一支持 sqlite（默认按 deploy/.env 的 DATABASE_URL 判断，没有则 sqlite）。",
     )
     parser.add_argument(
         "--image",

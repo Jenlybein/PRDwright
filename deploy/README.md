@@ -14,7 +14,7 @@
 | 项 | 要求 |
 | --- | --- |
 | Docker | Docker Engine 或 Docker Desktop（Linux 容器模式），Compose v2 及以上 |
-| 宿主端口 | `80` 空闲（被占用时见 §9，改一个变量即可） |
+| 宿主端口 | `80` 空闲（被占用时见 §8，改一个变量即可） |
 | 宿主机工具 | **不需要** Node、Python、uv——镜像里自带 |
 | 磁盘 | 两个镜像合计约 1.3 GB（含 Python 依赖树与两个前端产物） |
 
@@ -205,7 +205,7 @@ uv run --project ../backend python backup.py
 uv run --project backend python deploy/backup.py
 ```
 
-脚本用项目自己的 uv 环境跑（`backend/.venv`，SQLite 分支只用 Python stdlib，不要求宿主装
+脚本用项目自己的 uv 环境跑（`backend/.venv`，只用 Python stdlib，不要求宿主装
 `sqlite3` CLI）。它按四步走，**任何一步失败都非零退出，并指出失败在哪一步**：
 
 1. **前置检查**：Docker 可用、`prdwright-api:<tag>` 镜像存在、`prdwright_data` 与
@@ -246,13 +246,14 @@ deploy/backups/
 
 | 退出码 | 失败在哪一步 |
 | --- | --- |
-| `2` | 前置检查：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 后端分派 |
+| `2` | 前置检查：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 后端判定（只接受 SQLite） |
 | `3` | 在线备份：`VACUUM INTO` 本身失败 |
 | `4` | 自检：打不开、`integrity_check` 不为 `ok`、读不到 `alembic_version` |
 | `5` | 写盘或校验：拷贝到宿主目录失败，或宿主 sha256 与容器内不一致 |
 
-PostgreSQL 分支只留分派位：v9 的 `db` 服务是默认关闭的 profile，`--backend postgresql`
-会明确报「v9 未启用、见 v10」并以 `2` 退出。这里不写未演练的 `pg_dump` 流程（见 §8）。
+**唯一后端是 SQLite**：`--backend` 传任何非 `sqlite` 的值（例如 `postgresql`、`mysql`）
+都会明确报「本项目固定使用 SQLite，不支持其它后端」并以 `2` 退出。本项目不使用其它数据库，
+所以这里没有第二条备份流程。
 
 ### 6.3 校验
 
@@ -342,19 +343,7 @@ docker compose up -d --build
 
 ---
 
-## 8. 升级到下一版（PostgreSQL）时的预留位
-
-compose 里有一个 **默认关闭** 的 `db` 服务（`profiles: ["db"]`）：
-
-- 它不会随 `docker compose up -d` 启动，v9 的数据库仍是 `prdwright_data` 卷里的 SQLite；
-- 现在启动它（`docker compose --profile db up -d db`）也不会让应用改用 PG——api 的
-  `DATABASE_URL` 没有指向它，服务之间也没有依赖关系；
-- 它的存在只为下一版接 PostgreSQL 时不必重写编排。`.env.example` 里的 `POSTGRES_*`
-  同样是「v9 不使用，见 v10」。
-
----
-
-## 9. 常见问题
+## 8. 常见问题
 
 | 症状 | 原因与处理 |
 | --- | --- |
@@ -376,15 +365,15 @@ compose 里有一个 **默认关闭** 的 `db` 服务（`profiles: ["db"]`）：
 
 ---
 
-## 10. 部署件清单与延伸阅读
+## 9. 部署件清单与延伸阅读
 
 | 文件 | 作用 |
 | --- | --- |
-| `deploy/compose.yaml` | 唯一编排：两个服务 + 一个默认关闭的 db 预留位、卷、网络、探针、排空宽限 |
+| `deploy/compose.yaml` | 唯一编排：两个服务（api / web）、三个命名卷、网络、探针、排空宽限 |
 | `deploy/.env.example` | 每个可调变量的中文说明与默认值 |
 | `deploy/docker/api.Dockerfile` 与 `deploy/docker/api-entrypoint.sh` | 应用镜像（单 worker、非 root、主密钥缺失即拒启动） |
 | `deploy/docker/web.Dockerfile` 与 `deploy/docker/nginx.conf` | 静态站点镜像与三路反代、SSE 不缓冲 |
-| `deploy/backup.py` | 备份脚本：按后端分派，SQLite 走 `VACUUM INTO` + 自检 + sha256（§6） |
+| `deploy/backup.py` | 备份脚本：SQLite 在线备份（`VACUUM INTO`）+ 自检 + sha256（§6） |
 | `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份） |
 | `deploy/backups/` | 备份产物目录（被版本控制忽略；由 `backup.py` 创建，可整目录删除） |
 

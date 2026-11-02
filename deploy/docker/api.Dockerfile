@@ -110,7 +110,7 @@ COPY deploy/docker/api-entrypoint.sh /usr/local/bin/api-entrypoint
 #   /secrets            密钥卷（只读挂载，master.key 由运维一次性生成）
 # 命名卷首次创建时会**继承镜像里这个目录的属主与权限**，所以「先建好 + 改属主」意味着
 # 多数情况下第一次启动根本不需要 chown。启动脚本里的校正负责兜住其余情况：卷早于本镜像
-# 被创建（属主 root）、从别处恢复、或下一版换了 uid。
+# 被创建（属主 root）、从别处恢复，或 uid 与当前镜像不同。
 RUN set -eux; \
     install -d -o prdwright -g prdwright -m 0750 /var/lib/prdwright /var/log/prdwright /secrets; \
     sed -i 's/\r$//' /usr/local/bin/api-entrypoint; \
