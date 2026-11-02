@@ -31,6 +31,7 @@ from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.errors import AppError, ErrorCode
 from backend.services import job_service, quota_service
 from backend.services.auth_service import User
+from backend.services.job_drain import drain_controller
 from backend.services.job_fingerprint import compute_input_fingerprint
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -173,6 +174,19 @@ async def create_job(
     创建即返回——生成在后台进行，与浏览器连接解耦；前端随后订阅
     `/{job_id}/stream` 拿 `snapshot` + live 事件。刷新 / 断线只断订阅，不影响任务。
     """
+    # 排空期间不收新活。放在最前面（连参数校验之前）：此刻「请求长什么样」已经无关
+    # 紧要，服务端就是不接。塞进队列的代价是「任务起来了、进程随后死了、下次启动才
+    # 告诉用户失败」——用户等三分钟换来一句生成失败，而重试用时只要几秒。
+    #
+    # 503 用既有的 INTERNAL_ERROR 承载，不新增错误码：错误码是前后端共享契约
+    # （前端有一份逐字镜像的枚举），加一个就得多改一处前端，而这一版不碰前端。
+    if drain_controller.is_draining():
+        raise AppError(
+            ErrorCode.INTERNAL_ERROR,
+            "服务正在重启（排空），暂不接收新的生成任务，请稍后重试",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
     _validate_payload(payload)
 
     # 额度检查必须在这里——**校验之后、建任务之前**。

@@ -240,6 +240,20 @@ class Settings(BaseSettings):
         "而不是等某次生成的 PRD 风格悄悄变了才被发现。",
     )
 
+    # --- 排空（容器重启的收尾，issue #13） -----------------------------------
+    drain_timeout_seconds: float = Field(
+        default=30.0,
+        ge=0,
+        # 与 `skills_strict` 同一口径：运维口径写带 `PRDWRIGHT_` 前缀的那一个。
+        # 不带前缀的也认，免得有人照着别的项目习惯写 `DRAIN_TIMEOUT` 却静默无效
+        # （`extra="ignore"` 会把不认识的变量直接吃掉，症状是「设了没生效」）。
+        validation_alias=AliasChoices("PRDWRIGHT_DRAIN_TIMEOUT", "DRAIN_TIMEOUT"),
+        description="收到终止信号后等待在途任务的**上限**（秒），默认 30。"
+        "这是上限不是必等：任务都结束了就立刻退出。超过它仍在跑的任务被标成已取消并"
+        "落终态，订阅者收到 error 事件。容器的 `stop_grace_period` 必须大于这个值，"
+        "否则进程会在排空走完之前被硬杀，任务又变回 `running` 的尸体。",
+    )
+
     # --- 可观测性（日志） ----------------------------------------------------
     log_level: str = Field(
         default="INFO",
