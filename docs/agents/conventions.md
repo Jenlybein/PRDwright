@@ -29,7 +29,7 @@
 - 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8）。
 - 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8）。
 - upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；MySQL 的 DO NOTHING 用主键 no-op，绝不用 `INSERT IGNORE`（会吞列超长 / NOT NULL）；只准用在「该表只有一个唯一约束」的表上（契约 C-D1，v8）。
-- SQLite 与 MySQL 都是一等后端、部署时自选：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），设计见 `docs/architecture/v8/ARCHITECTURE.md 附录 C`；写 MySQL 兼容代码守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+- SQLite 与 MySQL 的差异收在 `core/dialect.py`：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），可移植性台账见 `docs/architecture/v8/ARCHITECTURE.md 附录 B`。MySQL 代码保留，但已不是「一等后端」——下一版的目标库是 PostgreSQL。写 MySQL 兼容代码仍守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
 - `get_settings()` 走 lru_cache：改环境变量后必须 `cache_clear()`；`prompts.py` 走 `str.format()`，字面量花括号写 `{{ }}`，给 LLM 的指令用 `<!-- -->` 注释。
 
 ## 3. 迁移（Alembic）
@@ -200,7 +200,7 @@
 - 环境硬事实：`requires-python >=3.12`（Ubuntu 22.04 不够，建议 24.04）、Node `^22.18 || >=24.12`、无 requirements.txt（`uv sync --frozen`）。
 - 管理端挂 `/admin/` 要两处一致：`vite base: '/admin/'` + `createWebHistory(import.meta.env.BASE_URL)`（Vue Router 的 `normalizeBase()` 不跟随 Vite 的 base）。
 - Nginx：SSE 三行（`proxy_buffering off` / `read_timeout 1800s` / `gzip off`）+ 服务端 `: ping` 心跳；`assets/*` 长缓存、`index.html` 必须 `no-store`；`/docs` 生产 404（后端不注册 + 白名单移除 + Nginx 兜底）。
-- `deploy/` 目录不存在：v8 起尚未落盘——`deploy/docker/` 同样不存在，v7 的 `backend.env.example` / `systemd/prdwright.service` / `nginx/prdwright.conf` 三份按「未落盘」处理，别照文档里的路径当真。
+- `deploy/` 目录是 v9 的交付物（compose、反向代理、env 样例、启动脚本、备份脚本、README），由 T19.3~T19.6 逐一落盘；在那之前 `ls deploy` 的答案是「不存在」，v7 的 `backend.env.example` / `systemd/prdwright.service` / `nginx/prdwright.conf` 三份一律按「未落盘」处理，别照文档里的路径当真。容器形态（镜像、命名卷、探针、排空）的唯一说明在 `docs/architecture/v9/ARCHITECTURE.md`。
 
 ## 已失效（勿再引用）
 
@@ -216,5 +216,5 @@
 - `clarification_ask.render_ask_spec()` 这个旧名：已退役，现名 `render_ask_tool_instruction()`。
 - 测试建库用 `init_schema()` 或每用例 `create_all`：被「`tests/dbsupport.py` 模板库 + 每用例拷贝」取代。
 - 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006：全部作废，现行基线是 **1014（工作区）/ 986（HEAD）**。
-- 排期真源 `docs/architecture/v3/roadmap.md`：只是 v3 期的口径，别当现状真源（现行排期看 `docs/architecture/v8/roadmap.md`；决策与取舍看各层 `ARCHITECTURE.md`）。
+- 排期真源 `docs/architecture/v3/roadmap.md`：只是 v3 期的口径，别当现状真源（现行排期看 `docs/architecture/v9/roadmap.md`；决策与取舍看各层 `ARCHITECTURE.md`）。
 - `docs/architecture/v*/` 下原有的按层决策记录文件与 `docs/architecture/evolution-truth.md`：**文件已删除**（决策记录目录随后也整体移除），`evolution-truth.md` 的独有内容并入 `docs/architecture/README.md`；按旧路径引用一律无效。
