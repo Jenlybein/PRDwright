@@ -8,7 +8,8 @@
 #   3. 卷里没有主密钥就生成一把（有则复用——本机重复跑不会撞上「拒绝覆盖」）
 #   4. `docker compose up -d --build`
 #   5. 轮询 `/readyz`，直到**响应体里的 `status == "ready"`**（有硬超时）
-#   6. 断言主链路可达：`/` 与 `/admin/` 是 HTML、`/api/...` 经反代可达、`/healthz` 200
+#   6. 断言主链路可达：`/` 与 `/admin/` 是 HTML、`/api/...` 经反代可达、`/healthz` 200，
+#      并确认 api 的 **PID 1 以 uid 10001 运行**（#14 的「非 root」是可验证的）
 #   7. 无论成败都拆栈（`down`，**不带 `-v`**）；失败时先输出容器日志
 #
 # 用法（在仓库任意目录都行，脚本自己切到仓库根）：
@@ -19,10 +20,16 @@
 #   PRDWRIGHT_HTTP_PORT   宿主端口，默认 8080（CI 避开特权端口 80）
 #   PRDWRIGHT_IMAGE_TAG   镜像 tag，默认 local（与 compose 的默认值一致）
 #   SMOKE_READY_TIMEOUT   就绪轮询的硬上限（秒），默认 180
-#   SMOKE_COMPOSE_FILE    compose 文件，默认 deploy/compose.yaml
 #
-# 边界（#10 / #19）：只验「容器能起来、主链路可达」，**不跑登录与生成**——
+# 边界（#10 / #19）：只验「容器能起来、主链路可达、运行身份正确」，**不跑登录与生成**——
 # 那需要真实模型密钥，会把 CI 变成对外部服务的依赖。
+#
+# **明确没做的断言：SSE 不被缓冲。** 现有流式端点全都挂在登录 + 真实模型调用之后
+# （`/api/conversation/*-stream`、`/api/jobs/{id}/stream`），
+# 而冒烟不登录、也不调真实模型；`/readyz` 是普通 JSON，拿它测不出「首字节之后还有没有
+# 分片陆续到达」。宁可不写，也不写一条看着像验证、其实证明不了缓冲行为的假断言：
+# 缓冲行为目前由 `deploy/docker/nginx.conf` 的 `proxy_buffering off` 与 v7 §6 的
+# SSE 三行契约保证，真机验证需要一次带模型的端到端手测。
 #
 # 为什么单独成脚本而不内联进 ci.yml：
 #   1. 它是「轮询 + 多条断言 + 失败转储日志 + 收尾」四段有顺序的逻辑，内联会让
@@ -35,7 +42,7 @@ set -euo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-COMPOSE_FILE="${SMOKE_COMPOSE_FILE:-deploy/compose.yaml}"
+COMPOSE_FILE="deploy/compose.yaml"
 HTTP_PORT="${PRDWRIGHT_HTTP_PORT:-8080}"
 IMAGE_TAG="${PRDWRIGHT_IMAGE_TAG:-local}"
 READY_TIMEOUT="${SMOKE_READY_TIMEOUT:-180}"
@@ -264,5 +271,18 @@ advanced = doc.get("advanced_questions")
 sys.exit(0 if isinstance(base, list) and base and isinstance(advanced, list) else 1)
 ' < "$HTTP_BODY_FILE" || fail "/api/conversation/questions：响应体不是问卷配置（base_questions 为空或不是数组）"
 echo "✓ /api/conversation/questions → 200 application/json（/api/ 反代可达）"
+
+# 6.6 运行身份：api 的**应用进程**必须是 uid 10001（#14 验收里「非 root」的自动化形式）
+#
+# 为什么不是 `docker compose exec api id -u`：镜像刻意没有 `USER` 指令（启动脚本第一阶段
+# 必须是 root 才能校正卷属主，之后才 `exec gosu` 降权），而 `exec` 用的是**镜像的 User**，
+# 所以那样读到的恒是 0。要证明的是「真正在跑业务的那个进程是谁」，判据是 PID 1 的 Uid
+# ——启动脚本降权后 `gosu` 是 exec 而不是 fork，PID 1 就是应用本身。
+API_UID="$(
+    "${COMPOSE[@]}" exec -T api sh -c "sed -n 's/^Uid:[[:space:]]*//p' /proc/1/status" \
+        | cut -f1 | tr -d '\r\n'
+)"
+[ "$API_UID" = "10001" ] || fail "api 的 PID 1 期望以 uid 10001 运行，实际「${API_UID:-读不到}」"
+echo "✓ api 的 PID 1 以 uid 10001 运行（非 root）"
 
 echo "===== 冒烟通过：整栈可起、主链路可达（up → ready ${ready_seconds}s）====="

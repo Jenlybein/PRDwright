@@ -28,11 +28,17 @@
 # ---------------------------------------------------------------------------
 set -eu
 
-RUN_USER="${PRDWRIGHT_RUN_USER:-prdwright}"
+RUN_USER="prdwright"
 KEY_FILE="${PRDWRIGHT_MASTER_KEY_PATH:-/secrets/master.key}"
-PYTHON="${PRDWRIGHT_PYTHON:-/opt/venv/bin/python}"
+PYTHON="/opt/venv/bin/python"
 IMAGE_REF="${PRDWRIGHT_IMAGE_REF:-prdwright-api:local}"
-SECRETS_VOLUME="${PRDWRIGHT_SECRETS_VOLUME:-prdwright_secrets}"
+# 卷名由 compose 里的 `name: prdwright` 钉死（`prdwright_secrets`），不随目录改名。
+SECRETS_VOLUME="prdwright_secrets"
+#
+# 上面前四个里只有 KEY_FILE 与 IMAGE_REF 读环境变量：它们分别由 compose 的 `.env` 与
+# Dockerfile 的构建参数给值。`RUN_USER` / `PYTHON` / `SECRETS_VOLUME` 是写死的——它们与
+# 镜像里的 `useradd`、venv 路径、compose 的项目名成对，没有任何编排者会设它们；
+# 留一个可覆盖的口子只会让「镜像与编排不一致」成为可能。
 
 log() { printf '[api-entrypoint] %s\n' "$*"; }
 
@@ -62,8 +68,8 @@ prepare_dirs() {
 
     # 需要可写的目录：数据卷 + 日志卷。`DATABASE_URL` 指到别处时那个目录同样是挂载点，
     # 一并校正——否则「按文档改了库路径」就变成一次静默的「属主没改」。
-    # 只解析 SQLite 的绝对路径形态（`sqlite:////abs/path`）；换成 MySQL/PG 之后
-    # 数据目录不由容器管，这里自然不做任何事。
+    # 本项目固定 SQLite，所以只解析它的绝对路径形态（`sqlite:////abs/path`）；
+    # 其它形态的 URL 在 `core/database.py` 就被拒绝，这里不需要分支。
     dirs="${PRDWRIGHT_DATA_DIR:-/var/lib/prdwright} ${LOG_DIR:-/var/log/prdwright}"
     case "${DATABASE_URL:-}" in
         sqlite*:///*) dirs="$dirs $(dirname "${DATABASE_URL#sqlite*:///}")" ;;

@@ -273,11 +273,13 @@
 
 | 出处 | 承诺的路径 | 实际 |
 |---|---|---|
-| `v7/roadmap.md:57,58,59,60`、`v7/ARCHITECTURE.md:846-849`、`v7/README.md:75` | `deploy/backend.env.example`、`deploy/systemd/prdwright.service`、`deploy/nginx/prdwright.conf`、`scripts/deploy/{backup,restore,release,smoke}.py` | **否**（连 `deploy/` 目录都没有；`scripts/` 下只有 `keygen/generate_keys.py`） |
+| `v7/roadmap.md:57,58,59,60`、`v7/ARCHITECTURE.md:846-849`、`v7/README.md:75` | `deploy/backend.env.example`、`deploy/systemd/prdwright.service`、`deploy/nginx/prdwright.conf`、`scripts/deploy/{backup,restore,release,smoke}.py` | **v8 当时未落盘**（连 `deploy/` 目录都没有；`scripts/` 下只有 `keygen/generate_keys.py`）。**v9 已交付**：容器形态的部署件落在 `deploy/`，CI 冒烟落在 `scripts/deploy/smoke.sh` |
 | 已在本轮清理中删除 | `docs/plans/`、`docs/artifacts/` | 目录已删；根 `README.md` 与历史档案索引里的引用已同步改写（历史档案目录随后也整体移除） |
 
 **处置（已定）**：对 `deploy/` 与 `scripts/deploy/` 选「废」——在相关文档标注「未落盘」，
-不补一套只为存档的裸机模板（补了就是两份真相并存，且没人会照着它部署）。
+不补一套只为存档的裸机模板（补了就是两份真相并存，且没人会照着它部署）。这段处置是
+**v8 当期的结论**：v9 换了一条路交付部署件（容器形态，落 `deploy/`），v7 那批裸机模板
+仍然不补。
 `v6/roadmap.md:45-46` 的 `tests/support/`、`tests/fixtures/` 与 `backend/tests/integration/`（早先已被明确否决过的形态）同属此类，一并标注。
 
 > ⚠️ 这与 v5 那批部署文档是同一类问题的**第二次出现**：**文档写了、文件没落盘**。
@@ -417,7 +419,7 @@ for base in ("frontend/src", "frontend_admin/src"):
 
 > 正文由该专题原文逐字移入，仅标题降两级以适应附录层级；内部交叉引用已改指本文件对应附录。
 >
-> **曾计划 MySQL、后评估 PostgreSQL，最终决定固定 SQLite（v9）。**
+> **曾计划 MySQL、后评估 PostgreSQL，最终决定固定 SQLite。**
 
 > 主题：让「这个项目跑在 SQLite 上」这件事只出现在一个文件里。
 > 本文只写**设计与契约**，不含实施记录；实测数据见附录 D。

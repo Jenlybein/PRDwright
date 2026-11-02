@@ -341,6 +341,82 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
     return affected
 
 
+def running_runtimes() -> list[JobRuntime]:
+    """当前在途（`status == running`）的运行时的快照。
+
+    调用方是排空（`services/job_drain.py`）：它要「等在途任务跑完、再挑出还没跑完的」，
+    需要一份稳定快照，而不是随任务收尾不断变化的视图。快照之后自然结束的任务会在
+    `cancel_in_flight` 里按当时的 `status` 被排除。
+
+    为什么判据用运行时上的 `status` 而不是 `_TASKS`：任务集合只是保活用的强引用，
+    它不知道「这个任务是不是已经收尾了」；运行时上的 `status` 才是权威。
+
+    这是**公开入口**：排空不该伸手进 `_RUNTIMES`。工程上「谁可以直接读进程内登记表」
+    只有本模块一处，换了存储结构时改动面因此只有这个文件。
+    """
+    return [
+        runtime for runtime in list(_RUNTIMES.values()) if runtime.status == STATUS_RUNNING
+    ]
+
+
+def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -> int:
+    """把在途任务收成「已取消」终态，返回被取消的条数。
+
+    调用方是排空（`services/job_drain.py`）：它在等满窗口之后，把仍卡在模型调用里、
+    自己走不出来的任务收掉。**这是那条路径唯一的公开入口**——`_failure_event` /
+    `_finalize` / `_RUNTIMES` 都是本模块的私有名，排空只调这一个函数。
+
+    Args:
+        reason: 落进 `error_message` 与 `error` 事件的终止原因。文案要说清**是谁**动的手
+            （例如「服务正在重启」），否则前端与运维会把排空取消当成生成失败。
+        runtimes: 要取消的运行时。`None` 表示「当前全部在途任务」。排空传的是它等待
+            之前的那份快照，这样「取消数 ≤ 开始时在途数」由构造保证，汇总里的三个
+            数字不可能互相对不上。
+
+    Returns:
+        真正置为取消的条数；快照里已经自然收尾的任务会被跳过、不计数。
+
+    实现上三步顺序不能换：**先发错误事件、再收尾**。`_finalize` 结尾会广播
+    `run_summary`，订阅者按「error → run_summary」读到的是一条完整的坏消息；反过来
+    先 `run_summary` 的话，前端会在收到「已结束」之后才收到原因。
+    末端那条 `job_bus.close()` 是给订阅者的哨兵：超时者可能正卡在模型调用里，
+    等它自己的 `finally` 放哨兵就是「再等一个 30 秒」。
+    """
+    targets = running_runtimes() if runtimes is None else list(runtimes)
+    cancelled = 0
+    for runtime in targets:
+        if runtime.status != STATUS_RUNNING:
+            # 快照之后已经自然收尾：它有自己更准确的结论，别再覆盖成「被取消」。
+            continue
+        cancelled += 1
+        runtime.cancelled = True
+        runtime.failed = True
+        runtime.error_code = "CANCELLED"
+        runtime.error_message = reason
+        if runtime.kind == "chat":
+            # 对话的「被中止」要保留已经说出口的话（`_write_chat_turn` 按这一位处理）
+            runtime.chat_interrupted = True
+
+        logger.warning(
+            "取消在途任务",
+            extra={
+                "event": "job.cancel_in_flight",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "kind": runtime.kind,
+                "error_code": runtime.error_code,
+                "reason": reason,
+            },
+        )
+        # 错误事件走 `_failure_event`（与异常兜底同一个构造）：订阅者只看有没有
+        # `error` 事件判断失败，自造一个形状不同的错误事件等于让前端多一条解析分支。
+        job_bus.publish(runtime.job_id, _failure_event(runtime.error_code, runtime.error_message))
+        _finalize(runtime, "failed")
+        # 收尾的哨兵由本任务自己的 `finally` 放；超时者可能卡在模型调用里，这里替它放。
+        job_bus.close(runtime.job_id)
+    return cancelled
+
+
 def _resolve_skill_refs(kind: str, request: dict[str, Any]) -> list[dict[str, Any]]:
     """本次任务注入的技能包身份：按**目标产物**去技能注册表里查。
 

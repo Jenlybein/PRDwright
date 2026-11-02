@@ -41,10 +41,11 @@ SQLite 自己的读事务，把当前可见的完整内容（含 WAL 里未 chec
 读得到 `alembic_version`（说明这是一份已迁移的 PRDwright 库，不是空文件）。
 任一项失败即以非零状态退出，并且**不留下一个看起来可用的产物**。
 
-## 后端
+## 固定 SQLite
 
-本项目固定使用 SQLite，唯一支持的后端就是它。任何其它后端（PostgreSQL、MySQL……）
-都在前置检查里明确拒绝并以非零状态退出——不猜、不降级。
+本项目固定使用 SQLite，唯一支持的后端就是它：`deploy/.env` 的 `DATABASE_URL` 指向
+别的数据库时，前置检查会明确拒绝并以非零状态退出——不猜、不降级，也不存在第二条
+备份流程。
 
 ## 退出码
 
@@ -92,6 +93,10 @@ DEFAULT_DB_PATH = "/var/lib/prdwright/prdwright.db"
 DEFAULT_MASTER_KEY_PATH = "/secrets/master.key"
 CONTAINER_BACKUP_DIR = "/backup"
 CONTAINER_SCRIPT_PATH = "/app/backup.py"
+
+# 一次性容器要做的事（VACUUM INTO + 自检 + 落盘）都是本地 I/O，900 秒是「磁盘/卷出问题
+# 时别无限挂着」的天花板，不是需要按环境调的旋钮：部署形态只有一种，所以它是常量。
+DOCKER_BACKUP_TIMEOUT = 900
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -200,28 +205,6 @@ def _env_file_value(name: str) -> str | None:
     return None
 
 
-def _url_backend(url: str) -> str:
-    """SQLAlchemy URL → 后端名（`sqlite+pysqlite` 这类取 `+` 前那段）。
-
-    这里只做名字归一，不做别名表：本项目只认 SQLite，其它名字一律交给
-    `_do_on_host` 的统一拒绝分支，不在解析层给它们留位置。
-    """
-    scheme = url.split("://", 1)[0].strip().lower().split("+", 1)[0]
-    return "sqlite" if scheme == "sqlite3" else scheme or "unknown"
-
-
-def _sqlite_absolute_path(url: str) -> str | None:
-    """从 SQLite URL 取绝对路径；相对路径（`sqlite:///foo.db`）返回 None。
-
-    SQLAlchemy 的形态：`sqlite:///relative.db` 与 `sqlite:////abs/path.db` 的区别是
-    后者在 `sqlite://` 之后多一个 `/`。只有绝对路径能映射进命名卷。
-    """
-    rest = url.split("://", 1)[1]
-    if rest.startswith("//"):
-        return "/" + rest.lstrip("/")
-    return None
-
-
 def _backup_name(output_dir: Path) -> str:
     """`prdwright-YYYYmmdd-HHMM.db`；同一分钟内第二次备份退化为带秒。
 
@@ -254,32 +237,45 @@ def _parse_json_line(stdout: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_backend(args: argparse.Namespace) -> str:
-    if args.backend:
-        return args.backend
-    # `.env` 是 compose 的 env_file，也就是 api 容器实际读到的值；宿主 shell 里的
-    # DATABASE_URL 不会被 compose 自动注入，所以不拿它当判据（避免「以为切了库」）。
-    url = _env_file_value("DATABASE_URL")
-    if url:
-        return _url_backend(url)
-    return "sqlite"
+def _database_url() -> str | None:
+    """`deploy/.env` 里的 `DATABASE_URL`（compose 的 env_file，api 容器实际读到的值）。
+
+    不读宿主 shell 的同名变量：它不会被 compose 自动注入，拿它当判据会得到
+    「以为备份的是另一套配置」的错位。
+    """
+    return _env_file_value("DATABASE_URL")
 
 
-def _resolve_db_path(args: argparse.Namespace, backend: str) -> str:
+def _resolve_db_path(args: argparse.Namespace) -> str:
+    """容器内的库文件路径：`--db-path` > `.env` 的 `DATABASE_URL` > 镜像默认值。
+
+    本项目**固定 SQLite**：URL 的协议头不是 sqlite 就直接拒绝，不猜、不降级、也不
+    留第二条备份流程。这条检查在拼容器命令之前完成——先失败，比让 `VACUUM INTO`
+    在一个不是库的文件上失败更容易归因。
+    """
     if args.db_path:
         return args.db_path
-    url = _env_file_value("DATABASE_URL")
-    if url and backend == "sqlite":
-        path = _sqlite_absolute_path(url)
-        if path:
-            return path
+    url = _database_url()
+    if not url:
+        return DEFAULT_DB_PATH
+    scheme, _, rest = url.partition("://")
+    if scheme.strip().lower().split("+", 1)[0] not in {"sqlite", "sqlite3"}:
         raise BackupError(
             EXIT_PRECHECK,
-            f"DATABASE_URL 里的 SQLite 路径不是绝对路径，无法映射进数据卷：{url}",
-            "用 --db-path 指定容器内的绝对路径（v9 默认 "
-            f"{DEFAULT_DB_PATH}）。",
+            f"本项目固定使用 SQLite，不支持其它后端；deploy/.env 的 DATABASE_URL 是「{scheme}」。",
+            "这不是「暂时没接」：换数据库后端已明确不在计划里。"
+            f"把 DATABASE_URL 改成 SQLite 绝对路径（v9 默认 {DEFAULT_DB_PATH}），"
+            "或用 --db-path 指定容器内的绝对路径。",
         )
-    return DEFAULT_DB_PATH
+    if rest.startswith("//"):
+        # SQLAlchemy 的形态：`sqlite:///relative.db` 与 `sqlite:////abs/path.db` 的区别是
+        # 后者在 `sqlite://` 之后多一个 `/`。只有绝对路径能映射进命名卷。
+        return "/" + rest.lstrip("/")
+    raise BackupError(
+        EXIT_PRECHECK,
+        f"DATABASE_URL 里的 SQLite 路径不是绝对路径，无法映射进数据卷：{url}",
+        f"用 --db-path 指定容器内的绝对路径（v9 默认 {DEFAULT_DB_PATH}）。",
+    )
 
 
 def _resolve_image(args: argparse.Namespace) -> str:
@@ -327,34 +323,21 @@ def _force_remove_container(name: str) -> None:
 
 
 def _do_on_host(args: argparse.Namespace) -> None:
-    backend = _resolve_backend(args)
-
-    if backend != "sqlite":
-        raise BackupError(
-            EXIT_PRECHECK,
-            f"本项目固定使用 SQLite，不支持其它后端；收到的是「{backend}」。",
-            "这不是「暂时没接」：换数据库后端已明确不在计划里。"
-            "用 --backend sqlite 备份当前库，并检查 .env 里的 DATABASE_URL "
-            "是否是 SQLite 绝对路径。",
-        )
-
-    db_path = _resolve_db_path(args, backend)
+    db_path = _resolve_db_path(args)
     image = _resolve_image(args)
-    data_volume = args.data_volume or DEFAULT_DATA_VOLUME
-    secrets_volume = args.secrets_volume or DEFAULT_SECRETS_VOLUME
     output_dir = Path(args.output_dir).expanduser().resolve()
 
     _require_docker()
     _require_image(image)
     _require_volume(
-        data_volume,
+        DEFAULT_DATA_VOLUME,
         "数据",
         f"数据卷不存在说明这套栈还没起过（或卷被 `docker compose down -v` 删了）。\n"
         "先起栈（cd deploy && docker compose up -d --build），等 /readyz 返回 200 再备份。\n"
         "如果这是新机器，本机没有可备份的数据——别把它当成「备份失败」。",
     )
     _require_volume(
-        secrets_volume,
+        DEFAULT_SECRETS_VOLUME,
         "主密钥",
         "主密钥卷不存在，说明主密钥从未生成过。\n"
         "先按 deploy/README.md §1.2 生成主密钥再备份。\n"
@@ -368,7 +351,7 @@ def _do_on_host(args: argparse.Namespace) -> None:
     container_name = f"prdwright-backup-{datetime.now():%Y%m%d%H%M%S}"
 
     print(
-        f"[备份] 后端 sqlite；库 {db_path}（数据卷 {data_volume}）\n"
+        f"[备份] 固定 SQLite；库 {db_path}（数据卷 {DEFAULT_DATA_VOLUME}）\n"
         f"[备份] 镜像 {image}；产物目录 {output_dir}\n"
         f"[备份] 在一次性容器里执行 VACUUM INTO 与自检…"
     )
@@ -384,9 +367,9 @@ def _do_on_host(args: argparse.Namespace) -> None:
         "-v",
         f"{script_path}:{CONTAINER_SCRIPT_PATH}:ro",
         "-v",
-        f"{data_volume}:{db_parent}",
+        f"{DEFAULT_DATA_VOLUME}:{db_parent}",
         "-v",
-        f"{secrets_volume}:/secrets:ro",
+        f"{DEFAULT_SECRETS_VOLUME}:/secrets:ro",
         "-v",
         f"{output_dir}:{CONTAINER_BACKUP_DIR}",
     ]
@@ -411,7 +394,7 @@ def _do_on_host(args: argparse.Namespace) -> None:
         command += ["--owner", f"{os.getuid()}:{os.getgid()}"]
 
     try:
-        result = _run(command, timeout=args.timeout)
+        result = _run(command, timeout=DOCKER_BACKUP_TIMEOUT)
     except BackupError:
         _force_remove_container(container_name)
         raise
@@ -697,18 +680,14 @@ def _do_in_container(args: argparse.Namespace) -> dict[str, object]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "PRDwright v9 备份：唯一后端是 SQLite。走 VACUUM INTO + "
+            "PRDwright v9 备份：本项目固定 SQLite。走 VACUUM INTO + "
             "integrity_check + alembic_version 自检，产物落 deploy/backups/ 并带同名 "
-            ".sha256。其它后端一律明确拒绝。"
+            ".sha256。DATABASE_URL 指向别的数据库时一律明确拒绝。"
         ),
         epilog=(
             "示例：uv run --project backend python deploy/backup.py\n"
-            "      uv run --project backend python deploy/backup.py --backend sqlite"
+            "      uv run --project backend python deploy/backup.py --output-dir /mnt/backup"
         ),
-    )
-    parser.add_argument(
-        "--backend",
-        help="数据库后端；唯一支持 sqlite（默认按 deploy/.env 的 DATABASE_URL 判断，没有则 sqlite）。",
     )
     parser.add_argument(
         "--image",
@@ -720,22 +699,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="宿主上的产物目录；默认 deploy/backups/。",
     )
     parser.add_argument(
-        "--data-volume",
-        help=f"数据命名卷；默认 {DEFAULT_DATA_VOLUME}。",
-    )
-    parser.add_argument(
-        "--secrets-volume",
-        help=f"主密钥命名卷；默认 {DEFAULT_SECRETS_VOLUME}。",
-    )
-    parser.add_argument(
         "--db-path",
         help=f"容器内库文件路径；默认 {DEFAULT_DB_PATH}（数据卷挂到它的父目录）。",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=900,
-        help="容器内备份的超时秒数；默认 900。",
     )
 
     # 内部参数：宿主模式会自己传，不暴露在 --help 里。

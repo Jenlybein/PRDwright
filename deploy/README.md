@@ -54,23 +54,15 @@ Copy-Item .env.example .env
 主密钥决定库里所有模型密钥能不能解开。**缺少它时 api 拒绝启动**（不会自动生成——
 自动生成会让换机后的旧密文永久解不开），启动日志里也会打印同样的命令。
 
-密钥生成器在应用镜像里，所以先构建 api 镜像（不启动容器）：
+密钥生成器在应用镜像里，所以先构建镜像（不启动容器），再生成并写进密钥卷：
 
 ```bash
-docker compose build api
+make build   # = docker compose build
+make keygen  # = 下面那条 docker run
 ```
 
-然后生成并写进密钥卷：
-
-```bash
-docker run --rm --user 10001:10001 \
-  -e PRDWRIGHT_MASTER_KEY_PATH=/secrets/master.key \
-  -v prdwright_secrets:/secrets \
-  --entrypoint python prdwright-api:local \
-  /app/scripts/keygen/generate_keys.py
-```
-
-Windows PowerShell 没有 `\` 续行，直接用一行：
+`make keygen` 展开后就是这条命令（Windows 原生 PowerShell 没有 `make`、也没有 `\` 续行，
+直接用一行）：
 
 ```powershell
 docker run --rm --user 10001:10001 -e PRDWRIGHT_MASTER_KEY_PATH=/secrets/master.key -v prdwright_secrets:/secrets --entrypoint python prdwright-api:local /app/scripts/keygen/generate_keys.py
@@ -90,16 +82,17 @@ docker run --rm --user 10001:10001 -e PRDWRIGHT_MASTER_KEY_PATH=/secrets/master.
 ## 2. 起栈（一条命令）
 
 ```bash
-docker compose up -d --build
+make up
 ```
 
 Windows 用**同一条命令**——命名卷不是宿主目录，两个平台的路径与文件锁语义一致。
+没有 `make` 时展开成 `docker compose up -d --build`（见 §4 的展开表）。
 
 看状态与日志：
 
 ```bash
-docker compose ps
-docker compose logs -f api
+make ps
+make logs
 ```
 
 等 api 的 health 列变成 `healthy`（首次启动要跑迁移并扫描技能包，通常几秒到几十秒）：
@@ -149,19 +142,35 @@ api 的 8000 端口**不发布到宿主**，只能被 web 通过内部网络访�
 
 | 目的 | 命令 |
 | --- | --- |
-| 起栈 / 改完代码重建 | `docker compose up -d --build` |
-| 停栈（**保留数据**） | `docker compose down` |
-| 重启 api（触发排空） | `docker compose restart api` |
-| 看日志 | `docker compose logs -f api` |
-| 看状态与健康 | `docker compose ps` |
-| 进 api 容器 | `docker compose exec api sh` |
-| 看卷 | `docker volume ls --filter name=prdwright` |
-| 看生效的完整编排 | `docker compose config` |
-| 备份（见 §6） | `make backup` 或 `uv run --project ../backend python backup.py` |
+| 起栈 / 改完代码重建 | `make up` |
+| 停栈（**保留数据**） | `make down` |
+| 重启 api（触发排空） | `make restart` |
+| 看日志 | `make logs` |
+| 看状态与健康 | `make ps` |
+| 进 api 容器 | `make shell` |
+| 看卷 | `make volumes` |
+| 看生效的完整编排 | `make config` |
+| 构建两个镜像 | `make build` |
+| 生成主密钥（仅首次） | `make keygen` |
+| 备份（见 §6） | `make backup` |
 
-有 `make` 的环境（Linux / macOS / WSL）可以用等价的 `deploy/Makefile`：
-`make up`、`make logs`、`make restart`、`make down`、`make shell`、`make backup`。
-Windows 原生 PowerShell 没有 `make`，直接用上表命令（备份那行用 `uv` 的那一半）。
+`deploy/Makefile` 的每条目标**只有一条 `docker compose …` / `uv run …`**，没有额外逻辑，
+所以 `make` 与 docker 命令是同一套口径的简写与展开式。没有 `make` 的环境（Windows 原生
+PowerShell）把上表逐行展开即可：
+
+```
+make up      = docker compose up -d --build
+make down    = docker compose down
+make restart = docker compose restart api
+make logs    = docker compose logs -f api
+make ps      = docker compose ps
+make shell   = docker compose exec api sh
+make volumes = docker volume ls --filter name=prdwright
+make config  = docker compose config
+make build   = docker compose build
+make keygen  = 上面 §1.2 那条 docker run
+make backup  = uv run --project ../backend python backup.py
+```
 
 ---
 
@@ -173,7 +182,7 @@ Windows 原生 PowerShell 没有 `make`，直接用上表命令（备份那行�
 | `prdwright_logs` | `/var/log/prdwright` | 轮转日志文件 | 丢历史日志（`app_logs` 表里还有一份派生数据） |
 | `prdwright_secrets` | `/secrets`（**只读**） | `master.key` | 库里所有模型密钥都解不开 |
 
-- 日志同时写 stdout，所以 `docker compose logs` 是第一现场；卷里的文件供跨容器重建后回查。
+- 日志同时写 stdout，所以 `make logs` 是第一现场；卷里的文件供跨容器重建后回查。
 - **实时库文件不能双击查看**，这是命名卷的代价。可见性由备份产物补上：备份落到
   `deploy/backups/`（已被版本控制忽略，由备份脚本创建）。
 - 不要往 compose 里加宿主目录挂载。Windows 上的宿主目录经桥接层会丢掉文件锁与共享内存映射，
@@ -185,7 +194,7 @@ Windows 原生 PowerShell 没有 `make`，直接用上表命令（备份那行�
 
 ### 6.1 纪律（比命令更重要）
 
-- **迁移之前必须先有备份**；备份没做成，不许 `docker compose up -d`。
+- **迁移之前必须先有备份**；备份没做成，不许 `make up`。
 - **删列 / 改类型之后的回滚方式是恢复备份，不是 `git revert`**：回退代码后的真实状态是
   「新结构 + 旧代码」，旧代码读不到那一列，启动即失败。代码可以回退，数据不会自己回去。
 - 备份要能**在另一台机器上**被服务读起来，才算备份。
@@ -195,8 +204,8 @@ Windows 原生 PowerShell 没有 `make`，直接用上表命令（备份那行�
 在 `deploy/` 下（默认的产物目录、`.env`、卷名都按这个位置算）：
 
 ```bash
-uv run --project ../backend python backup.py
-# 有 make 的环境等价于：make backup
+make backup
+# 无 make 时展开成：uv run --project ../backend python backup.py
 ```
 
 在仓库根目录执行的是同一件事：
@@ -246,13 +255,13 @@ deploy/backups/
 
 | 退出码 | 失败在哪一步 |
 | --- | --- |
-| `2` | 前置检查：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 后端判定（只接受 SQLite） |
+| `2` | 前置检查：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 库地址判定（只接受 SQLite） |
 | `3` | 在线备份：`VACUUM INTO` 本身失败 |
 | `4` | 自检：打不开、`integrity_check` 不为 `ok`、读不到 `alembic_version` |
 | `5` | 写盘或校验：拷贝到宿主目录失败，或宿主 sha256 与容器内不一致 |
 
-**唯一后端是 SQLite**：`--backend` 传任何非 `sqlite` 的值（例如 `postgresql`、`mysql`）
-都会明确报「本项目固定使用 SQLite，不支持其它后端」并以 `2` 退出。本项目不使用其它数据库，
+**本项目固定 SQLite**：脚本读 `deploy/.env` 的 `DATABASE_URL`，它不是 SQLite 绝对路径时
+明确报「本项目固定使用 SQLite，不支持其它后端」并以 `2` 退出。数据库形态已经定死，
 所以这里没有第二条备份流程。
 
 ### 6.3 校验
@@ -277,13 +286,13 @@ Get-Content .\prdwright-20261102-2121.db.sha256
 ### 6.4 恢复（也是「回滚」）
 
 ```bash
-docker compose down                     # 停栈，保留卷
+make down                               # 停栈，保留卷（= docker compose down）
 
 # 用一次性容器把备份放回数据卷；卷名固定为 prdwright_data
 docker run --rm -v prdwright_data:/data -v "${PWD}/backups:/backup" alpine \
   sh -c "rm -f /data/prdwright.db-wal /data/prdwright.db-shm && cp /backup/prdwright-<日期>.db /data/prdwright.db && chown 10001:10001 /data/prdwright.db"
 
-docker compose up -d
+make up
 ```
 
 - 恢复前删掉 `-wal` / `-shm`：留着旧边车文件，SQLite 会把它们和新库拼在一起。
@@ -295,17 +304,18 @@ docker compose up -d
 
 | 命令 | 容器 | 网络 | **卷（数据/日志/密钥）** |
 | --- | --- | --- | --- |
-| `docker compose down` | 删 | 删 | **保留** |
+| `make down`（= `docker compose down`） | 删 | 删 | **保留** |
 | `docker compose down -v` | 删 | 删 | **连卷一起删，无法撤销** |
 
 `-v` 只该用在「反正我要从零重来」的时候。它删的不只是数据库，还有主密钥——两者一起没，
-等于所有加密配置永久作废。普通停栈、升级、重启都**不要**带 `-v`。
+等于所有加密配置永久作废。普通停栈、升级、重启都**不要**带 `-v`。这一条刻意没有
+`make` 目标：删除数据只该是一次需要人真的把 `-v` 敲出来的动作。
 
 ---
 
 ## 7. 重启与升级
 
-### 7.1 `docker compose restart api` 时正在生成的任务
+### 7.1 `make restart`（重启 api）时正在生成的任务
 
 v9 的排空语义（实现见 `backend/src/backend/services/job_drain.py`）：
 
@@ -321,7 +331,8 @@ compose 的 `stop_grace_period` 是 **45 秒**，必须保持大于上面的等�
 日志里能看到这次重启影响了几个任务：
 
 ```bash
-docker compose logs api | grep -E "drain_started|drain_cancelled|drain_finished"
+# 一次性扫日志（`make logs` 是 `-f` 跟随，不适合管道）
+docker compose logs api | grep -E "drain_started|cancel_in_flight|drain_finished"
 ```
 
 ### 7.2 升级
@@ -330,14 +341,14 @@ docker compose logs api | grep -E "drain_started|drain_cancelled|drain_finished"
 # 1) 先备份（§6）
 # 2) 拉代码 / 切到目标提交
 # 3) 重建并替换
-docker compose up -d --build
+make up
 ```
 
 重启会让在途任务有确定结局（跑完或被取消），不会凭空消失。
 
 ### 7.3 回滚
 
-- **代码**：切回上一个提交后 `docker compose up -d --build` 重建镜像。
+- **代码**：切回上一个提交后 `make up` 重建镜像。
 - **数据**：如果这次发布动过表结构，按 §6.4 恢复备份。`git revert` 只回退代码，回退不了
   已经被迁移过的库。
 
@@ -351,14 +362,14 @@ docker compose up -d --build
 | api 反复重启，日志说「找不到主密钥」 | 没生成密钥，或生成时用了 root（属主不对）。按 §1.2 用 `--user 10001:10001` 重来；已存在就先删掉再生成。 |
 | api 起不来，日志说「主密钥存在但运行用户读不到」 | 文件属主不是 10001，或权限不是 600/640。 |
 | 端口 80 被占用 | 在 `.env` 里设 `PRDWRIGHT_HTTP_PORT=8080`，然后访问 `http://localhost:8080/`（`/admin/`、`/api/` 同前缀）。 |
-| `/` 正常但 `/api/` 502 | api 没起来或正在重启。`docker compose logs api`；web 会一直服务静态页，所以页面打得开不代表后端健康。 |
+| `/` 正常但 `/api/` 502 | api 没起来或正在重启。`make logs`；web 会一直服务静态页，所以页面打得开不代表后端健康。 |
 | `/readyz` 一直 503 | 看响应体的 `checks`：`database` 失败多与卷权限/磁盘有关，`skills` 失败说明镜像里的技能包不完整（重建镜像，不要挂载覆盖）。 |
 | 登录接口 200，但下个请求又是未登录 | `AUTH_COOKIE_SECURE=true` 却用 HTTP 访问。纯 HTTP 必须 `false`；上前置 HTTPS 后再改 `true`。 |
 | 生成报「还没有模型配置」 | 首次部署没配模型供应商。§3。 |
 | `/health` 显示 `degraded`（llm 项 false） | 同上。另外技能包缺失也会让它是 degraded，但 `/readyz` 会拦下这种。 |
 | 备份报「数据卷不存在」 | 这套栈还没起过，或卷被 `down -v` 删了。先起栈并等 `/readyz` 200（§2）。 |
 | 备份报「找不到主密钥」 | 密钥卷里没有 `master.key`。§1.2 生成后再备份；没有密钥的备份解不开密文，脚本因此拒绝。 |
-| 备份报「镜像不存在」 | 还没构建过 api 镜像。`docker compose build api`（或直接 `up -d --build`）。 |
+| 备份报「镜像不存在」 | 还没构建过 api 镜像。`make build`（或直接 `make up`）。 |
 | 备份报「`integrity_check` 未通过」 | 源库可能已损坏。先看运行中服务的 `/readyz` 与 `/health`，并考虑改用更早的备份。 |
 | 想看实时数据库文件 | 不能直接双击。用 §6 的备份产物看。 |
 | Windows 上想改成 `D:\data` 挂载 | 不要。见 §5 最后一条。 |
@@ -375,7 +386,7 @@ docker compose up -d --build
 | `deploy/docker/web.Dockerfile` 与 `deploy/docker/nginx.conf` | 静态站点镜像与三路反代、SSE 不缓冲 |
 | `deploy/backup.py` | 备份脚本：SQLite 在线备份（`VACUUM INTO`）+ 自检 + sha256（§6） |
 | `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份） |
-| `deploy/backups/` | 备份产物目录（被版本控制忽略；由 `backup.py` 创建，可整目录删除） |
+| `deploy/backups/` | 备份产物目录（**内容**被版本控制忽略，目录本身靠 `.gitkeep` 入库；产物由 `backup.py` 写入，可整目录删除） |
 
 设计依据与取舍：[`../docs/architecture/v9/ARCHITECTURE.md`](../docs/architecture/v9/ARCHITECTURE.md)。
 路线图与各票落点：[`../docs/architecture/v9/roadmap.md`](../docs/architecture/v9/roadmap.md)。
