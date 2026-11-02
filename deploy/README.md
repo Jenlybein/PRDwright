@@ -157,10 +157,11 @@ api 的 8000 端口**不发布到宿主**，只能被 web 通过内部网络访�
 | 进 api 容器 | `docker compose exec api sh` |
 | 看卷 | `docker volume ls --filter name=prdwright` |
 | 看生效的完整编排 | `docker compose config` |
+| 备份（见 §6） | `make backup` 或 `uv run --project ../backend python backup.py` |
 
 有 `make` 的环境（Linux / macOS / WSL）可以用等价的 `deploy/Makefile`：
-`make up`、`make logs`、`make restart`、`make down`、`make shell`。
-Windows 原生 PowerShell 没有 `make`，直接用上表命令。
+`make up`、`make logs`、`make restart`、`make down`、`make shell`、`make backup`。
+Windows 原生 PowerShell 没有 `make`，直接用上表命令（备份那行用 `uv` 的那一半）。
 
 ---
 
@@ -189,31 +190,90 @@ Windows 原生 PowerShell 没有 `make`，直接用上表命令。
   「新结构 + 旧代码」，旧代码读不到那一列，启动即失败。代码可以回退，数据不会自己回去。
 - 备份要能**在另一台机器上**被服务读起来，才算备份。
 
-### 6.2 备份命令（脚本见 issue #18）
+### 6.2 备份命令（一条命令，产物带 sha256）
 
-> **备份脚本由 issue #18 提供，本版尚未合入。** 合入后的目标形态是一条命令：
->
-> ```bash
-> cd deploy && make backup
-> # → deploy/backups/prdwright-<日期>.db + 同名 .sha256（含 VACUUM INTO 与 integrity_check）
-> ```
->
-> 在它合入之前，可以用下面两条临时命令把库完整拷出来（**这不是长期方案**：没有 sha256、
-> 没有自检输出）。备份文件请另存到宿主上你信任的位置。
+在 `deploy/` 下（默认的产物目录、`.env`、卷名都按这个位置算）：
 
 ```bash
-mkdir -p backups
-
-# 1) 在容器内用 VACUUM INTO 生成一份在线一致快照（不要直接 cp 库文件：
-#    开了 WAL，直接复制会静默丢掉最近几分钟的写入）
-docker compose exec api python -c "import sqlite3; s=sqlite3.connect('/var/lib/prdwright/prdwright.db'); s.execute(\"VACUUM INTO '/var/lib/prdwright/prdwright-backup.db'\"); s.close()"
-
-# 2) 把它从数据卷拷到宿主（容器名固定为 prdwright-api-1）
-docker cp prdwright-api-1:/var/lib/prdwright/prdwright-backup.db backups/prdwright-manual.db
-docker compose exec api rm -f /var/lib/prdwright/prdwright-backup.db
+uv run --project ../backend python backup.py
+# 有 make 的环境等价于：make backup
 ```
 
-### 6.3 恢复（也是「回滚」）
+在仓库根目录执行的是同一件事：
+
+```bash
+uv run --project backend python deploy/backup.py
+```
+
+脚本用项目自己的 uv 环境跑（`backend/.venv`，SQLite 分支只用 Python stdlib，不要求宿主装
+`sqlite3` CLI）。它按四步走，**任何一步失败都非零退出，并指出失败在哪一步**：
+
+1. **前置检查**：Docker 可用、`prdwright-api:<tag>` 镜像存在、`prdwright_data` 与
+   `prdwright_secrets` 两个卷存在。**主密钥缺失或不可用就拒绝备份**——没有密钥的备份
+   解不开库里的模型密钥，等于无用备份。
+2. **在线备份**：把数据卷挂进一个一次性容器，用 `VACUUM INTO` 生成一致快照。不拷库文件：
+   库开了 WAL，直接 `cp` 会静默丢掉还留在 `-wal` 里、尚未 checkpoint 的最近写入。
+3. **自检**：快照必须能打开、`PRAGMA integrity_check` 返回 `ok`、并且读得到
+   `alembic_version`（证明是一份已迁移的 PRDwright 库，而不是空壳）。自检不过的产物会被
+   删掉并报错——不留下一个「看起来可用」的文件。
+4. **落盘与复核**：把自检通过的库放进 `deploy/backups/`，在宿主上再算一遍 sha256 与容器
+   内的值比对（证明拷贝没有坏），然后写同名 `.sha256`。
+
+产物：
+
+```
+deploy/backups/
+├── prdwright-20261102-2121.db
+└── prdwright-20261102-2121.db.sha256   # 一行：<sha256>  <文件名>
+```
+
+成功时的输出如下（数字来自一次实测，会随库变化）：
+
+```
+[备份] ✓ 备份完成
+        文件         /…/deploy/backups/prdwright-20261102-2121.db
+        字节数       200704
+        sha256       666137bb…
+        自检结论     ok（库可打开、integrity_check 通过、alembic_version=0004、表 15 张）
+        校验和文件   /…/deploy/backups/prdwright-20261102-2121.db.sha256
+```
+
+**栈起着或停着都能备份**：`VACUUM INTO` 是在线备份，脚本也不依赖 api 容器活着；它唯一
+需要的是**已经构建过的 api 镜像**（只借用里面的 python 与依赖，不启动服务）。所以升级前
+先把栈停掉再备份同样成立。
+
+失败时的退出码含义（脚本开头有完整表）：
+
+| 退出码 | 失败在哪一步 |
+| --- | --- |
+| `2` | 前置检查：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 后端分派 |
+| `3` | 在线备份：`VACUUM INTO` 本身失败 |
+| `4` | 自检：打不开、`integrity_check` 不为 `ok`、读不到 `alembic_version` |
+| `5` | 写盘或校验：拷贝到宿主目录失败，或宿主 sha256 与容器内不一致 |
+
+PostgreSQL 分支只留分派位：v9 的 `db` 服务是默认关闭的 profile，`--backend postgresql`
+会明确报「v9 未启用、见 v10」并以 `2` 退出。这里不写未演练的 `pg_dump` 流程（见 §8）。
+
+### 6.3 校验
+
+在 `deploy/backups/` 里（Linux / WSL / macOS）：
+
+```bash
+sha256sum -c prdwright-20261102-2121.db.sha256
+# prdwright-20261102-2121.db: OK
+```
+
+Windows PowerShell 没有 `sha256sum`，用两条命令比对即可：
+
+```powershell
+Get-FileHash .\prdwright-20261102-2121.db -Algorithm SHA256   # 与下一行的首列比
+Get-Content .\prdwright-20261102-2121.db.sha256
+```
+
+校验和只证明「文件没被改动」，证明不了「备份可用」——可用性由脚本里的
+`integrity_check` + `alembic_version` 自检负责，恢复演练见 §6.4。
+
+### 6.4 恢复（也是「回滚」）
 
 ```bash
 docker compose down                     # 停栈，保留卷
@@ -230,7 +290,7 @@ docker compose up -d
   卷（否则库里的模型密钥解不开）。
 - 恢复后先打开 `/readyz` 与 `/admin/` 确认，再继续操作。
 
-### 6.4 `docker compose down -v` 会删数据
+### 6.5 `docker compose down -v` 会删数据
 
 | 命令 | 容器 | 网络 | **卷（数据/日志/密钥）** |
 | --- | --- | --- | --- |
@@ -277,7 +337,7 @@ docker compose up -d --build
 ### 7.3 回滚
 
 - **代码**：切回上一个提交后 `docker compose up -d --build` 重建镜像。
-- **数据**：如果这次发布动过表结构，按 §6.3 恢复备份。`git revert` 只回退代码，回退不了
+- **数据**：如果这次发布动过表结构，按 §6.4 恢复备份。`git revert` 只回退代码，回退不了
   已经被迁移过的库。
 
 ---
@@ -307,6 +367,10 @@ compose 里有一个 **默认关闭** 的 `db` 服务（`profiles: ["db"]`）：
 | 登录接口 200，但下个请求又是未登录 | `AUTH_COOKIE_SECURE=true` 却用 HTTP 访问。纯 HTTP 必须 `false`；上前置 HTTPS 后再改 `true`。 |
 | 生成报「还没有模型配置」 | 首次部署没配模型供应商。§3。 |
 | `/health` 显示 `degraded`（llm 项 false） | 同上。另外技能包缺失也会让它是 degraded，但 `/readyz` 会拦下这种。 |
+| 备份报「数据卷不存在」 | 这套栈还没起过，或卷被 `down -v` 删了。先起栈并等 `/readyz` 200（§2）。 |
+| 备份报「找不到主密钥」 | 密钥卷里没有 `master.key`。§1.2 生成后再备份；没有密钥的备份解不开密文，脚本因此拒绝。 |
+| 备份报「镜像不存在」 | 还没构建过 api 镜像。`docker compose build api`（或直接 `up -d --build`）。 |
+| 备份报「`integrity_check` 未通过」 | 源库可能已损坏。先看运行中服务的 `/readyz` 与 `/health`，并考虑改用更早的备份。 |
 | 想看实时数据库文件 | 不能直接双击。用 §6 的备份产物看。 |
 | Windows 上想改成 `D:\data` 挂载 | 不要。见 §5 最后一条。 |
 
@@ -320,8 +384,9 @@ compose 里有一个 **默认关闭** 的 `db` 服务（`profiles: ["db"]`）：
 | `deploy/.env.example` | 每个可调变量的中文说明与默认值 |
 | `deploy/docker/api.Dockerfile` 与 `deploy/docker/api-entrypoint.sh` | 应用镜像（单 worker、非 root、主密钥缺失即拒启动） |
 | `deploy/docker/web.Dockerfile` 与 `deploy/docker/nginx.conf` | 静态站点镜像与三路反代、SSE 不缓冲 |
-| `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器） |
-| `deploy/backups/` | 备份产物目录（被版本控制忽略；由 #18 的脚本创建） |
+| `deploy/backup.py` | 备份脚本：按后端分派，SQLite 走 `VACUUM INTO` + 自检 + sha256（§6） |
+| `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份） |
+| `deploy/backups/` | 备份产物目录（被版本控制忽略；由 `backup.py` 创建，可整目录删除） |
 
 设计依据与取舍：[`../docs/architecture/v9/ARCHITECTURE.md`](../docs/architecture/v9/ARCHITECTURE.md)。
 路线图与各票落点：[`../docs/architecture/v9/roadmap.md`](../docs/architecture/v9/roadmap.md)。
