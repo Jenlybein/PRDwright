@@ -120,34 +120,10 @@ services:
     restart: unless-stopped
 
   # =========================================================================
-  # 数据库服务：**默认关闭**（profile），v9 不使用，见 v10
+  # 本项目固定使用 SQLite：没有独立的数据库服务
   # =========================================================================
-  # v9 的数据库仍是 SQLite 文件库，住在 data 卷里；这个服务现在没有任何调用方，
-  # api 的 DATABASE_URL 也不会指向它。留在这里只为下一版接 PostgreSQL 时
-  # 不必重写整份编排（端口、卷、健康检查、依赖位都已经就位）。
-  #
-  # 它不会随 `docker compose up -d` 启动。真要看一眼：
-  #   docker compose --profile db up -d db
-  # 但下一版之前不要这么做——它不会让当前应用改用 PG。
-  db:
-    profiles: ["db"]
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-prdwright}
-      POSTGRES_USER: ${POSTGRES_USER:-prdwright}
-      # v9 不使用；下一版务必改成强口令。`$$` 是 compose 的转义，容器里拿到的是 $。
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-before-v10}
-      TZ: UTC
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    expose:
-      - "5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
+  # 库就是 data 卷里的那个文件（含 WAL 的 -wal / -shm 边车）。没有第二个服务、
+  # 也没有第二个端口——这不是「暂时没加」，而是本项目的数据库形态已经定死。
 
 volumes:
   # SQLite 库（含 WAL 的 -wal / -shm 边车）。丢了 = 业务数据全丢。
@@ -156,11 +132,9 @@ volumes:
   logs:
   # 只读挂进 api 的 master.key。丢了 = 库里所有模型密钥都解不开。
   secrets:
-  # 仅 db profile 使用；v9 不启动 db，所以这个卷不会出现在 `docker volume ls`。
-  pgdata:
 
 networks:
   # 显式命名默认网络：容器内的服务名解析（api → 容器 IP）由 Docker 内嵌 DNS
-  # 提供，而内嵌 DNS 只在用户自定义网络上生效。名字钉死，方便排查与下一版复用。
+  # 提供，而内嵌 DNS 只在用户自定义网络上生效。名字钉死，方便排查。
   default:
     name: prdwright_net

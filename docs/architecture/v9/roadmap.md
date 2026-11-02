@@ -30,7 +30,7 @@
 | T19.3 | v9.3 | 应用镜像与启动脚本：非 root、属主自愈、主密钥缺失拒启动 | T19.0 | 新增文件 |
 | T19.4 | v9.4 | 静态站点镜像与反向代理：两个 dist + 三路分派 | T19.0 | 新增文件 |
 | T19.5 | v9.5 | compose 编排与部署 README：一条命令跑通主链路 | T19.3、T19.4 | 新增文件 |
-| T19.6 | v9.6 | 备份脚本：按后端分派、带 sha256、自检通过 | T19.5 | 脚本 + 演练 |
+| T19.6 | v9.6 | 备份脚本：SQLite 在线备份、带 sha256、自检通过 | T19.5 | 脚本 + 演练 |
 | T19.7 | v9.7 | CI：镜像构建 + 整栈冒烟 | T19.5 | CI |
 
 ```text
@@ -55,7 +55,7 @@ T19.0 文档与术语
 | 2 | v8 删容器章节 | `docs/architecture/v8/ARCHITECTURE.md` | 容器形态、进程与副本、卷与数据、健康检查、镜像与构建五节整段删除 |
 | 3 | v8 删双后端附录 | 同上 | 「双后端方案（SQLite / MySQL）」附录整段删除；全仓没有指向它的悬空引用 |
 | 4 | v8 标题与路线图 | `docs/architecture/v8/`、`docs/architecture/README.md` | 标题不再出现「容器化」；镜像 / 健康检查 / 卷备份三条路线图条目已删 |
-| 5 | 方言附录保留 | `docs/architecture/v8/ARCHITECTURE.md 附录 B` | 开头写明「当时目标为 MySQL，后改为 PostgreSQL，实施见下一版」 |
+| 5 | 方言附录保留 | `docs/architecture/v8/ARCHITECTURE.md 附录 B` | 开头写明「曾计划 MySQL、后评估 PostgreSQL，最终决定固定 SQLite」 |
 | 6 | 术语 | `GLOSSARY.md` | 「方案」= 一次完整工作的承载单元；「容器」只指 Docker 容器 |
 | 7 | 层级导航 | `docs/architecture/README.md` | 层级表新增 v9 一行；v8 的描述不再提容器化 |
 | 8 | 路径自检 | `%TEMP%` 下的一次性脚本（不入库） | `docs/**/*.md` + `GLOSSARY.md` + 根 `README.md` 反引号里的仓库路径逐条 `Test-Path`，失败项逐条说明 |
@@ -161,11 +161,10 @@ T19.0 文档与术语
 | # | 交付物 | 落点 | 验收要点 |
 | --- | --- | --- | --- |
 | 1 | 编排 | `deploy/` | 两服务；`api` 只 `expose` 不 `ports`；三个命名卷；宿主只发布 80；`stop_grace_period` |
-| 2 | 预留数据库服务 | 同上 | profile 默认关闭；`.env` 样例注明「v9 不使用，见下一版」 |
-| 3 | env 样例 | `deploy/` | 每个变量一行中文说明 + 默认值；`CORS_ORIGINS=` 为空并注释；`PRDWRIGHT_MASTER_KEY_PATH` 指向只读卷 |
-| 4 | 部署 README | `deploy/` | 备 `.env` 与主密钥 → `docker compose up -d` → 打开 `/` 与 `/admin/`；**备份纪律写在显著位置** |
-| 5 | 危险命令警示 | 同上 | `docker compose down -v` 标注为「连数据一起删」 |
-| 6 | 验收 | 全新机器 | 起栈后 `/`、`/admin/`、`/api/...` 三者可达；`/readyz` 200；重启后数据仍在 |
+| 2 | env 样例 | `deploy/` | 每个变量一行中文说明 + 默认值；`CORS_ORIGINS=` 为空并注释；`PRDWRIGHT_MASTER_KEY_PATH` 指向只读卷 |
+| 3 | 部署 README | `deploy/` | 备 `.env` 与主密钥 → `docker compose up -d` → 打开 `/` 与 `/admin/`；**备份纪律写在显著位置** |
+| 4 | 危险命令警示 | 同上 | `docker compose down -v` 标注为「连数据一起删」 |
+| 5 | 验收 | 全新机器 | 起栈后 `/`、`/admin/`、`/api/...` 三者可达；`/readyz` 200；重启后数据仍在 |
 
 **风险**：`.env` 样例漏一个变量 → 读者起栈失败却不知道为什么。样例要覆盖 `ARCHITECTURE.md`
 §4 提到的全部项（数据路径、日志目录、主密钥路径、skills 严格模式、`CORS_ORIGINS`、`TZ`）。
@@ -176,14 +175,14 @@ T19.0 文档与术语
 
 ## T19.6 · 备份脚本（v9.6）
 
-**目标**：一条命令得到一份**能验证完整性**的备份，且换库那天这条链不断。
+**目标**：一条命令得到一份**能验证完整性**的备份。
 
 | # | 交付物 | 落点 | 验收要点 |
 | --- | --- | --- | --- |
-| 1 | 备份脚本 | `deploy/` | 一条命令；按后端分派：SQLite 走 `VACUUM INTO`，PG 走 `pg_dump -Fc` |
+| 1 | 备份脚本 | `deploy/` | 一条命令；SQLite 在线备份（`VACUUM INTO` 到新文件），不设第二种后端 |
 | 2 | 产物 | `deploy/` 下备份目录（版本控制忽略） | 文件名带日期；旁边一份同名 `.sha256` |
 | 3 | 自检 | 同上 | 能打开 + `PRAGMA integrity_check` = `ok` + 读得到 `alembic_version`；任一失败即非 0 退出 |
-| 4 | 运行环境 | `backend/.venv` | SQLite 分支只用 Python stdlib，不要求宿主机装 `sqlite3` CLI |
+| 4 | 运行环境 | `backend/.venv` | 只用 Python stdlib，不要求宿主机装 `sqlite3` CLI |
 | 5 | 演练记录 | 本文件附录 | 备份 → 在另一目录恢复 → 服务能读起来并答 `/readyz` 200 |
 
 **风险**：只写「备份成功」而不自检，等于把「备份存在」当成「备份可用」。
@@ -231,7 +230,7 @@ v7 已经踩过一次（`VACUUM INTO` 与 `cp` 的差别），这次把自检写
 
 ## 债务与遗留（本期不做，登记备查）
 
-- **PostgreSQL 接入、全库真类型化、MySQL**：下一版。备份脚本的「按后端分派」是给它预留的接缝。
+- **PostgreSQL / MySQL 接入、全库真类型化**：不做（固定 SQLite）。
 - **k8s / Swarm、多架构镜像、容器内 TLS、热重载容器、业务链路自动化**：见 `ARCHITECTURE.md` §1.3。
 - **就绪探针不覆盖「模型供应商配置是否可用」**：依赖外部网络，高频探针会烧额度、会误报；
   它仍在 `/health` 三项体检里，由人看。

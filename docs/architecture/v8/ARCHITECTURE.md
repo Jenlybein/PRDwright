@@ -417,7 +417,7 @@ for base in ("frontend/src", "frontend_admin/src"):
 
 > 正文由该专题原文逐字移入，仅标题降两级以适应附录层级；内部交叉引用已改指本文件对应附录。
 >
-> **当时目标为 MySQL，后改为 PostgreSQL，实施见下一版。**
+> **曾计划 MySQL、后评估 PostgreSQL，最终决定固定 SQLite（v9）。**
 
 > 主题：让「这个项目跑在 SQLite 上」这件事只出现在一个文件里。
 > 本文只写**设计与契约**，不含实施记录；实测数据见附录 D。
