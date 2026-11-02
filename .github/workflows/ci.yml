@@ -6,7 +6,7 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
-    # 时长护栏（ADR-069）：先给宽松上限防止挂起吞掉 runner，T04 提速完成后再下调。
+    # 时长护栏：先给宽松上限防止挂起吞掉 runner，T04 提速完成后再下调。
     # 现已下调到 5 分钟：全量默认按核数并行，本机 16 核 72 秒、CI 4 核约 2 分钟，
     # 留一倍余量。超过 5 分钟基本只可能是挂起，不是"机器偶尔慢"。
     timeout-minutes: 5
@@ -34,8 +34,8 @@ jobs:
       - run: npm ci
       - run: npm run test:unit -- --run
       - run: npm run build
-  # 管理端：与用户端完全独立的工程（ADR-039），有自己的一份依赖与 lock 文件。
-  # 这 114 个用例早就写好了且本地全绿，但此前从未在 CI 上跑过——资产闲置（ADR-068）。
+  # 管理端：与用户端完全独立的工程，有自己的一份依赖与 lock 文件。
+  # 这 114 个用例早就写好了且本地全绿，但此前从未在 CI 上跑过——资产闲置。
   frontend-admin:
     runs-on: ubuntu-latest
     timeout-minutes: 10

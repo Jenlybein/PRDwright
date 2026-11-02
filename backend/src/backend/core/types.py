@@ -1,4 +1,4 @@
-"""列类型策略（v8 / ADR-097）：全项目**唯一**决定「一列用什么类型」的地方。
+"""列类型策略（v8）：全项目**唯一**决定「一列用什么类型」的地方。
 
 ## 为什么需要它
 
@@ -70,7 +70,6 @@ def long_text() -> TypeEngine:
     """大段文本：SQLite `TEXT` / MySQL `MEDIUMTEXT`（16MB）。
 
     容量不是业务约束——「最多 60KB」由 `core/limits.py` 在写入前拦。
-    两者分开的理由见 ADR-095。
     """
     return Text().with_variant(mysql.MEDIUMTEXT(), "mysql")
 
@@ -78,8 +77,8 @@ def long_text() -> TypeEngine:
 def timestamp_text() -> TypeEngine:
     """时间戳串（ISO 8601 文本）。
 
-    为什么不改成真的 `DATETIME`：本项目靠「ISO 字符串的字典序 = 时间序」做比较
-    （ADR-077），改成 `DATETIME` 会同时改变落盘格式、精度与时区解释，
+    为什么不改成真的 `DATETIME`：本项目靠「ISO 字符串的字典序 = 时间序」做比较，
+    改成 `DATETIME` 会同时改变落盘格式、精度与时区解释，
     代价远大于收益。这里只把宽度定下来，让它能建索引。
     """
     return short_text(TIMESTAMP_CHARS)

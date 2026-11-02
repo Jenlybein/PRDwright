@@ -2322,7 +2322,7 @@ describe('AppV2 分章节生成的阶段展示', () => {
  * 文档澄清：从审阅页进入**对话页的某条线程**、聊清楚、再按结论就地改写。
  *
  * 三条文档线程（PRD / 接口 / 提示词）与需求澄清**共用同一个对话页**，靠顶部子标签栏切换；
- * 消息共用一张表、靠 `stage` 分线（ADR-028）。这条链路的落点必须在测试里钉住：
+ * 消息共用一张表、靠 `stage` 分线。这条链路的落点必须在测试里钉住：
  *
  * ① 交给后端的**只有**正文与清单（前端不递提示词，只点名 `doc-clarification` 场景）；
  * ② 改写任务必须带 `docKind`——它既是「写回哪一份」也是「注入哪套产出规范」的依据，
@@ -2768,7 +2768,7 @@ describe('AppV2 对话页的子标签栏', () => {
     expect(buttons).not.toContain('重新开始')
     expect(buttons).not.toContain('改需求')
     expect(buttons).not.toContain('生成 PRD')
-    // 澄清标签下也没有「返回审阅」：回审阅页靠顶部进度条（ADR-028 的取舍）
+    // 澄清标签下也没有「返回审阅」：回审阅页靠顶部进度条
     expect(buttons).not.toContain('返回审阅')
 
     await clickButton(wrapper, '需求澄清')

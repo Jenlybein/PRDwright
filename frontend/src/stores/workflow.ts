@@ -158,9 +158,9 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const activeChatStage = computed<ChatStage | null>(() => runs.pointer?.chatStage ?? null)
 
   // 澄清线程的历史沿革（免得下一个人重蹈覆辙）：
-  // ADR-025 为了让闸门①读不到文档答疑，曾把接口文档 / 提示词的澄清做成**完全独立的一套**
+  // 为了让闸门①读不到文档答疑，曾把接口文档 / 提示词的澄清做成**完全独立的一套**
   // 字段（`clarifyMessages` / `clarifyConversationId` / `clarifyTarget`）并配一个独立页面；
-  // ADR-027 先让 PRD 澄清回到主对话栏（共用 `messages` + `stage` 标记）；本版把剩下两条
+  // 先让 PRD 澄清回到主对话栏（共用 `messages` + `stage` 标记）；本版把剩下两条
   // 也并了进来。分开的理由（防闸门①污染）经核实不成立——闸门①只比对结构化摘要，
   // 回填也只读 `requirement` 的消息。于是「一套字段 + 一个开关 + 一个页面」全部退役，
   // 换成「一个消息数组 + 一个 stage 标记 + 一个对话页的四条线程」。

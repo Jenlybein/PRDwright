@@ -1,4 +1,4 @@
-"""管理员专属的接口文档（ADR-085）。
+"""管理员专属的接口文档。
 
 守的是三件事，每一件错了都**不会报错**，只会静默地把接口清单交出去：
 
@@ -89,7 +89,7 @@ def test_admin_docs_require_login(client):
 
 
 def test_admin_docs_reject_normal_user(client):
-    """已登录但不是管理员 → 403，文案统一为「账号不存在」（ADR-049）。"""
+    """已登录但不是管理员 → 403，文案统一为「账号不存在」。"""
     register(client, "alice")
     for path in ADMIN_DOC_PATHS:
         response = client.get(path)

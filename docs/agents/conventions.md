@@ -1,7 +1,7 @@
 # PRDwright 工程约定（agent 必读）
 
 > 一句话说明：这是从旧长期笔记蒸馏出的当前有效约定；失效规则见文末附录。
-> 相关：`docs/adr/`（决策与否决理由）、`../../GLOSSARY.md`（术语）、`domain.md`（谁在读这些）。
+> 相关：`docs/architecture/`（各层设计与取舍）、`../../GLOSSARY.md`（术语）、`domain.md`（谁在读这些）。
 
 ## 1. 通用纪律
 
@@ -9,7 +9,7 @@
 - 提交前必须用户确认：先 `git add -An .` 预演，确认无 `.env` / `.venv` / `node_modules` / `dist`；agent 不自行 commit。
 - 架构文档正向写：目标 → 范围（含「本期不做」）→ 设计 → 契约 → 取舍；禁止写成「盘点了哪些缺口」。
 - `code` 是唯一机器判据，`detail` 仅供展示：禁止用 `detail` 或中文做分支判断。
-- 提示词只在后端（`services/prompts.py`、`skills/prd-generator/**`、`core/question_config.json`）；前端只能「点名」场景（`profile_key`），不能「递剧本」文本（ADR-010）；用户可见文案不复述提示词数值。
+- 提示词只在后端（`services/prompts.py`、`skills/prd-generator/**`、`core/question_config.json`）；前端只能「点名」场景（`profile_key`），不能「递剧本」文本；用户可见文案不复述提示词数值。
 - 前端守卫扫 `frontend/src/**` 全文（分不出注释与代码）：注释里写「等号紧跟中文」也会红。
 - 文档里写出的每个路径，`ls` 必须能看见；写完 `ls` + `git status` 复核并尽快提交（本项目两次出现「报告写入成功、次日消失」）。
 - 品牌 PRDwright，仓库根目录名仍是 `HarnessPRD`（勿改）；远端 `origin = github.com/Jenlybein/PRDwright`，CI 只有 push 后才真跑。
@@ -19,17 +19,17 @@
 ## 2. 后端分层与数据层
 
 - `api/` 只解析 / 校验 / 封装 → `services/` 业务 → `repositories/`（唯一碰模型与查询的地方）。
-- Pydantic 模型集中 `api/schemas/`（按领域拆成 9 个子模块，`__init__.py` 是唯一出口；ADR-099），被引用的模型必须先定义；Router 各自带完整 prefix，`main.py` 不叠加。
-- 仓储返回模型对象或 frozen dataclass 投影，不返回裸 dict（ADR-078）。
+- Pydantic 模型集中 `api/schemas/`（按领域拆成 9 个子模块，`__init__.py` 是唯一出口），被引用的模型必须先定义；Router 各自带完整 prefix，`main.py` 不叠加。
+- 仓储返回模型对象或 frozen dataclass 投影，不返回裸 dict。
 - 仓库是绑定 `Session` 的实例方法：不许 `import sqlite3`、不许 `.commit()` / `.rollback()`、不许 SQL 字符串字面量（守卫 C1/C2/C3）。
 - 事务边界唯一落点是 `session_scope()`（正常提交 / 异常回滚 / 必定关闭）：仓库只管翻译，服务层负责「一个业务操作 = 一个事务」；不许在 `async def` 里跨 `await` 持有（C4）。
 - 引擎参数固定 `expire_on_commit=False`（防 `DetachedInstanceError`）+ `autoflush=False`（要自增 id 就自己 `flush()`）。
-- `max_overflow=0` 是承重设计：运行期一条连接都不许新建（躲 T15 的 WAL `-shm` `SQLITE_READONLY` 竞态）；启动路径必须在 `prepare_schema` 之后调 `warmup(engine)`（ADR-084）。
+- `max_overflow=0` 是承重设计：运行期一条连接都不许新建（躲 T15 的 WAL `-shm` `SQLITE_READONLY` 竞态）；启动路径必须在 `prepare_schema` 之后调 `warmup(engine)`。
 - 数据层是 SQLModel：时间工具在 `core/clock.py`，引擎 / 事务在 `core/engine.py`，连哪个库在 `core/database.py`。
-- 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8 / ADR-097）。
-- 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8 / ADR-095）。
-- upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；MySQL 的 DO NOTHING 用主键 no-op，绝不用 `INSERT IGNORE`（会吞列超长 / NOT NULL）；只准用在「该表只有一个唯一约束」的表上（契约 C-D1，v8 / ADR-088）。
-- SQLite 与 MySQL 都是一等后端、部署时自选（ADR-097，部分取代 ADR-091）：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），设计见 `docs/architecture/v8/MULTI-BACKEND.md`；写 MySQL 兼容代码守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+- 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8）。
+- 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8）。
+- upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；MySQL 的 DO NOTHING 用主键 no-op，绝不用 `INSERT IGNORE`（会吞列超长 / NOT NULL）；只准用在「该表只有一个唯一约束」的表上（契约 C-D1，v8）。
+- SQLite 与 MySQL 都是一等后端、部署时自选：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），设计见 `docs/architecture/v8/MULTI-BACKEND.md`；写 MySQL 兼容代码守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
 - `get_settings()` 走 lru_cache：改环境变量后必须 `cache_clear()`；`prompts.py` 走 `str.format()`，字面量花括号写 `{{ }}`，给 LLM 的指令用 `<!-- -->` 注释。
 
 ## 3. 迁移（Alembic）
@@ -54,14 +54,14 @@
 - 预算检查在 `astream_text` 开头、记账在末尾；超顶复用 `INVALID_REQUEST`（别标 `LLM_UPSTREAM_ERROR`，否则前端白重试）；`max_retries` 设 0；`text_emitted` 守卫：yield 过增量就绝不重来。
 - 需整段结果（JSON 回填等）用 `document_service._collect_reply()`（拼增量 + 截断检查）。
 - SSE 分帧唯一实现 `api/sse.py::make_sse_generator`（已带 `X-Accel-Buffering: no`）；事件 `status/chunk/part/stage/review/done/error` + 末尾 `data: [DONE]`；服务层与路由层两层异常兜底；前端用原生 `fetch` + `ReadableStream`（axios 不支持流式读）。
-- 心跳 `: ping` 是 v7 必做（ADR-059 修订），只能走 `api/sse.py` 这个出口。
+- 心跳 `: ping` 是 v7 必做，只能走 `api/sse.py` 这个出口。
 - 三家 LLM 抽象、路由 / service 分离、SSE 两层兜底、技能包驱动 + 资源缺失降级：别动。
 
 ## 5. 生成与审核管线
 
 - `PRD_PIPELINE_CONCURRENCY=1` 是串行回滚路径（不发 `review`、不产生 `partial`）；`>1` 并行（生成车道严格按章序、每章派生审核 + 改写任务、一个信号量罩住全部 LLM 调用）。并行牺牲跨章一致性，`review` 只聚合各章结论。
 - 两条轨：`chunk` 是过程字（可能缺标题）、`part` 是权威正文（整段覆盖该章）；分章 `chunk` 必须带 `section_id` + `index`。
-- `part` 带 `index`、可乱序：看板装配与 `done.reply` 一律按 index 排序；并行必须关闭逐字 `chunk`（ADR-016：已交付的增量撤不回来）。
+- `part` 带 `index`、可乱序：看板装配与 `done.reply` 一律按 index 排序；并行必须关闭逐字 `chunk`（已交付的增量撤不回来）。
 - `stage(writing)` 放在单章重试循环内；按章分缓冲 `live_by_index`；`part` 只清该章；`_draft` 按 index 交错归并。
 - 失败语义：单章每阶段按 `PRD_SECTION_MAX_RETRIES` 重试；撰写用尽写占位继续、仍 `completed` 且 `partial=true`，审核用尽保留正文，改写用尽保留改写前版本，全部章节失败才 `error`。
 - `review_enabled=False` 时连 `review` 事件都不发（报「0 个待处理问题」会被读成「审过了、没问题」）。
@@ -73,11 +73,11 @@
 - 只改 N 节时，未被改写章节的待确认项必须合并保留（`pending_items.finalize_items`）。
 - 骨架化 `doc_skeleton.py`（纯字符串、零 LLM 调用）只用在审核侧：标题整行 / 表格整行（只留首列会丢接口路径）/ 条目整行 / 含数字行 / 代码块只留围栏首行；撰写侧的需求输入不动（唯一事实来源），撰写侧要带 `format_field_contract`（枚举递归扫）；`skeletonize` 喂 fenced JSON 会静默吐空。
 - PRD 改写不复用 `PRD_SECTION_GENERATION_PROMPT`（6000 字符字段契约 + `{{占位符}}` 会诱导重新渲染），改用 `PRD_SECTION_REWRITE_PROMPT`。
-- 待确认清单唯一实现 `services/pending_items.py`（ADR-023）：`extract()` 剥离全部块并按 `{prefix}-{n}` 重分配 id、坏 JSON 与未闭合块跳过；`id` 由后端分配、不信任模型的 id；抑制器流结束仍在块内则什么都不输出。
+- 待确认清单唯一实现 `services/pending_items.py`：`extract()` 剥离全部块并按 `{prefix}-{n}` 重分配 id、坏 JSON 与未闭合块跳过；`id` 由后端分配、不信任模型的 id；抑制器流结束仍在块内则什么都不输出。
 - 清单三路可达前端：`done.data.pending_items` → `snapshot`（`generation_jobs.pending_items` 列，`_snapshot_event` 与 `_db_snapshot_event` 两条路都要带）→ `GET .../documents`。
 - 澄清档案 `doc-clarification` 的 `opening_fields` 必须与模板占位符一一对应（多一个 KeyError、少一个静默填空）；`continue-stream` 也要带 `profile_key`，且 `profile_key` 校验必须在构造 SSE 之前。
 - 澄清改写走 `clarify` 任务（复用 job 框架，不是裸 SSE）→ `apply_clarification_stream`；「只动涉及章节」只能靠提示词约束（代码保证不了），提示词里写「逐字保留」。
-- 技能包：归属与资源由 `skill.yaml` 自述（`applies_to` / `references[]`），加包 = 加目录、别加中心注册表；唯一入口 `load_skill_artifacts(kind)`，缺件返回 `None` 降级且降级要在回执上看得见（ADR-017/019/020/031）；规范整段注入、不检索（ADR-020），改写 / 澄清按白名单 `format_rewrite_reference`。
+- 技能包：归属与资源由 `skill.yaml` 自述（`applies_to` / `references[]`），加包 = 加目录、别加中心注册表；唯一入口 `load_skill_artifacts(kind)`，缺件返回 `None` 降级且降级要在回执上看得见；规范整段注入、不检索，改写 / 澄清按白名单 `format_rewrite_reference`。
 - `prompts` 生成线的占位符（`prd_content` / `api_docs_content` / `pending_spec`）是跨文件契约：技能包版与 `prompts.py` 兜底版少一个不是「那节空着」而是 `KeyError`；留空填 `NO_API_DOCS_NOTE`。
 - `optimize` / `clarify` / `auto-clarify` 的 `kind` 只说「做了什么」，目标产物取 `doc_kind`（回执与落库共用 `_target_product_kind()`）；资源存在性不进缓存。
 - 交付：`GET /api/solutions/{id}/export` → ZIP = 三份 md + `README.md`；只导用户看得见的；目录名必须消毒（`_safe_name` 抹 `..`、拦 `con` / `nul`）；上限 50MB、CSV 带 BOM。
@@ -91,14 +91,14 @@
 
 - `main.ts` 只挂 `AppV2`；router 只有 `/v2`、`/v2/:id`，阶段流转走状态机、不进 URL；外壳在左侧 `SolutionSidebar.vue`（无顶栏）。
 - `types/index.ts` 是契约准绳（不一致时改后端迁就前端）；状态在 Pinia `stores/{workflow,solutions,auth}.ts`；Markdown 统一走 `utils/markdown.ts::renderMarkdown()`（`html:false` 防 XSS）。
-- 入口 = 一屏两组四叶子（`EntryStage.vue`，ADR-031）：`从零创建 PRD`（`structured` / `prd-quick`）｜`导入已有素材`（`prompt-debug` / `prd-and-api-paste`）；`prompt-debug` 键名故意不改，新键刻意不叫 `prompts`（那是 `DocKind` 取值）。
+- 入口 = 一屏两组四叶子（`EntryStage.vue`）：`从零创建 PRD`（`structured` / `prd-quick`）｜`导入已有素材`（`prompt-debug` / `prd-and-api-paste`）；`prompt-debug` 键名故意不改，新键刻意不叫 `prompts`（那是 `DocKind` 取值）。
 - 流程：入口 → 表单 → 对话 → 闸门①摘要 Diff（回填失败返回原摘要深拷贝）→ PRD → 接口文档 → 提示词 → 交付；文档澄清就在对话页。
 - 加一个入口模式要同步十来处（`EntryMode` / `ViewState`、`VIEW_STATES` / `isEntryMode` / `MODE_STEP_IDS` / `REQUIRED_DOCS`、`MODE_LANDING` 与「快照四件事」+ `hasContent` + return、`MODE_LABELS` / `STAGE_LABELS` / `computeTitle`、`AppV2.vue` 渲染分支、`backToInput` / `backLabel`、`AppV2.spec.ts` 的入口文案断言）：漏一处大多不报错、只是行为不对。
 - 加 `ViewState` 同步四处：`ViewState` / `VIEW_STATES` / `STEP_OF_STATE` / `STATE_DOWNGRADE`，漏一处只表现为进度条算错或刷新后进不去。
 - 快捷流程 = 同一管线、六步齐全：`REQUIRED_DOCS` 与 `structured` 一致、`STEP_OF_STATE['prd-quick']='form'`；`hasRequirementChat()` 只认 `structured`；「AI 对话」那格不能省（找不到就归零 → 停在对话页却高亮「描述产品」）；它不问问题，缺的信息靠「待确认」+ 审阅页「AI 自行澄清」。
 - 进度条「AI 对话」摘到最左、用竖线隔开（纯呈现，`stepsForMode` / `stepIndexOf` / `reachedStepIndex` 未动）：高亮与可点一律按「原始下标」；分隔线用 `border-r`、别插 div；`li` 数量仍为 5。
 - `DocKind` 含 `optimize` / `clarify` / `auto-clarify` / `chat`（动作），`DocumentKind` 只三份（东西），`isDocKind` 必须认 `chat`；前端 `api-docs`（连字符）/ 后端 `api_docs`（下划线），唯一转换点在 `documentService.ts` 与 `api.ts`。
-- 四条澄清线程（需求 / PRD / 接口 / 提示词）全在同一对话页（ADR-028）：单 `messages` + 每条打 `stage`，只渲染当前标签那一条；`chatTab`（意图）与 `activeChatTab`（实际显示）必须分开、后者绝不回写；回填只取 `requirement`；`ProgressSteps.canClick` 必须含「当前步骤」；线程作废只在整篇重生成。
+- 四条澄清线程（需求 / PRD / 接口 / 提示词）全在同一对话页：单 `messages` + 每条打 `stage`，只渲染当前标签那一条；`chatTab`（意图）与 `activeChatTab`（实际显示）必须分开、后者绝不回写；回填只取 `requirement`；`ProgressSteps.canClick` 必须含「当前步骤」；线程作废只在整篇重生成。
 - 澄清改写 / AI 自行澄清切到 `generating-<kind>`，完成回审阅；`goTo` 必须在 `job.start` 之前（`docGenerating` 置位后 busy 守卫会拦），并把 `clarifyTarget` 钉为 `'prd'`；改写失败也留在生成视图。
 - 澄清上限与分级 = 后端共享常量 `CLARIFICATION_QUESTION_RULE`，各档案整段引用、别各写数字；等级没有兜底（`IMPORTANCE_ORDER` 是 P0..P6，缺失或非法一律丢弃）；未注册档案名 → 400。
 - 澄清选项卡挂 `ChatMessage.asks`（不加顶层快照字段）；无选项时不写 `asks` 字段（恒带 `[]` 会撞破形状断言）；选项说明不许空；卡片里不放输入框；多选答案按选项序拼、不按点选序；写回会话历史的必须是剥离后的干净正文；可交互判据 =「当前线程最后一条消息」。
@@ -108,7 +108,7 @@
 - 任务与连接解耦：`POST /api/jobs` + `GET /{id}/stream`，`detach()` 只退订不取消；同一任务绝不能并发订阅两次（两路 SSE 交错写同一份预览缓冲 → 整章重复 + 表格单元格成对重复，而只有预览坏、落稿是好的）；两道锁：`loadAndResume` 按方案 id 单飞（`main.ts` 未等 `router.isReady()` 就挂载）+ `reconnectJob` 复位前再单飞。
 - 预览必须幂等：`part` 按 `sectionId` 去重，`applyJobSnapshot` 只在预览还空着时初始化；`optimize` / `clarify` 不切阶段，重连落点由 `docKeyForJob(kind)` 定。
 - 顶部提示一律走 `AppV2.vue` 浮层（`fixed right-4 top-4 z-50 w-72`），绝不进文档流；自动保存成功 / 进行中都静默，只有失败弹（`saveError` 的 watch 要覆盖任意失败）。
-- `ui/AppActionBar.vue` 是全站唯一操作落点（ADR-015）：最多两行、主操作永远最右且唯一、吸底 `fixed bottom-0`（不要 `sticky`）、没有「保存」按钮，卡片内嵌底栏传 `:sticky="false"`；底栏高度写进 `--shell-action-bar-h`，只允许「可见的那条」写（`el.getClientRects().length`，`v-show` 隐藏的 0 会覆盖可见值），首次同步放 `requestAnimationFrame`。
+- `ui/AppActionBar.vue` 是全站唯一操作落点：最多两行、主操作永远最右且唯一、吸底 `fixed bottom-0`（不要 `sticky`）、没有「保存」按钮，卡片内嵌底栏传 `:sticky="false"`；底栏高度写进 `--shell-action-bar-h`，只允许「可见的那条」写（`el.getClientRects().length`，`v-show` 隐藏的 0 会覆盖可见值），首次同步放 `requestAnimationFrame`。
 - `DocumentReview.vue` 只渲染卡片、不自带控件，工具全在底栏、经 `defineExpose` 交出；「保存」判据是「有正文」不是「改过」。
 - 底栏读子组件句柄要兜 null（模板 ref 首帧后才赋值），断言状态前必须 `await nextTick()`。
 - 待确认清单面板在正文之上（`PendingItemsPanel.vue`，只 `ReviewStage` 用），默认铺开 2 条、其余可展开；折叠只改铺开数量、不动排序、不进快照；序号用位置下标，后端 `id` 只作渲染 key。
@@ -130,7 +130,7 @@
 - 删除只重拉列表、不重拉当前文档；checkpoint / restore 相反（要 `documents.reload()` + 重拉列表）。
 - `fetchVersion` / `deleteVersion` 的 404 不收敛成 `DocumentsNotFoundError`，直接透传后端 `detail`（`fetchVersions` 仍走它）；`DocumentVersionDetail` 不含 `contentSha` / `contentLength`，别用 `...toVersionSummary()` 展开构造。
 - 前端另开 `stores/documentVersions.ts`（别挂 `documents`），抽屉 `ui/VersionDrawer.vue` 纯展示、点条目才 `fetchVersion` 单取详情并就地加宽到 640px；写动作先 `flushPendingSave`，成功后 `documents.reload()` + 重拉列表；删除与恢复都要二次确认且互斥，Esc 逐层退出（先撤确认 → 再退预览 → 最后关抽屉）。
-- ADR-030 = ADR-015 的有意例外：抽屉只放内容操作（存为新版本 / 恢复 / 删除），流程动作永远只在底栏；抽屉以 `--shell-action-bar-h` 作下边距不遮底栏。
+- 底栏唯一操作落点的有意例外：抽屉只放内容操作（存为新版本 / 恢复 / 删除），流程动作永远只在底栏；抽屉以 `--shell-action-bar-h` 作下边距不遮底栏。
 - 保存单飞，唯一入口 `scheduleSave()`；`changeTick`（该存）≠ `restoreTick`（重建组件），用 restoreTick 触发保存会把刚读回的存回去还刷 `updated_at`。
 - 两根时间轴：列表时间与排序一律用 `content_updated_at`；推进判据 `content_changed` = `workflow.contentTick` ∪ `documents.contentWriteTick`（分两个计数是防成环）。
 - `content_changed` 缺省假，且只在保存成功之后把基准推到发送时的值（失败不能推进，否则静默丢一次变更）；打开方案时要同步两个基准。
@@ -155,7 +155,7 @@
 - 配置项控件类型按 `Settings` 注解推导；Vue 模板 / `help` 里不能用 markdown 的 `**`。
 - 登录链路是同步代码（`time.sleep` 卡死事件循环）→ 延时走 `api/login_flow.py::_sleep`；失败渐进延时 2/4/8 秒，不存在的用户名也计数。
 - 不上 JWT（触发条件是多实例不共享会话存储 / 微服务传身份 / 给第三方发 token）：随机 token 存库 + HttpOnly Cookie，`TokenIssuer` 封装以便替换；密码 `hashlib.scrypt` + 独立 salt；注册开放但需邀请码（`invite_codes.max_uses` 0 = 不限，首启播种 `.env` 的 `INVITE_CODE`）。
-- 单点登录（ADR-024）：`replace_for_user` 在一条事务里先删该用户全部旧会话再插入；刻意不按过期时间挑着删；残余风险 = 多设备互相踢下线。
+- 单点登录：`replace_for_user` 在一条事务里先删该用户全部旧会话再插入；刻意不按过期时间挑着删；残余风险 = 多设备互相踢下线。
 - 门禁 = 中间件默认拦截 + 白名单（只有 `/`、`/health`、`/api/auth/*`、`/api/conversation/questions`）；不变量测试遍历 OpenAPI 断言非白名单必 401；中间件必须是纯 ASGI 类（`BaseHTTPMiddleware` 会重包响应体、对 SSE 有风险）；`AUTH_ENABLED` 默认 true；接口前缀 `/api/solutions/*`，运维 CLI 是 `backend/scripts/auth_cli.py`。
 - 未登录禁止创建任务：可浏览 `/v2` 入口页，点入口即弹 `AuthDialog` 且不进入流程；登录成功只关弹窗、回入口页让用户重选；未登录时 `viewState` 锁在 `entry`。
 
@@ -204,17 +204,17 @@
 
 ## 已失效（勿再引用）
 
-- `core/db.py` 与那个 444 行连接池实现的 `core/database.py`：已删（v6 换 SQLModel）；旧说法「`core/database.py` 已删」已作废 —— v8 里该文件名以「连哪个库」的四模块之一重新存在（ADR-097）。
-- `SCHEMA_SQL` / `init_schema` / `PRAGMA user_version` 的 20 步手写迁移链（`core/migrations.py` 的 `MIGRATIONS` 清单）：v6.1 / ADR-083 整体删除，被 Alembic 取代（`core/schema.py::prepare_schema`）；「自研迁移比 alembic 省」的论证同时作废。
+- `core/db.py` 与那个 444 行连接池实现的 `core/database.py`：已删（v6 换 SQLModel）；旧说法「`core/database.py` 已删」已作废 —— v8 里该文件名以「连哪个库」的四模块之一重新存在。
+- `SCHEMA_SQL` / `init_schema` / `PRAGMA user_version` 的 20 步手写迁移链（`core/migrations.py` 的 `MIGRATIONS` 清单）：v6.1 整体删除，被 Alembic 取代（`core/schema.py::prepare_schema`）；「自研迁移比 alembic 省」的论证同时作废。
 - `solutions.data` 存全量 `SessionDataV2` JSON（后端不解析 data）：`data` 已退役（create 写空串、update 不碰），正文住 `document_versions`。
 - 三份正文存 `documents` 的正文列：v6 删列（单向门），被 `document_versions` 取代。
 - 闸门② RAG（`retrieve-api-docs-rag` + `core/api_doc_knowledge.json` 本地词法检索 + `RagResultPanel`）：已整条移除。
 - 整篇生成删下游、`_write_document` 一律传 `invalidate_downstream=True`：已被「下游只置 `stale` 亮黄条、不删、仍可交付」取代。
 - `quality_gate` / 需求基线签字 / `manifest.json`：裁决不做（`quality_gate` 恒 `'{}'` 的旧口径一并作废）。
-- 三家 LLM 自动 failover：已取消（ADR-016），不再跨供应商换线。
+- 三家 LLM 自动 failover：已取消，不再跨供应商换线。
 - `PRD_SECTION_REWRITE_APPENDIX`：已退役（改写改用 `PRD_SECTION_REWRITE_PROMPT`）。
 - `clarification_ask.render_ask_spec()` 这个旧名：已退役，现名 `render_ask_tool_instruction()`。
 - 测试建库用 `init_schema()` 或每用例 `create_all`：被「`tests/dbsupport.py` 模板库 + 每用例拷贝」取代。
 - 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006：全部作废，现行基线是 **1014（工作区）/ 986（HEAD）**。
-- 排期真源 `docs/architecture/v3/roadmap.md`：只是 v3 期的口径，别当现状真源（现行排期看 `docs/architecture/v8/roadmap.md`，决策记录看 `docs/adr/`）。
-- `docs/architecture/v*/ADR.md` 与 `docs/architecture/evolution-truth.md`：**文件已删除**，正文分别并入 `docs/adr/` 与 `docs/architecture/README.md`；按旧路径引用一律无效。
+- 排期真源 `docs/architecture/v3/roadmap.md`：只是 v3 期的口径，别当现状真源（现行排期看 `docs/architecture/v8/roadmap.md`；决策与取舍看各层 `ARCHITECTURE.md`）。
+- `docs/architecture/v*/` 下原有的按层决策记录文件与 `docs/architecture/evolution-truth.md`：**文件已删除**（决策记录目录随后也整体移除），`evolution-truth.md` 的独有内容并入 `docs/architecture/README.md`；按旧路径引用一律无效。

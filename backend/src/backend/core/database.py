@@ -1,4 +1,4 @@
-"""数据库装配（v8 / ADR-097）：全项目**唯一**决定「连哪个库、怎么连」的地方。
+"""数据库装配（v8）：全项目**唯一**决定「连哪个库、怎么连」的地方。
 
 ## 只做三件事
 
@@ -157,7 +157,7 @@ def _mysql_on_connect(dbapi_connection: Any, _record: Any) -> None:
 
     两条都是**为了与 SQLite 行为对齐**：
 
-    - `time_zone='+00:00'`：本项目按 UTC 存时间文本（ADR-077）。不设的话会话时区
+    - `time_zone='+00:00'`：本项目按 UTC 存时间文本。不设的话会话时区
       跟随服务端，一旦有人把服务端设成 `+08:00`，`NOW()` 之类的函数就会写进本地时间，
       而读出来仍是"看起来像 UTC"的字符串——错 8 小时且不报错。
     - `sql_mode` 含 `STRICT_TRANS_TABLES`：让「列超长、非空缺失」直接报错，而不是
@@ -214,7 +214,7 @@ def build_engine(
     _ensure_sqlite_dir(url)
 
     # ⚠️ 固定池：`max_overflow=0` 不许运行期扩容。
-    # 对 SQLite 是承重设计（躲 WAL `-shm` 的首次映射竞态，见 ADR-084）；
+    # 对 SQLite 是承重设计（躲 WAL `-shm` 的首次映射竞态）；
     # 对 MySQL 是"池满即报错"的可观测性选择——悄悄扩容会把连接数问题推迟到
     # 服务端的 `max_connections` 上，那时更难查。
     common: dict[str, Any] = {

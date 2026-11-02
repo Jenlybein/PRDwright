@@ -19,7 +19,7 @@
 PRD / 接口文档 / 提示词套件三类生成均走技能包驱动：各自从对应技能包
 （`skills/prd-generator`、`skills/api-docs-generator`、`skills/prompts-generator`）取用
 字段契约、团队规范或产出要求，拼进提示词；技能包缺失时自动降级为 `prompts.py` 里的
-内置提示词。这一改动废弃了原先的 RAG 检索（见 ADR-020）：团队规范不再「按 PRD 关键词
+内置提示词。这一改动废弃了原先的 RAG 检索：团队规范不再「按 PRD 关键词
 挑几条」下发，而是整段注入，避免「检索没命中就悄悄丢规范」的静默降级。
 
 按摘要生成 PRD 时优先走**分章节生成 + 写作/审核双 Agent**（`services/prd_section_writer.py`），
@@ -254,7 +254,7 @@ def review_enabled_for_whole_document(value: bool | None) -> bool:
 
     与 PRD 的逐章审核共用一个请求字段 `review_enabled`，但**默认口径不同**：
     `None` 在这里视为**开启**——这两份产物没有独立的配置开关，历史行为就是审，
-    只有快捷流程会在请求体里显式传 `False`（ADR-034：快捷流程不审不改）。
+    只有快捷流程会在请求体里显式传 `False`（快捷流程不审不改）。
 
     写成「只有 `False` 才是关」而不是「只有 `True` 才是开」：未知/缺省值一律保持
     原有行为，别因为一个前端漏传字段就悄悄改变产出的质量口径。
@@ -263,10 +263,10 @@ def review_enabled_for_whole_document(value: bool | None) -> bool:
 
 
 def format_rewrite_reference(kind: str) -> str:
-    """按目标产物取「改写时要对齐的规范」文本（整段注入，见 ADR-020）。
+    """按目标产物取「改写时要对齐的规范」文本（整段注入）。
 
     技能包不在位或资源缺失时返回一句**显式**的降级说明，而不是空串：提示词里什么都不写，
-    模型会以为「没有规范要守」，而实际约定是被悄悄丢掉了——这类静默降级正是 ADR-020 要消灭的。
+    模型会以为「没有规范要守」，而实际约定是被悄悄丢掉了——这类静默降级正是要避免的。
 
     Args:
         kind: 目标产物类型（`prd` / `api_docs` / `prompts`）。空串或未知取值一律降级。
@@ -665,13 +665,13 @@ class DocumentService:
 
         团队接口规范（统一响应结构、错误码、分页、鉴权等）由 `api-docs-generator` 技能包
         整段提供，生成时全量注入提示词，要求模型按团队约定对齐——不再做「按 PRD 关键词
-        挑几条」的 RAG 检索（见 ADR-020）。技能包缺失时退化为「不注入规范」的普通生成，
+        挑几条」的 RAG 检索。技能包缺失时退化为「不注入规范」的普通生成，
         并在日志里如实报出。
 
         Args:
             prd_content: PRD 正文（Markdown）。
             review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」。`None`（默认）
-                视为开启；快捷流程显式传 `False`，一遍过（ADR-034）。
+                视为开启；快捷流程显式传 `False`，一遍过。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（接口文档正文）。
@@ -775,7 +775,7 @@ class DocumentService:
                 此时模板里那一节填 `NO_API_DOCS_NOTE`——写成「本次未提供」而不是留空，
                 免得模型把「空的一节」理解成「漏读了」，转头自己编一份接口契约出来。
             review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」。`None`（默认）
-                视为开启；快捷流程显式传 `False`，一遍过（ADR-034）。
+                视为开启；快捷流程显式传 `False`，一遍过。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（提示词套件正文）。

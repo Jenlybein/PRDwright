@@ -29,7 +29,7 @@ from backend.core.schema_snapshot import (
 #
 # v8 之前这里**不含** VARCHAR：那时裸 `str` 字段会生成它，与现有库的 TEXT 在 SQLite
 # 里行为相同、类型名不同，会让 alembic 产生幻影迁移。
-# v8 之后 VARCHAR 是**故意**的：索引列在 MySQL 上必须有长度（ADR-097），
+# v8 之后 VARCHAR 是**故意**的：索引列在 MySQL 上必须有长度，
 # 所以判据从「不许 VARCHAR」改成「不许**没有长度**的 String」——那才是裸 str 的特征。
 _ALLOWED_TYPES = {"TEXT", "INTEGER", "BOOLEAN", "BLOB", "LARGEBINARY", "STRING"}
 
@@ -95,7 +95,7 @@ def test_no_bare_str_columns():
     在 SQLite 里与 `TEXT` 亲和性相同、行为一致，但类型名不同 → 结构对拍与
     `alembic check` 会全表报漂移。
 
-    v8 之后多了 `String(n)` 这种**合法**形态（索引列必须有长度，ADR-097），
+    v8 之后多了 `String(n)` 这种**合法**形态（索引列必须有长度），
     所以判据从「不许 VARCHAR」细化成「不许**没有长度**的 String」。
     """
     from backend.core import models  # noqa: F401

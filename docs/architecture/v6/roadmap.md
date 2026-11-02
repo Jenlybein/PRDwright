@@ -154,7 +154,7 @@ def test_indexes_and_constraints_parity(tmp_path):
 - v20 库 → `prepare_schema` → **数据行数不变、schema 不变、`alembic_version` 写入**；
 - v18 库 → 跑冻结的 legacy 20 步到 v20 → `stamp` → 数据不丢；
 - 人为改坏基线（删一列）→ `assert_schema_matches_baseline` **拒绝启动**并打印差异；
-- 基线建的库与模型建的库**语义快照一致**（不用 `alembic check`，见 ADR-082 的实测说明）。
+- 基线建的库与模型建的库**语义快照一致**（不用 `alembic check`，理由见本节实测说明）。
 
 **回滚**：删 `alembic.ini` / `migrations/` / `core/schema.py`，启动仍走 `init_schema()`。
 
@@ -250,7 +250,7 @@ def test_indexes_and_constraints_parity(tmp_path):
 - `supersede_active` / `cancel_*` 系列是**条件更新**（`WHERE status='running'`），
   改成 `update(...).where(...)` 并返回 `rowcount`，语义必须一致（调用方靠返回值判断「有没有真的改到」）；
 - `persist_progress` 是高频写（≤300ms / 增量 4KB），**每次一个短事务**，不合并；
-- 时间列 `updated_at` 仍用 `utc_now_text()`（ADR-077）。
+- 时间列 `updated_at` 仍用 `utc_now_text()`。
 
 **验收**
 

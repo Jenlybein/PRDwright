@@ -216,7 +216,7 @@ def test_reset_restores_default(client):
 def test_fresh_install_has_no_config_entries(client):
     """装完就是空的，且没有「使用中」——这不是异常，是还没配过。
 
-    这条钉住 v19 + ADR-051 的核心变化：不再有 6 条内置播种行，
+    这条钉住 v19 的核心变化：不再有 6 条内置播种行，
     也不再退回 `env:` 合成的降级项（env 里已经没有第二份模型配置）。
     列表为空时 `active_provider_id` 是空串，前端据此显示「还没有任何模型配置」。
     """
@@ -232,7 +232,7 @@ def test_fresh_install_has_no_config_entries(client):
 def test_protocols_no_longer_carry_key_var(client):
     """协议不再附带「默认密钥变量名」——密钥由管理员在后台直接录入。
 
-    ADR-053 之后 env 不存密钥，`key_env_var` 这个预填字段也随之消失；
+    env 不存密钥，`key_env_var` 这个预填字段也随之消失；
     若它还在，前端会渲染一个没有意义、且填了也不生效的输入框。
     """
     from backend.core.providers import PROTOCOLS

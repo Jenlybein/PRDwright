@@ -129,7 +129,7 @@ export const NAV: NavGroup[] = [
     items: [
       { name: 'logs', label: '系统日志', code: 'LOGS' },
       /**
-       * 接口文档（ADR-085）。
+       * 接口文档。
        *
        * 它**不是**一个外链：这一项进的是后台自己的页面，页面里再放按钮跳到
        * 后端渲染的 Swagger UI / ReDoc。直接塞两个外链会让侧栏看起来像跳出了

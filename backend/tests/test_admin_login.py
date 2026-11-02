@@ -1,4 +1,4 @@
-"""管理后台登录入口（ADR-049）：**只允许管理员账号登入**。
+"""管理后台登录入口：**只允许管理员账号登入**。
 
 这份用例钉的是三件容易混淆、而混淆后都很难看出来的事：
 
@@ -77,7 +77,7 @@ def test_admin_login_is_reachable_without_a_session(client):
 def test_normal_user_cannot_log_in_to_the_console(client):
     """普通账号（密码正确）登录后台：401「账号不存在」。
 
-    文案刻意不是「无权限」：后台对外只承认管理员账号存在（ADR-049）。
+    文案刻意不是「无权限」：后台对外只承认管理员账号存在。
     """
     register(client, "alice", "password123")
     client.post("/api/auth/logout")

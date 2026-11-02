@@ -354,7 +354,7 @@ PRD_SKILL_GENERATION_PROMPT = """请基于以下信息，产出一份完整、�
 # 占位符：prd_content（PRD 正文）、api_specs（团队接口规范，来自 api-docs-generator 技能包）
 # 说明：旧实现会先按 PRD 关键词做 RAG 检索、把「挑出来」的规范随请求下发；
 # 现在团队规范由 `api-docs-generator` 技能包整段提供，生成时直接全量注入，
-# 不再有「检索没命中就悄悄丢规范」的问题（见 ADR-020）。技能包缺失时
+# 不再有「检索没命中就悄悄丢规范」的问题。技能包缺失时
 # `api_specs` 由调用方降级为一条提示语，接口文档照常生成。
 API_DOCS_GENERATION_PROMPT = """请基于以下项目需求文档，产出配套的 API 接口文档。
 

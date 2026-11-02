@@ -6,8 +6,8 @@ Create Date: 2026-10-23
 
 ## 这份基线是怎么来的
 
-由 `alembic revision --autogenerate` 从 `core/models.py` 生成，**不是**把历史 20 步重放一遍
-（见 ADR-076）。理由：已有库的形状就是今天，重放 20 个中间态只增加风险，不增加信息。
+由 `alembic revision --autogenerate` 从 `core/models.py` 生成，**不是**把历史 20 步重放一遍。
+理由：已有库的形状就是今天，重放 20 个中间态只增加风险，不增加信息。
 
 ## 已有库怎么处理
 

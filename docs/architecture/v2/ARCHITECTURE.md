@@ -4,7 +4,7 @@
 > v2 要做的是把它变成**能长期使用、多人可用、出错可诊断**的产品。
 > 收尾于 tag `v2.0.0`（`b78de90`）。时间线与方法见 `../README.md`。
 >
-> 本文只回答「**v2 是什么**」；「**为什么这么选**」见 `../../adr/README.md`（ADR-001 ~ 015，文中按主题标注了对应编号）。
+> 本文只回答「**v2 是什么**」；「**为什么这么选**」写在本层「取舍」一节与 issue 历史里。
 > 施工期的一次性设计单据已逐字并入本文附录 A~D，不代表当前状态。
 
 ---
@@ -107,9 +107,9 @@ SQL 只出现在 `repositories/`；`schemas.py` 集中契约。这条规则从 v
 | 外壳 | `AppV2.vue` 只做分派；`router.ts` 只有 `/v2` 与 `/v2/:id` 两条；**阶段流转走状态机，不进 URL** |
 | 状态 | `stores/workflow.ts`（阶段机 + 快照）、`stores/solutions.ts`（列表 + 1.5s 防抖保存）、`stores/auth.ts` |
 | 复用逻辑 | `composables/`：`useClarificationChat`（澄清对话）、`useDocumentPipeline`（文档流水线）、`useTheme`（主题） |
-| 组件（ADR-015） | `stages/` 9 个阶段组件、`form/` 表单编辑器、`ui/` 11 个基础件（按钮 / 卡片 / 对话框 / 图标 / Toast…）；其中 `AppDialog` / `AppToast` / `AppEmpty` / `AppInput` **已建未接线**（`AuthDialog` 仍手写 Teleport，表单输入仍自绘） |
-| 主题（ADR-014） | 三层语义令牌：`@theme` → `@theme inline` → `:root` / `.dark`；组件只用语义令牌，`dark:` 只留给结构性判断、状态色 tint、模态遮罩三类例外（残留 101 处 / 19 文件，是已知的未完成收敛） |
-| 操作落点（ADR-015） | `ui/AppActionBar.vue` 是全站唯一操作栏：内容行（文档工具 / 输入框）+ 流程行（永远存在），主操作永远最右且唯一；`DocumentReview.vue` 只渲染卡片、自带零控件，能力经 `defineExpose` 交给底栏 |
+| 组件 | `stages/` 9 个阶段组件、`form/` 表单编辑器、`ui/` 11 个基础件（按钮 / 卡片 / 对话框 / 图标 / Toast…）；其中 `AppDialog` / `AppToast` / `AppEmpty` / `AppInput` **已建未接线**（`AuthDialog` 仍手写 Teleport，表单输入仍自绘） |
+| 主题 | 三层语义令牌：`@theme` → `@theme inline` → `:root` / `.dark`；组件只用语义令牌，`dark:` 只留给结构性判断、状态色 tint、模态遮罩三类例外（残留 101 处 / 19 文件，是已知的未完成收敛） |
+| 操作落点 | `ui/AppActionBar.vue` 是全站唯一操作栏：内容行（文档工具 / 输入框）+ 流程行（永远存在），主操作永远最右且唯一；`DocumentReview.vue` 只渲染卡片、自带零控件，能力经 `defineExpose` 交给底栏 |
 | 流式读取 | 原生 `fetch` + `ReadableStream`（axios 不支持流式读）；**正文以 `part` 事件为准**——每章定稿整段下发，因此预览与最终 `done.reply` 逐字同源 |
 | 契约 | `types/index.ts` 是准绳，后端迁就前端字段名 |
 | 错误 | `services/errors.ts` 独立成文件（`ApiError` / `isApiError`），避免被测试里的模块级 mock 替换 |
@@ -137,8 +137,8 @@ SQL 只出现在 `repositories/`；`schemas.py` 集中契约。这条规则从 v
 | 纯 ASGI 中间件 | `BaseHTTPMiddleware` 会重包响应体，对 SSE 有风险 |
 | 分章节串行 + 前序上下文 | 章节间有跨引用（6.1 引 2.1 编号、附录汇总全部待确认），并行会破坏一致性 |
 | 定稿后整段下发 `part` | 让后端成为正文的唯一来源，前端不必复现补标题/补空行的加工 |
-| 主题只用语义令牌（ADR-014） | 组件里写 `dark:` 分支会随组件数量爆炸，令牌层一处切换即可 |
-| 底栏为唯一操作落点（ADR-015） | 操作分散在各处时，用户找不到「下一步该点哪」 |
+| 主题只用语义令牌 | 组件里写 `dark:` 分支会随组件数量爆炸，令牌层一处切换即可 |
+| 底栏为唯一操作落点 | 操作分散在各处时，用户找不到「下一步该点哪」 |
 | 错误带机器码 | 前端匹配中文文案是活 bug，文案一改判断就失效 |
 
 ## 8. 收尾状态
@@ -154,7 +154,7 @@ v2 共 25 个提交，120 files，+22776 / −2099（约为 v1 全部代码的 4
 
 > **归档留档（已完工，不代表当前状态）**
 > 本文是 2026-10-14 施工时的增量设计与任务分解，是一次性施工单据，不是常青文档。
-> 结论已压缩为 [`../../adr/ADR-012-错误契约用-机器码-人类消息-code-是唯一判据.md` 的 ADR-012](../../adr/ADR-012-错误契约用-机器码-人类消息-code-是唯一判据.md)；**当前实现以 `ARCHITECTURE.md` 为准**。
+> 结论已写进本文的关键契约一节；**当前实现以 `ARCHITECTURE.md` 为准**。
 > 保留它是为了回溯「当时为什么这么拆任务」，不用于了解现状。
 >
 > 适用范围：既有项目上的**增量改造**（不是从零开始）。品牌 PRDwright，根目录仍为 `HarnessPRD`。
@@ -215,7 +215,7 @@ v2 共 25 个提交，120 files，+22776 / −2099（约为 v1 全部代码的 4
 | `frontend/src/composables/useClarificationChat.ts` | 改 | 判据由 `message.includes('会话不存在')` 换成 `isApiError(error, 'SESSION_NOT_FOUND')` |
 | `frontend/src/__tests__/api.spec.ts` | 改 | 追加 SSE error → `ApiError.code` 的用例 |
 | `frontend/src/__tests__/useClarificationChat.spec.ts` | **新建** | 降级重试用例（直接用**任意文案**构造错误，证明与文案解耦） |
-| `docs/adr/` | 改（T05 收尾） | 记一条 ADR：错误契约以 `code` 为唯一判据 |
+| 错误契约 | 改（T05 收尾） | 以 `code` 为唯一判据 |
 
 ### 3. 数据结构与接口（Data Structures and Interfaces）
 
@@ -455,8 +455,8 @@ sequenceDiagram
 
 | 项 | 内容 |
 |---|---|
-| 文件 | `docs/adr/`（追加一条 ADR）；不改业务代码（手工验收的临时改动必须还原） |
-| 改什么 | ① 全量跑：`cd backend && uv run pytest`；`cd frontend && npm run test:unit -- --run && npm run build`<br>② 手工验收四项：a) 前端源码 grep 不到 `includes('中文')` 这类判据；b) 任一 4xx/5xx 响应体含 `code`；c) 310 用例全绿；d) **临时**把后端「会话不存在或已过期」改成任意变体（如「该会话已失效：」），跑前端用例 + 手点一次续接对话，确认降级仍生效，**然后改回**<br>③ ADR 记录：错误契约以 `code` 为唯一机器判据，`detail` 仅供展示且可随时改写 |
+| 改动范围 | 只改错误契约相关代码，不新增功能；手工验收的临时改动必须还原 |
+| 改什么 | ① 全量跑：`cd backend && uv run pytest`；`cd frontend && npm run test:unit -- --run && npm run build`<br>② 手工验收四项：a) 前端源码 grep 不到 `includes('中文')` 这类判据；b) 任一 4xx/5xx 响应体含 `code`；c) 310 用例全绿；d) **临时**把后端「会话不存在或已过期」改成任意变体（如「该会话已失效：」），跑前端用例 + 手点一次续接对话，确认降级仍生效，**然后改回**<br>③ 在本层 `ARCHITECTURE.md` 记下：错误契约以 `code` 为唯一机器判据，`detail` 仅供展示且可随时改写 |
 | 验收 | 四项全过；`git status` 干净（除本次设计改动外无残留） |
 | 依赖 | T04 |
 
@@ -489,7 +489,7 @@ graph LR
     T02["T02 后端抛错点迁移<br/>deps · auth · conversation · solutions · services×4"]
     T03["T03 前端错误对象与判据<br/>services/errors.ts · api.ts · useClarificationChat.ts"]
     T04["T04 不变量与回归测试<br/>test_error_contract.py · api.spec.ts · useClarificationChat.spec.ts"]
-    T05["T05 全量回归与验收<br/>93+217 全绿 · 手工四项 · ADR"]
+    T05["T05 全量回归与验收<br/>93+217 全绿 · 手工四项"]
 
     T01 --> T02
     T01 --> T03
@@ -529,7 +529,7 @@ graph LR
 > 本文是 2026-10-13 的 UI 评审与重构**提案**，实施过程中有调整：
 > 最终落地的是**三层语义令牌**（`@theme` → `@theme inline` → `:root` / `.dark`），
 > 而非本文提案的 `brand-*` / `primary-*` 令牌；组件清单与用例数也与本文写作时不同。
-> 已落地的决策见 [`../../adr/README.md` 的 ADR-014 / ADR-015](../../adr/README.md)；
+> 已落地的决策见本层 `ARCHITECTURE.md` 的主题令牌与操作落点两节；
 > **当前实现以 `ARCHITECTURE.md` 为准**。
 
 > 评审范围：`frontend/src` 下全部 14 个组件、全局样式与构建配置
@@ -710,7 +710,7 @@ graph LR
 ```mermaid
 %% 归档留档（已完工，不代表当前状态）
 %% 本文是附录 A 的配套类图，只覆盖 ErrorCode / AppError / error_payload。
-%% 结论见 docs/adr/ 的 ADR-012；当前实现以 ARCHITECTURE.md 为准。
+%% 当前实现以 ARCHITECTURE.md 的错误契约为准。
 classDiagram
     direction LR
 
@@ -815,7 +815,7 @@ classDiagram
 ```mermaid
 %% 归档留档（已完工，不代表当前状态）
 %% 本文是附录 A 的配套时序图，只覆盖 SSE error 事件带 code 的那条流转。
-%% 结论见 docs/adr/ 的 ADR-012；当前实现以 ARCHITECTURE.md 为准。
+%% 当前实现以 ARCHITECTURE.md 的错误契约为准。
 sequenceDiagram
     autonumber
     participant UI as useClarificationChat

@@ -91,7 +91,7 @@ class AdminResetConfigRequest(BaseModel):
 class AdminProviderItem(BaseModel):
     """一条模型配置。
 
-    ⚠️ **没有任何密钥字段**：`key_present` 只回布尔，密钥值永远不出后端（ADR-053）。
+    ⚠️ **没有任何密钥字段**：`key_present` 只回布尔，密钥值永远不出后端。
 
     `id` 是**配置条目**的身份（`cfg_xxx`），不是供应商/协议名——同一协议可以有多条。
     """

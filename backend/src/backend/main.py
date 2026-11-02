@@ -55,7 +55,7 @@ async def lifespan(_: FastAPI):
     current = get_settings()
     configure_logging(level=current.log_level, fmt=current.log_format)
 
-    # 建库 / 演进只有一条路（v6 / ADR-076）：`prepare_schema` 按库的当前状态决定
+    # 建库 / 演进只有一条路（v6）：`prepare_schema` 按库的当前状态决定
     # 是「建全量」还是「增量 upgrade」。旧版本（v20 之前）的库不再自动升级——
     # 它会在这里被拒绝启动并打印差异，而不是被悄悄 stamp 成最新。
     revision = prepare_schema(get_engine())
@@ -63,7 +63,7 @@ async def lifespan(_: FastAPI):
         "数据库结构已就绪",
         extra={"event": "service.schema_ready", "revision": revision},
     )
-    # ★ 建满连接池（ADR-084）。这一步不是优化，是 `max_overflow=0` 那条不变量的**前提**：
+    # ★ 建满连接池。这一步不是优化，是 `max_overflow=0` 那条不变量的**前提**：
     # 池是懒建的，不预热的话，连接会在「第一次真被借用」时才建；而本项目里有两个
     # 借用者会并发（事件循环线程 + `log-store` 日志线程），第一处并发就发生在**启动期**——
     # `install_log_persistence()` 起线程之后，主线程还要跑 ensure_bootstrap / reap_orphans /
@@ -152,7 +152,7 @@ app = FastAPI(
     description="PRDwright 后端服务",
     version="0.1.0",
     lifespan=lifespan,
-    # ⚠️ 公开的交互式文档一律**不注册**（ADR-085）。
+    # ⚠️ 公开的交互式文档一律**不注册**。
     #
     # 框架默认会挂四条免登录路由：`/openapi.json`、`/docs`、
     # `/docs/oauth2-redirect`、`/redoc`。它们暴露全部接口形状（含管理员接口的
@@ -232,7 +232,7 @@ register_error_handlers(app)
 # 注册业务路由（各自在 Router 上声明了完整 prefix）
 # 管理员路由：整组由 `require_admin` 依赖守卫，未登录另有中间件拦成 401
 app.include_router(admin_router)
-# 管理员专属的接口文档（ADR-085）：公开的 `/docs` 等四条已在上面的 FastAPI(...) 里关掉，
+# 管理员专属的接口文档：公开的 `/docs` 等四条已在上面的 FastAPI(...) 里关掉，
 # 这三个入口逐条挂 `require_admin`。
 app.include_router(admin_docs_router)
 app.include_router(auth_router)

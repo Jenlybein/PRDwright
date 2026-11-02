@@ -194,7 +194,7 @@ const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
   // 完整流程：六步齐全（最后一步是交付）
   structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
   // 快捷流程与完整流程**同一条流水线**，连步数都一样：只差第一步长什么样（极简输入而不是
-  // 结构化表单），以及它**没有需求澄清对话**（ADR-034 修订）——「AI 对话」这一格在快捷
+  // 结构化表单），以及它**没有需求澄清对话**——「AI 对话」这一格在快捷
   // 流程里对应的是**文档澄清**那三条线程（它们就在同一个对话页上）。
   //
   // ⚠️ 这一格**不能省**：省掉之后 `stepIndexOf('chatting', 'prd-quick')` 会算出 -1 并归零，
@@ -221,7 +221,7 @@ export function hasRequirementChat(mode: EntryMode | null): boolean {
 /**
  * 这个入口的产物是否带「审核 / 改写」环节。
  *
- * 只有**快捷流程**不要：它的定义就是「不审不改」（ADR-034），三份产物都一样。
+ * 只有**快捷流程**不要：它的定义就是「不审不改」，三份产物都一样。
  * 除了跳过调用，界面上也不能留这两个阶段——进度条上画两格永远走不到的路，
  * 用户会读成「还没审到」而不是「这次压根不审」。
  *

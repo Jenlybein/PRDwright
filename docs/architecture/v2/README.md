@@ -6,7 +6,7 @@
 > 时间线真源：**`../README.md`**（按 git 提交还原，含「文档断言 vs git 事实」失真清单）
 >
 > **本层常青文档只有一份**：`ARCHITECTURE.md`（v2 是什么，末尾附录 A~D 逐字收着四份施工留档）。
-> 「为什么这么选」已按条入库：ADR-001 ~ 015 见 `../../adr/README.md`。附录里的四份施工留档**已完工，不代表当前状态**。
+> 「为什么这么选」写在本层 `ARCHITECTURE.md` 的主题与取舍两节。附录里的四份施工留档**已完工，不代表当前状态**。
 
 ## 交付清单
 
@@ -14,10 +14,10 @@
 | --- | --- |
 | 核心流程 | 三入口（完整流程 / 快捷入口 / 调试入口）→ 表单 → 对话澄清 → 双闸门（摘要 Diff + RAG 接口规范）→ PRD → 接口文档 → 提示词 |
 | 生成 | 分章节撰写 + 审核 + 改写双 Agent（`prd_section_writer`）、`max_tokens` 分档、SSE 流式实时预览 |
-| 持久化 | 方案单表全量快照 + owner 强制过滤 + 左侧栏 + 防抖保存（ADR-009） |
-| 账号 | 邀请码注册 / 登录 / HttpOnly Cookie / 默认拒绝中间件 / 未登录禁止建任务（ADR-007 / 008） |
-| 前端 | `App.vue` 巨石已拆（`AppV2` + `stages/` + `ui/` + `composables/`）、亮暗主题三层令牌（ADR-014）、底栏为唯一操作落点（ADR-015） |
-| 可靠性护栏 | CI 双 job（后端 117 例 / 前端 222 例，全程离线零 token）、错误契约机器码化（ADR-012）、流式编排单一实现（ADR-013） |
+| 持久化 | 方案单表全量快照 + owner 强制过滤 + 左侧栏 + 防抖保存 |
+| 账号 | 邀请码注册 / 登录 / HttpOnly Cookie / 默认拒绝中间件 / 未登录禁止建任务 |
+| 前端 | `App.vue` 巨石已拆（`AppV2` + `stages/` + `ui/` + `composables/`）、亮暗主题三层令牌、底栏为唯一操作落点 |
+| 可靠性护栏 | CI 双 job（后端 117 例 / 前端 222 例，全程离线零 token）、错误契约机器码化、流式编排单一实现 |
 | 品牌 | HarnessPRD → PRDwright 全量更名（仓库根目录名保留 `HarnessPRD`） |
 
 ## v2 的边界（明确没做，由 v3 承接）
@@ -28,7 +28,7 @@
 2. **供应商单点**——`llm_factory.get_llm()` 只构造一个模型，挂了就整条链路失败。
 3. **成本不可见**——没有任何 token 打点，`/health` 只会回 `{"status":"ok"}`。
 
-另有一项与生成无关、不影响功能的前端收敛未完成（细节见 ADR-014 / ADR-015 的「实施现状」）：
+另有一项与生成无关、不影响功能的前端收敛未完成（细节见本层 `ARCHITECTURE.md` 主题 / 操作落点两节的「实施现状」）：
 `dark:` 变体仍有 101 处 / 19 文件残留；`ui/` 里的 `AppDialog` / `AppToast` / `AppEmpty` / `AppInput` 已建但零外部引用。
 
 ## 本层文件
@@ -36,21 +36,20 @@
 | 文件 | 性质 | 内容 |
 | --- | --- | --- |
 | `ARCHITECTURE.md` | **常青** | v2 架构文档：目标与范围、分层总览、后端 / 前端设计、关键契约、设计取舍；末尾附录 A~D 逐字保留四份施工留档 |
-| `../../adr/` | **常青**（append-only，跨层共用） | ADR-001 ~ 015 **全卷**：**全部成文于 v2 期**（2026-10-12 ~ 10-14），已按条入库，索引见 `../../adr/README.md` |
 
 ### 附录 A~D · 施工留档（已并入 `ARCHITECTURE.md`）
 
-这些内容是**一次性施工单据**，结论已进 ADR，实现以 `ARCHITECTURE.md` 为准。原文件已删除，正文逐字并入本层 `ARCHITECTURE.md` 末尾；保留只为回溯「当时为什么这么拆」。
+这些内容是**一次性施工单据**，结论已写进本层 `ARCHITECTURE.md`，实现以它为准。原文件已删除，正文逐字并入本层 `ARCHITECTURE.md` 末尾；保留只为回溯「当时为什么这么拆」。
 
 | 附录 | 原文件 | 内容 |
 | --- | --- | --- |
-| ARCHITECTURE.md（附录 A） | `archive/system_design.md` | R0-T5 错误契约机器码化的增量设计与任务分解（含任务依赖图）→ 结论见 ADR-012 |
-| ARCHITECTURE.md（附录 B） | `archive/ui-redesign-plan.md` | 前端 UI 评审与重构**提案**（10-13）→ 已落地部分见 ADR-014 / ADR-015 |
+| ARCHITECTURE.md（附录 A） | `archive/system_design.md` | R0-T5 错误契约机器码化的增量设计与任务分解（含任务依赖图）→ 结论见本层 `ARCHITECTURE.md` |
+| ARCHITECTURE.md（附录 B） | `archive/ui-redesign-plan.md` | 前端 UI 评审与重构**提案**（10-13）→ 已落地部分见本层 `ARCHITECTURE.md` |
 | ARCHITECTURE.md（附录 C） | `archive/class-diagram.mermaid` | 附录 A 的配套类图（只覆盖 `ErrorCode` / `AppError` / `error_payload`） |
 | ARCHITECTURE.md（附录 D） | `archive/sequence-diagram.mermaid` | 附录 A 的配套时序图（SSE `error` 事件带 `code` 的流转） |
 
 ⚠️ 附录 B（原 `archive/ui-redesign-plan.md`）是**提案且与实际落地有偏差**：它提的是 `brand-*` / `primary-*` 令牌，
-最终落地的是三层语义令牌（ADR-014）。拿它当现状读会被误导。
+最终落地的是三层语义令牌。拿它当现状读会被误导。
 
 ## v2 是怎么走过来的（七波，按 git 提交）
 

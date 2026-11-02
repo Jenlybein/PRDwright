@@ -1,4 +1,4 @@
-"""数据库地址解析（v8 / T18.9 / ADR-097）。
+"""数据库地址解析（v8 / T18.9）。
 
 这一层要守的是「换库 = 改一个环境变量」这个承诺。三个必须先钉住的点：
 
@@ -95,7 +95,7 @@ def test_sqlite_engine_keeps_fixed_pool_and_no_pre_ping():
     try:
         assert engine.dialect.name == "sqlite"
         assert engine.pool._pre_ping is False  # noqa: SLF001
-        # `max_overflow=0` 是承重设计（ADR-084）：运行期一条连接都不许新建
+        # `max_overflow=0` 是承重设计：运行期一条连接都不许新建
         assert engine.pool._max_overflow == 0  # noqa: SLF001
     finally:
         engine.dispose()

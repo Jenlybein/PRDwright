@@ -1,4 +1,4 @@
-"""删除 `model_providers.builtin`（v8 / ADR-096）。
+"""删除 `model_providers.builtin`（v8）。
 
 Revision ID: 0004
 Revises: 0003
@@ -26,7 +26,7 @@ batch 重建 = 建新表 + 拷数据 + 换名，建表语句尾部的表选项�
 
 ## 回滚
 
-按 ADR-096 / ADR-057：删列不可逆，生产回滚方式是**恢复备份**，不是 `git revert`。
+按既有约定：删列不可逆，生产回滚方式是**恢复备份**，不是 `git revert`。
 `downgrade` 仍写了真正的反操作（把列补回来），但它只用于结构演练与对拍，
 不承担生产回滚——旧快照的字节只在删除前的备份里。
 

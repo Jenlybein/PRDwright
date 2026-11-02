@@ -11,8 +11,8 @@
 而不是 `/api/documents/{kind}/...`：归属只能经 `documents → solutions` 两级 JOIN 过滤，
 作用域带上方案 id 才能在 SQL 层一次判完，守住「越权不可区分」的口径。
 
-版本不存在**复用** `SOLUTION_NOT_FOUND`（HTTP 404）：错误码表刻意不膨胀
-（ADR-012），前端只按 404 状态分支，不拿中文 detail 判断。
+版本不存在**复用** `SOLUTION_NOT_FOUND`（HTTP 404）：错误码表刻意不膨胀，
+前端只按 404 状态分支，不拿中文 detail 判断。
 """
 
 from __future__ import annotations
@@ -191,6 +191,6 @@ async def delete_version(
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _VERSION_NOT_FOUND_DETAIL)
     if outcome == "is_current":
         # 400 而不是 404/409：请求本身语法没问题，是「这个动作在这一版上不成立」——
-        # 与「超预算复用 INVALID_REQUEST」同一个口径（ADR-012：错误码表不膨胀）
+        # 与「超预算复用 INVALID_REQUEST」同一个口径（错误码表不膨胀）
         raise AppError(ErrorCode.INVALID_REQUEST, _CURRENT_VERSION_DETAIL)
     return schemas.DocumentVersionDeleteResponse(ok=True, version_id=version_id)

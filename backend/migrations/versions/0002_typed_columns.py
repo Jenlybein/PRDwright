@@ -43,7 +43,7 @@ MySQL 的两条硬约束，在 SQLite 上**完全看不出来**——SQLite 既�
 反向操作要把 86 列的默认值逐个还原（`''` / `'[]'` / `'{}'` / `'generated'` /
 `'running'` / `'0'` / `'2'`），任何一处对不上，`test_schema_parity` 就会在
 「回滚后的库」上报假差异——那种差异比不回滚更难查。
-按 ADR-057：**回滚用备份，不用 downgrade**。
+按既有约定：**回滚用备份，不用 downgrade**。
 """
 from typing import Sequence, Union
 
@@ -225,8 +225,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """不回滚。理由见模块 docstring 最后一节：回滚用备份（ADR-057）。"""
+    """不回滚。理由见模块 docstring 最后一节：回滚用备份。"""
     raise NotImplementedError(
         "0002 不支持 downgrade：它改了 86 列的类型与默认值，反向还原无法保证逐列一致。"
-        "回滚请恢复备份（ADR-057）。"
+        "回滚请恢复备份。"
     )

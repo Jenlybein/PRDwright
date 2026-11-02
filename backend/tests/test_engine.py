@@ -7,7 +7,7 @@
 | PRAGMA 生效 | 外键不生效 → 级联删除静默不发生；WAL 没开 → 读写互相阻塞 |
 | 池固定大小、满了就报错 | 池悄悄扩容 → 运行期建连接 → WAL `-shm` 竞态重现（偶发 `SQLITE_READONLY`） |
 | 预热后（含并发）不再建连接 | 同上，且是**不可观测**的退化 |
-| `lifespan` 真的调用了 `warmup` | 函数写好了却没接线——v7 之前的真实状态（ADR-084） |
+| `lifespan` 真的调用了 `warmup` | 函数写好了却没接线——v7 之前的真实状态 |
 | `session_scope` 提交 | 写操作全部丢失（而且不报错） |
 | `session_scope` 异常回滚 | 半截写入留在库里 |
 | `expire_on_commit=False` | 事务外读属性抛 `DetachedInstanceError` |
@@ -119,7 +119,7 @@ def test_lifespan_warms_the_pool(client):  # noqa: ARG001 - 只需 client 触发
 
     前两条测的是 `warmup()` **这个函数本身**；这条测的是**它有没有被调用**。
     没有这条，`main.py` 里漏掉那一行不会有任何用例转红——而这正是 v7 之前的状态：
-    函数写好了、测试也有，唯独生产路径里没有它（ADR-084）。
+    函数写好了、测试也有，唯独生产路径里没有它。
 
     ⚠️ 判据必须取 `idle`（`pool.checkedin()`），**不能取 `size`**：
     `QueuePool.size()` 返回的是 `maxsize`（配置容量），恒等于 `DB_POOL_SIZE`，

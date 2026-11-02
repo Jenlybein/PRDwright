@@ -21,8 +21,8 @@
 绑定 `Session` 的实例方法：`DocumentRepository(session).get(...)`。
 
 单表读取返回 ORM 模型对象；跨表 JOIN 读取返回**只读投影**（`DocumentRow` /
-`VersionSummary` / `VersionDetail`）。为什么不是 `dict`、也不是模型对象：ADR-078 要求
-不返回 `dict`（属性写错要等运行时才暴露），而 ADR-080 又刻意不声明 `Relationship()`
+`VersionSummary` / `VersionDetail`）。为什么不是 `dict`、也不是模型对象：
+不返回 `dict`（属性写错要等运行时才暴露），同时刻意不声明 `Relationship()`
 （懒加载会在 session 关闭后炸），所以 JOIN 的结果没有单一 ORM 对象可承载——用冻结
 dataclass 做投影，字段与列一一对应，既拿到属性访问与类型检查，又不把大字段（正文）
 拖进「不含正文」的版本列表。
@@ -42,7 +42,7 @@ from backend.core.models import Document, DocumentVersion, Solution
 
 
 # ---------------------------------------------------------------------------
-# 只读投影：JOIN 结果没有单一 ORM 对象可承载（ADR-080 不声明 Relationship）
+# 只读投影：JOIN 结果没有单一 ORM 对象可承载（模型不声明 Relationship）
 # ---------------------------------------------------------------------------
 
 
@@ -454,7 +454,7 @@ class DocumentRepository:
         写在 SELECT 里，因此**归属不通过时一行都插不进去**，不需要「先查一次再写」
         这种两次往返、留下窗口的写法。随后再查一次既拿模型对象又当归属校验的第二道闸。
 
-        冲突处理走方言适配层（v8 / ADR-088）：调用方只说「冲突就跳过」，
+        冲突处理走方言适配层（v8）：调用方只说「冲突就跳过」，
         不关心是 `ON CONFLICT DO NOTHING` 还是 MySQL 的主键 no-op 更新。
         """
         upsert_select(

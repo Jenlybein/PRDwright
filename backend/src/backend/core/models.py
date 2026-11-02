@@ -31,7 +31,7 @@ SQLModel 的 `id: int | None = Field(default=None, primary_key=True)` 生成的�
 
 库里存的是 ISO 8601 文本，且大量 SQL 直接做字符串比较（`WHERE expires_at > ?`）——
 ISO 8601 的字典序等于时间序，这是承重设计。换 `DateTime` 会同时改变落盘格式、
-精度与比较语义（见 ADR-077）。
+精度与比较语义。
 
 ## 关于索引里的 `DESC`
 
@@ -67,7 +67,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects import mysql
 from sqlmodel import Field, SQLModel
 
-# 列类型策略统一走 `core/types.py`（v8 / ADR-097）。本文件**不给索引列声明裸 Text**：
+# 列类型策略统一走 `core/types.py`（v8）。本文件**不给索引列声明裸 Text**：
 # 索引列一旦没有长度上限，MySQL 建索引会失败，而 SQLite 上完全正常——那种错误只有
 # 到换库那天才暴露，所以由 `assert_metadata_is_portable` 在 import 时统一拦。
 from backend.core.types import (
@@ -78,10 +78,10 @@ from backend.core.types import (
 )
 
 # 大段文本（SQLite TEXT / MySQL MEDIUMTEXT）。容量不是业务约束——60KB 由
-# `core/limits.py` 在写入前拦（ADR-095）。
+# `core/limits.py` 在写入前拦。
 _BIG_TEXT = long_text()
 
-# 用户名：**大小写敏感**的唯一键（v8 / ADR-089）。
+# 用户名：**大小写敏感**的唯一键（v8）。
 #
 # 不能写 `mysql_collate=...`（SQLAlchemy 2.0 已移除），也不能用
 # `String(32, collation=...)`——类型级 collation 会无条件写进 DDL，SQLite 会收到
@@ -198,7 +198,7 @@ class Solution(SQLModel, table=True):
     """方案：一份完整会话的全量快照。
 
     方案状态已拆成标量列；`title` / `mode` / `stage` 等只是给列表用的摘要，
-    列表查询不再需要反序列化大 JSON。旧的整份 `SessionDataV2` 快照列已在 v8 删除（ADR-096）。
+    列表查询不再需要反序列化大 JSON。旧的整份 `SessionDataV2` 快照列已在 v8 删除。
     """
 
     __tablename__ = "solutions"

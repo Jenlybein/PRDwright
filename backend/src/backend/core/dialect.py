@@ -1,4 +1,4 @@
-"""方言适配（v8 / ADR-088）：全项目**唯一**知道「数据库品牌」的语句构造层。
+"""方言适配（v8）：全项目**唯一**知道「数据库品牌」的语句构造层。
 
 ## 这个模块存在的理由
 
@@ -15,7 +15,7 @@
 ## 两条纪律
 
 1. **只做语句构造，不碰事务边界**。这里不 commit / rollback / close，边界仍然只由
-   `session_scope()` 决定（ADR-073）。
+   `session_scope()` 决定。
 2. **不承载业务判断**。「该不该覆盖」是调用方的决定，本模块只负责翻译。
 
 ## ⚠️ MySQL 的两个坑（都与「静默」有关）
@@ -65,7 +65,7 @@ def _insert_for(model: type[SQLModel], name: str) -> Any:
         return sqlite.insert(model)
     raise NotImplementedError(
         f"upsert 尚未适配方言 {name!r}；新增方言请在本模块加一条分支，"
-        "不要在调用方写 if（那会把方言重新散开，ADR-088）。"
+        "不要在调用方写 if（那会把方言重新散开）。"
     )
 
 

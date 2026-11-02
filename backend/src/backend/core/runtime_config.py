@@ -11,7 +11,7 @@
   所以「升级后行为零变化」是结构保证，而不是靠人记得别写默认值。
 - 白名单之外的键**永不查库**（连 `SELECT` 都不需要）。`db_path` / 日志 / 认证
   这类「改了必须重启」的项刻意不在白名单里——后台也不显示它们。
-- ⚠️ **模型接入不在这条链上**（ADR-051）：接哪家、走哪个协议、地址、型号、
+- ⚠️ **模型接入不在这条链上**：接哪家、走哪个协议、地址、型号、
   输出上限、思考开关只住在 `model_providers` 表里，`.env` 里连字段都没有。
   所以本模块除了「白名单参数」还负责一件事：算出**当前使用中那一条配置**
   （`active_provider`）。一条都没有时它是 `None`——生成会明确报错，
@@ -88,7 +88,7 @@ WHITELIST: tuple[str, ...] = (
     "llm_budget_default_cap",
     "llm_budget_caps",
     "llm_budget_warn_ratio",
-    # ⚠️ `llm_context_window` 不在这里，也不再存在于 `Settings`（ADR-051）：
+    # ⚠️ `llm_context_window` 不在这里，也不再存在于 `Settings`：
     # 窗口属于「这条配置」，由 `model_providers.context_window` 决定。
     # 每日额度（v4.5 T5-2）。这五项都是「每次检查时现读」，所以改完下一次生成即生效。
     # 注意 `quota_timezone_offset_minutes` 也在这里：它改的是「日界怎么算」，
@@ -127,7 +127,7 @@ class RuntimeConfig:
     `get_runtime_config().settings` **不需要改任何取值写法**。
 
     ⚠️ 它**不含**模型接入（供应商 / 协议 / 地址 / 型号）：那些在这份快照的
-    `active_provider` 里，而且可能为 `None`（一条配置都没有），见 ADR-051。
+    `active_provider` 里，而且可能为 `None`（一条配置都没有）。
     """
 
     settings: Settings
@@ -221,7 +221,7 @@ def _resolve_active_provider(override_id: str | None) -> ProviderSpec | None:
     2. 没有指针 / 指针悬空 / 指针指向已停用的那条 → 按 `sort_order` 取**第一条可用的**
        （仓库层已按 `sort_order, created_at` 排序，所以结果稳定可预期）。
 
-    ⚠️ **不再有第 3 条「env 合成」**（ADR-051）。模型接入已整体迁入后台面板，
+    ⚠️ **不再有第 3 条「env 合成」**。模型接入已整体迁入后台面板，
     `.env` 里没有第二份默认供应商可回退——写进去也不会被读。列表为空时
     `None` 就是**正确答案**：调用方据此报一句「请先在后台新增一条」，
     而不是拿着一个界面上看不见、也改不了的 spec 继续跑。
@@ -455,7 +455,7 @@ def current_input_ceiling(override: int = 0) -> int:
 
     窗口只有一个来源：**当前使用中那条配置**填的 `context_window`，
     没填才退回 `model_registry`。不再有全局的 `LLM_CONTEXT_WINDOW` 覆盖项
-    （ADR-051）——它会静默盖掉条目里的值，表现为「换了大窗口还老报超顶」。
+    ——它会静默盖掉条目里的值，表现为「换了大窗口还老报超顶」。
     """
     limits = resolve_model_limits()
     window = override or limits.context_window

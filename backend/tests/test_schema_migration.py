@@ -1,4 +1,4 @@
-"""迁移编排守卫（v6 / T16.4 / ADR-076）。
+"""迁移编排守卫（v6 / T16.4）。
 
 四条用例，守的是**升级安全性**，不是功能正确性：
 
@@ -167,7 +167,7 @@ def test_baseline_produces_exactly_the_model_schema(tmp_path):
 
 
 def test_models_declare_no_relationship():
-    """模型不声明 `Relationship()`（ADR-080）。
+    """模型不声明 `Relationship()`。
 
     声明了就会在「Session 已关闭」时触发懒加载 → `DetachedInstanceError`，
     而这类错误只在特定分支偶发。跨表查询一律显式 join。

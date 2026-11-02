@@ -3,7 +3,7 @@
 背景：合并前「把模型流包装成 SSE 事件」在 `conversation_service`、
 `document_service`、`prd_section_writer` 里各有一份实现，两处调用点各自依赖
 不同的边角行为（`on_finish` 回写历史、`extra_data` 透传）。本文件把这些行为钉成
-不变量——**合并后仍必须成立**（ADR-013）。
+不变量——**合并后仍必须成立**。
 
 覆盖的行为契约：
 

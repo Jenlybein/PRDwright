@@ -148,7 +148,7 @@ def test_missing_key_falls_back_to_filename(temp_skills_root) -> None:
 
 
 def test_artifact_is_reloaded_after_edit(temp_skills_root) -> None:
-    """改了资源之后下一次读取就是新内容——不必重启后端（ADR-017）。"""
+    """改了资源之后下一次读取就是新内容——不必重启后端。"""
     write_skill_package(temp_skills_root, "prd-generator")
     relative_path = PRD_SKILL_ARTIFACTS["prd_template"]
     first = load_artifact("prd-generator", relative_path)

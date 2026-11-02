@@ -20,14 +20,14 @@
 - **聊天** → `chat_turns`（只追加，服务端单写者）；
 - **会话 id** → `chat_sessions`（按方案 + 线程唯一）。
 
-拆完之后 `data` 先退役（不再写、不再读），再于 v8 按 ADR-096 **直接删列**：
-新库没有这一列；旧库的旧快照只能从删除前的备份里取（ADR-057：回滚用备份，不用 downgrade）。
+拆完之后 `data` 先退役（不再写、不再读），再于 v8 **直接删列**：
+新库没有这一列；旧库的旧快照只能从删除前的备份里取（回滚用备份，不用 downgrade）。
 
 ## 形态（v6 / T16.7）
 
 绑定 `Session` 的实例方法：`SolutionRepository(session).get(...)`。
 **不 commit、不 rollback、不 close**——事务边界归调用方的 `session_scope()`。
-返回 `Solution` 模型对象（ADR-078），不再是 `dict`：`row.stage` 写错会被类型检查抓住，
+返回 `Solution` 模型对象，不再是 `dict`：`row.stage` 写错会被类型检查抓住，
 `row["stage"]` 要等运行时。需要自增 id 时用 `flush()` + `solution.id`，不再用 `lastrowid`。
 """
 

@@ -16,7 +16,7 @@
 密钥的处理
 ----------
 本文件**只存、只返回密文**（`value_token`），永远不出现明文密钥。加密与解密都在
-`core/crypto.py`，且解密只发生在构造 LLM 的前一刻（ADR-053）。
+`core/crypto.py`，且解密只发生在构造 LLM 的前一刻。
 """
 
 from __future__ import annotations

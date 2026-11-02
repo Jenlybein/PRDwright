@@ -247,7 +247,7 @@ def _seed_ark_provider() -> None:
     """放一条 ark + doubao 配置并设为使用中。
 
     ⚠️ 物理顶是按「当前使用中那条配置」算的（`runtime_config.resolve_model_limits`）。
-    ADR-051 之后 `.env` 不再提供默认供应商，一条配置都没有时只能落到 32k 兜底——
+    `.env` 不再提供默认供应商，一条配置都没有时只能落到 32k 兜底——
     于是「默认业务顶给真实提示词留了余量」这条断言会假失败（其实是被 32k 卡住）。
     """
     import json

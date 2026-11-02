@@ -209,7 +209,7 @@ def test_auto_clarify_prompt_carries_document_and_pending_list(client, monkeypat
     """提示词里必须同时有「原文档」与「渲染成人话的清单」——它要照单逐条拍板。
 
     清单是**结构化数据**，渲染由后端负责（`format_pending_items`）：前端不该拼好一段
-    提示词递过来（ADR-010）。因此这里断言的是「后端把结构渲染成了什么」。
+    提示词递过来。因此这里断言的是「后端把结构渲染成了什么」。
     """
     register(client)
     uid = _alice_id()

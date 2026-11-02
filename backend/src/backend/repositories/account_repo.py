@@ -9,7 +9,7 @@
 两者都不会报错，只是安静地少了一点。
 
 边界：**管理面、跨 owner，安全性由路由层的 `require_admin` 保证**。
-与 `generation_job_repo` 的 `admin_*` 系列同一纪律（ADR-046）：
+与 `generation_job_repo` 的 `admin_*` 系列同一纪律：
 用户面绝不可调用本模块，新增方法也必须留在这一段注释之下。
 
 ## 形态（v6 / T16.6）

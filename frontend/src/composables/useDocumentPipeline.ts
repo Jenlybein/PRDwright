@@ -808,7 +808,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 就地替换：写回 `target` 那一份。`kind` 只说「做了一件什么事」，写哪一份由 `target`
     // 回答——调用方本来就知道（生成任务就是它的产物、优化看当前审阅页、澄清看当前标签）。
     // 刻意不再用「当前正在处理的文档」那种内存变量去猜：它**在导航到审阅页时不会被赋值**，
-    // 于是把接口文档的优化结果写进了 PRD（见 ADR-028 记录的那处修复）。
+    // 于是把接口文档的优化结果写进了 PRD（见那处修复）。
     documents.setLocal(target, content)
     // 后端在 `done` 之前就已经把正文写进库了（「写正文的唯一入口 = job 成功收尾」），
     // 所以这一句报的是**已经发生的事实**，不是「打算写」。方案列表的内容时间据此前进：
@@ -979,7 +979,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 本次生成要不要复核（后端 `review_enabled`）。
    *
-   * 快捷流程一律 `false`：**不审不改**是它当初的定义（ADR-034），这一点对三份产物
+   * 快捷流程一律 `false`：**不审不改**是它当初的定义，这一点对三份产物
    * 同样成立——接口文档与提示词在快捷流程里也是一遍过，否则「快捷」只剩 PRD 那一半。
    * 其余入口返回 `undefined`：要不要复核由后端配置决定，前端不替它挑默认值。
    */
@@ -1117,7 +1117,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * 目标是**当前审阅页的那一份**——判据取 `viewState` 而不是某个「当前正在处理的文档」
    * 内存变量：那个变量只在生成流程里被写入，用户打开一份旧方案直接点「AI 优化」时它还是
-   * 初值 `'prd'`，于是接口文档的优化结果会被写进 PRD（见 ADR-028 记录的那处修复）。
+   * 初值 `'prd'`，于是接口文档的优化结果会被写进 PRD（见那处修复）。
    */
   async function optimizeCurrentDocument(content: string, instruction: string): Promise<void> {
     if (isRunInFlight()) return
@@ -1149,7 +1149,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // 聊够了点「按澄清结果改写」，交给后端就地改写那一份。
   //
   // 历史上它们是两条路：PRD 复用主对话栏，另两条走独立的 `clarifying` 页与
-  // `clarifyMessages` 字段。ADR-028 把两条并成一条，独立澄清页与那个阶段一并退役。
+  // `clarifyMessages` 字段。两条并成一条之后，独立澄清页与那个阶段一并退役。
   // -------------------------------------------------------------------------
 
   /**

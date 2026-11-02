@@ -14,7 +14,7 @@
 
 绑定 `Session` 的实例方法：`GenerationJobRepository(session).get(...)`。
 **不 commit、不 rollback、不 close**——事务边界归调用方的 `session_scope()`。
-返回 `GenerationJob` 模型对象（ADR-078）；管理面 JOIN 用户名的查询返回只读投影
+返回 `GenerationJob` 模型对象；管理面 JOIN 用户名的查询返回只读投影
 `AdminJob`（模型 + owner_name），不返回 dict。条件更新（supersede / cancel / reap）
 一律 `update(...).where(...)` 并返回 `rowcount`——调用方靠它判断「有没有真的改到」。
 """

@@ -147,7 +147,7 @@ def test_only_adapters_import_vendor_sdk():
 # API 契约模块（#7）：按领域拆包，对外导出面逐字冻结
 # ---------------------------------------------------------------------------
 #
-# `backend.api.schemas` 曾是 1321 行的单文件（ADR-099 重写清单的 W3）。按领域拆成
+# `backend.api.schemas` 曾是 1321 行的单文件（重写清单的 W3）。按领域拆成
 # 一个包之后，新增契约落进对应的领域模块，不必再在一千三百多行里找位置。
 #
 # 但拆的是**模块边界**，不是契约本身：下面这张表是拆分前 dump 出来的对外形状。
@@ -155,7 +155,7 @@ def test_only_adapters_import_vendor_sdk():
 
 _CONTRACT_DIR = _BACKEND_SRC / "api" / "schemas"
 
-# ADR-099：单文件重写阈值。
+# 单文件重写阈值。
 _CONTRACT_LINE_LIMIT = 1200
 
 # 领域模块清单。新增一个领域时在这里登记，并在包的 `__init__.py` 里加一行再导出。
@@ -267,7 +267,7 @@ _EXPECTED_DOCUMENT_KINDS = ("prd", "api_docs", "prompts")
 
 
 def test_contract_module_is_split_and_below_line_limit():
-    """契约模块按领域拆成包，且每一份都在 ADR-099 的 1200 行阈值以内。
+    """契约模块按领域拆成包，且每一份都在 1200 行阈值以内。
 
     双判据：既要有领域模块，也不能出现「拆完之后又长回 1200 行」的单文件。
     """

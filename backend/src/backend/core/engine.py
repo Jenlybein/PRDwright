@@ -42,7 +42,7 @@ from sqlalchemy.orm import sessionmaker
 # 抛 `AttributeError: 'Session' object has no attribute 'exec'`。
 from sqlmodel import Session
 
-# 建引擎与连接级配置归 `core/database.py`（v8 / ADR-097）。
+# 建引擎与连接级配置归 `core/database.py`（v8）。
 # 这里**再导出**是为了让 `from backend.core.engine import build_engine, warmup`
 # 这类既有 import 一行都不用改——迁移期最重要的是"公开路径不变"。
 from backend.core.database import (

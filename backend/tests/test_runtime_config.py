@@ -178,7 +178,7 @@ def test_degraded_when_table_missing():
 def test_tables_missing_means_no_provider():
     """表都不可用时 `active_provider` 是 `None`：不崩，也不从 env 编一个出来。
 
-    这是 ADR-051 的取舍。`.env` 里已经没有第二份模型配置，所以「配置层失败」
+    这是既定取舍。`.env` 里已经没有第二份模型配置，所以「配置层失败」
     只能表现为「没有可用配置」，由调用方给出人话报错（「请先在后台新增一条」）。
     悄悄用一个界面上看不见、也改不了的 spec 继续跑，会把排查方向从
     「后台还没配」误导到「为什么这次请求失败」。
@@ -323,7 +323,7 @@ def test_env_context_window_is_gone(monkeypatch):
     升级用户的 `.env` 里往往还留着这一行（`extra="ignore"` 会静默吃掉它）。
     留着它的后果不是报错，而是**悄悄把后台填的窗口盖回去**：后台给某条填了 128k、
     env 里留着 32k，预算就按 32k 判——症状是「换了大窗口还老报超顶」，
-    而看代码的人以为配置生效了。ADR-051 把这根线彻底拔掉。
+    而看代码的人以为配置生效了。这根线已被彻底拔掉。
     """
     monkeypatch.setenv("LLM_CONTEXT_WINDOW", "32000")
     get_settings.cache_clear()
@@ -479,7 +479,7 @@ def test_missing_key_fails_loudly_with_admin_hint():
 def test_get_llm_without_any_config_says_build_one_first():
     """一条配置都没有时，`get_llm()` 的报错必须说清「去哪儿建」。
 
-    ADR-051 之后这里没有 env 兜底了，所以「装完直接用」会撞到这条。
+    这里没有 env 兜底了，所以「装完直接用」会撞到这条。
     报错若是「没有可用的模型供应商」这类含糊话，用户第一反应是去翻 `.env`——
     而答案恰恰是「`.env` 里没有了，去后台建一条」。文案本身就是修复指引。
     """
@@ -500,7 +500,7 @@ def test_env_example_has_no_effective_lines():
 
     三层理由叠在一起：
 
-    1. **可热改项不能出现**（ADR-052）：模板是所有人第一次接触配置的地方，
+    1. **可热改项不能出现**：模板是所有人第一次接触配置的地方，
        列着 `LLM_TIMEOUT` / `PRD_*` / `LLM_BUDGET_*` 就会让人以为「这里才是入口」，
        改完不生效（后台覆盖在它前面）。
     2. **启动项也不写成生效行**：全都有可用默认值，而且默认值通常比手写更对

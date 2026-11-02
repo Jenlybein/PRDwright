@@ -49,7 +49,7 @@ from backend.services.llm_meter import RunMeter, use_meter
 from backend.services.skill_registry import describe_kind
 
 # ----------------------------------------------------------------------------
-# 内部实现已按职责拆到同目录的模块（ADR-099 的单文件阈值）。
+# 内部实现已按职责拆到同目录的模块（单文件阈值）。
 # 下面全部**再导出**：`job_service` 的对外形状与拆分前逐字一致，调用方（含测试）
 # 仍然只从本模块取这些名字。
 # ----------------------------------------------------------------------------
@@ -646,7 +646,7 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
     if kind == "api_docs":
         return document_service.generate_api_docs_stream(
             prd_content=request.get("prd_content", "") or "",
-            # 快捷流程显式传 False：整篇一遍过，不审也不改（ADR-034）
+            # 快捷流程显式传 False：整篇一遍过，不审也不改
             review_enabled=request.get("review_enabled"),
         )
     if kind == "prompts":

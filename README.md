@@ -18,7 +18,6 @@
 | `skills/` | —— | —— | 生成管线使用的技能包（`prd-generator` 等） |
 | `scripts/keygen/` | Python | —— | 主密钥生成与轮换脚本 |
 | `docs/architecture/` | Markdown | —— | 分层架构说明（v1 ~ v8）与时间线真源 |
-| `docs/adr/` | Markdown | —— | 决策记录 ADR-001 ~ ADR-097（含 ADR-053 密钥加密入库） |
 
 ---
 
@@ -73,7 +72,7 @@ npm run dev                     # http://localhost:5174
 
 ## 密钥与配置（重要）
 
-模型密钥的存放方式在 **ADR-053** 中定稿，是这套部署最该先理解的一点：
+模型密钥的存放方式在 v4 期定稿，是这套部署最该先理解的一点：
 
 - **密钥不再放在 `.env`**。它改为在管理后台「模型配置」页录入，由服务端用一把主密钥
   加密（Fernet）后以**密文**存进数据库（`model_providers.value_token`）。
@@ -116,7 +115,7 @@ cd frontend_admin && npm run test:unit
 给**人**看的：
 
 - 架构总览：`docs/architecture/v8/ARCHITECTURE.md`（当前层；历史层 `v1` ~ `v7` 各留一套）
-- 决策记录（ADR-001 ~ ADR-097，一条一文件 + 索引）：[`docs/adr/`](./docs/adr/README.md)
+- 决策与取舍：各层 `ARCHITECTURE.md` 的「取舍」节，加上 issue 历史
 - 路线图：`docs/architecture/v8/roadmap.md`
 - 阶段总表与已确认的失真（按 git 实测）：`docs/architecture/README.md`
 
@@ -125,8 +124,6 @@ cd frontend_admin && npm run test:unit
 - 术语准绳：[`GLOSSARY.md`](./GLOSSARY.md)
 - 工程约定与已知的坑：[`docs/agents/conventions.md`](./docs/agents/conventions.md)
 - 领域文档怎么读、issue 怎么记：[`docs/agents/`](./docs/agents/)
-
-历史档案（旧工具工作区迁入，仅存档）：`docs/journal/`。施工单与截图两类已在本轮清理中删除，不留副本。
 
 ---
 

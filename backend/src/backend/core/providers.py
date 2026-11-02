@@ -22,7 +22,7 @@ LangChain 的 chat 集成有二十来家独立包，但按**协议**归类只有
 | `nvidia`            | `langchain_nvidia_ai_endpoints.ChatNVIDIA` | 无 `timeout` 参数 |
 | `huggingface`       | `ChatHuggingFace` 包 `HuggingFaceEndpoint` | **两段式**构造 |
 
-密钥怎么存（ADR-053）
+密钥怎么存
 --------------------
 `ProviderSpec.value_token` 是**加密后的密钥密文**（主密钥在
 `backend/secrets/master.key`，见 `core/crypto.py`）。数据库里只有密文，

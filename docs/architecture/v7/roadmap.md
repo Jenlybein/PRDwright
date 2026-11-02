@@ -1,6 +1,6 @@
 # v7 路线图：部署与上线
 
-> 排期真源本文件；架构依据见 `ARCHITECTURE.md`；决策依据见 `../../adr/README.md`。
+> 排期真源本文件；架构依据与决策取舍见 `ARCHITECTURE.md`。
 > 任务编号用于日常排期（T17.x），版本号用于对外收口（v7.x，对照见 `README.md`）。
 
 ---
@@ -8,7 +8,7 @@
 ## 0. 排期总原则
 
 1. **先补启动期的洞，再谈部署。** T17.1 排在目标机之前，不是排错了：`warmup()` 现在只有
-   测试在调（ADR-084），而它守的是「连接只在启动期建满」这条不变量。部署完再改，
+   测试在调，而它守的是「连接只在启动期建满」这条不变量。部署完再改，
    就要为两行代码重走一遍完整发布。
 2. **先让它起来，再让它安全，最后让它好养。** T17.2–T17.4 是「能用」，T17.5 是「敢对外」，
    T17.6–T17.7 是「长期活着」。反过来的顺序（先折腾备份再上线）会把验证反馈推迟太久。
@@ -16,7 +16,7 @@
    互相等待。最典型的是 T17.4：Nginx 配好之前站点不可用，但后端已经在 T17.3 单独验证过。
 4. **备份排在第一次改结构之前。** T17.3 的首次启动会建库并 `upgrade head`，之后每次发布
    都会重启——所以备份脚本（T17.6）必须在**第一次正式发布**之前就绪。若推进中 T17.6 尚未
-   做完就要重启服务，至少手工执行一次 `VACUUM INTO`（ADR-057 推论 1）。
+   做完就要重启服务，至少手工执行一次 `VACUUM INTO`。
 5. **改动面尽量小。** v7 的后端改动只有三处（预热、文档入口、SSE 心跳），前端只有两处
    （`base` 与路由基址），其余全是新增脚本与模板。每多改一处，都要问它是不是真的属于部署。
 
@@ -82,10 +82,10 @@ T17.0 骨架
 | 2 | 预热不变量用例 | `tests/test_engine.py` | ✅ **已完成**：串行 + **并发**「不新建连接」+ **`lifespan` 真的调用了它**。⚠️ 判据用 `pool.checkedin()`，不是 `size()`（后者返回 `maxsize`，恒真） |
 | 3 | 公开四条不注册 | `main.py`（构造 `FastAPI` 处） | `docs_url=None, redoc_url=None, openapi_url=None`——连带去掉 `/docs/oauth2-redirect`；`app.openapi()` 仍可用 |
 | 4 | 管理员专属三条 | 新文件 `api/admin_docs.py` + `main.py` 注册 | `/api/admin/{openapi.json,docs,redoc}` 三条都挂 `require_admin`；Swagger/ReDoc 的 `openapi_url` 指向 `/api/admin/openapi.json` |
-| 4b | 三条移出认证白名单 | `api/deps.py::_PUBLIC_EXACT` | 删除 `/docs`、`/redoc`、`/openapi.json`；**保留注释写明为什么删**（ADR-085） |
+| 4b | 三条移出认证白名单 | `api/deps.py::_PUBLIC_EXACT` | 删除 `/docs`、`/redoc`、`/openapi.json`；**保留注释写明为什么删** |
 | 4c | 管理端「接口文档」页 | `frontend_admin/src/{nav.ts,router.ts,views/ApiDocsView.vue}` | 侧栏「系统」组多一项；页内两个按钮分别新标签打开 `/api/admin/docs` 与 `/api/admin/redoc` |
 | 5 | 文档权限用例 | `tests/test_admin_docs.py`（9 条）+ `__tests__/api-docs.spec.ts`（3 条） | 路由不存在 / 不在白名单 / 匿名 401 / 普通用户 404（公开）+ 403（管理员入口）/ 管理员 200；两个按钮地址正确 |
-| 6 | SSE 心跳 | `api/sse.py::make_sse_generator` | 15 秒无事件即 `yield ": ping\n\n"`；走同一出口；不产生 `StreamEvent`（ADR-059 v7 修订） |
+| 6 | SSE 心跳 | `api/sse.py::make_sse_generator` | 15 秒无事件即 `yield ": ping\n\n"`；走同一出口；不产生 `StreamEvent` |
 | 7 | 心跳用例 | `tests/test_sse*.py` | ① 静默期确实产出 `: ping`；② `stage` / `chunk` / `part` / `error` 形状断言**一条不改**地继续绿；③ `[DONE]` 之后不再有 ping |
 | 8 | 全量回归 | `uv run pytest --junit-xml=pytest-report.xml` | 基线 **975 例** + 新增 ≥6 条，全绿；退出码以 junit 为准（沙箱偶尔拦 `%TEMP%`）。实测收口 **986 例 / 92.9 秒** |
 
@@ -105,7 +105,7 @@ T17.0 骨架
   与 ping 的顺序无法保证。
 - **文档那三条靠 Cookie 认身份**：`/api/admin/docs` 是浏览器新标签页打开的 HTML，
   同源顶层导航会带会话 Cookie；页面里 Swagger UI 再同源 `fetch` schema，同样带 Cookie。
-  如果将来前端改成 Bearer token，这两个页面会一起失效——那时要重新设计（ADR-085 细节 3）。
+  如果将来前端改成 Bearer token，这两个页面会一起失效——那时要重新设计。
 
 **回滚**：三处改动各自独立，可以单独撤。撤了之后系统回到「能跑但有一个部署期缺口」的状态——
 不算故障，但 T17.3 之前必须补。
@@ -114,7 +114,7 @@ T17.0 骨架
 
 ## T17.2 · 目标机与四目录（v7.2）
 
-**目标**：把「这台机器能装 PRDwright」变成一套可重复的命令，并把四类目录按 ADR-056 分开。
+**目标**：把「这台机器能装 PRDwright」变成一套可重复的命令，并把四类目录分开。
 
 | # | 交付物 | 落点 | 验收要点 |
 | --- | --- | --- | --- |
@@ -165,7 +165,7 @@ T17.0 骨架
 | 其余 `Settings` 字段 | `pydantic-settings`（读 `.env` 也读进程环境） | 有效 |
 
 三者放在一起，最容易出现的误判是「照 `.env` 的老习惯写了，本地能跑就以为部署也行」。
-所以本阶段**刻意用 `EnvironmentFile` 提供全部启动项，不保留 `.env`**（ADR-056）。
+所以本阶段**刻意用 `EnvironmentFile` 提供全部启动项，不保留 `.env`**。
 
 **另一个坑：`/health` 的 `llm` 项报「未配置密钥」时，先查主密钥路径。**
 `crypto.is_configured()` 对「解不开」返回 `False` 而不是抛异常，所以「主密钥丢了」
@@ -208,7 +208,7 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 - 第 2 项如果漏了，症状是「`/admin/` 能打开、点进去就空白」，而控制台报错指向路由；
   它不会在构建期报错，所以必须**打开页面**验证。
 - 第 3 / 4 项在 2 GB 机器上必须**串行**执行，并设 `NODE_OPTIONS=--max-old-space-size=1024`
-  （ADR-086 的代价一栏）。
+  （见 `ARCHITECTURE.md` 取舍节的代价一栏）。
 - 第 5 项切换前要确认新目录里 `user/index.html` 与 `admin/index.html` **都存在**：
   符号链接切到一个不完整的目录，表现是「整站 403 / 404」，而 `nginx -t` 依然通过。
 
@@ -226,7 +226,7 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 | 4 | `AUTH_COOKIE_SECURE=true` | `backend.env` | 浏览器里会话 Cookie 的 `Secure` 已置位；不设的话 HTTPS 下登录态不回传 |
 | 5 | `AUTH_ENABLED=true` 显式写死 | `backend.env` | 防止被误关后全站裸奔 |
 | 6 | HSTS 与四个安全头 | Nginx | 响应头齐全；⚠️ **不加 CSP**（理由见 §6.2 注释） |
-| 7 | `CORS_ORIGINS` 为空 | `backend.env` | 响应里不带 `Access-Control-Allow-Origin`；同源请求照常工作（ADR-054 v7 修订） |
+| 7 | `CORS_ORIGINS` 为空 | `backend.env` | 响应里不带 `Access-Control-Allow-Origin`；同源请求照常工作（v7 修订） |
 | 8 | 全量冒烟 | `ARCHITECTURE.md` §10.3 | basic 五条 + deep 五条全过，特别是第 7 条（流式）与第 8 条（刷新恢复） |
 
 **风险**
@@ -246,7 +246,7 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 
 | # | 交付物 | 落点 | 验收要点 |
 | --- | --- | --- | --- |
-| 1 | 备份脚本 | `scripts/deploy/backup.py` | 用 `VACUUM INTO`（**不 `cp`**，ADR-058）；失败非 0 退出 |
+| 1 | 备份脚本 | `scripts/deploy/backup.py` | 用 `VACUUM INTO`（**不 `cp`**）；失败非 0 退出 |
 | 2 | **备份自检** | 同上 | 打开产物做 `PRAGMA integrity_check`、读 `alembic_version`、算 sha256，写进 `manifest.json` |
 | 3 | 主密钥随备份同批 | 同上 | 每次备份归档 `master.key`；**按指纹命名，保留每一把** |
 | 4 | 保留策略 | cron / systemd timer | 数据库近 14 份；`backend.env` 最新 1 份；密钥全部版本 |
@@ -263,7 +263,7 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 在真正需要它的那天只是一个文件。
 
 第二个风险是**用错了代码去演练**：因为恢复后的第一次启动会再跑一次 `upgrade head`
-（ADR-057 v7 修订），拿「备份那天的代码」去恢复，验证的是另一条路径。
+（v7 修订），拿「备份那天的代码」去恢复，验证的是另一条路径。
 必须用**当前 HEAD 的代码**，才能验证「我们真正会经历的那条路」。
 
 ---
@@ -285,7 +285,7 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 **风险**
 
 第 6 项与 T17.6 第 5 项同源：回滚演练要真的走一遍，而不是「读一遍脚本觉得没问题」。
-它的特殊价值在于验证 ADR-057 那条推论——**回滚靠恢复备份，不是反向迁移**；
+它的特殊价值在于验证「回滚靠恢复备份」那条推论——**回滚靠恢复备份，不是反向迁移**；
 而且因为迁移随重启自动跑，「恢复备份」之后服务会**再升一次结构**，
 这个行为不演练一次是不会安心的。
 
@@ -319,14 +319,14 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 | --- | --- |
 | 容器化 / 镜像 | 见 §1.3。`uv sync --frozen` + `npm ci` 已提供可复现性 |
 | CI 自动发布（CD） | 无制品库与部署凭据通道；本期用「CI 绿 → 服务器跑发布脚本」，人只确认一次 |
-| 多副本 / 负载均衡 / Redis / PostgreSQL | 被 ADR-055 的单 worker 约束挡住，先做那三件前置 |
+| 多副本 / 负载均衡 / Redis / PostgreSQL | 被单 worker 硬约束挡住，先做那三件前置 |
 | 蓝绿 / 金丝雀 / 零停机 | 与单进程冲突；改用「排空 → 短窗重启 → 冒烟」 |
 | 指标平台 | 日志 + 健康检查已够本期 |
 | CSP | 两个前端 `index.html` 有内联首帧主题脚本，上 CSP 要么放行 `unsafe-inline`（等于没加）要么改造构建链路，不成比例 |
 | WAL 归档（更细粒度备份） | 每日一次够本期；将来需要 RPO < 24h 时再加 |
 | 备份加密 / 异地备份 | 未出机器；将来备份离开本机必须一并加密 |
 | 管理端 dev 基址回退 | `base: '/admin/'` 会让本地 dev 地址变成 `localhost:5174/admin/`。先接受；影响体验再用 `mode` 分支 |
-| 恢复脚本自动化（一键换库 + 起服务） | 恢复是危险动作，脚本故意只做「拷到指定路径」，不替人做决定（ADR-087） |
+| 恢复脚本自动化（一键换库 + 起服务） | 恢复是危险动作，脚本故意只做「拷到指定路径」，不替人做决定 |
 
 ---
 
@@ -339,7 +339,7 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
   现在的真假源是 `alembic_version`。新增迁移时，断言应比对「当前 revision 是不是
   `migrations/versions/` 里的 head」，而不是把 `0001` 这类字面量再抄一遍。
 - 结构变更**只追加新版本号**（`backend/migrations/versions/0002_*.py`），改已应用的迁移等于没改。
-- ⚠️ **重启服务 = 跑迁移**：任何时候要重启，先确认备份已做成（ADR-057 推论 1）。
+- ⚠️ **重启服务 = 跑迁移**：任何时候要重启，先确认备份已做成。
 - ⚠️ **不要在服务器上改代码再同步回仓库**：服务器是部署目标，不是开发环境。
 - ⚠️ **文档写完必须 `ls` + `git status` 复核**：v5 那批部署文档「写入报成功但次日消失」
   就是没复核的结果。
@@ -349,20 +349,20 @@ Nginx 配错了，**所有页面都正常**，只有「AI 正在写字」这一�
 
 ## 与仓库外 v5 部署素材的对照
 
-> 素材位置：仓库外（`C:\Users\Jen\Desktop\v5\`，四份：README / ARCHITECTURE / ADR / roadmap）。
-> 它**从未提交进本仓库**（`git log --all -- 'docs/architecture/v5/*'` 零命中，见 `../../adr/README.md` 的 ADR-070）。
+> 素材位置：仓库外（`C:\Users\Jen\Desktop\v5\`，四份：README / ARCHITECTURE / 决策记录 / roadmap）。
+> 它**从未提交进本仓库**（`git log --all -- 'docs/architecture/v5/*'` 零命中）。
 > v7 是参考其结构、按 v6 之后的实际重判，**不是照抄**。
 
 | # | v5 素材的写法 | v7 的结论 | 原因 |
 | --- | --- | --- | --- |
-| 1 | `lifespan` 里 `init_schema()` + `run_migrations()`（`user_version` 20 步链） | `prepare_schema()` + Alembic，三条分支，**旧库拒绝启动** | v6 换数据层（ADR-076 / 083） |
+| 1 | `lifespan` 里 `init_schema()` + `run_migrations()`（`user_version` 20 步链） | `prepare_schema()` + Alembic，三条分支，**旧库拒绝启动** | v6 换数据层 |
 | 2 | 内存态清单第四条是 `core/db.py` 与 444 行自建池 | `core/engine.py` 的 `QueuePool`（`pool_size=4`、`max_overflow=0`） | v6 / T16.12 删旧池 |
 | 3 | 「后端业务代码预期零改动」 | 后端**三处**必改（预热、文档入口、心跳） | 前两条是 v6 之后才成立的缺口；第三条因分章生成的静默期升级为必做 |
 | 4 | 备份只说「用 `VACUUM INTO`，不能 `cp`」 | 追加：**自检**、`manifest.json`、恢复要用当前代码验 | 「备份配不配得上当前代码」成为新的失败模式 |
-| 5 | SSE 心跳「可选，排 T2 尾部」 | **必做** | 分章 + 审核 + 改写的静默期可长达数分钟（ADR-059 v7 修订） |
+| 5 | SSE 心跳「可选，排 T2 尾部」 | **必做** | 分章 + 审核 + 改写的静默期可长达数分钟（v7 修订） |
 | 6 | `CORS_ORIGINS` 保持默认 | **设空串** | 同源部署不需要；默认值给了 `localhost:5173/5174` 一个用不上的跨源许可 |
-| 7 | 三个 bash 运维脚本 | 四个 Python 脚本（`backup/restore/release/smoke`） | 备份自检、迁移判断、失败语义（ADR-087） |
-| 8 | 静态产物「先建新目录再原子改名」 | `releases/<ts>` + `current` 符号链接 | `rename` 符号链接比 `mv` 目录安全（ADR-086） |
+| 7 | 三个 bash 运维脚本 | 四个 Python 脚本（`backup/restore/release/smoke`） | 备份自检、迁移判断、失败语义 |
+| 8 | 静态产物「先建新目录再原子改名」 | `releases/<ts>` + `current` 符号链接 | `rename` 符号链接比 `mv` 目录安全 |
 | 9 | 部署项清单散落在文档正文 | `deploy/backend.env.example` 逐项带理由 | 照 `backend/.env.example` 配会漏掉 `LOG_DIR` / `AUTH_COOKIE_SECURE` / `PRDWRIGHT_MASTER_KEY_PATH` |
 | 10 | 目录契约里没有 `backend/migrations/` | 明确列为**必须打包**项 | 少了它启动就失败，而报错与数据库无关，极易误判 |
 | 11 | 没有「启动路径」一节 | 新增 §4（九步 + 三条分支 + 四种失败形态） | v6 之后「第一次起服务会发生什么」整件事都变了 |

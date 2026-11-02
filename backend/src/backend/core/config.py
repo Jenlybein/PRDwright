@@ -4,8 +4,8 @@
 （backend/.env）下的本地 .env 文件覆盖。复制 .env.example 为 .env 即可开始使用。
 
 ⚠️ 模型接入（供应商 / 协议 / 地址 / 型号 / 输出上限 / 思考开关 / **密钥**）**不在这里**，
-它只住在 `model_providers` 表里，由管理后台维护（ADR-051）。本文件里连字段都
-不声明——写了也不会有任何效果。密钥用主密钥加密后以密文存库（ADR-053），
+它只住在 `model_providers` 表里，由管理后台维护。本文件里连字段都
+不声明——写了也不会有任何效果。密钥用主密钥加密后以密文存库，
 加密与解密在 `core/crypto.py`；本文件里**没有也不该有**任何密钥。
 
 使用方式::
@@ -44,10 +44,10 @@ class Settings(BaseSettings):
     #
     # 接哪家、走哪个协议、地址是什么、用哪个型号、输出上限多少、要不要开思考——
     # 这些全部是**运行时数据**，只住在 `model_providers` 表里，由管理后台面板维护
-    # （ADR-051）。理由不是洁癖，而是这些值必须能**按条**存在：同一家要配
+    # 理由不是洁癖，而是这些值必须能**按条**存在：同一家要配
     # 「生产」「测试」两条时，一个进程级变量根本表达不了「这次用哪条」。
     #
-    # 密钥**值**仍在 `.env`（或进程环境）里，数据库只存变量名（ADR-042）——
+    # 密钥**值**仍在 `.env`（或进程环境）里，数据库只存变量名——
     # 那是安全边界，与「配置放哪」是两件事：配置可以进库，凭据不行。
     # 密钥按**变量名**取（`core/secrets.lookup_env`），不经过 `Settings`，
     # 所以新增一条配置不必改代码、也不必重启。
@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     )
 
     # ⚠️ 这里原本还有一个 `llm_context_window`（全局覆盖上下文窗口）。
-    # 它已随 ADR-051 删除：配置条目自己就有 `context_window` / `max_output`，
+    # 它已删除：配置条目自己就有 `context_window` / `max_output`，
     # 而全局那个值会**静默覆盖**条目的设置（`settings.llm_context_window or ...`）
     # ——后台给某条填了 128k 却仍按 env 的 32k 判预算，症状是「换了大窗口还老报超顶」。
 
@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     # --- 超时与重试（单次调用自愈） ------------------------------------------
     # 背景：三家 SDK 各自带着「默认重试 2 次 + 默认超时 600 秒」在跑，而项目从未显式
     # 配置过它们——不知道重试在发生，比没有重试更糟。下面四个开关把这件事摆到明面上，
-    # 并把重试收归 `stream_reply` 自己管（ADR-016），让废弃的尝试也能被计量。
+    # 并把重试收归 `stream_reply` 自己管，让废弃的尝试也能被计量。
     llm_timeout: float = Field(
         default=60.0,
         ge=0,
@@ -369,7 +369,7 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="",
         description=(
-            "数据库地址（v8 / ADR-097）。例如 "
+            "数据库地址（v8）。例如 "
             "sqlite:////var/lib/prdwright/prdwright.db 或 "
             "mysql+pymysql://user:pass@host:3306/prdwright?charset=utf8mb4。"
             "留空时回落到 DB_PATH（兼容糖，见 core/database.py::database_url）。"

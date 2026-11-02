@@ -24,7 +24,7 @@ dependencies = [
     "pymysql>=1.1.0",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
-    # 数据层（v6 / ADR-074）。三个包的分工：
+    # 数据层（v6）。三个包的分工：
     # - sqlmodel：表模型（同时是 Pydantic 模型），结构真源只有一份；
     # - sqlalchemy：Engine / Session / 连接池 / 事务，取代 444 行自建池；
     # - alembic：迁移链，取代 `PRAGMA user_version` 的 20 步手写清单。

@@ -20,7 +20,7 @@
 第 3 条是边界：`paste_prd_text` / `draft_prd_text` 这类列看起来"老"，但它们**仍在
 `schemas.py` 与 `solution_service.py` 里读写**，不满足第 1 条，因此不在本清单内。
 
-⚠️ **"被文档说是死的"不算证据**：`AppDialog.vue` 被 ADR-015 与 `v2/ARCHITECTURE.md` 写成
+⚠️ **"被文档说是死的"不算证据**：`AppDialog.vue` 被 `v2/ARCHITECTURE.md` 写成
 "零外部引用"，实际 `ReviewStage.vue:7` 正在 import 它；照文档删会构建失败。每次删除前必须自己 grep。
 
 ---
@@ -34,7 +34,7 @@
 | **A3** | `frontend/src/components/ui/AppToast.vue` | 全仓 `grep AppToast` 零命中（含 kebab-case 与全局注册两条逃逸路径） | 删文件 | 是 |
 | **A4** | `frontend/src/components/ui/AppEmpty.vue` | 同上，零命中 | 删文件 | 是 |
 | **A5** | `frontend/src/components/ui/AppInput.vue` | **原清单漏项**。零 importer；`src` 内唯一命中是 `fieldStyles.ts:9` 的**注释** | 删文件 | 是 |
-| **A6** | `services/job_service.py:363 cancel_for_solution` | **原清单漏项**。零调用；`delete_solution_and_cancel_jobs`（`:411-424`）把同样三步内联重写了一遍；ADR-036 与 3 处注释仍写「删除方案时必须走这里」 | 删函数 + 同步 ADR-036 指向 | 是 |
+| **A6** | `services/job_service.py:363 cancel_for_solution` | **原清单漏项**。零调用；`delete_solution_and_cancel_jobs`（`:411-424`）把同样三步内联重写了一遍；3 处注释仍写「删除方案时必须走这里」 | 删函数 + 同步 3 处注释的指向 | 是 |
 | **A7** | 10 个零提及的符号 | `normalize_stage`、`is_valid_role`（`core/chat_kinds.py:44/59`）、`master_key_exists`（`core/crypto.py:51`）、`is_present`（`core/secrets.py:119`）、`current_engine`（`core/engine.py:154`）、`config_service_window`、`input_ceiling_for`（`core/runtime_config.py:465/500`）、`ClearForSolution.clear_for_solution`（`chat_session_repo.py:105`）、`ChatTurnRepository.has_turns`（`chat_turn_repo.py:219`）、`_PLACEHOLDER_URL`（`core/schema.py:53`） | 删 | 是 |
 | **A8** | 8 条未使用 import（ruff F401 已确认真无消费者） | `api/conversation.py:11`、`api/schemas/`（拆分前为单文件 19/22 行）、`core/engine.py:49/50`、`core/runtime_config.py:54`、`repositories/document_repo.py:34`、`services/conversation_service.py:42` | 删 | 是 |
 | **A9** | `backend/src/backend/__init__.py` 的第二个 FastAPI app + `pyproject.toml:36` 坏入口点 | `__init__.py:1-7` 建了 `app` 与 `/health`，全仓 `from backend import app` 零命中；真 app 在 `main.py`、`/health` 在 `api/health.py:144`；`pyproject.toml:36` 的 `backend = "backend:main"` 指向不存在的属性（`hasattr(backend,'main')` 实测 False） | 删 app 代码块；入口点最终**整块删除**（见下方补记） | 是 |
@@ -112,17 +112,16 @@
 
 | 出处 | 承诺的路径 | 实际 |
 |---|---|---|
-| `v7/roadmap.md:57,58,59,60`、`v7/ARCHITECTURE.md:846-849`、`v7/ADR.md:684,689-692`、`v7/README.md:75`、`ADR-087`、`v8/MULTI-BACKEND.md:262`、`v8/roadmap.md:198` | `deploy/backend.env.example`、`deploy/systemd/prdwright.service`、`deploy/nginx/prdwright.conf`、`scripts/deploy/{backup,restore,release,smoke}.py` | **否**（连 `deploy/` 目录都没有；`scripts/` 下只有 `keygen/generate_keys.py`） |
+| `v7/roadmap.md:57,58,59,60`、`v7/ARCHITECTURE.md:846-849`、`v7/README.md:75`、`v8/MULTI-BACKEND.md:262`、`v8/roadmap.md:198` | `deploy/backend.env.example`、`deploy/systemd/prdwright.service`、`deploy/nginx/prdwright.conf`、`scripts/deploy/{backup,restore,release,smoke}.py` | **否**（连 `deploy/` 目录都没有；`scripts/` 下只有 `keygen/generate_keys.py`） |
 | `v8/MULTI-BACKEND.md:487,533`、`v8/roadmap.md:246` | `scripts/deploy/test-mysql.sh` | **否** |
 | `v8/MULTI-BACKEND.md:485`、`v8/roadmap.md:244` | `core/snapshot/{sqlite,mysql}.py` | **否**（`core/snapshot/` 目录不存在） |
-| 已在本轮清理中删除 | `docs/plans/`、`docs/artifacts/` | 目录已删；根 `README.md` 与 `docs/journal/README.md` 的引用已同步改写 |
+| 已在本轮清理中删除 | `docs/plans/`、`docs/artifacts/` | 目录已删；根 `README.md` 与历史档案索引里的引用已同步改写（历史档案目录随后也整体移除） |
 
 **处置（已定）**：对 `deploy/` 与 `scripts/deploy/` 选「废」——在相关文档标注「未落盘，以 v8 容器化为准」，
 不补一套只为存档的裸机模板（v8 之后裸机不是主路径，补了就是两份真相并存）。
-`v6/roadmap.md:45-46` 的 `tests/support/`、`tests/fixtures/` 与 ADR-061 的
-`backend/tests/integration/`（ADR-060 明确否决过的形态）同属此类，一并标注。
+`v6/roadmap.md:45-46` 的 `tests/support/`、`tests/fixtures/` 与 `backend/tests/integration/`（早先已被明确否决过的形态）同属此类，一并标注。
 
-> ⚠️ 这与 `ADR-070` 是同一类问题的**第二次出现**：**文档写了、文件没落盘**。
+> ⚠️ 这与 v5 那批部署文档是同一类问题的**第二次出现**：**文档写了、文件没落盘**。
 > 所以 v8 的验收里加一条硬要求：**凡是文档里写出的路径，`ls` 必须能看见**。
 
 ---
@@ -167,7 +166,7 @@
 **笔 5 的不可逆性必须说清楚**：
 
 - 删列之后，**回滚代码会让旧代码读不到列**（启动即报错）。所以回滚方式是
-  **恢复备份**，不是 `git revert`（ADR-057 的推论在删列场景下同样成立）。
+  **恢复备份**，不是 `git revert`（同样的推论在删列场景下也成立）。
 - 因此三步必须在同一个窗口内完成：`VACUUM INTO` 备份 + 自检 → 跑迁移 → 全量用例。
   备份没做成不许跑迁移。
 - SQLite 的 `DROP COLUMN` 需要 batch 模式（`migrations/env.py` 已配 `render_as_batch=True`）。
@@ -202,7 +201,7 @@
 
 ## 9 删列的备份窗口（演练记录）
 
-删列不可逆（ADR-057 / ADR-096），窗口内三步必须齐：`VACUUM INTO` 备份 + 自检 → 跑迁移 → 全量用例。
+删列不可逆，窗口内三步必须齐：`VACUUM INTO` 备份 + 自检 → 跑迁移 → 全量用例。
 A1（`solutions.data`）删除时实际做过一遍自检，记录如下（据 #8 报告）：
 
 1. 临时库先建到 `0002`（删列前的最新结构）；

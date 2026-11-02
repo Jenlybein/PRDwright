@@ -40,7 +40,7 @@ SQLAlchemy → sqlite3 → 文件
 - 11 个仓库文件、102 个函数、86 个 `@staticmethod` 全部改为 session 绑定；
 - 服务层事务边界上移，`commit_generated` 的多表写收口为一个事务；
 - 删除 `core/db.py`、`core/database.py`（444 行自建池）、`core/migrations.py` 与
-  `core/legacy_migrations.py`（`PRAGMA user_version` 的 20 步链，v6.1 / ADR-083）；
+  `core/legacy_migrations.py`（`PRAGMA user_version` 的 20 步链，v6.1 已删除）；
 - 两条静态守卫 + 三条结构对拍测试。
 
 ### 本期不做
@@ -48,10 +48,10 @@ SQLAlchemy → sqlite3 → 文件
 | 不做 | 理由 |
 | --- | --- |
 | 换数据库（PostgreSQL 等） | 本次只换访问方式，不动存储引擎；换库应是独立阶段 |
-| 引入 `Relationship()` / 级联加载 | 会引入 N+1 与 detached 懒加载两类故障；join 保持显式（ADR-080） |
+| 引入 `Relationship()` / 级联加载 | 会引入 N+1 与 detached 懒加载两类故障；join 保持显式 |
 | 改 API 契约 | 响应字段、错误码、状态机一律不变；T16.13 逐字段对拍 |
 | 改 `PRAGMA` 之外的 SQLite 调优（页大小、`mmap_size`） | 与本次目标无关，混进来会让回归定位变难 |
-| 部署 / 上线 | 推迟到 v7（ADR-073） |
+| 部署 / 上线 | 推迟到 v7 |
 | 补测试覆盖 | v5 已完成；本次只补「迁移引入的新故障模式」的守卫 |
 
 ---
@@ -174,7 +174,7 @@ meta: str = Field(default="{}", sa_column=Column("metadata", TEXT, nullable=Fals
 > 为什么不干脆保留 `int`：`is_admin == 1` 这种写法会让「真假」与「1」混在一起，
 > 而 `api/schemas.py` 早已声明 `is_admin: bool`。模型层对齐 `bool` 是**收敛**，不是扩张。
 
-**④ 时间戳保持 `TEXT`，不换 `DateTime`。** 见 ADR-077。
+**④ 时间戳保持 `TEXT`，不换 `DateTime`。**
 
 ### 4.3 JSON 列
 
@@ -193,7 +193,7 @@ meta: str = Field(default="{}", sa_column=Column("metadata", TEXT, nullable=Fals
 而收益只是「少两行序列化代码」。
 
 这条是**有意的取舍**，与「不为开发成本妥协」不冲突：我们不为省事留着 SQL 字符串，
-但也不会为了类型好看去动已经在库里的字节。见 ADR-077。
+但也不会为了类型好看去动已经在库里的字节。
 
 ---
 
@@ -246,7 +246,7 @@ class GenerationJobRepository:
 3. **返回模型对象**，不返回 `dict`。
 
 第 3 条是本次改动面最大的一条（71 个调用点）。理由是它带来的是**编译期**收益：
-`job.stauts` 会被类型检查抓住，`job["stauts"]` 要等运行时。见 ADR-078。
+`job.stauts` 会被类型检查抓住，`job["stauts"]` 要等运行时。
 
 ### 5.3 事务边界画在哪
 
@@ -321,7 +321,7 @@ def prepare_schema(engine) -> str:
 ### 6.3 20 步旧迁移：已整体删除
 
 原计划是把 `core/migrations.py`（1365 行）冻结成 `core/legacy_migrations.py`、留到 v7。
-实际在 **v6.1 就删干净了**（ADR-083）：
+实际在 **v6.1 就删干净了**：
 
 - 没有任何库需要它（没有已交付的自托管实例，开发库已是 v20 + `alembic_version`）；
 - 留着它意味着「版本」有两个真相（`user_version` 与 `alembic_version`），
@@ -395,7 +395,7 @@ class XxxRepository:
 
 ### 7.4 模型不声明 `Relationship()`
 
-理由（ADR-080）：
+理由：
 
 - 声明了就会在「session 已关闭」时触发懒加载 → `DetachedInstanceError`，
   而这类错误只在高并发路径上偶发；
@@ -495,7 +495,7 @@ lifespan 关闭
 | --- | --- | --- |
 | 表 | 14 | 全部由 Alembic 基线建（不再有第二份 DDL） |
 | 索引 | 16 | 含 2 个唯一索引、1 个部分唯一索引、2 处表级 `UNIQUE` |
-| 迁移步骤 | 20 → **0** | 旧链已删除（ADR-083），结构变更只写成 Alembic 迁移 |
+| 迁移步骤 | 20 → **0** | 旧链已删除，结构变更只写成 Alembic 迁移 |
 | 仓库文件 | 11 | 其中 10 个有类，`quota_repo` 只有模块级函数 |
 | 仓库函数 | 102 | 86 个 `@staticmethod`、16 个模块级/私有辅助 |
 | `commit()` | 44 | 全部删除 |
@@ -539,7 +539,7 @@ lifespan 关闭
 | `test_database_pool.py`（10 条） | **已删**（池不存在了）；`lease`/`owned` 的守卫由 C1/C3 接管 |
 | `core/database.py`（444 行池） | **已删**（T16.12） |
 | `core/db.py::connect` / `lease` | **已删**；测试侧改用 `tests/dbsupport.py::connect`（仅限 tests） |
-| `core/db.py::SCHEMA_SQL` / `init_schema()` | **已删除**（随旧链一起，ADR-083）。旧库不再自动升级，会拒绝启动 |
+| `core/db.py::SCHEMA_SQL` / `init_schema()` | **已删除**（随旧链一起）。旧库不再自动升级，会拒绝启动 |
 | `core/db.py` 时间工具（`utc_now` 等） | **已搬到** `core/clock.py` |
-| `core/migrations.py` / `core/legacy_migrations.py` | **已删除**（v6.1 / ADR-083）；守卫 C9 守着它们不许回来 |
+| `core/migrations.py` / `core/legacy_migrations.py` | **已删除**（v6.1）；守卫 C9 守着它们不许回来 |
 | `T15-data-access-layer.md` | 已**逐字**并入 `../v5/ARCHITECTURE.md` 附录 B，保留为历史记录 |

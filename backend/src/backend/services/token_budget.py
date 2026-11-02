@@ -210,7 +210,7 @@ def _physical_ceiling(provider: str, model: str) -> int:
     静默退到 `_FALLBACK`（32k），症状同上，而错误现场看不出原因。
     这条由 `test_config_id_never_reaches_provider_defaults` 钉住。
 
-    ⚠️ 不再接收 `Settings`：全局的 `LLM_CONTEXT_WINDOW` 已被 ADR-051 删除，
+    ⚠️ 不再接收 `Settings`：全局的 `LLM_CONTEXT_WINDOW` 已被删除，
     窗口只有「配置条目填的值 → 注册表」一条链。留着那个参数只会让下一个
     读代码的人以为 env 还能影响这里。
     """

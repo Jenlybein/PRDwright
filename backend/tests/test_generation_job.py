@@ -54,7 +54,7 @@ from fakes import ScriptedLLM
 def _seed_provider() -> str:
     """放一条配置并设为使用中，返回 id。
 
-    ⚠️ ADR-051 之后 `.env` 不再是模型配置的来源：一条配置都没有时
+    ⚠️ `.env` 不再是模型配置的来源：一条配置都没有时
     `active_provider` 是 `None`，回执里的 `protocol` / `model` 会是空串。
     而这两个字段正是「这次走了哪条配置」的唯一凭据，所以凡是要断言它们的用例
     都得先把配置落下来——这不是用例啰嗦，是真实前提。

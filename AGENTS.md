@@ -13,7 +13,7 @@
 | `frontend_admin/` | Vue 3 · Vite | 5174 | 管理端（与用户端零共享，`npm install` 需 `--legacy-peer-deps`） |
 | `skills/` | —— | —— | 生成管线的技能包（`prd-generator` 等），是管线知识的唯一来源 |
 | `scripts/keygen/` | Python | —— | 主密钥生成与轮换 |
-| `docs/` | Markdown | —— | 架构文档 · ADR · 约定 · 档案 |
+| `docs/` | Markdown | —— | 架构文档 · 约定 |
 
 ```bash
 cd backend && uv sync && uv run pytest     # 后端：只准用 uv，没有 requirements.txt
@@ -28,7 +28,7 @@ cd frontend_admin && npm run test:unit     # 管理端
 3. **只用 uv**；删除依赖也走 `uv`。
 4. **文档里写出的每个路径，`ls` 必须能看见** —— 本项目两次出现「报告写入成功但文件次日消失」，写完必须 `ls` + `git status` 复核。
 5. **架构文档正向写**：目标 → 范围（含「本期不做」）→ 设计 → 契约 → 取舍。禁止写成「盘点了哪些缺口」。
-6. 一次改动要**收口**：代码、ADR、架构文档、路线图四者同步，谁都不滞后。
+6. 一次改动要**收口**：代码、架构文档、路线图三者同步，谁都不滞后。
 
 完整的工程约定（分层边界、迁移纪律、SSE 契约、版本链语义、测试陷阱、部署硬约束）在 [`docs/agents/conventions.md`](./docs/agents/conventions.md)。
 
@@ -44,4 +44,4 @@ issue 与规格住在 GitHub Issues（`Jenlybein/PRDwright`，public），一律
 
 ### Domain docs
 
-单上下文：根目录一份 `GLOSSARY.md` + `docs/adr/`（ADR-001 ~ ADR-099）。见 [`docs/agents/domain.md`](./docs/agents/domain.md)。
+单上下文：根目录一份 `GLOSSARY.md`。决策记录不再单独归档，以该层 `ARCHITECTURE.md` 与 issue 历史为准。见 [`docs/agents/domain.md`](./docs/agents/domain.md)。

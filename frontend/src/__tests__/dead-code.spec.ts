@@ -5,7 +5,7 @@ import apiSource from '../services/api.ts?raw'
 import typesSource from '../types/index.ts?raw'
 
 /**
- * 死代码清理守卫（issue #2 / ADR-099 的三条判据）。
+ * 死代码清理守卫（issue #2 的三条判据）。
  *
  * 判据只有一条：没有代码读它。grep 是一次性证据，这里把结论钉成用例——
  * 已判定零引用的组件、资源与导出不得回流；被旧文档误判成「零外部引用」、
@@ -16,7 +16,7 @@ describe('死代码清理', () => {
     const uiModules = import.meta.glob('../components/ui/*.vue')
     const names = Object.keys(uiModules).map((path) => path.split('/').pop())
 
-    // 反例：ADR-015 与 v2/ARCHITECTURE.md 写它「零外部引用」，ReviewStage.vue 却在用
+    // 反例：v2/ARCHITECTURE.md 写它「零外部引用」，ReviewStage.vue 却在用
     expect(names).toContain('AppDialog.vue')
     expect(names).not.toContain('AppToast.vue')
     expect(names).not.toContain('AppEmpty.vue')

@@ -87,7 +87,7 @@ class ChatSessionRepository:
         # 「两条线程同时写同一行」就成了「两个都查到没有 → 两个都插入」，
         # 唯一索引会把第二条变成 IntegrityError，而那不是业务错误。
         # 冲突目标是唯一索引 `ux_chat_sessions_thread (solution_id, stage)`——
-        # 该表只有这一个唯一约束，满足方言适配层的契约 C-D1（ADR-088）。
+        # 该表只有这一个唯一约束，满足方言适配层的契约 C-D1。
         upsert_values(
             self.session,
             ChatSession,
