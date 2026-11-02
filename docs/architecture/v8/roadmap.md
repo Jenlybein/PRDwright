@@ -45,7 +45,7 @@ T18.0 文档
                           ├─→ T18.7
                           └─→ T18.8（清理，建议排在容器化之后）
 
-第二阶段：双后端（详细设计见 MULTI-BACKEND.md）
+第二阶段：双后端（详细设计见 附录 C）
 T18.9 ──→ T18.10 ──→ T18.11 ──→ T18.12 ──→ T18.13 ──→ T18.14
                                                         └─→ T18.15
 
@@ -66,8 +66,8 @@ T18.9 是第二阶段的开关，必须先单独做完；T18.10 与 T18.8 合并
 | # | 交付物 | 落点 | 验收要点 |
 |---|---|---|---|
 | 1 | 架构文档 | `docs/architecture/v8/ARCHITECTURE.md` | 含「本期不做」清单；契约 C-V8-1~7 可逐条检验 |
-| 2 | 方言专题 | `docs/architecture/v8/DIALECT-PORTABILITY.md` | §3.6 不收敛清单覆盖 10 项；每项标「永久适配 / 换模型 / 语义差异」 |
-| 3 | 勘察报告 | `docs/architecture/v8/schema-survey.md` | 7 节齐全；脏格式与字节数有实测值 |
+| 2 | 方言专题 | `docs/architecture/v8/ARCHITECTURE.md 附录 B` | §3.6 不收敛清单覆盖 10 项；每项标「永久适配 / 换模型 / 语义差异」 |
+| 3 | 勘察报告 | `docs/architecture/v8/ARCHITECTURE.md 附录 D` | 7 节齐全；脏格式与字节数有实测值 |
 | 4 | 勘察脚本 | `backend/scripts/schema_survey.py` | `mode=ro` 只读；`--out` 可写文件；生产库可直接复用 |
 | 5 | 决策与取舍 | 本层 `ARCHITECTURE.md` 的「取舍」节 | 已写进正文 |
 | 6 | 路线图 | 本文件 | 阶段之间无循环依赖 |
@@ -144,7 +144,7 @@ SELECT 里，改写时必须保留这个形状。改成「先查归属再插入�
 不是判据变松，是**这一项消失**。
 
 **结论**：保留 `core/schema_snapshot.py` 的 `PRAGMA` 实现。代价是它只在 SQLite 上成立，
-但它是测试与启动校验工具，不在业务路径上。详见 `DIALECT-PORTABILITY.md` §3.5。
+但它是测试与启动校验工具，不在业务路径上。详见 附录 B §3.5。
 
 **留存的产出**：探测结论本身。下次有人提"把结构对拍换成 inspector"，先看这张表。
 
@@ -207,7 +207,7 @@ SELECT 里，改写时必须保留这个形状。改成「先查归属再插入�
 
 ## T18.8 · 死代码与退役内容清理（v8.8）
 
-**目标**：仓库里不存在「读不到、也删不掉」的东西。完整清单与判据见 **`CLEANUP.md`**。
+**目标**：仓库里不存在「读不到、也删不掉」的东西。完整清单与判据见 **附录 A**。
 
 为什么值一个独立阶段：这类内容的成本不在运行时，而在**每个读代码的人**——他必须先判断
 「这一列还能不能用」，判断成本天天发生，删除成本只发生一次。
@@ -216,24 +216,24 @@ SELECT 里，改写时必须保留这个形状。改成「先查归属再插入�
 |---|---|---|---|
 | 1 | 删 `solutions.data` 列 | 一条 Alembic 迁移 + `models.Solution` 删字段 | `grep -rn "\.data\b" backend/src` 只剩注释；结构对拍绿 |
 | 2 | 删 `model_providers.builtin` 列 | 同一条迁移（或独立一条） | `grep builtin` 只剩历史迁移与注释 |
-| 3 | 删三个未引用组件 + 三个孤儿资源 + 两个零引用函数 + 一个死类型 | `ui/{AppToast,AppEmpty,AppInput}.vue`、`assets/{main.css,base.css,logo.svg}`、`api.ts` 的 `getQuestions` / `generatePrdStream`、`types/index.ts` 的 `SessionData`（逐项证据见 `CLEANUP.md` A3~A5 / A10） | 全仓 `grep` 零命中；两个前端仍能 `npm run build` |
+| 3 | 删三个未引用组件 + 三个孤儿资源 + 两个零引用函数 + 一个死类型 | `ui/{AppToast,AppEmpty,AppInput}.vue`、`assets/{main.css,base.css,logo.svg}`、`api.ts` 的 `getQuestions` / `generatePrdStream`、`types/index.ts` 的 `SessionData`（逐项证据见 附录 A A3~A5 / A10） | 全仓 `grep` 零命中；两个前端仍能 `npm run build` |
 | 4 | 处置 v7 悬空模板 | `../v7/` 文档加注（推荐废弃，不补） | 文档里出现的每个 `deploy/...` 路径，`ls` 都能看见 |
-| 5 | 工具扫描记录 | `CLEANUP.md` 附录补实测结果 | `ruff F401/F811`、`vulture`、`knip` 各跑一次，结论落纸 |
+| 5 | 工具扫描记录 | 附录 A 附录补实测结果 | `ruff F401/F811`、`vulture`、`knip` 各跑一次，结论落纸 |
 
 **顺序**：先 3（零风险，验证清理流程），再 1/2（不可逆），最后 5（扫描可能引出新项）。
 
 **风险**：删列**不可逆**。删完之后旧代码读不到列，回滚只能靠恢复备份。
 所以前置条件是「备份 + 自检通过」，且与 T18.7 演练过的流程保持一致。
 
-**验收**：`CLEANUP.md` §6 的六条判据逐条通过。
+**验收**：附录 A §6 的六条判据逐条通过。
 
 ---
 
 ## 第二阶段：双后端（T18.9 ~ T18.15）
 
 **目标**：`DATABASE_URL` 指向 SQLite 或 MySQL，同一份代码、同一套用例都成立。
-完整设计（含差异处置表、契约 C-M1~M7、验收 8 条）见 **`MULTI-BACKEND.md`**；
-决策见 `MULTI-BACKEND.md`。
+完整设计（含差异处置表、契约 C-M1~M7、验收 8 条）见 **附录 C**；
+决策见 附录 C。
 
 这一组与前面 T18.1~T18.8 的分工：前面是"代码不再依赖某个库"，这里是"两个库都能真跑"。
 

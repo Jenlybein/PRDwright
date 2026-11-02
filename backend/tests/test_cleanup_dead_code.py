@@ -13,7 +13,7 @@
 （例如某个 `has_turns` 确实有人调用），正确做法是**连这条用例里对应的一行一起改**，
 而不是把它注释掉——否则守卫会慢慢变回「永远不红」。
 
-判据与清单来源：`docs/architecture/v8/CLEANUP.md` §2（A6 / A7）。
+判据与清单来源：`docs/architecture/v8/ARCHITECTURE.md 附录 A` §2（A6 / A7）。
 """
 
 from __future__ import annotations
@@ -52,5 +52,5 @@ def test_dead_symbol_stays_deleted(module_name: str, class_name: str | None, sym
         target = getattr(target, class_name)
     assert not hasattr(target, symbol), (
         f"{module_name}{'.' + class_name if class_name else ''} 又长回了死符号 `{symbol}`："
-        "它全仓零调用。要么接上真实调用方，要么按 CLEANUP.md §1 的三条判据重新裁决。"
+        "它全仓零调用。要么接上真实调用方，要么按 附录 A §1 的三条判据重新裁决。"
     )

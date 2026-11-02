@@ -29,7 +29,7 @@
 - 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8）。
 - 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8）。
 - upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；MySQL 的 DO NOTHING 用主键 no-op，绝不用 `INSERT IGNORE`（会吞列超长 / NOT NULL）；只准用在「该表只有一个唯一约束」的表上（契约 C-D1，v8）。
-- SQLite 与 MySQL 都是一等后端、部署时自选：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），设计见 `docs/architecture/v8/MULTI-BACKEND.md`；写 MySQL 兼容代码守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+- SQLite 与 MySQL 都是一等后端、部署时自选：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），设计见 `docs/architecture/v8/ARCHITECTURE.md 附录 C`；写 MySQL 兼容代码守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
 - `get_settings()` 走 lru_cache：改环境变量后必须 `cache_clear()`；`prompts.py` 走 `str.format()`，字面量花括号写 `{{ }}`，给 LLM 的指令用 `<!-- -->` 注释。
 
 ## 3. 迁移（Alembic）

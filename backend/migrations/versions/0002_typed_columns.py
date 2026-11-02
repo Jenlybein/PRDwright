@@ -23,7 +23,7 @@ MySQL 的两条硬约束，在 SQLite 上**完全看不出来**——SQLite 既�
 
 ## 每个数字为什么是它
 
-长度来自 `docs/architecture/v8/schema-survey.md` 的实测最大值向上取档：
+长度来自 `docs/architecture/v8/ARCHITECTURE.md 附录 D` 的实测最大值向上取档：
 
 - 时间戳 `32`：`utc_now_text()` 产出 26 字符、`utc_ms_text()` 24 字符（带 Z）；
 - 枚举（kind / status / stage / role / level）`32`：取值都是 12 字符以内；

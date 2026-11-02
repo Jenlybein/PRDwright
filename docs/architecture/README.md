@@ -2,7 +2,9 @@
 
 > 这个目录按层归档 PRDwright 的演进。**每层三份文件**：`README.md`（这一层是什么、为什么做）、
 > `ARCHITECTURE.md`（设计：目标 → 范围 → 设计 → 契约 → 取舍，专题以附录形式并入）、
-> `roadmap.md`（排期与验收）。v1 与 v2 各只有前两份（这两层没有路线图）；v8 是当前层，另含五份在用的专题文档。
+> `roadmap.md`（排期与验收）。v1 与 v2 各只有前两份（这两层没有路线图）；v8 是当前层，
+> 它的四个专题（清理与重写、方言可移植性、双后端、库结构勘察）已按同一体例并入
+> `ARCHITECTURE.md` 的附录 A~D，因此同样是三份。
 >
 > **决策与否决理由不再单独归档**：v1~v8 的决策记录已整体移除，结论与取舍吸收进各层
 > `ARCHITECTURE.md` 的「取舍」节与 issue 历史。原根目录 `evolution-truth.md` 已删除，
@@ -85,8 +87,8 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 | 9 | 同一条决策只做到「PRD 复用主对话线程」，v3 把「接口文档 / 提示词独立澄清页」当现状写 | 同日 `c155608` 把四条线程全收进对话页，`clarifying` 这个 ViewState 已不存在 | v3 的图与表改为「一个页面 + 四条线程」 |
 | **10** | v1 收尾规模「44 files / +5891 / −470」 | 三种算法都复现不出；v1 期根本没有删除（无 `−470` 来源） | 前提改为「不可复核」，见本文 §2 注与 `v1/ARCHITECTURE.md` §8 注 |
 | **11** | 同一页对 v3 给了两个数：38 笔 / 143 files 与 34 笔 / 131 files | 两个都对——**基点不同**：`b78de90..d46b5d6` 与 `b78de90..e494e90` | 本文 §2 把两个基点的行都列出来，不再混用 |
-| **12** | 「全量用例基线 999」（`docs/agents/conventions.md`）、「基线 1006」（`v8/CLEANUP.md`） | 实测 **1014**（工作区，pytest 收集）/ **986**（HEAD 已提交部分）；`999` 与 `1006` 都是 10-25 的中间态 | 两处均改为实测值并注明口径（`def test_` 文本计数 = 890，与收集数不是同一个数） |
-| **13** | 「v8 起以 `deploy/docker/` 为准」（`docs/agents/conventions.md`） | `deploy/` 与 `deploy/docker/` **都不存在**；`scripts/deploy/` 那 5 个脚本也不存在 | 改为「部署交付物整体未落盘」，登记进 `v8/CLEANUP.md` 待办并列入悬空清单 |
+| **12** | 「全量用例基线 999」（`docs/agents/conventions.md`）、「基线 1006」（`v8/ARCHITECTURE.md 附录 A`） | 实测 **1014**（工作区，pytest 收集）/ **986**（HEAD 已提交部分）；`999` 与 `1006` 都是 10-25 的中间态 | 两处均改为实测值并注明口径（`def test_` 文本计数 = 890，与收集数不是同一个数） |
+| **13** | 「v8 起以 `deploy/docker/` 为准」（`docs/agents/conventions.md`） | `deploy/` 与 `deploy/docker/` **都不存在**；`scripts/deploy/` 那 5 个脚本也不存在 | 改为「部署交付物整体未落盘」，登记进 `v8/ARCHITECTURE.md 附录 A` 待办并列入悬空清单 |
 
 ## 5. 怎么复核这里的一切
 
@@ -97,4 +99,4 @@ cd backend && uv run pytest --collect-only -q   # 用例基线（收集数）
 ```
 
 文档里出现的每个路径，`ls` 都必须能看见——这是本项目两次「写入报成功、次日消失」换来的纪律，
-也是 `v8/CLEANUP.md` 验收里那条「逐条 `ls`」的由来。
+也是 `v8/ARCHITECTURE.md 附录 A` 验收里那条「逐条 `ls`」的由来。
