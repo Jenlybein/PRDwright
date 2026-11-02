@@ -6,6 +6,11 @@
 > **下层**：`../v6/`（数据层重构，已完成）。本层不改业务能力，只回答
 > 「这些东西怎么搬到公网上、怎么长期活着」。
 > 时间线真源：**`../README.md`**
+>
+> **现状**：部署交付物已随 v9 迁到 `deploy/`，本节保留为当期的形态记录。文中
+> `deploy/backend.env.example`、`deploy/systemd/*.service`、`deploy/nginx/*.conf`、
+> `scripts/deploy/{backup,restore,release,smoke}.py` 这些路径**从未落盘**；
+> 现在的部署形态与命令看 [`../v9/README.md`](../v9/README.md) 与 `deploy/README.md`。
 
 ---
 

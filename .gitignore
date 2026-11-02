@@ -189,5 +189,8 @@ uploads/**
 backend/secrets/
 
 # 部署备份产物（v9）：备份脚本把在线快照写到 deploy/backups/，宿主可见但绝不入库。
-# 目录由备份脚本创建，可以整目录删掉——里面的文件是恢复用的，不是运行时的真源。
-deploy/backups/
+# 忽略的是**目录内容**、保留目录本身（`.gitkeep`）：否则 clone 出来没有这个目录，
+# 而文档（deploy/README §6 / v9 ARCHITECTURE §6）把它列为交付件。
+# 目录里的文件是恢复用的，可以整个删掉——`deploy/backups/.gitkeep` 请留着。
+deploy/backups/*
+!deploy/backups/.gitkeep
