@@ -54,7 +54,7 @@ from backend.services.job_drain import drain_controller
 from backend.services.skill_registry import (
     audit_skills,
     describe_manifest,
-    read_text_cached,
+    load_skill_artifacts,
     skills_root,
 )
 
@@ -198,24 +198,42 @@ async def health() -> dict:
 
 
 def _check_database_writable() -> dict:
-    """探测「库现在能不能写」：借一条连接，建一张探针表再删掉，全程回滚。
+    """探测「库现在能不能写」：借一条连接，拿写锁 + 一次内容不变的页写，然后回滚。
 
     为什么不是 `SELECT 1`：只读的库（文件权限、只读挂载、磁盘满后的半只读状态）
     读得出来、写不进去，而「现在能接活」恰恰要求写得进去——存不了方案的服务，
     「健康」二字没有意义。这就是它与 `_check_database()`（只探「可连接」）的分工：
     详情端点回答「库通不通」，就绪探针回答「写不写得进去」。
 
-    为什么敢建表：整段包在一个事务里，结尾**无条件回滚**。SQLite 支持事务内的 DDL 回滚；
-    换到 MySQL 时 DDL 会隐式提交，但探针表建完就删，落库的东西同样是零。
-    代价只是一次极短的写锁，在这个探针的触发频率下可以忽略。
+    为什么是 `BEGIN IMMEDIATE`（而不是建一张探针表再回滚）：
+    在 pysqlite 上，SQLAlchemy 的 `conn.begin()` **不发 `BEGIN`**（驱动等到第一条
+    写语句才隐式开事务）。于是「建探针表」那条 DDL 在 SQLite 眼里是一句**没有外层
+    事务的独立写**，自己就提交了——后面那句 `rollback()` 只撤掉了 Python 侧的事务
+    记账，表已经落库（评审实测）。结果是探针每 15 秒真建一次表、真拿一次写锁，
+    还往 `sqlite_master` 里写东西；这与「探活不该有副作用」直接冲突。
+    `BEGIN IMMEDIATE` 是 SQLite 的「我要写」声明：能拿到 RESERVED 锁说明此刻没有
+    别的写者占着（拿不到会立刻报 `SQLITE_BUSY`，不必等满超时），结尾 `ROLLBACK`
+    把这次事务整个撤掉，不留任何痕迹。
+
+    为什么在写锁之外还要补一次页写：
+    **SQLite 从 3.53 起会放行只读库的 `BEGIN IMMEDIATE`**（锁是文件级语义，不校验
+    写权限；实测 `mode=ro` 连接上 `BEGIN IMMEDIATE` 成功、下一条写语句才报
+    `attempt to write a readonly database`）。只拿锁会把「只读库」误判成 ready——
+    那是最坏的一种假绿。所以紧接着做一次**内容不变**的页写：把 `application_id`
+    写成它当前的值。可写库上它只是一次会被回滚的脏页（表清单、`freelist_count`、
+    文件内容都不变）；只读库上它当场报 `SQLITE_READONLY`，探针如实转 503。
+    选 `application_id` 而不是 `user_version`：后者是已删除的旧手写迁移链的标识，
+    C9 守卫禁止生产代码里出现它——版本的唯一真源是 `alembic_version`。两者同在库头，
+    `application_id` 本项目从不读，写回原值纯粹是为了触发一次写。
     """
     try:
         with get_engine().connect() as conn:
             transaction = conn.begin()
             try:
                 # 走 Engine 的池：与业务请求借同一条通路，才能测出「业务会写不进去」的那种故障。
-                conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS __readyz_probe (id INTEGER)")
-                conn.exec_driver_sql("DROP TABLE IF EXISTS __readyz_probe")
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+                current = conn.exec_driver_sql("PRAGMA application_id").scalar()
+                conn.exec_driver_sql(f"PRAGMA application_id = {int(current or 0)}")
             finally:
                 transaction.rollback()
     except Exception as exc:  # noqa: BLE001 - 探针要兜住任何异常，否则它自己就 500 了
@@ -226,7 +244,7 @@ def _check_database_writable() -> dict:
         )
         # 只留异常类型：探针和 `/health` 一样是公开路径，不往外吐路径等内部细节
         return {"ok": False, "detail": f"数据库不可写（{type(exc).__name__}）"}
-    return {"ok": True, "detail": "可写（探针临时表已回滚）"}
+    return {"ok": True, "detail": "可写（写锁已拿到，页写已回滚）"}
 
 
 def _check_skills_loadable() -> dict:
@@ -237,6 +255,11 @@ def _check_skills_loadable() -> dict:
     **真的把资源内容读一遍**——`audit_skills()` 只查文件在不在，而编码坏了、文件被占住、
     内容读不动这些情况只有在读的时候才会暴露。探针回答的是「现在能不能接活」，
     不是「目录摆得对不对」。
+
+    读资源走的是生成链路自己的入口 `load_skill_artifacts(kind)`（`document_service`
+    取资源就是它），而不是在这里自己拼路径、自己读文件：探针要回答的是「管线拿不拿得到
+    资源」，那就该问管线问的那个函数，否则「探针绿了、生成却退回内置提示词」这种
+    分叉迟早会出现。`applies_to` 里声明的每个产物都会过一遍。
     """
     try:
         manifests, problems = audit_skills()
@@ -252,8 +275,14 @@ def _check_skills_loadable() -> dict:
                 "detail": f"未发现任何技能包（skills 根目录 {skills_root()} 为空或未打包）",
             }
         for manifest in manifests:
-            for key in manifest.artifacts:
-                read_text_cached(manifest.artifact_path(key))
+            for kind in manifest.applies_to:
+                if load_skill_artifacts(kind) is None:
+                    # 走到这里说明资源在这条连接上是坏的（缺失已被 audit_skills 拦下）：
+                    # 编码、权限、文件被占用，都属于「现在接不了活」。
+                    return {
+                        "ok": False,
+                        "detail": f"技能包 {manifest.name} 加载失败（产物 {kind}）",
+                    }
     except Exception as exc:  # noqa: BLE001 - 同上：探针不许自己 500
         logger.warning(
             "就绪探针：技能包加载失败",

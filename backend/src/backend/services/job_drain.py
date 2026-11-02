@@ -38,9 +38,10 @@ lifespan 的关闭阶段、用例）直接调用的 `drain_controller`；信号�
 `run_job` 在下一个事件处跳出循环，由 `_finalize` 收尾。排空复用它，而不是发明一套
 新的中止机制——同一个「中止」概念只该有一种表示，否则前端与排查要看两处。
 
-差别只在**超时者不能等它自己跳出循环**：它可能正卡在模型调用里。所以这里直接替它
-把终态写完（`_finalize`），再 `job_bus.close()` 给订阅者放哨兵——那个卡住的任务
-随后即使再产事件也不会改写这个结论（`cancelled` 已置位，它会走同一条收尾分支）。
+差别只在**超时者不能等它自己跳出循环**：它可能正卡在模型调用里。所以这里直接调
+`job_service.cancel_in_flight()`：由它替这个任务把终态写完（发错误事件 → 收尾落终态
+→ 给订阅者放哨兵）——那个卡住的任务随后即使再产事件也不会改写这个结论
+（`cancelled` 已置位，它会走同一条收尾分支）。
 """
 
 from __future__ import annotations
@@ -56,7 +57,6 @@ from backend.core.config import get_settings
 from backend.core.logging_setup import shutdown_log_persistence
 from backend.repositories.generation_job_repo import STATUS_RUNNING
 from backend.services import job_service
-from backend.services.job_bus import job_bus
 
 logger = logging.getLogger(__name__)
 
@@ -169,10 +169,7 @@ class DrainController:
         # 只从「排空开始那一刻在途的任务」里挑超时的：这样 `cancelled ≤ in_flight`
         # 由构造保证，汇总里的三个数字不可能互相对不上。
         victims = [runtime for runtime in pending if runtime.status == STATUS_RUNNING]
-        cancelled = 0
-        for runtime in victims:
-            self._cancel(runtime)
-            cancelled += 1
+        cancelled = job_service.cancel_in_flight(DRAIN_CANCEL_MESSAGE, runtimes=victims)
 
         report = DrainReport(
             in_flight=len(pending),
@@ -299,51 +296,11 @@ class DrainController:
     def in_flight(self) -> list[job_service.JobRuntime]:
         """还没跑完的运行时（`status == running`）。
 
-        判据用运行时而不是 `_TASKS`：任务集合只是保活用的强引用，它不知道
-        「这个任务是不是已经收尾了」；运行时上的 `status` 才是权威。
+        判据与「谁在读登记表」都归 `job_service`：本模块只调 `running_runtimes()`，
+        不碰 `_RUNTIMES` 这类私有名——排空与任务服务之间的契约就是那个公开函数。
         """
-        return [
-            runtime
-            for runtime in list(job_service._RUNTIMES.values())  # noqa: SLF001 - 同目录的运行时登记表
-            if runtime.status == STATUS_RUNNING
-        ]
-
-    def _cancel(self, runtime: job_service.JobRuntime) -> None:
-        """把一个超时任务收成「已取消」终态，并让订阅者拿到确定结论。
-
-        三步的顺序有讲究：**先发错误事件、再收尾**。`_finalize` 结尾会广播
-        `run_summary`，订阅者按「error → run_summary」读到的是一个完整的坏消息；
-        反过来先 run_summary 的话，前端会在收到「已结束」之后才收到原因。
-        """
-        runtime.cancelled = True
-        runtime.failed = True
-        runtime.error_code = "CANCELLED"
-        runtime.error_message = DRAIN_CANCEL_MESSAGE
-        if runtime.kind == "chat":
-            # 对话的「被中止」要保留已经说出口的话（`_write_chat_turn` 按这一位处理）
-            runtime.chat_interrupted = True
-
-        logger.warning(
-            "排空超时，取消任务",
-            extra={
-                "event": "job.drain_cancelled",
-                "job_id": runtime.job_id,
-                "user_id": runtime.owner_id,
-                "kind": runtime.kind,
-                "error_code": runtime.error_code,
-            },
-        )
-        # 错误事件走 `_failure_event`（与异常兜底同一个构造）：订阅者只看有没有
-        # `error` 事件判断失败，自造一个形状不同的错误事件等于让前端多一条解析分支。
-        job_bus.publish(
-            runtime.job_id,
-            job_service._failure_event(runtime.error_code, runtime.error_message),  # noqa: SLF001
-        )
-        job_service._finalize(runtime, "failed")  # noqa: SLF001 - 收尾落终态的唯一入口
-        # 收尾的哨兵由本任务自己的 `finally` 放；但超时者可能正卡在模型调用里，
-        # 等它到那里就是「再等一个 30 秒」。这里替它放哨兵，订阅者立刻读到尾巴。
-        job_bus.close(runtime.job_id)
+        return job_service.running_runtimes()
 
 
-# 模块级单例：进程内只有一份排空状态（与 `job_bus` / `_RUNTIMES` 同一口径）
+# 模块级单例：进程内只有一份排空状态（与 `job_bus` / 运行时登记表同一口径）
 drain_controller = DrainController()
