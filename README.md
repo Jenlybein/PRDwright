@@ -17,7 +17,7 @@
 | `frontend_admin/` | Vue 3 · Vite | 5174 | 管理端：用户 / 邀请码 / 审计 / 任务监控 / 模型配置 |
 | `skills/` | —— | —— | 生成管线使用的技能包（`prd-generator` 等） |
 | `scripts/keygen/` | Python | —— | 主密钥生成与轮换脚本 |
-| `docs/architecture/` | Markdown | —— | 分层架构说明（v1 ~ v9）与时间线真源 |
+| `docs/architecture/` | Markdown | —— | 单一现状架构文档、时间线真源与现状排期 |
 
 ---
 

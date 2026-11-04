@@ -23,7 +23,7 @@ gh repo view --json nameWithOwner   # 期望输出 Jenlybein/PRDwright
 ## 本仓库附加约定
 
 - 标签词表见 [`triage-labels.md`](./triage-labels.md)，五个角色一一对应，不要临时造第六个。
-- issue 里提到架构决策时**直接写清结论与现行落点**（如「方言收敛收进 `core/dialect.py`，见 `docs/architecture/ARCHITECTURE.md 附录 A`」）；**架构决策**单独归档在 `docs/adr/`，编号从 0001 重新开始，决策正文与各层取舍看 `docs/architecture/ARCHITECTURE.md` 的「取舍」节。
+- issue 里提到架构决策时**直接写清结论与现行落点**（如「方言收敛收进 `core/dialect.py`，见 `docs/architecture/ARCHITECTURE.md 附录 A`」）；跨层的**架构决策**单独归档在 `docs/adr/`，编号从 0001 重新开始；具体实施取舍写进 `docs/architecture/ARCHITECTURE.md` 的「取舍」节。
 - 术语用 [`GLOSSARY.md`](../../GLOSSARY.md) 的写法：说「方案」不说「项目」，说「被取代」不说「中止」。
 - CI 只在 **push 之后**才真跑（`.github/workflows/ci.yml`），本地绿灯不等于远端绿灯。
 - 本仓库铁律：**提交与推送前必须经用户确认**（先 `git add -An .` 预演）。agent 不要自作主张 commit。
