@@ -100,6 +100,44 @@ _ABORT_CODES = frozenset({"CANCELLED", "SUPERSEDED"})
 # ----------------------------------------------------------------------------
 
 
+def _immutable_projection(kind: str, request: dict[str, Any]) -> dict[str, Any]:
+    """算出任务单里三块不可变数据（建任务那一刻一次定格）。
+
+    - 原始请求参数：原样存调用方摊平后的 dict，不做二次加工；
+    - 配置/供应商快照：只取热配置白名单里的生效值 + 激活供应商四格，
+      **刻意不存整份 `Settings`**——里面有部署地址、初始管理员口令等不该进任务行的值；
+    - 技能包身份：`_resolve_skill_refs` 与派发时用的是同一个判断（按目标产物查注册表）。
+
+    这三块只服务于「DB 行是不可变数据的完整投影」。运行态仍以内存运行时为权威，
+    按既有节奏落进度；生成中途改后台配置/模板，也不会让这一行跟着变。
+    """
+    from backend.core import runtime_config as rc
+
+    config = rc.get_runtime_config()
+    spec = config.active_provider
+    active_provider = {
+        "provider_protocol": spec.protocol if spec is not None else "",
+        "provider_config_id": spec.id if spec is not None else "",
+        "provider_name": spec.name if spec is not None else "",
+        "provider_model": spec.model if spec is not None else "",
+    }
+    settings = {
+        key: getattr(config.settings, key)
+        for key in rc.WHITELIST
+        if hasattr(config.settings, key)
+    }
+    return {
+        "request_params": request,
+        "config_snapshot": {
+            "active_provider": active_provider,
+            "settings": settings,
+            "revision": config.revision,
+            "source": config.source,
+        },
+        "skill_refs": _resolve_skill_refs(kind, request),
+    }
+
+
 def create_job(
     *,
     owner_id: int,
@@ -120,10 +158,14 @@ def create_job(
     `request` 是**摊平后的生成参数**（`api/jobs.py::_build_request` 的产物）。创建时就传进来
     是为了算 `doc_kind`：`optimize` / `clarify` 靠 `kind` 定不了产物，只有请求体知道；
     落成列之后，刷新、进程重启、`GET /api/jobs` 都能回答「这个任务改的是哪一份」。
+
+    三块不可变数据（`request_params` / `config_snapshot` / `skill_refs`）在建任务
+    这一刻算一次并写全；供应商四列从同一份 `config_snapshot` 里取，收尾不再另算。
     """
     request = request or {}
+    projection = _immutable_projection(kind, request)
     if kind == "chat":
-        return _create_chat_job(owner_id, solution_id, request)
+        return _create_chat_job(owner_id, solution_id, request, projection)
 
     with session_scope() as session:
         GenerationJobRepository(session).supersede_active(
@@ -133,12 +175,22 @@ def create_job(
     doc_kind = _target_product_kind(kind, request) or ""
     with session_scope() as session:
         job = GenerationJobRepository(session).create(
-            owner_id, kind, solution_id, input_fingerprint, doc_kind=doc_kind
+            owner_id,
+            kind,
+            solution_id,
+            input_fingerprint,
+            doc_kind=doc_kind,
+            **projection,
         )
         return int(job.id or 0)
 
 
-def _create_chat_job(owner_id: int, solution_id: int | None, request: dict[str, Any]) -> int:
+def _create_chat_job(
+    owner_id: int,
+    solution_id: int | None,
+    request: dict[str, Any],
+    projection: dict[str, Any] | None = None,
+) -> int:
     """新建一轮对话任务：校验线程、拦住并发、把「进去的那一条」先落库。
 
     为什么对话**不走 `supersede`**
@@ -192,7 +244,13 @@ def _create_chat_job(owner_id: int, solution_id: int | None, request: dict[str, 
 
     with session_scope() as session:
         job = GenerationJobRepository(session).create(
-            owner_id, "chat", solution_id, None, doc_kind="", chat_stage=stage
+            owner_id,
+            "chat",
+            solution_id,
+            None,
+            doc_kind="",
+            chat_stage=stage,
+            **(projection or _immutable_projection("chat", request)),
         )
         job_id = int(job.id or 0)
 

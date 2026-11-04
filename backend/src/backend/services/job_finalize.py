@@ -114,15 +114,10 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     # 不用把每行 JSON 取回解析。取不到就当 0——宁可少算，不猜数字。
     prompt_tokens = int(summary.get("prompt_tokens") or 0)
     completion_tokens = int(summary.get("completion_tokens") or 0)
-    # 供应商快照同理：五列都从**同一份** summary 里取，不另外读一次配置。
-    # 它必须落在这行自己身上（而不是只留 config_id 回查）：配置会被改名/删除，
-    # 回查等于让历史账单跟着今天的状态变。
-    provider_snapshot = {
-        "provider_protocol": str(summary.get("protocol") or ""),
-        "provider_config_id": str(summary.get("provider_config_id") or ""),
-        "provider_name": str(summary.get("provider_name") or ""),
-        "provider_model": str(summary.get("model") or ""),
-    }
+    # 供应商四列已在**建任务那一刻**从 `config_snapshot` 里的同一份定格一次写全
+    # （见 `GenerationJobRepository.create`）。收尾不再从 `summary` 里另取四格、
+    # 不再重读配置或另算一遍：配置会被改名/删除，回查等于让历史账单跟着今天的状态变。
+    # `usage` JSON、token 两列、错误码与终态语义都不改。
     if status == "completed":
         with session_scope() as session:
             GenerationJobRepository(session).finish(
@@ -134,7 +129,6 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
                 pending_items=runtime.pending_items,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                provider=provider_snapshot,
             )
         _write_document(runtime, summary)
     else:
@@ -151,7 +145,6 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
                 pending_items=runtime.pending_items,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                provider=provider_snapshot,
             )
 
     # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`

@@ -357,6 +357,8 @@ class GenerationJob(SQLModel, table=True):
         Index("idx_generation_jobs_owner", "owner_id", "created_at"),
         # 兜底找回：按「运行态 + owner + 种类」定位可恢复的任务
         Index("idx_generation_jobs_recover", "status", "owner_id", "kind"),
+        # 运行中回答「这次用的是哪套技能包」：身份短串可索引，长度 ≤768
+        Index("idx_generation_jobs_skill_manifest", "skill_manifest"),
         {"sqlite_autoincrement": True},
     )
 
@@ -421,6 +423,17 @@ class GenerationJob(SQLModel, table=True):
     )
     created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    # --- 任务单里不可变数据的完整投影（票 #34）---
+    # 建任务那一刻一次写全，之后任何运行态写入路径都不碰这四列。
+    # ⚠️ 不设 server_default：MEDIUMTEXT 在遗留 MySQL 上不接受字面量默认值
+    # （`assert_metadata_is_portable` 会在 import 时自检）。
+    request_params: str = Field(default="{}", sa_column=Column(_BIG_TEXT, nullable=False))
+    config_snapshot: str = Field(default="{}", sa_column=Column(_BIG_TEXT, nullable=False))
+    skill_refs: str = Field(default="[]", sa_column=Column(_BIG_TEXT, nullable=False))
+    # 主技能包的可索引身份（名称 / 版本 / 指纹拼出的短串），不参与生成链路。
+    skill_manifest: str = Field(
+        default="", sa_column=Column(short_text(64), nullable=False)
+    )
 
 
 # ---------------------------------------------------------------------------

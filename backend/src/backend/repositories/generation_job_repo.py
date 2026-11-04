@@ -62,6 +62,33 @@ def _ensure_progress_texts(draft_content: str, sections_text: str) -> None:
     ensure_text_within_limit(sections_text, field="章节清单")
 
 
+def _dump_immutable(request_params: Any, config_snapshot: Any, skill_refs: Any) -> tuple[str, str, str]:
+    """把任务单的不可变数据序列化成三列 JSON 文本，并按既有 60KB 口径拦超限。
+
+    这三列**只在建任务时写一次**，与 `_ensure_progress_texts` 分开：后者专管
+    渐进增长的正文/章节清单，每 300ms 都要跑一次；这里只在 `create` 跑一次。
+    上限仍是同一个 `ensure_text_within_limit`（不另立口径、不新增错误码）。
+    """
+    request_text = json.dumps(request_params or {}, ensure_ascii=False, default=str)
+    config_text = json.dumps(config_snapshot or {}, ensure_ascii=False, default=str)
+    skills_text = json.dumps(skill_refs or [], ensure_ascii=False, default=str)
+    ensure_text_within_limit(request_text, field="原始请求参数")
+    ensure_text_within_limit(config_text, field="配置快照")
+    ensure_text_within_limit(skills_text, field="技能包身份")
+    return request_text, config_text, skills_text
+
+
+def _skill_manifest(skill_refs: Any) -> str:
+    """取主技能包的可索引短身份；没有技能包时为空串（不猜占位值）。"""
+    if not isinstance(skill_refs, list) or not skill_refs:
+        return ""
+    first = skill_refs[0]
+    if not isinstance(first, dict):
+        return ""
+    parts = [str(first.get(key) or "") for key in ("name", "version", "fingerprint")]
+    return "|".join(parts)[:64]
+
+
 # 供应商快照的四列，顺序与写入列一一对应。
 _PROVIDER_SNAPSHOT_KEYS: tuple[str, ...] = (
     "provider_protocol",
@@ -115,6 +142,10 @@ class GenerationJobRepository:
         input_fingerprint: str | None = None,
         doc_kind: str = "",
         chat_stage: str = "",
+        *,
+        request_params: Any = None,
+        config_snapshot: Any = None,
+        skill_refs: Any = None,
     ) -> GenerationJob:
         """新建一条 running 任务，返回**模型对象**（已 `flush`，`id` 可用）。
 
@@ -123,7 +154,18 @@ class GenerationJobRepository:
         创建时就把结论落列，刷新 / 进程重启后仍能回答「这个任务改的是哪一份」。
 
         `chat_stage` 同理：`kind='chat'` 定不了「哪条线程」，而并发判重与重连都要它。
+
+        `request_params` / `config_snapshot` / `skill_refs` 是任务单里**不可变数据**
+        的完整投影：建任务这一刻一次写全，之后任何运行态写入路径都不碰它们。
+        供应商四列也从 `config_snapshot["active_provider"]` 这**同一份**定格里取，
+        收尾不再从 `usage` 那份 JSON 派生第二遍（配置会被改名/删除，回查等于让
+        历史账单跟着今天的状态变）。
         """
+        request_text, config_text, skills_text = _dump_immutable(
+            request_params, config_snapshot, skill_refs
+        )
+        # 四列的键名与 `provider` 字典一一对应，避免两处各写一遍映射。
+        active = (config_snapshot or {}).get("active_provider") or {}
         now = utc_now_text()
         job = GenerationJob(
             owner_id=owner_id,
@@ -143,6 +185,11 @@ class GenerationJobRepository:
             error_message="",
             created_at=now,
             updated_at=now,
+            request_params=request_text,
+            config_snapshot=config_text,
+            skill_refs=skills_text,
+            skill_manifest=_skill_manifest(skill_refs),
+            **_provider_columns(active),
         )
         self.session.add(job)
         self.session.flush()  # 拿自增 id（替代旧的 lastrowid）
@@ -188,16 +235,14 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-        provider: dict[str, str] | None = None,
     ) -> None:
         """标记任务完成，落最终正文与章节。清空错误字段。
 
-        `prompt_tokens` / `completion_tokens` 与 `provider` 里的四列都是 `usage`
-        那份 JSON 的**派生副本**：管理员后台统计消耗时用 SQL 直接求和，不必把每行
-        JSON 取回解析（见迁移 v14 / v19）。
+        `prompt_tokens` / `completion_tokens` 是 `usage` 那份 JSON 的派生副本：
+        管理员后台统计消耗时用 SQL 直接求和，不必把每行 JSON 取回解析。
 
-        `provider` 收的是一个字典，而不是四个位置参数：它们总是同时有值、同时为空，
-        拆成四个参数只会让调用点写四行 `''` 兜底。
+        供应商四列**不在这里写**：它们已在建任务时从 `config_snapshot` 那份定格
+        一次写全，收尾再写一遍等于从 `summary` 另算一条路径。
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
@@ -214,7 +259,6 @@ class GenerationJobRepository:
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                **_provider_columns(provider),
                 updated_at=utc_now_text(),
             )
         )
@@ -232,13 +276,15 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-        provider: dict[str, str] | None = None,
     ) -> None:
         """标记任务失败，保留已产出的半截正文、章节与已发生的用量。
 
         `usage` 在失败路径同样要落：失败的生成**照样消耗了 token**，
-        只记成功那次等于把最贵的失败藏起来。两个 token 列与供应商四列同理一并写：
+        只记成功那次等于把最贵的失败藏起来。两个 token 列同理一并写：
         成本统计若跳过失败任务，「这次为什么这么贵」永远查不出来。
+
+        供应商四列**不在这里写**：它们已在建任务时从同一份 `config_snapshot`
+        定格，收尾不再从 `summary` 另算一遍。
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
@@ -255,7 +301,6 @@ class GenerationJobRepository:
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                **_provider_columns(provider),
                 updated_at=utc_now_text(),
             )
         )

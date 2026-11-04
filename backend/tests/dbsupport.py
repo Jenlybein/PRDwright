@@ -65,8 +65,8 @@ def insert_job(
             "input_fingerprint, usage, max_provider_switches, "
             "error_code, error_message, prompt_tokens, completion_tokens, "
             "provider_protocol, provider_config_id, provider_name, provider_model, "
-            "created_at, updated_at"
-            ") VALUES (?, NULL, ?, '', '', ?, ?, '', '[]', '[]', NULL, NULL, 2, ?, '', ?, ?, '', '', '', '', ?, ?)",
+            "created_at, updated_at, request_params, config_snapshot, skill_refs, skill_manifest"
+            ") VALUES (?, NULL, ?, '', '', ?, ?, '', '[]', '[]', NULL, NULL, 2, ?, '', ?, ?, '', '', '', '', ?, ?, '{}', '{}', '[]', '')",
             (
                 owner_id,
                 kind,

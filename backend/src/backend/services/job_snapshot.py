@@ -57,6 +57,36 @@ def _load_pending_items(raw: Any) -> list[dict[str, Any]]:
     return parsed if isinstance(parsed, list) else []
 
 
+def _load_immutable_object(raw: Any) -> dict[str, Any]:
+    """读回任务单的不可变对象（请求参数 / 配置快照）；坏数据一律退化成空对象。
+
+    与 `_load_pending_items` 同一口径：旧库回填的是 `'{}'`、将来也可能被改过结构，
+    读不出来不该让整个 DB 兜底快照炸掉。字符串形式的数组 / 标量同样视为无效。
+    """
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _load_skill_refs(raw: Any) -> list[dict[str, Any]]:
+    """读回技能包身份清单；坏 JSON / 非数组一律退化成空清单。"""
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def _elapsed_ms_from_row(row: dict[str, Any]) -> int:
     """由 DB 行的创建 / 更新时间推算耗时（毫秒）；时间格式异常时返回 0。
 
@@ -181,5 +211,11 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "partial": bool(usage.get("partial")),
             "failed_sections": failed_sections,
             "elapsed_ms": _elapsed_ms_from_row(row),
+            # 任务单里不可变数据的完整投影：运行时未命中时，DB 兜底快照仍读得回
+            # 「这次生成用的原始请求、哪套配置/供应商、哪套技能包」。坏数据按上面
+            # 三个容错解析退化成空容器，行为与既有 `usage` / `pending_items` 一致。
+            "request_params": _load_immutable_object(row.get("request_params")),
+            "config_snapshot": _load_immutable_object(row.get("config_snapshot")),
+            "skill_refs": _load_skill_refs(row.get("skill_refs")),
         },
     )
