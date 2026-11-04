@@ -4,9 +4,9 @@
 
 用量是在流水线最深处产生的（`stream_reply.astream_text` 消费模型分块），而「这是哪一次
 生成、第几步」只有最外层（`job_service`）知道。若靠参数一路传下去，`document_service`、
-`prd_section_writer`、`conversation_service` 的每个流式入口签名都要改——而 v3 的设计约定是
-**业务层调用方式不变**（见 `docs/architecture/v3/ARCHITECTURE.md` 第 4.2 节：观测层挂在
-模型调用之外，业务层无感）。
+`prd_section_writer`、`conversation_service` 的每个流式入口签名都要改——而现行设计约定是
+**业务层调用方式不变**（见 `docs/architecture/ARCHITECTURE.md` §3.3「生成任务与 SSE 契约」：
+观测层挂在模型调用之外，业务层无感）。
 
 因此计量器用 `ContextVar` 挂成**环境值**：`job_service.run_job` 在任务开头 `use_meter(...)`，
 深处只需要 `current_meter()`；没有任务上下文时（澄清对话、脚本、测试直接调服务）返回 `None`，

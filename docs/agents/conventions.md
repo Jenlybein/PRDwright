@@ -1,7 +1,7 @@
 # PRDwright 工程约定（agent 必读）
 
 > 一句话说明：这是从旧长期笔记蒸馏出的当前有效约定；失效规则见文末附录。
-> 相关：`docs/architecture/`（各层设计与取舍）、`../../GLOSSARY.md`（术语）、`domain.md`（谁在读这些）。
+> 相关：`docs/architecture/ARCHITECTURE.md`（唯一一版现状架构与取舍）、`docs/architecture/README.md`（时间线真源）、`docs/architecture/roadmap.md`（现状排期）、`docs/adr/`（决策档案）、`../../GLOSSARY.md`（术语）、`domain.md`（谁在读这些）。
 
 ## 1. 通用纪律
 
@@ -29,7 +29,7 @@
 - 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8）。
 - 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8）。
 - upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；MySQL 的 DO NOTHING 用主键 no-op，绝不用 `INSERT IGNORE`（会吞列超长 / NOT NULL）；只准用在「该表只有一个唯一约束」的表上（契约 C-D1，v8）。
-- SQLite 与 MySQL 的差异收在 `core/dialect.py`：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），可移植性台账见 `docs/architecture/v8/ARCHITECTURE.md 附录 B`。**唯一部署后端是 SQLite**；MySQL 相关分支是遗留代码（未验收、不再扩展），不计划引入其它后端。改动遗留 MySQL 分支时仍守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+- SQLite 与 MySQL 的差异收在 `core/dialect.py`：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），可移植性台账与 C-D1~C-D6 见 `docs/architecture/ARCHITECTURE.md 附录 A`。**唯一部署后端是 SQLite**；MySQL 相关分支是遗留代码（未验收、不再扩展），不计划引入其它后端。改动遗留 MySQL 分支时仍守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
 - `get_settings()` 走 lru_cache：改环境变量后必须 `cache_clear()`；`prompts.py` 走 `str.format()`，字面量花括号写 `{{ }}`，给 LLM 的指令用 `<!-- -->` 注释。
 
 ## 3. 迁移（Alembic）
@@ -200,7 +200,7 @@
 - 环境硬事实：`requires-python >=3.12`（Ubuntu 22.04 不够，建议 24.04）、Node `^22.18 || >=24.12`、无 requirements.txt（`uv sync --frozen`）。
 - 管理端挂 `/admin/` 要两处一致：`vite base: '/admin/'` + `createWebHistory(import.meta.env.BASE_URL)`（Vue Router 的 `normalizeBase()` 不跟随 Vite 的 base）。
 - Nginx：SSE 三行（`proxy_buffering off` / `read_timeout 1800s` / `gzip off`）+ 服务端 `: ping` 心跳；`assets/*` 长缓存、`index.html` 必须 `no-store`；`/docs` 生产 404（后端不注册 + 白名单移除 + Nginx 兜底）。
-- `deploy/` 目录是 v9 的交付物（compose、反向代理、env 样例、启动脚本、备份脚本、README），**已随 v9 落盘**：`ls deploy` 与 `ls deploy/docker` 都看得见，交付形态的唯一说明在 `docs/architecture/v9/ARCHITECTURE.md`。v7 文档里那几份（`backend.env.example` / `systemd/prdwright.service` / `nginx/prdwright.conf` / `scripts/deploy/{backup,restore,release,smoke}.py`）**从未落盘**，只作当期的形态记录，别照那些路径找文件。
+- `deploy/` 目录是 v9 的交付物（compose、反向代理、env 样例、启动脚本、备份脚本、README），**已随 v9 落盘**：`ls deploy` 与 `ls deploy/docker` 都看得见，交付形态的唯一说明在 `docs/architecture/ARCHITECTURE.md` §3.6。v7 文档里那几份（`backend.env.example` / `systemd/prdwright.service` / `nginx/prdwright.conf` / `scripts/deploy/{backup,restore,release,smoke}.py`）**从未落盘**，只作当期的形态记录，别照那些路径找文件。
 
 ## 已失效（勿再引用）
 
@@ -216,5 +216,8 @@
 - `clarification_ask.render_ask_spec()` 这个旧名：已退役，现名 `render_ask_tool_instruction()`。
 - 测试建库用 `init_schema()` 或每用例 `create_all`：被「`tests/dbsupport.py` 模板库 + 每用例拷贝」取代。
 - 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006、1014 / 986：全部作废，现行基线是 **1089（本分支工作区，pytest 收集数）**。
-- 排期真源 `docs/architecture/v3/roadmap.md`：只是 v3 期的口径，别当现状真源（现行排期看 `docs/architecture/v9/roadmap.md`；决策与取舍看各层 `ARCHITECTURE.md`）。
-- `docs/architecture/v*/` 下原有的按层决策记录文件与 `docs/architecture/evolution-truth.md`：**文件已删除**（决策记录目录随后也整体移除），`evolution-truth.md` 的独有内容并入 `docs/architecture/README.md`；按旧路径引用一律无效。
+- v3 期的排期只是当时的口径，别当现状真源；按层路线图已随九层目录一并删除。现行排期看 `docs/architecture/roadmap.md`；决策与取舍看 `docs/architecture/ARCHITECTURE.md` 的「取舍」节与 `docs/adr/`。
+- 原有的按层决策记录文件与按层时间线记录文件**均已删除**（决策记录目录随后也整体移除）；按层文档目录随后也整体移除，独有内容并入 `docs/architecture/ARCHITECTURE.md` 附录、`docs/architecture/README.md` 与 `docs/adr/0001-architecture-docs-consolidation.md`；按旧路径引用一律无效。
+- **拆分依据**：取消「单文件 > 1200 行就拆」阈值，改以**接缝**为依据，取代 v8 附录 A §5 的 W1 口径；见 `docs/architecture/ARCHITECTURE.md` §5.4。
+- **数字与基线**：文档里的数字先复核再写；用例基线现取现算（`uv run pytest --collect-only -q`），不沿用旧总数；**加列不是单向门**，单向门指删列 / 退役列。
+- **先文档、后代码**：本轮 #31~#33 先收口文档，#34 起才动代码；见 `docs/architecture/roadmap.md`。

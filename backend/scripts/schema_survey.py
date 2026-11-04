@@ -1,4 +1,7 @@
-"""库结构勘察（v8 / 只读）：为「换库前定长度」提实测依据。
+"""库结构勘察（只读）：为「定长度」提实测依据。
+
+实测数据与列长度取值来源见 `docs/architecture/ARCHITECTURE.md 附录 B`；
+方言可移植性台账与 C-D1~C-D6 见同文件附录 A。
 
 ## 为什么需要它
 
@@ -21,7 +24,7 @@
 
     python backend/scripts/schema_survey.py
     python backend/scripts/schema_survey.py --db /var/lib/prdwright/prdwright.db
-    python backend/scripts/schema_survey.py --out docs/architecture/v8/ARCHITECTURE.md 附录 D
+    python backend/scripts/schema_survey.py --out docs/architecture/ARCHITECTURE.md 附录 B
 
 不带 `--db` 时读 `backend/prdwright.db`（与 `core/paths.default_db_file()` 同口径）。
 """

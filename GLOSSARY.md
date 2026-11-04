@@ -140,15 +140,15 @@ _Avoid_: 方案、实例、节点
 ## 文档与决策
 
 **层**（v1 … v9）：
-仓库的演进分期，一层一套架构文档。
+仓库的**历史分期**说明，一层一个主题。九层目录已删除，不再各自有现状文档；九行摘要（主题 + 关键取舍）在 `docs/architecture/ARCHITECTURE.md` §6，演进史的阶段规模与界碑在 `docs/architecture/README.md`（时间线真源）。
 _Avoid_: 版本（会与「文档版本」撞车）、里程碑、迭代
 
 **架构决策**（Architecture decision）：
-一次「为什么这么选」的结论：当时的选项、最终选择、**被否决的方案与理由**。写在该层 `ARCHITECTURE.md` 的「取舍」节与 issue 历史里，不再单独归档、不再有全局编号；推翻旧决策在正文里改写并写明取代关系。
+一次「为什么这么选」的结论：当时的选项、最终选择、**被否决的方案与理由**。跨层的架构决策记在 `docs/adr/`（编号从 0001 重新开始），具体实施取舍记在 `docs/architecture/ARCHITECTURE.md` 的「取舍」节；推翻旧决策在正文里改写并写明取代关系。
 _Avoid_: 设计文档、技术方案
 
 **时间线真源**：
-按 git 实测出来的阶段与规模——提交数用 `git rev-list --count`，规模用 `git diff --shortstat <界碑A> <界碑B>`（**不是**逐提交累加）。文档的「自我叙述」与它冲突时，以它为准。当前落点是 `docs/architecture/README.md` §2。
+按 git 实测出来的阶段与规模——提交数用 `git rev-list --count`，规模用 `git diff --shortstat <界碑A> <界碑B>`（**不是**逐提交累加）。文档的「自我叙述」与它冲突时，以它为准。当前落点是 `docs/architecture/README.md` §2（阶段总表），§3 / §4 / §5 分别收 v2 七波重写、已确认的失真与复核方法。
 _Avoid_: 变更日志、changelog、路线图
 
 **收口**（Close-out）：
