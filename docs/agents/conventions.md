@@ -15,6 +15,12 @@
 - 品牌 PRDwright，仓库根目录名仍是 `HarnessPRD`（勿改）；远端 `origin = github.com/Jenlybein/PRDwright`，CI 只有 push 后才真跑。
 - 本地 curl 一律加 `--noproxy '*'`；Vite 8 只监听 IPv6 `[::1]`；删 schema 后复查 import 孤儿。
 - 临时预览页用 `frontend/*.html` + `src/__preview__/*.ts`（样式入口 `src/index.css`，不是 `assets/`），核对完删干净；别用内联 `template` 写预览入口（runtime-only 构建静默不渲染），用 `h()`；截图前调 `__VUE_DEVTOOLS_TOGGLE_OVERLAY__(false)`。
+- **先文档、后代码**：#31~#33 先收口架构文档、词表、路线图与工程约定，#34 起才动生成任务与数据库投影；票序与依赖见 `docs/architecture/roadmap.md` §1，顺序写进文档、不靠口头约定。
+- **文件边界以接缝为依据**：取消「单文件 > 1200 行就拆」阈值，改以接缝为依据，取代 v8 附录 A §5 的 W1 口径（见 `docs/architecture/ARCHITECTURE.md` §5.4）；按「对外 / 内部」划分，包入口只露正常动作、包内互引私有名合法，七个实现文件归入同一内部包即可，不必合并回单个大文件。
+- **数字先复核再写**：对外动作与名字数量、入口模式同步点数量、外部引用条数一律以实测为准；写文档前先 `git grep` 复核，不沿用旧报告里的约数。
+- **用例基线现取现算**：收口时按 `--collect-only -q` 的当前收集数现取，连「`def test_` 文本计数 / 参数化展开差额」整段一起重算，不沿用旧总数；具体新数字由 #41 现取，见 §10。
+- **加列不是单向门**：单向门指删列 / 退役列（回滚靠备份库文件、不设兼容期）；新增列属于加列，评审不拿迁移成本当架构理由。
+- **一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后；与 `docs/architecture/ARCHITECTURE.md` §1.3 / §4.3 及 `docs/architecture/roadmap.md` §0.6 同口径。
 
 ## 2. 后端分层与数据层
 
@@ -39,7 +45,7 @@
 - 迁移手写：autogenerate 会生成 `drop_constraint(None)`，在 SQLite 上必失败。
 - batch 迁移会丢 `sqlite_autoincrement`（反射读不到表级参数，重建后 id 开始复用）→ `batch_alter_table(..., table_kwargs={"sqlite_autoincrement": True})`；自增表全集在 `0002_typed_columns.py::_AUTOINCREMENT_TABLES`。
 - 删列只用原生 `ALTER TABLE … DROP COLUMN`：`PRAGMA foreign_keys` 在事务内是空操作，「关外键 + 重建表 + 改回」那套在步骤内关不掉。
-- 删列 / 退役列是单向门：删完旧代码读不到该列，回滚只能靠备份库文件，不设兼容期。
+- 删列 / 退役列是单向门：删完旧代码读不到该列，回滚只能靠备份库文件，不设兼容期；**加列不是单向门**，新增列不拿迁移成本当架构理由。
 - 迁移用例别写死「第几步」：真假源是 `alembic_version`，新迁移比对 head 而不是抄字面量。
 - 守卫 C9 = 旧迁移链不许回来（文件存在性 + AST，docstring 豁免）。
 
@@ -93,7 +99,7 @@
 - `types/index.ts` 是契约准绳（不一致时改后端迁就前端）；状态在 Pinia `stores/{workflow,solutions,auth}.ts`；Markdown 统一走 `utils/markdown.ts::renderMarkdown()`（`html:false` 防 XSS）。
 - 入口 = 一屏两组四叶子（`EntryStage.vue`）：`从零创建 PRD`（`structured` / `prd-quick`）｜`导入已有素材`（`prompt-debug` / `prd-and-api-paste`）；`prompt-debug` 键名故意不改，新键刻意不叫 `prompts`（那是 `DocKind` 取值）。
 - 流程：入口 → 表单 → 对话 → 闸门①摘要 Diff（回填失败返回原摘要深拷贝）→ PRD → 接口文档 → 提示词 → 交付；文档澄清就在对话页。
-- 加一个入口模式要同步十来处（`EntryMode` / `ViewState`、`VIEW_STATES` / `isEntryMode` / `MODE_STEP_IDS` / `REQUIRED_DOCS`、`MODE_LANDING` 与「快照四件事」+ `hasContent` + return、`MODE_LABELS` / `STAGE_LABELS` / `computeTitle`、`AppV2.vue` 渲染分支、`backToInput` / `backLabel`、`AppV2.spec.ts` 的入口文案断言）：漏一处大多不报错、只是行为不对。
+- 加一个入口模式要同步约 20 处（`EntryMode` / `ViewState`、`VIEW_STATES` / `isEntryMode` / `MODE_STEP_IDS` / `REQUIRED_DOCS`、`MODE_LANDING` 与「快照四件事」+ `hasContent` + return、`MODE_LABELS` / `STAGE_LABELS` / `computeTitle`、`AppV2.vue` 渲染分支、`backToInput` / `backLabel`、`AppV2.spec.ts` 的入口文案断言）：`git grep` 实测核心标识符在 `frontend/src/` 下有 25+ 个文件:行号落点（跨约 16 个文件，含 `__tests__`），漏一处大多不报错、只是行为不对。`backToInput` / `backLabel` 定义在 `frontend/src/composables/useDocumentPipeline.ts:1352-1378`，`AppV2.vue` 只解构引用并绑到模板（`:back-label` / `@back`），不是它们的定义处。
 - 加 `ViewState` 同步四处：`ViewState` / `VIEW_STATES` / `STEP_OF_STATE` / `STATE_DOWNGRADE`，漏一处只表现为进度条算错或刷新后进不去。
 - 快捷流程 = 同一管线、六步齐全：`REQUIRED_DOCS` 与 `structured` 一致、`STEP_OF_STATE['prd-quick']='form'`；`hasRequirementChat()` 只认 `structured`；「AI 对话」那格不能省（找不到就归零 → 停在对话页却高亮「描述产品」）；它不问问题，缺的信息靠「待确认」+ 审阅页「AI 自行澄清」。
 - 进度条「AI 对话」摘到最左、用竖线隔开（纯呈现，`stepsForMode` / `stepIndexOf` / `reachedStepIndex` 未动）：高亮与可点一律按「原始下标」；分隔线用 `border-r`、别插 div；`li` 数量仍为 5。
@@ -175,7 +181,7 @@
 
 ## 10. 测试
 
-- 基线 **1089 例**（本分支工作区，pytest 收集数）；注意「`def test_` 文本计数 = 955」与「收集数」不是同一个数——差额 134 来自 parametrize 展开。默认 `addopts = "-n auto"`，全量 ~100 秒；单文件调试加 `-n0`。旧口径里的 975 / 863 / 867 / 999 / 1006 / 1014 全是过时数字，别再用（报基线前先 `uv run pytest --collect-only -q` 现取）。
+- **用例基线现取现算**：报基线前先 `cd backend && uv run pytest --collect-only -q` 取当前收集数，不沿用任何旧总数；旧文档里的「1089 例」及其「`def test_` 文本计数 955 / 参数化展开差额 134」整段一并重算，本票不编新数字，新基线由 #41 收口时现取。默认 `addopts = "-n auto"`，全量 ~100 秒；单文件调试加 `-n0`。旧口径里的 975 / 863 / 867 / 999 / 1006 / 1014、以及 1089 / 955 / 134 全是过时数字，别再用。
 - 退出码不可信时用 `uv run pytest --junit-xml=...` 判成败（沙箱可能拦 `%TEMP%`；必要时加 `--basetemp=<项目外可写目录>`）。
 - 两个人同时跑全量会互相污染（单条从 0.5s 涨到 3s+，`LogStoreHandler.close()` 超时后写进下一用例的库 → `total != 25` 偶发红）。
 - 别在 `test_admin_logs.py` 断「全表行数」：每请求都异步写一条 `request.completed`，与 `total==N` 赛跑（单文件绿、全量红）。
@@ -215,9 +221,7 @@
 - `PRD_SECTION_REWRITE_APPENDIX`：已退役（改写改用 `PRD_SECTION_REWRITE_PROMPT`）。
 - `clarification_ask.render_ask_spec()` 这个旧名：已退役，现名 `render_ask_tool_instruction()`。
 - 测试建库用 `init_schema()` 或每用例 `create_all`：被「`tests/dbsupport.py` 模板库 + 每用例拷贝」取代。
-- 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006、1014 / 986：全部作废，现行基线是 **1089（本分支工作区，pytest 收集数）**。
+- 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006、1014 / 986、1089（及配套的「文本计数 955 / 差额 134」）：全部作废；现行基线现取现算，见 §10。
 - v3 期的排期只是当时的口径，别当现状真源；按层路线图已随九层目录一并删除。现行排期看 `docs/architecture/roadmap.md`；决策与取舍看 `docs/architecture/ARCHITECTURE.md` 的「取舍」节与 `docs/adr/`。
 - 原有的按层决策记录文件与按层时间线记录文件**均已删除**（决策记录目录随后也整体移除）；按层文档目录随后也整体移除，独有内容并入 `docs/architecture/ARCHITECTURE.md` 附录、`docs/architecture/README.md` 与 `docs/adr/0001-architecture-docs-consolidation.md`；按旧路径引用一律无效。
-- **拆分依据**：取消「单文件 > 1200 行就拆」阈值，改以**接缝**为依据，取代 v8 附录 A §5 的 W1 口径；见 `docs/architecture/ARCHITECTURE.md` §5.4。
-- **数字与基线**：文档里的数字先复核再写；用例基线现取现算（`uv run pytest --collect-only -q`），不沿用旧总数；**加列不是单向门**，单向门指删列 / 退役列。
-- **先文档、后代码**：本轮 #31~#33 先收口文档，#34 起才动代码；见 `docs/architecture/roadmap.md`。
+- **本轮收口作废的旧口径**（正向条文只写一次，见 §1「先文档、后代码 / 文件边界以接缝为依据 / 数字先复核再写 / 用例基线现取现算 / 加列不是单向门」、§3「加列不是单向门」、§10「基线现取现算」）：「按单文件 > 1200 行阈值拆文件」（取代 v8 附录 A §5 W1，见 `docs/architecture/ARCHITECTURE.md` §5.4）、「报告里的约数可直接抄」（对外动作、再导出名、入口模式同步点、外部引用条数）、「用例基线沿用旧总数」（1089 及文本计数 955 / 差额 134 整段）、「加列是单向门」（单向门指删列 / 退役列），以及「#31~#33 与代码票可并行」——全部作废；票序与总原则见 `docs/architecture/roadmap.md` §0 / §1。

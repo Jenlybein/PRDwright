@@ -2,7 +2,7 @@
 
 > **排期真源**：本文件列出 #31~#41 各票的落点与验收方式；架构结论与设计契约见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)，阶段规模与界碑见 [`README.md`](./README.md)（时间线真源），本次文档重组的架构决策见 [`../adr/0001-architecture-docs-consolidation.md`](../adr/0001-architecture-docs-consolidation.md)。
 >
-> 从 v9/roadmap.md 收敛为现状排期：先文档、后代码；v9 的 T19.0~T19.7 是已交付的历史排期，不再是现状。
+> 由 v9 那一版排期收敛为现状排期：先文档、后代码；其中 T19.0~T19.7 是已交付的历史排期，不再是现状。
 
 ---
 
