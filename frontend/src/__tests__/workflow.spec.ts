@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ChatMessage, RequirementsSummary, SessionDataV2 } from '@/types'
+import type { ChatMessage, EntryMode, RequirementsSummary, SessionDataV2 } from '@/types'
+import type { EntrySpec } from '@/utils/workflow'
 import {
   ENTRY_REGISTRY,
+  EntrySpecMissingError,
+  assertEntrySpecComplete,
   canGeneratePrdFrom,
   chatStageForDocument,
   docKindOfGeneratingState,
@@ -11,6 +14,7 @@ import {
   emptyConversationIds,
   entryModeForDisplay,
   entrySpecFor,
+  entrySpecForDisplay,
   fromBackendKind,
   generatingStateFor,
   hasDocumentReview,
@@ -925,6 +929,137 @@ describe('入口模式登记表：四行齐全', () => {
       const all = { prd: '# prd', apiDocs: '# api', prompts: '# prompts' }
       expect(hasRequiredDocuments(mode, all)).toBe(true)
       expect(hasRequiredDocuments(mode, { prd: '', apiDocs: '', prompts: '' })).toBe(false)
+    }
+  })
+})
+
+/**
+ * 入口登记表完整性：漏行漏列当场失败。
+ *
+ * 三种「没有」必须分清，这是本票的核心口径：
+ * - `null` = **「未选择」**，合法：照完整流程展示，绝不抛错；
+ * - **未知入口键**（从没登记过的键）= 失败，不猜任何默认值；
+ * - **缺行 / 缺列**（维护者加了第 5 个入口却漏填一列）= 失败，消息里点名缺的是哪一列。
+ *
+ * 这里只断言**外部可观察结果**：问询抛不抛错、抛出的消息能不能让维护者一眼定位。
+ * 不扫源码、不数落点、不查标识符词频。
+ */
+describe('入口登记表完整性：漏行漏列当场失败', () => {
+  /** 取一次调用的错误消息；没抛错就是空串（于是后面的 `toContain` 会红） */
+  function messageOf(run: () => unknown): string {
+    try {
+      run()
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+    return ''
+  }
+
+  /**
+   * 一份「填全了」的假第 5 入口。
+   *
+   * 逐条用例只在它身上挖掉一列，其余保持完整——这样「被拒」只可能是被挖掉的那一列，
+   * 不会出现「反正哪儿都不全，随便拒绝一下也算通过」。
+   */
+  function completeFifthEntry(): EntrySpec {
+    return {
+      mode: 'fifth-entry' as EntryMode,
+      card: {
+        groupId: 'from-scratch',
+        groupTitle: '从零创建 PRD',
+        groupDescription: '还没有任何材料，从这里把需求说清楚。',
+        title: '第五入口',
+        description: '维护者新加的一行。',
+      },
+      landing: {
+        onSelect: 'prompt-debug',
+        editRequirements: 'prompt-debug',
+        backToInput: 'prompt-debug',
+      },
+      steps: ['review-prompts', 'done'],
+      inputPageOnBar: false,
+      needsRequirementChat: false,
+      needsDocumentReview: false,
+      requiredDocs: ['prompts'],
+      copy: {
+        modeLabel: '第五入口',
+        backLabel: '返回素材',
+        editRequirementsLabel: '改需求',
+      },
+      input: {
+        stateField: 'debugPrdText',
+        stateColumn: 'draft_prd_text',
+        fields: [{ key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true }],
+      },
+    }
+  }
+
+  it('填全了的一行能通过校验（正例：否则「全都拒绝」也会看起来像通过）', () => {
+    const spec = completeFifthEntry()
+    expect(assertEntrySpecComplete('fifth-entry' as EntryMode, spec)).toBe(spec)
+  })
+
+  it('只填一半的假第 5 入口被当场拒绝，消息指出缺的是哪一列', () => {
+    // 维护者最容易漏的一列：完成所需文档。空数组就是典型的「忘了填」
+    const halfFilled: EntrySpec = { ...completeFifthEntry(), requiredDocs: [] }
+
+    expect(() => assertEntrySpecComplete('fifth-entry' as EntryMode, halfFilled)).toThrow(
+      EntrySpecMissingError,
+    )
+    const message = messageOf(() => assertEntrySpecComplete('fifth-entry' as EntryMode, halfFilled))
+    // 维护者一眼定位：哪个入口、缺哪一列
+    expect(message).toContain('fifth-entry')
+    expect(message).toContain('requiredDocs')
+  })
+
+  it('文案列空了同样当场失败（不是只盯步骤那一列）', () => {
+    const halfFilled: EntrySpec = {
+      ...completeFifthEntry(),
+      copy: { modeLabel: '', backLabel: '返回素材', editRequirementsLabel: '改需求' },
+    }
+    expect(messageOf(() => assertEntrySpecComplete('fifth-entry' as EntryMode, halfFilled))).toContain(
+      'modeLabel',
+    )
+  })
+
+  it('缺行与未知入口键在问询时失败，不返回任何默认值', () => {
+    // 没登记过的键：展示口径当场失败，绝不拿完整流程那一行顶替
+    expect(() => entrySpecForDisplay('bogus' as EntryMode)).toThrow(EntrySpecMissingError)
+    expect(messageOf(() => entrySpecForDisplay('bogus' as EntryMode))).toContain('bogus')
+
+    // 失败路径覆盖所有按模式的问询，而不是只在某一个函数上生效
+    expect(() => stepsForMode('bogus' as EntryMode)).toThrow(EntrySpecMissingError)
+    expect(() => hasRequiredDocuments('bogus' as EntryMode, {
+      prd: '# prd',
+      apiDocs: '# api',
+      prompts: '# promises',
+    })).toThrow(EntrySpecMissingError)
+  })
+
+  it('往登记表里放一行只填一半的假第 5 入口 → 问询当场被拒（最高可注入点）', () => {
+    const key = 'fifth-half-filled' as EntryMode
+    const halfFilled: EntrySpec = { ...completeFifthEntry(), mode: key, requiredDocs: [] }
+
+    // 登记表是运行时读的，所以这里能真的把它塞进去——这就是维护者「加了一行」的那一步
+    ENTRY_REGISTRY[key] = halfFilled
+    try {
+      expect(() => entrySpecForDisplay(key)).toThrow(EntrySpecMissingError)
+      // 同一个残缺行，换一个问询函数也照样被拒：缺的是那一列，不是某个入口的局部问题
+      expect(messageOf(() => stepsForMode(key))).toContain('requiredDocs')
+    } finally {
+      delete ENTRY_REGISTRY[key]
+    }
+  })
+
+  it('未选择（null）仍走合法口径：不抛错，就是完整流程那一行', () => {
+    let spec: EntrySpec | undefined
+    expect(() => {
+      spec = entrySpecForDisplay(null)
+    }).not.toThrow()
+    expect(spec).toEqual(ENTRY_REGISTRY.structured)
+    // 四个已登记的入口都填齐了：日常路径不会因为这条守卫变红
+    for (const mode of ['structured', 'prd-quick', 'prompt-debug', 'prd-and-api-paste'] as const) {
+      expect(() => entrySpecForDisplay(mode)).not.toThrow()
     }
   })
 })

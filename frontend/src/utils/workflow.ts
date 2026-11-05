@@ -286,7 +286,8 @@ export interface EntryInputSpec {
 /**
  * 一个入口模式的全部资料：七类为列，一行填齐才算一个入口。
  *
- * 缺列在 `#48` 会变成当场失败；本票（`#47`）先把四个入口的行填齐。
+ * 填不齐不会「凑合着用」：{@link entrySpecForDisplay} 问询时逐列校验，
+ * 缺行 / 缺列当场抛 {@link EntrySpecMissingError}。
  */
 export interface EntrySpec {
   /** ① 键 */
@@ -354,8 +355,8 @@ const PASTE_PAIR_FIELDS: readonly EntryInputField[] = [
 /**
  * 完整流程这一行。
  *
- * 单独取出来是为了给 {@link entrySpecForDisplay} 一个「未选择」的展示口径落脚点：
- * 未选择（`null`）按完整流程展示，是唯一的合法默认。
+ * 单独取名是因为它是「未选择」的展示口径落脚点：未选择（`null`）经
+ * {@link entryModeForDisplay} 归到 `structured`，再走同一套查表与完整性校验。
  */
 const STRUCTURED_ENTRY_SPEC: EntrySpec = {
   mode: 'structured',
@@ -393,10 +394,9 @@ const STRUCTURED_ENTRY_SPEC: EntrySpec = {
 /**
  * 入口模式登记表：一行一个入口，四个入口各占一行。
  *
- * 类型是 `Partial<Record<EntryMode, EntrySpec>>`：**缺行不是「默认值」，而是「还没迁入」**，
- * 类型上保留这种可能，是为了让「缺行」不被一个悄悄补上的默认值掩盖。`#48` 起，缺行 / 缺列
- * 在问询那一刻当场失败；在那之前，查不到行的地方经 {@link entrySpecForDisplay} 按
- * 「未选择」的展示口径处理，绝不在这里猜成某个业务默认值。
+ * 类型是 `Partial<Record<EntryMode, EntrySpec>>`：**缺行不是「默认值」，而是「还没填」**——
+ * 类型上保留这种可能，是为了让缺行不被一个悄悄补上的默认值掩盖。问询一律走
+ * {@link entrySpecForDisplay}：缺行 / 缺列 / 未知键当场失败，只有「未选择」按完整流程展示。
  */
 export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
   structured: STRUCTURED_ENTRY_SPEC,
@@ -506,25 +506,186 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
 }
 
 /**
- * 查这一行登记表；查不到返回 `undefined`。
+ * 登记表完整性校验失败。
  *
- * 未选择（`null`）先经 {@link entryModeForDisplay} 归一成完整流程再查——「未选择」是
- * 合法状态，不是缺行。未知入口键 / 缺行的失败路径属于 `#48` 的完整性校验，不在这里。
+ * 三种「没有」里只有「未选择」（`null` / 空串）是合法的；**未知入口键、缺行、缺列**
+ * 都是维护者漏干活，必须在问询那一刻炸出来。从前查不到就按完整流程兜住，于是
+ * 「加了第 5 个入口却忘了填一列」的表现是「悄悄按完整流程跑下去」，没有任何报错。
+ *
+ * 消息里带**入口键**与**缺的那一列**（列名用代码里的字段路径，例如 `requiredDocs`、
+ * `copy.modeLabel`），维护者一眼能定位到该补哪一行哪一列。
  */
-export function entrySpecFor(mode: EntryMode | null): EntrySpec | undefined {
-  return ENTRY_REGISTRY[entryModeForDisplay(mode)]
+export class EntrySpecMissingError extends Error {
+  /** 问询时用的入口键 */
+  readonly key: string
+  /** 缺的是哪一列；缺整行时为 `null` */
+  readonly column: string | null
+
+  constructor(key: string, column: string | null, reason: string) {
+    super(
+      column === null
+        ? `入口登记表「${key}」缺这一行：${reason}`
+        : `入口登记表「${key}」缺列 ${column}：${reason}`,
+    )
+    this.name = 'EntrySpecMissingError'
+    this.key = key
+    this.column = column
+  }
+}
+
+/** 七类资料里「某一列」的规范取值（枚举列用它校验，避免拼错一个字符串就当成配好了） */
+const ENTRY_SPEC_STATE_FIELDS: readonly EntryInputSpec['stateField'][] = [
+  'summary',
+  'quickInput',
+  'debugPrdText',
+  'pastePairInput',
+]
+
+/** 完成所需文档只能是这三份产物 */
+const ENTRY_SPEC_DOC_TYPES: readonly DocType[] = ['prd', 'api-docs', 'prompts']
+
+/** 报「缺列」并终止；`column` 为 `null` 表示缺的是整行 */
+function missingEntrySpec(key: EntryMode, column: string | null, reason: string): never {
+  throw new EntrySpecMissingError(key, column, reason)
+}
+
+/** 某一列必须是非空文案：空串、全空白、`undefined` 都算没填 */
+function requireEntrySpecText(key: EntryMode, column: string, value: unknown): void {
+  if (typeof value !== 'string' || value.trim() === '') {
+    missingEntrySpec(key, column, '必须是非空文案；空串等于没填')
+  }
+}
+
+/** 某一列必须是布尔：用 `undefined` / `null` 糊过去会让「要不要这一环」变成碰运气 */
+function requireEntrySpecBoolean(key: EntryMode, column: string, value: unknown): void {
+  if (typeof value !== 'boolean') {
+    missingEntrySpec(key, column, '必须是 true / false；不能留空')
+  }
+}
+
+/** 某一列必须是非空数组（步骤、完成所需文档、录入字段） */
+function requireEntrySpecList(key: EntryMode, column: string, value: unknown): readonly unknown[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    missingEntrySpec(key, column, '必须是非空数组；空数组等于没填')
+  }
+  return value
 }
 
 /**
- * 取这一行登记表，**一定给出一行**。
+ * 校验一行登记表填齐了没有；填齐了原样返回，缺任何一列都抛 {@link EntrySpecMissingError}。
  *
- * 与 {@link entrySpecFor} 的差别只在一件事：查不到时按「未选择」的展示口径处理，
- * 也就是完整流程那一行。四张入口都已登记，走到这一步只可能是绕过类型的脏值；
- * 那时宁可照完整流程展示，也不能返回某个业务默认值——缺行 / 缺列当场失败是 `#48` 的事，
- * 本票不加失败路径。
+ * 七类资料逐列检查，判据都是**「这一列有没有真的填上」**，不涉及业务对错：
+ * 步骤不能是空数组、完成所需文档不能是空数组、文案不能是空串、三个布尔必须是布尔、
+ * 落页必须是已定义的视图状态、录入字段不能空。
+ *
+ * 这是本票守卫用例的注入点：喂一份只填一半的假第 5 入口进来，它必须当场拒绝。
+ */
+export function assertEntrySpecComplete(
+  key: EntryMode,
+  spec: EntrySpec | undefined | null,
+): EntrySpec {
+  if (!spec) {
+    missingEntrySpec(key, null, '未登记这个入口键；不猜默认值，请补上这一行')
+  }
+
+  // ① 键：行里的键必须就是查它的那个键，否则「查 A 得 B」比缺行更难查
+  if (spec.mode !== key) {
+    missingEntrySpec(key, 'mode', `这一行登记的键是「${String(spec.mode)}」，与查的键对不上`)
+  }
+
+  // ① 组别与卡片文案：入口页那张卡片的四段文字
+  const card = spec.card
+  if (!card) missingEntrySpec(key, 'card', '整列缺失')
+  requireEntrySpecText(key, 'card.groupId', card.groupId)
+  requireEntrySpecText(key, 'card.groupTitle', card.groupTitle)
+  requireEntrySpecText(key, 'card.groupDescription', card.groupDescription)
+  requireEntrySpecText(key, 'card.title', card.title)
+  requireEntrySpecText(key, 'card.description', card.description)
+
+  // ② 落页：三个「去哪一页」都必须是已定义的视图状态
+  const landing = spec.landing
+  if (!landing) missingEntrySpec(key, 'landing', '整列缺失')
+  for (const field of ['onSelect', 'editRequirements', 'backToInput'] as const) {
+    if (!isViewState(landing[field])) {
+      missingEntrySpec(key, `landing.${field}`, '必须是已定义的视图状态')
+    }
+  }
+
+  // ③ 进度条步骤：非空，且每个 id 都得是全局 `STEPS` 里定义过的
+  const steps = requireEntrySpecList(key, 'steps', spec.steps)
+  const knownStepIds = new Set(STEPS.map((step) => step.id))
+  for (const stepId of steps) {
+    if (!knownStepIds.has(stepId as StepId)) {
+      missingEntrySpec(key, 'steps', `「${String(stepId)}」不是已定义的步骤`)
+    }
+  }
+
+  // ④ 三个布尔：录入页是否在进度条上 / 是否需需求澄清 / 是否需审核改写
+  requireEntrySpecBoolean(key, 'inputPageOnBar', spec.inputPageOnBar)
+  requireEntrySpecBoolean(key, 'needsRequirementChat', spec.needsRequirementChat)
+  requireEntrySpecBoolean(key, 'needsDocumentReview', spec.needsDocumentReview)
+
+  // ⑤ 完成所需文档：非空，且只能是三份产物之一
+  const requiredDocs = requireEntrySpecList(key, 'requiredDocs', spec.requiredDocs)
+  for (const docType of requiredDocs) {
+    if (!ENTRY_SPEC_DOC_TYPES.includes(docType as DocType)) {
+      missingEntrySpec(key, 'requiredDocs', `「${String(docType)}」不是已定义的产物`)
+    }
+  }
+
+  // ⑥ 文案：列表模式名 + 两个「回去」按钮
+  const copy = spec.copy
+  if (!copy) missingEntrySpec(key, 'copy', '整列缺失')
+  requireEntrySpecText(key, 'copy.modeLabel', copy.modeLabel)
+  requireEntrySpecText(key, 'copy.backLabel', copy.backLabel)
+  requireEntrySpecText(key, 'copy.editRequirementsLabel', copy.editRequirementsLabel)
+
+  // ⑦ 录入字段：内容挂在哪个字段上、落快照哪一列、有哪些字段
+  const input = spec.input
+  if (!input) missingEntrySpec(key, 'input', '整列缺失')
+  if (!ENTRY_SPEC_STATE_FIELDS.includes(input.stateField)) {
+    missingEntrySpec(key, 'input.stateField', '不是已登记的录入内容持有者')
+  }
+  requireEntrySpecText(key, 'input.stateColumn', input.stateColumn)
+  const fields = requireEntrySpecList(key, 'input.fields', input.fields)
+  for (const field of fields as readonly EntryInputField[]) {
+    requireEntrySpecText(key, 'input.fields.key', field?.key)
+    requireEntrySpecText(key, 'input.fields.label', field?.label)
+    requireEntrySpecBoolean(key, 'input.fields.countsAsContent', field?.countsAsContent)
+  }
+
+  return spec
+}
+
+/**
+ * 查这一行登记表；查不到返回 `undefined`。
+ *
+ * 未选择（`null`）先经 {@link entryModeForDisplay} 归一成完整流程再查——「未选择」是
+ * 合法状态，不是缺行。
+ *
+ * 返回 `undefined` 只表示**没有这一行**（留给「有没有登记」这类内部判断）；真查到一行时
+ * 仍会跑一遍完整性校验，残缺的行与缺行一样当场失败，不会让半个配置流出去。
+ */
+export function entrySpecFor(mode: EntryMode | null): EntrySpec | undefined {
+  const key = entryModeForDisplay(mode)
+  const spec = ENTRY_REGISTRY[key]
+  return spec ? assertEntrySpecComplete(key, spec) : undefined
+}
+
+/**
+ * 取这一行登记表，**一定给出一行**；给不出就当场失败。
+ *
+ * 这是「按入口模式问答案」的唯一出口，三态口径在这里收口：
+ * - `null`（「未选择」）= 合法，经 {@link entryModeForDisplay} 落到完整流程那一行；
+ * - **未知入口键 / 缺行** → 抛 {@link EntrySpecMissingError}，绝不拿默认值顶替；
+ * - **缺列**（这一行在，但某一列没填）→ 同样抛错，消息指出缺的是哪一列。
+ *
+ * 从前这里查不到就按「未选择」兜住，于是维护者加第 5 个入口漏填一列时，程序会
+ * 悄悄按完整流程跑下去——正是本票要根治的那种「漏改不报错」。
  */
 export function entrySpecForDisplay(mode: EntryMode | null): EntrySpec {
-  return ENTRY_REGISTRY[entryModeForDisplay(mode)] ?? STRUCTURED_ENTRY_SPEC
+  const key = entryModeForDisplay(mode)
+  return assertEntrySpecComplete(key, ENTRY_REGISTRY[key])
 }
 
 /**
