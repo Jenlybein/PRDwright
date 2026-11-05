@@ -748,8 +748,14 @@ const canReturnToChat = computed(
  * 澄清入口与「返回」落点相同时由它顶替「返回」；落点不同时必须保留，否则用户再也回不去。
  * 现在只有两个**导入**入口会走到「落点不同」这一支——它们的录入页不在进度条上
  * （两个从零创建的入口由 `hideBack` 直接不给这个按钮，靠进度条第 1 步回去）。
+ *
+ * 答案在登记表的 `keepBackButton` 列。`null`（未选择）与 `structured` 在这一列**不同**：
+ * 未选择时没有这一条入口的录入页可回，旧行为是保留「返回」，而登记表按入口填、`null` 会先被
+ * 归一成完整流程（`false`），所以这里显式处理 `null`。
  */
-const keepBackButton = computed(() => store.entryMode !== 'structured')
+const keepBackButton = computed(() =>
+  store.entryMode === null ? true : entrySpecForDisplay(store.entryMode).keepBackButton,
+)
 
 /**
  * 当前标签这条线程是否聊到了可以改写的程度。

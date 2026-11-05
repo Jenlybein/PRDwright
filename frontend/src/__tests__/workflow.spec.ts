@@ -980,6 +980,7 @@ describe('入口登记表完整性：漏行漏列当场失败', () => {
       inputPageOnBar: false,
       needsRequirementChat: false,
       needsDocumentReview: false,
+      keepBackButton: false,
       requiredDocs: ['prompts'],
       copy: {
         modeLabel: '第五入口',

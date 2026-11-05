@@ -304,6 +304,18 @@ export interface EntrySpec {
   readonly needsRequirementChat: boolean
   /** ④ 是否需要审核 / 改写 */
   readonly needsDocumentReview: boolean
+  /**
+   * ④ 审阅页的澄清入口出现时，是否**保留**「返回」按钮。
+   *
+   * 判据是「澄清入口与『返回』是不是同一个落点」：完整流程两者都回对话页，澄清入口顶替「返回」
+   * 就够了；其余入口的「返回」是回各自录入页，与澄清入口落点不同，必须并排保留——否则用户
+   * 再也改不了自己贴进来的材料。
+   *
+   * ⚠️「未选择」与完整流程在这一列**不同**：未选择时没有这一条入口的录入页可回，旧行为是
+   * 保留「返回」。登记表按入口填，`null` 会先被归一成完整流程，因此调用处显式处理 `null`
+   * （见 `AppV2.vue` 的 `keepBackButton`）。
+   */
+  readonly keepBackButton: boolean
   /** ⑤ 完成所需文档 */
   readonly requiredDocs: readonly DocType[]
   /** ⑥ 文案 */
@@ -377,6 +389,8 @@ const STRUCTURED_ENTRY_SPEC: EntrySpec = {
   inputPageOnBar: true,
   needsRequirementChat: true,
   needsDocumentReview: true,
+  // 澄清入口与「返回」都回对话页：由澄清入口顶替「返回」，不并排
+  keepBackButton: false,
   requiredDocs: ['prd', 'api-docs', 'prompts'],
   copy: {
     modeLabel: '完整流程',
@@ -423,6 +437,8 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     needsRequirementChat: false,
     // 「不审不改」是这一条的定义，三份产物都一样
     needsDocumentReview: false,
+    // 「返回」回快捷录入页，与澄清入口（回对话）落点不同，必须并排保留
+    keepBackButton: true,
     // 交付判据与完整流程对齐：三份齐备才算完成，不因「快捷」降低门槛
     requiredDocs: ['prd', 'api-docs', 'prompts'],
     copy: {
@@ -460,6 +476,8 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     needsRequirementChat: false,
     // 导入的正文仍要过一遍审核 / 改写
     needsDocumentReview: true,
+    // 「返回」回粘贴页，与澄清入口（回对话）落点不同：不保留就成了死路
+    keepBackButton: true,
     requiredDocs: ['prompts'],
     copy: {
       modeLabel: '导入 PRD',
@@ -491,6 +509,8 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     inputPageOnBar: false,
     needsRequirementChat: false,
     needsDocumentReview: true,
+    // 同「我有 PRD」：两份材料的粘贴页只能在「返回」后面，澄清入口不能顶替它
+    keepBackButton: true,
     requiredDocs: ['prompts'],
     copy: {
       modeLabel: '导入 PRD + 接口文档',
@@ -620,10 +640,11 @@ export function assertEntrySpecComplete(
     }
   }
 
-  // ④ 三个布尔：录入页是否在进度条上 / 是否需需求澄清 / 是否需审核改写
+  // ④ 四个布尔：录入页是否在进度条上 / 是否需需求澄清 / 是否需审核改写 / 澄清入口旁是否保留「返回」
   requireEntrySpecBoolean(key, 'inputPageOnBar', spec.inputPageOnBar)
   requireEntrySpecBoolean(key, 'needsRequirementChat', spec.needsRequirementChat)
   requireEntrySpecBoolean(key, 'needsDocumentReview', spec.needsDocumentReview)
+  requireEntrySpecBoolean(key, 'keepBackButton', spec.keepBackButton)
 
   // ⑤ 完成所需文档：非空，且只能是三份产物之一
   const requiredDocs = requireEntrySpecList(key, 'requiredDocs', spec.requiredDocs)
