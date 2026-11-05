@@ -8,11 +8,13 @@ import {
   docKindOfState,
   documentKindOfChatStage,
   emptyConversationIds,
+  entryModeForDisplay,
   fromBackendKind,
   generatingStateFor,
   hasDocumentReview,
   hasRequiredDocuments,
   hasRequirementChat,
+  inputPageOnBar,
   isChatStage,
   fromBackendJobKind,
   isDocKind,
@@ -559,5 +561,59 @@ describe('澄清线程的取值与互逆映射', () => {
     // 落在一个没有任何视图认领的阶段上
     expect(VIEW_STATES).not.toContain('clarifying')
     expect(isViewState('clarifying')).toBe(false)
+  })
+})
+
+/**
+ * 「未选择」的唯一出口。
+ *
+ * `null`（用户还没点入口 / 老快照没记入口名）是**合法状态**，不等于「未知入口键」：
+ * 它必须照常按完整流程的展示口径给出答案。从前这条口径散在六处各写一次
+ * `?? 'structured'`，改默认口径时漏改一处也不会报错，只表现为「入口页进度条少一格」
+ * 或「老方案列表显示成别的入口」这类错位。这里把「所有按模式的判断在未选择时
+ * 都等于完整流程」钉住，并钉住那个唯一出口本身。
+ */
+describe('未选择入口（null）按完整流程的展示口径', () => {
+  it('唯一出口 entryModeForDisplay 把 null 归到完整流程', () => {
+    expect(entryModeForDisplay(null)).toBe('structured')
+    // 已选入口时原样返回，不做任何映射
+    expect(entryModeForDisplay('prd-quick')).toBe('prd-quick')
+  })
+
+  it('进度条步骤与下标在未选择时与完整流程一致（六步）', () => {
+    const unselected = stepsForMode(null).map((step) => step.id)
+    expect(unselected).toEqual(stepsForMode('structured').map((step) => step.id))
+    expect(unselected).toHaveLength(6)
+    for (const state of [
+      'form',
+      'chatting',
+      'review-prd',
+      'review-api-docs',
+      'review-prompts',
+      'done',
+    ] as const) {
+      expect(stepIndexOf(state, null)).toBe(stepIndexOf(state, 'structured'))
+    }
+  })
+
+  it('三个按模式的判断在未选择时与完整流程一致', () => {
+    expect(hasRequirementChat(null)).toBe(hasRequirementChat('structured'))
+    expect(hasDocumentReview(null)).toBe(hasDocumentReview('structured'))
+    expect(inputPageOnBar(null)).toBe(inputPageOnBar('structured'))
+    // 再用显式期望钉一次：避免「两边一起错」也被判成一致
+    expect(hasRequirementChat(null)).toBe(true)
+    expect(hasDocumentReview(null)).toBe(true)
+    expect(inputPageOnBar(null)).toBe(true)
+  })
+
+  it('完成条件在未选择时与完整流程一致', () => {
+    const threeDocs = { prd: '# prd', apiDocs: '# api', prompts: '# prompts' }
+    expect(hasRequiredDocuments(null, threeDocs)).toBe(
+      hasRequiredDocuments('structured', threeDocs),
+    )
+    expect(hasRequiredDocuments(null, threeDocs)).toBe(true)
+    // 只齐一份时，两条口径都判「未完成」
+    const oneDoc = { prd: '# prd', apiDocs: '', prompts: '' }
+    expect(hasRequiredDocuments(null, oneDoc)).toBe(false)
   })
 })

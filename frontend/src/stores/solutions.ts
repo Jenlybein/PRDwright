@@ -49,7 +49,7 @@ import type {
   SolutionStatePayload,
   SolutionSummary,
 } from '@/types'
-import { fromStatePayload, normalizeSessionSnapshot } from '@/utils/workflow'
+import { entryModeForDisplay, fromStatePayload, normalizeSessionSnapshot } from '@/utils/workflow'
 
 /** 防抖时长：既能挡住连续输入，又不会让用户觉得「怎么还没存上」 */
 export const SAVE_DEBOUNCE_MS = 1500
@@ -698,9 +698,16 @@ export const useSolutionsStore = defineStore('solutions', () => {
     },
   )
 
-  /** 列表里展示的入口模式名 */
+  /**
+   * 列表里展示的入口模式名。
+   *
+   * 后端把「未选择」存成空串（契约里的合法值）。它和 `null` 共用同一个出口
+   * `entryModeForDisplay`，这里不再另写一份「完整流程」默认文案——默认口径
+   * 一旦有两处，改一处不会报错，只会让列表悄悄显示成别的入口。
+   */
   function modeLabel(mode: string): string {
-    return MODE_LABELS[mode as EntryMode] ?? '完整流程'
+    const display = entryModeForDisplay(mode === '' ? null : (mode as EntryMode))
+    return MODE_LABELS[display] ?? MODE_LABELS[entryModeForDisplay(null)]
   }
 
   /** 列表里展示的阶段名 */

@@ -189,6 +189,27 @@ export function emptyConversationIds(): Record<ChatStage, string> {
   return ids
 }
 
+/**
+ * 「未选择」时按哪个入口模式展示。
+ *
+ * `null`（用户还没点入口 / 老快照没记入口名）是**合法状态**，不是「未知入口键」：
+ * 它必须照常给出答案，不能报错。这条口径此前散在六处各写一次 `?? 'structured'`，
+ * 改默认口径时必须逐处找，漏一处的表现只是「进度条少一格」这类不报错的错位。
+ * 现在只在这里定义一次。
+ */
+const UNSELECTED_ENTRY_MODE: EntryMode = 'structured'
+
+/**
+ * 把入口模式归一成「可展示的取值」：未选择（`null`）落到 {@link UNSELECTED_ENTRY_MODE}。
+ *
+ * 这是「未选择」的**唯一出口**——凡是要回答「未选入口时该显示什么」的地方都调它，
+ * 不要再写 `?? 'structured'`。它只管**合法状态**；未知入口键的失败路径属于登记表
+ * 完整性校验，不在这里。
+ */
+export function entryModeForDisplay(mode: EntryMode | null): EntryMode {
+  return mode ?? UNSELECTED_ENTRY_MODE
+}
+
 /** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`） */
 const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
   // 完整流程：六步齐全（最后一步是交付）
@@ -215,7 +236,7 @@ const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
  * 得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
  */
 export function hasRequirementChat(mode: EntryMode | null): boolean {
-  return (mode ?? 'structured') === 'structured'
+  return entryModeForDisplay(mode) === 'structured'
 }
 
 /**
@@ -229,7 +250,7 @@ export function hasRequirementChat(mode: EntryMode | null): boolean {
  * 漏配的代价只是多等一会儿；反过来则悄悄把产出质量降了一档。
  */
 export function hasDocumentReview(mode: EntryMode | null): boolean {
-  return (mode ?? 'structured') !== 'prd-quick'
+  return entryModeForDisplay(mode) !== 'prd-quick'
 }
 
 /**
@@ -242,15 +263,16 @@ export function hasDocumentReview(mode: EntryMode | null): boolean {
  * 因此审阅页必须保留一个「返回」按钮，否则用户改不了贴进来的材料，直接成了死路。
  */
 export function inputPageOnBar(mode: EntryMode | null): boolean {
-  return (mode ?? 'structured') === 'structured' || mode === 'prd-quick'
+  const display = entryModeForDisplay(mode)
+  return display === 'structured' || display === 'prd-quick'
 }
 
 /**
  * 某个入口模式下进度条要展示的步骤。
- * `mode` 为 `null`（还没选入口 / 旧快照）时按完整流程处理。
+ * `mode` 为 `null`（还没选入口 / 旧快照）时经 {@link entryModeForDisplay} 按完整流程处理。
  */
 export function stepsForMode(mode: EntryMode | null): readonly Step[] {
-  const ids = MODE_STEP_IDS[mode ?? 'structured']
+  const ids = MODE_STEP_IDS[entryModeForDisplay(mode)]
   return STEPS.filter((step) => ids.includes(step.id))
 }
 
@@ -504,7 +526,7 @@ export function hasRequiredDocuments(
     'api-docs': docs.apiDocs,
     prompts: docs.prompts,
   }
-  return REQUIRED_DOCS[mode ?? 'structured'].every((type) => byType[type].trim() !== '')
+  return REQUIRED_DOCS[entryModeForDisplay(mode)].every((type) => byType[type].trim() !== '')
 }
 
 /** 判断任意值是否为合法聊天消息 */
