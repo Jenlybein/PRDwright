@@ -79,7 +79,7 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 
 ## 4. 已确认的失真（文档断言 vs git 事实）
 
-前 9 条迁自已删除的时间线记录文件第 5 节；第 10~13 条为文档收敛时新增。下表保留**仍然成立**的部分：断言与 git 事实的对照、以及当时的修正结论。表中出现的按层文档路径已随九层目录删除，仅作为「曾经写在哪」的记录，不是可点击的现行落点；现行结论见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
+前 9 条迁自已删除的时间线记录文件第 5 节；第 10~13 条为文档收敛时新增；第 14~18 条为「入口模式收成一张登记表」这一轮（#44 写结论 / #49 终检）新增。下表保留**仍然成立**的部分：断言与 git 事实的对照、以及当时的修正结论。表中出现的按层文档路径已随九层目录删除，仅作为「曾经写在哪」的记录，不是可点击的现行落点；现行结论见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
 
 | # | 曾经的断言 | git 事实 | 已做的修正 |
 | --- | --- | --- | --- |
@@ -97,15 +97,18 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 | **12** | 「全量用例基线 999」（`docs/agents/conventions.md`）、「基线 1006」（v8 附录 A） | 当时实测 **1014**（工作区，pytest 收集）/ **986**（HEAD 已提交部分）；`999` 与 `1006` 都是 10-25 的中间态 | 两处均改为当时的实测值并注明口径（`def test_` 文本计数与收集数不是同一个数）；**现行基线现取现算**，见 [`../agents/conventions.md`](../agents/conventions.md) §10 |
 | **13** | 「v8 起以 `deploy/docker/` 为准」（`docs/agents/conventions.md`） | 记这条时 `deploy/` 与 `deploy/docker/` 都还不存在，`scripts/deploy/` 的脚本也没有 | 当时改为「部署交付物整体未落盘」；v9 已交付：`deploy/`（compose、`docker/`、README、Makefile、`backup.py`、`backups/`）均已落盘，形态说明见 `ARCHITECTURE.md` §3.6 |
 | **14** | 「`goTo` 必须在 `job.start` 之前（`docGenerating` 置位后 busy 守卫会拦），并把 `clarifyTarget` 钉为 `'prd'`」（`docs/agents/conventions.md`） | 旧忙碌闸门已拆：`frontend/src/stores/runs.ts` 说明 `docGenerating` 退役、`goTo()` 不因忙拒绝跳转；现状 `frontend/src/composables/useDocumentPipeline.ts` 是 `isRunInFlight()` 提前 return → `goTo('generating-prd')` → `await generatePrd()`；`clarifyTarget` 已删，源码只剩退役说明；旧注释仍留着旧理由 | 理由改写成「先切生成视图，再让这次发起成为唯一发起」，字段从清单删除；旧口径列入 `docs/agents/conventions.md` 文末「已失效」 |
-| **15** | 「13 个核心标识符 170 个文件:行号落点 / 23 文件」「约 20 处同步」「新增快照字段同步四处」（`docs/agents/conventions.md`） | 现跑现算：13 个标识符在 `frontend/src/` 下为 **154 行 / 23 文件**（23 成立、170 失真）；四入口字面量在 `frontend/src/__tests__` 下为 **151 行 / 13 文件**；`714cef0` 为 `33 files changed, 1237 insertions(+), 192 deletions(-)`；快照字段同步实测**至少 8 处**（类型、序列化、snapshot / applySnapshot / reset / watch / 有内容判据 / return / 测试夹具，共 13 个落点）。清单里还含已删的 `clarifyTarget` | 人工同步清单整段退役，约定文档改描述一张登记表、一行一个入口、七类资料为列；数字按本行实测重写，旧值列入文末「已失效」 |
+| **15** | 「13 个核心标识符 170 个文件:行号落点 / 23 文件」「约 20 处同步」「新增快照字段同步四处」（`docs/agents/conventions.md`） | 现跑现算：13 个标识符在 `frontend/src/` 下为 **154 行 / 23 文件**（23 成立、170 失真）；#49 终检复测为 **199 行 / 23 文件**。四入口字面量在 `frontend/src/__tests__` 下为 **151 行 / 13 文件**；#49 复测为 **213 行 / 13 文件**（两轮文件数一致）。`714cef0` 为 `33 files changed, 1237 insertions(+), 192 deletions(-)`；快照字段同步实测**至少 8 处**（类型、序列化、snapshot / applySnapshot / reset / watch / 有内容判据 / return / 测试夹具，共 13 个落点）。清单里还含已删的 `clarifyTarget` | 人工同步清单整段退役，约定文档改描述一张登记表、一行一个入口、七类资料为列；数字按本行实测重写，旧值列入文末「已失效」 |
 | **16** | 词表「改动入口必须四处同步」（`GLOSSARY.md`）与约定「约 20 处」互相冲突；词表也没说**入口模式**可为「未选择」 | 两处数字彼此对不上，也都不是现跑值；入口页与老方案没记入口名都是合法状态，归一成「未选择」后照常显示、恢复、编辑保存 | 词表只保留产品概念：删「四处同步」，补「可为未选择」及其合法口径；登记表是实现、不进词表；工程口径归 `docs/agents/conventions.md` 与 `ARCHITECTURE.md` §5.8 |
 | **17** | 「快捷入口只要 PRD」（`frontend/src/stores/workflow.ts` 注释）与「入口用 exact」（`docs/agents/conventions.md`） | 登记表的 `requiredDocs` 列给快捷流程三份齐备；`frontend/src/__tests__/AppV2.spec.ts` 的 `clickButton` 默认 `exact = false`，入口卡靠固定 DOM 顺序消歧 | 约定按三份齐备与 `exact = false` 改写；旧注释已随代码票删除（#47），测试写法留给终检票 |
+| **18** | #46 票面验收写「侧栏显示『完整流程』」，读起来像四个入口的模式名都会出现在侧栏 | `frontend/src/components/SolutionSidebar.vue` 的列表项只渲染 `solutions.stageLabel(item.stage)`；`git grep -n modeLabel -- frontend/src` 命中只有登记表的列定义与 `frontend/src/stores/solutions.ts` 的 `modeLabel()`，以及 `frontend/src/__tests__/AppV2.spec.ts` / `frontend/src/__tests__/solutions-store.spec.ts` / `frontend/src/__tests__/workflow.spec.ts` 三处测试——**没有任何组件消费** `solutions.modeLabel` | 如实登记：模式名目前只能在 store 层断言（`frontend/src/__tests__/solutions-store.spec.ts` 的用例旁已注明「全仓没有组件消费它」）。若要让模式名上屏，属界面变更，另开票，本期不做（见 `ARCHITECTURE.md` §5.8「本期不做」与 `roadmap.md` §2 的 #46 / #47 行） |
 
 > 补充一条本轮确认的失真：**「加列是单向门」是错的**，仓库里的单向门指删列 / 退役列（回滚靠备份库文件）。已如实记录在 `ARCHITECTURE.md` §3.1 / §5.6 与 `roadmap.md` §0.5，以后评审不拿迁移成本当架构理由。
 >
 > 再补一条：**「任务单不落库 / 重启中断」与「深还原 `thaw_object` 边界」**是本轮实现结论，落点在 `ARCHITECTURE.md` §5.7（生成任务收口后的取舍）。
 >
 > #44 的收口结论：入口模式收成一张登记表（一行一个入口、七类资料为列）写在 `ARCHITECTURE.md` §5.8，票序 #44 → #45 → #46 → #47 → #48 → #49 写在 `roadmap.md` §1；本表第 14~17 行是本轮先文档、后代码的依据。
+>
+> #49 的收口结论：代码、现状架构文档、路线图三者按现状对齐——第 15 行补上终检复测的两个数字、第 18 行登记「模式名只到 store 层」这条票面假设与实况的落差；约定里把 ⑥ 文案列的「阶段名 / 标题取值」删掉（它们本来就是全局映射与固定回落链，不进登记表），侧栏显示模式名列为本期不做、另开票。
 
 ---
 
