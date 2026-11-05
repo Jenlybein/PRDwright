@@ -33,6 +33,7 @@ import {
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
+  entrySpecFor,
   fromBackendJobKind,
   generatingStateFor,
   hasDocumentReview,
@@ -790,13 +791,17 @@ async function handleStartConversation(value: RequirementsSummary): Promise<void
  * 仍会渲染，此时「改需求」必须回到极简录入页而不是结构化表单。
  */
 function handleEditRequirements(): void {
-  goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+  // 登记表这一行优先；未迁入的入口仍回落到按模式写死的落点
+  const spec = entrySpecFor(store.entryMode)
+  goTo(spec ? spec.landing.editRequirements : store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
 }
 
 /** 「改需求」按钮的文案；与 `handleEditRequirements` 的落点一一对应 */
-const editRequirementsLabel = computed(() =>
-  store.entryMode === 'prd-quick' ? '改描述' : '改需求',
-)
+const editRequirementsLabel = computed(() => {
+  const spec = entrySpecFor(store.entryMode)
+  if (spec) return spec.copy.editRequirementsLabel
+  return store.entryMode === 'prd-quick' ? '改描述' : '改需求'
+})
 
 /**
  * 对话页展示哪几条线程。

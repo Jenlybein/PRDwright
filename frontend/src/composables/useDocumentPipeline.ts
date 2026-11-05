@@ -49,6 +49,7 @@ import {
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
+  entrySpecFor,
   fromBackendJobKind,
   generatingStateFor,
   jobDocumentKind,
@@ -1350,6 +1351,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 因为「回到我的录入页」是一个独立于按钮是否存在的动作。
    */
   function backToInput(): void {
+    // 先查登记表这一行；未迁入的入口仍回落到按模式写死的落点
+    const spec = entrySpecFor(entryMode.value)
+    if (spec) {
+      goTo(spec.landing.backToInput)
+      return
+    }
     if (entryMode.value === 'prd-quick') {
       goTo('prd-quick')
       return
@@ -1372,6 +1379,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 出口。两个从零创建的入口不渲染这个按钮（`hideBack`），因此这里也不再给它们文案。
    */
   const backLabel = computed(() => {
+    // 登记表这一行优先；未迁入的入口仍回落到按模式写死的文案
+    const spec = entrySpecFor(entryMode.value)
+    if (spec) return spec.copy.backLabel
     if (entryMode.value === 'prompt-debug') return '返回 PRD'
     if (entryMode.value === 'prd-and-api-paste') return '返回素材'
     return '返回对话'

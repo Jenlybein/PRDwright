@@ -36,6 +36,7 @@ import {
   canGeneratePrdFrom,
   documentKindOfChatStage,
   DOWNGRADE_NOTICE,
+  entrySpecFor,
   farthestContentStepIndex,
   hasRequiredDocuments,
   hasRequirementChat,
@@ -553,7 +554,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function chooseEntry(mode: EntryMode): boolean {
     if (hasActiveRun.value) return false
     entryMode.value = mode
-    goTo(MODE_LANDING[mode])
+    // 先查登记表这一行；未迁入的入口仍回落到旧表（`#47` 四行齐了才退役）
+    goTo(entrySpecFor(mode)?.landing.onSelect ?? MODE_LANDING[mode])
     return true
   }
 

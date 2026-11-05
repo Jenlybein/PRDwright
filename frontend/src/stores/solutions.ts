@@ -49,7 +49,12 @@ import type {
   SolutionStatePayload,
   SolutionSummary,
 } from '@/types'
-import { entryModeForDisplay, fromStatePayload, normalizeSessionSnapshot } from '@/utils/workflow'
+import {
+  entryModeForDisplay,
+  entrySpecFor,
+  fromStatePayload,
+  normalizeSessionSnapshot,
+} from '@/utils/workflow'
 
 /** 防抖时长：既能挡住连续输入，又不会让用户觉得「怎么还没存上」 */
 export const SAVE_DEBOUNCE_MS = 1500
@@ -707,7 +712,12 @@ export const useSolutionsStore = defineStore('solutions', () => {
    */
   function modeLabel(mode: string): string {
     const display = entryModeForDisplay(mode === '' ? null : (mode as EntryMode))
-    return MODE_LABELS[display] ?? MODE_LABELS[entryModeForDisplay(null)]
+    // 先查登记表这一行；未迁入的入口仍回落到旧表（`#47` 四行齐了才退役）
+    return (
+      entrySpecFor(display)?.copy.modeLabel ??
+      MODE_LABELS[display] ??
+      MODE_LABELS[entryModeForDisplay(null)]
+    )
   }
 
   /** 列表里展示的阶段名 */

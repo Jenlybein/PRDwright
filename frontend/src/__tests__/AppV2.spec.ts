@@ -18,6 +18,7 @@ import { DOCUMENT_SAVE_DEBOUNCE_MS, useDocumentsStore } from '../stores/document
 import { useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import { downloadFile } from '../utils/download'
+import { ENTRY_REGISTRY } from '../utils/workflow'
 import type {
   ChatMessage,
   DocumentRecord,
@@ -1772,6 +1773,28 @@ describe('AppV2 入口模式', () => {
     await clickButton(wrapper, '生成 PRD', true)
     await flushPromises()
   }
+
+  it('完整流程：落页、六格进度条、模式名与返回文案都由登记表这一行给出', async () => {
+    const wrapper = await mountEntry()
+    await clickButton(wrapper, '完整流程')
+
+    const spec = ENTRY_REGISTRY.structured
+    if (!spec) throw new Error('登记表缺「完整流程」一行')
+
+    // 落页：结构化表单（登记表说落在哪儿，界面就该落在哪儿）
+    expect(wrapper.text()).toContain('告诉我们你的产品想法')
+    expect(storeOf(wrapper).viewState).toBe(spec.landing.onSelect)
+    // 进度条：六格，且与这一行登记的步骤数一致
+    const bars = wrapper.findAll('nav[aria-label="生成进度"] li')
+    expect(bars).toHaveLength(6)
+    expect(bars).toHaveLength(spec.steps.length)
+    // 侧栏 / 方案列表里的模式名取自这一行；「未选择」也按这一行展示
+    expect(solutionsOf(wrapper).modeLabel('structured')).toBe(spec.copy.modeLabel)
+    expect(solutionsOf(wrapper).modeLabel('')).toBe(spec.copy.modeLabel)
+    // 表单的返回落点是入口页
+    await clickButton(wrapper, '返回入口', true)
+    expect(wrapper.text()).toContain('新建 PRD 方案')
+  })
 
   it('快捷流程：一段话直接生成 PRD，不问问题也不经过摘要确认闸门', async () => {
     const wrapper = await mountEntry()
