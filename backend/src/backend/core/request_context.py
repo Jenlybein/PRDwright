@@ -7,7 +7,7 @@
 **为什么用 `ContextVar`**：中间件与路由之间没有参数通道——纯 ASGI 中间件只在 `scope`
 里能留下东西，而需要在服务层（深层调用）读到的值不可能靠一路传参。`ContextVar` 是
 asyncio 里传递这类「隐式上下文」的标准做法，且**任务边界会自然复制上下文**：
-`job_service.dispatch` 在请求上下文内 `asyncio.create_task`，后台任务于是自动带上
+「造单 → 登记 → 派发」的派发在请求上下文内 `asyncio.create_task`，后台任务于是自动带上
 同一个 `request_id`，无需任何额外接线。
 """
 

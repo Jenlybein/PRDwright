@@ -147,7 +147,7 @@ class RuntimeConfig:
         return "" if is_configured(spec.value_token) else spec.key_hint
 
 
-# 任务级冻结：`job_service.dispatch` 取快照后 `use_config` 把它挂到上下文，
+# 任务级冻结：造单时定格配置/供应商快照，后台任务用 `use_config` 把它挂到上下文，
 # 整条生成链路（含子任务）都读同一份，直到任务结束。
 _frozen: ContextVar[RuntimeConfig | None] = ContextVar("runtime_config_frozen", default=None)
 
@@ -400,7 +400,7 @@ def invalidate() -> None:
 def use_config(config: RuntimeConfig | None) -> Iterator[None]:
     """把一份快照冻在上下文里（任务级）。
 
-    由 `job_service.dispatch` 与直连 SSE 的路由使用。任务内所有读取点都会
+    由登记后派发的后台任务与直连 SSE 的路由使用。任务内所有读取点都会
     读到它，于是「任务跑到一半有人改了配置」不会让同一次生成前后参数不一致
     ——那会让章节乱序、正文重复，且极难归因。
 

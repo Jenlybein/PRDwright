@@ -16,7 +16,7 @@ describe('死代码清理', () => {
     const uiModules = import.meta.glob('../components/ui/*.vue')
     const names = Object.keys(uiModules).map((path) => path.split('/').pop())
 
-    // 反例：v2/ARCHITECTURE.md 写它「零外部引用」，ReviewStage.vue 却在用
+    // 反例：docs/architecture/ARCHITECTURE.md §5.5 写它「零外部引用」，ReviewStage.vue 却在用
     expect(names).toContain('AppDialog.vue')
     expect(names).not.toContain('AppToast.vue')
     expect(names).not.toContain('AppEmpty.vue')

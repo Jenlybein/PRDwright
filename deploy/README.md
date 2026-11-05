@@ -2,7 +2,7 @@
 
 两个镜像、一个入口、三个命名卷。**Linux 与 Windows 用同一份编排、同一组命令**——
 持久化全在 Docker 命名卷里，没有宿主目录挂载，所以不需要平台的 override 文件
-（为什么必须这样，见 [`../docs/architecture/v9/ARCHITECTURE.md`](../docs/architecture/v9/ARCHITECTURE.md) §4.2）。
+（为什么必须这样，见 [`../docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md) §3.6：三个命名卷与唯一部署后端 SQLite）。
 
 第一次部署的完整路径：**准备 `.env` 与主密钥 → 起栈 → 进管理后台配一个模型供应商 → 登录使用**。
 下面的命令都可以直接粘贴，Docker 命令在 PowerShell 与 bash 里一致；只有复制文件那一步不同。
@@ -388,5 +388,5 @@ make up
 | `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份） |
 | `deploy/backups/` | 备份产物目录（**内容**被版本控制忽略，目录本身靠 `.gitkeep` 入库；产物由 `backup.py` 写入，可整目录删除） |
 
-设计依据与取舍：[`../docs/architecture/v9/ARCHITECTURE.md`](../docs/architecture/v9/ARCHITECTURE.md)。
-路线图与各票落点：[`../docs/architecture/v9/roadmap.md`](../docs/architecture/v9/roadmap.md)。
+设计依据与取舍：[`../docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md)（§3.6 部署形态、§5 取舍）。
+现状排期：[`../docs/architecture/roadmap.md`](../docs/architecture/roadmap.md)。

@@ -29,10 +29,11 @@ from backend.api.deps import acting_user
 from backend.api.sse import sse_response
 from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.errors import AppError, ErrorCode
-from backend.services import job_service, quota_service
+from backend.services import job_service, job_ticket, quota_service
 from backend.services.auth_service import User
 from backend.services.job_drain import drain_controller
 from backend.services.job_fingerprint import compute_input_fingerprint
+from backend.services.job_snapshot import parse_usage
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -139,7 +140,7 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
 
 def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
     """把 DB 行（含未对外暴露的列）收敛成 `JobStatus`（不含 draft_content）。"""
-    usage = job_service.parse_usage(row.get("usage"))
+    usage = parse_usage(row.get("usage"))
     return schemas.JobStatus(
         id=int(row.get("id", 0)),
         kind=str(row.get("kind", "")),
@@ -199,26 +200,20 @@ async def create_job(
     if payload.kind == "prd":
         fingerprint = compute_input_fingerprint(_requirements_text(payload))
 
-    # 摊平参数只算一次：创建时要靠它算 `doc_kind`，dispatch 时要靠它跑生成。
+    # 摊平参数只算一次，并且**只交给造单这一个入口**：单①把请求参数、配置/供应商
+    # 快照与技能包身份一次定格成不可变数据，登记产出单②，派发只认单②。旧形状把同一份
+    # 可变 dict 同时递给 `create_job` 与 `dispatch`（chat 还会原地改写它），从此不再发生。
     request = _build_request(payload)
-
-    job_id = job_service.create_job(
+    ticket = job_ticket.build_job_ticket(
         owner_id=user.id,
         solution_id=payload.solution_id,
         kind=payload.kind,
+        request=request,
         input_fingerprint=fingerprint,
-        # 同一份摊平参数既用于「创建时算 doc_kind」，也用于后续 dispatch：
-        # 两处共用一次 `_build_request`，避免口径分叉（例如一处多了字段、一处没有）。
-        request=request,
     )
-    job_service.dispatch(
-        job_id,
-        owner_id=user.id,
-        solution_id=payload.solution_id,
-        kind=payload.kind,
-        request=request,
-    )
-    return schemas.JobCreated(job_id=job_id, status="running")
+    registered = job_ticket.register_job_ticket(ticket)
+    job_ticket.start_registered_job(registered)
+    return schemas.JobCreated(job_id=registered.job_id, status="running")
 
 
 @router.get("", response_model=schemas.JobListResponse, summary="列出我的生成任务")

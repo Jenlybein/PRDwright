@@ -1,7 +1,7 @@
 # PRDwright 工程约定（agent 必读）
 
 > 一句话说明：这是从旧长期笔记蒸馏出的当前有效约定；失效规则见文末附录。
-> 相关：`docs/architecture/`（各层设计与取舍）、`../../GLOSSARY.md`（术语）、`domain.md`（谁在读这些）。
+> 相关：`docs/architecture/ARCHITECTURE.md`（唯一一版现状架构与取舍）、`docs/architecture/README.md`（时间线真源）、`docs/architecture/roadmap.md`（现状排期）、`docs/adr/`（决策档案）、`../../GLOSSARY.md`（术语）、`domain.md`（谁在读这些）。
 
 ## 1. 通用纪律
 
@@ -15,6 +15,13 @@
 - 品牌 PRDwright，仓库根目录名仍是 `HarnessPRD`（勿改）；远端 `origin = github.com/Jenlybein/PRDwright`，CI 只有 push 后才真跑。
 - 本地 curl 一律加 `--noproxy '*'`；Vite 8 只监听 IPv6 `[::1]`；删 schema 后复查 import 孤儿。
 - 临时预览页用 `frontend/*.html` + `src/__preview__/*.ts`（样式入口 `src/index.css`，不是 `assets/`），核对完删干净；别用内联 `template` 写预览入口（runtime-only 构建静默不渲染），用 `h()`；截图前调 `__VUE_DEVTOOLS_TOGGLE_OVERLAY__(false)`。
+- **先文档、后代码**：#31~#33 先收口架构文档、词表、路线图与工程约定，#34 起才动生成任务与数据库投影；票序与依赖见 `docs/architecture/roadmap.md` §1，顺序写进文档、不靠口头约定。
+- **文件边界以接缝为依据**：取消「单文件 > 1200 行就拆」阈值，改以接缝为依据，取代 v8 附录 A §5 的 W1 口径（见 `docs/architecture/ARCHITECTURE.md` §5.4）；按「对外 / 内部」划分，包入口只露正常动作、包内互引私有名合法，七个实现文件归入同一内部包即可，不必合并回单个大文件。
+- **数字先复核再写**：对外动作与名字数量、入口模式同步点数量、外部引用条数一律以实测为准；写文档前先 `git grep` 复核，不沿用旧报告里的约数。本轮实测：`job_service.__all__` 为 9 个正常动作（`job_ticket` / `job_wait` 另有公开面）；入口模式同步约 20 处，13 个核心标识符在 `frontend/src/` 下实测 170 个文件:行号落点、跨 23 个文件；#31 外部引用分布在 8 个文件、改动 13 个 M 文件（含额外发现的前端注释）；再导出块在 #40 已删空，别再引用「25 行 / 15 行 / 11 个动作」等中间数。
+- **路径扫描白名单**：终检按类别排除三类写法，别误判成悬空路径——`backend/secrets/master.key` / `deploy/.env` 是运行时生成物（`.gitignore` 排除）、`README.md` / `SKILL.md` 是文档内简写（相对当前文档 / 技能包目录）、`frontend/*.html` / `frontend/src/**` / `scripts/deploy/{backup,restore,release,smoke}.py` 是通配或明确标注「从未落盘」的历史叙述。依据与守卫见 `backend/tests/test_closeout_docs.py`。
+- **用例基线现取现算**：收口时按 `--collect-only -q` 的当前收集数现取，连「`def test_` 文本计数 / 参数化展开差额」整段一起重算，不沿用旧总数；本轮实测数字见 §10。
+- **加列不是单向门**：单向门指删列 / 退役列（回滚靠备份库文件、不设兼容期）；新增列属于加列，评审不拿迁移成本当架构理由。
+- **一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后；与 `docs/architecture/ARCHITECTURE.md` §1 目标 / §4.3 及 `docs/architecture/roadmap.md` §0.6 同口径。
 
 ## 2. 后端分层与数据层
 
@@ -29,7 +36,7 @@
 - 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8）。
 - 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8）。
 - upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；MySQL 的 DO NOTHING 用主键 no-op，绝不用 `INSERT IGNORE`（会吞列超长 / NOT NULL）；只准用在「该表只有一个唯一约束」的表上（契约 C-D1，v8）。
-- SQLite 与 MySQL 的差异收在 `core/dialect.py`：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），可移植性台账见 `docs/architecture/v8/ARCHITECTURE.md 附录 B`。**唯一部署后端是 SQLite**；MySQL 相关分支是遗留代码（未验收、不再扩展），不计划引入其它后端。改动遗留 MySQL 分支时仍守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+- SQLite 与 MySQL 的差异收在 `core/dialect.py`：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），可移植性台账与 C-D1~C-D6 见 `docs/architecture/ARCHITECTURE.md 附录 A`。**唯一部署后端是 SQLite**；MySQL 相关分支是遗留代码（未验收、不再扩展），不计划引入其它后端。改动遗留 MySQL 分支时仍守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
 - `get_settings()` 走 lru_cache：改环境变量后必须 `cache_clear()`；`prompts.py` 走 `str.format()`，字面量花括号写 `{{ }}`，给 LLM 的指令用 `<!-- -->` 注释。
 
 ## 3. 迁移（Alembic）
@@ -39,7 +46,7 @@
 - 迁移手写：autogenerate 会生成 `drop_constraint(None)`，在 SQLite 上必失败。
 - batch 迁移会丢 `sqlite_autoincrement`（反射读不到表级参数，重建后 id 开始复用）→ `batch_alter_table(..., table_kwargs={"sqlite_autoincrement": True})`；自增表全集在 `0002_typed_columns.py::_AUTOINCREMENT_TABLES`。
 - 删列只用原生 `ALTER TABLE … DROP COLUMN`：`PRAGMA foreign_keys` 在事务内是空操作，「关外键 + 重建表 + 改回」那套在步骤内关不掉。
-- 删列 / 退役列是单向门：删完旧代码读不到该列，回滚只能靠备份库文件，不设兼容期。
+- 删列 / 退役列是单向门：删完旧代码读不到该列，回滚只能靠备份库文件，不设兼容期；**加列不是单向门**，新增列不拿迁移成本当架构理由。
 - 迁移用例别写死「第几步」：真假源是 `alembic_version`，新迁移比对 head 而不是抄字面量。
 - 守卫 C9 = 旧迁移链不许回来（文件存在性 + AST，docstring 豁免）。
 
@@ -93,7 +100,7 @@
 - `types/index.ts` 是契约准绳（不一致时改后端迁就前端）；状态在 Pinia `stores/{workflow,solutions,auth}.ts`；Markdown 统一走 `utils/markdown.ts::renderMarkdown()`（`html:false` 防 XSS）。
 - 入口 = 一屏两组四叶子（`EntryStage.vue`）：`从零创建 PRD`（`structured` / `prd-quick`）｜`导入已有素材`（`prompt-debug` / `prd-and-api-paste`）；`prompt-debug` 键名故意不改，新键刻意不叫 `prompts`（那是 `DocKind` 取值）。
 - 流程：入口 → 表单 → 对话 → 闸门①摘要 Diff（回填失败返回原摘要深拷贝）→ PRD → 接口文档 → 提示词 → 交付；文档澄清就在对话页。
-- 加一个入口模式要同步十来处（`EntryMode` / `ViewState`、`VIEW_STATES` / `isEntryMode` / `MODE_STEP_IDS` / `REQUIRED_DOCS`、`MODE_LANDING` 与「快照四件事」+ `hasContent` + return、`MODE_LABELS` / `STAGE_LABELS` / `computeTitle`、`AppV2.vue` 渲染分支、`backToInput` / `backLabel`、`AppV2.spec.ts` 的入口文案断言）：漏一处大多不报错、只是行为不对。
+- 加一个入口模式要同步约 20 处（`EntryMode` / `ViewState`、`VIEW_STATES` / `isEntryMode` / `MODE_STEP_IDS` / `REQUIRED_DOCS`、`MODE_LANDING` 与「快照四件事」+ `hasContent` + return、`MODE_LABELS` / `STAGE_LABELS` / `computeTitle`、`AppV2.vue` 渲染分支、`backToInput` / `backLabel`、`AppV2.spec.ts` 的入口文案断言）：`git grep` 实测 13 个核心标识符在 `frontend/src/` 下有 170 个文件:行号落点、跨 23 个文件（含 `__tests__`；按「同步点」而非标识符词频计仍约 20 处），漏一处大多不报错、只是行为不对。`backToInput` / `backLabel` 定义在 `frontend/src/composables/useDocumentPipeline.ts:1352-1378`，`AppV2.vue` 只解构引用并绑到模板（`:back-label` / `@back`），不是它们的定义处。
 - 加 `ViewState` 同步四处：`ViewState` / `VIEW_STATES` / `STEP_OF_STATE` / `STATE_DOWNGRADE`，漏一处只表现为进度条算错或刷新后进不去。
 - 快捷流程 = 同一管线、六步齐全：`REQUIRED_DOCS` 与 `structured` 一致、`STEP_OF_STATE['prd-quick']='form'`；`hasRequirementChat()` 只认 `structured`；「AI 对话」那格不能省（找不到就归零 → 停在对话页却高亮「描述产品」）；它不问问题，缺的信息靠「待确认」+ 审阅页「AI 自行澄清」。
 - 进度条「AI 对话」摘到最左、用竖线隔开（纯呈现，`stepsForMode` / `stepIndexOf` / `reachedStepIndex` 未动）：高亮与可点一律按「原始下标」；分隔线用 `border-r`、别插 div；`li` 数量仍为 5。
@@ -175,7 +182,7 @@
 
 ## 10. 测试
 
-- 基线 **1089 例**（本分支工作区，pytest 收集数）；注意「`def test_` 文本计数 = 955」与「收集数」不是同一个数——差额 134 来自 parametrize 展开。默认 `addopts = "-n auto"`，全量 ~100 秒；单文件调试加 `-n0`。旧口径里的 975 / 863 / 867 / 999 / 1006 / 1014 全是过时数字，别再用（报基线前先 `uv run pytest --collect-only -q` 现取）。
+- **用例基线现取现算**：报基线前先 `cd backend && uv run pytest --collect-only -q` 取当前收集数，不沿用任何旧总数。**本轮终检实测（集成分支 `fc7a40e` 起、加入终检守卫前）**：收集数 **1175**；`git grep -c 'def test_' -- backend/tests` 的文本计数 **1005**；参数化展开差额 **170**（1175 − 1005，即一条 `def test_` 被参数化展开成多条收集项后的净增）。加入 `test_closeout_docs.py` 的 4 条守卫后，终值为收集数 **1179** / 文本计数 **1009** / 差额 **170**；以后收口仍按 `--collect-only -q` 现取，别抄这里的数字。默认 `addopts = "-n auto"`，全量 ~100 秒；单文件调试加 `-n0`。旧口径里的 975 / 863 / 867 / 999 / 1006 / 1014 / 1089，以及 955 / 134、1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 等中间数全是过时数字，别再用。
 - 退出码不可信时用 `uv run pytest --junit-xml=...` 判成败（沙箱可能拦 `%TEMP%`；必要时加 `--basetemp=<项目外可写目录>`）。
 - 两个人同时跑全量会互相污染（单条从 0.5s 涨到 3s+，`LogStoreHandler.close()` 超时后写进下一用例的库 → `total != 25` 偶发红）。
 - 别在 `test_admin_logs.py` 断「全表行数」：每请求都异步写一条 `request.completed`，与 `total==N` 赛跑（单文件绿、全量红）。
@@ -200,7 +207,7 @@
 - 环境硬事实：`requires-python >=3.12`（Ubuntu 22.04 不够，建议 24.04）、Node `^22.18 || >=24.12`、无 requirements.txt（`uv sync --frozen`）。
 - 管理端挂 `/admin/` 要两处一致：`vite base: '/admin/'` + `createWebHistory(import.meta.env.BASE_URL)`（Vue Router 的 `normalizeBase()` 不跟随 Vite 的 base）。
 - Nginx：SSE 三行（`proxy_buffering off` / `read_timeout 1800s` / `gzip off`）+ 服务端 `: ping` 心跳；`assets/*` 长缓存、`index.html` 必须 `no-store`；`/docs` 生产 404（后端不注册 + 白名单移除 + Nginx 兜底）。
-- `deploy/` 目录是 v9 的交付物（compose、反向代理、env 样例、启动脚本、备份脚本、README），**已随 v9 落盘**：`ls deploy` 与 `ls deploy/docker` 都看得见，交付形态的唯一说明在 `docs/architecture/v9/ARCHITECTURE.md`。v7 文档里那几份（`backend.env.example` / `systemd/prdwright.service` / `nginx/prdwright.conf` / `scripts/deploy/{backup,restore,release,smoke}.py`）**从未落盘**，只作当期的形态记录，别照那些路径找文件。
+- `deploy/` 目录是 v9 的交付物（compose、反向代理、env 样例、启动脚本、备份脚本、README），**已随 v9 落盘**：`ls deploy` 与 `ls deploy/docker` 都看得见，交付形态的唯一说明在 `docs/architecture/ARCHITECTURE.md` §3.6。v7 文档里那几份（`backend.env.example` / `systemd/prdwright.service` / `nginx/prdwright.conf` / `scripts/deploy/{backup,restore,release,smoke}.py`）**从未落盘**，只作当期的形态记录，别照那些路径找文件。`scripts/deploy/` 目录现只保留 `smoke.sh`，不要把它读成整套交付脚本仍在。
 
 ## 已失效（勿再引用）
 
@@ -215,6 +222,7 @@
 - `PRD_SECTION_REWRITE_APPENDIX`：已退役（改写改用 `PRD_SECTION_REWRITE_PROMPT`）。
 - `clarification_ask.render_ask_spec()` 这个旧名：已退役，现名 `render_ask_tool_instruction()`。
 - 测试建库用 `init_schema()` 或每用例 `create_all`：被「`tests/dbsupport.py` 模板库 + 每用例拷贝」取代。
-- 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006、1014 / 986：全部作废，现行基线是 **1089（本分支工作区，pytest 收集数）**。
-- 排期真源 `docs/architecture/v3/roadmap.md`：只是 v3 期的口径，别当现状真源（现行排期看 `docs/architecture/v9/roadmap.md`；决策与取舍看各层 `ARCHITECTURE.md`）。
-- `docs/architecture/v*/` 下原有的按层决策记录文件与 `docs/architecture/evolution-truth.md`：**文件已删除**（决策记录目录随后也整体移除），`evolution-truth.md` 的独有内容并入 `docs/architecture/README.md`；按旧路径引用一律无效。
+- 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006、1014 / 986、1089、1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175（及配套的「文本计数 955 / 差额 134」）：全部作废。本轮终检按 `--collect-only -q` 现取，连文本计数与参数化展开差额一起重算，实测口径见 §10。
+- v3 期的排期只是当时的口径，别当现状真源；按层路线图已随九层目录一并删除。现行排期看 `docs/architecture/roadmap.md`；决策与取舍看 `docs/architecture/ARCHITECTURE.md` 的「取舍」节与 `docs/adr/`。
+- 原有的按层决策记录文件与按层时间线记录文件**均已删除**（决策记录目录随后也整体移除）；按层文档目录随后也整体移除，独有内容并入 `docs/architecture/ARCHITECTURE.md` 附录、`docs/architecture/README.md` 与 `docs/adr/0001-architecture-docs-consolidation.md`；按旧路径引用一律无效。
+- **本轮收口作废的旧口径**（正向条文只写一次，见 §1「先文档、后代码 / 文件边界以接缝为依据 / 数字先复核再写 / 用例基线现取现算 / 加列不是单向门」、§3「加列不是单向门」、§10「基线现取现算」）：「按单文件 > 1200 行阈值拆文件」（取代 v8 附录 A §5 W1，见 `docs/architecture/ARCHITECTURE.md` §5.4）、「报告里的约数可直接抄」（对外动作、再导出名、入口模式同步点、外部引用条数）、「用例基线沿用旧总数」（1089 / 1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175 及文本计数 955 / 差额 134 整段）、「25 行再导出块 / 11 个对外动作 / 十来处入口同步」（#40 后为 9 个对外动作、再导出块删空；入口模式实测约 20 处同步点、13 个核心标识符 170 个文件:行号落点 / 23 个文件）、「加列是单向门」（单向门指删列 / 退役列），以及「#31~#33 与代码票可并行」——全部作废；票序与总原则见 `docs/architecture/roadmap.md` §0 / §1。

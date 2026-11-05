@@ -33,10 +33,13 @@ from backend.core.request_context import reset_request_id, set_request_id
 from backend.services import (
     document_service,
     job_service,
+    job_runtime,
     llm_factory,
     prd_section_writer,
 )
+from backend.services.job_ticket import start_registered_job
 from fakes import ScriptedLLM
+from ticket_support import build_and_register
 
 
 @pytest.fixture
@@ -72,11 +75,11 @@ def no_real_llm(monkeypatch):
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """用例前后清空进程内运行时，避免串扰。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
 
 
 def _rows() -> list[dict]:
@@ -110,23 +113,23 @@ def test_main_chain_logs_carry_job_and_request_ids(client, log_env, monkeypatch)
     )
 
     async def scenario() -> None:
-        job_id = job_service.create_job(owner_id=owner_id, solution_id=None, kind="prd")
+        # 造单 → 登记走公开正门；假环境用生产真值（模型边界仍是离线假 LLM）。
+        registered = build_and_register(
+            owner_id=owner_id,
+            solution_id=None,
+            kind="prd",
+            request={"requirements": "做一个演示产品", "product_name": "演示产品"},
+        )
         # 显式进入 request 上下文：模拟真实 HTTP 请求的 request_id 传播。
         # `create_task` 会复制 ContextVar，但落库线程读不到它，靠 `extra=` 显式传。
         token = set_request_id("req-test-123")
         try:
-            job_service.dispatch(
-                job_id,
-                owner_id=owner_id,
-                solution_id=None,
-                kind="prd",
-                request={"requirements": "做一个演示产品", "product_name": "演示产品"},
-            )
+            start_registered_job(registered)
         finally:
             reset_request_id(token)
         # 派发后立刻跑：事件循环必须让后台任务有机会推进并收尾
         # （这里把 open_stream 消费到底，顺带等任务收尾 flush 日志）。
-        async for _ in job_service.open_stream(owner_id, job_id):
+        async for _ in job_service.open_stream(owner_id, registered.job_id):
             pass
 
     asyncio.run(scenario())
@@ -178,19 +181,18 @@ def test_llm_retry_is_logged(client, log_env, monkeypatch):
     )
 
     async def scenario() -> None:
-        job_id = job_service.create_job(owner_id=owner_id, solution_id=None, kind="prd")
+        registered = build_and_register(
+            owner_id=owner_id,
+            solution_id=None,
+            kind="prd",
+            request={"requirements": "演示", "product_name": "演示"},
+        )
         token = set_request_id("req-retry-456")
         try:
-            job_service.dispatch(
-                job_id,
-                owner_id=owner_id,
-                solution_id=None,
-                kind="prd",
-                request={"requirements": "演示", "product_name": "演示"},
-            )
+            start_registered_job(registered)
         finally:
             reset_request_id(token)
-        async for _ in job_service.open_stream(owner_id, job_id):
+        async for _ in job_service.open_stream(owner_id, registered.job_id):
             pass
 
     asyncio.run(scenario())

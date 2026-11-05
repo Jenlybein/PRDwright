@@ -17,7 +17,7 @@
 | `frontend_admin/` | Vue 3 · Vite | 5174 | 管理端：用户 / 邀请码 / 审计 / 任务监控 / 模型配置 |
 | `skills/` | —— | —— | 生成管线使用的技能包（`prd-generator` 等） |
 | `scripts/keygen/` | Python | —— | 主密钥生成与轮换脚本 |
-| `docs/architecture/` | Markdown | —— | 分层架构说明（v1 ~ v9）与时间线真源 |
+| `docs/architecture/` | Markdown | —— | 单一现状架构文档、时间线真源与现状排期 |
 
 ---
 
@@ -114,10 +114,10 @@ cd frontend_admin && npm run test:unit
 
 给**人**看的：
 
-- 架构总览：`docs/architecture/v9/ARCHITECTURE.md`（当前层；历史层 `v1` ~ `v8` 各留一套）
-- 决策与取舍：各层 `ARCHITECTURE.md` 的「取舍」节，加上 issue 历史
-- 路线图：`docs/architecture/v9/roadmap.md`
-- 阶段总表与已确认的失真（按 git 实测）：`docs/architecture/README.md`
+- 架构现状：[`docs/architecture/ARCHITECTURE.md`](./docs/architecture/ARCHITECTURE.md)（唯一一版，含契约与取舍）
+- 架构决策：[`docs/adr/0001-architecture-docs-consolidation.md`](./docs/adr/0001-architecture-docs-consolidation.md)（决策档案从 0001 重新编号；旧 ADR-001~099 只在 git 历史）
+- 路线图：[`docs/architecture/roadmap.md`](./docs/architecture/roadmap.md)
+- 阶段总表与已确认的失真（时间线真源，按 git 实测）：[`docs/architecture/README.md`](./docs/architecture/README.md)
 
 给 **agent** 看的（入口是 [`AGENTS.md`](./AGENTS.md)）：
 

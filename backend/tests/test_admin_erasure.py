@@ -71,8 +71,9 @@ def _job(owner_id: int, *, status: str = "completed", prompt_tokens: int = 10) -
             " draft_content, completed_sections, pending_items, input_fingerprint, usage, "
             " max_provider_switches, error_code, error_message, "
             " provider_protocol, provider_config_id, provider_name, provider_model, "
-            " prompt_tokens, completion_tokens, created_at, updated_at) "
-            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', ?, 7, ?, ?)",
+            " prompt_tokens, completion_tokens, created_at, updated_at, "
+            " request_params, config_snapshot, skill_refs, skill_manifest) "
+            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', ?, 7, ?, ?, '{}', '{}', '[]', '')",
             (owner_id, status, prompt_tokens, moment, moment),
         )
         conn.commit()
@@ -270,32 +271,46 @@ def test_delete_clears_login_failures_for_that_username(client) -> None:
 
 
 def test_cancel_for_user_marks_db_rows_and_memory_runtime(client) -> None:
-    """删除前取消任务：库里的行落 CANCELLED，内存里的运行时也要被打标记。
+    """删除前取消任务：库里的行落 CANCELLED，在途任务也不再继续消费事件。
 
     只改库不改内存的话，在途协程不知道自己被取消，收尾时照样去写文档——
-    「删了账号，正文却还在往里写」，不报错、只是数据对不上。
+    「删了账号，正文却还在往里写」，不报错、只是数据对不上。跨公开动作断言：
+    假事件流在造单时传入并卡在第一段，`cancel_for_user` 之后放开流，
+    观察到的结局是「后续事件没被消费 + 库行 failed + CANCELLED」。
     """
+    from backend.core.contracts import StreamEvent
+    from ticket_support import run_ticket_in_flight
+
     register(client, "alice")
     owner_id = _user_id("alice")
-    job_id = _job(owner_id, status="running")
 
-    runtime = job_service.JobRuntime(
-        job_id=job_id, owner_id=owner_id, solution_id=None, kind="prd"
+    def cancel_for_user() -> None:
+        assert job_service.cancel_for_user(owner_id) == 1
+
+    registered, events = run_ticket_in_flight(
+        owner_id,
+        None,
+        "prd",
+        {"requirements": "会被取消"},
+        cancel_for_user,
+        StreamEvent(type="chunk", content="第一段", data={}),
+        reply="完整正文",
     )
-    job_service._RUNTIMES[job_id] = runtime  # noqa: SLF001 - 直接摆一支在途运行时
-    try:
-        affected = job_service.cancel_for_user(owner_id)
 
-        assert affected == 1
-        assert runtime.cancelled is True
-        with connect() as conn:
-            row = conn.execute(
-                "SELECT status, error_code FROM generation_jobs WHERE id = ?", (job_id,)
-            ).fetchone()
-        assert row["status"] == "failed"
-        assert row["error_code"] == "CANCELLED"
-    finally:
-        job_service._RUNTIMES.pop(job_id, None)  # noqa: SLF001
+    assert any(
+        event.type == "run_summary" and event.data["status"] == "failed"
+        for event in events
+    ), "在途任务被取消后收尾必须落成失败"
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT status, error_code, draft_content FROM generation_jobs WHERE id = ?",
+            (registered.job_id,),
+        ).fetchone()
+    assert row["status"] == "failed"
+    assert row["error_code"] == "CANCELLED"
+    # 取消之后 `done` 不再被消费：正文停在半截，绝不能变成完整的 reply。
+    assert row["draft_content"] == "第一段"
+    assert job_service.get_job(owner_id, registered.job_id)["status"] == "failed"
 
 
 def test_cancel_for_user_leaves_finished_jobs_alone(client) -> None:

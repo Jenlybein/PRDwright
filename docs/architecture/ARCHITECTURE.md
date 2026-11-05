@@ -1,428 +1,264 @@
-# v8 架构：方言收敛与清理
+# PRDwright 现状架构
 
-> 方言收敛的完整论证见附录 B；清理清单见附录 A；库结构实测数据见附录 D。
-> 决策依据见本层「取舍」一节与 issue 历史。
-
----
-
-## 1 目标
-
-两件事，彼此独立，但共用同一次发布窗口：
-
-1. **方言收敛**：让「本项目的数据库是 SQLite」只出现在 `core/dialect.py`
-   与 `core/engine.py` 两处；业务三层不出现任何数据库品牌。
-2. **清理**：把「读不到、也删不掉」的东西清出去——退役列、零引用组件、零调用符号，
-   以及文档里承诺过却从未落盘的路径。
-
-### 方言收敛要解决的两个具体问题
-
-不是"为了将来换库"，而是现在就有代价的两件事：
-
-- **upsert 的方言 import 散在 3 个仓库**，每个新仓库都要自己记得"用 `sqlite_insert`
-  而不是 `insert`"，漏了会到运行时才炸；
-- **结构对拍用 `PRAGMA` 检查 SQLite 的库结构**，工具与被检查对象共用同一个数据库的
-  私有接口，`assert_schema_matches_models` 因此缺少独立证据。
-
-### 清理要解决的两个具体问题
-
-不是"代码好看"，而是两笔持续发生的成本：
-
-| 问题 | 表现 | 清理的解法 |
-|---|---|---|
-| 每个读代码的人都要先判断「这一列 / 这个组件还能不能用」 | 判断成本天天发生，删除成本只发生一次 | 按附录 A 的三条判据逐项处置，删干净的连同注释一起删 |
-| 文档承诺的路径在仓库里不存在 | 读者去 `deploy/` 找模板会以为是自己 clone 错了（台账见附录 A §4） | 不补只为存档的模板；台账登记，谁做部署形态谁关账 |
+> **一句话**：本地优先的 PRD 生成平台；这份文档是仓库里唯一一版架构结论，正向写「目标 → 范围（含本期不做）→ 设计 → 契约 → 取舍」。
+>
+> 导航：[`README.md`](./README.md) 是**时间线真源**（阶段总表、v2 七波重写、已确认的失真、复核方法）；[`roadmap.md`](./roadmap.md) 是现状排期；[`../adr/0001-architecture-docs-consolidation.md`](../adr/0001-architecture-docs-consolidation.md) 是本次文档重组的**架构决策**；术语以 [`../../GLOSSARY.md`](../../GLOSSARY.md) 为准。
+>
+> v1~v9 是九个历史**层**，其目录已删除；演进史的索引是本文 §6 的九层摘要表，阶段规模与界碑只在时间线真源里写一次。**「v10」不是架构层**，它指数据库迁移版本与一批已关闭的历史 issue 编号。
 
 ---
 
-## 2 范围
+## 1. 目标
 
-### 本期做
-
-| # | 内容 | 性质 |
-|---|---|---|
-| V8-1 | 方言收敛：upsert 收进 `core/dialect.py`；库地址与空库判定去特化 | 改代码，零行为变化 |
-| V8-2 | 模型层声明：4 个大文本列挂 `MEDIUMTEXT` 变体；`username` 声明大小写敏感 collation | 改代码，零行为变化 |
-| V8-3 | 时区聚合搬进应用层（`admin_repo` 的按天统计） | 改代码，**需等价性对拍** |
-| V8-4 | 结构对拍改用 `sqlalchemy.inspect` —— **实测否决**，保留 `PRAGMA` 实现（§3.3） | 不改 |
-| V8-5 | 死代码与退役内容清理：两个退役列、三个未引用组件、一批零调用符号 | 改代码 + 迁移（删列不可逆） |
-
-### 本期不做
-
-- **不换数据库**。换库的最大收益（多副本）被进程内状态锁死，
-  改造代价却全落在唯一真实运行的路径上。附录 B §3.6 的台账保留，
-  换库那次按它执行。
-- **不做多副本 / 不做水平扩展**。`_RUNTIMES`、`JobBus`、runtime 快照、固定连接池
-  都在进程内，多副本会互相看不见对方的任务；要讨论扩展，先外置这些状态。
-- **不改 `/health` 的语义**。它恒返回 200、`status` 只有 `ok` / `degraded`（v7 契约）。
-- **不改前端代码**。两个前端已经是相对路径（`baseURL: '/'`）。
-- **不改时间列的存储格式**（业务表无 `Z`、日志表带 `Z` 的双轨）——它属于「全库真类型化」那一版。
-- **不补部署模板**。`deploy/` 与 `scripts/deploy/` 的悬空台账登记在附录 A §4，
-  不在本层补一套只为存档的实现。
+1. **一处可读**：维护者打开仓库，读这一份文档就能回答「现在怎么跑、边界在哪、为什么这么选」，不必判断「哪一层说的算」。
+2. **结论可追溯**：契约有编号（C-V9-1~10、C-D1~C-D6）；承重的实测数据、方言可移植性台账与恢复演练要求整段留在本文附录，不靠 git 历史当唯一依据。
+3. **收口可验证**：文档里写出的每个仓库路径 `ls` 都能看见；一次改动把代码、架构文档、路线图三者同步更新。
+4. **产品能力不变**：三份文档、澄清、审核、改写、技能包内容、鉴权与配额、用户端交互都按现行形态运行。
 
 ---
 
-## 3 设计
+## 2. 范围
 
-正文只写「收敛点长什么样、清理怎么判定」；完整论证与接口契约在附录 B、附录 A。
+### 2.1 本文覆盖的现行架构
 
-### 3.1 收敛点：一个模块，两个函数
+| # | 范围 | 落点 |
+| --- | --- | --- |
+| 1 | 后端分层（api/services/repositories/core） | §3.1 |
+| 2 | 三份文档与文档版本链 | §3.2 |
+| 3 | 生成任务与 SSE 契约 | §3.3 |
+| 4 | 技能包 | §3.4 |
+| 5 | 鉴权与配额 | §3.5 |
+| 6 | 部署形态（单域名 / 单 worker / 命名卷 / 探针 / 排空 / 备份） | §3.6 |
+| 7 | 唯一部署后端 SQLite | §3.7 |
+| 8 | 现行契约 | §4 |
+| 9 | 取舍、接受的风险、否决的方案与风险登记 | §5 |
+| 10 | 九层摘要表（演进索引） | §6 |
+| 11 | 承重专题：方言可移植性台账、库结构勘察实测数据、恢复演练要求 | 附录 A / B / C |
 
-`core/dialect.py` 只暴露两个 helper，都不含业务语义：
+### 2.2 本期不做
 
-| helper | 语义 | 用在哪 |
-|---|---|---|
-| `upsert_values(...)` | 有冲突就更新指定列；`update_cols=None` 时退化成 DO NOTHING | `document_repo._ensure_document`、`chat_session_repo.bind_thread`、`runtime_config_repo.upsert_many` |
-| `upsert_select(...)` | 冲突时用 SELECT 的结果更新（把"归属校验"一起写进语句） | 同上，用于需要原子判定的那两处 |
+| 事项 | 为什么本期不做 |
+| --- | --- |
+| **换数据库后端** | 项目固定 SQLite；没有第二个部署形态要支持，换库要连迁移链、结构对拍与备份链一起重做，收益不抵成本 |
+| **k8s / Swarm、多副本、外置运行时表或跨进程事件总线** | 目标是单机 compose，滚动更新与探针权重还没有需要它的人；多副本要先外置 `_RUNTIMES` / `JobBus`，那是另一版的工作 |
+| **全库真类型化**（时间从 ISO 文本改真时间、布尔改原生） | 自带 API 时间契约变更与两个前端的适配，改动面与收益不成比例 |
+| **容器内 TLS、多架构镜像、开发者热重载容器** | 证书生命周期不放进取舍受限的单机 compose；开发仍走本机 `uv run uvicorn` 与两个 `npm run dev` |
+| **业务链路自动化测试 / 老数据迁移** | 容器冒烟只验「主链路可达」；SQLite 库不搬迁，旧库结构不符时按「检测到旧结构就拒绝启动」处理 |
+| **在途任务续跑或回放** | 运行态以内存为权威；重启仍中断在途任务，数据库投影只保证可读，不保证可继续执行 |
+| **重开已关闭的双后端系列** | 那批 v10 issue 是历史记录，不是架构层 |
+| **按层重写演进史** | 演进史只在 §6 留九行索引；阶段规模、界碑与失真由时间线真源独占，不在本文重复 |
 
-三条边界，破了就等于没收敛：
+> §2.2 收自 v9 §1.3 的「本期明确不做」，并按现行形态补齐。
 
-1. 仓库层不许再 import `sqlalchemy.dialects.*`；
-2. 业务三层（`api/` / `services/` / `repositories/`）不出现数据库品牌名；
-3. `_ensure_document` 那条「归属校验写在 SELECT 里」的形状必须保留——
-   改成"先查归属再插入"会重新引入窗口。
+---
 
-### 3.2 模型层的两条前置声明
+## 3. 设计
 
-- **大文本列**（`document_versions.content`、`generation_jobs.draft_content`、
-  `generation_jobs.completed_sections`、`solutions.data`）挂 `MEDIUMTEXT` 变体：
-  SQLite 侧仍是 `TEXT`，目标库侧才是 `MEDIUMTEXT`；
-- **`users.username`** 声明大小写敏感 collation（`utf8mb4_0900_as_cs`），SQLite 侧忽略。
+### 3.1 后端分层（api/services/repositories/core）
 
-这一批的正确性判据是「**什么都没变**」：`test_schema_parity` 与 `alembic check`
-都不该有差异；红了说明声明位置写错。
+`backend/src/backend/` 下四层单向依赖：
 
-### 3.3 结构对拍为什么还在用 `PRAGMA`
+| 层 | 职责 | 边界 |
+| --- | --- | --- |
+| `api/` | 解析 / 校验 / 封装 | Pydantic 模型集中在 `api/schemas/`（按领域拆成 9 个子模块，`__init__.py` 是唯一出口）；Router 各带完整 prefix，`main.py` 不叠加 |
+| `services/` | 业务编排 | 一个业务操作 = 一个事务；事务边界唯一落点 `session_scope()`，不许在 `async def` 里跨 `await` 持有 |
+| `repositories/` | 唯一碰模型与查询的地方 | 绑定 `Session` 的实例方法；返回模型对象或 frozen dataclass 投影，不返回裸 dict；不许 `import sqlite3`、不许 `.commit()` / `.rollback()`、不许 SQL 字符串字面量 |
+| `core/` | 引擎、事务、类型、时钟、限制、方言、配置 | `expire_on_commit=False` 防 `DetachedInstanceError`、`autoflush=False`（要自增 id 就自己 `flush()`）、`max_overflow=0` 躲 WAL `-shm` 竞态 |
 
-`core/schema_snapshot.py` 用 `PRAGMA` 读 SQLite 的库结构——工具与被检查对象共用同一个
-数据库的私有接口，这是它的弱点。但换成 `sqlalchemy.inspect()` 实测会**丢判据**：
+- 列类型只走 `core/types.py`（`short_text(n)` / `long_text()` / `timestamp_text()`）；大段文本上限 60KB 字节，闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`。
+- Schema 只走 Alembic：手写迁移落 `backend/migrations/versions/`，入口 `core/schema.py::prepare_schema`，在 `lifespan` 里跑（重启 = 跑迁移）；autogenerate 在 SQLite 会生成 `drop_constraint(None)`，因此迁移必须手写。
+- 删列 / 退役列是**单向门**（回滚靠备份、不设兼容期）；**加列不是单向门**。
+- 提示词只在后端；前端只能点名场景（`profile_key`），不能递剧本文本。
 
-| 判据项 | `PRAGMA` | `inspect()` |
-|---|---|---|
-| 外键 `ON DELETE` | `CASCADE` / `SET NULL` 都能读 | `options` 返回 `{}`，**规则丢失** |
-| 部分索引 `WHERE` | 从 `sqlite_master.sql` 取 | 只能从 `dialect_options['sqlite_where']` 取，那本身是方言选项 |
+### 3.2 三份文档与文档版本链
 
-外键级联是本项目最重要的一条判据（`current_version_id` 是 `SET NULL`、
-`document_id` 是 `CASCADE`，写错任一都会留下孤儿或误删，且不报错）。
-换过去之后两边快照都不含 `ondelete`，`diff_snapshots` 会判它们相等——
-不是判据变松，是**这一项消失**。
+一个**方案**下挂 PRD、接口文档、提示词三份**文档**。正文只住 `document_versions`（**文档版本**是正文的一次不可变快照），`documents` 只剩身份 + `current_version_id` 指针，读当前一律 `LEFT JOIN`。
 
-### 3.4 清理的判据：三条同时成立才动
+- 整篇生成 = 追加新版本（不再删下游）；`optimize` / `clarify` / 手改 = 就地改当前版本；checkpoint / **恢复** = 追加新版本。当前版本指针只前进不回拨，历史只增不改。
+- 环形外键：先空指针插 `documents` 行 → 插版本 → 回填指针（`_ensure_document()`）。
+- 写正文唯一入口是生成任务成功收尾（`_write_document` → `commit_generated`）：正文 + 待确认清单 + 回执同批写入，失败不覆写正文；新增产出正文的路径接进 `_build_event_stream` 的 `done`。
+- 上游正文变化（含手改，按 `content_sha`）只让下游 `stale=true` 亮黄条：不删除、仍可交付、只汇总提示不硬拦。
+- 交付走 `GET /api/solutions/{id}/export`：ZIP = 三份 md + `README.md`；目录名消毒、上限 50MB、CSV 带 BOM。
 
-1. 没有任何代码读它（`grep` 可证，不是"我觉得没人用"）；
+### 3.3 生成任务与 SSE 契约
+
+**生成任务**是一次管线运行，有独立生命周期，与「用户是否正连着看」解耦：`POST /api/jobs` 建任务 + `GET /{id}/stream` 订阅；`detach()` 只退订不取消，同一任务绝不并发订阅两次。
+
+- 阶段：需求澄清 → 大纲 → 撰写 → 审核 → 改写。两条并行信息轨是**过程字** `chunk`（可能缺标题）与**权威正文** `part`（整段覆盖该章、`index` 可乱序）；混用会把审核 JSON 写进正文。
+- SSE 分帧唯一实现 `backend/src/backend/api/sse.py::make_sse_generator`（已带 `X-Accel-Buffering: no`）：事件 `status/chunk/part/stage/review/done/error` + 末尾 `data: [DONE]`；`: ping` 心跳只能走这个出口；服务层与路由层两层异常兜底；前端用原生 `fetch` + `ReadableStream`。
+- 重连先收快照再接实时流，恢复正文 = `finalized_text + live_buffer`；失败不覆写正文；**被取代**与**已取消**是两种不同终局；只有 `high` 严重度触发改写、改写后不复审。
+- 运行态以内存为权威：`_RUNTIMES` / `JobBus` / runtime 配置快照（5 秒 TTL）/ 固定连接池都在进程内；请求参数、配置/供应商快照与技能包身份在建任务那一刻一次写全，收尾不再另取供应商四格；进度按 300ms / 4KB 合并写 `draft_content / completed_sections / phase / pending_items`。
+- token 计量以 `ContextVar` 挂成环境值（`backend/src/backend/services/llm_meter.py`）：观测层挂在模型调用之外，**业务层调用方式不变**；没有任务上下文时计量自然无操作。预算检查在 `astream_text` 开头、记账在末尾，超顶复用 `INVALID_REQUEST`。
+- 排空顺序固定：就绪探针转 503 → 停止接收新任务 → 最多等 30 秒（等待上限、不是必须等满）→ 超时者标为已取消落终态并向订阅者发错误事件 → flush 日志退出。`stop_grace_period` 必须大于 30 秒。排空是**可直接调用的单元**（不起子进程、不发真信号），用例毫秒级验证。
+- 启动回收孤儿任务（`reap_orphans`），把 `running` 收成确定终态，重启不留「进行中」的尸体。
+
+### 3.4 技能包
+
+`skills/` 是管线知识的唯一来源：归属与资源由 `skill.yaml` 自述（`applies_to` / `references[]`），加包 = 加目录、不加中心注册表；唯一入口 `load_skill_artifacts(kind)`，规范整段注入、不检索，改写 / 澄清按白名单 `format_rewrite_reference`。缺件返回 `None` 降级，且降级要在回执上看得见。
+
+部署态把技能包随代码打进镜像、不挂载，`PRDWRIGHT_SKILLS_STRICT=true` 保持开启：技能包缺失时启动直接失败，而不是静默退回内置提示词。理由只有一条：**镜像即完整交付物**，挂载会让「镜像里的代码」与「挂载进来的技能包」版本不一致成为可能，而就绪探针检查的恰好是「技能包可加载」。
+
+### 3.5 鉴权与配额
+
+- 会话：随机 token 存库 + HttpOnly Cookie，`TokenIssuer` 封装以便替换；密码 `hashlib.scrypt` + 独立 salt；不上 JWT。单点登录 `replace_for_user` 在一条事务里先删该用户全部旧会话再插入。邀请码注册（`invite_codes.max_uses` 0 = 不限，首启播种 `INVITE_CODE`）。
+- 门禁 = 中间件默认拦截 + 白名单（`/`、`/health`、`/api/auth/*`、`/api/conversation/questions`，以及 `/healthz` / `/readyz` 两条探针）；中间件必须是纯 ASGI 类；`AUTH_ENABLED` 默认 true。越权 / 不存在一律 404。未登录禁止创建任务：可浏览入口页，点入口即弹登录框。
+- 主密钥只以文件形式存在（不在数据库、不在环境变量），由 `scripts/keygen/generate_keys.py` 生成与轮换；**密钥条目**密文入库、面板只回 `key_present`；轮换先重加密再换主密钥，主密钥保留每一把。
+- **配额**给单个用户设用量上限；额度检查与记账在 `astream_text` 两端。管理端真边界是后端 `require_admin`，前端门禁只是体验；**审计日志**有意不随用户删除而级联清理。
+- 日志唯一入口 `configure_logging`，双写轮转文件（永开）与 `app_logs`（可关）；`request_id` 由格式化器从 contextvar 现取。
+
+### 3.6 部署形态（v9 落盘）
+
+`deploy/` 一个目录装全部部署件：`deploy/compose.yaml`（唯一编排，全平台一份）、`deploy/.env.example`、`deploy/Makefile`、`deploy/backup.py`、`deploy/backups/`、`deploy/docker/`、`deploy/README.md`。宿主只发布 `80`，Nginx 唯一对外：`/` → 用户端 dist、`/admin/` → 管理端 dist、`/api/` 与两条探针 → `api:8000`（只 `expose` 不 `ports`）。**单域名 + 路径前缀**的硬理由是 Cookie host-only，跨子域会「后台登录了、调 API 仍 401」；`CORS_ORIGINS` 设空串。Nginx SSE 三行（`proxy_buffering off` / `read_timeout 1800s` / `gzip off`）+ 服务端 `: ping` 心跳；`assets/*` 长缓存、`index.html` 必须 `no-store`。
+
+- **两个镜像**：应用镜像（`python:3.12-slim`，多阶段，`uv sync --frozen --no-dev`，`CMD` 写死 `--workers 1`）+ 静态站点镜像（`nginx:alpine`，node 构建两个前端）。`uv sync` 与 `npm install` 缓存键不同、两进程重启语义不同；合并成单容器会让「重启 Nginx 杀掉在途任务」。
+- **单 worker 硬约束**：`_RUNTIMES` / `JobBus` / runtime 配置快照 / 固定连接池 / 技能包缓存都在进程内，多 worker 会让任务与 SSE 分属不同进程。不提供环境变量覆盖、不写 `replicas`、不引 gunicorn。
+- **三个命名卷**：数据（SQLite 库 + `-wal` / `-shm` 边车）、日志、密钥（只读 `master.key`）。命名卷是**语义问题不是配置问题**：WAL 的 `-shm` 是 mmap 共享内存，Docker Desktop for Windows 的 bind mount 不支持 SQLite 需要的文件锁语义，症状是随机 `disk I/O error` 或静默丢最近几分钟写入。宿主目录挂载 + Windows 专用覆盖文件因此被否决；实时库不能双击查看，可见性由备份产物补上。
+- **两个探针**：`GET /healthz` 恒 200、不查库不查配置不发外部请求（判生死）；`GET /readyz` 判「库可写」且「技能包可加载」，任一不满足返回 503 且响应体指出是哪一项（判就绪）。两者都进认证白名单，漏了会表现为「容器永远不健康」。`/health` 语义不变（恒 200、`status` 只有 `ok` / `degraded`、三项体检），它是人看的详情页，不是机器闸门；探针也不查模型供应商配置（依赖外部网络、高频会烧额度会误报）。
+- **排空**：见 §3.3。就绪探针转 503 给「摘流」留时间，新的生成请求返回明确失败而不是排进一个马上要死的队列。
+- **备份**：一条命令产出带日期的 `.db` 与同名 `.sha256`，落 `deploy/backups/`；SQLite 在线备份 `VACUUM INTO`（不能 `cp`，开了 WAL 会静默缺最近写入），自检 `integrity_check` = `ok` + 读得到 `alembic_version` + sha256。迁移之前必须先有备份，备份没做成不许起栈；删列与改类型后的回滚方式是恢复备份，不是 `git revert`。恢复演练要求整段见附录 C。
+- 启动脚本以 root 校正数据 / 日志目录属主后降权 `exec`，代码层只读；迁移只由 `lifespan` 跑一次（C-V9-4）。主密钥缺失即拒绝启动并打印生成指引，绝不自动生成。`PRDWRIGHT_MASTER_KEY_PATH` 只经 `os.environ` 读，`.env` 文件读不到，必须走 `EnvironmentFile`；`PRDWRIGHT_SKILLS_DIR` 走 `lookup_env`。日志双写 stdout + 日志卷。
+- 镜像 tag 用 `git describe`；CI **只构建不推送**，整栈冒烟轮询 `/readyz` 直到响应体 `status == "ready"`（只看 200 会假绿），并断言 api 的 PID 1 以非 root uid 运行。
+
+### 3.7 唯一部署后端：SQLite
+
+数据库固定是数据命名卷里的那个 SQLite 文件，编排里只有 `api` 与 `web` 两个服务，没有第三个数据库容器，也没有留给它的端口或卷。可移植性四模块边界 = `core/database.py`（连哪个库）/ `core/dialect.py`（语句）/ `core/types.py`（列声明）/ `core/schema.py`（迁移）；MySQL 相关分支是遗留代码（未验收、不再扩展），不计划引入其它后端。改动遗留 MySQL 分支时仍守三条：`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+
+结构对拍保留 `PRAGMA` 实现（实测 `sqlalchemy.inspect` 会丢外键 `ON DELETE`，那会让判据消失而不是变宽松）；完整方言台账与 C-D1~C-D6 在附录 A，库结构勘察实测数据在附录 B。
+
+---
+
+## 4. 契约
+
+### 4.1 C-V9-1 ~ C-V9-10（部署与运行形态）
+
+| # | 契约 | 破了会怎样 |
+| --- | --- | --- |
+| **C-V9-1** | 宿主只发布 `80`；`api` 的 `8000` 只 `expose` 不 `ports` | v7 的「后端只听回环」退化成「后端直接对外」，CORS 与 Cookie 行为随之改变 |
+| **C-V9-2** | `api` 副本恒为 1，`--workers 1` 写死在镜像 `CMD`，不提供覆盖 | 任务与 SSE 分属不同进程，客户端永远等不到输出 |
+| **C-V9-3** | 数据、密钥、日志**必须是命名卷**，禁止 bind mount 宿主目录 | 随机 `disk I/O error`、静默丢最近写入，Windows 上必现 |
+| **C-V9-4** | 迁移只在 `lifespan` 里跑一次，启动脚本不跑迁移 | 两个入口各跑一次，迁移日志与锁行为都不可预测 |
+| **C-V9-5** | 技能包打进镜像，不挂载；`PRDWRIGHT_SKILLS_STRICT=true` | 镜像与技能包版本可能不一致，就绪探针失去意义 |
+| **C-V9-6** | 主密钥缺失即拒绝启动，绝不自动生成 | 换机器时旧密文永久解不开，且当场无人发现 |
+| **C-V9-7** | `/health` 语义不变（恒 200）；探针一律用 `/healthz` / `/readyz` | 可降级状态被当成故障，容器被反复重启 |
+| **C-V9-8** | 排空窗口 30 秒；超时的在途任务落「已取消」终态，不留 `running` | 每次重启都留尸体，只能等下一条启动的 `reap_orphans` 收尾 |
+| **C-V9-9** | 备份以 SQLite 在线备份（`VACUUM INTO`）产出，产物必须有 `sha256` 且自检通过 | 「备份完成」变成一句没有证据的话 |
+| **C-V9-10** | CI 只构建镜像，不推送；tag 用 `git describe` | 没有凭据通道的推送会把 CI 变成不可复现的猜谜 |
+
+### 4.2 C-D1 ~ C-D6（方言可移植性）
+
+| 契约 | 内容 | 破了会怎样 |
+| --- | --- | --- |
+| **C-D1** | `upsert` 的冲突目标只在「该表只有一个唯一约束」时等价。新增表若有两个以上唯一约束，MySQL 下 `ON DUPLICATE KEY` 会命中非目标约束 | 静默写错行。三个现有调用点都已核对：`documents` 仅 `(solution_id, kind)`、`chat_sessions` 仅 `ux_chat_sessions_thread`、`system_config` 仅主键 |
+| **C-D2** | 布尔列一律登记 `BOOLEAN_COLUMNS`；`is_` / `has_` 命名不作为判据 | 类型归一漏一项 → 幻影迁移。`test_schema_parity` 已在守这条 |
+| **C-D3** | 时间列只允许两种形态：业务表 26 字符无 `Z`、`app_logs.ts` 24 字符带 `Z`。**`+00:00Z` 零容忍** | 勘察已捞出 16 行脏格式；转 `DATETIME` 时解析失败 |
+| **C-D4** | 结构对拍必须在两种库上都能跑（SQLite 现状 + 将来的目标库），不接受「只在 SQLite 上成立」的实现 | D6 白做 |
+| **C-D5** | 搜索的大小写行为必须显式（`lower()` 或方言 `ILIKE`），不依赖库默认 | 换库后「搜 admin 搜不到 Admin」，被当成业务 bug 报上来 |
+| **C-D6** | 业务不变量（「至多一个 running」「额度不超过上限」）不能只靠「单写者」保证。换库前每条都必须落成唯一约束、条件更新或显式锁 | 并发下静默出现两条 `running`、额度被击穿。这类错不报错，只在对账时才发现 |
+
+### 4.3 契约的落点
+
+- 完整论证在附录 A（方言台账）与附录 B（库结构实测）；分层守卫 C1~C4 与 60KB 闸门在 [`docs/agents/conventions.md`](../agents/conventions.md) §2。路径即承诺是普通纪律：文档写出的每个路径都要看得见（[`../../AGENTS.md`](../../AGENTS.md) 纪律 4，复核方法见 `docs/agents/conventions.md` §1），写完逐条 `Test-Path` + `git status` 复核。
+- 改探针或排空，必须同步改本文 §3.3 / §3.6 与 §4.1 的对应契约行；**一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后。
+
+---
+
+## 5. 取舍
+
+### 5.1 接受的风险（v9 §8.1）
+
+| 风险 | 为什么接受 | 缓解 |
+| --- | --- | --- |
+| 单副本 → 重启必然中断在途任务 | 多副本要先外置 `_RUNTIMES` / `JobBus`，那是另一版的工作 | 排空 + `stop_grace_period` 大于 30 秒（C-V9-8） |
+| 命名卷不能直接双击查看 | 它是 SQLite 在 Windows 上不坏的**唯一**做法 | 备份产物落宿主目录，可见性由它补上 |
+| 镜像体积（含 langchain 全家桶） | 多阶段构建已把构建工具剥掉 | 只装 `--no-dev`；必要时按协议拆镜像 |
+| 容器内时区是 UTC | 项目本来就按 UTC 存（`backend/src/backend/core/clock.py`） | 显式 `TZ=UTC`，不继承宿主机 |
+| 就绪探针不覆盖「模型供应商配置是否可用」 | 依赖外部网络，探针高频触发会烧额度、会误报 | 留给 `/health` 三项体检与人工判断 |
+| 容器冒烟不跑业务链路 | 登录 → 生成的端到端在 CI 上不稳定（真模型调用） | 冒烟覆盖「可达」，业务链路由既有用例守 |
+
+### 5.2 否决的方案（v9 §8.2）
+
+| 方案 | 否决理由 |
+| --- | --- |
+| 单容器塞 Nginx + uvicorn（supervisord） | 重启 Nginx 会杀掉生成任务；两个进程的失败语义不同 |
+| 三个容器（再加一个 DB 容器） | 数据库固定是 SQLite 文件库，独立 DB 容器没有对象 |
+| 换数据库后端 | 维护者已决定固定 SQLite：没有第二个部署形态要支持，换库要连迁移链、结构对拍与备份链一起重做，收益不抵成本 |
+| Windows 专用 compose + 宿主目录挂载 | bind mount 在 Windows 上是语义问题不是配置问题；两份编排会让「哪些目录要持久化」写两遍 |
+| 技能包挂载进容器 | 让「镜像与技能包版本不一致」成为可能，而这正是就绪探针要保证的事 |
+| 用 `/health` 当 `healthcheck` | 恒 200，等于没配；技能包缺失时会把还能用的容器反复踢掉 |
+| 自动生成主密钥 | 换机时旧密文永久解不开，且没人会发现 |
+| 容器里跑两个前端 dev server / 热重载 | 开发体验不如本机；容器只承载部署形态 |
+| 系统级 `sqlite3` CLI 做备份 | 多一个「目标机上装没装」的变量；用项目自己的 venv，脚本还能顺手做自检 |
+
+### 5.3 风险登记
+
+| 风险 | 缓解 |
+| --- | --- |
+| 排空窗口不够长，任务被硬杀 | `stop_grace_period` 大于 30 秒；实测一条真实长任务校准 |
+| 就绪探针漏挂白名单 → 容器永远不健康 | 探针端点与白名单在同一个提交里改，用例钉住「未登录访问返回 200/503 而不是 401」 |
+| 主密钥路径没进进程环境 | 启动即失败并给出下一步命令（C-V9-6），而不是降级到「未配置密钥」继续跑 |
+| 卷被 `docker compose down -v` 删掉 | 文档把 `-v` 标为危险命令；备份产物在宿主目录，不在卷里 |
+
+### 5.4 拆分依据：取消 1200 行阈值，改以接缝为依据
+
+**取消单文件 >1200 行阈值、改以接缝为依据，取代 v8 附录 A §5 的 W1 口径。** 文件边界按「对外 / 内部」的**接缝**划分：包入口只露正常动作，包内互引私有名合法；行数不是判据，接缝才是。七个实现文件归入同一内部包即可，不必合并回单个大文件。原文「拆不动的就不拆——这条优先于『压到 1200 以内』」的让步随之作废，因为它预设了行数目标存在。`backend/tests/test_layering.py` 里 `_CONTRACT_LINE_LIMIT = 1200` 是 `api/schemas` 契约模型包既有的活跃护栏，管的是「拆完之后别又长回一行」，与「拿行数当拆分依据」是两回事，本轮不动它。
+
+### 5.5 清理判据（三条同时成立才动）
+
+1. 没有任何代码读它（`grep` 可证，不是「我觉得没人用」）；
 2. 删掉它不会让用例变红；
 3. 删掉它不需要改业务逻辑（需要改逻辑的属于重构，不属于清理）。
 
-「被文档说是死的」不算证据——附录 A 里 `AppDialog.vue` 就是被旧文档写成"零外部引用"、
-实际仍被 import 的例子。逐项清单、顺序与不可逆点见附录 A。
+「被文档说是死的」不算证据；每次删除前自己 `grep` 一次。反向守卫在 `backend/tests/test_cleanup_dead_code.py`：它用 `assert not hasattr` 守住「名字回来就红」，将来真需要同名能力时连守卫对应的一行一起改，而不是把守卫注释掉。
+
+### 5.6 数字与基线口径
+
+文档里的**数字先复核再写**，对外动作与名字数量、入口模式同步点数量一律以实测为准，不沿用旧报告里的约数；**用例基线现取现算**（`cd backend && uv run pytest --collect-only -q`），连旧文档里「文本计数 / 参数化展开差额」整段一起重算。**加列不是单向门；单向门指删列 / 退役列**，回滚靠备份库文件、不设兼容期。全流程离线、零 LLM Key。本轮终检实测口径见 [`docs/agents/conventions.md`](../agents/conventions.md) §10。
+
+### 5.7 生成任务收口后的取舍
+
+- **任务单不落库、重启中断**：**造单**是公开动作，产出无 id、不可变的任务单，不落库、不顶替旧任务、不发事件；**登记**才在一个事务里落库并当场查「方案是否仍存在」。运行态仍以内存为权威，单副本重启必然中断在途任务，数据库行只是不可变数据的完整投影，不保证续跑（见 §2.2 / §5.1）。新增列属于**加列**，不是删列 / 退役列那种单向门。
+- **深还原 `thaw_object` 的边界**：任务单内部深冻结以保持不可变；跨到外部 API（事件流、DB 投影、chat 输入轮次）时统一经 `thaw_object` 递归还原成普通 dict / list，不用浅 `dict()` 回退。嵌套 `pending_items.sections` 与 `chat_tool_result.answers` 因此在提示词、库行与落库轮次里都保持原结构。
+- **对外形状按实测收口**：`job_service.__all__` 实测 9 个正常动作，新三步与「等待在途」各有自己的公开面；再导出块删空、不设旧名兼容期，排空留在包外。数字口径不沿用旧报告的约数（见 §5.6）。
+- **守卫落在行为接缝上**：反向守卫守住「死符号与旧入口不许回来」，分层守卫守住既有契约模型行数护栏，终检守卫守住「文档写出的路径可见、无悬空引用」。测试只跨「造单 → 登记 → 派发 → 订阅」主接缝断言外部可观察结果。
+
+### 5.8 本次文档重组的决策
+
+被否决的「保留按层演进史」及理由写在 [`docs/adr/0001-architecture-docs-consolidation.md`](../adr/0001-architecture-docs-consolidation.md)；决策档案编号从 0001 重新开始，旧 `ADR-001~099` 只在 git 历史里。
 
 ---
 
-## 4 契约
+## 6. 九层摘要表（演进索引）
 
-| # | 契约 | 破了会怎样 |
-|---|---|---|
-| **C-V8-1** | 大段文本（文档正文、草稿、章节清单）上限 **60KB 字节**；闸门在 `core/limits.py`，写入前报错 | 没有这条，超长内容会在目标库写入那一刻以 `Data too long` 失败，错误指向数据库而不是"内容太长" |
-| **C-V8-2** | 删列与改类型**不可逆**：回滚方式是恢复备份，不是 `git revert` | 回退代码后旧代码读不到列，启动即失败 |
-| **C-V8-3** | 文档里写出的仓库路径必须 `ls` 可见；删掉的章节不许留悬空引用 | 读者照文档找文件只会撞墙——这是附录 A §4 那个坑的第二次现场 |
+> 只写主题与关键取舍；阶段规模、界碑与失真清单在 [`README.md`](./README.md)（时间线真源），此处不重复口径。九层目录已删除，这里的九行是唯一的演进索引。
 
-方言收敛自身的契约是 **C-D1~C-D6**，写在附录 B 第 4 节，本文不重复。
-
----
-
-## 5 取舍与风险
-
-### 接受的风险
-
-| 风险 | 为什么接受 | 缓解 |
-|---|---|---|
-| 结构对拍仍只在 SQLite 上成立 | 换 inspector 会让级联规则这项判据消失，比"依赖私有接口"更糟 | 它是测试与启动校验工具，不在业务路径上；换库那次按目标库补读取实现（附录 B §6 末段） |
-| 收敛只做到「接口干净」，不保证在目标库上真能跑 | 目标库未定，早做只能靠猜，猜错的表现为"上线那天才炸" | 台账在附录 B §3.6，换库时按它执行 |
-| 删列不可逆 | 保留的成本天天发生，删除的成本只发生一次 | 备份 + 自检 + 全量用例在同一个窗口内完成（附录 A §6 / §9） |
-| 悬空路径台账在本层没关账 | 补一套只为存档的裸机模板会让两份真相并存 | 台账留在附录 A §4，谁做部署形态谁关账 |
-
-### 否决的方案
-
-| 方案 | 否决理由 |
-|---|---|
-| 结构对拍换 `sqlalchemy.inspect()` | 实测丢外键 `ON DELETE`（§3.3）：判据消失，不是变宽松 |
-| 全库把 `Text` 换成 `String(n)`，一次性通用 | 与现有 SQLite 基线直接冲突，等于立刻做一次全表迁移；且 n 依赖生产数据，本地库量不出来 |
-| 退役列标 `deprecated` 留着备查 | 「备查」这个用途从未兑现（无导出、无页面读它）；保留的成本是每人每天一次判断 |
-| 给 `deploy/` 补一套只为存档的裸机模板 | 两份真相并存，且没人会照着它部署（附录 A §4） |
-
-**风险登记**
-
-| 风险 | 缓解 |
-|---|---|
-| 删列窗口内备份没做成 | 三步同一窗口：`VACUUM INTO` + 自检 → 迁移 → 全量用例；备份没做成不许跑迁移 |
-| 清理删出"看起来能跑"的残骸 | 每次删除前自己 `grep` 一次，不信旧文档的「零引用」结论 |
-| 文档再次出现悬空路径 | 收口时逐条 `ls` + `git status` 复核（C-V8-3） |
-
-## 附录 A：死代码与退役内容清理（原 v8 的清理清单，已并入）
-
-> 正文由该专题原文逐字移入，仅标题降两级以适应附录层级；内部交叉引用已改指本文件对应附录。
-
-> 本文件是 **T18.8** 的执行清单。目标不是"代码好看"，是**仓库里不存在"读不到、也删不掉"的东西**。
-> 为什么单列一个阶段：这类内容的成本不在运行时，在读代码的人——每个新人都要先判断
-> "这一列/这个组件还能不能用"，判断成本天天发生，而删掉它的成本只发生一次。
->
-> ⚠️ 本清单于 2026-11-02 按工作区实测重审过一次：原 §2 的四项（A1~A4）判据仍成立，
-> 但**漏了 6 类**，且验收基线写错了（1006）。下方 §2 已补全，§6 已改实测值。
+| 层 | 主题 | 关键取舍 |
+| --- | --- | --- |
+| **v1** | 一次性流程原型 | 只验证「一段需求能否生成三份文档」；会话状态在内存 dict、测试列为范围外，不为长期使用做准备 |
+| **v2** | 能用（另起炉灶重写） | 账号 / 持久化 / UI 体系 / 入口与生成质量先做，护栏（CI、错误契约、流式去重）最后补；`AppV2` 取代单体 `App.vue` |
+| **v3** | 放心用 | 长文续传与自愈靠生成任务骨架；观测与预算走环境计量器，业务层调用方式不变；技能包成为管线知识唯一来源 |
+| **v4** | 平台化运营（管理端） | 管理员身份由服务端裁决、前端门禁只是体验；日志可查，但审计日志有意不随用户删除级联 |
+| **v5** | 测试重构 | 用例数不是指标、能抓 bug 才算；共享状态治理与 SSE 分帧唯一实现收口 |
+| **v6** | 数据层重构（SQLModel） | 手写 `sqlite3` + 自建连接池换成 SQLModel + Alembic；环形外键靠「先空指针插行再回填」 |
+| **v7** | 部署与上线 | 单域名 + 路径前缀、单 worker、`VACUUM INTO` 备份、回滚 = 恢复备份而非反向迁移；恢复演练是验收项（附录 C） |
+| **v8** | 方言收敛与清理 | 品牌感知收进 `core/dialect.py` 一个模块；结构对拍保留 `PRAGMA`（实测否决 inspector）；删列不可逆、靠备份 |
+| **v9** | 容器化 | 两个镜像 + 三个命名卷 + 两个探针 + 一次可预期的排空；固定 SQLite 单后端，否决宿主目录挂载与多副本 |
 
 ---
 
-#### 1 判据
+## 附录索引
 
-一个东西算"死"，必须同时满足三条，缺一条就不动：
-
-1. **没有任何代码读它**（`grep` 可证，不是"我觉得没人用"）；
-2. **删掉它不会让用例变红**（若有，必须在清单里写明为什么仍要删、用例怎么改）；
-3. **删掉它不需要改业务逻辑**（需要改逻辑的，属于重构，不属于清理）。
-
-第 3 条是边界：`paste_prd_text` / `draft_prd_text` 这类列看起来"老"，但它们**仍在
-`schemas.py` 与 `solution_service.py` 里读写**，不满足第 1 条，因此不在本清单内。
-
-⚠️ **"被文档说是死的"不算证据**：`AppDialog.vue` 被 `v2/ARCHITECTURE.md` 写成
-"零外部引用"，实际 `ReviewStage.vue:7` 正在 import 它；照文档删会构建失败。每次删除前必须自己 grep。
+以下三段是承重专题，按原文整段搬入，不留在 git 历史里当唯一依据：附录 A（v8 附录 B，方言可移植性台账与 C-D1~C-D6）、附录 B（v8 附录 D，库结构勘察实测数据与列长度取值来源）、附录 C（v7 §8.5，恢复演练要求）。专题里出现的实施期用例基线数字属当时口径，现行基线现取现算（见 §5.6）。
 
 ---
 
-#### 2 已确认清单（可删）
+## 附录 A：方言可移植性台账与 C-D1~C-D6
 
-| # | 项 | 证据 | 处置 | 可逆 |
-|---|---|---|---|---|
-| **A1** | `solutions.data` 列 | `models.py:229`；`solution_repo.py:119` 写空串、`update` 不写；`solution_service` 文件头写「不再写、不再读」 | Alembic `drop_column` + 删模型字段 · **已完成（#8）** | **否** |
-| **A2** | `model_providers.builtin` 列 | `models.py:625-627`「v19 起一律为 0，代码不再读取」；全仓零查询 | Alembic `drop_column` + 删模型字段 · **已完成（#9）** | **否** |
-| **A3** | `frontend/src/components/ui/AppToast.vue` | 全仓 `grep AppToast` 零命中（含 kebab-case 与全局注册两条逃逸路径） | 删文件 | 是 |
-| **A4** | `frontend/src/components/ui/AppEmpty.vue` | 同上，零命中 | 删文件 | 是 |
-| **A5** | `frontend/src/components/ui/AppInput.vue` | **原清单漏项**。零 importer；`src` 内唯一命中是 `fieldStyles.ts:9` 的**注释** | 删文件 | 是 |
-| **A6** | `services/job_service.py:363 cancel_for_solution` | **原清单漏项**。零调用；`delete_solution_and_cancel_jobs`（`:411-424`）把同样三步内联重写了一遍；3 处注释仍写「删除方案时必须走这里」 | 删函数 + 同步 3 处注释的指向 | 是 |
-| **A7** | 10 个零提及的符号 | `normalize_stage`、`is_valid_role`（`core/chat_kinds.py:44/59`）、`master_key_exists`（`core/crypto.py:51`）、`is_present`（`core/secrets.py:119`）、`current_engine`（`core/engine.py:154`）、`config_service_window`、`input_ceiling_for`（`core/runtime_config.py:465/500`）、`ClearForSolution.clear_for_solution`（`chat_session_repo.py:105`）、`ChatTurnRepository.has_turns`（`chat_turn_repo.py:219`）、`_PLACEHOLDER_URL`（`core/schema.py:53`） | 删 | 是 |
-| **A8** | 8 条未使用 import（ruff F401 已确认真无消费者） | `api/conversation.py:11`、`api/schemas/`（拆分前为单文件 19/22 行）、`core/engine.py:49/50`、`core/runtime_config.py:54`、`repositories/document_repo.py:34`、`services/conversation_service.py:42` | 删 | 是 |
-| **A9** | `backend/src/backend/__init__.py` 的第二个 FastAPI app + `pyproject.toml:36` 坏入口点 | `__init__.py:1-7` 建了 `app` 与 `/health`，全仓 `from backend import app` 零命中；真 app 在 `main.py`、`/health` 在 `api/health.py:144`；`pyproject.toml:36` 的 `backend = "backend:main"` 指向不存在的属性（`hasattr(backend,'main')` 实测 False） | 删 app 代码块；入口点最终**整块删除**（见下方补记） | 是 |
-| **A10** | 前端 6 项：3 个孤儿资源 + 2 个零引用函数 + 1 个死类型 | `assets/main.css`（0 importer）、`assets/base.css`（仅被 main.css 引用 → 级联死）、`assets/logo.svg`（0 命中，注意 `grep logo` 会命中 `logout` 是假阳性）、`api.ts:123 getQuestions()`、`api.ts:887 generatePrdStream()`、`types/index.ts:457 SessionData`（**不是** `:1155` 的 `SessionDataV2`，那个活着） | 删 | 是 |
-
-##### A9 补记：入口点不是改对值就完事，它有两层坑
-
-层一（本次执行中修掉）：`backend = "backend:main"` 指向包里不存在的属性 —— 只有真按脚本
-启动才炸 `AttributeError`，所以长期没人碰。
-
-层二（#4 收口之后才浮出来）：把值改成 `backend.main:app`，属性**确实解析得到**了，票面验收
-「指向真实存在的属性」达成；但 console script 是**零参调用**入口对象，而 FastAPI 实例的
-`__call__(scope, receive, send)` 要服务器递来的三个参数，于是 `uv run backend` 变成
-`TypeError: FastAPI.__call__() missing 3 required positional arguments`。
-
-根因不是「值写错」，是**把 web 应用当成了可执行命令**。应用只由服务器加载
-（`uvicorn backend.main:app`，README / 部署 / CI 一直走这条）。最终处置：**把
-`[project.scripts]` 整块删除**——全仓零使用者，留着它等于给下一个人（或下一个 agent）
-留一个照 `pyproject.toml` 一敲就报错的陷阱；不包 `serve()` 是因为那会让「怎么启动」
-多出第二种说法。守卫落在 `tests/test_entrypoint.py`：一条钉住「别再声明 backend 命令」，
-一条对**任何**现存命令做 `signature().bind()` 零参可调用性检查（同时覆盖旧坑与新坑）。
-
-##### A1 / A2 的删除障碍（必须一起改）
-
-- `models.py:665` 的 `("model_providers","builtin")` 在 `BOOLEAN_COLUMNS` 白名单里，
-  该集合被 `migrations/env.py:41,90`、`core/schema_snapshot.py:41,56`、`tests/test_schema_parity.py:23,133` 读。
-  **只删字段不删这一行，parity 用例立刻红。**
-- `tests/conftest.py:291` 的 `data.pop("builtin", None)` 是给这一列做的兼容垫片，删列后可一并删。
-- `tests/test_text_limits.py:109` 手写 `data=""` 构造 `Solution(...)`，删列后这处构造要改。
-
-##### 为什么 A1 值得删，而不是"留着当历史备份"
-
-1. **"留着备查"这个用途从未兑现**（无导出功能、无管理端页面读它）；
-2. **它会在换库时变成额外决策**（附录 B §3.3 把它列进 `MEDIUMTEXT` 变体名单，理由是"不知道它会多大"）；
-3. **结构对拍要为它买单**（多一列 = `diff_snapshots` 多一条可能的假阳性）。
-
-另有一处**文档自相矛盾**需在删列时一并修：`core/limits.py:6` 仍把 `solutions.data` 当作受
-60KB 闸门约束的四列之一，而 `models.py:228` 明写"闸门不覆盖它"——且 `ensure_text_within_limit`
-对该列**零调用**。
-
----
-
-#### 3 需人判断（判据 1 成立、2 不成立：只被测试引用，或属公共 API）
-
-**后端 7 项**
-
-| 项 | 证据 | 为什么不能一刀切 |
-|---|---|---|
-| `document_store.get_document` | 生产零调用（内部走 `_read_document`），22 处测试调用 | 删要连 22 处用例一起改 |
-| `review_whole_document` | 生产零调用，docstring 自己写"面向用户的生成链路不要用"；4 处测试调用 | 看着像"给测试留的第二实现" |
-| `solution_service.delete_solution` | 生产零调用（路由走 `job_service.delete_solution_and_cancel_jobs`），1 处测试调用 | 同上 |
-| `DOWNSTREAM_KINDS` | 零代码引用；`v3/ARCHITECTURE.md:209` 把它当"依赖失效"语义的锚点 | 当文档用还是当数据用 |
-| `langchain` 顶层依赖 | `pyproject.toml:13`，backend/src 零 import（只用 `langchain_core`/`langchain_openai`）；`uv.lock` 反向依赖里只有 backend 需要它 | 删前须确认没有隐式 `import langchain` 的插件路径 |
-| `python-dotenv` | 零 import，`core/secrets.py:42-48` 明写"刻意不用 `dotenv_values`"；但 `pydantic-settings`/`uvicorn` 依赖它，删声明不会从环境消失 | 收益低 |
-| `api/config.py` 空路由 | 0 个端点，被 `main.py:20/240` import，`config.py:10` 挂 TODO | 自述"给将来留的接口" |
-
-**前端 28 项**：全部是"源码零引用、只有 `__tests__` 存活"（`api.ts` 的 8 个流式接口、
-`runSubscriptions.detach`、store 的若干导出、`utils/workflow.ts` 的一组守卫函数等）。
-其中 `frontend/src/__tests__/AppV2.spec.ts:99-101` 的注释**自己承认**那 8 个流式接口
-"应用里已经没有任何调用点"。另：35 处只是 `export` 关键字多余（声明本身活着），删的是 `export` 二字不是代码。
-
-**两类明确不删**：
-
-- `resetForTests`（`runSubscriptions.ts:53`）——测试隔离钩子，属设计如此，判据 1 不适用；
-- `pymysql`（`pyproject.toml:24`）——零 import，但 SQLAlchemy 按 `mysql+pymysql` **动态加载驱动**，
-  删了 MySQL 部署第一次连接就报 `No module named 'pymysql'`（证据 `tests/test_database_url.py:33,84`）。
-
----
-
-#### 4 文档承诺、但仓库里不存在的路径
-
-这一类不是死代码，是**文档承诺与仓库现实不一致**——更容易误导人：读者照着文档去 `deploy/` 找模板，会以为是自己 clone 错了。
-
-原 §3 只记了 3 份模板；**实测是整个"部署交付物"层从未落盘**：
-
-| 出处 | 承诺的路径 | 实际 |
-|---|---|---|
-| `v7/roadmap.md:57,58,59,60`、`v7/ARCHITECTURE.md:846-849`、`v7/README.md:75` | `deploy/backend.env.example`、`deploy/systemd/prdwright.service`、`deploy/nginx/prdwright.conf`、`scripts/deploy/{backup,restore,release,smoke}.py` | **v8 当时未落盘**（连 `deploy/` 目录都没有；`scripts/` 下只有 `keygen/generate_keys.py`）。**v9 已交付**：容器形态的部署件落在 `deploy/`，CI 冒烟落在 `scripts/deploy/smoke.sh` |
-| 已在本轮清理中删除 | `docs/plans/`、`docs/artifacts/` | 目录已删；根 `README.md` 与历史档案索引里的引用已同步改写（历史档案目录随后也整体移除） |
-
-**处置（已定）**：对 `deploy/` 与 `scripts/deploy/` 选「废」——在相关文档标注「未落盘」，
-不补一套只为存档的裸机模板（补了就是两份真相并存，且没人会照着它部署）。这段处置是
-**v8 当期的结论**：v9 换了一条路交付部署件（容器形态，落 `deploy/`），v7 那批裸机模板
-仍然不补。
-`v6/roadmap.md:45-46` 的 `tests/support/`、`tests/fixtures/` 与 `backend/tests/integration/`（早先已被明确否决过的形态）同属此类，一并标注。
-
-> ⚠️ 这与 v5 那批部署文档是同一类问题的**第二次出现**：**文档写了、文件没落盘**。
-> 所以 v8 的验收里加一条硬要求：**凡是文档里写出的路径，`ls` 必须能看见**。
-
----
-
-#### 5 重写（阈值：单文件 > 1200 行）
-
-判定口径：**只看文件行数，不看函数行数**——Vue 的 composable 与 Pinia 的 `defineStore` setup 函数
-天然等于整个模块（如 `useDocumentPipeline` 1543 行、`useSolutionsStore` 648 行），把它们当"大函数"
-等于把"重写整个 store"当成"拆一个函数"。函数口径因此作废。
-
-| # | 文件 | 行数 | 备注 |
-|---|---|---|---|
-| W1 | `backend/src/backend/services/job_service.py` | 792 | **已完成（#5）**。按职责拆到 `backend/src/backend/services/job_runtime.py` / `job_runtime_events.py` / `job_finalize.py` 等子模块；`_apply_event` 已随迁 |
-| W2 | `backend/src/backend/services/prd_section_writer.py` | 1129 | **已完成（#6）**。并行车道拆进新模块 `backend/src/backend/services/prd_section_parallel.py`（474 行） |
-| W3 | `backend/src/backend/api/schemas/` | 9 个模块，最大 358 | **已完成（#7）**。无函数，纯 Pydantic 模型，按领域拆模块 |
-
-临界区不入列（`document_service.py` 1144、`prompts.py` 918、`conversation_service.py` 913、
-`adminService.ts` 873、`admin.py` 842、`admin_service.py` 835、`admin_config_service.py` 812）。
-前端 `useDocumentPipeline.ts` 1627 / `api.ts` 1269 / `types/index.ts` 1201 **本轮不动**，下一轮再议。
-拆不动的就不拆——这条优先于"压到 1200 以内"。
-
-**唯一一对 ≥30 行完全重复**：`prd_section_writer.py` 553-585 ↔ 739-771（33 行，
-`_stream_linear` 与 `_stream_parallel` 的同一段初始化）。是否抽成私有方法，**留到重写 W2 时一并决定**。
-
-**验收方式**：TDD——先补覆盖再改结构；改前后行为不变由全量用例证明；补的用例只覆盖原本没覆盖的分支；
-并给出重写前后的行数/函数数对比。
-
----
-
-#### 6 顺序与不可逆点
-
-```text
-笔 1  文档层收敛 + 修正硬错      → 链接自检 + 逐条 ls
-笔 2  前端死代码（A3/A4/A5/A10） → npm run build（两个工程）
-笔 3  后端死代码（A6~A9）        → uv run pytest + 构建
-笔 4  重写 W1~W3（TDD）          → 全量绿 + 行数对比
-笔 5  删列 A1/A2                 → 备份 → 迁移 → 结构对拍 → 全量
-```
-
-**笔 2/3 先做**：零风险、零依赖，可以立刻验证清理流程本身。
-
-**笔 5 的不可逆性必须说清楚**：
-
-- 删列之后，**回滚代码会让旧代码读不到列**（启动即报错）。所以回滚方式是
-  **恢复备份**，不是 `git revert`（同样的推论在删列场景下也成立）。
-- 因此三步必须在同一个窗口内完成：`VACUUM INTO` 备份 + 自检 → 跑迁移 → 全量用例。
-  备份没做成不许跑迁移。
-- SQLite 的 `DROP COLUMN` 需要 batch 模式（`migrations/env.py` 已配 `render_as_batch=True`）。
-
----
-
-#### 7 验收
-
-| # | 判据 | 怎么验 |
-|---|---|---|
-| 1 | 删掉的列不再出现在任何读写路径 | `grep -rn "\.data\b" backend/src` 只剩注释；`grep builtin` 只剩历史迁移 |
-| 2 | 结构对拍全绿 | `uv run pytest tests/test_schema_parity.py` |
-| 3 | 全量用例绿 | `uv run pytest`；**工作区基线 1014 例 / HEAD 986 例**（`--collect-only` 口径；`def test_` 文本计数 890，差额来自 parametrize 展开）。原写的 1006 是旧账 |
-| 4 | 前端两个工程仍能构建 | `npm run build`（用户端 + 管理端） |
-| 5 | 文档里写出的路径都真实存在 | 逐条 `ls` |
-| 6 | 库结构里没有"模型没有、库里还在"的表 | `alembic check` 无差异 |
-
----
-
-#### 8 本轮接受的偏差（记录用）
-
-这一节只记录**与既定口径不一致、但有意保留**的地方——不是待办，也不是辩解；写下来是为了
-下一轮 review 不必重新判断「这是漏了还是已经决定过」。
-
-- **新增 3 个守卫测试文件 + `test_layering.py` 的棘轮/冻结点**（`backend/tests/test_entrypoint.py`、`backend/tests/test_cleanup_dead_code.py`、`frontend/src/__tests__/dead-code.spec.ts`）：偏离「零新增接缝」，理由是它们钉住的是「删掉的东西不许回流」与「契约形状」，属于仓库既有的**架构守卫**范式，不是新的测试接缝。
-- **#2 多删 3 个级联类型**（`GeneratePrdStreamPayload` / `QuestionsConfig` / `QuestionConfig`）、**#3 多删 2 个常量**（`DEFAULT_CHAT_STAGE` / `TURN_ROLES`）：前者的唯一消费者是被删的 `getQuestions` / `generatePrdStream`，后者口径已并入 `backend/src/backend/core/chat_kinds.py` 的 docstring——都是删干净而不是留下「有类型没函数」的空壳。
-- **#6 两处行为校准**（失败任务不再被 `done_callback` 摘除 → 恢复「出错只发 error 不发 done」；断开时 `lane.aclose()` 立即取消在途调用）：两处都有新用例覆盖，不是顺手改行为。
-- **`prd_section_parallel` 与 `prd_section_writer` 存在双向依赖**（函数内延迟 import），且并行模块会调 writer 的若干私有方法：记录为已知的边界代价——本轮重写只搬不改，拆成两个模块仍比留一个 1129 行的单模块可读。
-- **`job_service` 用 `noqa` 再导出 25 个名字（其中 23 个私有名）**：是为保住既有测试的 `import` 面（`js._finalize` / `js._RUNTIMES` 这类直触），与 `api/schemas/__init__.py` 的再导出是同一种范式。
-
----
-
-#### 9 删列的备份窗口（演练记录）
-
-删列不可逆，窗口内三步必须齐：`VACUUM INTO` 备份 + 自检 → 跑迁移 → 全量用例。
-A1（`solutions.data`）删除时实际做过一遍自检，记录如下（据 #8 报告）：
-
-1. 临时库先建到 `0002`（删列前的最新结构）；
-2. `VACUUM INTO` 生成备份；
-3. 三条断言：`PRAGMA integrity_check` = `ok`；备份内 `alembic_version` = `0002`；备份含 `data` 列；
-4. 备份 180,224 字节，sha256 `bb1cd19205dc532c163789c8547158d9c84e3e6d9b9e72ccfe1e4b1347b0c20a`；
-5. **三条断言通过之后**才执行迁移。
-
-同一窗口内的处置对 #9（`model_providers.builtin`）同样适用。
-
----
-
-#### A-1 扫描工具与误报
-
-| 工具 | 命令 | 实测 |
-|---|---|---|
-| ruff F401/F811 | `uv run ruff check --select F401,F811 backend/src` | 命中 11 条，其中 8 条是真未使用 import（→ A8） |
-| vulture | `uv run --with vulture vulture backend/src --min-confidence 80` | ⚠️ **0 条**。该阈值太高；放低到默认 60% 才出 122 条 |
-| knip | `npx --yes knip@5 --reporter compact` | 两个工程都跑通；但**不认 vitest 入口**，把 45+14 个 spec 报成"未使用文件"、`@vue/test-utils` 报成"未使用依赖"——**误报** |
-
-**`--min-confidence 80` 这条命令要从清单里改掉**：它给出的是"零命中"的假安全感。放低到 60% 后，
-122 条里**真死的只有 1 条**（`DOWNSTREAM_KINDS`），其余 121 条分别是路由函数（19）、
-LangChain 覆盖点（3）、Pydantic/SQLModel 字段（74）、测试装置 helper（8）——误报比 **121:1**。
-
-处置规则（照旧）：路由函数、`@field_validator`、模型字段 → **保留**；私有函数零调用 → 删；
-公共函数零调用 → 先问"是不是给将来留的接口"，答不上来就删。
-
-#### A-2 查未引用 `.vue` 的一次性脚本
-
-```python
-import pathlib
-
-for base in ("frontend/src", "frontend_admin/src"):
-    root = pathlib.Path(base)
-    files = [p for p in root.rglob("*") if p.suffix in (".vue", ".ts")]
-    texts = {p: p.read_text(encoding="utf-8", errors="ignore") for p in files}
-    for p in files:
-        if p.suffix != ".vue":
-            continue
-        used = [q for q in files if q != p and p.stem in texts[q]]
-        if not used:
-            print("UNUSED", p.relative_to(root))
-```
-
-三个注意点（第三个是 A5 被漏掉的原因）：
-
-- 它按**文件名**匹配，所以对"全局注册"（`app.component("AppToast", ...)`）会漏；跑完对每个命中项再 grep 一次确认；
-- 对 `backend/` 的模块级分析**不适用**（`from backend.services import x` 这种写法里没有完整模块路径，会误报）；后端请用 `vulture`；
-- ⚠️ 它按文件名做**子串**匹配，**任何一句注释里提到名字都会让它漏报**。
-  `AppInput.vue` 就是这么被漏掉的（`fieldStyles.ts:9` 的一句注释）。
-
-
-## 附录 B：方言可移植性方案（原 v8 的方言专题，已并入）
-
-> 正文由该专题原文逐字移入，仅标题降两级以适应附录层级；内部交叉引用已改指本文件对应附录。
+> 正文由 v8 附录 B 原文逐字移入，仅标题降两级以适应附录层级；内部交叉引用已改指本文对应附录。
 >
 > **曾计划 MySQL、后评估 PostgreSQL，最终决定固定 SQLite。**
 
 > 主题：让「这个项目跑在 SQLite 上」这件事只出现在一个文件里。
-> 本文只写**设计与契约**，不含实施记录；实测数据见附录 D。
+> 本文只写**设计与契约**，不含实施记录；实测数据见本文附录 B。
 > 采集方式：`uv run python backend/scripts/schema_survey.py --out /tmp/schema-survey.md`（一次性产物不入库）
 
 ---
@@ -727,9 +563,11 @@ D6（snapshot 换 inspector） ← **已否决**（3.5）；原计划独立一�
 - **本文是否拆成两份文档**（建议：一份「方言收敛点 = `core/dialect.py`」、一份「可移植性分两段，本期只做接口收敛」）。3.6 的不收敛清单可以并进后者的"范围之外"，也可以单独成一份。
 
 
-## 附录 D：库结构勘察（prdwright.db 实测）（原 v8 的勘察报告，已并入）
+---
 
-> 正文由该报告原文逐字移入，仅标题降两级以适应附录层级；内部交叉引用已改指本文件对应附录。
+## 附录 B：库结构勘察（prdwright.db 实测）
+
+> 正文由 v8 附录 D 原文逐字移入，仅标题降两级以适应附录层级；各表「建议」列是当时的列长度取值来源。
 
 - 表 14 张，共 2001 行，文件 1788 KB
 - 只读打开（`mode=ro`），不存在任何写入路径
@@ -956,4 +794,38 @@ SQLite 这边约束**已经生效**（`PRAGMA foreign_keys=ON`），所以正常
 | --- | ---: | ---: | --- |
 | `document_versions.content` | 11566 | 24534 | `MEDIUMTEXT` |
 | `generation_jobs.draft_content` | 26957 | 36919 | `MEDIUMTEXT` |
+
+
+---
+
+## 附录 C：恢复演练要求（v7 §8.5 原文整段搬入）
+
+> 正文由 v7 §8.5 及其前置结论逐字移入；「T17.6」是当时的排期编号，现行落点见 `docs/architecture/roadmap.md` 与 `deploy/backup.py`。
+
+### 前置结论（v7 §8.4 末）
+
+**回滚 = 恢复备份，不是跑反向迁移。**
+
+补充一条 v7 新增的推论：**恢复之后第一次启动会再跑一次 `upgrade head`。**
+
+| 备份里的 `alembic_version` | 恢复后的第一次启动 | 说明 |
+| --- | --- | --- |
+| 等于当前代码 head | `upgrade` 跑空 | 正常 |
+| 比代码旧 | 自动补到 head | 正常，这正是迁移的用处 |
+| **比代码新**（备份来自更新的版本） | 启动失败（Alembic 找不到对应 revision） | 说明「代码退得比数据还早」。必须先升代码，或接受用不上这份备份 |
+
+所以**恢复演练必须用当前代码跑**，而不是「用备份那天的代码跑一遍」——后者验证的是别的东西。
+
+
+### 8.5 恢复演练是验收项，不是可选项
+
+
+「有备份」和「能恢复」是两件事。T17.6 的验收必须包含一次**完整演练**：
+
+1. 停掉生产实例（或换一个空闲端口）；
+2. 把一份备份恢复到临时库路径，权限设成 `prdwright`；
+3. 用**当前代码**起一个只监听回环的实例（`DB_PATH` 指向临时库）；
+4. `/health` 三项全绿、能登录、能看到方案列表、能打开一份文档的版本抽屉。
+
+没演练过的备份，在真正需要它的那天只是个文件。
 
