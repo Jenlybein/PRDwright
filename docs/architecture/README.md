@@ -79,7 +79,7 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 
 ## 4. 已确认的失真（文档断言 vs git 事实）
 
-前 9 条迁自已删除的时间线记录文件第 5 节；第 10~13 条为文档收敛时新增；第 14~18 条为「入口模式收成一张登记表」这一轮（#44 写结论 / #49 终检）新增。下表保留**仍然成立**的部分：断言与 git 事实的对照、以及当时的修正结论。表中出现的按层文档路径已随九层目录删除，仅作为「曾经写在哪」的记录，不是可点击的现行落点；现行结论见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
+前 9 条迁自已删除的时间线记录文件第 5 节；第 10~13 条为文档收敛时新增；第 14~18 条为「入口模式收成一张登记表」这一轮（#44 写结论 / #49 终检）新增；第 19~20 条为 #49 双轴评审后补记的**两条裁决**。下表保留**仍然成立**的部分：断言与 git 事实的对照、以及当时的修正结论。表中出现的按层文档路径已随九层目录删除，仅作为「曾经写在哪」的记录，不是可点击的现行落点；现行结论见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
 
 | # | 曾经的断言 | git 事实 | 已做的修正 |
 | --- | --- | --- | --- |
@@ -101,6 +101,8 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 | **16** | 词表「改动入口必须四处同步」（`GLOSSARY.md`）与约定「约 20 处」互相冲突；词表也没说**入口模式**可为「未选择」 | 两处数字彼此对不上，也都不是现跑值；入口页与老方案没记入口名都是合法状态，归一成「未选择」后照常显示、恢复、编辑保存 | 词表只保留产品概念：删「四处同步」，补「可为未选择」及其合法口径；登记表是实现、不进词表；工程口径归 `docs/agents/conventions.md` 与 `ARCHITECTURE.md` §5.8 |
 | **17** | 「快捷入口只要 PRD」（`frontend/src/stores/workflow.ts` 注释）与「入口用 exact」（`docs/agents/conventions.md`） | 登记表的 `requiredDocs` 列给快捷流程三份齐备；`frontend/src/__tests__/AppV2.spec.ts` 的 `clickButton` 默认 `exact = false`，入口卡靠固定 DOM 顺序消歧 | 约定按三份齐备与 `exact = false` 改写；旧注释已随代码票删除（#47），测试写法留给终检票 |
 | **18** | #46 票面验收写「侧栏显示『完整流程』」，读起来像四个入口的模式名都会出现在侧栏 | `frontend/src/components/SolutionSidebar.vue` 的列表项只渲染 `solutions.stageLabel(item.stage)`；`git grep -n modeLabel -- frontend/src` 命中只有登记表的列定义与 `frontend/src/stores/solutions.ts` 的 `modeLabel()`，以及 `frontend/src/__tests__/AppV2.spec.ts` / `frontend/src/__tests__/solutions-store.spec.ts` / `frontend/src/__tests__/workflow.spec.ts` 三处测试——**没有任何组件消费** `solutions.modeLabel` | 如实登记：模式名目前只能在 store 层断言（`frontend/src/__tests__/solutions-store.spec.ts` 的用例旁已注明「全仓没有组件消费它」）。若要让模式名上屏，属界面变更，另开票，本期不做（见 `ARCHITECTURE.md` §5.8「本期不做」与 `roadmap.md` §2 的 #46 / #47 行） |
+| **19** | US11「导入入口不审改写」与 US24「行为不变」被当成同一句话读：既然导入入口自带 PRD，就该跳过审核改写 | 旧实现（`frontend/src/composables/useDocumentPipeline.ts` 在 `3d8bcd5` 的 `reviewEnabledForJob`）对两个导入入口返回 `undefined`，复核与否交给后端默认——**从未**「不审」；登记表这两行的 `needsDocumentReview` 都是 `true` | **本轮选「行为不变」**：两个导入入口照旧走审核改写，登记表按旧行为填。要改成「导入即不审」是产品决策（会改变产物质量与等待时间），另开票，本期不做 |
+| **20** | ⑦「录入字段」列（`stateField` / `stateColumn` / `defaultValue` / `countsAsContent`）读起来像是已有代码在按它渲染录入页 | `git grep` 这几列只有登记表自身、完整性校验与测试在读：四个录入页（`frontend/src/components/RequirementsForm.vue` / `frontend/src/components/stages/QuickPrdStage.vue` / `frontend/src/components/stages/PromptDebugStage.vue` / `frontend/src/components/stages/PastePairStage.vue`）的字段与初值仍各自写死，`stateColumn` / `defaultValue` / `countsAsContent` **暂无生产消费者** | 如实登记为「**声明式资料、暂无生产消费者**」——它不是 bug，也不删：它是「录入页按登记表生成」的下一步接入点，删掉等于把这张表一半的事实丢掉（见 `ARCHITECTURE.md` §5.8「本期不做」） |
 
 > 补充一条本轮确认的失真：**「加列是单向门」是错的**，仓库里的单向门指删列 / 退役列（回滚靠备份库文件）。已如实记录在 `ARCHITECTURE.md` §3.1 / §5.6 与 `roadmap.md` §0.5，以后评审不拿迁移成本当架构理由。
 >
@@ -109,6 +111,8 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 > #44 的收口结论：入口模式收成一张登记表（一行一个入口、七类资料为列）写在 `ARCHITECTURE.md` §5.8，票序 #44 → #45 → #46 → #47 → #48 → #49 写在 `roadmap.md` §1；本表第 14~17 行是本轮先文档、后代码的依据。
 >
 > #49 的收口结论：代码、现状架构文档、路线图三者按现状对齐——第 15 行补上终检复测的两个数字、第 18 行登记「模式名只到 store 层」这条票面假设与实况的落差；约定里把 ⑥ 文案列的「阶段名 / 标题取值」删掉（它们本来就是全局映射与固定回落链，不进登记表），侧栏显示模式名列为本期不做、另开票。
+>
+> #49 评审补记（**两条裁决**，都不改代码）：第 19 行——US11「导入入口不审改写」与 US24「行为不变」冲突时，本轮选**行为不变**（两个导入入口仍走审核改写，与旧版一致）；要改成「导入即不审」是产品决策，另开票。第 20 行——⑦ 录入字段列目前是**声明式资料、暂无生产消费者**（`stateColumn` / `defaultValue` / `countsAsContent`），这不是 bug，是「录入页按登记表生成」的下一步接入点。两条都只在失真表补记，`ARCHITECTURE.md` 的结论不动。
 
 ---
 
