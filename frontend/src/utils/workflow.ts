@@ -463,9 +463,10 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     },
     landing: {
       onSelect: 'prompt-debug',
-      // 导入入口没有需求澄清，对话页也就不会给「改需求」按钮；这一列登记成自己的录入页，
-      // 万一旧快照带着需求对话恢复了，回去的也该是「改贴入的材料」而不是结构化表单。
-      editRequirements: 'prompt-debug',
+      // 与旧版一致；语义不理想（改需求跳结构化表单），但本期行为不变，要改另开票。
+      // 导入入口没有需求澄清，对话页也就不会给「改需求」按钮；这一列只为旧快照存在
+      // （那次改动之前存的方案里可能带着需求对话）。
+      editRequirements: 'form',
       backToInput: 'prompt-debug',
     },
     // 产物只有提示词套件：进度条是「提示词 → 交付」两格
@@ -501,7 +502,8 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     },
     landing: {
       onSelect: 'prd-and-api-paste',
-      editRequirements: 'prd-and-api-paste',
+      // 与旧版一致；语义不理想（改需求跳结构化表单），但本期行为不变，要改另开票。
+      editRequirements: 'form',
       backToInput: 'prd-and-api-paste',
     },
     // 与「我有 PRD」同属导入组：产物一样只有提示词套件，进度条口径就该一样

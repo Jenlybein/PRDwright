@@ -658,10 +658,11 @@ describe('入口模式登记表：完整流程一行', () => {
       'done',
     ])
 
-    // ④ 三个布尔：录入页在进度条上、要需求澄清、要审核改写
+    // ④ 四个布尔：录入页在进度条上、要需求澄清、要审核改写、澄清入口可顶替「返回」
     expect(spec.inputPageOnBar).toBe(true)
     expect(spec.needsRequirementChat).toBe(true)
     expect(spec.needsDocumentReview).toBe(true)
+    expect(spec.keepBackButton).toBe(false)
 
     // ⑤ 完成所需文档：三份齐备
     expect(spec.requiredDocs).toEqual(['prd', 'api-docs', 'prompts'])
@@ -751,10 +752,11 @@ describe('入口模式登记表：快捷流程一行', () => {
       'done',
     ])
 
-    // ④ 三个布尔：录入页在进度条上、**不要**需求澄清、**不审不改**
+    // ④ 四个布尔：录入页在进度条上、**不要**需求澄清、**不审不改**、保留「返回」
     expect(spec.inputPageOnBar).toBe(true)
     expect(spec.needsRequirementChat).toBe(false)
     expect(spec.needsDocumentReview).toBe(false)
+    expect(spec.keepBackButton).toBe(true)
 
     // ⑤ 完成所需文档：与完整流程一致，三份齐备
     expect(spec.requiredDocs).toEqual(['prd', 'api-docs', 'prompts'])
@@ -798,18 +800,21 @@ describe('入口模式登记表：我有 PRD 一行', () => {
     expect(spec.card.title).toBe('我有 PRD')
     expect(spec.card.description).toBe('贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。')
 
-    // ② 落页：选中落在粘贴 PRD 页；两处「回去」也回它
+    // ② 落页：选中落在粘贴 PRD 页；「返回」回它
     expect(spec.landing.onSelect).toBe('prompt-debug')
-    expect(spec.landing.editRequirements).toBe('prompt-debug')
+    // 「改需求」与旧版一致地落在结构化表单：语义不理想，但本期是行为不变的裁决
+    // （导入入口没有需求澄清线程，这一列只为旧快照存在）。要改另开票。
+    expect(spec.landing.editRequirements).toBe('form')
     expect(spec.landing.backToInput).toBe('prompt-debug')
 
     // ③ 进度条步骤：产物只有提示词，两格
     expect(spec.steps).toEqual(['review-prompts', 'done'])
 
-    // ④ 三个布尔：录入页不在进度条上、不要需求澄清、要审核改写
+    // ④ 四个布尔：录入页不在进度条上、不要需求澄清、要审核改写、保留「返回」
     expect(spec.inputPageOnBar).toBe(false)
     expect(spec.needsRequirementChat).toBe(false)
     expect(spec.needsDocumentReview).toBe(true)
+    expect(spec.keepBackButton).toBe(true)
 
     // ⑤ 完成所需文档：只要提示词套件（自带的那份 PRD 不算本工具的产物）
     expect(spec.requiredDocs).toEqual(['prompts'])
@@ -856,18 +861,20 @@ describe('入口模式登记表：我有 PRD + 接口文档一行', () => {
     expect(spec.card.title).toBe('我有 PRD + 接口文档')
     expect(spec.card.description).toBe('两份都贴进来，提示词因此能对齐真实的接口路径与字段名。')
 
-    // ② 落页：选中落在双粘贴页；两处「回去」也回它
+    // ② 落页：选中落在双粘贴页；「返回」回它
     expect(spec.landing.onSelect).toBe('prd-and-api-paste')
-    expect(spec.landing.editRequirements).toBe('prd-and-api-paste')
+    // 同「我有 PRD」：改需求落结构化表单是旧版行为，本期不变
+    expect(spec.landing.editRequirements).toBe('form')
     expect(spec.landing.backToInput).toBe('prd-and-api-paste')
 
     // ③ 进度条步骤：与另一个导入入口同口径，两格
     expect(spec.steps).toEqual(['review-prompts', 'done'])
 
-    // ④ 三个布尔：录入页不在进度条上、不要需求澄清、要审核改写
+    // ④ 四个布尔：录入页不在进度条上、不要需求澄清、要审核改写、保留「返回」
     expect(spec.inputPageOnBar).toBe(false)
     expect(spec.needsRequirementChat).toBe(false)
     expect(spec.needsDocumentReview).toBe(true)
+    expect(spec.keepBackButton).toBe(true)
 
     // ⑤ 完成所需文档：只要提示词套件
     expect(spec.requiredDocs).toEqual(['prompts'])
