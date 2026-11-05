@@ -793,7 +793,11 @@ async function handleStartConversation(value: RequirementsSummary): Promise<void
 function handleEditRequirements(): void {
   // 登记表这一行优先；未迁入的入口仍回落到按模式写死的落点
   const spec = entrySpecFor(store.entryMode)
-  goTo(spec ? spec.landing.editRequirements : store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+  if (spec) {
+    goTo(spec.landing.editRequirements)
+    return
+  }
+  goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
 }
 
 /** 「改需求」按钮的文案；与 `handleEditRequirements` 的落点一一对应 */

@@ -10,6 +10,7 @@ import {
   documentKindOfChatStage,
   emptyConversationIds,
   entryModeForDisplay,
+  entrySpecFor,
   fromBackendKind,
   generatingStateFor,
   hasDocumentReview,
@@ -717,5 +718,39 @@ describe('入口模式登记表：完整流程一行', () => {
     expect(hasRequiredDocuments('structured', { prd: '# prd', apiDocs: '', prompts: '' })).toBe(
       false,
     )
+  })
+
+  it('未迁入的三个入口仍走旧表：行为与本票之前逐条一致', () => {
+    // 缺行 = 还没迁入（合法中间状态），不是「被默认值补上」
+    expect(entrySpecFor('prd-quick')).toBeUndefined()
+    expect(entrySpecFor('prompt-debug')).toBeUndefined()
+    expect(entrySpecFor('prd-and-api-paste')).toBeUndefined()
+
+    // 进度条：快捷流程仍是六格，两个导入入口仍是两格
+    expect(stepsForMode('prd-quick').map((step) => step.id)).toEqual([
+      'form',
+      'chatting',
+      'review-prd',
+      'review-api-docs',
+      'review-prompts',
+      'done',
+    ])
+    expect(stepsForMode('prompt-debug').map((step) => step.id)).toEqual([
+      'review-prompts',
+      'done',
+    ])
+    expect(stepsForMode('prd-and-api-paste').map((step) => step.id)).toEqual([
+      'review-prompts',
+      'done',
+    ])
+
+    // 三个布尔与完成条件
+    expect(hasRequirementChat('prd-quick')).toBe(false)
+    expect(hasDocumentReview('prd-quick')).toBe(false)
+    expect(hasDocumentReview('prompt-debug')).toBe(true)
+    expect(inputPageOnBar('prd-quick')).toBe(true)
+    expect(inputPageOnBar('prompt-debug')).toBe(false)
+    expect(hasRequiredDocuments('prompt-debug', { prd: '', apiDocs: '', prompts: '# p' })).toBe(true)
+    expect(hasRequiredDocuments('prd-quick', { prd: '# p', apiDocs: '', prompts: '' })).toBe(false)
   })
 })

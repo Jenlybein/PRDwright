@@ -408,6 +408,8 @@ const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
  *
  * 写成白名单而不是「不等于某些入口」：将来加新入口时，默认「没有需求对话」比默认「有」安全
  * 得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
+ *
+ * 先查登记表这一行；**未迁入的入口仍回落到下面这套旧口径**（`#47` 四行齐了才退役）。
  */
 export function hasRequirementChat(mode: EntryMode | null): boolean {
   const spec = entrySpecFor(mode)
@@ -424,6 +426,8 @@ export function hasRequirementChat(mode: EntryMode | null): boolean {
  *
  * 写成黑名单（`prd-quick` 是例外）而不是白名单：将来加新入口默认**带上复核**，
  * 漏配的代价只是多等一会儿；反过来则悄悄把产出质量降了一档。
+ *
+ * 先查登记表这一行；**未迁入的入口仍回落到下面这套旧口径**（`#47` 四行齐了才退役）。
  */
 export function hasDocumentReview(mode: EntryMode | null): boolean {
   const spec = entrySpecFor(mode)
@@ -439,6 +443,8 @@ export function hasDocumentReview(mode: EntryMode | null): boolean {
  *
  * 两个**导入**入口不是——它们的录入页（贴 PRD / 贴两份材料）根本不在进度条上，
  * 因此审阅页必须保留一个「返回」按钮，否则用户改不了贴进来的材料，直接成了死路。
+ *
+ * 先查登记表这一行；**未迁入的入口仍回落到下面这套旧口径**（`#47` 四行齐了才退役）。
  */
 export function inputPageOnBar(mode: EntryMode | null): boolean {
   const spec = entrySpecFor(mode)
@@ -450,6 +456,8 @@ export function inputPageOnBar(mode: EntryMode | null): boolean {
 /**
  * 某个入口模式下进度条要展示的步骤。
  * `mode` 为 `null`（还没选入口 / 旧快照）时经 {@link entryModeForDisplay} 按完整流程处理。
+ *
+ * 先查登记表这一行；**未迁入的入口仍回落到旧表 `MODE_STEP_IDS`**（`#47` 四行齐了才退役）。
  */
 export function stepsForMode(mode: EntryMode | null): readonly Step[] {
   const spec = entrySpecFor(mode)
@@ -697,6 +705,8 @@ export function canGeneratePrdFrom(messages: readonly ChatMessage[], busy: boole
  *
  * 完整流程 / 快捷流程的判定与旧版完全等价，
  * 因此这里只保留这一个函数，不再另开一个只服务单一口径的封装。
+ *
+ * 先查登记表这一行；**未迁入的入口仍回落到旧表 `REQUIRED_DOCS`**（`#47` 四行齐了才退役）。
  */
 export function hasRequiredDocuments(
   mode: EntryMode | null,
