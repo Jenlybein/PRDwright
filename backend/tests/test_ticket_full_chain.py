@@ -271,7 +271,7 @@ def test_fake_stream_partial_done_marks_receipt_and_keeps_text(alice):
 def test_cancel_through_public_action_keeps_aborted_semantics(alice):
     """按停止走公开动作 `cancel_job`：落 `failed + CANCELLED`，不是「生成失败」。
 
-    被中止与真出错要分开：订阅不该收到红色 `error` 事件，回执仍是 failed。
+    已取消与真出错要分开：订阅不该收到红色 `error` 事件，回执仍是 failed。
     假流在造单时传入并停在一个可放行的位置，用公开动作而不是内部标志位来取消。
     """
     gate = asyncio.Event()

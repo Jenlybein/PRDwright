@@ -79,7 +79,8 @@ class JobTicket:
     solution_id: int | None
     kind: str
     request_params: Mapping[str, Any]
-    event_stream_source: EventStreamSource | None
+    # 造单时必定定格一份来源（不传则填生产真值），因此派发可以直接递给 `run_job`。
+    event_stream_source: EventStreamSource
     config_snapshot: Mapping[str, Any]
     skill_refs: Sequence[Mapping[str, Any]]
     # 配置对象本体（供 `use_config` 冻结到任务上下文）：与 config_snapshot 同源。
@@ -106,7 +107,8 @@ class RegisteredJobTicket:
     solution_id: int | None
     kind: str
     request_params: Mapping[str, Any]
-    event_stream_source: EventStreamSource | None
+    # 与单①同源：登记只是复制身份，事件流来源保持必填，派发不再做可选兜底。
+    event_stream_source: EventStreamSource
     config_snapshot: Mapping[str, Any]
     skill_refs: Sequence[Mapping[str, Any]]
     runtime_config: Any = None

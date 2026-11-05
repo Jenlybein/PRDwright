@@ -87,7 +87,7 @@
 - 阶段：需求澄清 → 大纲 → 撰写 → 审核 → 改写。两条并行信息轨是**过程字** `chunk`（可能缺标题）与**权威正文** `part`（整段覆盖该章、`index` 可乱序）；混用会把审核 JSON 写进正文。
 - SSE 分帧唯一实现 `backend/src/backend/api/sse.py::make_sse_generator`（已带 `X-Accel-Buffering: no`）：事件 `status/chunk/part/stage/review/done/error` + 末尾 `data: [DONE]`；`: ping` 心跳只能走这个出口；服务层与路由层两层异常兜底；前端用原生 `fetch` + `ReadableStream`。
 - 重连先收快照再接实时流，恢复正文 = `finalized_text + live_buffer`；失败不覆写正文；**被取代**与**已取消**是两种不同终局；只有 `high` 严重度触发改写、改写后不复审。
-- 运行态以内存为权威：`_RUNTIMES` / `JobBus` / runtime 配置快照（5 秒 TTL）/ 固定连接池都在进程内；进度按 300ms / 4KB 合并写 `draft_content / completed_sections / phase / pending_items`，用量与供应商四格在收尾时写全。
+- 运行态以内存为权威：`_RUNTIMES` / `JobBus` / runtime 配置快照（5 秒 TTL）/ 固定连接池都在进程内；请求参数、配置/供应商快照与技能包身份在建任务那一刻一次写全，收尾不再另取供应商四格；进度按 300ms / 4KB 合并写 `draft_content / completed_sections / phase / pending_items`。
 - token 计量以 `ContextVar` 挂成环境值（`backend/src/backend/services/llm_meter.py`）：观测层挂在模型调用之外，**业务层调用方式不变**；没有任务上下文时计量自然无操作。预算检查在 `astream_text` 开头、记账在末尾，超顶复用 `INVALID_REQUEST`。
 - 排空顺序固定：就绪探针转 503 → 停止接收新任务 → 最多等 30 秒（等待上限、不是必须等满）→ 超时者标为已取消落终态并向订阅者发错误事件 → flush 日志退出。`stop_grace_period` 必须大于 30 秒。排空是**可直接调用的单元**（不起子进程、不发真信号），用例毫秒级验证。
 - 启动回收孤儿任务（`reap_orphans`），把 `running` 收成确定终态，重启不留「进行中」的尸体。
@@ -157,7 +157,7 @@
 
 ### 4.3 契约的落点
 
-- 完整论证在附录 A（方言台账）与附录 B（库结构实测）；分层守卫 C1~C4、60KB 闸门、路径即承诺（C-V8-3）在 [`docs/agents/conventions.md`](../agents/conventions.md)。
+- 完整论证在附录 A（方言台账）与附录 B（库结构实测）；分层守卫 C1~C4 与 60KB 闸门在 [`docs/agents/conventions.md`](../agents/conventions.md) §2。路径即承诺是普通纪律：文档写出的每个路径都要看得见（[`../../AGENTS.md`](../../AGENTS.md) 纪律 4，复核方法见 `docs/agents/conventions.md` §1），写完逐条 `Test-Path` + `git status` 复核。
 - 改探针或排空，必须同步改本文 §3.3 / §3.6 与 §4.1 的对应契约行；**一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后。
 
 ---

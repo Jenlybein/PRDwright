@@ -3,7 +3,8 @@
 本模块是 `job_service` 公开面背后的**内部实现**，与同目录的 `job_*` 模块同属一个
 内部包：包内互引私有名合法，包外只能经 `job_service.__all__` 的动作进入。
 新三步「造单 → 登记 → 派发」住在 `job_ticket` / `job_registration`，派发只认单②；
-排空留在包外（`job_drain`），只经 `job_wait` 问「还有哪些在跑 / 要不要等」。
+排空留在包外（`job_drain`），只经 `job_wait` 问「还有哪些在跑 / 要不要等 /
+超时取消哪几支」三个问题，运行时字段不越过包边界。
 
 核心思想是**生成与浏览器连接解耦**：
 
@@ -13,7 +14,8 @@
 - 订阅（SSE）通过 `open_stream`：命中内存运行时则**先发一份 `snapshot`（补全已产出
   正文）再挂上 live 流**；未命中（进程重启 / 已完成过久）则读 DB 发一份快照即止。
 
-持久化策略（合并写）：内存运行时是权威，DB 每 ≤300ms 或 `live_buffer` 增量 >4KB
+持久化策略（合并写）：请求参数、配置/供应商快照与技能包身份在建任务那一刻
+一次写全；内存运行时是权威，DB 每 ≤300ms 或 `live_buffer` 增量 >4KB
 `flush` 一次（`persist_progress`）；任务收尾时再落一次终态。快照读的是内存运行时，
 DB 只在「运行时未命中」时兜底。
 
@@ -71,7 +73,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 失败收尾里「不是错误」的两个中止码：取消（用户走开 / 删方案）与被顶替（同一份
+# 失败收尾里「不是错误」的两个终态判定：已取消（用户走开 / 删方案）与被取代（同一份
 # 文档已有更新的任务接手）。它们同样落 failed 状态，但不该作为红色错误弹给用户，
 # 因此补发 `error` 事件时要排除——否则「用户自己按了停止」会被渲染成「生成失败」。
 _ABORT_CODES = frozenset({"CANCELLED", "SUPERSEDED"})
@@ -194,10 +196,10 @@ def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
 
     为什么放在 `job_service` 而不是 `solution_service`
     -------------------------------------------------
-    在途任务的协作式取消标记（`_RUNTIMES`）住在同目录的 `job_runtime.py`（#5 拆模块时迁出，
-    本模块只再导出）；而本模块已经依赖 `solution_service`（收尾前要确认方案还在），
-    让 `solution_service` 反向 import 就会成环。这里直接用仓储——`repositories` 是更下一层，
-    不构成环。
+    在途任务的协作式取消标记（`_RUNTIMES`）住在同目录的 `job_runtime.py`：#5 拆模块时
+    迁出，#40 删空再导出块后由包内互引直接使用。而本模块已经依赖 `solution_service`
+    （收尾前要确认方案还在），让 `solution_service` 反向 import 就会成环。这里直接用
+    仓储——`repositories` 是更下一层，不构成环。
 
     Returns:
         方案是否存在并被删除。`False` 表示不存在或不属于该用户（路由翻 404）。
@@ -246,15 +248,16 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
 def running_runtimes() -> list[JobRuntime]:
     """当前在途（`status == running`）的运行时的快照。
 
-    调用方是排空（`services/job_drain.py`）：它要「等在途任务跑完、再挑出还没跑完的」，
-    需要一份稳定快照，而不是随任务收尾不断变化的视图。快照之后自然结束的任务会在
-    `cancel_in_flight` 里按当时的 `status` 被排除。
+    调用方是同一生成任务包内的 `job_wait`：它把这份快照折算成只带 `job_id` 的抽象句柄
+    交给包外排空，再由自己按句柄回答「等在途任务跑完、超时取消哪几支」。快照之后自然
+    结束的任务会在 `cancel_in_flight` 里按当时的 `status` 被排除。
 
     为什么判据用运行时上的 `status` 而不是 `_TASKS`：任务集合只是保活用的强引用，
     它不知道「这个任务是不是已经收尾了」；运行时上的 `status` 才是权威。
 
-    这是**公开入口**：排空不该伸手进 `_RUNTIMES`。工程上「谁可以直接读进程内登记表」
-    只有本模块一处，换了存储结构时改动面因此只有这个文件。
+    本函数是 `job_service` 公开面上的正常动作：排空留在包外、只问三个问题，不伸手进
+    `_RUNTIMES`；「谁可以直接读进程内登记表」在生成任务一侧收口，换存储结构时改动面
+    只有本包。
     """
     return [
         runtime for runtime in list(_RUNTIMES.values()) if runtime.status == STATUS_RUNNING
@@ -264,9 +267,10 @@ def running_runtimes() -> list[JobRuntime]:
 def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -> int:
     """把在途任务收成「已取消」终态，返回被取消的条数。
 
-    调用方是排空（`services/job_drain.py`）：它在等满窗口之后，把仍卡在模型调用里、
-    自己走不出来的任务收掉。**这是那条路径唯一的公开入口**——`_failure_event` /
-    `_finalize` / `_RUNTIMES` 都是本模块的私有名，排空只调这一个函数。
+    调用方是同一生成任务包内的 `job_wait`：等满窗口之后，由它把仍卡在模型调用里、
+    自己走不出来的任务收掉，再把汇总数字交回包外排空。本函数是 `job_service` 公开面
+    上的正常动作；`_failure_event` / `_finalize` / `_RUNTIMES` 都是本包私有名，
+    排空只问三个问题，不直接调这里。
 
     Args:
         reason: 落进 `error_message` 与 `error` 事件的终止原因。文案要说清**是谁**动的手
@@ -296,7 +300,7 @@ def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -
         runtime.error_code = "CANCELLED"
         runtime.error_message = reason
         if runtime.kind == "chat":
-            # 对话的「被中止」要保留已经说出口的话（`_write_chat_turn` 按这一位处理）
+            # 对话的「已取消」要保留已经说出口的话（`_write_chat_turn` 按这一位处理）
             runtime.chat_interrupted = True
 
         logger.warning(
@@ -352,23 +356,21 @@ def _resolve_skill_refs(kind: str, request: dict[str, Any]) -> list[dict[str, An
 
 
 async def run_job(
-    runtime: JobRuntime, event_stream_source: Callable[..., AsyncIterator[StreamEvent]] | None = None
+    runtime: JobRuntime, event_stream_source: Callable[..., AsyncIterator[StreamEvent]]
 ) -> None:
     """后台任务主体：驱动事件流、更新内存、广播、按节奏落库、收尾。
 
     `use_meter` 包住整条事件流的消费过程：计量器是环境值，流水线深处的
     `stream_reply.astream_text` 靠它把自己记到这次任务上（见 `llm_meter`）。
 
-    `event_stream_source` 是新三步「造单」定格的事件流来源（#36）：不给时仍用
-    本模块 `_build_event_stream`，旧入口行为逐项不变。除此之外整条循环、
-    包裹顺序、广播与收尾都只有这一份实现，新旧入口不会各写一遍。
+    `event_stream_source` 是单②在造单时定格的事件流来源（生产真值 / 测试假值），
+    派发时随单递入；本模块只有这一条事件流循环，包裹顺序、广播与收尾都只写一遍。
     """
-    source = event_stream_source or _build_event_stream
     try:
         # `use_config` 把派发那一刻的配置冻进上下文：整条生成链路（含并行子任务）
         # 读到的是同一份。任务跑到一半有人改配置，也不会让同一次生成前后参数不一致。
         with use_meter(runtime.meter), use_config(runtime.config):
-            async for event in source(runtime.kind, runtime.request):
+            async for event in event_stream_source(runtime.kind, runtime.request):
                 # 方案在生成途中被删除：下一个事件不再消费。
                 # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，
                 # 收尾时 `_finalize` 也就拿不到新的 `done`，不会把半截过程当成「已产出」。

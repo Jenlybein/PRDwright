@@ -313,7 +313,7 @@ class GenerationJobRepository:
         """把同 owner + solution + kind 下旧的 running 置为 failed，返回被取代的条数。
 
         「同一 owner + solution + kind 至多一个 running」是一条业务不变量，在新建任务前
-        先把旧的中止掉，避免两个任务同时往同一处写正文。
+        先把旧的判为被取代，避免两个任务同时往同一处写正文。
         `solution_id` 可能为 `None`，SQL 需用 `IS NULL` 而不是 `= NULL`。
 
         `error_code` 用 `SUPERSEDED` 而不是笼统的 `INTERNAL_ERROR`：这次失败有明确原因
