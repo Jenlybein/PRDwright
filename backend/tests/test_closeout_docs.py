@@ -1,8 +1,13 @@
-"""终检守卫：文档写出的路径可见、全仓无悬空引用（票 #41）。
+"""终检守卫：文档写出的路径可见、全仓无悬空引用、收口结论落在指定落点（票 #41 / #44）。
 
 接缝是「工作树里的 Markdown 文档与 nine-layer 旧路径字面量」：从文档自身的
 相对位置解析链接，从仓库根解析反引号里的全路径，逐条要求文件真的存在。
 不用 git / 子进程，纯文件系统读，离线可跑、xdist 各 worker 结果一致。
+
+#44 追加的守卫把「维护者打开仓库能读到什么结论」也当成公开接缝：读现状架构文档的
+「取舍」节、路线图的票序、约定的正向条文、时间线真源的失真表与词表的概念定义，
+断言票面要求的结论确实落在这些落点上。期望值来自票面验收标准，不扫源码、
+不数落点、不查标识符词频。
 
 路径扫描白名单（#33 报告，按类别排除，不是逐个路径硬编码放行）：
 - 运行时生成物：`backend/secrets/master.key` 由 `scripts/keygen/generate_keys.py`
@@ -156,3 +161,140 @@ def test_whitelist_categories_have_documented_evidence() -> None:
         assert (_REPO_ROOT / "skills" / skill / "SKILL.md").is_file(), (
             f"技能包 {skill} 的文档内简写没有落点"
         )
+
+
+def _doc(rel: str) -> str:
+    """读工作树里的一份文档（相对仓库根），不经过 git 索引。"""
+    return (_REPO_ROOT / rel).read_text(encoding="utf-8")
+
+
+def _between(text: str, start: str, end: str) -> str:
+    """取两个标题之间的正文；标题缺失时返回空串，交给断言报出可读的落点。"""
+    if start not in text or end not in text:
+        return ""
+    head = text.index(start)
+    return text[head : text.index(end, head + len(start))]
+
+
+def _from(text: str, start: str) -> str:
+    """取从某个标题到文末的正文。"""
+    return text[text.index(start) :] if start in text else ""
+
+
+def test_entry_registry_conclusions_are_in_current_docs() -> None:
+    """#44：维护者打开仓库，登记表结论与校正数字都能在指定落点读到。
+
+    期望值来自票面验收标准原文，与实现无关；只判断「文档对外给出什么结论」，
+    不扫源码、不数落点、不查标识符词频。
+    """
+    missing: list[str] = []
+
+    def require(label: str, section: str, *anchors: str) -> None:
+        for anchor in anchors:
+            if anchor not in section:
+                missing.append(f"{label} 缺「{anchor}」")
+
+    # 现状架构文档：结论写在「取舍」节新增的小节里，且按目标 → 范围 → 设计 → 契约 → 取舍正向写。
+    architecture = _doc("docs/architecture/ARCHITECTURE.md")
+    tradeoffs = _between(architecture, "## 5. 取舍", "## 6.")
+    registry = _between(tradeoffs, "### 5.8", "### 5.9")
+    require(
+        "ARCHITECTURE.md §5.8",
+        registry,
+        "一张登记表",
+        "一行一个入口",
+        "七类资料",
+        "只收随入口模式变化的事实",
+        "14 个视图状态",
+        "进度格",
+        "后端",
+        "界面交互",
+        "本期不做",
+        "**目标**",
+        "**范围**",
+        "**设计**",
+        "**契约**",
+        "**取舍**",
+    )
+    positive_order = ["**目标**", "**范围**", "**设计**", "**契约**", "**取舍**"]
+    positions = [registry.find(marker) for marker in positive_order]
+    if any(pos < 0 for pos in positions) or positions != sorted(positions):
+        missing.append("ARCHITECTURE.md §5.8 未按「目标 → 范围 → 设计 → 契约 → 取舍」正向写")
+    for stale in ("盘点", "缺口", "约 20 处"):
+        if stale in registry:
+            missing.append(f"ARCHITECTURE.md §5.8 仍在反向写旧口径「{stale}」")
+    require("ARCHITECTURE.md §5", tradeoffs, "### 5.9 本次文档重组的决策")
+
+    # 路线图：本轮六张票（四张代码票 + 文档票 + 终检票）的票序、落点与验收总表齐备。
+    roadmap = _doc("docs/architecture/roadmap.md")
+    require(
+        "roadmap.md §1",
+        _between(roadmap, "## 1. 票序与依赖", "## 2."),
+        "#44 → #45 → #46 → #47 → #48 → #49",
+        "#45 依赖 #44",
+        "#49 依赖 #48",
+    )
+    landing = _between(roadmap, "## 2. 各票落点与验收方式", "## 3.")
+    for ticket in ("**#44**", "**#45**", "**#46**", "**#47**", "**#48**", "**#49**"):
+        require("roadmap.md §2", landing, ticket)
+    require(
+        "roadmap.md §5",
+        _from(roadmap, "## 5. 验收总表"),
+        "#44",
+        "#45",
+        "#46",
+        "#47",
+        "#48",
+        "#49",
+    )
+
+    # 约定：人工同步清单整段退役，正向条文改描述登记表，数字按实测写。
+    conventions = _doc("docs/agents/conventions.md")
+    live = (
+        _between(conventions, "## 1. 通用纪律", "## 2.")
+        + _between(conventions, "## 6. 前端与状态机", "## 7.")
+        + _between(conventions, "## 7. 持久化与版本链", "## 8.")
+    )
+    require("conventions.md §1/§6/§7", live, "登记表", "154 行 / 23 文件", "151 行 / 13 文件", "至少 8 处")
+    retired_markers = ("退役", "作废", "旧口径", "旧文", "更正为")
+    live_lines = [line for line in live.splitlines() if not any(m in line for m in retired_markers)]
+    for stale in ("约 20 处", "170 个文件:行号落点", "reset / watch 四处"):
+        offenders = [line for line in live_lines if stale in line]
+        if offenders:
+            missing.append(f"conventions.md 正向条文仍在用旧口径「{stale}」：{offenders[0][:60]}")
+    require(
+        "conventions.md 已失效附录",
+        _from(conventions, "## 已失效（勿再引用）"),
+        "登记表",
+        "154 行 / 23 文件",
+    )
+
+    # 时间线真源：失真表补上四条已复核的校正与本轮实测数字。
+    drift = _between(
+        _doc("docs/architecture/README.md"),
+        "## 4. 已确认的失真",
+        "## 5. 怎么复核这里的一切",
+    )
+    require(
+        "README.md §4 失真表",
+        drift,
+        "goTo",
+        "clarifyTarget",
+        "四处",
+        "约 20 处",
+        "未选择",
+        "154 行 / 23 文件",
+        "151 行 / 13 文件",
+        "33 files changed, 1237 insertions(+), 192 deletions(-)",
+        "至少 8 处",
+    )
+
+    # 词表：只装产品概念——入口模式可为「未选择」，且不写实现（登记表）与同步处数。
+    glossary = _doc("GLOSSARY.md")
+    states = _between(glossary, "## 入口与状态", "## 任务与运行态")
+    require("GLOSSARY.md §入口与状态", states, "入口模式", "未选择")
+    for stale in ("四处同步", "登记表"):
+        if stale in glossary:
+            missing.append(f"GLOSSARY.md 混进了实现口径「{stale}」")
+
+    assert missing == [], "以下收口结论还没写进现状文档：\n" + "\n".join(missing)

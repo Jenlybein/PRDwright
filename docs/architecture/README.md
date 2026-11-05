@@ -1,6 +1,6 @@
 # 架构文档导航与时间线真源
 
-> **导航**：本目录只有三份文件——[`ARCHITECTURE.md`](./ARCHITECTURE.md) 是唯一一版**现状架构**（目标 → 范围（含本期不做）→ 设计 → 契约 → 取舍，附三段承重专题）；[`roadmap.md`](./roadmap.md) 是现状排期（#31~#41 各票的落点与验收方式）；本文是导航与**时间线真源**。
+> **导航**：本目录只有三份文件——[`ARCHITECTURE.md`](./ARCHITECTURE.md) 是唯一一版**现状架构**（目标 → 范围（含本期不做）→ 设计 → 契约 → 取舍，附三段承重专题；入口模式登记表的结论在 §5.8 取舍节）；[`roadmap.md`](./roadmap.md) 是现状排期（#31~#41 各票的落点与验收方式，以及 #44~#49 这一轮的票序）；本文是导航与**时间线真源**。
 >
 > **架构决策**单独归档在 [`../adr/`](../adr/)，编号从 0001 重新开始，目前只有 [`0001-architecture-docs-consolidation.md`](../adr/0001-architecture-docs-consolidation.md)（为什么把按层演进史换成单一现状文档 + 决策档案）。生成任务相关的取舍在 `ARCHITECTURE.md` 的「取舍」节，不在决策档案里。
 >
@@ -15,7 +15,7 @@
 | 落点 | 内容 | 什么时候读它 |
 | --- | --- | --- |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | **唯一现状文档**：后端分层、三份文档与文档版本链、生成任务与 SSE 契约、技能包、鉴权与配额、部署形态、唯一部署后端 SQLite；契约 C-V9-1~10 / C-D1~C-D6；取舍、风险与否决的方案 | 想知道现在怎么跑、边界在哪、为什么这么选 |
-| [`roadmap.md`](./roadmap.md) | 现状排期：#31~#41 各票落点与验收方式、票序与依赖、排期总原则 | 想知道这一轮先做什么、每票怎么验 |
+| [`roadmap.md`](./roadmap.md) | 现状排期：#31~#41 各票落点与验收方式、#44~#49 这一轮的票序与落点、排期总原则 | 想知道这一轮先做什么、每票怎么验 |
 | [`README.md`](./README.md)（本文件） | **时间线真源**：§2 阶段总表、§3 v2 七波重写、§4 已确认的失真、§5 复核方法 | 想核对阶段规模、界碑，或查某条文档断言与 git 事实的冲突 |
 | [`../adr/0001-architecture-docs-consolidation.md`](../adr/0001-architecture-docs-consolidation.md) | 本次文档重组的架构决策，含被否决的「保留按层演进史」及理由 | 想知道为什么不再按层维护文档 |
 | [`../agents/conventions.md`](../agents/conventions.md) | 当前有效的工程约定与已知的坑（分层、迁移、SSE、版本链、测试、部署） | 改代码前读 |
@@ -96,10 +96,16 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 | **11** | 同一页对 v3 给了两个数：38 笔 / 143 files 与 34 笔 / 131 files | 两个都对——**基点不同**：`b78de90..d46b5d6` 与 `b78de90..e494e90` | 本文 §2 把两个基点的行都列出来，不再混用 |
 | **12** | 「全量用例基线 999」（`docs/agents/conventions.md`）、「基线 1006」（v8 附录 A） | 当时实测 **1014**（工作区，pytest 收集）/ **986**（HEAD 已提交部分）；`999` 与 `1006` 都是 10-25 的中间态 | 两处均改为当时的实测值并注明口径（`def test_` 文本计数与收集数不是同一个数）；**现行基线现取现算**，见 [`../agents/conventions.md`](../agents/conventions.md) §10 |
 | **13** | 「v8 起以 `deploy/docker/` 为准」（`docs/agents/conventions.md`） | 记这条时 `deploy/` 与 `deploy/docker/` 都还不存在，`scripts/deploy/` 的脚本也没有 | 当时改为「部署交付物整体未落盘」；v9 已交付：`deploy/`（compose、`docker/`、README、Makefile、`backup.py`、`backups/`）均已落盘，形态说明见 `ARCHITECTURE.md` §3.6 |
+| **14** | 「`goTo` 必须在 `job.start` 之前（`docGenerating` 置位后 busy 守卫会拦），并把 `clarifyTarget` 钉为 `'prd'`」（`docs/agents/conventions.md`） | 旧忙碌闸门已拆：`frontend/src/stores/runs.ts` 说明 `docGenerating` 退役、`goTo()` 不因忙拒绝跳转；现状 `frontend/src/composables/useDocumentPipeline.ts` 是 `isRunInFlight()` 提前 return → `goTo('generating-prd')` → `await generatePrd()`；`clarifyTarget` 已删，源码只剩退役说明；旧注释仍留着旧理由 | 理由改写成「先切生成视图，再让这次发起成为唯一发起」，字段从清单删除；旧口径列入 `docs/agents/conventions.md` 文末「已失效」 |
+| **15** | 「13 个核心标识符 170 个文件:行号落点 / 23 文件」「约 20 处同步」「新增快照字段同步四处」（`docs/agents/conventions.md`） | 现跑现算：13 个标识符在 `frontend/src/` 下为 **154 行 / 23 文件**（23 成立、170 失真）；四入口字面量在 `frontend/src/__tests__` 下为 **151 行 / 13 文件**；`714cef0` 为 `33 files changed, 1237 insertions(+), 192 deletions(-)`；快照字段同步实测**至少 8 处**（类型、序列化、snapshot / applySnapshot / reset / watch / 有内容判据 / return / 测试夹具，共 13 个落点）。清单里还含已删的 `clarifyTarget` | 人工同步清单整段退役，约定文档改描述一张登记表、一行一个入口、七类资料为列；数字按本行实测重写，旧值列入文末「已失效」 |
+| **16** | 词表「改动入口必须四处同步」（`GLOSSARY.md`）与约定「约 20 处」互相冲突；词表也没说**入口模式**可为「未选择」 | 两处数字彼此对不上，也都不是现跑值；入口页与老方案没记入口名都是合法状态，归一成「未选择」后照常显示、恢复、编辑保存 | 词表只保留产品概念：删「四处同步」，补「可为未选择」及其合法口径；登记表是实现、不进词表；工程口径归 `docs/agents/conventions.md` 与 `ARCHITECTURE.md` §5.8 |
+| **17** | 「快捷入口只要 PRD」（`frontend/src/stores/workflow.ts` 注释）与「入口用 exact」（`docs/agents/conventions.md`） | `frontend/src/utils/workflow.ts` 的 `REQUIRED_DOCS` 给快捷流程三份齐备；`frontend/src/__tests__/AppV2.spec.ts` 的 `clickButton` 默认 `exact = false`，入口卡靠固定 DOM 顺序消歧 | 约定按三份齐备与 `exact = false` 改写；两处源码注释 / 测试写法留给代码票随迁，本票只登记失真 |
 
 > 补充一条本轮确认的失真：**「加列是单向门」是错的**，仓库里的单向门指删列 / 退役列（回滚靠备份库文件）。已如实记录在 `ARCHITECTURE.md` §3.1 / §5.6 与 `roadmap.md` §0.5，以后评审不拿迁移成本当架构理由。
 >
 > 再补一条：**「任务单不落库 / 重启中断」与「深还原 `thaw_object` 边界」**是本轮实现结论，落点在 `ARCHITECTURE.md` §5.7（生成任务收口后的取舍）。
+>
+> #44 的收口结论：入口模式收成一张登记表（一行一个入口、七类资料为列）写在 `ARCHITECTURE.md` §5.8，票序 #44 → #45 → #46 → #47 → #48 → #49 写在 `roadmap.md` §1；本表第 14~17 行是本轮先文档、后代码的依据。
 
 ---
 

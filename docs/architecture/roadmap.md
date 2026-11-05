@@ -1,6 +1,6 @@
 # PRDwright 现状排期
 
-> **排期真源**：本文件列出 #31~#41 各票的落点与验收方式；架构结论与设计契约见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)，阶段规模与界碑见 [`README.md`](./README.md)（时间线真源），本次文档重组的架构决策见 [`../adr/0001-architecture-docs-consolidation.md`](../adr/0001-architecture-docs-consolidation.md)。
+> **排期真源**：本文件列出 #31~#41 各票的落点与验收方式，以及 #44~#49「入口模式收成一张登记表」这一轮的票序与验收；架构结论与设计契约见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)（入口模式结论在 §5.8 取舍节），阶段规模与界碑见 [`README.md`](./README.md)（时间线真源），本次文档重组的架构决策见 [`../adr/0001-architecture-docs-consolidation.md`](../adr/0001-architecture-docs-consolidation.md)。
 >
 > 由 v9 那一版排期收敛为现状排期：先文档、后代码；其中 T19.0~T19.7 是已交付的历史排期，不再是现状。
 
@@ -11,7 +11,7 @@
 1. **先文档、后代码**：#31 先把 v1~v9 九层压成一版现状文档 + 决策档案，#32~#33 把词表与收口纪律对齐，之后才动代码（#34 起）。
 2. **1200 行阈值作废**：文件边界改以**接缝**为依据，取代 v8 附录 A §5 的 W1 口径（见 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §5.4）。七个实现文件归入同一内部包即可，不必合并回单个大文件。
 3. **数字先复核再写**：对外动作与名字数量、入口模式同步点数量一律以实测为准，不沿用旧报告里的约数；写文档前 `git grep` 复核。
-4. **用例基线现取现算**：`cd backend && uv run pytest --collect-only -q` 取当前收集数；旧文档里的 1089 / 1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175 及「文本计数 955 / 参数化展开差额 134」整段一起重算，不沿用中间数。#41 终检实测：加入终检守卫前收集数 1175、`def test_` 文本计数 1005、参数化展开差额 170；加入 4 条终检守卫后的终值 1179 / 1009 / 170，实测口径见 `docs/agents/conventions.md` §10。
+4. **用例基线现取现算**：`cd backend && uv run pytest --collect-only -q` 取当前收集数；旧文档里的 1089 / 1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175 及「文本计数 955 / 参数化展开差额 134」整段一起重算，不沿用中间数。#41 终检实测：加入终检守卫前收集数 1175、`def test_` 文本计数 1005、参数化展开差额 170；加入 4 条终检守卫后的终值 1179 / 1009 / 170；#44 再补一条「登记表结论落在指定落点」守卫后，本轮现取现算为 **1180 / 1010 / 170**，实测口径见 `docs/agents/conventions.md` §10。以后收口仍按 `--collect-only -q` 现取，别抄这里的数字。
 5. **加列不是单向门**：单向门指删列 / 退役列（回滚靠备份库文件）；新增列属于加列，评审不拿迁移成本当架构理由。
 6. **一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后。
 7. **路径即承诺**：文档里写出的每个仓库路径 `ls` 都要能看见，写完逐条 `Test-Path` + `git status` 复核。
@@ -25,9 +25,13 @@
 #31 → #32 → #33 → #34 → #35 → #36 → {#37, #38} → #39 → #40 → #41
  #34 另依赖 #33；#35 依赖 #31,#33,#34；#36 依赖 #34,#35
  #39 依赖 #36,#38（不等 #37）；#40 依赖 #37,#38,#39；#41 依赖前十张全部
+
+#44 → #45 → #46 → #47 → #48 → #49   （入口模式收成一张登记表，严格串行）
+  #44 文档先行，无前置；#45 依赖 #44；#46 依赖 #45；#47 依赖 #46；#48 依赖 #47；#49 依赖 #48
+  四张代码票 #45 / #46 / #47 / #48 + 终检票 #49 全部依赖文档票 #44
 ```
 
-**先文档、后代码**的分界在 #33 / #34 之间：#31~#33 不动生产代码语义，#34 起才改生成任务与数据库投影。
+**先文档、后代码**的分界在 #33 / #34 之间：#31~#33 不动生产代码语义，#34 起才改生成任务与数据库投影。第二轮同样先文档、后代码：#44 只把结论写进 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §5.8、本文件、`docs/agents/conventions.md`、`GLOSSARY.md` 与时间线真源 [`README.md`](./README.md)，#45 起才动前端代码，#49 收口三者一致。
 
 ---
 
@@ -46,6 +50,12 @@
 | **#39** | 迁移批次三——登记 / 收尾 / 快照 / 裸运行时用例归位 | `backend/tests/` 中登记、收尾、数据库兜底快照、直接构造运行时四类用例 | 只造单不派发的用例归到登记语义（顶替、目标产物落列）；只派发不登记的用例归到造单 + 派发；直接构造裸运行时的用例全改成跨公开动作断言；方案被删时收尾作终态判定、失败不覆写正文仍成立 |
 | **#40** | 收缩——删旧入口、再导出与内部包边界落定 | `backend/src/backend/services/job_service.py`（包入口）、`backend/src/backend/services/job_service_impl.py` 与同包实现文件 | 包入口 `job_service.__all__` 实测只露 9 个正常动作（#37/#38 迁走 `create_job` / `dispatch` 后），新三步 `job_ticket` 与「等待在途」`job_wait` 各有自己的公开面；再导出整块删空、主文件不再当中转；两个仍被生产使用的名字各归其位、调用方从真正所属处引用；排空留在包外；单 worker + 进程内运行时不变 |
 | **#41** | 文档 / 路线图 / 词表 / 基线与引用终检 | `docs/architecture/ARCHITECTURE.md`、`docs/architecture/roadmap.md`、`docs/agents/conventions.md`、`backend/pyproject.toml`、`backend/scripts/schema_survey.py`、`backend/tests/test_closeout_docs.py` | 代码、架构文档、路线图、词表与决策档案结论一致；用例基线按收集数现取现算（连文本计数 / 参数化展开差额整段重算）；数字逐条 `git grep` 复核；全仓无悬空引用、文档写出的路径逐条可见；路径扫描白名单按类别写明依据；全量离线跑绿；`git add -An .` 预演并经人确认后才提交 |
+| **#44** | 文档先行：登记表结论写进现状架构与路线图 | `docs/architecture/ARCHITECTURE.md` §2.2 / §5.8、`docs/architecture/roadmap.md`、`docs/agents/conventions.md`、`docs/architecture/README.md` §4、`GLOSSARY.md`、`backend/tests/test_closeout_docs.py` | 取舍节写明「一张登记表 / 一行一个入口 / 七类资料为列」与范围（只收随入口变化的事实；14 个视图状态 → 进度格全局映射、后端、界面交互不动）；本文件 §1 / §2 / §5 出现 #44~#49 票序与依赖；约定的人工「约 20 处」清单整段退役并改写实测数字；失真表补齐已复核校正；词表补「未选择」并退役「四处同步」；文档路径逐条可见；不碰前端源码、后端业务与测试夹具 |
+| **#45** | 显式「未选择」：收拢入口模式的默认口径 | `frontend/src/utils/workflow.ts`、`frontend/src/stores/workflow.ts`、`frontend/src/stores/solutions.ts` | 「未选择」唯一出口；入口页四卡、老方案恢复并保存、进度条与阶段名按完整流程展示；现有行为断言全绿（含「历史快照无入口模式仍能恢复并保存」） |
+| **#46** | 登记表落地：完整流程一行打通全链路 | `frontend/src/utils/workflow.ts`、`frontend/src/types/index.ts`、`frontend/src/AppV2.vue`、`frontend/src/__tests__/AppV2.spec.ts` | 登记表七类列落地、只填「完整流程」一行；落结构化表单 / 六格进度条 / 侧栏模式名 / 返回文案 / 刷新后录入还在 / 三份文档齐才可完成；其余三入口走旧路径、行为不变；用例走外壳集成接缝 |
+| **#47** | 其余三个入口迁入登记表、旧表退役 | `frontend/src/utils/workflow.ts`、`frontend/src/stores/solutions.ts`、`frontend/src/composables/useDocumentPipeline.ts` | 四行齐全；快捷流程不追问需求、两个导入入口两格且只要提示词套件即可完成；侧栏模式名 / 阶段名 / 标题回落 / 返回与改需求文案四入口都对；旧表删空前确认零调用，夹具随迁，行为断言全绿 |
+| **#48** | 缺行缺列当场失败 + 一条会红的守卫 | `frontend/src/utils/workflow.ts`、`frontend/src/__tests__/workflow.spec.ts` | 未知入口键 / 缺行 / 缺列问询时明确失败、不返回默认值；「未选择」仍合法；假第 5 入口半填即被拒（最高可注入点）；用例只断言外部可观察结果；失败转「该块界面不可用」不白屏 |
+| **#49** | 终检收口：代码、架构文档、路线图三者对齐 | `docs/architecture/ARCHITECTURE.md`、`docs/architecture/roadmap.md`、`docs/agents/conventions.md`、`backend/tests/test_closeout_docs.py` | 三者结论一致；用例基线按当前收集数现取现算（含文本计数与参数化展开差额）；路径逐条可见、全仓无悬空引用；`git add -An .` 预演确认无 `.env` / `.venv` / `node_modules` / `dist` |
 
 ---
 
@@ -87,3 +97,5 @@
 | 6 | 全量用例离线跑绿、零 LLM Key | `cd backend && uv run pytest`；基线按 `--collect-only -q` 现取现算 |
 | 7 | 代码、架构文档、路线图三者同步 | 逐票对照 §2 的落点表 |
 | 8 | 提交前预演并经人确认 | `git add -An .`，确认无 `.env` / `.venv` / `node_modules` / `dist` |
+| 9 | #44~#49 票序与依赖写在现状排期 | 对照本文 §1 的第二段票序、§2 的六行落点与 §5 本表；#44 文档先行，#45 / #46 / #47 / #48 四张代码票与 #49 终检票严格串行 |
+| 10 | 登记表结论与全局映射边界只按现状架构文档作答 | `docs/architecture/ARCHITECTURE.md` §5.8 写明一张登记表、一行一个入口、七类资料为列；14 个视图状态 → 进度格的全局映射、后端、界面交互不动 |

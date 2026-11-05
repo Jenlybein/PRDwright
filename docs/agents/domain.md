@@ -8,7 +8,7 @@
 - **`docs/architecture/ARCHITECTURE.md`**：唯一一版现状架构，读「设计」「契约」「取舍」节与三段承重附录；与既有架构决策冲突时以它为准。
 - **`docs/adr/`**：决策档案（编号从 0001 重新开始），目前只有一条关于文档重组的架构决策；不要预先堆砌新档案。
 - **`docs/architecture/README.md`**：时间线真源（阶段总表 / v2 七波重写 / 已确认的失真 / 复核方法）。
-- **`docs/architecture/roadmap.md`**：现状排期（#31~#41 各票落点与验收方式）。
+- **`docs/architecture/roadmap.md`**：现状排期（#31~#41 各票落点与验收方式，以及 #44~#49「入口模式收成一张登记表」这一轮的票序与落点）。
 - **`docs/agents/conventions.md`**：当前有效的工程约定与已知的坑（分层、迁移、SSE、版本链、测试、部署）。改代码前读，比翻历史文档快。
 
 任何一份不存在就**静默跳过**——不要提示缺失，也不要主动张罗着去创建。`GLOSSARY.md` 由 `/domain-modeling` 在术语真正定下来时增量更新；实施取舍写进 `docs/architecture/ARCHITECTURE.md` 的「取舍」节，跨层的架构决策才进 `docs/adr/`。
@@ -28,7 +28,7 @@
 │   ├── architecture/           ← 单一现状文档 + 导航 / 时间线真源 + 现状排期
 │   │   ├── ARCHITECTURE.md     ← 唯一一版现状架构（含承重附录）
 │   │   ├── README.md           ← 导航 + 时间线真源（阶段总表、已确认的失真）
-│   │   └── roadmap.md          ← 现状排期（#31~#41）
+│   │   └── roadmap.md          ← 现状排期（#31~#41、#44~#49）
 ├── backend/  frontend/  frontend_admin/  skills/  scripts/
 ```
 
