@@ -584,16 +584,6 @@ export function stepsForMode(mode: EntryMode | null): readonly Step[] {
   return STEPS.filter((step) => ids.includes(step.id))
 }
 
-/** 各入口模式下「完成」所需的最低文档集合 */
-export const REQUIRED_DOCS: Record<EntryMode, readonly DocType[]> = {
-  structured: ['prd', 'api-docs', 'prompts'],
-  // 快捷流程复用完整流程的进度条，交付判据也一并对齐：三份齐备才算完成
-  'prd-quick': ['prd', 'api-docs', 'prompts'],
-  // 两个导入入口的交付物都只有提示词套件（自带的那两份材料不算本工具的产物）
-  'prompt-debug': ['prompts'],
-  'prd-and-api-paste': ['prompts'],
-}
-
 /** 刷新降级的类型：生成中断 / 确认步骤中断 */
 export type DowngradeKind = 'generating' | 'pending'
 
@@ -825,7 +815,7 @@ export function canGeneratePrdFrom(messages: readonly ChatMessage[], busy: boole
  * 完整流程 / 快捷流程的判定与旧版完全等价，
  * 因此这里只保留这一个函数，不再另开一个只服务单一口径的封装。
  *
- * 先查登记表这一行；**未迁入的入口仍回落到旧表 `REQUIRED_DOCS`**（`#47` 四行齐了才退役）。
+ * 要哪几份文档在登记表的 `requiredDocs` 列。
  */
 export function hasRequiredDocuments(
   mode: EntryMode | null,
@@ -836,9 +826,7 @@ export function hasRequiredDocuments(
     'api-docs': docs.apiDocs,
     prompts: docs.prompts,
   }
-  const spec = entrySpecFor(mode)
-  const required = spec ? spec.requiredDocs : REQUIRED_DOCS[entryModeForDisplay(mode)]
-  return required.every((type) => byType[type].trim() !== '')
+  return entrySpecForDisplay(mode).requiredDocs.every((type) => byType[type].trim() !== '')
 }
 
 /** 判断任意值是否为合法聊天消息 */

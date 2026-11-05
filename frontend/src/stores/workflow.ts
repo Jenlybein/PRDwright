@@ -476,7 +476,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
 
   /**
    * 当前入口模式「完成」所需的文档是否齐备。
-   * 完整流程要三份齐全，快捷入口只要 PRD，调试入口只要提示词。
+   *
+   * 要哪几份由登记表的 `requiredDocs` 列回答：完整流程与快捷流程都是三份齐备，
+   * 两个导入入口只要提示词套件。这里不再写一份「快捷入口只要 PRD」的旧说法——那是
+   * 早就作废的口径，与三份齐备的判据相冲突。
    */
   const requiredDocsReady = computed(() =>
     hasRequiredDocuments(entryMode.value, {
