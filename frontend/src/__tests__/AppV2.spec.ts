@@ -1816,13 +1816,9 @@ describe('AppV2 入口模式', () => {
     const bars = wrapper.findAll('nav[aria-label="生成进度"] li')
     expect(bars).toHaveLength(6)
     expect(bars).toHaveLength(spec.steps.length)
-    // 侧栏 / 方案列表里的模式名：四个入口各按自己那一行给出，期望值是用户看到的字样本身
-    // （这一层比较的是名字，不是「登记表等于登记表」）。「未选择」按完整流程展示。
-    expect(solutionsOf(wrapper).modeLabel('structured')).toBe('完整流程')
-    expect(solutionsOf(wrapper).modeLabel('prd-quick')).toBe('快捷流程')
-    expect(solutionsOf(wrapper).modeLabel('prompt-debug')).toBe('导入 PRD')
-    expect(solutionsOf(wrapper).modeLabel('prd-and-api-paste')).toBe('导入 PRD + 接口文档')
-    expect(solutionsOf(wrapper).modeLabel('')).toBe('完整流程')
+    // 模式名（侧栏 / 方案列表里那几个字）不在这里断言：那是 store 层的取值，
+    // 屏幕上看不见它，越界断言只会让这条用例在重构时白挂一次。口径由
+    // `solutions-store.spec.ts` 覆盖。
     // 表单的返回落点是入口页
     await clickButton(wrapper, '返回入口', true)
     expect(wrapper.text()).toContain('新建 PRD 方案')
