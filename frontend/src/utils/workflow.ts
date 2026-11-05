@@ -329,6 +329,12 @@ const STRUCTURED_INPUT_FIELDS: readonly EntryInputField[] = [
   { key: 'scope_out', label: '不在范围内', defaultValue: '', countsAsContent: true },
 ]
 
+/** 快捷流程的字段：与 `QuickPrdStage.vue` 的两栏一一对应 */
+const QUICK_INPUT_FIELDS: readonly EntryInputField[] = [
+  { key: 'product_name', label: '产品名称', defaultValue: '', countsAsContent: true },
+  { key: 'requirements', label: '需求描述', defaultValue: '', countsAsContent: true },
+]
+
 /**
  * 入口模式登记表：一行一个入口。
  *
@@ -370,6 +376,42 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
       stateField: 'summary',
       stateColumn: 'summary',
       fields: STRUCTURED_INPUT_FIELDS,
+    },
+  },
+  'prd-quick': {
+    mode: 'prd-quick',
+    card: {
+      groupId: 'from-scratch',
+      groupTitle: '从零创建 PRD',
+      groupDescription: '还没有任何材料，从这里把需求说清楚。',
+      title: '快捷流程',
+      description: '一段话说清想法，跳过表单与对话，直接逐章生成 PRD。',
+    },
+    landing: {
+      onSelect: 'prd-quick',
+      // 「改描述」与审阅页的「返回」都回极简录入页：它就是这一条的起点
+      editRequirements: 'prd-quick',
+      backToInput: 'prd-quick',
+    },
+    // 与完整流程**同一套六步**：只差第一步的形态。「AI 对话」这一格不能省——
+    // 快捷流程没有需求澄清，但文档澄清的三条线程就住在那个对话页上。
+    steps: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
+    inputPageOnBar: true,
+    // 用户选它就是因为不想多聊几轮：一段话写完直接生成
+    needsRequirementChat: false,
+    // 「不审不改」是这一条的定义，三份产物都一样
+    needsDocumentReview: false,
+    // 交付判据与完整流程对齐：三份齐备才算完成，不因「快捷」降低门槛
+    requiredDocs: ['prd', 'api-docs', 'prompts'],
+    copy: {
+      modeLabel: '快捷流程',
+      backLabel: '返回对话',
+      editRequirementsLabel: '改描述',
+    },
+    input: {
+      stateField: 'quickInput',
+      stateColumn: 'quick_requirements',
+      fields: QUICK_INPUT_FIELDS,
     },
   },
 }

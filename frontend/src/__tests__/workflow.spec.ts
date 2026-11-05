@@ -623,19 +623,10 @@ describe('未选择入口（null）按完整流程的展示口径', () => {
 /**
  * 入口模式登记表的第一行。
  *
- * 登记表**一行一个入口、七类资料为列**。这一步只填「完整流程」一行，其余三个入口仍走
- * 旧路（旧表还在，见下一个 describe）。这里的期望值取自票面与架构文档的口径，
+ * 登记表**一行一个入口、七类资料为列**。这里的期望值取自票面与架构文档的口径，
  * 不是把实现再算一遍：六步、三份文档、要澄清、要审核、落结构化表单、列表名「完整流程」。
  */
 describe('入口模式登记表：完整流程一行', () => {
-  it('只填了「完整流程」一行，其余三个入口尚未迁入', () => {
-    expect(ENTRY_REGISTRY.structured).toBeDefined()
-    // 本票只迁一行：另外三个入口必须仍是「缺行」，由旧表兜住，行为一点不变
-    expect(ENTRY_REGISTRY['prd-quick']).toBeUndefined()
-    expect(ENTRY_REGISTRY['prompt-debug']).toBeUndefined()
-    expect(ENTRY_REGISTRY['prd-and-api-paste']).toBeUndefined()
-  })
-
   it('七类资料为列，每一列都填了「完整流程」的答案', () => {
     const spec = ENTRY_REGISTRY.structured
     if (!spec) throw new Error('登记表缺「完整流程」一行')
@@ -720,14 +711,34 @@ describe('入口模式登记表：完整流程一行', () => {
     )
   })
 
-  it('未迁入的三个入口仍走旧表：行为与本票之前逐条一致', () => {
-    // 缺行 = 还没迁入（合法中间状态），不是「被默认值补上」
-    expect(entrySpecFor('prd-quick')).toBeUndefined()
-    expect(entrySpecFor('prompt-debug')).toBeUndefined()
-    expect(entrySpecFor('prd-and-api-paste')).toBeUndefined()
+})
 
-    // 进度条：快捷流程仍是六格，两个导入入口仍是两格
-    expect(stepsForMode('prd-quick').map((step) => step.id)).toEqual([
+/**
+ * 登记表的第二行：快捷流程。
+ *
+ * 它与完整流程**共用同一条流水线**，差别全在这一行里：起点是一段话而不是表单、
+ * 没有需求澄清、不审不改、落页是自己的极简录入页。期望值逐列写死，不从实现里取。
+ */
+describe('入口模式登记表：快捷流程一行', () => {
+  it('七类资料为列，每一列都填了「快捷流程」的答案', () => {
+    const spec = entrySpecFor('prd-quick')
+    if (!spec) throw new Error('登记表缺「快捷流程」一行')
+
+    // ① 键、组别与卡片文案：与入口页上那张卡一致（文案照抄，不改写）
+    expect(spec.mode).toBe('prd-quick')
+    expect(spec.card.groupId).toBe('from-scratch')
+    expect(spec.card.groupTitle).toBe('从零创建 PRD')
+    expect(spec.card.groupDescription).toBe('还没有任何材料，从这里把需求说清楚。')
+    expect(spec.card.title).toBe('快捷流程')
+    expect(spec.card.description).toBe('一段话说清想法，跳过表单与对话，直接逐章生成 PRD。')
+
+    // ② 落页：选中落在极简描述页；「改描述」回同一页；返回落点也是它
+    expect(spec.landing.onSelect).toBe('prd-quick')
+    expect(spec.landing.editRequirements).toBe('prd-quick')
+    expect(spec.landing.backToInput).toBe('prd-quick')
+
+    // ③ 进度条步骤：与完整流程同一套六步——「AI 对话」留给文档澄清
+    expect(spec.steps).toEqual([
       'form',
       'chatting',
       'review-prd',
@@ -735,22 +746,31 @@ describe('入口模式登记表：完整流程一行', () => {
       'review-prompts',
       'done',
     ])
-    expect(stepsForMode('prompt-debug').map((step) => step.id)).toEqual([
-      'review-prompts',
-      'done',
-    ])
-    expect(stepsForMode('prd-and-api-paste').map((step) => step.id)).toEqual([
-      'review-prompts',
-      'done',
-    ])
 
-    // 三个布尔与完成条件
+    // ④ 三个布尔：录入页在进度条上、**不要**需求澄清、**不审不改**
+    expect(spec.inputPageOnBar).toBe(true)
+    expect(spec.needsRequirementChat).toBe(false)
+    expect(spec.needsDocumentReview).toBe(false)
+
+    // ⑤ 完成所需文档：与完整流程一致，三份齐备
+    expect(spec.requiredDocs).toEqual(['prd', 'api-docs', 'prompts'])
+
+    // ⑥ 文案：列表模式名、返回按钮、改描述按钮
+    expect(spec.copy.modeLabel).toBe('快捷流程')
+    expect(spec.copy.backLabel).toBe('返回对话')
+    expect(spec.copy.editRequirementsLabel).toBe('改描述')
+
+    // ⑦ 录入字段：落在快照的 `quickInput`（产品名与需求描述），非空即算有内容
+    expect(spec.input.stateField).toBe('quickInput')
+    expect(spec.input.fields.map((field) => field.key)).toEqual(['product_name', 'requirements'])
+    expect(spec.input.fields.map((field) => field.label)).toEqual(['产品名称', '需求描述'])
+    expect(spec.input.fields.map((field) => field.countsAsContent)).toEqual([true, true])
+  })
+
+  it('快捷流程不被追问需求：问询给出「不澄清」，也没有摘要回填的余地', () => {
     expect(hasRequirementChat('prd-quick')).toBe(false)
+    // 同一行驱动的其它两列也得跟着对，避免「答了半个入口」
     expect(hasDocumentReview('prd-quick')).toBe(false)
-    expect(hasDocumentReview('prompt-debug')).toBe(true)
     expect(inputPageOnBar('prd-quick')).toBe(true)
-    expect(inputPageOnBar('prompt-debug')).toBe(false)
-    expect(hasRequiredDocuments('prompt-debug', { prd: '', apiDocs: '', prompts: '# p' })).toBe(true)
-    expect(hasRequiredDocuments('prd-quick', { prd: '# p', apiDocs: '', prompts: '' })).toBe(false)
   })
 })
