@@ -548,11 +548,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
    */
   function chooseEntry(mode: EntryMode): boolean {
     if (hasActiveRun.value) return false
-    entryMode.value = mode
     // 落页由登记表这一行的 `landing.onSelect` 回答。查不到不猜：未知入口键、缺行、缺列
     // 都会当场抛 `EntrySpecMissingError`（只有「未选择」经 `entryModeForDisplay` 按完整流程
-    // 展示）。失败由界面的错误边界变成一句「这块界面暂时不可用」，不再悄悄按完整流程跑下去。
-    goTo(entrySpecForDisplay(mode).landing.onSelect)
+    // 展示）。**先查表再改状态**：查表失败时不要留下「入口已经换了、页面没换」的半截状态。
+    // 失败由界面的错误边界变成一句「这块界面暂时不可用」，不再悄悄按完整流程跑下去。
+    const landing = entrySpecForDisplay(mode).landing.onSelect
+    entryMode.value = mode
+    goTo(landing)
     return true
   }
 
