@@ -774,3 +774,62 @@ describe('入口模式登记表：快捷流程一行', () => {
     expect(inputPageOnBar('prd-quick')).toBe(true)
   })
 })
+
+/**
+ * 登记表的第三行：我有 PRD。
+ *
+ * 两个**导入**入口的共同点是「自带材料、只补做提示词套件」：录入页不在进度条上（所以审阅页
+ * 必须留「返回」），完成只要提示词。它与下一个入口的差别只在贴几份材料。
+ */
+describe('入口模式登记表：我有 PRD 一行', () => {
+  it('七类资料为列，每一列都填了「我有 PRD」的答案', () => {
+    const spec = entrySpecFor('prompt-debug')
+    if (!spec) throw new Error('登记表缺「我有 PRD」一行')
+
+    // ① 键、组别与卡片文案：第二个分组的第一个叶子
+    expect(spec.mode).toBe('prompt-debug')
+    expect(spec.card.groupId).toBe('with-material')
+    expect(spec.card.groupTitle).toBe('导入已有素材')
+    expect(spec.card.groupDescription).toBe('手头已经有写好的材料，别重复劳动。')
+    expect(spec.card.title).toBe('我有 PRD')
+    expect(spec.card.description).toBe('贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。')
+
+    // ② 落页：选中落在粘贴 PRD 页；两处「回去」也回它
+    expect(spec.landing.onSelect).toBe('prompt-debug')
+    expect(spec.landing.editRequirements).toBe('prompt-debug')
+    expect(spec.landing.backToInput).toBe('prompt-debug')
+
+    // ③ 进度条步骤：产物只有提示词，两格
+    expect(spec.steps).toEqual(['review-prompts', 'done'])
+
+    // ④ 三个布尔：录入页不在进度条上、不要需求澄清、要审核改写
+    expect(spec.inputPageOnBar).toBe(false)
+    expect(spec.needsRequirementChat).toBe(false)
+    expect(spec.needsDocumentReview).toBe(true)
+
+    // ⑤ 完成所需文档：只要提示词套件（自带的那份 PRD 不算本工具的产物）
+    expect(spec.requiredDocs).toEqual(['prompts'])
+
+    // ⑥ 文案：列表模式名沿用「导入 PRD」、返回写「返回 PRD」
+    expect(spec.copy.modeLabel).toBe('导入 PRD')
+    expect(spec.copy.backLabel).toBe('返回 PRD')
+    expect(spec.copy.editRequirementsLabel).toBe('改需求')
+
+    // ⑦ 录入字段：贴入的 PRD 落在快照的 `debugPrdText`
+    expect(spec.input.stateField).toBe('debugPrdText')
+    expect(spec.input.fields.map((field) => field.key)).toEqual(['prd'])
+    expect(spec.input.fields.map((field) => field.label)).toEqual(['PRD 正文（Markdown）'])
+    expect(spec.input.fields.every((field) => field.countsAsContent)).toBe(true)
+  })
+
+  it('两个导入入口口径一致：两格进度条、只要提示词即可完成、录入页不在条上', () => {
+    for (const mode of ['prompt-debug', 'prd-and-api-paste'] as const) {
+      expect(stepsForMode(mode).map((step) => step.id)).toEqual(['review-prompts', 'done'])
+      expect(hasRequiredDocuments(mode, { prd: '# p', apiDocs: '# a', prompts: '' })).toBe(false)
+      expect(hasRequiredDocuments(mode, { prd: '', apiDocs: '', prompts: '# p' })).toBe(true)
+      expect(inputPageOnBar(mode)).toBe(false)
+      expect(hasRequirementChat(mode)).toBe(false)
+      expect(hasDocumentReview(mode)).toBe(true)
+    }
+  })
+})

@@ -335,6 +335,11 @@ const QUICK_INPUT_FIELDS: readonly EntryInputField[] = [
   { key: 'requirements', label: '需求描述', defaultValue: '', countsAsContent: true },
 ]
 
+/** 我有 PRD 的字段：与 `PromptDebugStage.vue` 的正文框一一对应 */
+const DEBUG_PRD_FIELDS: readonly EntryInputField[] = [
+  { key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true },
+]
+
 /**
  * 入口模式登记表：一行一个入口。
  *
@@ -412,6 +417,42 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
       stateField: 'quickInput',
       stateColumn: 'quick_requirements',
       fields: QUICK_INPUT_FIELDS,
+    },
+  },
+  'prompt-debug': {
+    mode: 'prompt-debug',
+    card: {
+      groupId: 'with-material',
+      groupTitle: '导入已有素材',
+      groupDescription: '手头已经有写好的材料，别重复劳动。',
+      title: '我有 PRD',
+      description: '贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。',
+    },
+    landing: {
+      onSelect: 'prompt-debug',
+      // 导入入口没有需求澄清，对话页也就不会给「改需求」按钮；这一列登记成自己的录入页，
+      // 万一旧快照带着需求对话恢复了，回去的也该是「改贴入的材料」而不是结构化表单。
+      editRequirements: 'prompt-debug',
+      backToInput: 'prompt-debug',
+    },
+    // 产物只有提示词套件：进度条是「提示词 → 交付」两格
+    steps: ['review-prompts', 'done'],
+    // 录入页不在进度条上（贴 PRD 不是一格），所以审阅页必须保留「返回」，否则改不了材料
+    inputPageOnBar: false,
+    // 自带的 PRD 就是答案，不再追问需求
+    needsRequirementChat: false,
+    // 导入的正文仍要过一遍审核 / 改写
+    needsDocumentReview: true,
+    requiredDocs: ['prompts'],
+    copy: {
+      modeLabel: '导入 PRD',
+      backLabel: '返回 PRD',
+      editRequirementsLabel: '改需求',
+    },
+    input: {
+      stateField: 'debugPrdText',
+      stateColumn: 'draft_prd_text',
+      fields: DEBUG_PRD_FIELDS,
     },
   },
 }
