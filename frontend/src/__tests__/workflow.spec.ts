@@ -833,3 +833,98 @@ describe('入口模式登记表：我有 PRD 一行', () => {
     }
   })
 })
+
+/**
+ * 登记表的第四行：我有 PRD + 接口文档。
+ *
+ * 它与「我有 PRD」同属导入组，口径应当逐列一致，只有录入页与两份文案不同。
+ */
+describe('入口模式登记表：我有 PRD + 接口文档一行', () => {
+  it('七类资料为列，每一列都填了「我有 PRD + 接口文档」的答案', () => {
+    const spec = entrySpecFor('prd-and-api-paste')
+    if (!spec) throw new Error('登记表缺「我有 PRD + 接口文档」一行')
+
+    // ① 键、组别与卡片文案：第二个分组的第二个叶子
+    expect(spec.mode).toBe('prd-and-api-paste')
+    expect(spec.card.groupId).toBe('with-material')
+    expect(spec.card.groupTitle).toBe('导入已有素材')
+    expect(spec.card.groupDescription).toBe('手头已经有写好的材料，别重复劳动。')
+    expect(spec.card.title).toBe('我有 PRD + 接口文档')
+    expect(spec.card.description).toBe('两份都贴进来，提示词因此能对齐真实的接口路径与字段名。')
+
+    // ② 落页：选中落在双粘贴页；两处「回去」也回它
+    expect(spec.landing.onSelect).toBe('prd-and-api-paste')
+    expect(spec.landing.editRequirements).toBe('prd-and-api-paste')
+    expect(spec.landing.backToInput).toBe('prd-and-api-paste')
+
+    // ③ 进度条步骤：与另一个导入入口同口径，两格
+    expect(spec.steps).toEqual(['review-prompts', 'done'])
+
+    // ④ 三个布尔：录入页不在进度条上、不要需求澄清、要审核改写
+    expect(spec.inputPageOnBar).toBe(false)
+    expect(spec.needsRequirementChat).toBe(false)
+    expect(spec.needsDocumentReview).toBe(true)
+
+    // ⑤ 完成所需文档：只要提示词套件
+    expect(spec.requiredDocs).toEqual(['prompts'])
+
+    // ⑥ 文案：列表模式名沿用「导入 PRD + 接口文档」、返回写「返回素材」
+    expect(spec.copy.modeLabel).toBe('导入 PRD + 接口文档')
+    expect(spec.copy.backLabel).toBe('返回素材')
+    expect(spec.copy.editRequirementsLabel).toBe('改需求')
+
+    // ⑦ 录入字段：两份材料都落在快照的 `pastePairInput`（PRD 为主内容列）
+    expect(spec.input.stateField).toBe('pastePairInput')
+    expect(spec.input.stateColumn).toBe('paste_prd_text')
+    expect(spec.input.fields.map((field) => field.key)).toEqual(['prd', 'api_docs'])
+    expect(spec.input.fields.map((field) => field.label)).toEqual([
+      'PRD 正文（Markdown）',
+      '接口文档正文（Markdown）',
+    ])
+    expect(spec.input.fields.every((field) => field.countsAsContent)).toBe(true)
+  })
+})
+
+/**
+ * 四行齐全。
+ *
+ * 这一条是「旧表已退役」的正面证据：四个入口全部在登记表里，问询函数只可能从这些行取答案。
+ */
+describe('入口模式登记表：四行齐全', () => {
+  it('四个入口各占一行，没有缺行', () => {
+    const modes = ['structured', 'prd-quick', 'prompt-debug', 'prd-and-api-paste'] as const
+    expect(Object.keys(ENTRY_REGISTRY).sort()).toEqual([...modes].sort())
+    for (const mode of modes) {
+      expect(ENTRY_REGISTRY[mode]).toBeDefined()
+      expect(ENTRY_REGISTRY[mode]?.mode).toBe(mode)
+      expect(entrySpecFor(mode)?.mode).toBe(mode)
+    }
+  })
+
+  it('四行的组别与卡片文案合起来就是入口页上的两组四叶', () => {
+    const fromScratch = Object.values(ENTRY_REGISTRY).filter(
+      (spec) => spec?.card.groupId === 'from-scratch',
+    )
+    const withMaterial = Object.values(ENTRY_REGISTRY).filter(
+      (spec) => spec?.card.groupId === 'with-material',
+    )
+    expect(fromScratch.map((spec) => spec?.card.title)).toEqual(['完整流程', '快捷流程'])
+    expect(withMaterial.map((spec) => spec?.card.title)).toEqual(['我有 PRD', '我有 PRD + 接口文档'])
+  })
+
+  it('每个入口的问询都从自己那一行取答案（登记表真的被读到）', () => {
+    const modes = ['structured', 'prd-quick', 'prompt-debug', 'prd-and-api-paste'] as const
+    for (const mode of modes) {
+      const spec = ENTRY_REGISTRY[mode]
+      if (!spec) throw new Error(`登记表缺 ${mode} 一行`)
+      expect(stepsForMode(mode).map((step) => step.id)).toEqual([...spec.steps])
+      expect(hasRequirementChat(mode)).toBe(spec.needsRequirementChat)
+      expect(hasDocumentReview(mode)).toBe(spec.needsDocumentReview)
+      expect(inputPageOnBar(mode)).toBe(spec.inputPageOnBar)
+      // 完成判据按这一行登记的那几份文档算：凑齐它们是 true，少一份是 false
+      const all = { prd: '# prd', apiDocs: '# api', prompts: '# prompts' }
+      expect(hasRequiredDocuments(mode, all)).toBe(true)
+      expect(hasRequiredDocuments(mode, { prd: '', apiDocs: '', prompts: '' })).toBe(false)
+    }
+  })
+})

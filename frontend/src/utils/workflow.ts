@@ -214,8 +214,8 @@ export function entryModeForDisplay(mode: EntryMode | null): EntryMode {
 // 入口模式登记表
 //
 // **一行一个入口，七类资料为列**。原来按入口写死的表（进度步骤、三个布尔、完成所需文档、
-// 落页、模式名、返回与改需求文案）都改成「先查这一行」，未迁入的入口回落到旧表。
-// 目标形态见 `docs/architecture/ARCHITECTURE.md` §5.8；本票（#46）只填「完整流程」一行。
+// 落页、模式名、返回与改需求文案）都改成「查这一行」，旧表已退役。
+// 目标形态见 `docs/architecture/ARCHITECTURE.md` §5.8；四个入口各占一行。
 // ----------------------------------------------------------------------------
 
 /** ① 键、组别与卡片文案：入口页上那张卡片怎么说 */
@@ -273,7 +273,12 @@ export interface EntryInputField {
 export interface EntryInputSpec {
   /** 录入内容在 workflow store 上的持有者 */
   readonly stateField: 'summary' | 'quickInput' | 'debugPrdText' | 'pastePairInput'
-  /** 快照里承载它的列（`solutions.state.<列>`）；与后端契约同名 */
+  /**
+   * 快照里承载它的列（`solutions.state.<列>`）；与后端契约同名。
+   *
+   * 一个入口的录入内容可能落多列（例如快捷流程的产品名与需求描述、双粘贴的两份材料），
+   * 这里记**主内容那一列**；各字段的列见 `fields` 的顺序与后端契约。
+   */
   readonly stateColumn: string
   readonly fields: readonly EntryInputField[]
 }
@@ -281,7 +286,7 @@ export interface EntryInputSpec {
 /**
  * 一个入口模式的全部资料：七类为列，一行填齐才算一个入口。
  *
- * 缺列在 `#48` 会变成当场失败；本票（`#46`）先落地结构并只填「完整流程」一行。
+ * 缺列在 `#48` 会变成当场失败；本票（`#47`）先把四个入口的行填齐。
  */
 export interface EntrySpec {
   /** ① 键 */
@@ -340,15 +345,19 @@ const DEBUG_PRD_FIELDS: readonly EntryInputField[] = [
   { key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true },
 ]
 
+/** 我有 PRD + 接口文档的字段：与 `PastePairStage.vue` 的两个文本框一一对应 */
+const PASTE_PAIR_FIELDS: readonly EntryInputField[] = [
+  { key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true },
+  { key: 'api_docs', label: '接口文档正文（Markdown）', defaultValue: '', countsAsContent: true },
+]
+
 /**
- * 入口模式登记表：一行一个入口。
+ * 入口模式登记表：一行一个入口，四个入口各占一行。
  *
- * **未填的入口不是「默认值」，而是「还没迁入」**：查不到这一行的调用方回落到旧表
- * （`MODE_STEP_IDS` / `REQUIRED_DOCS` / `MODE_LANDING` / `MODE_LABELS` 与几处按模式写死的
- * if 链）。旧表在 `#47` 四个入口全部迁入后才退役，`#48` 再把回落改成失败。
- *
- * 类型写成 `Partial<Record<EntryMode, EntrySpec>>` 就是为了让「只填一部分」在类型上是合法的：
- * 缺行是一个**已知的中间状态**，不是一个被默认值悄悄补上的洞。
+ * 类型是 `Partial<Record<EntryMode, EntrySpec>>`：**缺行不是「默认值」，而是「还没迁入」**，
+ * 类型上保留这种可能，是为了让「缺行」不被一个悄悄补上的默认值掩盖。`#48` 起，缺行 / 缺列
+ * 在问询那一刻当场失败；在那之前，查不到行的地方经 {@link entrySpecForDisplay} 按
+ * 「未选择」的展示口径处理，绝不在这里猜成某个业务默认值。
  */
 export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
   structured: {
@@ -453,6 +462,37 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
       stateField: 'debugPrdText',
       stateColumn: 'draft_prd_text',
       fields: DEBUG_PRD_FIELDS,
+    },
+  },
+  'prd-and-api-paste': {
+    mode: 'prd-and-api-paste',
+    card: {
+      groupId: 'with-material',
+      groupTitle: '导入已有素材',
+      groupDescription: '手头已经有写好的材料，别重复劳动。',
+      title: '我有 PRD + 接口文档',
+      description: '两份都贴进来，提示词因此能对齐真实的接口路径与字段名。',
+    },
+    landing: {
+      onSelect: 'prd-and-api-paste',
+      editRequirements: 'prd-and-api-paste',
+      backToInput: 'prd-and-api-paste',
+    },
+    // 与「我有 PRD」同属导入组：产物一样只有提示词套件，进度条口径就该一样
+    steps: ['review-prompts', 'done'],
+    inputPageOnBar: false,
+    needsRequirementChat: false,
+    needsDocumentReview: true,
+    requiredDocs: ['prompts'],
+    copy: {
+      modeLabel: '导入 PRD + 接口文档',
+      backLabel: '返回素材',
+      editRequirementsLabel: '改需求',
+    },
+    input: {
+      stateField: 'pastePairInput',
+      stateColumn: 'paste_prd_text',
+      fields: PASTE_PAIR_FIELDS,
     },
   },
 }
