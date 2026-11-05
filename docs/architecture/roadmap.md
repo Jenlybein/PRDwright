@@ -11,7 +11,7 @@
 1. **先文档、后代码**：#31 先把 v1~v9 九层压成一版现状文档 + 决策档案，#32~#33 把词表与收口纪律对齐，之后才动代码（#34 起）。
 2. **1200 行阈值作废**：文件边界改以**接缝**为依据，取代 v8 附录 A §5 的 W1 口径（见 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §5.4）。七个实现文件归入同一内部包即可，不必合并回单个大文件。
 3. **数字先复核再写**：对外动作与名字数量、入口模式同步点数量一律以实测为准，不沿用旧报告里的约数；写文档前 `git grep` 复核。
-4. **用例基线现取现算**：`cd backend && uv run pytest --collect-only -q` 取当前收集数；旧文档里的 1089 及「文本计数 955 / 参数化展开差额 134」整段一起重算，不沿用旧总数。
+4. **用例基线现取现算**：`cd backend && uv run pytest --collect-only -q` 取当前收集数；旧文档里的 1089 / 1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175 及「文本计数 955 / 参数化展开差额 134」整段一起重算，不沿用中间数。#41 终检实测：加入终检守卫前收集数 1175、`def test_` 文本计数 1005、参数化展开差额 170；加入 4 条终检守卫后的终值 1179 / 1009 / 170，实测口径见 `docs/agents/conventions.md` §10。
 5. **加列不是单向门**：单向门指删列 / 退役列（回滚靠备份库文件）；新增列属于加列，评审不拿迁移成本当架构理由。
 6. **一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后。
 7. **路径即承诺**：文档里写出的每个仓库路径 `ls` 都要能看见，写完逐条 `Test-Path` + `git status` 复核。
@@ -35,7 +35,7 @@
 
 | 票 | 主题 | 落点 | 验收方式 |
 | --- | --- | --- | --- |
-| **#31** | 压成一版架构文档 + 新建决策档案 0001 | `docs/architecture/ARCHITECTURE.md`、`docs/architecture/README.md`、`docs/architecture/roadmap.md`、`docs/adr/0001-architecture-docs-consolidation.md`；删九个按层目录；18 条外部引用与 `AGENTS.md` / `docs/agents/` 口径 | 正向结构「目标 / 范围（含本期不做）/ 设计 / 契约 / 取舍」齐备；九层摘要表九行；三段承重专题整段可在新文档找到；九层目录已删；`git grep` 无悬空引用；每条写出的路径 `Test-Path` 可见；`git add -An .` 预演；`uv run pytest --collect-only -q` 收集不炸 |
+| **#31** | 压成一版架构文档 + 新建决策档案 0001 | `docs/architecture/ARCHITECTURE.md`、`docs/architecture/README.md`、`docs/architecture/roadmap.md`、`docs/adr/0001-architecture-docs-consolidation.md`；删九个按层目录；九层之外 8 个文件里的旧层引用逐条改到新落点（另含 `AGENTS.md` / `docs/agents/` / 前端注释等口径，`git diff-tree` 实测 13 个 M 文件） | 正向结构「目标 / 范围（含本期不做）/ 设计 / 契约 / 取舍」齐备；九层摘要表九行；三段承重专题整段可在新文档找到；九层目录已删；`git grep` 无悬空引用；每条写出的路径 `Test-Path` 可见；`git add -An .` 预演；`uv run pytest --collect-only -q` 收集不炸 |
 | **#32** | 词表三条定义对齐新形态 | `GLOSSARY.md` 的「架构决策」「层（v1 … v9）」「时间线真源」三条 | 三条与新文档形态一致；「方案」词条仍只指产品概念、不加第二层意思；不新增词条、不收实现概念 |
 | **#33** | 收口纪律写进路线图与约定 | `docs/architecture/roadmap.md`、`docs/agents/conventions.md` | 「先文档、后代码」「1200 行阈值作废」「数字先复核再写」「用例基线现取现算」「加列不是单向门」五条写进两份文档；入口模式同步点数量按实测改正 |
 | **#34** | DB 行成为任务单不可变数据的完整投影 | `backend/src/backend/core/models.py`、`backend/migrations/versions/`、`backend/src/backend/repositories/generation_job_repo.py` | 建任务那一刻一次写全请求参数 / 配置快照 / 技能包身份；运行态仍按既有节奏合并写；重启不续跑；迁移手写、结构对拍全绿；全流程离线 |
@@ -44,8 +44,8 @@
 | **#37** | 迁移批次一——生产调用方 + 排空职责归位 | `backend/src/backend/api/jobs.py`、`backend/src/backend/main.py`、`backend/src/backend/services/job_drain.py`、`backend/src/backend/api/health.py` | 等候在途任务交回生成任务一侧；排空只问「还有哪些在跑 / 要不要等 / 超时取消哪几支」，不读运行时内部字段；30 秒窗口、摘流、就绪探针、可直接调用形态都不变；启动回收孤儿任务不变 |
 | **#38** | 迁移批次二——测试全链路用例改走主接缝 | `backend/tests/test_generation_job.py`、`backend/tests/test_chat_job.py` 等全链路用例 | 断言只跨「造单 → 登记 → 派发 → 订阅到结束」主接缝；假环境在造单时传入（生产真值 / 测试假值）；旧的裸运行时用例替换而非叠加；不新增测试专用私有缝 |
 | **#39** | 迁移批次三——登记 / 收尾 / 快照 / 裸运行时用例归位 | `backend/tests/` 中登记、收尾、数据库兜底快照、直接构造运行时四类用例 | 只造单不派发的用例归到登记语义（顶替、目标产物落列）；只派发不登记的用例归到造单 + 派发；直接构造裸运行时的用例全改成跨公开动作断言；方案被删时收尾中止、失败不覆写正文仍成立 |
-| **#40** | 收缩——删旧入口、再导出与内部包边界落定 | `backend/src/backend/services/job_service.py`（包入口）、七个实现文件、`backend/src/backend/repositories/` | 包入口只露 11 个正常动作；再导出整块删除、主文件不再当中转；两个仍被生产使用的名字各归其位、调用方从真正所属处引用；排空留在包外；单 worker + 进程内运行时不变 |
-| **#41** | 文档 / 路线图 / 词表 / 基线与引用终检 | `docs/architecture/ARCHITECTURE.md`、`docs/architecture/roadmap.md`、`docs/agents/conventions.md`、`GLOSSARY.md`、`README.md`、`AGENTS.md` | 代码、架构文档、路线图三者同步收口；用例基线按收集数现取现算；数字逐条 `git grep` 复核；全仓 `git grep` 无悬空引用；文档写出的路径逐条 `Test-Path` 可见；`git add -An .` 预演并经人确认后才提交 |
+| **#40** | 收缩——删旧入口、再导出与内部包边界落定 | `backend/src/backend/services/job_service.py`（包入口）、七个实现文件、`backend/src/backend/repositories/` | 包入口 `job_service.__all__` 实测只露 9 个正常动作（#37/#38 迁走 `create_job` / `dispatch` 后），新三步 `job_ticket` 与「等待在途」`job_wait` 各有自己的公开面；再导出整块删空、主文件不再当中转；两个仍被生产使用的名字各归其位、调用方从真正所属处引用；排空留在包外；单 worker + 进程内运行时不变 |
+| **#41** | 文档 / 路线图 / 词表 / 基线与引用终检 | `docs/architecture/ARCHITECTURE.md`、`docs/architecture/roadmap.md`、`docs/agents/conventions.md`、`backend/pyproject.toml`、`backend/scripts/schema_survey.py`、`backend/tests/test_closeout_docs.py` | 代码、架构文档、路线图、词表与决策档案结论一致；用例基线按收集数现取现算（连文本计数 / 参数化展开差额整段重算）；数字逐条 `git grep` 复核；全仓无悬空引用、文档写出的路径逐条可见；路径扫描白名单按类别写明依据；全量离线跑绿；`git add -An .` 预演并经人确认后才提交 |
 
 ---
 

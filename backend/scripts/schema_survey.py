@@ -24,7 +24,7 @@
 
     python backend/scripts/schema_survey.py
     python backend/scripts/schema_survey.py --db /var/lib/prdwright/prdwright.db
-    python backend/scripts/schema_survey.py --out docs/architecture/ARCHITECTURE.md 附录 B
+    python backend/scripts/schema_survey.py --out /tmp/schema-survey.md
 
 不带 `--db` 时读 `backend/prdwright.db`（与 `core/paths.default_db_file()` 同口径）。
 """

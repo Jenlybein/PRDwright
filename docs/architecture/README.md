@@ -97,7 +97,9 @@ git diff --shortstat 1c65e94 b78de90            # 规模
 | **12** | 「全量用例基线 999」（`docs/agents/conventions.md`）、「基线 1006」（v8 附录 A） | 当时实测 **1014**（工作区，pytest 收集）/ **986**（HEAD 已提交部分）；`999` 与 `1006` 都是 10-25 的中间态 | 两处均改为当时的实测值并注明口径（`def test_` 文本计数与收集数不是同一个数）；**现行基线现取现算**，见 [`../agents/conventions.md`](../agents/conventions.md) §10 |
 | **13** | 「v8 起以 `deploy/docker/` 为准」（`docs/agents/conventions.md`） | 记这条时 `deploy/` 与 `deploy/docker/` 都还不存在，`scripts/deploy/` 的脚本也没有 | 当时改为「部署交付物整体未落盘」；v9 已交付：`deploy/`（compose、`docker/`、README、Makefile、`backup.py`、`backups/`）均已落盘，形态说明见 `ARCHITECTURE.md` §3.6 |
 
-> 补充一条本轮确认的失真：**「加列是单向门」是错的**，仓库里的单向门指删列 / 退役列（回滚靠备份库文件）。已如实记录在 `ARCHITECTURE.md` §5.6 与 `roadmap.md` §0.5，以后评审不拿迁移成本当架构理由。
+> 补充一条本轮确认的失真：**「加列是单向门」是错的**，仓库里的单向门指删列 / 退役列（回滚靠备份库文件）。已如实记录在 `ARCHITECTURE.md` §3.1 / §5.6 与 `roadmap.md` §0.5，以后评审不拿迁移成本当架构理由。
+>
+> 再补一条：**「任务单不落库 / 重启中断」与「深还原 `thaw_object` 边界」**是本轮实现结论，落点在 `ARCHITECTURE.md` §5.7（生成任务收口后的取舍）。
 
 ---
 
@@ -110,5 +112,5 @@ cd backend && uv run pytest --collect-only -q   # 用例基线（收集数，现
 ```
 
 文档里出现的每个路径，`ls` 都必须能看见——这是本项目两次「写入报成功、次日消失」换来的纪律，
-也是现行 `ARCHITECTURE.md` §5.6 与 `roadmap.md` §0.7 里「逐条 `Test-Path`」要求的由来。
+也是现行 `ARCHITECTURE.md` §1 目标（第 3 条「收口可验证」）与 `roadmap.md` §0.7 里「逐条 `Test-Path`」要求的由来。
 写完必须 `ls` + `git status` 复核；提交前先 `git add -An .` 预演并经人确认。
