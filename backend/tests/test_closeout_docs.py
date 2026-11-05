@@ -255,7 +255,17 @@ def test_entry_registry_conclusions_are_in_current_docs() -> None:
         + _between(conventions, "## 6. 前端与状态机", "## 7.")
         + _between(conventions, "## 7. 持久化与版本链", "## 8.")
     )
-    require("conventions.md §1/§6/§7", live, "登记表", "154 行 / 23 文件", "151 行 / 13 文件", "至少 8 处")
+    # 断言**结论性表述**，不断言任何实测计数：数字本来就该现取现算（见 §1「数字先复核再写」
+    # 与 §10「基线现取现算」），把它抄进守卫里，文档一修订守卫就红，等于逼着维护者去改守卫。
+    require(
+        "conventions.md §1/§6/§7",
+        live,
+        "一张登记表",
+        "一行一个入口",
+        "七类资料为列",
+        "缺行、缺列、未知键在问询当场失败",
+        "未选择",
+    )
     retired_markers = ("退役", "作废", "旧口径", "旧文", "更正为")
     live_lines = [line for line in live.splitlines() if not any(m in line for m in retired_markers)]
     for stale in ("约 20 处", "170 个文件:行号落点", "reset / watch 四处"):
@@ -266,10 +276,11 @@ def test_entry_registry_conclusions_are_in_current_docs() -> None:
         "conventions.md 已失效附录",
         _from(conventions, "## 已失效（勿再引用）"),
         "登记表",
-        "154 行 / 23 文件",
+        "一张登记表、一行一个入口",
+        "作废",
     )
 
-    # 时间线真源：失真表补上四条已复核的校正与本轮实测数字。
+    # 时间线真源：失真表补上已复核的校正。同样只断言结论，不抄任何计数。
     drift = _between(
         _doc("docs/architecture/README.md"),
         "## 4. 已确认的失真",
@@ -280,13 +291,9 @@ def test_entry_registry_conclusions_are_in_current_docs() -> None:
         drift,
         "goTo",
         "clarifyTarget",
-        "四处",
-        "约 20 处",
         "未选择",
-        "154 行 / 23 文件",
-        "151 行 / 13 文件",
-        "33 files changed, 1237 insertions(+), 192 deletions(-)",
-        "至少 8 处",
+        "现跑现算",
+        "整段退役",
     )
 
     # 词表：只装产品概念——入口模式可为「未选择」，且不写实现（登记表）与同步处数。
