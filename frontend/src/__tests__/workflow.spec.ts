@@ -695,7 +695,7 @@ describe('入口模式登记表：完整流程一行', () => {
     expect(spec.input.fields.find((field) => field.key === 'product_name')?.label).toBe('产品名称')
   })
 
-  it('结构化入口的问询都从这一行取答案（与旧表口径一致，行为不变）', () => {
+  it('结构化入口的问询都从这一行取答案（与迁移前的行为一致）', () => {
     const spec = ENTRY_REGISTRY.structured
     if (!spec) throw new Error('登记表缺「完整流程」一行')
     // 这一条是接缝：登记表真的被问询读到，而不是写了一份没人用的数据
