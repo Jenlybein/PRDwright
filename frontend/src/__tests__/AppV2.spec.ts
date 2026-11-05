@@ -218,13 +218,13 @@ vi.mock('../components/stages/PromptDebugStage.vue', async (importOriginal) => {
   return {
     default: defineComponent({
       name: 'FaultInjectingPromptDebugStage',
-      // props 与事件都是透传的「外壳属性」，所以不自动继承、手动挂到真实组件上
-      inheritAttrs: false,
-      setup(_props, { attrs }) {
+      // 本组件不声明任何 props：props 与事件都按「未声明的属性」透传到它渲染的根节点上，
+      // 因此平时它就是真实录入页的一层薄壳，行为与直接渲染真实组件一致。
+      setup() {
         if (stageRenderFault.failingStage === 'prompt-debug') {
           throw new Error('假第 5 入口：这一行没填全，渲染当场失败')
         }
-        return () => h(actual.default, attrs)
+        return () => h(actual.default)
       },
     }),
   }
