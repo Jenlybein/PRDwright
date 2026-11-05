@@ -165,16 +165,15 @@ def test_running_query_reads_model_and_skill_identity(alice):
 
 
 def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypatch):
-    """跨主接缝：建任务定格的供应商四格，与收尾回执 `run_summary` 是同一份值。
+    """跨主接缝：造单定格的供应商四格，与收尾回执 `run_summary` 是同一份值。
 
-    走 `create_job → dispatch → open_stream` 的真实链路（离线假 LLM），只断言两个
-    公开出口一致：DB 行的不可变投影，以及订阅者收到的回执；收尾也不覆写四列。
+    走「造单 → 登记 → 派发 → 订阅」真实链路（离线假 LLM），只断言两个公开
+    出口一致：DB 行的不可变投影，以及订阅者收到的回执；收尾也不覆写四列。
     """
-    import asyncio
-
     from backend.services import document_service, prd_section_writer
     from backend.services.job_bus import job_bus
     from fakes import ScriptedLLM
+    from ticket_support import run_ticket
 
     _seed_provider()
     # 全链路离线：模块级文档服务换成注入假 LLM 的实例，真实工厂一调用即抛。
@@ -192,21 +191,13 @@ def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypa
     job_service._RUNTIMES.clear()  # noqa: SLF001 - 清掉别的用例留下的运行时
     job_bus._subscribers.clear()  # noqa: SLF001
 
-    async def scenario() -> tuple[int, list]:
-        job_id = job_service.create_job(
-            owner_id=alice, solution_id=None, kind="prd", request={"summary": "定格"}
-        )
-        job_service.dispatch(
-            job_id,
-            owner_id=alice,
-            solution_id=None,
-            kind="prd",
-            request={"summary": "定格"},
-        )
-        return job_id, [event async for event in job_service.open_stream(alice, job_id)]
-
-    job_id, events = asyncio.run(scenario())
-    frozen = json.loads(_raw(job_id)["config_snapshot"])["active_provider"]
+    registered, events = run_ticket(
+        owner_id=alice,
+        solution_id=None,
+        kind="prd",
+        request={"summary": "定格"},
+    )
+    frozen = json.loads(_raw(registered.job_id)["config_snapshot"])["active_provider"]
     summary = events[-1].data
     assert events[-1].type == "run_summary"
     assert summary["protocol"] == frozen["provider_protocol"] != ""
@@ -214,42 +205,48 @@ def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypa
     assert summary["provider_name"] == frozen["provider_name"]
     assert summary["model"] == frozen["provider_model"] != ""
     # 收尾没覆写四列：DB 行仍是建任务时定格的那一份。
-    row = _raw(job_id)
+    row = _raw(registered.job_id)
     assert row["provider_config_id"] == frozen["provider_config_id"]
     assert row["provider_model"] == frozen["provider_model"]
 
 
-def test_create_job_service_freezes_the_same_snapshot(alice, monkeypatch):
-    """生产入口 `create_job` 把同一份请求/配置/技能包身份定格进 DB 行。
+def test_registered_ticket_freezes_the_same_snapshot(
+    alice, monkeypatch, temp_skills_root
+):
+    """造单 → 登记把同一份请求/配置/技能包身份定格进 DB 行。
 
-    配置来自造单那一刻的 `get_runtime_config()`，技能包身份由注册表算出；两者
-    都不在收尾时重读。这里只换掉注册表读盘那一步（离线假值），其余走真实入口。
+    配置来自造单那一刻的 `get_runtime_config()`，技能包身份由注册表在造单时
+    算好作为数据随单走；两者都不在收尾时重读。假环境用 `temp_skills_root`
+    里的技能包（不替换 `describe_kind` 内部零件）。
     """
     import backend.core.runtime_config as rc
+    from conftest import write_skill_package
+    from ticket_support import build_and_register
 
     _seed_provider()
-    # 技能包注册表读盘换成假值：证明 DB 行里的身份是「算好的数据」，不是能力。
-    monkeypatch.setattr(job_service, "describe_kind", lambda kind: {
-        "name": "fake-skill", "version": "9.9.9", "fingerprint": "deadbeef"
-    })
+    write_skill_package(temp_skills_root, "prd-generator", version="9.9.9")
 
     payload = {"summary": "原始需求", "requirements": "别被改写", "doc_kind": "prd"}
-    job_id = job_service.create_job(
-        owner_id=alice, solution_id=None, kind="prd", request=payload
+    registered = build_and_register(
+        owner_id=alice,
+        solution_id=None,
+        kind="prd",
+        request=payload,
     )
-    row = _raw(job_id)
+    row = _raw(registered.job_id)
 
     assert json.loads(row["request_params"])["summary"] == "原始需求"
     snapshot = json.loads(row["config_snapshot"])
     assert snapshot["active_provider"]["provider_config_id"] == "cfg_proj01"
     assert snapshot["active_provider"]["provider_model"] == "doubao-frozen-01"
-    assert json.loads(row["skill_refs"]) == [
-        {"name": "fake-skill", "version": "9.9.9", "fingerprint": "deadbeef"}
-    ]
+    skills = json.loads(row["skill_refs"])
+    assert skills[0]["name"] == "prd-generator"
+    assert skills[0]["version"] == "9.9.9"
+    assert len(skills[0]["fingerprint"]) == 12
     assert row["provider_config_id"] == "cfg_proj01"
     assert row["provider_model"] == "doubao-frozen-01"
-    # 运行态权威不变：请求 dict 仍由调用方持有、可被 dispatch 原地补全。
-    assert payload["summary"] == "原始需求"
+    # 不再原地改写调用方传入的字典：四个 chat 派生字段明写在单②上。
+    assert payload == {"summary": "原始需求", "requirements": "别被改写", "doc_kind": "prd"}
     # 配置对象仍是「那一刻」的快照，不是每次现算的新对象。
     assert rc.get_runtime_config().active_provider is not None
 

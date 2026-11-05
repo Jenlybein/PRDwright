@@ -22,9 +22,13 @@ import pytest
 
 from backend.core import runtime_config as rc
 from backend.core.config import get_settings
+from backend.core.contracts import StreamEvent
 from dbsupport import connect
 from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
 from backend.services import document_service, llm_factory
+from backend.services.job_bus import job_bus
+from backend.services.job_ticket import start_registered_job
+from ticket_support import fake_registered_ticket
 
 
 class _FakeLLM:
@@ -255,13 +259,13 @@ def test_task_snapshot_does_not_drift():
     assert rc.get_runtime_config().settings.prd_pipeline_concurrency != before
 
 
-def test_job_meter_uses_active_provider(monkeypatch):
+def test_job_meter_uses_active_provider():
     """任务回执里记的是**使用中的那条配置**，而不是 `DEFAULT_LLM_PROVIDER`。
 
     切过配置之后，后者可能与实际发出的请求不符——回执与账单就对不上了。
+    只派发不登记的用例归到「造单 + 派发」：造单是公开正门，可直接造假单；
+    假事件流在造单时传入，断言外部可观察的 `run_summary` 回执，不探内部摆位。
     """
-    from backend.services import job_service
-
     ModelProviderRepository.create(
         provider_id="cfg_claude01",
         name="Claude-测试",
@@ -271,49 +275,41 @@ def test_job_meter_uses_active_provider(monkeypatch):
     _set(active_provider_id="cfg_claude01")
     rc.invalidate()
 
-    captured = {}
-
-    class _Stop(Exception):
-        pass
-
-    async def _noop_stream(kind, request):  # noqa: ANN001, ARG001
-        raise _Stop
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(job_service, "_build_event_stream", _noop_stream)
-
-    original = job_service.JobRuntime
-
-    class _Spy(original):  # type: ignore[misc, valid-type]
-        def __init__(self, **kwargs):  # noqa: ANN003
-            captured.update(kwargs)
-            super().__init__(**kwargs)
-
-    monkeypatch.setattr(job_service, "JobRuntime", _Spy)
+    async def fake_stream(kind, request):  # noqa: ANN001, ARG001
+        yield StreamEvent(type="chunk", content="假流", data={})
+        yield StreamEvent(type="done", content="", data={"reply": "假流", "partial": False})
 
     import asyncio
 
-    async def _run() -> None:
-        job_service.dispatch(
-            999,
+    async def _run() -> list:
+        # 造单时定格配置快照（生产真值），随即用公开正门补登记身份造假单②。
+        ticket = fake_registered_ticket(
             owner_id=1,
             solution_id=None,
             kind="prd",
             request={"requirements": "x", "product_name": "y"},
+            job_id=999,
+            event_stream_source=fake_stream,
         )
-        # 等任务跑完（它会因 _Stop 而落 failed）
-        await asyncio.sleep(0.05)
+        # 只派发不登记：订阅这个假 id，读回执里的四格供应商身份。
+        queue = job_bus.subscribe(ticket.job_id)
+        start_registered_job(ticket)
+        events = []
+        while True:
+            event = await asyncio.wait_for(queue.get(), timeout=5)
+            if event is None:
+                break
+            events.append(event)
+        return events
 
-    asyncio.run(_run())
-
-    meter = captured.get("meter")
-    assert meter is not None
+    events = asyncio.run(_run())
+    summary = next(event for event in reversed(events) if event.type == "run_summary").data
     # 协议与条目 id 必须同时记下：前者用于查限值与聚合账单，后者用于定位到具体一条
-    assert meter.protocol == "anthropic", f"应按协议记录，实际 {meter.protocol}"
-    assert meter.config_id == "cfg_claude01"
-    assert meter.name == "Claude-测试"
-    assert meter.model == "claude-test"
-    assert captured.get("config") is not None
+    assert summary["protocol"] == "anthropic", f"应按协议记录，实际 {summary['protocol']}"
+    assert summary["provider_config_id"] == "cfg_claude01"
+    assert summary["provider_name"] == "Claude-测试"
+    assert summary["model"] == "claude-test"
+    assert summary["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------

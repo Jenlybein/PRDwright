@@ -28,6 +28,12 @@ from backend.core.models import ChatTurn
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.services import conversation_service, job_service, solution_service
 from fakes import ScriptedLLM
+from ticket_support import (
+    build_and_register,
+    chat_request_from_ticket,
+    run_ticket,
+    run_ticket_async,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -67,37 +73,32 @@ def _use_llm(monkeypatch, llm) -> None:
 
 
 def _create(owner_id: int, solution_id: int, request: dict) -> int:
-    """建一条对话任务（不派发），返回 job_id。"""
-    return job_service.create_job(
+    """造单 → 登记一条对话任务（不派发），返回 job_id。
+
+    只造单不派发的边界用例（单写者、方案归属等）走公开正门的登记语义，
+    不再借旧入口 `create_job`。
+    """
+    return build_and_register(
+        owner_id=owner_id,
+        solution_id=solution_id,
+        kind="chat",
+        request=dict(request),
+    ).job_id
+
+
+def _run(owner_id: int, solution_id: int, request: dict) -> tuple[int, list, dict]:
+    """造单 → 登记 → 派发 → 一路订阅到结束。
+
+    返回 (job_id, 事件, 单②上明写的四个 chat 派生字段)。假环境（生成事件流
+    来源、配置快照）在造单时传入；这里用生产真值，模型边界仍是离线假 LLM。
+    """
+    registered, events = run_ticket(
         owner_id=owner_id,
         solution_id=solution_id,
         kind="chat",
         request=dict(request),
     )
-
-
-def _run(owner_id: int, solution_id: int, request: dict) -> tuple[int, list, dict]:
-    """建任务、派发、一路订阅到结束。返回 (job_id, 事件, 被 create_job 补全后的 request)。"""
-
-    async def scenario() -> tuple[int, list, dict]:
-        payload = dict(request)
-        job_id = job_service.create_job(
-            owner_id=owner_id,
-            solution_id=solution_id,
-            kind="chat",
-            request=payload,
-        )
-        job_service.dispatch(
-            job_id,
-            owner_id=owner_id,
-            solution_id=solution_id,
-            kind="chat",
-            request=payload,
-        )
-        events = [event async for event in job_service.open_stream(owner_id, job_id)]
-        return job_id, events, payload
-
-    return asyncio.run(scenario())
+    return registered.job_id, events, chat_request_from_ticket(registered)
 
 
 def _turns(owner_id: int, solution_id: int, stage: str = "requirement"):
@@ -265,27 +266,33 @@ def test_cancel_stops_and_keeps_partial_reply(client, alice, monkeypatch):
     llm = ScriptedLLM(["很长的一段", "还在继续说", "第三段"])
     _use_llm(monkeypatch, llm)
 
-    async def scenario() -> tuple[int, list]:
-        payload = {
-            "stage": "requirement",
-            "chat_mode": "continue",
-            "content": "讲个长故事",
-        }
-        job_id = job_service.create_job(
-            owner_id=owner_id, solution_id=solution_id, kind="chat", request=payload
-        )
-        job_service.dispatch(
-            job_id, owner_id=owner_id, solution_id=solution_id, kind="chat", request=payload
-        )
-        events = []
-        async for event in job_service.open_stream(owner_id, job_id):
-            events.append(event)
-            # 收到第一段增量就按停止：模拟「说到一半用户点了停止」
-            if event.type == "chunk" and not any(e.type == "run_summary" for e in events):
-                job_service.cancel_job(owner_id, job_id)
-        return job_id, events
+    seen: list = []
 
-    job_id, _ = asyncio.run(scenario())
+    def _stop_on_first_chunk(event):
+        seen.append(event)
+        # 收到第一段增量就按停止：模拟「说到一半用户点了停止」
+        if event.type == "chunk" and not any(e.type == "run_summary" for e in seen):
+            job_service.cancel_job(owner_id, cancel_target[0])
+
+    cancel_target = [0]
+
+    async def scenario() -> int:
+        registered, _ = await run_ticket_async(
+            owner_id=owner_id,
+            solution_id=solution_id,
+            kind="chat",
+            request={
+                "stage": "requirement",
+                "chat_mode": "continue",
+                "content": "讲个长故事",
+            },
+            # 派发之后、订阅之前记下公开可观察的 job_id，供停止动作使用。
+            before_open=lambda job_id: cancel_target.__setitem__(0, job_id),
+            on_event=_stop_on_first_chunk,
+        )
+        return registered.job_id
+
+    job_id = asyncio.run(scenario())
 
     turns = [turn for turn in _turns(owner_id, solution_id) if turn.role == "assistant"]
     assert len(turns) == 1

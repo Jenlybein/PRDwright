@@ -45,8 +45,14 @@ from backend.services import (
     solution_service,
 )
 from backend.services.job_bus import job_bus
+from backend.services.job_ticket import start_registered_job
 from backend.services.prd_section_writer import PRD_SECTIONS
 from fakes import ScriptedLLM
+from ticket_support import (
+    build_and_register,
+    run_ticket_async,
+    run_ticket_to_completion,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -161,16 +167,12 @@ def _create_solution(client) -> int:
 
 
 def _run_job(owner_id: int, solution_id: int | None, kind: str, request: dict) -> tuple[int, list]:
-    """建任务 → 派发 → 一路订阅到结束，返回 (job_id, 全部事件)。"""
+    """造单 → 登记 → 派发 → 一路订阅到结束，返回 (job_id, 全部事件)。
 
-    async def scenario() -> tuple[int, list]:
-        job_id = job_service.create_job(owner_id=owner_id, solution_id=solution_id, kind=kind)
-        job_service.dispatch(
-            job_id, owner_id=owner_id, solution_id=solution_id, kind=kind, request=request
-        )
-        return job_id, [event async for event in job_service.open_stream(owner_id, job_id)]
-
-    return _run(scenario())
+    假环境（生成事件流来源、配置快照）在造单时传入；这里用生产真值，
+    模型边界仍用既有的离线假 LLM（零 token）。
+    """
+    return run_ticket_to_completion(owner_id, solution_id, kind, request)
 
 
 # ---------------------------------------------------------------------------
@@ -185,19 +187,9 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     solution_id = _create_solution(client)
     _seed_provider()
 
-    async def scenario() -> tuple[int, list]:
-        job_id = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
-        job_service.dispatch(
-            job_id,
-            owner_id=alice,
-            solution_id=solution_id,
-            kind="prd",
-            request={"requirements": "做一个演示产品", "product_name": "演示产品"},
-        )
-        events = [event async for event in job_service.open_stream(alice, job_id)]
-        return job_id, events
-
-    job_id, events = _run(scenario())
+    job_id, events = _run_job(
+        alice, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"}
+    )
 
     # 首事件必为 snapshot（重连补全正文的落点）
     assert events[0].type == "snapshot"
@@ -272,23 +264,22 @@ def test_reconnect_after_unsubscribe_completes_remaining(client, alice, monkeypa
     solution_id = _create_solution(client)
 
     async def scenario() -> tuple[list, list]:
-        job_id = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
-        job_service.dispatch(
-            job_id,
+        registered = build_and_register(
             owner_id=alice,
             solution_id=solution_id,
             kind="prd",
             request={"requirements": "做一个演示产品", "product_name": "演示产品"},
         )
+        start_registered_job(registered)
 
         first: list = []
-        async for event in job_service.open_stream(alice, job_id):
+        async for event in job_service.open_stream(alice, registered.job_id):
             first.append(event)
             if len(_parts(first)) >= 2:  # 拿到文档头 + 第一章后断线
                 break
 
         # 断线重连：同一协程内立即重订阅，任务尚未跑完，仍能续流
-        second = [event async for event in job_service.open_stream(alice, job_id)]
+        second = [event async for event in job_service.open_stream(alice, registered.job_id)]
         return first, second
 
     first, second = _run(scenario())
@@ -316,19 +307,21 @@ def test_resubscribe_after_completion_sends_snapshot_then_summary(client, alice,
     solution_id = _create_solution(client)
 
     async def scenario() -> list:
-        job_id = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
-        job_service.dispatch(
-            job_id,
+        registered = build_and_register(
             owner_id=alice,
             solution_id=solution_id,
             kind="prd",
             request={"requirements": "做一个演示产品", "product_name": "演示产品"},
         )
+        start_registered_job(registered)
         # 第一次订阅跑到任务结束
-        async for _ in job_service.open_stream(alice, job_id):
+        async for _ in job_service.open_stream(alice, registered.job_id):
             pass
         # 第二次订阅：snapshot + run_summary 后返回，不挂起
-        return [event async for event in job_service.open_stream(alice, job_id)]
+        return [
+            event
+            async for event in job_service.open_stream(alice, registered.job_id)
+        ]
 
     events = _run(scenario())
 
@@ -346,18 +339,9 @@ def test_failure_event_marks_job_failed_and_keeps_partial(alice, monkeypatch):
     # 第一段吐完即断
     _fake_service(monkeypatch, ScriptedLLM(["第一段正文", "第二段"], raise_at=1))
 
-    async def scenario() -> tuple[int, list]:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id,
-            owner_id=alice,
-            solution_id=None,
-            kind="prd",
-            request={"requirements": "做一个演示产品", "product_name": "演示产品"},
-        )
-        return job_id, [event async for event in job_service.open_stream(alice, job_id)]
-
-    job_id, events = _run(scenario())
+    job_id, events = _run_job(
+        alice, None, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"}
+    )
 
     error = next(event for event in events if event.type == "error")
     assert error.code == "LLM_UPSTREAM_ERROR"
@@ -389,23 +373,26 @@ def test_late_subscriber_gets_error_when_job_already_failed(alice, monkeypatch):
         raise RuntimeError("还没有任何模型配置。请先在管理后台「模型配置」页新增一条")
         yield  # pragma: no cover - 有 yield 才是 async generator，@ 第一次迭代即抛
 
-    monkeypatch.setattr(document_service, "generate_prd_from_summary_stream", _boom)
-
     async def scenario() -> list:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id,
+        # 假事件流在造单时传入：无模型配置那种「一进流就抛」的失败分支。
+        registered = build_and_register(
             owner_id=alice,
             solution_id=None,
             kind="prd",
             request={"requirements": "随便写点", "product_name": "演示"},
+            event_stream_source=lambda kind, request: _boom(),
         )
-        # 等任务彻底收尾、运行时被摘掉：确保订阅发生在失败**之后**（走 DB 兜底分支）。
+        start_registered_job(registered)
+        # 等任务彻底收尾：用公开查询的终态作判据，不探内部登记表。
         for _ in range(200):
-            if job_id not in job_service._RUNTIMES:  # noqa: SLF001
+            row = job_get(alice, registered.job_id)
+            if row is not None and row["status"] != "running":
                 break
             await asyncio.sleep(0.005)
-        return [event async for event in job_service.open_stream(alice, job_id)]
+        return [
+            event
+            async for event in job_service.open_stream(alice, registered.job_id)
+        ]
 
     events = _run(scenario())
 
@@ -422,9 +409,14 @@ def test_open_stream_rejects_other_owner(alice, monkeypatch):
     """owner 不符时不泄内容：退化为失败/未命中的 404 语义（流内不返回任何事件）。"""
 
     async def scenario() -> list:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prompts")
+        registered = build_and_register(
+            owner_id=alice, solution_id=None, kind="prompts", request={}
+        )
         # 用另一个不存在的 owner 订阅：既非内存运行时归属，DB 也查不到
-        return [event async for event in job_service.open_stream(alice + 999, job_id)]
+        return [
+            event
+            async for event in job_service.open_stream(alice + 999, registered.job_id)
+        ]
 
     assert _run(scenario()) == []
 
@@ -443,17 +435,13 @@ def test_offline_zero_token(alice, monkeypatch):
     _fake_service(monkeypatch, ScriptedLLM(["正文"]))
 
     async def scenario() -> int:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id,
+        registered, _ = await run_ticket_async(
             owner_id=alice,
             solution_id=None,
             kind="prd",
             request={"requirements": "做一个演示产品"},
         )
-        async for _ in job_service.open_stream(alice, job_id):
-            pass
-        return job_id
+        return registered.job_id
 
     job_id = _run(scenario())
     assert calls["count"] == 0
@@ -490,7 +478,7 @@ def test_superseded_job_does_not_write_document(client, alice, monkeypatch):
     它收尾时照样 `_write_document`，把旧稿盖在新稿上——用户看到「新任务跑完了，
     正文却是上一版的」，不报错、只是内容对不上。因此新建任务时两处都要标记。
     """
-    monkeypatch.setattr(job_service.solution_service, "solution_exists", lambda *a, **k: True)
+    # 方案是真实建出来的，收尾时的「方案还在不在」判定走真值即可。
     solution_id = _create_solution(client)
 
     old = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
@@ -1340,32 +1328,48 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
     assert document_store.list_documents(uid, solution_id) == []
 
 
-def test_run_job_stops_consuming_events_after_cancel(alice, monkeypatch):
-    """运行时被标记取消后，下一个事件就不再消费（假事件流证明后续事件没被取走）。"""
-    job_id = job_create(alice, "prd", None)
-    runtime = job_service.JobRuntime(
-        job_id=job_id, owner_id=alice, solution_id=None, kind="prd"
-    )
-    produced: list[str] = []
+def test_run_job_stops_consuming_events_after_cancel(client, alice):
+    """方案中途被删：订阅只收到第一段增量，done 不再消费，正文不变成「完整正文」。
 
-    async def stream():
+    假事件流在造单时传入；「方案被删」走公开动作 `delete_solution_and_cancel_jobs`
+    （等同 HTTP 删除方案那条路），断言外部可观察的事件序列、终态与落库正文，
+    不再构造裸运行时、也不读内部标志位。
+    """
+    solution_id = _create_solution(client)
+    produced: list[str] = []
+    consumed: list[StreamEvent] = []
+
+    async def stream(kind, request):
         produced.append("第一段")
         yield StreamEvent(type="chunk", content="第一段", data={})
-        # 第一个事件处理完之后，用户删除了方案（`delete_solution_and_cancel_jobs` 会置这一位）
-        runtime.cancelled = True
+        # 第一个事件处理完之后，方案被删除（公开动作会标记在途任务）。
+        job_service.delete_solution_and_cancel_jobs(alice, solution_id)
         produced.append("第二段")
         yield StreamEvent(type="chunk", content="第二段", data={})
         produced.append("done")
         yield StreamEvent(type="done", content="", data={"reply": "完整正文"})
 
-    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
+    async def scenario() -> tuple[int, list]:
+        registered = build_and_register(
+            owner_id=alice,
+            solution_id=solution_id,
+            kind="prd",
+            request={"requirements": "取消分支", "product_name": "假流"},
+            event_stream_source=stream,
+        )
+        start_registered_job(registered)
+        events = []
+        async for event in job_service.open_stream(alice, registered.job_id):
+            events.append(event)
+            consumed.append(event)
+        return registered.job_id, events
 
-    _run(job_service.run_job(runtime))
+    job_id, events = _run(scenario())
 
-    # 只取走了两个事件就 break：第三个（done）从未被请求，正文不可能是「完整正文」
+    # 只取走了两个事件就 break：done 从未被消费，正文不可能变成「完整正文」
     assert produced == ["第一段", "第二段"]
-    assert runtime.live_buffer == "第一段"
-    assert runtime.final_reply == ""
+    assert "第二段" not in [event.content for event in events if event.type == "chunk"]
+    assert not any(event.type == "done" for event in events)
 
     row = job_get(alice, job_id)
     assert row is not None
@@ -1636,17 +1640,18 @@ def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
     assert untouched.cancelled is False, "别的方案上的任务一个字都不该动"
 
 
-def test_skill_registry_failure_degrades_visibility_not_the_job(client, alice, monkeypatch):
+def test_skill_registry_failure_degrades_visibility_not_the_job(
+    client, alice, monkeypatch, temp_skills_root
+):
     """技能包身份读不出来时：回执里**如实为空**，任务照常跑完。
 
     降级要看得见（债务 D8）：读盘出意外属于「该起的自检没拦住」，不能让一次具体的
-    生成请求无缘无故失败，也不能报一个与实际注入不符的包。
+    生成请求无缘无故失败，也不能报一个与实际注入不符的包。假环境用临时技能目录
+    里「元数据损坏」的包，不替换 `describe_kind` 内部零件。
     """
-
-    def _boom(kind: str) -> dict:
-        raise RuntimeError("考核点：读技能包元数据时出错")
-
-    monkeypatch.setattr(job_service, "describe_kind", _boom)
+    skill_dir = temp_skills_root / "prd-generator"
+    skill_dir.mkdir()
+    (skill_dir / "skill.yaml").write_text("这不是合法的 YAML 映射：[\n", encoding="utf-8")
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
     solution_id = _create_solution(client)
 
@@ -1840,12 +1845,22 @@ def test_db_snapshot_tolerates_corrupt_columns():
     assert snapshot.data["failed_sections"] == []
 
 
-def test_unknown_kind_is_rejected_by_the_stream_builder():
-    """未知任务类型必须在构造事件流时就抛：静默返回空流等于「生成成功但没内容」。"""
-    with pytest.raises(ValueError) as raised:
-        job_service._build_event_stream("nope", {})  # noqa: SLF001
+def test_unknown_kind_fails_loudly_through_the_public_seam(alice):
+    """未知任务类型不许被当成「生成成功但没内容」：订阅必须收到 error、任务落 failed。
 
-    assert "未知的生成任务类型" in str(raised.value)
+    造单用生产默认的事件流来源（不传假环境）；未知 kind 在事件流构造那一刻抛错，
+    `run_job` 兜底把它变成外部可观察的失败回执。只断言事件序列与终态。
+    """
+    job_id, events = _run_job(alice, None, "nope", {})
+
+    error = next((event for event in events if event.type == "error"), None)
+    assert error is not None, "未知类型被静默当成空内容成功"
+    assert "未知的生成任务类型" in error.content
+    assert events[-1].type == "run_summary"
+    assert events[-1].data["status"] == "failed"
+    row = job_get(alice, job_id)
+    assert row is not None
+    assert row["status"] == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -1890,30 +1905,31 @@ def test_drain_waits_for_a_job_that_finishes_within_the_window(client, alice, mo
     """
     release = asyncio.Event()
 
-    async def stream():
+    first_chunk_seen = asyncio.Event()
+
+    async def stream(kind, request):
         yield StreamEvent(type="chunk", content="第一段", data={})
+        first_chunk_seen.set()
         await release.wait()  # 模拟「模型还在吐字」：任务确实在途，不是还没开始
         yield StreamEvent(type="done", content="", data={"reply": "完整正文"})
 
-    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
-
     async def scenario() -> tuple[int, job_drain.DrainReport]:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        registered = build_and_register(
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={},
+            event_stream_source=stream,
         )
-        # 等第一个 chunk 被消费：这样断言的是「排空在等一个真的在跑的任务」
-        for _ in range(200):
-            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
-            if runtime is not None and runtime.live_buffer:
-                break
-            await asyncio.sleep(0.005)
+        start_registered_job(registered)
+        # 等第一个 chunk 被产出：断言的是「排空在等一个真的在跑的任务」
+        await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
 
         draining = asyncio.create_task(job_drain.drain_controller.drain(timeout=5))
         await asyncio.sleep(0.05)
         assert not draining.done(), "任务还在跑，排空不该提前结束"
         release.set()
-        return job_id, await draining
+        return registered.job_id, await draining
 
     job_id, report = _run(scenario())
 
@@ -1940,24 +1956,26 @@ def test_drain_cancels_a_job_that_outlives_the_window(client, alice, monkeypatch
     """
     never = asyncio.Event()  # 永不 set：任务卡在「模型调用」里，自己走不出来
 
-    async def stream():
+    async def stream(kind, request):
         yield StreamEvent(type="chunk", content="第一段", data={})
         await never.wait()
         yield StreamEvent(type="done", content="", data={"reply": "完整正文"})
 
-    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
-
     async def scenario() -> tuple[int, job_drain.DrainReport, list]:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        registered = build_and_register(
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={},
+            event_stream_source=stream,
         )
+        start_registered_job(registered)
 
         # 订阅者先挂上：真实场景是「浏览器正连着这个任务，然后运维重启了容器」
         events: list = []
 
         async def consume() -> None:
-            async for event in job_service.open_stream(alice, job_id):
+            async for event in job_service.open_stream(alice, registered.job_id):
                 events.append(event)
 
         watcher = asyncio.create_task(consume())
@@ -1970,7 +1988,7 @@ def test_drain_cancels_a_job_that_outlives_the_window(client, alice, monkeypatch
         report = await job_drain.drain_controller.drain(timeout=0.2)
         # 订阅者必须能自己读完（哨兵），不是被用例硬 cancel 掉
         await asyncio.wait_for(watcher, timeout=5)
-        return job_id, report, events
+        return registered.job_id, report, events
 
     job_id, report, events = _run(scenario())
 
@@ -2036,22 +2054,23 @@ def test_drain_logs_how_many_jobs_it_cancelled(client, alice, monkeypatch, caplo
     """
     never = asyncio.Event()
 
-    async def stream():
+    first_chunk_seen = asyncio.Event()
+
+    async def stream(kind, request):
         yield StreamEvent(type="chunk", content="第一段", data={})
+        first_chunk_seen.set()
         await never.wait()
 
-    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
-
     async def scenario() -> job_drain.DrainReport:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        registered = build_and_register(
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={},
+            event_stream_source=stream,
         )
-        for _ in range(200):
-            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
-            if runtime is not None and runtime.live_buffer:
-                break
-            await asyncio.sleep(0.005)
+        start_registered_job(registered)
+        await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
         return await job_drain.drain_controller.drain(timeout=0.1)
 
     with caplog.at_level(logging.WARNING, logger="backend.services.job_drain"):
@@ -2079,22 +2098,23 @@ def test_shutdown_returns_a_success_exit_code_after_draining(client, alice, monk
     """
     never = asyncio.Event()
 
-    async def stream():
+    first_chunk_seen = asyncio.Event()
+
+    async def stream(kind, request):
         yield StreamEvent(type="chunk", content="第一段", data={})
+        first_chunk_seen.set()
         await never.wait()
 
-    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
-
     async def scenario() -> int:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        registered = build_and_register(
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={},
+            event_stream_source=stream,
         )
-        for _ in range(200):
-            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
-            if runtime is not None and runtime.live_buffer:
-                break
-            await asyncio.sleep(0.005)
+        start_registered_job(registered)
+        await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
         return await job_drain.drain_controller.shutdown(timeout=0.1)
 
     code = _run(scenario())
@@ -2159,22 +2179,23 @@ def test_drain_window_comes_from_the_environment(client, alice, monkeypatch):
 
     never = asyncio.Event()
 
-    async def stream():
+    first_chunk_seen = asyncio.Event()
+
+    async def stream(kind, request):
         yield StreamEvent(type="chunk", content="第一段", data={})
+        first_chunk_seen.set()
         await never.wait()
 
-    monkeypatch.setattr(job_service, "_build_event_stream", lambda kind, request: stream())
-
     async def scenario() -> job_drain.DrainReport:
-        job_id = job_service.create_job(owner_id=alice, solution_id=None, kind="prd")
-        job_service.dispatch(
-            job_id, owner_id=alice, solution_id=None, kind="prd", request={}
+        registered = build_and_register(
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={},
+            event_stream_source=stream,
         )
-        for _ in range(200):
-            runtime = job_service._RUNTIMES.get(job_id)  # noqa: SLF001
-            if runtime is not None and runtime.live_buffer:
-                break
-            await asyncio.sleep(0.005)
+        start_registered_job(registered)
+        await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
         # 不传 timeout：窗口必须来自环境变量
         return await job_drain.drain_controller.drain()
 

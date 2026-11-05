@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from conftest import register, users
 
@@ -24,6 +22,7 @@ from backend.services import document_service, document_store, job_service, llm_
 from backend.services.job_bus import job_bus
 from backend.services.pending_items import BEGIN_SENTINEL, END_SENTINEL
 from fakes import ScriptedLLM
+from ticket_support import run_ticket_to_completion
 
 # ---------------------------------------------------------------------------
 # 夹具：不触网、任务状态互相隔离（与 test_clarify.py 同款）
@@ -74,16 +73,12 @@ def _fake_service(monkeypatch, llm) -> None:
 
 
 def _run_job(owner_id: int, solution_id: int | None, kind: str, request: dict) -> tuple[int, list]:
-    """建任务 → 派发 → 一路订阅到结束，返回 (job_id, 全部事件)。"""
+    """造单 → 登记 → 派发 → 一路订阅到结束，返回 (job_id, 全部事件)。
 
-    async def scenario() -> tuple[int, list]:
-        job_id = job_service.create_job(owner_id=owner_id, solution_id=solution_id, kind=kind)
-        job_service.dispatch(
-            job_id, owner_id=owner_id, solution_id=solution_id, kind=kind, request=request
-        )
-        return job_id, [event async for event in job_service.open_stream(owner_id, job_id)]
-
-    return asyncio.run(scenario())
+    假环境（生成事件流来源、配置快照）在造单时传入；这里用生产真值，
+    模型边界仍用既有的离线假 LLM（零 token）。
+    """
+    return run_ticket_to_completion(owner_id, solution_id, kind, request)
 
 
 def _create_solution(client) -> int:

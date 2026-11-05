@@ -316,27 +316,52 @@ def test_register_checks_solution_on_the_spot(client, alice):
 # ---------------------------------------------------------------------------
 
 
-def test_skill_identity_is_frozen_at_build_time(alice, monkeypatch):
-    """技能包清单在造单时读一次；之后换读盘结果，单①/单②/回执都还是定格值。"""
-    calls: list[str] = []
-    frozen = {"name": "ticket-skill", "version": "3.2.1", "fingerprint": "abcabc"}
+def test_skill_identity_is_frozen_at_build_time(
+    alice, monkeypatch, temp_skills_root
+):
+    """技能包清单在造单时读一次；之后换读盘结果，单①/单②/回执都还是定格值。
 
-    def _describe(kind: str):
-        calls.append(kind)
-        return dict(frozen)
+    假环境用临时技能目录：造单时包在位，之后把整个包删掉再登记 / 派发，
+    证明身份是「造单时算好的数据」随单走，而不是派发时重新读盘。
+    """
+    import shutil
 
-    # 复用 #34 的技能包身份判断：它在本模块按目标产物查一次注册表。
-    monkeypatch.setattr(job_service, "describe_kind", _describe)
+    from backend.services import skill_registry
+    from conftest import write_skill_package
+
+    module = _ticket_module()
+    write_skill_package(temp_skills_root, "prd-generator", version="3.2.1")
     _use_prd_llm(monkeypatch, ["技能包定格"])
 
-    draft, registered, events = _end_to_end(
-        alice, {"requirements": "定格", "product_name": "技能包身份"}
-    )
-    assert calls == ["prd"]  # 只在造单那一次算好，派发不再重算
-    assert list(draft.skill_refs) == [frozen]
-    assert list(registered.skill_refs) == [frozen]
-    assert events[-1].data["injected_skills"] == [frozen]
-    assert json.loads(_raw(registered.job_id)["skill_refs"]) == [frozen]
+    async def scenario():
+        draft = module.build_job_ticket(
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={"requirements": "定格", "product_name": "技能包身份"},
+        )
+        frozen = [dict(item) for item in draft.skill_refs]
+        assert len(frozen) == 1
+        assert frozen[0]["name"] == "prd-generator"
+        assert frozen[0]["version"] == "3.2.1"
+
+        # 造单之后把技能包整个删掉：登记 / 派发 / 回执都只能用定格值。
+        shutil.rmtree(temp_skills_root / "prd-generator")
+        skill_registry.clear_caches()
+
+        registered = module.register_job_ticket(draft)
+        module.start_registered_job(registered)
+        events = [
+            event
+            async for event in job_service.open_stream(alice, registered.job_id)
+        ]
+        return draft, registered, events, frozen
+
+    draft, registered, events, frozen = asyncio.run(scenario())
+    assert list(draft.skill_refs) == frozen
+    assert list(registered.skill_refs) == frozen
+    assert events[-1].data["injected_skills"] == frozen
+    assert json.loads(_raw(registered.job_id)["skill_refs"]) == frozen
 
 
 def test_build_is_the_public_door_for_fake_tickets(alice):
