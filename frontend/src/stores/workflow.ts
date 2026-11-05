@@ -36,7 +36,7 @@ import {
   canGeneratePrdFrom,
   documentKindOfChatStage,
   DOWNGRADE_NOTICE,
-  entrySpecFor,
+  entrySpecForDisplay,
   farthestContentStepIndex,
   hasRequiredDocuments,
   hasRequirementChat,
@@ -49,14 +49,6 @@ import {
   stepsForMode,
   type DowngradeKind,
 } from '@/utils/workflow'
-
-/** 各入口模式的落点：选中某个入口后直接进入该入口的第一个界面 */
-const MODE_LANDING: Record<EntryMode, ViewState> = {
-  structured: 'form',
-  'prd-quick': 'prd-quick',
-  'prompt-debug': 'prompt-debug',
-  'prd-and-api-paste': 'prd-and-api-paste',
-}
 
 export const useWorkflowStore = defineStore('workflow', () => {
   /**
@@ -557,8 +549,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
   function chooseEntry(mode: EntryMode): boolean {
     if (hasActiveRun.value) return false
     entryMode.value = mode
-    // 先查登记表这一行；未迁入的入口仍回落到旧表（`#47` 四行齐了才退役）
-    goTo(entrySpecFor(mode)?.landing.onSelect ?? MODE_LANDING[mode])
+    // 落页由登记表这一行的 `landing.onSelect` 回答（未知键不猜，按「未选择」口径展示）
+    goTo(entrySpecForDisplay(mode).landing.onSelect)
     return true
   }
 
