@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.contracts import StreamEvent
@@ -90,7 +90,9 @@ _ABORT_CODES = frozenset({"CANCELLED", "SUPERSEDED"})
 # ----------------------------------------------------------------------------
 
 
-def _immutable_projection(kind: str, request: dict[str, Any]) -> dict[str, Any]:
+def _immutable_projection(
+    kind: str, request: dict[str, Any], config: Any | None = None
+) -> dict[str, Any]:
     """算出任务单里三块不可变数据（建任务那一刻一次定格）。
 
     - 原始请求参数：原样存调用方摊平后的 dict，不做二次加工；
@@ -100,10 +102,13 @@ def _immutable_projection(kind: str, request: dict[str, Any]) -> dict[str, Any]:
 
     这三块只服务于「DB 行是不可变数据的完整投影」。运行态仍以内存运行时为权威，
     按既有节奏落进度；生成中途改后台配置/模板，也不会让这一行跟着变。
+
+    `config` 是新三步「造单」传入的定格快照（#36）：不给时仍按旧入口在这里
+    `get_runtime_config()` 取一次，旧入口行为逐项不变。
     """
     from backend.core import runtime_config as rc
 
-    config = rc.get_runtime_config()
+    config = config if config is not None else rc.get_runtime_config()
     spec = config.active_provider
     active_provider = {
         "provider_protocol": spec.protocol if spec is not None else "",
@@ -569,17 +574,24 @@ def dispatch(
     )
 
 
-async def run_job(runtime: JobRuntime) -> None:
+async def run_job(
+    runtime: JobRuntime, event_stream_source: Callable[..., AsyncIterator[StreamEvent]] | None = None
+) -> None:
     """后台任务主体：驱动事件流、更新内存、广播、按节奏落库、收尾。
 
     `use_meter` 包住整条事件流的消费过程：计量器是环境值，流水线深处的
     `stream_reply.astream_text` 靠它把自己记到这次任务上（见 `llm_meter`）。
+
+    `event_stream_source` 是新三步「造单」定格的事件流来源（#36）：不给时仍用
+    本模块 `_build_event_stream`，旧入口行为逐项不变。除此之外整条循环、
+    包裹顺序、广播与收尾都只有这一份实现，新旧入口不会各写一遍。
     """
+    source = event_stream_source or _build_event_stream
     try:
         # `use_config` 把派发那一刻的配置冻进上下文：整条生成链路（含并行子任务）
         # 读到的是同一份。任务跑到一半有人改配置，也不会让同一次生成前后参数不一致。
         with use_meter(runtime.meter), use_config(runtime.config):
-            async for event in _build_event_stream(runtime.kind, runtime.request):
+            async for event in source(runtime.kind, runtime.request):
                 # 方案在生成途中被删除：下一个事件不再消费。
                 # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，
                 # 收尾时 `_finalize` 也就拿不到新的 `done`，不会把半截过程当成「已产出」。
