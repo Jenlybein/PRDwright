@@ -52,6 +52,7 @@ import {
   entrySpecForDisplay,
   fromBackendJobKind,
   generatingStateFor,
+  hasDocumentReview,
   jobDocumentKind,
   normalizeChatStage,
   reviewStateFor,
@@ -112,6 +113,18 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 它带 jobId，收尾时按 jobId 比对，迟到的收尾清不掉新任务。
    */
   const isGenerating = computed(() => runs.hasRunning)
+
+  /**
+   * 需求是不是「一段自由文本」，答案在登记表的 `input.stateField` 列。
+   *
+   * 从前这条判断按入口字面量写成 `entryMode.value === 'prd-quick'`，散在「组装 PRD 请求体」
+   * 与「要不要走摘要确认闸门」两处：加第 5 个入口时两处都得记得改，漏一处不报错，
+   * 表现只是「闸门多问一次」或「需求取错了来源」。现在只有快捷流程把需求放在自由文本上，
+   * 其余入口（完整流程与两个导入入口）的需求都来自结构化摘要或粘贴稿，因此读表一处收口。
+   */
+  const requirementIsFreeText = computed(
+    () => entrySpecForDisplay(entryMode.value).input.stateField === 'quickInput',
+  )
 
   /**
    * 把 `runs.preview` 上的一个字段包成**可写 computed**。
@@ -980,12 +993,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 本次生成要不要复核（后端 `review_enabled`）。
    *
-   * 快捷流程一律 `false`：**不审不改**是它当初的定义，这一点对三份产物
-   * 同样成立——接口文档与提示词在快捷流程里也是一遍过，否则「快捷」只剩 PRD 那一半。
-   * 其余入口返回 `undefined`：要不要复核由后端配置决定，前端不替它挑默认值。
+   * 答案在登记表的 `needsDocumentReview` 列：只有**明确不审**的入口返回 `false`（现在是快捷
+   * 流程——「不审不改」是它当初的定义，对三份产物同样成立，否则「快捷」只剩 PRD 那一半）；
+   * 其余入口（含「未选择」）一律返回 `undefined`，要不要复核由后端配置决定，前端不替它挑默认值。
+   *
+   * 从前这里是 `entryMode.value === 'prd-quick' ? false : undefined`：加第 5 个入口时，
+   * 「这一条要不要复核」只能靠人记得回来改这一行。
    */
   function reviewEnabledForJob(): boolean | undefined {
-    return entryMode.value === 'prd-quick' ? false : undefined
+    return hasDocumentReview(entryMode.value) ? undefined : false
   }
 
   /**
@@ -996,12 +1012,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 调用方据此直接放弃，不要发出一个注定失败的请求。
    *
    * 两处差异都是**入口形态**造成的，不涉及「怎么写 PRD」：
-   * - 快捷流程的需求是那段自由文本，结构化摘要为空；
+   * - 快捷流程的需求是那段自由文本，结构化摘要为空（判据读登记表，见 `requirementIsFreeText`）；
    * - 快捷流程不跑逐章审核/改写（`reviewEnabled: false`）——输入只有一段话，
    *   逐章复核的边际收益低，省下的调用直接体现在等待时间上。
    */
   function buildPrdPayload(): GeneratePrdFromSummaryPayload | null {
-    if (entryMode.value === 'prd-quick') {
+    if (requirementIsFreeText.value) {
       const { productName, requirements } = quickInput.value
       if (!requirements.trim()) return null
       // 快捷流程没有需求澄清对话（一段话直接进生成），`history` 正常是空数组；
@@ -1321,6 +1337,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 自带的内容会让进度、完成条件与下载列表都失真。它只作为本次生成的输入存在。
    */
   async function handleGeneratePromptsFromDebugPrd(): Promise<void> {
+    // ⚠️ 这一处按入口键判断**不能改成读表**：登记表记的是「资料」（步骤、落页、布尔、
+    // 完成所需文档、文案、录入字段），没有「哪个按钮归哪个处理器」这一列；这里问的是
+    // 「这个处理器是不是被自己那一页调起来的」——那是键身份，不是配置。硬凑一列只会
+    // 造出一个单一消费者、语义靠猜的列。
     if (entryMode.value !== 'prompt-debug') return
     if (!debugPrdText.value.trim()) return
     goTo('generating-prompts')
@@ -1335,6 +1355,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 完成条件与下载列表都失真。它们只作为本次生成的输入存在。
    */
   async function handleGeneratePromptsFromPair(): Promise<void> {
+    // 同上：这是「处理器归不归这一页」的键身份判断，登记表没有也不该有这一列。
     if (entryMode.value !== 'prd-and-api-paste') return
     const { prd, apiDocs } = pastePairInput.value
     if (!prd.trim()) return
@@ -1478,7 +1499,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (isRunInFlight()) return
     // 快捷流程既没有结构化摘要（闸门①无处可写），也没有需求对话（「至少一轮 AI 回复」
     // 这个前提不存在）。它的校验只有一条：那段话写了没有。校验通过就直接进生成。
-    if (entryMode.value === 'prd-quick') {
+    // 判据读登记表的 `input.stateField` 列（`requirementIsFreeText`），不再按入口字面量分支。
+    if (requirementIsFreeText.value) {
       if (!quickInput.value.requirements.trim()) return
       // ⚠️ `goTo` 必须在 `generatePrd` 之前：生成态置位后 busy 守卫会拦下重复发起
       goTo('generating-prd')
