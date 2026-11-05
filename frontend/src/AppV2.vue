@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onErrorCaptured, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -33,6 +33,7 @@ import {
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
+  entrySpecForDisplay,
   fromBackendJobKind,
   generatingStateFor,
   hasDocumentReview,
@@ -200,6 +201,52 @@ function flashSavedTip(text: string, variant: 'success' | 'danger' = 'success'):
   savedTipTimer = window.setTimeout(() => {
     savedTip.value = ''
   }, 2500)
+}
+
+// ---------------------------------------------------------------------------
+// 错误边界：后代组件失败时，只让那一块不可用
+// ---------------------------------------------------------------------------
+
+/**
+ * 后代组件失败的原因（空串表示没失败）。
+ *
+ * 入口登记表的完整性校验是**故意**抛错的：维护者加了第 5 个入口却漏填一列时，问询当场
+ * 失败，而不是猜成完整流程跑下去。但「当场失败」不该等于「整页白屏」——错误在这里停下，
+ * 用户看到一句明确的「这块界面暂时不可用」，侧栏与其余部分照旧能用。
+ *
+ * ⚠️ `onErrorCaptured` 只捕获**后代**组件的错误（渲染、生命周期、事件处理器里抛出的）；
+ * AppV2 自身 setup 里抛的错误捕不到，那一层由 `main.ts` 的 `app.config.errorHandler` 兜底。
+ * 自身事件处理器与自身 computed 里的失败由 `guarded`（紧跟本节之后）在接缝处接住——
+ * 否则用户看到的只是「点了没反应」。
+ */
+const contentError = ref('')
+
+onErrorCaptured((error) => {
+  contentError.value = error instanceof Error ? error.message : String(error)
+  // 自己接住之后 Vue 不再打日志（返回 false 会抑制向上传播），这里补一条：
+  // 失败既对用户可见、也对开发者可见，不被悄悄吞掉。
+  console.error('[AppV2] 界面渲染失败，该块已停用', error)
+  return false
+})
+
+/**
+ * 把「可能当场失败」的调用包起来：失败转成屏幕上那句「这块界面暂时不可用」。
+ *
+ * 为什么事件处理器要自己包一层：`onErrorCaptured` 只接**后代组件**的错误数据；AppV2 **自己**
+ * setup / 渲染 / 事件处理器里抛的错它接不到——那一路会冒到 `main.ts` 的全局处理器，
+ * 而在用户眼里通常只表现为「点了没反应」（DOM 停在上一次成功渲染的样子）。
+ * 入口登记表的完整性校验是**故意**抛错的，所以它调用的每一处接缝都得把失败显式接住。
+ *
+ * 返回 `undefined` 表示「这次没做成」；调用方按需给替代动作，但**不再**静默吞掉。
+ */
+function guarded<T>(run: () => T): T | undefined {
+  try {
+    return run()
+  } catch (error) {
+    contentError.value = error instanceof Error ? error.message : String(error)
+    console.error('[AppV2] 操作失败，该块界面已停用', error)
+    return undefined
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -723,8 +770,22 @@ const canReturnToChat = computed(
  * 澄清入口与「返回」落点相同时由它顶替「返回」；落点不同时必须保留，否则用户再也回不去。
  * 现在只有两个**导入**入口会走到「落点不同」这一支——它们的录入页不在进度条上
  * （两个从零创建的入口由 `hideBack` 直接不给这个按钮，靠进度条第 1 步回去）。
+ *
+ * 答案在登记表的 `keepBackButton` 列。`null`（未选择）与 `structured` 在这一列**不同**：
+ * 未选择时没有这一条入口的录入页可回，旧行为是保留「返回」，而登记表按入口填、`null` 会先被
+ * 归一成完整流程（`false`），所以这里显式处理 `null`。
  */
-const keepBackButton = computed(() => store.entryMode !== 'structured')
+const keepBackButton = computed(() => {
+  // null 与 structured 在这一列**不同**：未选择时没有这一条入口的录入页可回，旧行为是保留
+  //「返回」；而登记表按入口填、`null` 会先被归一成完整流程（`false`），所以这里显式处理 null。
+  //
+  // 这一列在渲染期求值，抛错接不到 `onErrorCaptured`，因此走 `guarded`：失败先撑住这一帧，
+  // 占位由 `contentError` 接手。（今天更早失败的是工作流 store 的 `steps`，那一层是渲染期
+  // 整行校验，粒度更大，本票不动。）
+  const mode = store.entryMode
+  if (mode === null) return true
+  return guarded(() => entrySpecForDisplay(mode).keepBackButton) ?? true
+})
 
 /**
  * 当前标签这条线程是否聊到了可以改写的程度。
@@ -780,22 +841,28 @@ async function handleStartConversation(value: RequirementsSummary): Promise<void
 }
 
 /**
- * 对话页「改需求」的落点随入口模式而变：完整流程回结构化表单，快捷流程回极简描述页。
+ * 对话页「改需求」的落点随入口模式而变，答案在登记表的 `landing.editRequirements` 列：
+ * 完整流程回结构化表单，快捷流程回极简描述页，两个导入入口回各自的粘贴页。
  *
- * 两处的按钮文案也一并对齐（`editRequirementsLabel`）——同一个「返回」按钮把用户送到
- * 一个完全不同的页面，却还写着「改需求」，会让人以为表单被弄丢了。
+ * 落点与按钮文案（`editRequirementsLabel`）同出一行——同一个「返回」按钮把用户送到一个完全
+ * 不同的页面，却还写着「改需求」，会让人以为表单被弄丢了。
  *
  * ⚠️ 快捷流程现在**没有**需求澄清线程（见 `chatTabs`），所以这个分支正常情况下走不到；
  * 留着是为了**旧快照**：在这次改动之前存的快捷流程方案里可能有需求对话，恢复后那条线程
  * 仍会渲染，此时「改需求」必须回到极简录入页而不是结构化表单。
  */
 function handleEditRequirements(): void {
-  goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+  guarded(() => goTo(entrySpecForDisplay(store.entryMode).landing.editRequirements))
 }
 
-/** 「改需求」按钮的文案；与 `handleEditRequirements` 的落点一一对应 */
-const editRequirementsLabel = computed(() =>
-  store.entryMode === 'prd-quick' ? '改描述' : '改需求',
+/**
+ * 「改需求」按钮的文案；与 `handleEditRequirements` 的落点一一对应（同一行的 `copy` 列）。
+ *
+ * 这一列在**渲染期**被求值，抛错同样接不到 `onErrorCaptured`（见 `guarded`），因此也包一层：
+ * 查表失败时先用中性文案撑住这一帧，占位提示由 `contentError` 接手。
+ */
+const editRequirementsLabel = computed(
+  () => guarded(() => entrySpecForDisplay(store.entryMode).copy.editRequirementsLabel) ?? '改需求',
 )
 
 /**
@@ -826,7 +893,9 @@ function handleSelectEntry(mode: EntryMode): void {
   }
   // 生成中拒绝换入口：换模式会改写进度条口径与完成条件，而正在跑的那份是按旧模式发起的。
   // **要给出提示**——从前这里被 `goTo` 的 busy 静默吞掉，用户点了没反应，以为界面坏了。
-  if (!store.chooseEntry(mode)) {
+  // 查表失败（漏填一列 / 未知键）由 `guarded` 接手：显示「暂时不可用」，同样不是没反应。
+  const accepted = store.chooseEntry(mode)
+  if (accepted === false) {
     flashSavedTip('当前方案正在生成内容，完成或停止后才能切换入口', 'danger')
   }
 }
@@ -857,13 +926,14 @@ function handleRestart(): void {
  * 点击进度条中已到达的步骤，跳回对应阶段查看之前的内容。
  *
  * 步骤 id 与同名阶段一一对应（`StepId` 是 `ViewState` 的子集），**只有第 1 步例外**：
- * 「描述产品」是两个从零创建入口共用的一格，实际录入页由入口模式决定
- * （结构化表单 / 或一段话）。不映射的话，快捷流程点它会被送到结构化表单——
- * 而这一格正是「删掉『返回描述』按钮」的替代品，送错地方就等于没给退路。
+ * 「描述产品」是两个从零创建入口共用的一格，实际录入页由入口模式决定。落点取登记表的
+ * `landing.editRequirements`（它正是「回到这一条的录入页」那一列）。不映射的话，快捷流程
+ * 点它会被送到结构化表单——而这一格正是「删掉『返回描述』按钮」的替代品，送错地方就等于没给退路。
  */
 function handleStepClick(stepId: StepId): void {
   if (stepId === 'form') {
-    goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+    // 第 1 步的落点要查表，因此同样可能当场失败：失败就显示占位，而不是点了没反应
+    guarded(() => goTo(entrySpecForDisplay(store.entryMode).landing.editRequirements))
     return
   }
   goTo(stepId)
@@ -962,6 +1032,22 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
           </AppBadge>
         </Transition>
       </div>
+      <!--
+        后代组件失败时的占位：错误停在 main 里，不再往上冒成整页白屏。侧栏与浮层照旧可用，
+        用户看到的是一句明确的「这块界面暂时不可用」。
+      -->
+      <div
+        v-if="contentError"
+        class="rounded-2xl border border-line bg-surface px-5 py-10 text-center shadow-card dark:shadow-none"
+        role="alert"
+      >
+        <p class="text-base font-semibold text-fg">这块界面暂时不可用</p>
+        <p class="mt-2 text-sm text-subtle">
+          页面其余部分还能用；如果反复出现，请刷新后重试。
+        </p>
+      </div>
+
+      <template v-else>
       <!-- 步骤进度条：展示哪几步由入口模式决定，因此整条由 store 推导后传入 -->
       <ProgressSteps
         v-if="!isChoosingEntry"
@@ -1129,6 +1215,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @update:summary="handleSummaryChange"
         @back="backFromForm"
       />
+      </template>
     </main>
 
     <!--

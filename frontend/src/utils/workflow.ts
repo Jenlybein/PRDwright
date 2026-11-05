@@ -189,20 +189,526 @@ export function emptyConversationIds(): Record<ChatStage, string> {
   return ids
 }
 
-/** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`） */
-const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
-  // 完整流程：六步齐全（最后一步是交付）
-  structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
-  // 快捷流程与完整流程**同一条流水线**，连步数都一样：只差第一步长什么样（极简输入而不是
-  // 结构化表单），以及它**没有需求澄清对话**——「AI 对话」这一格在快捷
-  // 流程里对应的是**文档澄清**那三条线程（它们就在同一个对话页上）。
-  //
-  // ⚠️ 这一格**不能省**：省掉之后 `stepIndexOf('chatting', 'prd-quick')` 会算出 -1 并归零，
-  // 用户在文档澄清页里聊天时，进度条高亮的是第 1 步「描述产品」——一个明显错位的状态。
-  'prd-quick': ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
-  // 两个导入入口的产物只有提示词套件
-  'prompt-debug': ['review-prompts', 'done'],
-  'prd-and-api-paste': ['review-prompts', 'done'],
+/**
+ * 「未选择」时按哪个入口模式展示。
+ *
+ * `null`（用户还没点入口 / 老快照没记入口名）是**合法状态**，不是「未知入口键」：
+ * 它必须照常给出答案，不能报错。这条口径此前散在六处各写一次 `?? 'structured'`，
+ * 改默认口径时必须逐处找，漏一处的表现只是「进度条少一格」这类不报错的错位。
+ * 现在只在这里定义一次。
+ */
+const UNSELECTED_ENTRY_MODE: EntryMode = 'structured'
+
+/**
+ * 把入口模式归一成「可展示的取值」：未选择（`null`）落到 {@link UNSELECTED_ENTRY_MODE}。
+ *
+ * 这是「未选择」的**唯一出口**——凡是要回答「未选入口时该显示什么」的地方都调它，
+ * 不要再写 `?? 'structured'`。它只管**合法状态**；未知入口键的失败路径属于登记表
+ * 完整性校验，不在这里。
+ */
+export function entryModeForDisplay(mode: EntryMode | null): EntryMode {
+  return mode ?? UNSELECTED_ENTRY_MODE
+}
+
+// ----------------------------------------------------------------------------
+// 入口模式登记表
+//
+// **一行一个入口，七类资料为列**。原来按入口写死的表（进度步骤、三个布尔、完成所需文档、
+// 落页、模式名、返回与改需求文案）都改成「查这一行」，旧表已退役。
+// 目标形态见 `docs/architecture/ARCHITECTURE.md` §5.8；四个入口各占一行。
+// ----------------------------------------------------------------------------
+
+/** ① 键、组别与卡片文案：入口页上那张卡片怎么说 */
+export interface EntryCardSpec {
+  /** 组别 id（入口页分两组：从零创建 / 导入已有素材） */
+  readonly groupId: string
+  /** 组标题 */
+  readonly groupTitle: string
+  /** 组说明 */
+  readonly groupDescription: string
+  /** 卡片标题（也就是列表里的入口名） */
+  readonly title: string
+  /** 卡片上的一句说明 */
+  readonly description: string
+}
+
+/**
+ * ② 落页：选中入口后落在哪一页，以及两个「回去」动作跳哪一页。
+ *
+ * 三者都随入口变化，所以都在这一列；按**视图状态**选渲染组件的链条不在这里。
+ */
+export interface EntryLandingSpec {
+  /** 选中这个入口后直接进入的界面 */
+  readonly onSelect: ViewState
+  /** 对话页「改需求 / 改描述」回到哪一页 */
+  readonly editRequirements: ViewState
+  /** 审阅页 / 交付页的「返回」回到哪一页（录入页） */
+  readonly backToInput: ViewState
+}
+
+/** ⑥ 文案：列表里的模式名、两个「回去」按钮的文案 */
+export interface EntryCopySpec {
+  /** 方案列表里显示的模式名 */
+  readonly modeLabel: string
+  /** 审阅页 / 交付页「返回录入」按钮的文案 */
+  readonly backLabel: string
+  /** 对话页「改需求」按钮的文案 */
+  readonly editRequirementsLabel: string
+}
+
+/**
+ * ⑦ 录入字段：一个字段的登记项。
+ *
+ * `defaultValue` 是**未填写时的初值**；`countsAsContent` 表示它非空就算「录入页已有内容」
+ * （决定要不要为这份录入建一份方案）。
+ */
+export interface EntryInputField {
+  readonly key: string
+  readonly label: string
+  readonly defaultValue: string
+  readonly countsAsContent: boolean
+}
+
+/** ⑦ 录入字段：这一行的录入内容挂在哪个字段上、落到快照的哪一列、有哪些字段 */
+export interface EntryInputSpec {
+  /** 录入内容在 workflow store 上的持有者 */
+  readonly stateField: 'summary' | 'quickInput' | 'debugPrdText' | 'pastePairInput'
+  /**
+   * 快照里承载它的列（`solutions.state.<列>`）；与后端契约同名。
+   *
+   * 一个入口的录入内容可能落多列（例如快捷流程的产品名与需求描述、双粘贴的两份材料），
+   * 这里记**主内容那一列**；各字段的列见 `fields` 的顺序与后端契约。
+   */
+  readonly stateColumn: string
+  readonly fields: readonly EntryInputField[]
+}
+
+/**
+ * 一个入口模式的全部资料：七类为列，一行填齐才算一个入口。
+ *
+ * 填不齐不会「凑合着用」：{@link entrySpecForDisplay} 问询时逐列校验，
+ * 缺行 / 缺列当场抛 {@link EntrySpecMissingError}。
+ */
+export interface EntrySpec {
+  /** ① 键 */
+  readonly mode: EntryMode
+  /** ① 组别与卡片文案 */
+  readonly card: EntryCardSpec
+  /** ② 落页 */
+  readonly landing: EntryLandingSpec
+  /** ③ 进度条步骤（顺序沿用 `STEPS`） */
+  readonly steps: readonly StepId[]
+  /** ④ 录入页是否就在进度条上 */
+  readonly inputPageOnBar: boolean
+  /** ④ 是否需要需求澄清对话 */
+  readonly needsRequirementChat: boolean
+  /** ④ 是否需要审核 / 改写 */
+  readonly needsDocumentReview: boolean
+  /**
+   * ④ 审阅页的澄清入口出现时，是否**保留**「返回」按钮。
+   *
+   * 判据是「澄清入口与『返回』是不是同一个落点」：完整流程两者都回对话页，澄清入口顶替「返回」
+   * 就够了；其余入口的「返回」是回各自录入页，与澄清入口落点不同，必须并排保留——否则用户
+   * 再也改不了自己贴进来的材料。
+   *
+   * ⚠️「未选择」与完整流程在这一列**不同**：未选择时没有这一条入口的录入页可回，旧行为是
+   * 保留「返回」。登记表按入口填，`null` 会先被归一成完整流程，因此调用处显式处理 `null`
+   * （见 `AppV2.vue` 的 `keepBackButton`）。
+   */
+  readonly keepBackButton: boolean
+  /** ⑤ 完成所需文档 */
+  readonly requiredDocs: readonly DocType[]
+  /** ⑥ 文案 */
+  readonly copy: EntryCopySpec
+  /** ⑦ 录入字段 */
+  readonly input: EntryInputSpec
+}
+
+/** 结构化表单的字段：与 `RequirementsForm.vue` 的分节一一对应 */
+const STRUCTURED_INPUT_FIELDS: readonly EntryInputField[] = [
+  { key: 'product_name', label: '产品名称', defaultValue: '', countsAsContent: true },
+  { key: 'product_goal', label: '核心目标', defaultValue: '', countsAsContent: true },
+  { key: 'target_users', label: '目标用户', defaultValue: '', countsAsContent: true },
+  { key: 'platform', label: '平台', defaultValue: '', countsAsContent: true },
+  { key: 'mvp_features', label: 'MVP 功能', defaultValue: '', countsAsContent: true },
+  { key: 'v2_features', label: '未来规划', defaultValue: '', countsAsContent: true },
+  { key: 'ui_pages', label: '页面结构', defaultValue: '', countsAsContent: true },
+  { key: 'key_interactions', label: '关键交互', defaultValue: '', countsAsContent: true },
+  { key: 'tech_auth', label: '用户认证', defaultValue: '', countsAsContent: true },
+  { key: 'tech_storage', label: '数据存储', defaultValue: '', countsAsContent: true },
+  { key: 'tech_frontend', label: '前端技术', defaultValue: '', countsAsContent: true },
+  { key: 'tech_backend', label: '后端技术', defaultValue: '', countsAsContent: true },
+  { key: 'tech_deployment', label: '部署方式', defaultValue: '', countsAsContent: true },
+  { key: 'llm_usage', label: 'LLM 使用说明', defaultValue: '', countsAsContent: true },
+  { key: 'nf_security', label: '安全要求', defaultValue: '', countsAsContent: true },
+  { key: 'nf_performance', label: '性能要求', defaultValue: '', countsAsContent: true },
+  { key: 'nf_availability', label: '可用性要求', defaultValue: '', countsAsContent: true },
+  { key: 'scope_in', label: '在范围内', defaultValue: '', countsAsContent: true },
+  { key: 'scope_out', label: '不在范围内', defaultValue: '', countsAsContent: true },
+]
+
+/** 快捷流程的字段：与 `QuickPrdStage.vue` 的两栏一一对应 */
+const QUICK_INPUT_FIELDS: readonly EntryInputField[] = [
+  { key: 'product_name', label: '产品名称', defaultValue: '', countsAsContent: true },
+  { key: 'requirements', label: '需求描述', defaultValue: '', countsAsContent: true },
+]
+
+/** 我有 PRD 的字段：与 `PromptDebugStage.vue` 的正文框一一对应 */
+const DEBUG_PRD_FIELDS: readonly EntryInputField[] = [
+  { key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true },
+]
+
+/** 我有 PRD + 接口文档的字段：与 `PastePairStage.vue` 的两个文本框一一对应 */
+const PASTE_PAIR_FIELDS: readonly EntryInputField[] = [
+  { key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true },
+  { key: 'api_docs', label: '接口文档正文（Markdown）', defaultValue: '', countsAsContent: true },
+]
+
+/**
+ * 完整流程这一行。
+ *
+ * 单独取名是因为它是「未选择」的展示口径落脚点：未选择（`null`）经
+ * {@link entryModeForDisplay} 归到 `structured`，再走同一套查表与完整性校验。
+ */
+const STRUCTURED_ENTRY_SPEC: EntrySpec = {
+  mode: 'structured',
+  card: {
+    groupId: 'from-scratch',
+    groupTitle: '从零创建 PRD',
+    groupDescription: '还没有任何材料，从这里把需求说清楚。',
+    title: '完整流程',
+    description: '逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。',
+  },
+  landing: {
+    onSelect: 'form',
+    // 对话页「改需求」回到结构化表单；审阅页「返回」回到对话页
+    editRequirements: 'form',
+    backToInput: 'chatting',
+  },
+  steps: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
+  inputPageOnBar: true,
+  needsRequirementChat: true,
+  needsDocumentReview: true,
+  // 澄清入口与「返回」都回对话页：由澄清入口顶替「返回」，不并排
+  keepBackButton: false,
+  requiredDocs: ['prd', 'api-docs', 'prompts'],
+  copy: {
+    modeLabel: '完整流程',
+    backLabel: '返回对话',
+    editRequirementsLabel: '改需求',
+  },
+  input: {
+    // 结构化表单整份落在快照的 `summary` 列（`RequirementsSummary` 对象）
+    stateField: 'summary',
+    stateColumn: 'summary',
+    fields: STRUCTURED_INPUT_FIELDS,
+  },
+}
+
+/**
+ * 入口模式登记表：一行一个入口，四个入口各占一行。
+ *
+ * 类型是 `Partial<Record<EntryMode, EntrySpec>>`：**缺行不是「默认值」，而是「还没填」**——
+ * 类型上保留这种可能，是为了让缺行不被一个悄悄补上的默认值掩盖。问询一律走
+ * {@link entrySpecForDisplay}：缺行 / 缺列 / 未知键当场失败，只有「未选择」按完整流程展示。
+ */
+export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
+  structured: STRUCTURED_ENTRY_SPEC,
+  'prd-quick': {
+    mode: 'prd-quick',
+    card: {
+      groupId: 'from-scratch',
+      groupTitle: '从零创建 PRD',
+      groupDescription: '还没有任何材料，从这里把需求说清楚。',
+      title: '快捷流程',
+      description: '一段话说清想法，跳过表单与对话，直接逐章生成 PRD。',
+    },
+    landing: {
+      onSelect: 'prd-quick',
+      // 「改描述」与审阅页的「返回」都回极简录入页：它就是这一条的起点
+      editRequirements: 'prd-quick',
+      backToInput: 'prd-quick',
+    },
+    // 与完整流程**同一套六步**：只差第一步的形态。「AI 对话」这一格不能省——
+    // 快捷流程没有需求澄清，但文档澄清的三条线程就住在那个对话页上。
+    steps: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
+    inputPageOnBar: true,
+    // 用户选它就是因为不想多聊几轮：一段话写完直接生成
+    needsRequirementChat: false,
+    // 「不审不改」是这一条的定义，三份产物都一样
+    needsDocumentReview: false,
+    // 「返回」回快捷录入页，与澄清入口（回对话）落点不同，必须并排保留
+    keepBackButton: true,
+    // 交付判据与完整流程对齐：三份齐备才算完成，不因「快捷」降低门槛
+    requiredDocs: ['prd', 'api-docs', 'prompts'],
+    copy: {
+      modeLabel: '快捷流程',
+      backLabel: '返回对话',
+      editRequirementsLabel: '改描述',
+    },
+    input: {
+      stateField: 'quickInput',
+      stateColumn: 'quick_requirements',
+      fields: QUICK_INPUT_FIELDS,
+    },
+  },
+  'prompt-debug': {
+    mode: 'prompt-debug',
+    card: {
+      groupId: 'with-material',
+      groupTitle: '导入已有素材',
+      groupDescription: '手头已经有写好的材料，别重复劳动。',
+      title: '我有 PRD',
+      description: '贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。',
+    },
+    landing: {
+      onSelect: 'prompt-debug',
+      // 与旧版一致；语义不理想（改需求跳结构化表单），但本期行为不变，要改另开票。
+      // 导入入口没有需求澄清，对话页也就不会给「改需求」按钮；这一列只为旧快照存在
+      // （那次改动之前存的方案里可能带着需求对话）。
+      editRequirements: 'form',
+      backToInput: 'prompt-debug',
+    },
+    // 产物只有提示词套件：进度条是「提示词 → 交付」两格
+    steps: ['review-prompts', 'done'],
+    // 录入页不在进度条上（贴 PRD 不是一格），所以审阅页必须保留「返回」，否则改不了材料
+    inputPageOnBar: false,
+    // 自带的 PRD 就是答案，不再追问需求
+    needsRequirementChat: false,
+    // 导入的正文仍要过一遍审核 / 改写
+    needsDocumentReview: true,
+    // 「返回」回粘贴页，与澄清入口（回对话）落点不同：不保留就成了死路
+    keepBackButton: true,
+    requiredDocs: ['prompts'],
+    copy: {
+      modeLabel: '导入 PRD',
+      backLabel: '返回 PRD',
+      editRequirementsLabel: '改需求',
+    },
+    input: {
+      stateField: 'debugPrdText',
+      stateColumn: 'draft_prd_text',
+      fields: DEBUG_PRD_FIELDS,
+    },
+  },
+  'prd-and-api-paste': {
+    mode: 'prd-and-api-paste',
+    card: {
+      groupId: 'with-material',
+      groupTitle: '导入已有素材',
+      groupDescription: '手头已经有写好的材料，别重复劳动。',
+      title: '我有 PRD + 接口文档',
+      description: '两份都贴进来，提示词因此能对齐真实的接口路径与字段名。',
+    },
+    landing: {
+      onSelect: 'prd-and-api-paste',
+      // 与旧版一致；语义不理想（改需求跳结构化表单），但本期行为不变，要改另开票。
+      editRequirements: 'form',
+      backToInput: 'prd-and-api-paste',
+    },
+    // 与「我有 PRD」同属导入组：产物一样只有提示词套件，进度条口径就该一样
+    steps: ['review-prompts', 'done'],
+    inputPageOnBar: false,
+    needsRequirementChat: false,
+    needsDocumentReview: true,
+    // 同「我有 PRD」：两份材料的粘贴页只能在「返回」后面，澄清入口不能顶替它
+    keepBackButton: true,
+    requiredDocs: ['prompts'],
+    copy: {
+      modeLabel: '导入 PRD + 接口文档',
+      backLabel: '返回素材',
+      editRequirementsLabel: '改需求',
+    },
+    input: {
+      stateField: 'pastePairInput',
+      stateColumn: 'paste_prd_text',
+      fields: PASTE_PAIR_FIELDS,
+    },
+  },
+}
+
+/**
+ * 登记表完整性校验失败。
+ *
+ * 三种「没有」里只有「未选择」（`null` / 空串）是合法的；**未知入口键、缺行、缺列**
+ * 都是维护者漏干活，必须在问询那一刻炸出来。从前查不到就按完整流程兜住，于是
+ * 「加了第 5 个入口却忘了填一列」的表现是「悄悄按完整流程跑下去」，没有任何报错。
+ *
+ * 消息里带**入口键**与**缺的那一列**（列名用代码里的字段路径，例如 `requiredDocs`、
+ * `copy.modeLabel`），维护者一眼能定位到该补哪一行哪一列。
+ */
+export class EntrySpecMissingError extends Error {
+  /** 问询时用的入口键 */
+  readonly key: string
+  /** 缺的是哪一列；缺整行时为 `null` */
+  readonly column: string | null
+
+  constructor(key: string, column: string | null, reason: string) {
+    super(
+      column === null
+        ? `入口登记表「${key}」缺这一行：${reason}`
+        : `入口登记表「${key}」缺列 ${column}：${reason}`,
+    )
+    this.name = 'EntrySpecMissingError'
+    this.key = key
+    this.column = column
+  }
+}
+
+/** 七类资料里「某一列」的规范取值（枚举列用它校验，避免拼错一个字符串就当成配好了） */
+const ENTRY_SPEC_STATE_FIELDS: readonly EntryInputSpec['stateField'][] = [
+  'summary',
+  'quickInput',
+  'debugPrdText',
+  'pastePairInput',
+]
+
+/** 完成所需文档只能是这三份产物 */
+const ENTRY_SPEC_DOC_TYPES: readonly DocType[] = ['prd', 'api-docs', 'prompts']
+
+/** 报「缺列」并终止；`column` 为 `null` 表示缺的是整行 */
+function missingEntrySpec(key: EntryMode, column: string | null, reason: string): never {
+  throw new EntrySpecMissingError(key, column, reason)
+}
+
+/** 某一列必须是非空文案：空串、全空白、`undefined` 都算没填 */
+function requireEntrySpecText(key: EntryMode, column: string, value: unknown): void {
+  if (typeof value !== 'string' || value.trim() === '') {
+    missingEntrySpec(key, column, '必须是非空文案；空串等于没填')
+  }
+}
+
+/** 某一列必须是布尔：用 `undefined` / `null` 糊过去会让「要不要这一环」变成碰运气 */
+function requireEntrySpecBoolean(key: EntryMode, column: string, value: unknown): void {
+  if (typeof value !== 'boolean') {
+    missingEntrySpec(key, column, '必须是 true / false；不能留空')
+  }
+}
+
+/** 某一列必须是非空数组（步骤、完成所需文档、录入字段） */
+function requireEntrySpecList(key: EntryMode, column: string, value: unknown): readonly unknown[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    missingEntrySpec(key, column, '必须是非空数组；空数组等于没填')
+  }
+  return value
+}
+
+/**
+ * 校验一行登记表填齐了没有；填齐了原样返回，缺任何一列都抛 {@link EntrySpecMissingError}。
+ *
+ * 七类资料逐列检查，判据都是**「这一列有没有真的填上」**，不涉及业务对错：
+ * 步骤不能是空数组、完成所需文档不能是空数组、文案不能是空串、三个布尔必须是布尔、
+ * 落页必须是已定义的视图状态、录入字段不能空。
+ *
+ * 这是本票守卫用例的注入点：喂一份只填一半的假第 5 入口进来，它必须当场拒绝。
+ */
+export function assertEntrySpecComplete(
+  key: EntryMode,
+  spec: EntrySpec | undefined | null,
+): EntrySpec {
+  if (!spec) {
+    missingEntrySpec(key, null, '未登记这个入口键；不猜默认值，请补上这一行')
+  }
+
+  // ① 键：行里的键必须就是查它的那个键，否则「查 A 得 B」比缺行更难查
+  if (spec.mode !== key) {
+    missingEntrySpec(key, 'mode', `这一行登记的键是「${String(spec.mode)}」，与查的键对不上`)
+  }
+
+  // ① 组别与卡片文案：入口页那张卡片的四段文字
+  const card = spec.card
+  if (!card) missingEntrySpec(key, 'card', '整列缺失')
+  requireEntrySpecText(key, 'card.groupId', card.groupId)
+  requireEntrySpecText(key, 'card.groupTitle', card.groupTitle)
+  requireEntrySpecText(key, 'card.groupDescription', card.groupDescription)
+  requireEntrySpecText(key, 'card.title', card.title)
+  requireEntrySpecText(key, 'card.description', card.description)
+
+  // ② 落页：三个「去哪一页」都必须是已定义的视图状态
+  const landing = spec.landing
+  if (!landing) missingEntrySpec(key, 'landing', '整列缺失')
+  for (const field of ['onSelect', 'editRequirements', 'backToInput'] as const) {
+    if (!isViewState(landing[field])) {
+      missingEntrySpec(key, `landing.${field}`, '必须是已定义的视图状态')
+    }
+  }
+
+  // ③ 进度条步骤：非空，且每个 id 都得是全局 `STEPS` 里定义过的
+  const steps = requireEntrySpecList(key, 'steps', spec.steps)
+  const knownStepIds = new Set(STEPS.map((step) => step.id))
+  for (const stepId of steps) {
+    if (!knownStepIds.has(stepId as StepId)) {
+      missingEntrySpec(key, 'steps', `「${String(stepId)}」不是已定义的步骤`)
+    }
+  }
+
+  // ④ 四个布尔：录入页是否在进度条上 / 是否需需求澄清 / 是否需审核改写 / 澄清入口旁是否保留「返回」
+  requireEntrySpecBoolean(key, 'inputPageOnBar', spec.inputPageOnBar)
+  requireEntrySpecBoolean(key, 'needsRequirementChat', spec.needsRequirementChat)
+  requireEntrySpecBoolean(key, 'needsDocumentReview', spec.needsDocumentReview)
+  requireEntrySpecBoolean(key, 'keepBackButton', spec.keepBackButton)
+
+  // ⑤ 完成所需文档：非空，且只能是三份产物之一
+  const requiredDocs = requireEntrySpecList(key, 'requiredDocs', spec.requiredDocs)
+  for (const docType of requiredDocs) {
+    if (!ENTRY_SPEC_DOC_TYPES.includes(docType as DocType)) {
+      missingEntrySpec(key, 'requiredDocs', `「${String(docType)}」不是已定义的产物`)
+    }
+  }
+
+  // ⑥ 文案：列表模式名 + 两个「回去」按钮
+  const copy = spec.copy
+  if (!copy) missingEntrySpec(key, 'copy', '整列缺失')
+  requireEntrySpecText(key, 'copy.modeLabel', copy.modeLabel)
+  requireEntrySpecText(key, 'copy.backLabel', copy.backLabel)
+  requireEntrySpecText(key, 'copy.editRequirementsLabel', copy.editRequirementsLabel)
+
+  // ⑦ 录入字段：内容挂在哪个字段上、落快照哪一列、有哪些字段
+  const input = spec.input
+  if (!input) missingEntrySpec(key, 'input', '整列缺失')
+  if (!ENTRY_SPEC_STATE_FIELDS.includes(input.stateField)) {
+    missingEntrySpec(key, 'input.stateField', '不是已登记的录入内容持有者')
+  }
+  requireEntrySpecText(key, 'input.stateColumn', input.stateColumn)
+  const fields = requireEntrySpecList(key, 'input.fields', input.fields)
+  for (const field of fields as readonly EntryInputField[]) {
+    requireEntrySpecText(key, 'input.fields.key', field?.key)
+    requireEntrySpecText(key, 'input.fields.label', field?.label)
+    requireEntrySpecBoolean(key, 'input.fields.countsAsContent', field?.countsAsContent)
+  }
+
+  return spec
+}
+
+/**
+ * 查这一行登记表；查不到返回 `undefined`。
+ *
+ * 未选择（`null`）先经 {@link entryModeForDisplay} 归一成完整流程再查——「未选择」是
+ * 合法状态，不是缺行。
+ *
+ * 返回 `undefined` 只表示**没有这一行**（留给「有没有登记」这类内部判断）；真查到一行时
+ * 仍会跑一遍完整性校验，残缺的行与缺行一样当场失败，不会让半个配置流出去。
+ */
+export function entrySpecFor(mode: EntryMode | null): EntrySpec | undefined {
+  const key = entryModeForDisplay(mode)
+  const spec = ENTRY_REGISTRY[key]
+  return spec ? assertEntrySpecComplete(key, spec) : undefined
+}
+
+/**
+ * 取这一行登记表，**一定给出一行**；给不出就当场失败。
+ *
+ * 这是「按入口模式问答案」的唯一出口，三态口径在这里收口：
+ * - `null`（「未选择」）= 合法，经 {@link entryModeForDisplay} 落到完整流程那一行；
+ * - **未知入口键 / 缺行** → 抛 {@link EntrySpecMissingError}，绝不拿默认值顶替；
+ * - **缺列**（这一行在，但某一列没填）→ 同样抛错，消息指出缺的是哪一列。
+ *
+ * 从前这里查不到就按「未选择」兜住，于是维护者加第 5 个入口漏填一列时，程序会
+ * 悄悄按完整流程跑下去——正是本票要根治的那种「漏改不报错」。
+ */
+export function entrySpecForDisplay(mode: EntryMode | null): EntrySpec {
+  const key = entryModeForDisplay(mode)
+  return assertEntrySpecComplete(key, ENTRY_REGISTRY[key])
 }
 
 /**
@@ -211,11 +717,13 @@ const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
  * 只有**完整流程**有：它的起点是「先把需求交给 AI 逐题追问」。快捷流程刻意不要这一环——
  * 用户选它就是因为不想多聊几轮，一段话写完直接进生成；两个导入入口自带的 PRD 已经是答案。
  *
- * 写成白名单而不是「不等于某些入口」：将来加新入口时，默认「没有需求对话」比默认「有」安全
- * 得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
+ * 写成白名单（只有完整流程是 `true`）而不是「不等于某些入口」：将来加新入口时，默认「没有需求
+ * 对话」比默认「有」安全得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
+ *
+ * 答案在登记表的 `needsRequirementChat` 列。
  */
 export function hasRequirementChat(mode: EntryMode | null): boolean {
-  return (mode ?? 'structured') === 'structured'
+  return entrySpecForDisplay(mode).needsRequirementChat
 }
 
 /**
@@ -225,11 +733,13 @@ export function hasRequirementChat(mode: EntryMode | null): boolean {
  * 除了跳过调用，界面上也不能留这两个阶段——进度条上画两格永远走不到的路，
  * 用户会读成「还没审到」而不是「这次压根不审」。
  *
- * 写成黑名单（`prd-quick` 是例外）而不是白名单：将来加新入口默认**带上复核**，
+ * 写成黑名单（只有 `prd-quick` 是 `false`）而不是白名单：将来加新入口默认**带上复核**，
  * 漏配的代价只是多等一会儿；反过来则悄悄把产出质量降了一档。
+ *
+ * 答案在登记表的 `needsDocumentReview` 列。
  */
 export function hasDocumentReview(mode: EntryMode | null): boolean {
-  return (mode ?? 'structured') !== 'prd-quick'
+  return entrySpecForDisplay(mode).needsDocumentReview
 }
 
 /**
@@ -240,28 +750,22 @@ export function hasDocumentReview(mode: EntryMode | null): boolean {
  *
  * 两个**导入**入口不是——它们的录入页（贴 PRD / 贴两份材料）根本不在进度条上，
  * 因此审阅页必须保留一个「返回」按钮，否则用户改不了贴进来的材料，直接成了死路。
+ *
+ * 答案在登记表的 `inputPageOnBar` 列。
  */
 export function inputPageOnBar(mode: EntryMode | null): boolean {
-  return (mode ?? 'structured') === 'structured' || mode === 'prd-quick'
+  return entrySpecForDisplay(mode).inputPageOnBar
 }
 
 /**
  * 某个入口模式下进度条要展示的步骤。
- * `mode` 为 `null`（还没选入口 / 旧快照）时按完整流程处理。
+ * `mode` 为 `null`（还没选入口 / 旧快照）时经 {@link entryModeForDisplay} 按完整流程处理。
+ *
+ * 步骤清单在登记表的 `steps` 列；顺序由全局的 `STEPS` 决定，这一列只回答「要不要」。
  */
 export function stepsForMode(mode: EntryMode | null): readonly Step[] {
-  const ids = MODE_STEP_IDS[mode ?? 'structured']
+  const ids = entrySpecForDisplay(mode).steps
   return STEPS.filter((step) => ids.includes(step.id))
-}
-
-/** 各入口模式下「完成」所需的最低文档集合 */
-export const REQUIRED_DOCS: Record<EntryMode, readonly DocType[]> = {
-  structured: ['prd', 'api-docs', 'prompts'],
-  // 快捷流程复用完整流程的进度条，交付判据也一并对齐：三份齐备才算完成
-  'prd-quick': ['prd', 'api-docs', 'prompts'],
-  // 两个导入入口的交付物都只有提示词套件（自带的那两份材料不算本工具的产物）
-  'prompt-debug': ['prompts'],
-  'prd-and-api-paste': ['prompts'],
 }
 
 /** 刷新降级的类型：生成中断 / 确认步骤中断 */
@@ -494,6 +998,8 @@ export function canGeneratePrdFrom(messages: readonly ChatMessage[], busy: boole
  *
  * 完整流程 / 快捷流程的判定与旧版完全等价，
  * 因此这里只保留这一个函数，不再另开一个只服务单一口径的封装。
+ *
+ * 要哪几份文档在登记表的 `requiredDocs` 列。
  */
 export function hasRequiredDocuments(
   mode: EntryMode | null,
@@ -504,7 +1010,7 @@ export function hasRequiredDocuments(
     'api-docs': docs.apiDocs,
     prompts: docs.prompts,
   }
-  return REQUIRED_DOCS[mode ?? 'structured'].every((type) => byType[type].trim() !== '')
+  return entrySpecForDisplay(mode).requiredDocs.every((type) => byType[type].trim() !== '')
 }
 
 /** 判断任意值是否为合法聊天消息 */

@@ -2,6 +2,7 @@
 import type { EntryMode } from '@/types'
 import AppCard from '@/components/ui/AppCard.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
+import { ENTRY_REGISTRY, entrySpecFor, type EntrySpec } from '@/utils/workflow'
 
 /**
  * 入口选择页（新建方案的第一屏）。
@@ -74,68 +75,74 @@ interface EntryGroup {
 }
 
 /**
- * 四叶子两组的静态配置。
+ * 四叶子两组的**呈现**配置：组序、叶子图标与色调。
  *
- * 每条只留「标题 + 一句说明」：入口页的任务是让用户快速选起点，卡片越少元素越好比较。
+ * 文案不在这里——组标题、组说明、卡片标题与说明全部来自登记表
+ * （`utils/workflow.ts` 的 `ENTRY_REGISTRY` 的 `card` 列）。从前这段静态配置里也抄了一份
+ * 文案，改一处不会报错、只会让入口页与登记表说的不是一回事，所以那一份已经删了。
+ * 这里只留**图标**：七类资料里没有图标，它属于这一屏的视觉表达。
  */
-const GROUPS: EntryGroup[] = [
-  {
-    id: 'from-scratch',
-    title: '从零创建 PRD',
-    description: '还没有任何材料，从这里把需求说清楚。',
-    options: [
-      {
-        mode: 'structured',
-        title: '完整流程',
-        description: '逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。',
-        iconWrap:
-          'bg-primary-50 group-hover:bg-primary-100 dark:bg-primary-950/40 dark:group-hover:bg-primary-900/60',
-        iconColor: 'text-primary-600 dark:text-primary-300',
-        iconPath:
-          'M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z',
-      },
-      {
-        mode: 'prd-quick',
-        title: '快捷流程',
-        description: '一段话说清想法，跳过表单与对话，直接逐章生成 PRD。',
-        iconWrap:
-          'bg-amber-50 group-hover:bg-amber-100 dark:bg-amber-950/40 dark:group-hover:bg-amber-900/60',
-        iconColor: 'text-amber-600 dark:text-amber-300',
-        iconPath:
-          'M11.3 1.046A1 1 0 0 1 12 2v5h4a1 1 0 0 1 .82 1.573l-7 10A1 1 0 0 1 8 18v-5H4a1 1 0 0 1-.82-1.573l7-10a1 1 0 0 1 1.12-.381Z',
-      },
-    ],
+const ICONS: Record<EntryMode, Pick<EntryOption, 'iconWrap' | 'iconColor' | 'iconPath'>> = {
+  structured: {
+    iconWrap:
+      'bg-primary-50 group-hover:bg-primary-100 dark:bg-primary-950/40 dark:group-hover:bg-primary-900/60',
+    iconColor: 'text-primary-600 dark:text-primary-300',
+    iconPath:
+      'M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z',
   },
-  {
-    id: 'with-material',
-    title: '导入已有素材',
-    description: '手头已经有写好的材料，别重复劳动。',
-    options: [
-      {
-        mode: 'prompt-debug',
-        title: '我有 PRD',
-        description: '贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。',
-        iconWrap:
-          'bg-emerald-50 group-hover:bg-emerald-100 dark:bg-emerald-950/40 dark:group-hover:bg-emerald-900/60',
-        iconColor: 'text-emerald-600 dark:text-emerald-300',
-        // 尖括号：提示词套件本质上是给模型看的「代码」
-        iconPath:
-          'M6.28 5.22a.75.75 0 0 1 0 1.06L2.56 10l3.72 3.72a.75.75 0 0 1-1.06 1.06L.97 10.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Zm7.44 0a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L17.44 10l-3.72-3.72a.75.75 0 0 1 0-1.06Z',
-      },
-      {
-        mode: 'prd-and-api-paste',
-        title: '我有 PRD + 接口文档',
-        description: '两份都贴进来，提示词因此能对齐真实的接口路径与字段名。',
-        iconWrap:
-          'bg-violet-50 group-hover:bg-violet-100 dark:bg-violet-950/40 dark:group-hover:bg-violet-900/60',
-        iconColor: 'text-violet-600 dark:text-violet-300',
-        // 两条叠起来的块：这份入口比上一个多带一份材料
-        iconPath:
-          'M4 3h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm0 9h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z',
-      },
-    ],
+  'prd-quick': {
+    iconWrap:
+      'bg-amber-50 group-hover:bg-amber-100 dark:bg-amber-950/40 dark:group-hover:bg-amber-900/60',
+    iconColor: 'text-amber-600 dark:text-amber-300',
+    iconPath:
+      'M11.3 1.046A1 1 0 0 1 12 2v5h4a1 1 0 0 1 .82 1.573l-7 10A1 1 0 0 1 8 18v-5H4a1 1 0 0 1-.82-1.573l7-10a1 1 0 0 1 1.12-.381Z',
   },
-]
+  'prompt-debug': {
+    iconWrap:
+      'bg-emerald-50 group-hover:bg-emerald-100 dark:bg-emerald-950/40 dark:group-hover:bg-emerald-900/60',
+    iconColor: 'text-emerald-600 dark:text-emerald-300',
+    // 尖括号：提示词套件本质上是给模型看的「代码」
+    iconPath:
+      'M6.28 5.22a.75.75 0 0 1 0 1.06L2.56 10l3.72 3.72a.75.75 0 0 1-1.06 1.06L.97 10.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Zm7.44 0a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L17.44 10l-3.72-3.72a.75.75 0 0 1 0-1.06Z',
+  },
+  'prd-and-api-paste': {
+    iconWrap:
+      'bg-violet-50 group-hover:bg-violet-100 dark:bg-violet-950/40 dark:group-hover:bg-violet-900/60',
+    iconColor: 'text-violet-600 dark:text-violet-300',
+    // 两条叠起来的块：这份入口比上一个多带一份材料
+    iconPath:
+      'M4 3h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm0 9h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z',
+  },
+}
+
+/** 组的排列顺序：组本身是这一屏的分组，哪个入口属于哪一组由登记表的 `card.groupId` 决定 */
+const GROUP_IDS: readonly string[] = ['from-scratch', 'with-material']
+
+/**
+ * 四叶子两组的配置：文案取自登记表，图标取自 {@link ICONS}。
+ *
+ * 组的顺序由 `GROUP_IDS` 定，组内叶子的顺序由登记表里的书写顺序定（与原来一致：
+ * 完整流程 → 快捷流程、我有 PRD → 我有 PRD + 接口文档）。
+ */
+const GROUPS: EntryGroup[] = GROUP_IDS.map((groupId) => {
+  // 逐行走 `entrySpecFor` 而不是直接读 `ENTRY_REGISTRY` 的值：漏填一列的行在入口页
+  // 当场失败，而不是渲染成一张标题空白的卡片（那种「漏改不报错」正是要根治的）。
+  const rows = Object.keys(ENTRY_REGISTRY)
+    .map((mode) => entrySpecFor(mode as EntryMode))
+    .filter((row): row is EntrySpec => row !== undefined && row.card.groupId === groupId)
+  const head = rows[0]
+  return {
+    id: groupId,
+    title: head?.card.groupTitle ?? '',
+    description: head?.card.groupDescription ?? '',
+    options: rows.map((row) => ({
+      mode: row.mode,
+      title: row.card.title,
+      description: row.card.description,
+      ...ICONS[row.mode],
+    })),
+  }
+})
 
 /** 叶子右侧的箭头图标 */
 const ARROW_ICON =

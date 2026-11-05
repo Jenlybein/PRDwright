@@ -1,6 +1,6 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
-import { nextTick } from 'vue'
+import { nextTick, defineComponent, h } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,11 +18,13 @@ import { DOCUMENT_SAVE_DEBOUNCE_MS, useDocumentsStore } from '../stores/document
 import { useSolutionsStore } from '../stores/solutions'
 import { useWorkflowStore } from '../stores/workflow'
 import { downloadFile } from '../utils/download'
+import { ENTRY_REGISTRY, type EntrySpec } from '../utils/workflow'
 import type {
   ChatMessage,
   DocumentRecord,
   DocumentVersionDetail,
   DocumentVersionSummary,
+  EntryMode,
   JobSnapshot,
   RequirementsSummary,
   RunSummary,
@@ -198,6 +200,35 @@ vi.mock('../services/documentService', () => ({
 vi.mock('../utils/download', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/download')>()
   return { ...actual, downloadFile: vi.fn() }
+})
+
+/**
+ * 子组件渲染失败的注入开关。
+ *
+ * 「失败可见」那条验收要验证的是**错误边界**：后代组件在渲染时抛错，界面必须给出一句
+ * 明确的「暂时不可用」，而不是整页空白。注入点选「我有 PRD」的录入页——本文件没有
+ * 任何用例拿它的组件实例做断言（只按屏幕上的文字断言），因此平时原样透传，
+ * 只有那一条用例把它打开。
+ *
+ * 它模拟的正是维护者漏填一列的情形：界面要读的东西在查表那一刻就没了。
+ */
+const stageRenderFault = vi.hoisted(() => ({ failingStage: '' }))
+
+vi.mock('../components/stages/PromptDebugStage.vue', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../components/stages/PromptDebugStage.vue')>()
+  return {
+    default: defineComponent({
+      name: 'FaultInjectingPromptDebugStage',
+      // 本组件不声明任何 props：props 与事件都按「未声明的属性」透传到它渲染的根节点上，
+      // 因此平时它就是真实录入页的一层薄壳，行为与直接渲染真实组件一致。
+      setup() {
+        if (stageRenderFault.failingStage === 'prompt-debug') {
+          throw new Error('假第 5 入口：这一行没填全，渲染当场失败')
+        }
+        return () => h(actual.default)
+      },
+    }),
+  }
 })
 
 /**
@@ -1773,6 +1804,27 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
   }
 
+  it('完整流程：落页、六格进度条、模式名与返回文案都由登记表这一行给出', async () => {
+    const wrapper = await mountEntry()
+    await clickButton(wrapper, '完整流程')
+
+    const spec = ENTRY_REGISTRY.structured
+    if (!spec) throw new Error('登记表缺「完整流程」一行')
+
+    // 落页：结构化表单（登记表说落在哪儿，屏幕就该落在哪儿，不读 store 内部字段）
+    expect(wrapper.text()).toContain('告诉我们你的产品想法')
+    // 进度条：六格，且与这一行登记的步骤数一致
+    const bars = wrapper.findAll('nav[aria-label="生成进度"] li')
+    expect(bars).toHaveLength(6)
+    expect(bars).toHaveLength(spec.steps.length)
+    // 模式名（侧栏 / 方案列表里那几个字）不在这里断言：那是 store 层的取值，
+    // 屏幕上看不见它，越界断言只会让这条用例在重构时白挂一次。口径由
+    // `solutions-store.spec.ts` 覆盖。
+    // 表单的返回落点是入口页
+    await clickButton(wrapper, '返回入口', true)
+    expect(wrapper.text()).toContain('新建 PRD 方案')
+  })
+
   it('快捷流程：一段话直接生成 PRD，不问问题也不经过摘要确认闸门', async () => {
     const wrapper = await mountEntry()
     await fillQuickPrd(wrapper)
@@ -3059,5 +3111,127 @@ describe('AppV2 的版本预览与删除', () => {
     // 回到列表：窄栏 + 没有 .prose 正文
     expect(wrapper.find('.shell-version-drawer').classes()).toContain('w-[360px]')
     expect(wrapper.find('.shell-version-drawer .prose').exists()).toBe(false)
+  })
+})
+
+/**
+ * 失败可见：该块界面不可用，而不是整页白屏。
+ *
+ * 这是「漏改不报错」根治的最后一段：前面几条用例管「当场失败」，这一条管**失败之后
+ * 用户看到什么**。注入一个「一渲染就抛错」的后代组件（模拟维护者加了第 5 个入口却漏填
+ * 一列、界面读到它时查表当场失败），断言屏幕上出现一句明确的占位说明，且应用外壳还在。
+ *
+ * 只断言外部可观察结果：屏幕上有没有那句话、外壳还在不在。
+ */
+describe('AppV2 错误边界：子组件渲染失败时该块界面不可用', () => {
+  it('后代组件渲染抛错 → 屏幕出现「暂时不可用」占位，而不是整页空白', async () => {
+    stageRenderFault.failingStage = 'prompt-debug'
+    // 这条用例**故意**制造下游失败：控制台那两行是预期输出，不必混进测试报告
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const quietWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const wrapper = await mountEntry()
+      await clickButton(wrapper, '我有 PRD')
+      await nextTick()
+      await flushPromises()
+
+      // 用户看得见的一句说明，而不是一片空白
+      expect(wrapper.find('main').text()).toContain('暂时不可用')
+      // 不是整页白屏：应用外壳照旧在（侧栏品牌仍可读）
+      expect(wrapper.find('aside[aria-label="方案列表"]').text()).toContain('PRDwright')
+      // 失败没有被静默吞掉：那块界面确实退场了
+      expect(wrapper.text()).not.toContain('从现有 PRD 生成提示词套件')
+    } finally {
+      stageRenderFault.failingStage = ''
+      quiet.mockRestore()
+      quietWarn.mockRestore()
+    }
+  })
+})
+
+/**
+ * 失败可见：**应用外壳自己的接缝**也要看得见。
+ *
+ * 上一条用例注入的是「后代组件渲染时抛错」；这一条注入的是更贴近真实的那种：维护者加了第 5 个
+ * 入口却漏填一列，用户点下那张卡时**处理器**里查表当场失败。
+ *
+ * ⚠️ 这条路今天落在 `onErrorCaptured` 里，而不是落在 `guarded` 里——卡片是 `EntryStage` 画的，
+ * `emit('select')` 触发的回调按 Vue 的归因算**子组件**的错误，外壳的 `onErrorCaptured` 接得住。
+ * 也就是说：这条用例**无论有没有 `guarded` 都是绿的**，它守的是「用户看得见」这个结果，不是
+ * 某个具体实现。真正接不到的那一层在别处（外壳**自己**渲染期读登记表：`steps` / `inputPageOnBar`
+ * 这些按行校验的查表），改动粒度更大，不在本票范围。
+ *
+ * 注入方式：先登记一行**填全**的第五入口（入口页会把每一行都查一遍才画卡片，半填的行连卡片
+ * 都画不出来），等卡片已经出现在屏幕上，再抽掉一列：卡片看得见、点得着，一点就炸。
+ */
+describe('AppV2 错误边界：外壳接缝上失败也不静默', () => {
+  it('第五个入口一点就当场失败 → 屏幕出现「暂时不可用」，而不是「点了没反应」', async () => {
+    const key = 'fifth-entry' as EntryMode
+
+    /** 一行填全了的假第 5 入口：只为让入口页把它画成一张可点的卡 */
+    const completeFifthEntry = (): Record<string, unknown> => ({
+      mode: key,
+      card: {
+        groupId: 'with-material',
+        groupTitle: '导入已有素材',
+        groupDescription: '手头已经有写好的材料，别重复劳动。',
+        title: '第五入口',
+        description: '维护者新加的一行。',
+      },
+      landing: {
+        onSelect: 'prompt-debug',
+        editRequirements: 'form',
+        backToInput: 'prompt-debug',
+      },
+      steps: ['review-prompts', 'done'],
+      inputPageOnBar: false,
+      needsRequirementChat: false,
+      needsDocumentReview: true,
+      keepBackButton: true,
+      requiredDocs: ['prompts'],
+      copy: {
+        modeLabel: '第五入口',
+        backLabel: '返回素材',
+        editRequirementsLabel: '改需求',
+      },
+      input: {
+        stateField: 'debugPrdText',
+        stateColumn: 'draft_prd_text',
+        fields: [
+          { key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true },
+        ],
+      },
+    })
+
+    const row = completeFifthEntry()
+    ENTRY_REGISTRY[key] = row as unknown as EntrySpec
+    // 这条用例**故意**制造失败：控制台那两行是预期输出，不必混进测试报告
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const quietWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let wrapper: VueWrapper | null = null
+    try {
+      wrapper = await mountEntry()
+      // 点之前这一屏是好的：第五张卡已经画出来了
+      expect(wrapper.text()).toContain('第五入口')
+
+      // 漏填一列（只抽掉「落页」这一列，其余保持完整）：卡片仍在屏幕上、仍然点得着
+      delete row.landing
+
+      await clickButton(wrapper, '第五入口')
+      await nextTick()
+      await flushPromises()
+
+      // 用户看得见的一句说明，而不是「点了没反应」
+      expect(wrapper.find('main').text()).toContain('暂时不可用')
+      // 失败没有被静默吞掉：入口页确实退场了（停在原地装作没发生才是「点了没反应」）
+      expect(wrapper.text()).not.toContain('新建 PRD 方案')
+      // 不是整页白屏：应用外壳照旧在
+      expect(wrapper.find('aside[aria-label="方案列表"]').text()).toContain('PRDwright')
+    } finally {
+      wrapper?.unmount()
+      delete ENTRY_REGISTRY[key]
+      quiet.mockRestore()
+      quietWarn.mockRestore()
+    }
   })
 })

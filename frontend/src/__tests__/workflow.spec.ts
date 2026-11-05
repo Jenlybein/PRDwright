@@ -1,18 +1,26 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ChatMessage, RequirementsSummary, SessionDataV2 } from '@/types'
+import type { ChatMessage, EntryMode, RequirementsSummary, SessionDataV2 } from '@/types'
+import type { EntrySpec } from '@/utils/workflow'
 import {
+  ENTRY_REGISTRY,
+  EntrySpecMissingError,
+  assertEntrySpecComplete,
   canGeneratePrdFrom,
   chatStageForDocument,
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
   emptyConversationIds,
+  entryModeForDisplay,
+  entrySpecFor,
+  entrySpecForDisplay,
   fromBackendKind,
   generatingStateFor,
   hasDocumentReview,
   hasRequiredDocuments,
   hasRequirementChat,
+  inputPageOnBar,
   isChatStage,
   fromBackendJobKind,
   isDocKind,
@@ -97,7 +105,7 @@ describe('入口模式对进度与完成条件的影响', () => {
     expect(hasRequirementChat('prd-quick')).toBe(false)
     expect(hasRequirementChat('prompt-debug')).toBe(false)
     expect(hasRequirementChat('prd-and-api-paste')).toBe(false)
-    // 还没选入口（或旧快照）时按完整流程处理，与 `MODE_STEP_IDS` 的兜底口径一致
+    // 还没选入口（或旧快照）时按完整流程处理：六步与完整流程一致
     expect(hasRequirementChat(null)).toBe(true)
   })
 
@@ -559,5 +567,507 @@ describe('澄清线程的取值与互逆映射', () => {
     // 落在一个没有任何视图认领的阶段上
     expect(VIEW_STATES).not.toContain('clarifying')
     expect(isViewState('clarifying')).toBe(false)
+  })
+})
+
+/**
+ * 「未选择」的唯一出口。
+ *
+ * `null`（用户还没点入口 / 老快照没记入口名）是**合法状态**，不等于「未知入口键」：
+ * 它必须照常按完整流程的展示口径给出答案。从前这条口径散在六处各写一次
+ * `?? 'structured'`，改默认口径时漏改一处也不会报错，只表现为「入口页进度条少一格」
+ * 或「老方案列表显示成别的入口」这类错位。这里把「所有按模式的判断在未选择时
+ * 都等于完整流程」钉住，并钉住那个唯一出口本身。
+ */
+describe('未选择入口（null）按完整流程的展示口径', () => {
+  it('唯一出口 entryModeForDisplay 把 null 归到完整流程', () => {
+    expect(entryModeForDisplay(null)).toBe('structured')
+    // 已选入口时原样返回，不做任何映射
+    expect(entryModeForDisplay('prd-quick')).toBe('prd-quick')
+  })
+
+  it('进度条步骤与下标在未选择时与完整流程一致（六步）', () => {
+    const unselected = stepsForMode(null).map((step) => step.id)
+    expect(unselected).toEqual(stepsForMode('structured').map((step) => step.id))
+    expect(unselected).toHaveLength(6)
+    for (const state of [
+      'form',
+      'chatting',
+      'review-prd',
+      'review-api-docs',
+      'review-prompts',
+      'done',
+    ] as const) {
+      expect(stepIndexOf(state, null)).toBe(stepIndexOf(state, 'structured'))
+    }
+  })
+
+  it('三个按模式的判断在未选择时与完整流程一致', () => {
+    expect(hasRequirementChat(null)).toBe(hasRequirementChat('structured'))
+    expect(hasDocumentReview(null)).toBe(hasDocumentReview('structured'))
+    expect(inputPageOnBar(null)).toBe(inputPageOnBar('structured'))
+    // 再用显式期望钉一次：避免「两边一起错」也被判成一致
+    expect(hasRequirementChat(null)).toBe(true)
+    expect(hasDocumentReview(null)).toBe(true)
+    expect(inputPageOnBar(null)).toBe(true)
+  })
+
+  it('完成条件在未选择时与完整流程一致', () => {
+    const threeDocs = { prd: '# prd', apiDocs: '# api', prompts: '# prompts' }
+    expect(hasRequiredDocuments(null, threeDocs)).toBe(
+      hasRequiredDocuments('structured', threeDocs),
+    )
+    expect(hasRequiredDocuments(null, threeDocs)).toBe(true)
+    // 只齐一份时，两条口径都判「未完成」
+    const oneDoc = { prd: '# prd', apiDocs: '', prompts: '' }
+    expect(hasRequiredDocuments(null, oneDoc)).toBe(false)
+  })
+})
+
+/**
+ * 入口模式登记表的第一行。
+ *
+ * 登记表**一行一个入口、七类资料为列**。这里的期望值取自票面与架构文档的口径，
+ * 不是把实现再算一遍：六步、三份文档、要澄清、要审核、落结构化表单、列表名「完整流程」。
+ */
+describe('入口模式登记表：完整流程一行', () => {
+  it('七类资料为列，每一列都填了「完整流程」的答案', () => {
+    const spec = ENTRY_REGISTRY.structured
+    if (!spec) throw new Error('登记表缺「完整流程」一行')
+
+    // ① 键、组别与卡片文案：与入口页上那张卡一致
+    expect(spec.mode).toBe('structured')
+    expect(spec.card.groupId).toBe('from-scratch')
+    expect(spec.card.groupTitle).toBe('从零创建 PRD')
+    expect(spec.card.groupDescription).toBe('还没有任何材料，从这里把需求说清楚。')
+    expect(spec.card.title).toBe('完整流程')
+    expect(spec.card.description).toBe('逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。')
+
+    // ② 落页：选中落在结构化表单；「改需求」回表单；审阅页「返回」回对话页
+    expect(spec.landing.onSelect).toBe('form')
+    expect(spec.landing.editRequirements).toBe('form')
+    expect(spec.landing.backToInput).toBe('chatting')
+
+    // ③ 进度条步骤：六步齐全
+    expect(spec.steps).toEqual([
+      'form',
+      'chatting',
+      'review-prd',
+      'review-api-docs',
+      'review-prompts',
+      'done',
+    ])
+
+    // ④ 四个布尔：录入页在进度条上、要需求澄清、要审核改写、澄清入口可顶替「返回」
+    expect(spec.inputPageOnBar).toBe(true)
+    expect(spec.needsRequirementChat).toBe(true)
+    expect(spec.needsDocumentReview).toBe(true)
+    expect(spec.keepBackButton).toBe(false)
+
+    // ⑤ 完成所需文档：三份齐备
+    expect(spec.requiredDocs).toEqual(['prd', 'api-docs', 'prompts'])
+
+    // ⑥ 文案：列表模式名、返回按钮、改需求按钮
+    expect(spec.copy.modeLabel).toBe('完整流程')
+    expect(spec.copy.backLabel).toBe('返回对话')
+    expect(spec.copy.editRequirementsLabel).toBe('改需求')
+
+    // ⑦ 录入字段：结构化表单落在快照的 `summary` 这一列，字段非空才算「有内容」
+    expect(spec.input.stateField).toBe('summary')
+    expect(spec.input.stateColumn).toBe('summary')
+    expect(spec.input.fields.map((field) => field.key)).toEqual([
+      'product_name',
+      'product_goal',
+      'target_users',
+      'platform',
+      'mvp_features',
+      'v2_features',
+      'ui_pages',
+      'key_interactions',
+      'tech_auth',
+      'tech_storage',
+      'tech_frontend',
+      'tech_backend',
+      'tech_deployment',
+      'llm_usage',
+      'nf_security',
+      'nf_performance',
+      'nf_availability',
+      'scope_in',
+      'scope_out',
+    ])
+    expect(spec.input.fields.every((field) => field.countsAsContent)).toBe(true)
+    expect(spec.input.fields.find((field) => field.key === 'product_name')?.label).toBe('产品名称')
+  })
+
+  it('结构化入口的问询都从这一行取答案（与迁移前的行为一致）', () => {
+    const spec = ENTRY_REGISTRY.structured
+    if (!spec) throw new Error('登记表缺「完整流程」一行')
+    // 这一条是接缝：登记表真的被问询读到，而不是写了一份没人用的数据
+    expect(stepsForMode('structured').map((step) => step.id)).toEqual([...spec.steps])
+    expect(hasRequirementChat('structured')).toBe(spec.needsRequirementChat)
+    expect(hasDocumentReview('structured')).toBe(spec.needsDocumentReview)
+    expect(inputPageOnBar('structured')).toBe(spec.inputPageOnBar)
+    expect(
+      hasRequiredDocuments('structured', { prd: '# prd', apiDocs: '# api', prompts: '# prompts' }),
+    ).toBe(true)
+    expect(hasRequiredDocuments('structured', { prd: '# prd', apiDocs: '', prompts: '' })).toBe(
+      false,
+    )
+  })
+
+})
+
+/**
+ * 登记表的第二行：快捷流程。
+ *
+ * 它与完整流程**共用同一条流水线**，差别全在这一行里：起点是一段话而不是表单、
+ * 没有需求澄清、不审不改、落页是自己的极简录入页。期望值逐列写死，不从实现里取。
+ */
+describe('入口模式登记表：快捷流程一行', () => {
+  it('七类资料为列，每一列都填了「快捷流程」的答案', () => {
+    const spec = entrySpecFor('prd-quick')
+    if (!spec) throw new Error('登记表缺「快捷流程」一行')
+
+    // ① 键、组别与卡片文案：与入口页上那张卡一致（文案照抄，不改写）
+    expect(spec.mode).toBe('prd-quick')
+    expect(spec.card.groupId).toBe('from-scratch')
+    expect(spec.card.groupTitle).toBe('从零创建 PRD')
+    expect(spec.card.groupDescription).toBe('还没有任何材料，从这里把需求说清楚。')
+    expect(spec.card.title).toBe('快捷流程')
+    expect(spec.card.description).toBe('一段话说清想法，跳过表单与对话，直接逐章生成 PRD。')
+
+    // ② 落页：选中落在极简描述页；「改描述」回同一页；返回落点也是它
+    expect(spec.landing.onSelect).toBe('prd-quick')
+    expect(spec.landing.editRequirements).toBe('prd-quick')
+    expect(spec.landing.backToInput).toBe('prd-quick')
+
+    // ③ 进度条步骤：与完整流程同一套六步——「AI 对话」留给文档澄清
+    expect(spec.steps).toEqual([
+      'form',
+      'chatting',
+      'review-prd',
+      'review-api-docs',
+      'review-prompts',
+      'done',
+    ])
+
+    // ④ 四个布尔：录入页在进度条上、**不要**需求澄清、**不审不改**、保留「返回」
+    expect(spec.inputPageOnBar).toBe(true)
+    expect(spec.needsRequirementChat).toBe(false)
+    expect(spec.needsDocumentReview).toBe(false)
+    expect(spec.keepBackButton).toBe(true)
+
+    // ⑤ 完成所需文档：与完整流程一致，三份齐备
+    expect(spec.requiredDocs).toEqual(['prd', 'api-docs', 'prompts'])
+
+    // ⑥ 文案：列表模式名、返回按钮、改描述按钮
+    expect(spec.copy.modeLabel).toBe('快捷流程')
+    expect(spec.copy.backLabel).toBe('返回对话')
+    expect(spec.copy.editRequirementsLabel).toBe('改描述')
+
+    // ⑦ 录入字段：落在快照的 `quickInput`（产品名与需求描述），非空即算有内容
+    expect(spec.input.stateField).toBe('quickInput')
+    expect(spec.input.fields.map((field) => field.key)).toEqual(['product_name', 'requirements'])
+    expect(spec.input.fields.map((field) => field.label)).toEqual(['产品名称', '需求描述'])
+    expect(spec.input.fields.map((field) => field.countsAsContent)).toEqual([true, true])
+  })
+
+  it('快捷流程不被追问需求：问询给出「不澄清」，也没有摘要回填的余地', () => {
+    expect(hasRequirementChat('prd-quick')).toBe(false)
+    // 同一行驱动的其它两列也得跟着对，避免「答了半个入口」
+    expect(hasDocumentReview('prd-quick')).toBe(false)
+    expect(inputPageOnBar('prd-quick')).toBe(true)
+  })
+})
+
+/**
+ * 登记表的第三行：我有 PRD。
+ *
+ * 两个**导入**入口的共同点是「自带材料、只补做提示词套件」：录入页不在进度条上（所以审阅页
+ * 必须留「返回」），完成只要提示词。它与下一个入口的差别只在贴几份材料。
+ */
+describe('入口模式登记表：我有 PRD 一行', () => {
+  it('七类资料为列，每一列都填了「我有 PRD」的答案', () => {
+    const spec = entrySpecFor('prompt-debug')
+    if (!spec) throw new Error('登记表缺「我有 PRD」一行')
+
+    // ① 键、组别与卡片文案：第二个分组的第一个叶子
+    expect(spec.mode).toBe('prompt-debug')
+    expect(spec.card.groupId).toBe('with-material')
+    expect(spec.card.groupTitle).toBe('导入已有素材')
+    expect(spec.card.groupDescription).toBe('手头已经有写好的材料，别重复劳动。')
+    expect(spec.card.title).toBe('我有 PRD')
+    expect(spec.card.description).toBe('贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。')
+
+    // ② 落页：选中落在粘贴 PRD 页；「返回」回它
+    expect(spec.landing.onSelect).toBe('prompt-debug')
+    // 「改需求」与旧版一致地落在结构化表单：语义不理想，但本期是行为不变的裁决
+    // （导入入口没有需求澄清线程，这一列只为旧快照存在）。要改另开票。
+    expect(spec.landing.editRequirements).toBe('form')
+    expect(spec.landing.backToInput).toBe('prompt-debug')
+
+    // ③ 进度条步骤：产物只有提示词，两格
+    expect(spec.steps).toEqual(['review-prompts', 'done'])
+
+    // ④ 四个布尔：录入页不在进度条上、不要需求澄清、要审核改写、保留「返回」
+    expect(spec.inputPageOnBar).toBe(false)
+    expect(spec.needsRequirementChat).toBe(false)
+    expect(spec.needsDocumentReview).toBe(true)
+    expect(spec.keepBackButton).toBe(true)
+
+    // ⑤ 完成所需文档：只要提示词套件（自带的那份 PRD 不算本工具的产物）
+    expect(spec.requiredDocs).toEqual(['prompts'])
+
+    // ⑥ 文案：列表模式名沿用「导入 PRD」、返回写「返回 PRD」
+    expect(spec.copy.modeLabel).toBe('导入 PRD')
+    expect(spec.copy.backLabel).toBe('返回 PRD')
+    expect(spec.copy.editRequirementsLabel).toBe('改需求')
+
+    // ⑦ 录入字段：贴入的 PRD 落在快照的 `debugPrdText`
+    expect(spec.input.stateField).toBe('debugPrdText')
+    expect(spec.input.fields.map((field) => field.key)).toEqual(['prd'])
+    expect(spec.input.fields.map((field) => field.label)).toEqual(['PRD 正文（Markdown）'])
+    expect(spec.input.fields.every((field) => field.countsAsContent)).toBe(true)
+  })
+
+  it('两个导入入口口径一致：两格进度条、只要提示词即可完成、录入页不在条上', () => {
+    for (const mode of ['prompt-debug', 'prd-and-api-paste'] as const) {
+      expect(stepsForMode(mode).map((step) => step.id)).toEqual(['review-prompts', 'done'])
+      expect(hasRequiredDocuments(mode, { prd: '# p', apiDocs: '# a', prompts: '' })).toBe(false)
+      expect(hasRequiredDocuments(mode, { prd: '', apiDocs: '', prompts: '# p' })).toBe(true)
+      expect(inputPageOnBar(mode)).toBe(false)
+      expect(hasRequirementChat(mode)).toBe(false)
+      expect(hasDocumentReview(mode)).toBe(true)
+    }
+  })
+})
+
+/**
+ * 登记表的第四行：我有 PRD + 接口文档。
+ *
+ * 它与「我有 PRD」同属导入组，口径应当逐列一致，只有录入页与两份文案不同。
+ */
+describe('入口模式登记表：我有 PRD + 接口文档一行', () => {
+  it('七类资料为列，每一列都填了「我有 PRD + 接口文档」的答案', () => {
+    const spec = entrySpecFor('prd-and-api-paste')
+    if (!spec) throw new Error('登记表缺「我有 PRD + 接口文档」一行')
+
+    // ① 键、组别与卡片文案：第二个分组的第二个叶子
+    expect(spec.mode).toBe('prd-and-api-paste')
+    expect(spec.card.groupId).toBe('with-material')
+    expect(spec.card.groupTitle).toBe('导入已有素材')
+    expect(spec.card.groupDescription).toBe('手头已经有写好的材料，别重复劳动。')
+    expect(spec.card.title).toBe('我有 PRD + 接口文档')
+    expect(spec.card.description).toBe('两份都贴进来，提示词因此能对齐真实的接口路径与字段名。')
+
+    // ② 落页：选中落在双粘贴页；「返回」回它
+    expect(spec.landing.onSelect).toBe('prd-and-api-paste')
+    // 同「我有 PRD」：改需求落结构化表单是旧版行为，本期不变
+    expect(spec.landing.editRequirements).toBe('form')
+    expect(spec.landing.backToInput).toBe('prd-and-api-paste')
+
+    // ③ 进度条步骤：与另一个导入入口同口径，两格
+    expect(spec.steps).toEqual(['review-prompts', 'done'])
+
+    // ④ 四个布尔：录入页不在进度条上、不要需求澄清、要审核改写、保留「返回」
+    expect(spec.inputPageOnBar).toBe(false)
+    expect(spec.needsRequirementChat).toBe(false)
+    expect(spec.needsDocumentReview).toBe(true)
+    expect(spec.keepBackButton).toBe(true)
+
+    // ⑤ 完成所需文档：只要提示词套件
+    expect(spec.requiredDocs).toEqual(['prompts'])
+
+    // ⑥ 文案：列表模式名沿用「导入 PRD + 接口文档」、返回写「返回素材」
+    expect(spec.copy.modeLabel).toBe('导入 PRD + 接口文档')
+    expect(spec.copy.backLabel).toBe('返回素材')
+    expect(spec.copy.editRequirementsLabel).toBe('改需求')
+
+    // ⑦ 录入字段：两份材料都落在快照的 `pastePairInput`（PRD 为主内容列）
+    expect(spec.input.stateField).toBe('pastePairInput')
+    expect(spec.input.stateColumn).toBe('paste_prd_text')
+    expect(spec.input.fields.map((field) => field.key)).toEqual(['prd', 'api_docs'])
+    expect(spec.input.fields.map((field) => field.label)).toEqual([
+      'PRD 正文（Markdown）',
+      '接口文档正文（Markdown）',
+    ])
+    expect(spec.input.fields.every((field) => field.countsAsContent)).toBe(true)
+  })
+})
+
+/**
+ * 四行齐全。
+ *
+ * 这一条是「旧表已退役」的正面证据：四个入口全部在登记表里，问询函数只可能从这些行取答案。
+ */
+describe('入口模式登记表：四行齐全', () => {
+  it('四个入口各占一行，没有缺行', () => {
+    const modes = ['structured', 'prd-quick', 'prompt-debug', 'prd-and-api-paste'] as const
+    expect(Object.keys(ENTRY_REGISTRY).sort()).toEqual([...modes].sort())
+    for (const mode of modes) {
+      expect(ENTRY_REGISTRY[mode]).toBeDefined()
+      expect(ENTRY_REGISTRY[mode]?.mode).toBe(mode)
+      expect(entrySpecFor(mode)?.mode).toBe(mode)
+    }
+  })
+
+  it('四行的组别与卡片文案合起来就是入口页上的两组四叶', () => {
+    const fromScratch = Object.values(ENTRY_REGISTRY).filter(
+      (spec) => spec?.card.groupId === 'from-scratch',
+    )
+    const withMaterial = Object.values(ENTRY_REGISTRY).filter(
+      (spec) => spec?.card.groupId === 'with-material',
+    )
+    expect(fromScratch.map((spec) => spec?.card.title)).toEqual(['完整流程', '快捷流程'])
+    expect(withMaterial.map((spec) => spec?.card.title)).toEqual(['我有 PRD', '我有 PRD + 接口文档'])
+  })
+
+  it('每个入口的问询都从自己那一行取答案（登记表真的被读到）', () => {
+    const modes = ['structured', 'prd-quick', 'prompt-debug', 'prd-and-api-paste'] as const
+    for (const mode of modes) {
+      const spec = ENTRY_REGISTRY[mode]
+      if (!spec) throw new Error(`登记表缺 ${mode} 一行`)
+      expect(stepsForMode(mode).map((step) => step.id)).toEqual([...spec.steps])
+      expect(hasRequirementChat(mode)).toBe(spec.needsRequirementChat)
+      expect(hasDocumentReview(mode)).toBe(spec.needsDocumentReview)
+      expect(inputPageOnBar(mode)).toBe(spec.inputPageOnBar)
+      // 完成判据按这一行登记的那几份文档算：凑齐它们是 true，少一份是 false
+      const all = { prd: '# prd', apiDocs: '# api', prompts: '# prompts' }
+      expect(hasRequiredDocuments(mode, all)).toBe(true)
+      expect(hasRequiredDocuments(mode, { prd: '', apiDocs: '', prompts: '' })).toBe(false)
+    }
+  })
+})
+
+/**
+ * 入口登记表完整性：漏行漏列当场失败。
+ *
+ * 三种「没有」必须分清，这是本票的核心口径：
+ * - `null` = **「未选择」**，合法：照完整流程展示，绝不抛错；
+ * - **未知入口键**（从没登记过的键）= 失败，不猜任何默认值；
+ * - **缺行 / 缺列**（维护者加了第 5 个入口却漏填一列）= 失败，消息里点名缺的是哪一列。
+ *
+ * 这里只断言**外部可观察结果**：问询抛不抛错、抛出的消息能不能让维护者一眼定位。
+ * 不扫源码、不数落点、不查标识符词频。
+ */
+describe('入口登记表完整性：漏行漏列当场失败', () => {
+  /** 取一次调用的错误消息；没抛错就是空串（于是后面的 `toContain` 会红） */
+  function messageOf(run: () => unknown): string {
+    try {
+      run()
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+    return ''
+  }
+
+  /**
+   * 一份「填全了」的假第 5 入口。
+   *
+   * 逐条用例只在它身上挖掉一列，其余保持完整——这样「被拒」只可能是被挖掉的那一列，
+   * 不会出现「反正哪儿都不全，随便拒绝一下也算通过」。
+   */
+  function completeFifthEntry(): EntrySpec {
+    return {
+      mode: 'fifth-entry' as EntryMode,
+      card: {
+        groupId: 'from-scratch',
+        groupTitle: '从零创建 PRD',
+        groupDescription: '还没有任何材料，从这里把需求说清楚。',
+        title: '第五入口',
+        description: '维护者新加的一行。',
+      },
+      landing: {
+        onSelect: 'prompt-debug',
+        editRequirements: 'prompt-debug',
+        backToInput: 'prompt-debug',
+      },
+      steps: ['review-prompts', 'done'],
+      inputPageOnBar: false,
+      needsRequirementChat: false,
+      needsDocumentReview: false,
+      keepBackButton: false,
+      requiredDocs: ['prompts'],
+      copy: {
+        modeLabel: '第五入口',
+        backLabel: '返回素材',
+        editRequirementsLabel: '改需求',
+      },
+      input: {
+        stateField: 'debugPrdText',
+        stateColumn: 'draft_prd_text',
+        fields: [{ key: 'prd', label: 'PRD 正文（Markdown）', defaultValue: '', countsAsContent: true }],
+      },
+    }
+  }
+
+  it('填全了的一行能通过校验（正例：否则「全都拒绝」也会看起来像通过）', () => {
+    const spec = completeFifthEntry()
+    expect(assertEntrySpecComplete('fifth-entry' as EntryMode, spec)).toBe(spec)
+  })
+
+  it('只填一半的假第 5 入口被当场拒绝，消息指出缺的是哪一列', () => {
+    // 维护者最容易漏的一列：完成所需文档。空数组就是典型的「忘了填」
+    const halfFilled: EntrySpec = { ...completeFifthEntry(), requiredDocs: [] }
+
+    expect(() => assertEntrySpecComplete('fifth-entry' as EntryMode, halfFilled)).toThrow(
+      EntrySpecMissingError,
+    )
+    const message = messageOf(() => assertEntrySpecComplete('fifth-entry' as EntryMode, halfFilled))
+    // 维护者一眼定位：哪个入口、缺哪一列
+    expect(message).toContain('fifth-entry')
+    expect(message).toContain('requiredDocs')
+  })
+
+  it('文案列空了同样当场失败（不是只盯步骤那一列）', () => {
+    const halfFilled: EntrySpec = {
+      ...completeFifthEntry(),
+      copy: { modeLabel: '', backLabel: '返回素材', editRequirementsLabel: '改需求' },
+    }
+    expect(messageOf(() => assertEntrySpecComplete('fifth-entry' as EntryMode, halfFilled))).toContain(
+      'modeLabel',
+    )
+  })
+
+  it('缺行与未知入口键在问询时失败，不返回任何默认值', () => {
+    // 没登记过的键：展示口径当场失败，绝不拿完整流程那一行顶替
+    expect(() => entrySpecForDisplay('bogus' as EntryMode)).toThrow(EntrySpecMissingError)
+    expect(messageOf(() => entrySpecForDisplay('bogus' as EntryMode))).toContain('bogus')
+
+    // 失败路径覆盖所有按模式的问询，而不是只在某一个函数上生效
+    expect(() => stepsForMode('bogus' as EntryMode)).toThrow(EntrySpecMissingError)
+    expect(() => hasRequiredDocuments('bogus' as EntryMode, {
+      prd: '# prd',
+      apiDocs: '# api',
+      prompts: '# promises',
+    })).toThrow(EntrySpecMissingError)
+  })
+
+  it('往登记表里放一行只填一半的假第 5 入口 → 问询当场被拒（最高可注入点）', () => {
+    const key = 'fifth-half-filled' as EntryMode
+    const halfFilled: EntrySpec = { ...completeFifthEntry(), mode: key, requiredDocs: [] }
+
+    // 登记表是运行时读的，所以这里能真的把它塞进去——这就是维护者「加了一行」的那一步
+    ENTRY_REGISTRY[key] = halfFilled
+    try {
+      expect(() => entrySpecForDisplay(key)).toThrow(EntrySpecMissingError)
+      // 同一个残缺行，换一个问询函数也照样被拒：缺的是那一列，不是某个入口的局部问题
+      expect(messageOf(() => stepsForMode(key))).toContain('requiredDocs')
+    } finally {
+      delete ENTRY_REGISTRY[key]
+    }
+  })
+
+  it('未选择（null）仍走合法口径：不抛错，就是完整流程那一行', () => {
+    let spec: EntrySpec | undefined
+    expect(() => {
+      spec = entrySpecForDisplay(null)
+    }).not.toThrow()
+    expect(spec).toEqual(ENTRY_REGISTRY.structured)
+    // 四个已登记的入口都填齐了：日常路径不会因为这条守卫变红
+    for (const mode of ['structured', 'prd-quick', 'prompt-debug', 'prd-and-api-paste'] as const) {
+      expect(() => entrySpecForDisplay(mode)).not.toThrow()
+    }
   })
 })

@@ -36,6 +36,7 @@ import {
   canGeneratePrdFrom,
   documentKindOfChatStage,
   DOWNGRADE_NOTICE,
+  entrySpecForDisplay,
   farthestContentStepIndex,
   hasRequiredDocuments,
   hasRequirementChat,
@@ -48,14 +49,6 @@ import {
   stepsForMode,
   type DowngradeKind,
 } from '@/utils/workflow'
-
-/** 各入口模式的落点：选中某个入口后直接进入该入口的第一个界面 */
-const MODE_LANDING: Record<EntryMode, ViewState> = {
-  structured: 'form',
-  'prd-quick': 'prd-quick',
-  'prompt-debug': 'prompt-debug',
-  'prd-and-api-paste': 'prd-and-api-paste',
-}
 
 export const useWorkflowStore = defineStore('workflow', () => {
   /**
@@ -475,7 +468,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
 
   /**
    * 当前入口模式「完成」所需的文档是否齐备。
-   * 完整流程要三份齐全，快捷入口只要 PRD，调试入口只要提示词。
+   *
+   * 要哪几份由登记表的 `requiredDocs` 列回答：完整流程与快捷流程都是三份齐备，
+   * 两个导入入口只要提示词套件。这里不再写一份「快捷入口只要 PRD」的旧说法——那是
+   * 早就作废的口径，与三份齐备的判据相冲突。
    */
   const requiredDocsReady = computed(() =>
     hasRequiredDocuments(entryMode.value, {
@@ -552,8 +548,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
    */
   function chooseEntry(mode: EntryMode): boolean {
     if (hasActiveRun.value) return false
+    // 落页由登记表这一行的 `landing.onSelect` 回答。查不到不猜：未知入口键、缺行、缺列
+    // 都会当场抛 `EntrySpecMissingError`（只有「未选择」经 `entryModeForDisplay` 按完整流程
+    // 展示）。**先查表再改状态**：查表失败时不要留下「入口已经换了、页面没换」的半截状态。
+    // 失败由界面的错误边界变成一句「这块界面暂时不可用」，不再悄悄按完整流程跑下去。
+    const landing = entrySpecForDisplay(mode).landing.onSelect
     entryMode.value = mode
-    goTo(MODE_LANDING[mode])
+    goTo(landing)
     return true
   }
 

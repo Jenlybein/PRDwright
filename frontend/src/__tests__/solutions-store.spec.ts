@@ -346,6 +346,89 @@ describe('标题规则', () => {
 
     expect(vi.mocked(solutionApi.createSolution).mock.calls[0]?.[0].title).toContain('未命名方案')
   })
+
+  it('双粘贴入口取所贴 PRD 的一级标题，不拿接口文档的标题', async () => {
+    workflow.chooseEntry('prd-and-api-paste')
+    workflow.pastePairInput.prd = '# 会员中心需求\n\n正文'
+    workflow.pastePairInput.apiDocs = '# 会员中心接口文档\n\n正文'
+    await advanceDebounce()
+
+    // 接口文档是附属材料，它的标题多半是「XX 接口文档」，拿来当方案名反而更差
+    expect(vi.mocked(solutionApi.createSolution).mock.calls[0]?.[0].title).toBe('会员中心需求')
+  })
+
+  it('多个来源都有内容时按「摘要 → 快捷输入 → 贴入 PRD → 双粘贴」的先后取值', async () => {
+    workflow.chooseEntry('structured')
+    // 顺序链上一旦被改动，这里会立刻看到取了别的名字
+    workflow.summary = {
+      product_name: '订单系统',
+      product_goal: '收单',
+      target_users: [],
+      platform: '网页应用',
+      mvp_features: [],
+    }
+    workflow.quickInput.productName = '小账本'
+    workflow.quickInput.requirements = '记账'
+    workflow.debugPrdText = '# 库存中台需求\n\n正文'
+    workflow.pastePairInput.prd = '# 会员中心需求\n\n正文'
+    await advanceDebounce()
+
+    expect(vi.mocked(solutionApi.createSolution).mock.calls[0]?.[0].title).toBe('订单系统')
+  })
+
+  it('没有摘要时快捷输入优先于两份粘贴稿', async () => {
+    workflow.chooseEntry('structured')
+    workflow.quickInput.productName = '小账本'
+    workflow.quickInput.requirements = '记账'
+    workflow.debugPrdText = '# 库存中台需求\n\n正文'
+    workflow.pastePairInput.prd = '# 会员中心需求\n\n正文'
+    await advanceDebounce()
+
+    expect(vi.mocked(solutionApi.createSolution).mock.calls[0]?.[0].title).toBe('小账本')
+  })
+
+  it('没有摘要与快捷输入时先取贴入的 PRD，再取双粘贴的 PRD', async () => {
+    workflow.chooseEntry('structured')
+    workflow.debugPrdText = '# 库存中台需求\n\n正文'
+    workflow.pastePairInput.prd = '# 会员中心需求\n\n正文'
+    await advanceDebounce()
+
+    expect(vi.mocked(solutionApi.createSolution).mock.calls[0]?.[0].title).toBe('库存中台需求')
+  })
+})
+
+// ============================================================================
+// 列表里的模式名与阶段名
+// ============================================================================
+
+/**
+ * 侧栏 / 列表里显示的模式名。
+ *
+ * ⚠️ 这一条只能断言在 store 层：`solutions.modeLabel` 目前全仓没有组件消费它
+ * （侧栏只显示阶段名，没有展示入口模式的那一栏），因此「四个入口都对」这件事没有屏幕落点可断言。
+ * 期望值写死成用户会看到的字样本身，不跟实现走——改错一个字就该红。
+ */
+describe('列表模式名与阶段名', () => {
+  it('四个入口各有自己的模式名，「未选择」按完整流程展示', () => {
+    expect(solutions.modeLabel('structured')).toBe('完整流程')
+    expect(solutions.modeLabel('prd-quick')).toBe('快捷流程')
+    expect(solutions.modeLabel('prompt-debug')).toBe('导入 PRD')
+    expect(solutions.modeLabel('prd-and-api-paste')).toBe('导入 PRD + 接口文档')
+    // 后端把「未选择」存成空串：它与 null 共用同一个出口，按完整流程展示
+    expect(solutions.modeLabel('')).toBe('完整流程')
+  })
+
+  it('阶段名按视图状态给，四个入口的录入页各有自己的说法', () => {
+    // 阶段名由「视图状态」决定（全局映射，不随入口模式分叉）：入口不同，落的录入页不同，
+    // 侧栏里读到的阶段名也就不同。这一条钉住四个入口各会看到的那一格。
+    expect(solutions.stageLabel('form')).toBe('填写需求')
+    expect(solutions.stageLabel('prd-quick')).toBe('描述需求')
+    expect(solutions.stageLabel('prompt-debug')).toBe('粘贴 PRD')
+    expect(solutions.stageLabel('prd-and-api-paste')).toBe('粘贴 PRD 与接口文档')
+    // 收尾与陌生的阶段名
+    expect(solutions.stageLabel('done')).toBe('已完成')
+    expect(solutions.stageLabel('一个没见过的阶段')).toBe('进行中')
+  })
 })
 
 // ============================================================================
