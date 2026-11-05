@@ -101,7 +101,7 @@ describe('入口模式对进度与完成条件的影响', () => {
     expect(hasRequirementChat('prd-quick')).toBe(false)
     expect(hasRequirementChat('prompt-debug')).toBe(false)
     expect(hasRequirementChat('prd-and-api-paste')).toBe(false)
-    // 还没选入口（或旧快照）时按完整流程处理，与 `MODE_STEP_IDS` 的兜底口径一致
+    // 还没选入口（或旧快照）时按完整流程处理：六步与完整流程一致
     expect(hasRequirementChat(null)).toBe(true)
   })
 

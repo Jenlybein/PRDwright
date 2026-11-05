@@ -527,22 +527,6 @@ export function entrySpecForDisplay(mode: EntryMode | null): EntrySpec {
   return ENTRY_REGISTRY[entryModeForDisplay(mode)] ?? STRUCTURED_ENTRY_SPEC
 }
 
-/** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`）；旧表，未迁入的入口仍用它 */
-const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
-  // 完整流程：六步齐全（最后一步是交付）
-  structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
-  // 快捷流程与完整流程**同一条流水线**，连步数都一样：只差第一步长什么样（极简输入而不是
-  // 结构化表单），以及它**没有需求澄清对话**——「AI 对话」这一格在快捷
-  // 流程里对应的是**文档澄清**那三条线程（它们就在同一个对话页上）。
-  //
-  // ⚠️ 这一格**不能省**：省掉之后 `stepIndexOf('chatting', 'prd-quick')` 会算出 -1 并归零，
-  // 用户在文档澄清页里聊天时，进度条高亮的是第 1 步「描述产品」——一个明显错位的状态。
-  'prd-quick': ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
-  // 两个导入入口的产物只有提示词套件
-  'prompt-debug': ['review-prompts', 'done'],
-  'prd-and-api-paste': ['review-prompts', 'done'],
-}
-
 /**
  * 这个入口有没有「需求澄清」那条对话。
  *
@@ -593,11 +577,10 @@ export function inputPageOnBar(mode: EntryMode | null): boolean {
  * 某个入口模式下进度条要展示的步骤。
  * `mode` 为 `null`（还没选入口 / 旧快照）时经 {@link entryModeForDisplay} 按完整流程处理。
  *
- * 先查登记表这一行；**未迁入的入口仍回落到旧表 `MODE_STEP_IDS`**（`#47` 四行齐了才退役）。
+ * 步骤清单在登记表的 `steps` 列；顺序由全局的 `STEPS` 决定，这一列只回答「要不要」。
  */
 export function stepsForMode(mode: EntryMode | null): readonly Step[] {
-  const spec = entrySpecFor(mode)
-  const ids = spec ? spec.steps : MODE_STEP_IDS[entryModeForDisplay(mode)]
+  const ids = entrySpecForDisplay(mode).steps
   return STEPS.filter((step) => ids.includes(step.id))
 }
 
