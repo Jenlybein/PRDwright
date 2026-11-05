@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onErrorCaptured, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -202,6 +202,30 @@ function flashSavedTip(text: string, variant: 'success' | 'danger' = 'success'):
     savedTip.value = ''
   }, 2500)
 }
+
+// ---------------------------------------------------------------------------
+// 错误边界：后代组件失败时，只让那一块不可用
+// ---------------------------------------------------------------------------
+
+/**
+ * 后代组件失败的原因（空串表示没失败）。
+ *
+ * 入口登记表的完整性校验是**故意**抛错的：维护者加了第 5 个入口却漏填一列时，问询当场
+ * 失败，而不是猜成完整流程跑下去。但「当场失败」不该等于「整页白屏」——错误在这里停下，
+ * 用户看到一句明确的「这块界面暂时不可用」，侧栏与其余部分照旧能用。
+ *
+ * ⚠️ `onErrorCaptured` 只捕获**后代**组件的错误（渲染、生命周期、事件处理器里抛出的）；
+ * AppV2 自身 setup 里抛的错误捕不到，那一层由 `main.ts` 的 `app.config.errorHandler` 兜底。
+ */
+const contentError = ref('')
+
+onErrorCaptured((error) => {
+  contentError.value = error instanceof Error ? error.message : String(error)
+  // 自己接住之后 Vue 不再打日志（返回 false 会抑制向上传播），这里补一条：
+  // 失败既对用户可见、也对开发者可见，不被悄悄吞掉。
+  console.error('[AppV2] 界面渲染失败，该块已停用', error)
+  return false
+})
 
 // ---------------------------------------------------------------------------
 // 登录态
@@ -964,6 +988,22 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
           </AppBadge>
         </Transition>
       </div>
+      <!--
+        后代组件失败时的占位：错误停在 main 里，不再往上冒成整页白屏。侧栏与浮层照旧可用，
+        用户看到的是一句明确的「这块界面暂时不可用」。
+      -->
+      <div
+        v-if="contentError"
+        class="rounded-2xl border border-line bg-surface px-5 py-10 text-center shadow-card dark:shadow-none"
+        role="alert"
+      >
+        <p class="text-base font-semibold text-fg">这块界面暂时不可用</p>
+        <p class="mt-2 text-sm text-subtle">
+          页面其余部分还能用；如果反复出现，请刷新后重试。
+        </p>
+      </div>
+
+      <template v-else>
       <!-- 步骤进度条：展示哪几步由入口模式决定，因此整条由 store 推导后传入 -->
       <ProgressSteps
         v-if="!isChoosingEntry"
@@ -1131,6 +1171,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @update:summary="handleSummaryChange"
         @back="backFromForm"
       />
+      </template>
     </main>
 
     <!--

@@ -1,6 +1,6 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
-import { nextTick } from 'vue'
+import { nextTick, defineComponent, h } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -199,6 +199,35 @@ vi.mock('../services/documentService', () => ({
 vi.mock('../utils/download', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/download')>()
   return { ...actual, downloadFile: vi.fn() }
+})
+
+/**
+ * 子组件渲染失败的注入开关。
+ *
+ * 「失败可见」那条验收要验证的是**错误边界**：后代组件在渲染时抛错，界面必须给出一句
+ * 明确的「暂时不可用」，而不是整页空白。注入点选「我有 PRD」的录入页——本文件没有
+ * 任何用例拿它的组件实例做断言（只按屏幕上的文字断言），因此平时原样透传，
+ * 只有那一条用例把它打开。
+ *
+ * 它模拟的正是维护者漏填一列的情形：界面要读的东西在查表那一刻就没了。
+ */
+const stageRenderFault = vi.hoisted(() => ({ failingStage: '' }))
+
+vi.mock('../components/stages/PromptDebugStage.vue', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../components/stages/PromptDebugStage.vue')>()
+  return {
+    default: defineComponent({
+      name: 'FaultInjectingPromptDebugStage',
+      // props 与事件都是透传的「外壳属性」，所以不自动继承、手动挂到真实组件上
+      inheritAttrs: false,
+      setup(_props, { attrs }) {
+        if (stageRenderFault.failingStage === 'prompt-debug') {
+          throw new Error('假第 5 入口：这一行没填全，渲染当场失败')
+        }
+        return () => h(actual.default, attrs)
+      },
+    }),
+  }
 })
 
 /**
@@ -3085,5 +3114,40 @@ describe('AppV2 的版本预览与删除', () => {
     // 回到列表：窄栏 + 没有 .prose 正文
     expect(wrapper.find('.shell-version-drawer').classes()).toContain('w-[360px]')
     expect(wrapper.find('.shell-version-drawer .prose').exists()).toBe(false)
+  })
+})
+
+/**
+ * 失败可见：该块界面不可用，而不是整页白屏。
+ *
+ * 这是「漏改不报错」根治的最后一段：前面几条用例管「当场失败」，这一条管**失败之后
+ * 用户看到什么**。注入一个「一渲染就抛错」的后代组件（模拟维护者加了第 5 个入口却漏填
+ * 一列、界面读到它时查表当场失败），断言屏幕上出现一句明确的占位说明，且应用外壳还在。
+ *
+ * 只断言外部可观察结果：屏幕上有没有那句话、外壳还在不在。
+ */
+describe('AppV2 错误边界：子组件渲染失败时该块界面不可用', () => {
+  it('后代组件渲染抛错 → 屏幕出现「暂时不可用」占位，而不是整页空白', async () => {
+    stageRenderFault.failingStage = 'prompt-debug'
+    // 这条用例**故意**制造下游失败：控制台那两行是预期输出，不必混进测试报告
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const quietWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const wrapper = await mountEntry()
+      await clickButton(wrapper, '我有 PRD')
+      await nextTick()
+      await flushPromises()
+
+      // 用户看得见的一句说明，而不是一片空白
+      expect(wrapper.find('main').text()).toContain('暂时不可用')
+      // 不是整页白屏：应用外壳照旧在（侧栏品牌仍可读）
+      expect(wrapper.find('aside[aria-label="方案列表"]').text()).toContain('PRDwright')
+      // 失败没有被静默吞掉：那块界面确实退场了
+      expect(wrapper.text()).not.toContain('从现有 PRD 生成提示词套件')
+    } finally {
+      stageRenderFault.failingStage = ''
+      quiet.mockRestore()
+      quietWarn.mockRestore()
+    }
   })
 })

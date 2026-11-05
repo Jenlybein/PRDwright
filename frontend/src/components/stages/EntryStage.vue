@@ -2,7 +2,7 @@
 import type { EntryMode } from '@/types'
 import AppCard from '@/components/ui/AppCard.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
-import { ENTRY_REGISTRY, type EntrySpec } from '@/utils/workflow'
+import { ENTRY_REGISTRY, entrySpecFor, type EntrySpec } from '@/utils/workflow'
 
 /**
  * 入口选择页（新建方案的第一屏）。
@@ -125,9 +125,11 @@ const GROUP_IDS: readonly string[] = ['from-scratch', 'with-material']
  * 完整流程 → 快捷流程、我有 PRD → 我有 PRD + 接口文档）。
  */
 const GROUPS: EntryGroup[] = GROUP_IDS.map((groupId) => {
-  const rows = Object.values(ENTRY_REGISTRY).filter(
-    (row): row is EntrySpec => row !== undefined && row.card.groupId === groupId,
-  )
+  // 逐行走 `entrySpecFor` 而不是直接读 `ENTRY_REGISTRY` 的值：漏填一列的行在入口页
+  // 当场失败，而不是渲染成一张标题空白的卡片（那种「漏改不报错」正是要根治的）。
+  const rows = Object.keys(ENTRY_REGISTRY)
+    .map((mode) => entrySpecFor(mode as EntryMode))
+    .filter((row): row is EntrySpec => row !== undefined && row.card.groupId === groupId)
   const head = rows[0]
   return {
     id: groupId,
