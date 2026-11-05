@@ -47,6 +47,22 @@ def _freeze_object(value: Any) -> Any:
     return value
 
 
+def thaw_object(value: Any) -> Any:
+    """把深冻结数据递归还原成普通 dict / list（单 → 外部 API 的统一出口）。
+
+    单①/单② 本身仍保持 frozen + 深冻结：这里的还原**只**发生在跨越边界、
+    把单里的数据递给外部 API 的那一刻——事件流要 list 才能判断
+    `isinstance(sections, list)`，DB 投影与 chat 轮次要普通容器才能 `json.dumps`，
+    计量器与回执同理。浅还原（只 `dict(...)` 一层）会让嵌套的只读映射/元组
+    漏进这些 API：轻则提示词静默丢字段，重则登记当场抛 `TypeError`。
+    """
+    if isinstance(value, Mapping) or hasattr(value, "items"):
+        return {key: thaw_object(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [thaw_object(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class JobTicket:
     """单①（造单产物）：不含 id 的不可变任务单。
@@ -104,6 +120,7 @@ def build_job_ticket(
     request: Mapping[str, Any],
     event_stream_source: EventStreamSource | None = None,
     config: Any | None = None,
+    input_fingerprint: str | None = None,
 ) -> JobTicket:
     """造单：公开正门，产出不含 id 的不可变单①。
 
@@ -140,6 +157,8 @@ def build_job_ticket(
         config_snapshot=_freeze_object(projection["config_snapshot"]),
         skill_refs=_freeze_object(projection["skill_refs"]),
         runtime_config=frozen_config,
+        # 输入指纹是路由层算好的**数据**（仅 prd 有值），登记时随单落列。
+        input_fingerprint=input_fingerprint,
         doc_kind=job_service._target_product_kind(kind, params) or "",  # noqa: SLF001
         chat_stage=stage,
         chat_mode=str(params.get("chat_mode") or "continue"),
@@ -181,7 +200,7 @@ def as_event_request(ticket: RegisteredJobTicket) -> dict[str, Any]:
     每次调用都造一份**新 dict**：事件流只读它，不会把派生字段写回单②，
     也不会让已发布的事件持有任务单里那份只读映射。
     """
-    params = dict(ticket.request_params)
+    params = thaw_object(ticket.request_params)
     if ticket.kind == "chat":
         params["input_turn_id"] = ticket.input_turn_id
         params["job_id"] = ticket.job_id
@@ -211,5 +230,6 @@ __all__ = [
     "build_job_ticket",
     "register_job_ticket",
     "start_registered_job",
+    "thaw_object",
     "with_registered_identity",
 ]

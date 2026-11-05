@@ -29,6 +29,7 @@ from backend.services.job_ticket import (
     JobTicket,
     RegisteredJobTicket,
     as_event_request,
+    thaw_object,
     with_registered_identity,
 )
 from backend.services.llm_meter import RunMeter
@@ -69,9 +70,9 @@ def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
             ticket.input_fingerprint,
             doc_kind=ticket.doc_kind,
             chat_stage=ticket.chat_stage,
-            request_params=dict(ticket.request_params),
-            config_snapshot=_plain(ticket.config_snapshot),
-            skill_refs=_plain(ticket.skill_refs),
+            request_params=thaw_object(ticket.request_params),
+            config_snapshot=thaw_object(ticket.config_snapshot),
+            skill_refs=thaw_object(ticket.skill_refs),
         )
         job_id = int(job.id or 0)
 
@@ -79,8 +80,10 @@ def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
         if ticket.kind == "chat" and ticket.chat_mode != "start" and (
             ticket.chat_content.strip() or ticket.chat_tool_result is not None
         ):
+            # 先整体深还原再取值：嵌套的 answers 也要从 tuple 变回 list，
+            # 否则 `ChatTurnRepository._dumps` 的 json.dumps 会撞上 mappingproxy。
             tool_result = (
-                dict(ticket.chat_tool_result)
+                thaw_object(ticket.chat_tool_result)
                 if ticket.chat_tool_result is not None
                 else None
             )
@@ -105,17 +108,6 @@ def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
         )
 
     return with_registered_identity(ticket, job_id=job_id, input_turn_id=input_turn_id)
-
-
-def _plain(value: Any) -> Any:
-    """把只读映射/元组还原成普通 dict/list（DB 序列化与测试对拍用）。"""
-    if isinstance(value, dict):
-        return {key: _plain(item) for key, item in value.items()}
-    if hasattr(value, "items"):
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    return value
 
 
 def _check_solution_exists(session: Any, ticket: JobTicket) -> None:
@@ -176,7 +168,8 @@ def dispatch_registered(ticket: RegisteredJobTicket) -> None:
     from backend.services.job_runtime import _RUNTIMES, _TASKS
 
     config = ticket.runtime_config
-    active = ticket.config_snapshot.get("active_provider") or {}
+    # 计量器四格取深还原后的普通容器：与单②同源，且下游不必认识只读映射。
+    active = thaw_object(ticket.config_snapshot).get("active_provider") or {}
     meter = RunMeter(
         kind=ticket.kind,
         protocol=str(active.get("provider_protocol") or ""),
@@ -198,7 +191,7 @@ def dispatch_registered(ticket: RegisteredJobTicket) -> None:
         meter=meter,
         config=config,
     )
-    runtime.skill_refs = _plain(ticket.skill_refs)
+    runtime.skill_refs = thaw_object(ticket.skill_refs)
 
     # 复用唯一的 `run_job` 循环（事件应用 / 同步广播 / 合并写 / 收尾 / finally
     # 关总线与摘运行时都只有一份实现），只把造单定格的事件流来源递进去。

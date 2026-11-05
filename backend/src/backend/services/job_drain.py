@@ -38,10 +38,12 @@ lifespan 的关闭阶段、用例）直接调用的 `drain_controller`；信号�
 `run_job` 在下一个事件处跳出循环，由 `_finalize` 收尾。排空复用它，而不是发明一套
 新的中止机制——同一个「中止」概念只该有一种表示，否则前端与排查要看两处。
 
-差别只在**超时者不能等它自己跳出循环**：它可能正卡在模型调用里。所以这里直接调
-`job_service.cancel_in_flight()`：由它替这个任务把终态写完（发错误事件 → 收尾落终态
-→ 给订阅者放哨兵）——那个卡住的任务随后即使再产事件也不会改写这个结论
-（`cancelled` 已置位，它会走同一条收尾分支）。
+差别只在**超时者不能等它自己跳出循环**：它可能正卡在模型调用里。
+
+「等待在途任务」这件事归生成任务一侧（`services/job_wait.py`）：本模块只问
+「还有哪些在跑」「要不要等」「超时取消哪几支」，一个运行时内部字段都不碰。
+等待满窗口之后，由那一侧替超时任务把终态写完（发错误事件 → 收尾落终态 →
+给订阅者放哨兵）——那个卡住的任务随后即使再产事件也不会改写这个结论。
 """
 
 from __future__ import annotations
@@ -55,8 +57,7 @@ from dataclasses import dataclass
 
 from backend.core.config import get_settings
 from backend.core.logging_setup import shutdown_log_persistence
-from backend.repositories.generation_job_repo import STATUS_RUNNING
-from backend.services import job_service
+from backend.services import job_wait
 
 logger = logging.getLogger(__name__)
 
@@ -149,34 +150,19 @@ class DrainController:
         limit = get_settings().drain_timeout_seconds if timeout is None else timeout
         started = time.monotonic()
 
-        pending = self.in_flight()
-        loop = asyncio.get_running_loop()
-        # 只等**本事件循环**上的任务：跨循环的任务永远不会被本循环调度，等它们只是
-        # 白等满窗口。生产里只有一个循环（单 worker 是硬约束），这一句等于恒真；
-        # 用例里 `asyncio.run` 各自造循环，才可能出现这种任务。
-        tasks = {
-            runtime.task
-            for runtime in pending
-            if runtime.task is not None
-            and not runtime.task.done()
-            and runtime.task.get_loop() is loop
-        }
-        if tasks:
-            # `asyncio.wait` 只等这批任务，且超时后正常返回——超时那一半不会被当成
-            # 异常（`gather` 会抛，而我们要的恰恰是「没跑完的先记下来」）。
-            await asyncio.wait(tasks, timeout=limit)
-
-        # 只从「排空开始那一刻在途的任务」里挑超时的：这样 `cancelled ≤ in_flight`
-        # 由构造保证，汇总里的三个数字不可能互相对不上。
-        victims = [runtime for runtime in pending if runtime.status == STATUS_RUNNING]
-        cancelled = job_service.cancel_in_flight(DRAIN_CANCEL_MESSAGE, runtimes=victims)
+        # 三个问题一次交回生成任务一侧：还有哪些在跑（这份句柄快照）、要不要等、
+        # 超时取消哪几支。本模块读到的只是带 job_id 的抽象句柄，不碰运行时对象、
+        # 任务对象或状态字段；等待上限（默认 30 秒）与取消原因仍由排空决定。
+        outcome = await job_wait.wait_for_in_flight(
+            self.in_flight(), timeout=limit, reason=DRAIN_CANCEL_MESSAGE
+        )
 
         report = DrainReport(
-            in_flight=len(pending),
-            finished=len(pending) - cancelled,
-            cancelled=cancelled,
+            in_flight=outcome.in_flight,
+            finished=outcome.finished,
+            cancelled=outcome.cancelled,
             waited_seconds=time.monotonic() - started,
-            hit_deadline=bool(victims),
+            hit_deadline=outcome.hit_deadline,
         )
         # 汇总一行：运维要能一眼看出「这次重启影响了几个用户」。
         # 事件名与字段和 `service.drain_started` 配对，日志页按 request/事件名能连起来。
@@ -293,13 +279,14 @@ class DrainController:
 
     # -- 内部 -----------------------------------------------------------
 
-    def in_flight(self) -> list[job_service.JobRuntime]:
-        """还没跑完的运行时（`status == running`）。
+    def in_flight(self) -> list[job_wait.InFlightHandle]:
+        """还没跑完的任务（抽象句柄快照）。
 
-        判据与「谁在读登记表」都归 `job_service`：本模块只调 `running_runtimes()`，
-        不碰 `_RUNTIMES` 这类私有名——排空与任务服务之间的契约就是那个公开函数。
+        判据与「谁在读登记表」都归生成任务一侧：本模块只调 `job_wait.in_flight()`，
+        拿到的是带 job_id 的句柄，不是运行时对象——`main.py` 用它判断「要不要兜底
+        排空」，`begin()` 用它数「开始时在途几支」，两者都不需要内部字段。
         """
-        return job_service.running_runtimes()
+        return job_wait.in_flight()
 
 
 # 模块级单例：进程内只有一份排空状态（与 `job_bus` / 运行时登记表同一口径）
