@@ -1781,9 +1781,8 @@ describe('AppV2 入口模式', () => {
     const spec = ENTRY_REGISTRY.structured
     if (!spec) throw new Error('登记表缺「完整流程」一行')
 
-    // 落页：结构化表单（登记表说落在哪儿，界面就该落在哪儿）
+    // 落页：结构化表单（登记表说落在哪儿，屏幕就该落在哪儿，不读 store 内部字段）
     expect(wrapper.text()).toContain('告诉我们你的产品想法')
-    expect(storeOf(wrapper).viewState).toBe(spec.landing.onSelect)
     // 进度条：六格，且与这一行登记的步骤数一致
     const bars = wrapper.findAll('nav[aria-label="生成进度"] li')
     expect(bars).toHaveLength(6)
