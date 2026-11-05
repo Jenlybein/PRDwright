@@ -2,8 +2,8 @@
 
 从 `job_service` **机械迁出**（issue #5：单文件压到阈值以下，只搬代码不改行为）：
 `JobRuntime` 的字段定义、`_SectionLive`，以及「进程内运行时表」`_RUNTIMES` 与
-「保活集合」`_TASKS`。字段与注释逐字未改；`job_service` 仍再导出这些名字，
-因此对外可见形状与拆分前一致。
+「保活集合」`_TASKS`。字段与注释逐字未改；`job_service` 仍再导出其中被用到的
+名字，`_SectionLive` 这类仅包内使用的名字不再对外再导出。
 """
 
 from __future__ import annotations

@@ -50,39 +50,29 @@ from backend.services.skill_registry import describe_kind
 
 # ----------------------------------------------------------------------------
 # 内部实现已按职责拆到同目录的模块（单文件阈值）。
-# 下面全部**再导出**：`job_service` 的对外形状与拆分前逐字一致，调用方（含测试）
-# 仍然只从本模块取这些名字。
+# 下面是仍被本模块正文或外部调用方用到的再导出名；全仓零调用的内部名字已从
+# 本块清掉（实现本体仍留在各自拆出模块内部，包内互引不受影响）。
 # ----------------------------------------------------------------------------
 from backend.services.job_finalize import (  # noqa: F401 - 再导出
-    _build_derived_from,
-    _document_kind,
     _finalize,
-    _regenerates_whole_document,
     _write_chat_turn,
     _write_document,
 )
 from backend.services.job_product_kind import _target_product_kind  # noqa: F401 - 再导出
 from backend.services.job_runtime import (  # noqa: F401 - 再导出
     _RUNTIMES,
-    _SectionLive,
     _TASKS,
     JobRuntime,
 )
 from backend.services.job_runtime_events import (  # noqa: F401 - 再导出
-    _FLUSH_BYTES,
-    _FLUSH_INTERVAL_SECONDS,
     _apply_event,
     _draft,
-    _finalized_text,
-    _live_len,
     _maybe_flush,
     _run_summary_event,
     _summary_data,
 )
 from backend.services.job_snapshot import (  # noqa: F401 - 再导出
     _db_snapshot_event,
-    _elapsed_ms_from_row,
-    _load_pending_items,
     _snapshot_event,
     parse_usage,
 )

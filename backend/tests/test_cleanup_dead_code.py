@@ -37,6 +37,18 @@ _REMOVED_SYMBOLS = [
     ("backend.repositories.chat_session_repo", "ChatSessionRepository", "clear_for_solution"),
     ("backend.repositories.chat_turn_repo", "ChatTurnRepository", "has_turns"),
     ("backend.core.schema", None, "_PLACEHOLDER_URL"),
+    # #35：`job_service` 顶部再导出块里全仓零调用的 10 个内部名字。
+    # 本体仍在各自拆出模块内部使用，这里只拦「不许以 `job_service.X` 的形式回来」。
+    ("backend.services.job_service", None, "_build_derived_from"),
+    ("backend.services.job_service", None, "_document_kind"),
+    ("backend.services.job_service", None, "_regenerates_whole_document"),
+    ("backend.services.job_service", None, "_SectionLive"),
+    ("backend.services.job_service", None, "_FLUSH_BYTES"),
+    ("backend.services.job_service", None, "_FLUSH_INTERVAL_SECONDS"),
+    ("backend.services.job_service", None, "_finalized_text"),
+    ("backend.services.job_service", None, "_live_len"),
+    ("backend.services.job_service", None, "_elapsed_ms_from_row"),
+    ("backend.services.job_service", None, "_load_pending_items"),
 ]
 
 
