@@ -352,6 +352,45 @@ const PASTE_PAIR_FIELDS: readonly EntryInputField[] = [
 ]
 
 /**
+ * 完整流程这一行。
+ *
+ * 单独取出来是为了给 {@link entrySpecForDisplay} 一个「未选择」的展示口径落脚点：
+ * 未选择（`null`）按完整流程展示，是唯一的合法默认。
+ */
+const STRUCTURED_ENTRY_SPEC: EntrySpec = {
+  mode: 'structured',
+  card: {
+    groupId: 'from-scratch',
+    groupTitle: '从零创建 PRD',
+    groupDescription: '还没有任何材料，从这里把需求说清楚。',
+    title: '完整流程',
+    description: '逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。',
+  },
+  landing: {
+    onSelect: 'form',
+    // 对话页「改需求」回到结构化表单；审阅页「返回」回到对话页
+    editRequirements: 'form',
+    backToInput: 'chatting',
+  },
+  steps: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
+  inputPageOnBar: true,
+  needsRequirementChat: true,
+  needsDocumentReview: true,
+  requiredDocs: ['prd', 'api-docs', 'prompts'],
+  copy: {
+    modeLabel: '完整流程',
+    backLabel: '返回对话',
+    editRequirementsLabel: '改需求',
+  },
+  input: {
+    // 结构化表单整份落在快照的 `summary` 列（`RequirementsSummary` 对象）
+    stateField: 'summary',
+    stateColumn: 'summary',
+    fields: STRUCTURED_INPUT_FIELDS,
+  },
+}
+
+/**
  * 入口模式登记表：一行一个入口，四个入口各占一行。
  *
  * 类型是 `Partial<Record<EntryMode, EntrySpec>>`：**缺行不是「默认值」，而是「还没迁入」**，
@@ -360,38 +399,7 @@ const PASTE_PAIR_FIELDS: readonly EntryInputField[] = [
  * 「未选择」的展示口径处理，绝不在这里猜成某个业务默认值。
  */
 export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
-  structured: {
-    mode: 'structured',
-    card: {
-      groupId: 'from-scratch',
-      groupTitle: '从零创建 PRD',
-      groupDescription: '还没有任何材料，从这里把需求说清楚。',
-      title: '完整流程',
-      description: '逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。',
-    },
-    landing: {
-      onSelect: 'form',
-      // 对话页「改需求」回到结构化表单；审阅页「返回」回到对话页
-      editRequirements: 'form',
-      backToInput: 'chatting',
-    },
-    steps: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
-    inputPageOnBar: true,
-    needsRequirementChat: true,
-    needsDocumentReview: true,
-    requiredDocs: ['prd', 'api-docs', 'prompts'],
-    copy: {
-      modeLabel: '完整流程',
-      backLabel: '返回对话',
-      editRequirementsLabel: '改需求',
-    },
-    input: {
-      // 结构化表单整份落在快照的 `summary` 列（`RequirementsSummary` 对象）
-      stateField: 'summary',
-      stateColumn: 'summary',
-      fields: STRUCTURED_INPUT_FIELDS,
-    },
-  },
+  structured: STRUCTURED_ENTRY_SPEC,
   'prd-quick': {
     mode: 'prd-quick',
     card: {
@@ -498,13 +506,25 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
 }
 
 /**
- * 查这一行登记表；未迁入的入口返回 `undefined`，由调用方回落到旧表。
+ * 查这一行登记表；查不到返回 `undefined`。
  *
  * 未选择（`null`）先经 {@link entryModeForDisplay} 归一成完整流程再查——「未选择」是
- * 合法状态，不是缺行。未知入口键的失败路径属于 `#48` 的完整性校验，不在这里。
+ * 合法状态，不是缺行。未知入口键 / 缺行的失败路径属于 `#48` 的完整性校验，不在这里。
  */
 export function entrySpecFor(mode: EntryMode | null): EntrySpec | undefined {
   return ENTRY_REGISTRY[entryModeForDisplay(mode)]
+}
+
+/**
+ * 取这一行登记表，**一定给出一行**。
+ *
+ * 与 {@link entrySpecFor} 的差别只在一件事：查不到时按「未选择」的展示口径处理，
+ * 也就是完整流程那一行。四张入口都已登记，走到这一步只可能是绕过类型的脏值；
+ * 那时宁可照完整流程展示，也不能返回某个业务默认值——缺行 / 缺列当场失败是 `#48` 的事，
+ * 本票不加失败路径。
+ */
+export function entrySpecForDisplay(mode: EntryMode | null): EntrySpec {
+  return ENTRY_REGISTRY[entryModeForDisplay(mode)] ?? STRUCTURED_ENTRY_SPEC
 }
 
 /** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`）；旧表，未迁入的入口仍用它 */
@@ -529,15 +549,13 @@ const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
  * 只有**完整流程**有：它的起点是「先把需求交给 AI 逐题追问」。快捷流程刻意不要这一环——
  * 用户选它就是因为不想多聊几轮，一段话写完直接进生成；两个导入入口自带的 PRD 已经是答案。
  *
- * 写成白名单而不是「不等于某些入口」：将来加新入口时，默认「没有需求对话」比默认「有」安全
- * 得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
+ * 写成白名单（只有完整流程是 `true`）而不是「不等于某些入口」：将来加新入口时，默认「没有需求
+ * 对话」比默认「有」安全得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
  *
- * 先查登记表这一行；**未迁入的入口仍回落到下面这套旧口径**（`#47` 四行齐了才退役）。
+ * 答案在登记表的 `needsRequirementChat` 列。
  */
 export function hasRequirementChat(mode: EntryMode | null): boolean {
-  const spec = entrySpecFor(mode)
-  if (spec) return spec.needsRequirementChat
-  return entryModeForDisplay(mode) === 'structured'
+  return entrySpecForDisplay(mode).needsRequirementChat
 }
 
 /**
@@ -547,15 +565,13 @@ export function hasRequirementChat(mode: EntryMode | null): boolean {
  * 除了跳过调用，界面上也不能留这两个阶段——进度条上画两格永远走不到的路，
  * 用户会读成「还没审到」而不是「这次压根不审」。
  *
- * 写成黑名单（`prd-quick` 是例外）而不是白名单：将来加新入口默认**带上复核**，
+ * 写成黑名单（只有 `prd-quick` 是 `false`）而不是白名单：将来加新入口默认**带上复核**，
  * 漏配的代价只是多等一会儿；反过来则悄悄把产出质量降了一档。
  *
- * 先查登记表这一行；**未迁入的入口仍回落到下面这套旧口径**（`#47` 四行齐了才退役）。
+ * 答案在登记表的 `needsDocumentReview` 列。
  */
 export function hasDocumentReview(mode: EntryMode | null): boolean {
-  const spec = entrySpecFor(mode)
-  if (spec) return spec.needsDocumentReview
-  return entryModeForDisplay(mode) !== 'prd-quick'
+  return entrySpecForDisplay(mode).needsDocumentReview
 }
 
 /**
@@ -567,13 +583,10 @@ export function hasDocumentReview(mode: EntryMode | null): boolean {
  * 两个**导入**入口不是——它们的录入页（贴 PRD / 贴两份材料）根本不在进度条上，
  * 因此审阅页必须保留一个「返回」按钮，否则用户改不了贴进来的材料，直接成了死路。
  *
- * 先查登记表这一行；**未迁入的入口仍回落到下面这套旧口径**（`#47` 四行齐了才退役）。
+ * 答案在登记表的 `inputPageOnBar` 列。
  */
 export function inputPageOnBar(mode: EntryMode | null): boolean {
-  const spec = entrySpecFor(mode)
-  if (spec) return spec.inputPageOnBar
-  const display = entryModeForDisplay(mode)
-  return display === 'structured' || display === 'prd-quick'
+  return entrySpecForDisplay(mode).inputPageOnBar
 }
 
 /**
