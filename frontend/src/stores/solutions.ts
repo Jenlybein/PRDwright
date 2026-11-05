@@ -51,21 +51,13 @@ import type {
 } from '@/types'
 import {
   entryModeForDisplay,
-  entrySpecFor,
+  entrySpecForDisplay,
   fromStatePayload,
   normalizeSessionSnapshot,
 } from '@/utils/workflow'
 
 /** 防抖时长：既能挡住连续输入，又不会让用户觉得「怎么还没存上」 */
 export const SAVE_DEBOUNCE_MS = 1500
-
-/** 入口模式 → 中文名，用于列表展示 */
-const MODE_LABELS: Record<EntryMode, string> = {
-  structured: '完整流程',
-  'prd-quick': '快捷流程',
-  'prompt-debug': '导入 PRD',
-  'prd-and-api-paste': '导入 PRD + 接口文档',
-}
 
 /** 阶段 → 中文名：列表里显示「进行到哪一步」 */
 const STAGE_LABELS: Record<string, string> = {
@@ -709,15 +701,13 @@ export const useSolutionsStore = defineStore('solutions', () => {
    * 后端把「未选择」存成空串（契约里的合法值）。它和 `null` 共用同一个出口
    * `entryModeForDisplay`，这里不再另写一份「完整流程」默认文案——默认口径
    * 一旦有两处，改一处不会报错，只会让列表悄悄显示成别的入口。
+   *
+   * 名字本身在登记表的 `copy.modeLabel` 列；未选择时 `entrySpecForDisplay` 给的就是
+   * 完整流程那一行。
    */
   function modeLabel(mode: string): string {
     const display = entryModeForDisplay(mode === '' ? null : (mode as EntryMode))
-    // 先查登记表这一行；未迁入的入口仍回落到旧表（`#47` 四行齐了才退役）
-    return (
-      entrySpecFor(display)?.copy.modeLabel ??
-      MODE_LABELS[display] ??
-      MODE_LABELS[entryModeForDisplay(null)]
-    )
+    return entrySpecForDisplay(display).copy.modeLabel
   }
 
   /** 列表里展示的阶段名 */
