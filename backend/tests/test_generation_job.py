@@ -50,7 +50,10 @@ from backend.services.prd_section_writer import PRD_SECTIONS
 from fakes import ScriptedLLM
 from ticket_support import (
     build_and_register,
+    first_snapshot_event,
     run_ticket_async,
+    run_ticket_events,
+    run_ticket_snapshot,
     run_ticket_to_completion,
 )
 
@@ -450,14 +453,18 @@ def test_offline_zero_token(alice, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 仓储：supersede / reap / 归属
+# 仓储：登记顶替 / 目标产物落列 / reap / 归属
 # ---------------------------------------------------------------------------
 
 
 def test_new_job_supersedes_previous_running(alice):
-    """同一 owner + solution + kind 至多一个 running：新建前旧 running 被取代。"""
-    old = job_service.create_job(owner_id=alice, solution_id=3, kind="prd")
-    new = job_service.create_job(owner_id=alice, solution_id=3, kind="prd")
+    """登记：同一 owner + solution + kind 至多一个 running：登记前旧 running 被取代。
+
+    跨公开动作断言「顶替库行」：两次 `build_and_register` 之后旧行 `failed +
+    SUPERSEDED`、新行 running。只造单不派发的旧入口 `create_job` 不再承担这条语义。
+    """
+    old = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
+    new = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
 
     assert old != new
     old_row = job_get(alice, old)
@@ -467,36 +474,54 @@ def test_new_job_supersedes_previous_running(alice):
     assert old_row["error_code"] == "SUPERSEDED"
     assert old_row["error_message"] == "被新任务取代"
 
-    # 新建的是 running
+    # 新登记的是 running
     assert job_get(alice, new)["status"] == "running"
 
 
-def test_superseded_job_does_not_write_document(client, alice, monkeypatch):
-    """被顶替的旧任务收尾时**不写文档**，并落 `failed + SUPERSEDED`。
+def test_register_supersedes_old_job_in_db_and_memory(client, alice):
+    """登记顶替旧任务：库行 `failed + SUPERSEDED`，且旧任务收尾不写文档。
 
     只把库里那一行改成 failed 是不够的：内存里的旧运行时并不知道自己被取代，
-    它收尾时照样 `_write_document`，把旧稿盖在新稿上——用户看到「新任务跑完了，
-    正文却是上一版的」，不报错、只是内容对不上。因此新建任务时两处都要标记。
+    它收尾时照样写文档，把旧稿盖在新稿上——用户看到「新任务跑完了，
+    正文却是上一版的」，不报错、只是内容对不上。本用例跨公开动作断言「双标记」：
+    旧任务在**新任务登记那一刻**被标记，随后收尾落 `SUPERSEDED` 且不写文档。
     """
-    # 方案是真实建出来的，收尾时的「方案还在不在」判定走真值即可。
+    from backend.core.contracts import StreamEvent
+
     solution_id = _create_solution(client)
+    hold = asyncio.Event()
+    first_seen = asyncio.Event()
 
-    old = job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
-    runtime = job_service.JobRuntime(
-        job_id=old, owner_id=alice, solution_id=solution_id, kind="prd"
-    )
-    runtime.started_at = 0.0
-    runtime.final_reply = "# 旧稿"
-    runtime.finalized_parts = ["# 旧稿"]
-    job_service._RUNTIMES[old] = runtime  # noqa: SLF001 - 直接摆一支在途运行时
+    async def stream(kind, request):
+        yield StreamEvent(type="chunk", content="旧稿", data={})
+        first_seen.set()
+        await hold.wait()
+        yield StreamEvent(type="done", content="", data={"reply": "# 旧稿"})
 
-    # 新任务接手：库里的旧行与内存里的旧运行时都要被标记
-    job_service.create_job(owner_id=alice, solution_id=solution_id, kind="prd")
-    assert runtime.superseded is True
+    async def scenario() -> tuple[int, int, list]:
+        old = build_and_register(
+            owner_id=alice,
+            solution_id=solution_id,
+            kind="prd",
+            request={"requirements": "旧任务"},
+            event_stream_source=stream,
+        )
+        start_registered_job(old)
+        await asyncio.wait_for(first_seen.wait(), timeout=5)
 
-    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
+        # 新任务登记接手：库里的旧行与内存里的旧运行时都要被标记。
+        new = build_and_register(
+            owner_id=alice, solution_id=solution_id, kind="prd", request={"requirements": "新任务"}
+        ).job_id
+        hold.set()
+        events = [event async for event in job_service.open_stream(alice, old.job_id)]
+        return old.job_id, new, events
 
-    row = job_get(alice, old)
+    old_id, new_id, events = _run(scenario())
+
+    assert old_id != new_id
+    assert any(event.type == "run_summary" for event in events)
+    row = job_get(alice, old_id)
     assert row is not None
     assert row["status"] == "failed"
     assert row["error_code"] == "SUPERSEDED"
@@ -504,14 +529,23 @@ def test_superseded_job_does_not_write_document(client, alice, monkeypatch):
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
-def test_find_active_ignores_other_solution_and_kind(alice):
-    """`find_active` 精确匹配 owner + solution + kind，且只认 running。"""
-    job_service.create_job(owner_id=alice, solution_id=1, kind="prd")
-    assert job_find_active(alice, solution_id=1, kind="prd") is not None
-    assert job_find_active(alice, solution_id=2, kind="prd") is None
-    assert job_find_active(alice, solution_id=1, kind="prompts") is None
+def test_find_active_ignores_other_solution_and_kind(client, alice):
+    """`find_active` 精确匹配 owner + solution + kind，且只认 running。
+
+    登记语义：目标产物落列与活跃行都由「登记」这一个事务产生。
+    """
+    first = _create_solution(client)
+    second = _create_solution(client)
+    build_and_register(
+        owner_id=alice, solution_id=first, kind="prd", request={}
+    )
+    assert job_find_active(alice, solution_id=first, kind="prd") is not None
+    assert job_find_active(alice, solution_id=second, kind="prd") is None
+    assert job_find_active(alice, solution_id=first, kind="prompts") is None
     # solution_id=None 的匹配
-    none_job = job_service.create_job(owner_id=alice, solution_id=None, kind="prompts")
+    none_job = build_and_register(
+        owner_id=alice, solution_id=None, kind="prompts", request={}
+    ).job_id
     active = job_find_active(alice, solution_id=None, kind="prompts")
     assert active is not None and active["id"] == none_job
 
@@ -895,61 +929,86 @@ def test_create_optimize_job_via_http_carries_doc_kind(client, monkeypatch):
     assert status.json()["doc_kind"] == "prompts"
 
 
-def test_create_job_persists_doc_kind_from_request(alice):
-    """`create_job` 在**创建时**就把 doc_kind 算出来落列（不是收尾时才算）。
+def test_registration_persists_doc_kind_from_request(client, alice):
+    """登记在**落库那一刻**就把 doc_kind 算出来落列（不是收尾时才算）。
 
-    创建时能算是因为它是纯请求推导（`_target_product_kind`），不依赖入口模式或前端快照。
+    登记时能算是因为它是纯请求推导，不依赖入口模式或前端快照。
     晚算的话，进程重启后 DB 兜底快照与 `GET /api/jobs` 就永远答不出「改的是哪一份」。
     """
-    job_id = job_service.create_job(
+    optimize = build_and_register(
         owner_id=alice,
         solution_id=None,
         kind="optimize",
         request={"doc_kind": "api_docs"},
     )
-    row = job_get(alice, job_id)
+    row = job_get(alice, optimize.job_id)
     assert row is not None
     assert row["doc_kind"] == "api_docs"
 
     # 整篇生成的产物由 kind 直接决定，不依赖请求体
-    prd_id = job_service.create_job(
+    prd = build_and_register(
         owner_id=alice, solution_id=None, kind="prd", request={"requirements": "x"}
     )
-    assert job_get(alice, prd_id)["doc_kind"] == "prd"
+    assert job_get(alice, prd.job_id)["doc_kind"] == "prd"
+
+    # 「不猜成 prd」：optimize 漏传 doc_kind 时，DB 兜底快照读回的是 None。
+    unknown = build_and_register(
+        owner_id=alice, solution_id=None, kind="optimize", request={"document": "x"}
+    )
+    assert first_snapshot_event(alice, unknown.job_id).data["doc_kind"] is None
 
 
-def test_snapshot_events_carry_doc_kind():
-    """内存快照带 `doc_kind`；取不到时是 `None`，**不猜成 prd**。
+def test_in_flight_snapshot_carries_doc_kind(client, alice):
+    """在途内存快照带 `doc_kind`；取不到时是 `None`，**不猜成 prd**。
 
     「不猜」是硬口径：猜错等于把优化接口文档的结果写进 PRD 正文，属于静默的数据损坏。
+    跨「造单 → 登记 → 派发 → 订阅」读首份快照，取代直调 `_snapshot_event`。
     """
-    optimize = job_service.JobRuntime(
-        job_id=1,
-        owner_id=1,
-        solution_id=None,
-        kind="optimize",
-        request={"doc_kind": "api_docs"},
+    from backend.core.contracts import StreamEvent
+
+    _, optimize_snapshot, _ = run_ticket_snapshot(
+        alice,
+        None,
+        "optimize",
+        {"doc_kind": "api_docs", "document": "x"},
+        StreamEvent(type="chunk", content="在途", data={}),
     )
-    assert job_service._snapshot_event(optimize).data["doc_kind"] == "api_docs"  # noqa: SLF001
+    assert optimize_snapshot.data["doc_kind"] == "api_docs"
 
-    prd = job_service.JobRuntime(job_id=2, owner_id=1, solution_id=None, kind="prd")
-    assert job_service._snapshot_event(prd).data["doc_kind"] == "prd"  # noqa: SLF001
+    _, prd_snapshot, _ = run_ticket_snapshot(
+        alice,
+        None,
+        "prd",
+        {"requirements": "x"},
+        StreamEvent(type="chunk", content="在途", data={}),
+    )
+    assert prd_snapshot.data["doc_kind"] == "prd"
 
-    unknown = job_service.JobRuntime(job_id=3, owner_id=1, solution_id=None, kind="optimize")
-    assert job_service._snapshot_event(unknown).data["doc_kind"] is None  # noqa: SLF001
+    _, unknown_snapshot, _ = run_ticket_snapshot(
+        alice,
+        None,
+        "optimize",
+        {"document": "x"},
+        StreamEvent(type="chunk", content="在途", data={}),
+    )
+    assert unknown_snapshot.data["doc_kind"] is None
 
 
 def test_db_snapshot_event_carries_doc_kind(alice):
-    """DB 兜底快照同样带 `doc_kind`；旧行（空串）退化成 `None`。"""
-    job_id = job_create(alice, "prompts", None, doc_kind="prompts")
-    row = job_get(alice, job_id)
-    assert row is not None
-    assert job_service._db_snapshot_event(row).data["doc_kind"] == "prompts"  # noqa: SLF001
+    """DB 兜底快照同样带 `doc_kind`；旧行（空串）退化成 `None`。
 
-    legacy = job_create(alice, "optimize", None)
-    row = job_get(alice, legacy)
-    assert row is not None
-    assert job_service._db_snapshot_event(row).data["doc_kind"] is None  # noqa: SLF001
+    走「登记（不派发）→ `open_stream`」：登记表里没有这支运行时时读 DB 兜底；
+    这正是进程重启后前端重连的真实路径，取代直调 `_db_snapshot_event`。
+    """
+    prompts = build_and_register(
+        owner_id=alice, solution_id=None, kind="prompts", request={}
+    )
+    assert first_snapshot_event(alice, prompts.job_id).data["doc_kind"] == "prompts"
+
+    legacy = build_and_register(
+        owner_id=alice, solution_id=None, kind="optimize", request={}
+    )
+    assert first_snapshot_event(alice, legacy.job_id).data["doc_kind"] is None
 
 
 def test_doc_kind_rejects_unknown_value(client):
@@ -1123,91 +1182,93 @@ def test_fail_writes_pending_items(alice):
 
 
 def test_db_snapshot_event_carries_pending_items(alice):
-    """DB 兜底快照（`_db_snapshot_event`）携带待确认清单，刷新重连后前端直接展示。"""
+    """DB 兜底快照携带待确认清单，刷新重连后前端直接展示。
+
+    清单由 `done` 随收尾落到任务行；登记（不派发）之后 `open_stream` 走 DB 兜底，
+    读回的是库里那一份，取代直调 `_db_snapshot_event`。
+    """
     items = _sample_items()
-    job_id = job_create(alice, "api_docs", None)
-    job_persist_progress(
+    registered, _ = run_ticket_events(
+        alice, None, "api_docs", {}, done_data={"reply": "正文", "pending_items": items}
+    )
+    # 收尾已把任务摘出登记表：此刻订阅读的是 DB 兜底路径。
+    snapshot = first_snapshot_event(alice, registered.job_id)
+    assert snapshot.data["pending_items"] == items
+
+
+def test_in_flight_snapshot_carries_pending_items(alice):
+    """在途内存快照携带待确认清单：刷新重连后前端不用另发请求。"""
+    items = _sample_items()
+    _, snapshot, _ = run_ticket_snapshot(
         alice,
-        job_id,
-        draft_content="正文",
-        completed_sections=[{"section_id": "x", "heading": "小节", "text": "t"}],
-        phase="writing",
-        pending_items=items,
+        None,
+        "api_docs",
+        {},
+        StreamEvent(
+            type="done", content="", data={"reply": "正文", "pending_items": items}
+        ),
     )
-    row = job_get(alice, job_id)
-    snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 测内部快照构造
     assert snapshot.data["pending_items"] == items
 
 
-def test_snapshot_event_carries_pending_items():
-    """内存运行时快照（`_snapshot_event`）携带待确认清单。"""
-    items = _sample_items()
-    runtime = job_service.JobRuntime(
-        job_id=1, owner_id=1, solution_id=None, kind="api_docs", pending_items=items
-    )
-    snapshot = job_service._snapshot_event(runtime)  # noqa: SLF001 - 测内部快照构造
-    assert snapshot.data["pending_items"] == items
-
-
-def test_snapshot_event_carries_stage_output():
-    """内存运行时快照带上**当前阶段的原始输出**：刷新重连后审核面板不会空着。
+def test_in_flight_snapshot_carries_stage_output(alice):
+    """在途快照带上**当前阶段的原始输出**：刷新重连后审核面板不会空着。
 
     这条守的是「刷新后要重新接回流式输出」：阶段输出从前只活在前端内存里，
     一刷新就没了；现在它由任务运行时持有，随 `snapshot.stage_text` 一道回来。
     """
-    runtime = job_service.JobRuntime(job_id=1, owner_id=1, solution_id=None, kind="api_docs")
-    job_service._apply_event(  # noqa: SLF001 - 测内部事件归并
-        runtime, StreamEvent(type="stage", content="", data={"stage": "reviewing"})
-    )
-    for piece in ('{"verdict"', ':"revise"}', ""):
-        job_service._apply_event(  # noqa: SLF001
-            runtime,
-            StreamEvent(type="stage_chunk", content=piece, data={"stage": "reviewing"}),
-        )
-
-    snapshot = job_service._snapshot_event(runtime)  # noqa: SLF001
+    stage_events = [
+        StreamEvent(type="stage", content="", data={"stage": "reviewing"}),
+        *[
+            StreamEvent(type="stage_chunk", content=piece, data={"stage": "reviewing"})
+            for piece in ('{"verdict"', ':"revise"}', "")
+        ],
+    ]
+    _, snapshot, _ = run_ticket_snapshot(alice, None, "api_docs", {}, *stage_events)
 
     assert snapshot.data["phase"] == "reviewing"
     assert snapshot.data["stage_text"] == '{"verdict":"revise"}'
 
 
-def test_stage_change_clears_previous_stage_output():
+def test_stage_change_clears_previous_stage_output(alice):
     """换阶段清空上一阶段的输出：审核意见不该留在改写阶段的面板里。"""
-    runtime = job_service.JobRuntime(job_id=1, owner_id=1, solution_id=None, kind="api_docs")
-    job_service._apply_event(  # noqa: SLF001
-        runtime, StreamEvent(type="stage", content="", data={"stage": "reviewing"})
+    _, snapshot, _ = run_ticket_snapshot(
+        alice,
+        None,
+        "api_docs",
+        {},
+        StreamEvent(type="stage", content="", data={"stage": "reviewing"}),
+        StreamEvent(type="stage_chunk", content="审核意见", data={"stage": "reviewing"}),
+        StreamEvent(type="stage", content="", data={"stage": "rewriting"}),
+        StreamEvent(type="stage_chunk", content="改写稿", data={"stage": "rewriting"}),
     )
-    job_service._apply_event(  # noqa: SLF001
-        runtime, StreamEvent(type="stage_chunk", content="审核意见", data={"stage": "reviewing"})
-    )
-    job_service._apply_event(  # noqa: SLF001
-        runtime, StreamEvent(type="stage", content="", data={"stage": "rewriting"})
-    )
-    assert runtime.stage_text == ""
-
-    job_service._apply_event(  # noqa: SLF001
-        runtime, StreamEvent(type="stage_chunk", content="改写稿", data={"stage": "rewriting"})
-    )
-    assert runtime.stage_text == "改写稿"
+    assert snapshot.data["phase"] == "rewriting"
+    assert snapshot.data["stage_text"] == "改写稿"
 
 
-def test_stage_chunk_never_leaks_into_draft_text():
+def test_stage_chunk_never_leaks_into_draft_text(alice):
     """阶段输出与正文缓冲**严格分道**：审核 JSON 不能出现在会落库的正文里。"""
-    runtime = job_service.JobRuntime(job_id=1, owner_id=1, solution_id=None, kind="api_docs")
-    job_service._apply_event(  # noqa: SLF001
-        runtime, StreamEvent(type="stage_chunk", content='{"verdict":"pass"}', data={"stage": "reviewing"})
+    _, snapshot, _ = run_ticket_snapshot(
+        alice,
+        None,
+        "api_docs",
+        {},
+        StreamEvent(
+            type="stage_chunk",
+            content='{"verdict":"pass"}',
+            data={"stage": "reviewing"},
+        ),
     )
-
-    assert runtime.live_buffer == ""
-    assert job_service._draft(runtime) == ""  # noqa: SLF001 - 测内部草稿拼装
+    assert snapshot.data["live_buffer"] == ""
+    assert snapshot.data["finalized_text"] == ""
 
 
 def test_db_snapshot_event_has_empty_stage_text(alice):
     """DB 兜底快照（进程重启后）没有阶段输出：显式给空串，不让前端拿到 `undefined`。"""
-    job_id = job_create(alice, "api_docs", None)
-    row = job_get(alice, job_id)
-    snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 测内部快照构造
-    assert snapshot.data["stage_text"] == ""
+    registered = build_and_register(
+        owner_id=alice, solution_id=None, kind="api_docs", request={}
+    )
+    assert first_snapshot_event(alice, registered.job_id).data["stage_text"] == ""
 
 
 def test_generation_flows_pending_items_into_job_and_document(client, monkeypatch):
@@ -1294,33 +1355,49 @@ def test_cancel_running_only_targets_owner_and_solution(client, alice):
 def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
     """方案已删除时收尾**不写文档**，并把任务落成失败态。
 
-    这里刻意不置 `runtime.cancelled`：模拟「删除发生在标记生效之前」的那个时间窗——
-    运行时不在了 / 标记没赶上，只剩「方案还在不在」这一条事实可查。
+    跨公开动作复现「删除发生在标记生效之前」的时间窗：造单 → 登记 → 派发，
+    假事件流吐出第一段后卡住；此时用 `solution_service.delete_solution` 删方案
+    （**不是** `delete_solution_and_cancel_jobs`，后者会顺手置内存取消标记），
+    再放开流让 `done` 抵达收尾。收尾只剩「方案还在不在」这一条事实可查。
+    断言的是外部可观察的终态、写文档动作、以及回执，不探任何内部标志位。
     """
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
-    job_id = job_create(uid, "prd", solution_id)
-    runtime = job_service.JobRuntime(
-        job_id=job_id,
-        owner_id=uid,
-        solution_id=solution_id,
-        kind="prd",
-        final_reply="# 已经生成好的正文",
-    )
+    first_seen = asyncio.Event()
+    release = asyncio.Event()
 
-    assert solution_service.delete_solution(uid, solution_id) is True
-    assert runtime.cancelled is False
+    async def stream(kind, request):
+        yield StreamEvent(type="chunk", content="半截正文", data={})
+        first_seen.set()
+        await release.wait()
+        yield StreamEvent(type="done", content="", data={"reply": "# 已经生成好的正文"})
 
     written: list = []
     monkeypatch.setattr(
         document_store, "commit_generated", lambda *a, **k: written.append((a, k))
     )
 
-    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 直接测收尾分支
+    async def scenario() -> tuple[int, list]:
+        registered, events = await run_ticket_async(
+            owner_id=uid,
+            solution_id=solution_id,
+            kind="prd",
+            request={"requirements": "方案会被删"},
+            event_stream_source=stream,
+            before_open=delete_solution_after_first_chunk,
+        )
+        return registered.job_id, events
+
+    async def delete_solution_after_first_chunk(job_id: int) -> None:
+        await asyncio.wait_for(first_seen.wait(), timeout=5)
+        assert solution_service.delete_solution(uid, solution_id) is True
+        release.set()
+
+    job_id, events = _run(scenario())
 
     assert written == [], "方案已删除时不该再往 documents 里写"
-    assert runtime.status == "failed"
+    assert any(event.type == "run_summary" and event.data["status"] == "failed" for event in events)
     row = job_get(uid, job_id)
     assert row is not None
     assert row["status"] == "failed"
@@ -1398,16 +1475,12 @@ def test_delete_solution_endpoint_cancels_its_jobs(client):
 
 # ---------------------------------------------------------------------------
 # 分章节的按章缓冲：多章同时逐字流，但各存各的
+#
+# 这一组原先直接构造裸运行时、往 `_apply_event` 喂事件。归位后一律把同样的事件
+# 在**造单时**作为假事件流传入，经「登记 → 派发 → 订阅」读在途快照：
+# `live_by_section` / `completed_sections` / `finalized_text` 都是前端重连时
+# 真实拿得到的公开字段，内部实现怎么重排都不影响这些断言。
 # ---------------------------------------------------------------------------
-
-
-def _runtime_with_sections() -> job_service.JobRuntime:
-    """一支 PRD 运行时（不需要真建任务：这一组测的是事件到运行时的映射）。"""
-    runtime = job_service.JobRuntime(
-        job_id=1, owner_id=1, solution_id=1, kind="prd"
-    )
-    runtime.started_at = 0.0
-    return runtime
 
 
 def _header_part(text: str) -> StreamEvent:
@@ -1435,88 +1508,107 @@ def _stage(name: str, section_id: str, index: int) -> StreamEvent:
     )
 
 
-def test_section_chunks_are_buffered_per_section():
+def _section_snapshot(alice: int, *events: StreamEvent) -> StreamEvent:
+    """把一组分章节事件走主接缝，返回在途内存快照的第一份。"""
+    _, snapshot, _ = run_ticket_snapshot(alice, None, "prd", {}, *events)
+    return snapshot
+
+
+def test_section_chunks_are_buffered_per_section(alice):
     """每章的增量各进各的格子。
 
     混在一个 `live_buffer` 里就再也分不开了——前端只能整批丢弃，
     那正是「PRD 只能等整章定稿才蹦出来」的成因。
     """
-    runtime = _runtime_with_sections()
+    snapshot = _section_snapshot(
+        alice,
+        _chunk("第一章", "overview", 0),
+        _chunk("第二章", "features", 1),
+        _chunk("续写", "overview", 0),
+    )
+    live = snapshot.data["live_by_section"]
 
-    job_service._apply_event(runtime, _chunk("第一章", "overview", 0))
-    job_service._apply_event(runtime, _chunk("第二章", "features", 1))
-    job_service._apply_event(runtime, _chunk("续写", "overview", 0))
-
-    assert runtime.live_by_index[0].section_id == "overview"
-    assert runtime.live_by_index[0].text == "第一章续写"
-    assert runtime.live_by_index[1].text == "第二章"
+    assert [item["section_id"] for item in live] == ["overview", "features"]
+    assert live[0]["text"] == "第一章续写"
+    assert live[1]["text"] == "第二章"
     # 无归属的整篇缓冲保持干净：它只服务「不分章」的链路（文档 / 对话）
-    assert runtime.live_buffer == ""
+    assert snapshot.data["live_buffer"] == ""
 
 
-def test_part_clears_only_its_own_section():
+def test_part_clears_only_its_own_section(alice):
     """一章定稿只清这一章：并行时别的章还在写，清全场会把它们的字一起抹掉。"""
-    runtime = _runtime_with_sections()
-    job_service._apply_event(runtime, _chunk("甲", "overview", 0))
-    job_service._apply_event(runtime, _chunk("乙", "features", 1))
+    snapshot = _section_snapshot(
+        alice,
+        _chunk("甲", "overview", 0),
+        _chunk("乙", "features", 1),
+        _part("## 1. 甲\n\n", "overview", 0),
+    )
+    live = snapshot.data["live_by_section"]
 
-    job_service._apply_event(runtime, _part("## 1. 甲\n\n", "overview", 0))
+    assert [item["index"] for item in live] == [1], "定稿的章半成品该被清掉"
+    assert live[0]["text"] == "乙", "别的章一个字都不能丢"
+    assert snapshot.data["finalized_text"] == "## 1. 甲\n\n"
+    assert [item["section_id"] for item in snapshot.data["completed_sections"]] == ["overview"]
 
-    assert 0 not in runtime.live_by_index, "定稿的章半成品该被清掉"
-    assert runtime.live_by_index[1].text == "乙", "别的章一个字都不能丢"
-    assert runtime.parts_by_index[0] == "## 1. 甲\n\n"
 
-
-def test_rewriting_clears_the_section_so_draft_and_rewrite_do_not_stack():
+def test_rewriting_clears_the_section_so_draft_and_rewrite_do_not_stack(alice):
     """改写必须清掉该章半成品：否则初稿与改写稿会在同一张卡片里叠着长。"""
-    runtime = _runtime_with_sections()
-    job_service._apply_event(runtime, _chunk("初稿", "overview", 0))
+    snapshot = _section_snapshot(
+        alice,
+        _chunk("初稿", "overview", 0),
+        _stage("rewriting", "overview", 0),
+        _chunk("改后", "overview", 0),
+    )
+    live = snapshot.data["live_by_section"]
 
-    job_service._apply_event(runtime, _stage("rewriting", "overview", 0))
-    job_service._apply_event(runtime, _chunk("改后", "overview", 0))
-
-    assert runtime.live_by_index[0].text == "改后"
-    assert runtime.live_by_index[0].phase == "rewriting"
+    assert live[0]["text"] == "改后"
+    assert live[0]["phase"] == "rewriting"
 
 
-def test_retry_reannounced_writing_resets_the_section():
+def test_retry_reannounced_writing_resets_the_section(alice):
     """单章重试会重报 `writing`：那是「从头重来」的信号，必须清该章。"""
-    runtime = _runtime_with_sections()
-    job_service._apply_event(runtime, _chunk("第一轮的一半", "overview", 0))
+    snapshot = _section_snapshot(
+        alice,
+        _chunk("第一轮的一半", "overview", 0),
+        _stage("writing", "overview", 0),
+        _chunk("第二轮", "overview", 0),
+    )
+    live = snapshot.data["live_by_section"]
 
-    job_service._apply_event(runtime, _stage("writing", "overview", 0))
-    assert runtime.live_by_index[0].text == ""
-
-    job_service._apply_event(runtime, _chunk("第二轮", "overview", 0))
-    assert runtime.live_by_index[0].text == "第二轮"
+    assert live[0]["text"] == "第二轮"
 
 
-def test_draft_interleaves_finalized_and_live_by_index():
-    """`_draft` 必须按 index 交错归并，不能「先定稿、后半成品」。
+def test_draft_interleaves_finalized_and_live_by_index(alice):
+    """正文按 index 交错归并，不能「先定稿、后半成品」。
 
     并行时第 1 章可能还在写、第 2 章已经定稿；简单拼接会把正文排成 2、3、1，
-    而 `_draft` 是**进度落库**与「重连兜底」的正文来源——顺序错了刷新后就是错版。
+    而「已定稿 + 各章半成品」是**进度落库**与「重连兜底」的正文来源——
+    顺序错了刷新后就是错版。快照把两份分开给，前端按 index 拼回去。
     """
-    runtime = _runtime_with_sections()
-    job_service._apply_event(runtime, _header_part("# 文档头\n\n"))
-    job_service._apply_event(runtime, _chunk("第1章写到一半", "overview", 0))
-    job_service._apply_event(runtime, _part("第2章定稿\n\n", "features", 1))
+    snapshot = _section_snapshot(
+        alice,
+        _header_part("# 文档头\n\n"),
+        _chunk("第1章写到一半", "overview", 0),
+        _part("第2章定稿\n\n", "features", 1),
+    )
 
-    assert job_service._draft(runtime) == "# 文档头\n\n第1章写到一半第2章定稿\n\n"
+    assert snapshot.data["finalized_text"] == "# 文档头\n\n第2章定稿\n\n"
+    assert [item["index"] for item in snapshot.data["live_by_section"]] == [0]
+    assert [item["index"] for item in snapshot.data["completed_sections"]] == [1]
 
 
-def test_snapshot_carries_live_by_section_but_not_the_finalized_ones():
+def test_snapshot_carries_live_by_section_but_not_the_finalized_ones(alice):
     """快照要带上「正在写的几章」，且不能与已定稿章节重复。
 
     重复的后果是刷新后同一段正文出现两次；只发定稿章节的后果则是
     「正在写的那几章刷新后一片空白，直到定稿才整段出现」。
     """
-    runtime = _runtime_with_sections()
-    job_service._apply_event(runtime, _chunk("甲半截", "overview", 0))
-    job_service._apply_event(runtime, _part("乙定稿\n\n", "features", 1))
-    job_service._apply_event(runtime, _chunk("丙半截", "pages", 2))
-
-    snapshot = job_service._snapshot_event(runtime)  # noqa: SLF001 - 待测行为
+    snapshot = _section_snapshot(
+        alice,
+        _chunk("甲半截", "overview", 0),
+        _part("乙定稿\n\n", "features", 1),
+        _chunk("丙半截", "pages", 2),
+    )
     live = snapshot.data["live_by_section"]
 
     assert [item["section_id"] for item in live] == ["overview", "pages"]
@@ -1527,24 +1619,15 @@ def test_snapshot_carries_live_by_section_but_not_the_finalized_ones():
     assert [item["section_id"] for item in snapshot.data["completed_sections"]] == ["features"]
 
 
-def test_db_snapshot_has_no_live_by_section():
+def test_db_snapshot_has_no_live_by_section(alice):
     """DB 兜底快照显式给空数组：过程字不落库（同 `stage_text`）。
 
-    进程重启后拿到的就是这份快照——它只有已定稿章节，前端据此重建看板即可。
+    登记（不派发）之后 `open_stream` 走 DB 兜底——正是进程重启后前端重建看板的路径。
     """
-    row = {
-        "id": 1,
-        "kind": "prd",
-        "doc_kind": "prd",
-        "status": "running",
-        "phase": "writing",
-        "draft_content": "# 文档头\n\n",
-        "completed_sections": "[]",
-        "solution_id": 1,
-    }
-    snapshot = job_service._db_snapshot_event(row)  # noqa: SLF001 - 待测行为
-
-    assert snapshot.data["live_by_section"] == []
+    registered = build_and_register(
+        owner_id=alice, solution_id=None, kind="prd", request={}
+    )
+    assert first_snapshot_event(alice, registered.job_id).data["live_by_section"] == []
 
 # ---------------------------------------------------------------------------
 # 收尾与终态：被中止的三条路、以及「落库失败不等于任务失败」
@@ -1563,37 +1646,27 @@ def _collect(owner_id: int, job_id: int) -> list:
     return _run(scenario())
 
 
-def _terminal_runtime(
-    owner_id: int, *, status: str, code: str = "", message: str = ""
-) -> job_service.JobRuntime:
-    """摆一支「已收尾但还在内存里」的运行时。
-
-    真实窗口：`_finalize` 置终态之后、`run_job` 的 `finally` 摘掉运行时之前，
-    这段时间里来的订阅者命中内存运行时，而不是 DB 兜底路径。
-    """
-    runtime = job_service.JobRuntime(
-        job_id=91001,
-        owner_id=owner_id,
-        solution_id=None,
-        kind="prd",
-        status=status,
-        error_code=code,
-        error_message=message,
-    )
-    runtime.started_at = time.monotonic()
-    job_service._RUNTIMES[runtime.job_id] = runtime  # noqa: SLF001 - 摆一支在途运行时
-    return runtime
-
-
-def test_open_stream_replays_a_terminal_runtime_and_its_summary(alice):
-    """运行时已收尾但还没被摘掉：快照 + `error` + `run_summary`，随后立即结束。
+def test_late_subscriber_replays_failure_snapshot_then_error_and_summary(alice):
+    """失败任务重连：快照补全状态，`error` 说明原因，`run_summary` 补发用量。
 
     少这条，重连的订阅者会挂在队列上等一个永远不会再来的事件（任务已经跑完），
-    而「为什么失败」也就漏掉了。
+    而「为什么失败」也就漏掉了。跨主接缝复现：假事件流在造单时吐一个 `error`，
+    任务收尾后重订阅，读到的事件序列是 DB 兜底那一路补出来的。
     """
-    _terminal_runtime(alice, status="failed", code="LLM_UPSTREAM_ERROR", message="上游中断")
+    registered, _ = run_ticket_events(
+        alice,
+        None,
+        "prd",
+        {},
+        StreamEvent(
+            type="error",
+            content="上游中断",
+            code="LLM_UPSTREAM_ERROR",
+            data={"error_type": "JobFailed"},
+        ),
+    )
 
-    events = _collect(alice, 91001)
+    events = _collect(alice, registered.job_id)
 
     assert [event.type for event in events] == ["snapshot", "error", "run_summary"]
     assert events[0].data["status"] == "failed"
@@ -1602,15 +1675,43 @@ def test_open_stream_replays_a_terminal_runtime_and_its_summary(alice):
     assert events[2].data["status"] == "failed"
 
 
-def test_open_stream_does_not_replay_an_abort_as_an_error(alice):
+def test_late_subscriber_does_not_replay_an_abort_as_an_error(alice):
     """取消 / 被顶替同样落 failed，但补发时**不**发 `error`：那不是错误。
 
-    否则用户自己按的停止会被渲染成红色的「生成失败」（与 `_finalize` 的 `_ABORT_CODES`
-    是同一条口径，两处必须一致）。
+    否则用户自己按的停止会被渲染成红色的「生成失败」。跨主接缝复现：派发后
+    用公开动作 `cancel_job` 停止在途任务，收尾落 `failed + CANCELLED`；
+    重订阅只读到快照与回执。
     """
-    _terminal_runtime(alice, status="failed", code="CANCELLED", message="方案已删除，任务已取消")
+    release = asyncio.Event()
 
-    events = _collect(alice, 91001)
+    async def stream(kind, request):
+        yield StreamEvent(type="chunk", content="第一段", data={})
+        await release.wait()
+        yield StreamEvent(type="done", content="", data={"reply": "完整正文"})
+
+    target: list[int] = []
+    seen: list[StreamEvent] = []
+
+    def stop_on_first_snapshot(event: StreamEvent) -> None:
+        seen.append(event)
+        if event.type == "snapshot":
+            job_service.cancel_job(alice, target[0])
+            release.set()
+
+    async def scenario() -> int:
+        registered, _ = await run_ticket_async(
+            owner_id=alice,
+            solution_id=None,
+            kind="prd",
+            request={},
+            event_stream_source=stream,
+            before_open=lambda job_id: target.append(job_id),
+            on_event=stop_on_first_snapshot,
+        )
+        return registered.job_id
+
+    job_id = _run(scenario())
+    events = _collect(alice, job_id)
 
     assert [event.type for event in events] == ["snapshot", "run_summary"]
     assert events[0].data["error_code"] == "CANCELLED"
@@ -1618,26 +1719,70 @@ def test_open_stream_does_not_replay_an_abort_as_an_error(alice):
 
 
 def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
-    """删方案时**内存里的运行时也要标记**：只改库的话协程照旧烧 token 直到跑完。
+    """删方案时**内存里的在途任务也要停**：只改库的话协程照旧烧 token 直到跑完。
 
-    这是「协作式取消」的全部机制：库里那一行只是事后记录，真正让它停下的是这一位。
+    这是「协作式取消」的全部机制：库里那一行只是事后记录，真正让它停下的是
+    内存标记。跨公开动作断言两支在途任务的结局：
+    - 被删方案那支：`delete_solution_and_cancel_jobs` 之后不再消费后续事件，
+      落成 `failed + CANCELLED`，半截正文停在「第一段」；
+    - 别的方案那支：照常把「第二段」消费完、落 `completed`。
     """
-    other_solution = _create_solution(client)
     doomed_solution = _create_solution(client)
+    other_solution = _create_solution(client)
+    doomed_seen, other_seen = asyncio.Event(), asyncio.Event()
+    doomed_hold, other_hold = asyncio.Event(), asyncio.Event()
 
-    doomed = job_service.JobRuntime(
-        job_id=92001, owner_id=alice, solution_id=doomed_solution, kind="prd"
-    )
-    untouched = job_service.JobRuntime(
-        job_id=92002, owner_id=alice, solution_id=other_solution, kind="api_docs"
-    )
-    job_service._RUNTIMES[92001] = doomed  # noqa: SLF001
-    job_service._RUNTIMES[92002] = untouched  # noqa: SLF001
+    async def stream(kind, request, seen, hold, tag):
+        yield StreamEvent(type="chunk", content=f"第一段-{tag}", data={})
+        seen.set()
+        await hold.wait()
+        yield StreamEvent(type="chunk", content=f"第二段-{tag}", data={})
+        yield StreamEvent(type="done", content="", data={"reply": f"完整-{tag}"})
 
-    assert job_service.delete_solution_and_cancel_jobs(alice, doomed_solution) is True
+    async def scenario() -> tuple[int, int]:
+        doomed = build_and_register(
+            owner_id=alice,
+            solution_id=doomed_solution,
+            kind="prd",
+            request={"requirements": "会被取消"},
+            event_stream_source=lambda k, r: stream(k, r, doomed_seen, doomed_hold, "doomed"),
+        )
+        other = build_and_register(
+            owner_id=alice,
+            solution_id=other_solution,
+            kind="prd",
+            request={"requirements": "不该被波及"},
+            event_stream_source=lambda k, r: stream(k, r, other_seen, other_hold, "other"),
+        )
+        start_registered_job(doomed)
+        start_registered_job(other)
+        await asyncio.wait_for(doomed_seen.wait(), timeout=5)
+        await asyncio.wait_for(other_seen.wait(), timeout=5)
 
-    assert doomed.cancelled is True
-    assert untouched.cancelled is False, "别的方案上的任务一个字都不该动"
+        assert job_service.delete_solution_and_cancel_jobs(alice, doomed_solution) is True
+        doomed_hold.set()
+        other_hold.set()
+
+        # 用公开查询的终态作判据，等两支后台任务各自收尾完毕。
+        for _ in range(200):
+            rows = [job_get(alice, doomed.job_id), job_get(alice, other.job_id)]
+            if all(row is not None and row["status"] != "running" for row in rows):
+                break
+            await asyncio.sleep(0.005)
+        return doomed.job_id, other.job_id
+
+    doomed_id, other_id = _run(scenario())
+
+    doomed_row = job_get(alice, doomed_id)
+    assert doomed_row is not None
+    assert doomed_row["status"] == "failed"
+    assert doomed_row["error_code"] == "CANCELLED"
+    assert "第二段-doomed" not in doomed_row["draft_content"], "被取消的任务不该继续消费事件"
+
+    other_row = job_get(alice, other_id)
+    assert other_row is not None
+    assert other_row["status"] == "completed"
+    assert "第二段-other" in other_row["draft_content"], "别的方案上的任务一个字都不该丢"
 
 
 def test_skill_registry_failure_degrades_visibility_not_the_job(
@@ -1689,70 +1834,74 @@ def test_pipeline_app_error_keeps_its_own_code(alice, monkeypatch):
     assert error.code == "INVALID_REQUEST"
 
 
-def test_replace_part_wipes_every_section_buffer():
+def test_replace_part_wipes_every_section_buffer(alice):
     """`part{replace}` 是**整篇覆盖**：所有章节的半成品一并作废。
 
     若不清，改写稿会与初稿的半截字并排长在同一张卡片里——两条轨（过程字 / 权威正文）
-    混起来正是「PRD 不流式」与「重复正文」两类事故的同一个根。
+    混起来正是「PRD 不流式」与「重复正文」两类事故的同一个根。归位后读在途快照：
+    覆盖之后只剩新版全文，既无按章半成品、也无旧定稿章节。
     """
-    runtime = _runtime_with_sections()
-    job_service._apply_event(runtime, _header_part("# 文档头\n\n"))  # noqa: SLF001
-    job_service._apply_event(runtime, _chunk("甲半截", "overview", 0))  # noqa: SLF001
-    job_service._apply_event(runtime, _chunk("乙半截", "features", 1))  # noqa: SLF001
-    job_service._apply_event(  # noqa: SLF001
-        runtime,
+    snapshot = _section_snapshot(
+        alice,
+        _header_part("# 文档头\n\n"),
+        _chunk("甲半截", "overview", 0),
+        _chunk("乙半截", "features", 1),
         StreamEvent(type="part", content="", data={"text": "# 新版全文", "replace": True}),
     )
 
-    assert runtime.finalized_parts == ["# 新版全文"]
-    assert runtime.parts_by_index == {}
-    assert runtime.live_by_index == {}
-    assert runtime.live_buffer == ""
-    assert job_service._draft(runtime) == "# 新版全文"  # noqa: SLF001
+    assert snapshot.data["finalized_text"] == "# 新版全文"
+    assert snapshot.data["live_by_section"] == []
+    assert snapshot.data["live_buffer"] == ""
+    assert snapshot.data["completed_sections"] == []
 
 
 def test_write_document_skips_an_empty_reply(client, alice, monkeypatch):
-    """定稿正文为空时不写文档：宁可这次不落库，也不要拿空稿顶掉上一版。"""
+    """定稿正文为空时不写文档：宁可这次不落库，也不要拿空稿顶掉上一版。
+
+    跨主接缝：`done.reply` 是空白，`commit_generated` 是唯一写文档的公开落点，
+    用记录器断言它一次都没被调；任务本身照常成功（不写 ≠ 失败）。
+    """
     solution_id = _create_solution(client)
-    runtime = job_service.JobRuntime(
-        job_id=93001,
-        owner_id=alice,
-        solution_id=solution_id,
-        kind="prd",
-        final_reply="   \n\t",
-    )
     written: list = []
     monkeypatch.setattr(
         document_store, "commit_generated", lambda *a, **k: written.append((a, k))
     )
 
-    job_service._write_document(runtime, {})  # noqa: SLF001 - 测落点本身
+    registered, events = run_ticket_events(
+        alice, solution_id, "prd", {}, reply="   \n\t"
+    )
 
     assert written == []
+    assert events[-1].data["status"] == "completed"
+    assert job_get(alice, registered.job_id)["status"] == "completed"
+    assert document_store.get_document(alice, solution_id, "prd") is None
 
 
 def test_document_write_failure_keeps_the_job_successful(client, alice, monkeypatch):
     """写 documents 时库出错：任务**仍然算成功**，正文留在 `draft_content` 里。
 
     正文已经在任务记录里有一份；把整个任务判失败，等于让一次成功的生成看起来像失败。
+    跨主接缝：假事件流给出 `part` 定稿与 `done.reply`，`commit_generated` 抛错，
+    断言可观察的事件回执、库行终态与正文。
     """
     solution_id = _create_solution(client)
-    job_id = job_create(alice, "prd", solution_id)
-    runtime = job_service.JobRuntime(
-        job_id=job_id, owner_id=alice, solution_id=solution_id, kind="prd", final_reply="# 正文"
-    )
-    # `draft_content` 取的是「已定稿 + 实时缓冲」，不是 `final_reply`（后者只喂 documents）
-    runtime.finalized_parts = ["# 正文"]
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("考核点：写 documents 时库出错")
 
     monkeypatch.setattr(document_store, "commit_generated", _boom)
 
-    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
+    registered, events = run_ticket_events(
+        alice,
+        solution_id,
+        "prd",
+        {},
+        StreamEvent(type="part", content="", data={"text": "# 正文"}),
+        reply="# 正文",
+    )
 
-    assert runtime.status == "completed"
-    row = job_get(alice, job_id)
+    assert events[-1].data["status"] == "completed"
+    row = job_get(alice, registered.job_id)
     assert row is not None
     assert row["status"] == "completed"
     assert row["draft_content"] == "# 正文"
@@ -1762,16 +1911,14 @@ def test_document_write_failure_keeps_the_job_successful(client, alice, monkeypa
 def test_document_write_skip_is_not_a_failure(client, alice, monkeypatch):
     """`commit_generated` 返回 `None`（方案不可见 / 归属不符）也不算失败：只是没地方落。"""
     solution_id = _create_solution(client)
-    job_id = job_create(alice, "prd", solution_id)
-    runtime = job_service.JobRuntime(
-        job_id=job_id, owner_id=alice, solution_id=solution_id, kind="prd", final_reply="# 正文"
-    )
     monkeypatch.setattr(document_store, "commit_generated", lambda *a, **k: None)
 
-    job_service._finalize(runtime, "completed")  # noqa: SLF001
+    registered, events = run_ticket_events(
+        alice, solution_id, "prd", {}, reply="# 正文"
+    )
 
-    assert runtime.status == "completed"
-    row = job_get(alice, job_id)
+    assert events[-1].data["status"] == "completed"
+    row = job_get(alice, registered.job_id)
     assert row is not None and row["status"] == "completed"
     assert document_store.get_document(alice, solution_id, "prd") is None
 
@@ -1823,21 +1970,27 @@ def test_usage_parsing_tolerates_legacy_and_broken_values():
     assert job_service.parse_usage("{坏掉的 JSON") is None
 
 
-def test_db_snapshot_tolerates_corrupt_columns():
-    """DB 兜底快照遇到坏 JSON / 旧行：逐字段退化为空值，不整条炸掉。"""
-    snapshot = job_service._db_snapshot_event(  # noqa: SLF001 - 测快照构造
-        {
-            "id": 94001,
-            "kind": "prd",
-            "doc_kind": "prd",
-            "status": "failed",
-            "error_code": "LLM_UPSTREAM_ERROR",
-            "draft_content": "半截正文",
-            "completed_sections": "{坏掉的 JSON",
-            "usage": "{坏掉的 JSON",
-            "pending_items": "{坏掉的 JSON",
-        }
+def test_db_snapshot_tolerates_corrupt_columns(alice):
+    """DB 兜底快照遇到坏 JSON / 旧行：逐字段退化为空值，不整条炸掉。
+
+    坏数据由登记落库后的真实任务行回填（不走任何内部摆位），再走 `open_stream`
+    读 DB 兜底路径：前端刷新重连时拿到的仍是形状完整的快照。
+    """
+    from dbsupport import connect
+
+    registered = build_and_register(
+        owner_id=alice, solution_id=None, kind="prd", request={}
     )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE generation_jobs SET status = 'failed', error_code = 'LLM_UPSTREAM_ERROR', "
+            "draft_content = '半截正文', completed_sections = '{坏掉的 JSON', "
+            "usage = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' WHERE id = ?",
+            (registered.job_id,),
+        )
+        conn.commit()
+
+    snapshot = first_snapshot_event(alice, registered.job_id)
 
     assert snapshot.data["completed_sections"] == []
     assert snapshot.data["pending_items"] == []

@@ -420,10 +420,10 @@ def test_build_accepts_fake_config_environment(alice, monkeypatch):
 
 
 def test_config_freeze_does_not_drift_when_admin_changes_config(alice, monkeypatch):
-    """造单定格配置 A，随后后台切到 B：派发侧的计量器、回执与 DB 行仍是 A。
+    """造单定格配置 A，随后后台切到 B：回执与 DB 行仍是 A。
 
     若派发再自行 `get_runtime_config()`，四格就会跟着 B 漂移；这里跨公开接缝断言
-    三个出口（计量器 / `run_summary` / DB 投影）与单①定格的四格同源。
+    两个出口（`run_summary` / DB 投影）与单①定格的四格同源，不探运行时的计量器。
     """
     import backend.core.runtime_config as rc
     from conftest import system_config
@@ -449,19 +449,15 @@ def test_config_freeze_does_not_drift_when_admin_changes_config(alice, monkeypat
 
         registered = module.register_job_ticket(draft)
         module.start_registered_job(registered)
-        runtime = job_service._RUNTIMES[registered.job_id]  # noqa: SLF001 - 断言定格值
-        assert runtime.meter.protocol == frozen["provider_protocol"]
-        assert runtime.meter.config_id == frozen["provider_config_id"]
-        assert runtime.meter.name == frozen["provider_name"]
-        assert runtime.meter.model == frozen["provider_model"]
-
         events = [event async for event in job_service.open_stream(alice, registered.job_id)]
         return frozen, registered, events
 
     frozen, registered, events = asyncio.run(scenario())
-    assert events[-1].data["protocol"] == frozen["provider_protocol"]
-    assert events[-1].data["model"] == frozen["provider_model"]
-    assert events[-1].data["provider_config_id"] == frozen["provider_config_id"]
+    summary = events[-1].data
+    assert summary["protocol"] == frozen["provider_protocol"]
+    assert summary["model"] == frozen["provider_model"]
+    assert summary["provider_config_id"] == frozen["provider_config_id"]
+    assert summary["provider_name"] == frozen["provider_name"]
     row = _raw(registered.job_id)
     assert json.loads(row["config_snapshot"])["active_provider"] == dict(frozen)
     assert row["provider_config_id"] == frozen["provider_config_id"]
@@ -592,35 +588,43 @@ def test_registration_failure_leaves_no_half_running_row(client, alice, monkeypa
 
 
 def test_registration_supersedes_old_job_in_db_and_memory(alice, monkeypatch):
-    """登记顶替旧任务：库行 failed+SUPERSEDED，内存运行时也打 `superseded` 标记。"""
-    from backend.services.llm_meter import RunMeter
+    """登记顶替旧任务：库行 failed+SUPERSEDED，且旧任务收尾不写文档。
+
+    跨公开动作复现「双标记」：旧任务由「造单 → 登记 → 派发」起一支真的在途任务
+    （会卡住的假事件流在造单时传入），新任务登记接手时它的库行与在途任务都该
+    被标记；放开流后旧任务收尾落成 `SUPERSEDED`，不写任何文档。
+    """
+    from backend.core.contracts import StreamEvent
+    from backend.services import document_store
+    from ticket_support import run_ticket_in_flight
 
     _use_prd_llm(monkeypatch, ["旧任务不该落文档"])
-    # 造一个在跑的旧运行时（不经派发，避免后台任务自己收尾）。
-    old_runtime = job_service.JobRuntime(
-        job_id=7001,
-        owner_id=alice,
-        solution_id=None,
-        kind="prd",
-        meter=RunMeter(kind="prd"),
-    )
-    job_service._RUNTIMES[7001] = old_runtime  # noqa: SLF001
-    with session_scope() as session:
-        old = GenerationJobRepository(session).create(
-            alice, "prd", None, request_params={"summary": "旧任务"}
+
+    def register_new_job() -> None:
+        registered = _ticket_module().register_job_ticket(
+            _ticket(alice, {"requirements": "新任务"})
         )
-        old_id = int(old.id or 0)
+        assert registered.job_id > 0
+        assert _raw(registered.job_id)["status"] == "running"
 
-    registered = _ticket_module().register_job_ticket(
-        _ticket(alice, {"requirements": "新任务"})
+    old, events = run_ticket_in_flight(
+        alice,
+        None,
+        "prd",
+        {"requirements": "旧任务"},
+        register_new_job,
+        StreamEvent(type="chunk", content="旧稿半截", data={}),
+        reply="# 旧稿",
     )
 
-    assert registered.job_id != old_id
-    old_row = _raw(old_id)
+    old_row = _raw(old.job_id)
     assert old_row["status"] == "failed"
-    assert old_row["error_code"] == "SUPERSEDED"
-    assert old_runtime.superseded is True  # 双标记：内存那一半也在
-    assert _raw(registered.job_id)["status"] == "running"
+    assert old_row["error_code"] == "SUPERSEDED", "双标记：库行那一半也在"
+    assert any(
+        event.type == "run_summary" and event.data["status"] == "failed"
+        for event in events
+    ), "双标记：内存那一半的结局经回执可见"
+    assert document_store.get_document(alice, None, "prd") is None
 
 
 def test_registration_is_one_transaction_for_supersede_and_create(alice, monkeypatch):
@@ -647,6 +651,10 @@ def test_registration_is_one_transaction_for_supersede_and_create(alice, monkeyp
 
 # ---------------------------------------------------------------------------
 # 八、旧入口行为逐项不变
+#
+# 这两条是新旧并存期的「旧入口事件序列对拍」用例，刻意以 `create_job` + `dispatch`
+# 为对照面，验证新三步的事件形状 / 终态与旧入口逐项相同。票 #39 不删、不改写成新
+# 入口（那样就失去对拍意义）；票 #40 删除旧入口时应连同这两条一起处理。
 # ---------------------------------------------------------------------------
 
 

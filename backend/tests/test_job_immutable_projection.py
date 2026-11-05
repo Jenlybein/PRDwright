@@ -256,54 +256,76 @@ def test_registered_ticket_freezes_the_same_snapshot(
 # ---------------------------------------------------------------------------
 
 
-def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice):
-    """收尾时改了后台配置 / 计量器里的供应商名，四列仍等于建任务时定格的值。
+def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice, monkeypatch):
+    """收尾不另算供应商四列：跑完一整单，DB 四列仍是登记那一刻定格的值。
 
-    `usage` JSON、token 两列、错误码、终态语义都不改；只保证四列来自同一份快照。
+    `usage` JSON、token 两列、错误码、终态语义都不改。归位后跨「造单 → 登记 →
+    派发 → 订阅」：造单时传入一份假的「原始配置」快照，派发后即使后台配置被切成
+    另一套，收尾落库的四列与订阅者收到的回执都只能来自同一份定格值。
     """
-    from backend.services.llm_meter import RunMeter
+    import backend.core.runtime_config as rc
+    from backend.core.providers import ProviderSpec
+    from backend.services import document_service, prd_section_writer
+    from backend.services.job_bus import job_bus
+    from fakes import ScriptedLLM
+    from ticket_support import run_ticket_in_flight
 
-    with session_scope() as session:
-        job = GenerationJobRepository(session).create(
-            alice,
-            "prd",
-            None,
-            doc_kind="prd",
-            request_params={"summary": "定格"},
-            config_snapshot={"active_provider": {
-                "provider_protocol": "ark",
-                "provider_config_id": "cfg_original",
-                "provider_name": "原始配置",
-                "provider_model": "model-original",
-            }},
-            skill_refs=[{"name": "s", "version": "1", "fingerprint": "f"}],
-        )
-        job_id = int(job.id or 0)
-
-    # 计量器拿到的是「另一个」供应商名：若收尾仍从 summary 派生四列，就会覆写成新值。
-    runtime = job_service.JobRuntime(
-        job_id=job_id,
-        owner_id=alice,
-        solution_id=None,
-        kind="prd",
-        meter=RunMeter(
-            kind="prd",
-            protocol="openai_compatible",
-            model="model-CHANGED",
-            config_id="cfg_CHANGED",
-            name="改名后的配置",
-        ),
+    original = ProviderSpec(
+        id="cfg_original",
+        name="原始配置",
+        protocol="ark",
+        base_url="",
+        value_token="",
+        model="model-original",
+        max_tokens=0,
     )
-    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
+    fake_config = rc.RuntimeConfig(
+        settings=rc.get_settings(),
+        active_provider=original,
+        source="fake",
+        revision="fake-revision",
+    )
+    # 全链路离线：模块级文档服务换成注入假 LLM 的实例。
+    monkeypatch.setattr(
+        document_service,
+        "get_service",
+        lambda: document_service.DocumentService(llm=ScriptedLLM(["章节正文"])),
+    )
 
-    row = _raw(job_id)
+    def _no_real_llm(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("测试不应触网调用真实 LLM")
+
+    monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
+    monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
+    job_bus._subscribers.clear()  # noqa: SLF001
+
+    def switch_provider_while_running() -> None:
+        # 生成中途改后台配置：收尾若重读配置就会把四列写成新值。
+        _seed_provider(provider_id="cfg_changed", name="改名后的配置")
+        changed = rc.get_runtime_config().active_provider
+        assert changed is not None and changed.model != "model-original"
+
+    registered, events = run_ticket_in_flight(
+        alice,
+        None,
+        "prd",
+        {"summary": "定格"},
+        switch_provider_while_running,
+        config=fake_config,
+    )
+
+    assert events[-1].type == "run_summary"
+    assert events[-1].data["status"] == "completed"
+    row = _raw(registered.job_id)
     assert row["status"] == "completed"
+    # 收尾没有覆写四列：仍是建任务时定格的那一份。
     assert row["provider_protocol"] == "ark"
     assert row["provider_config_id"] == "cfg_original"
     assert row["provider_name"] == "原始配置"
     assert row["provider_model"] == "model-original"
-    # usage JSON 与 token 两列仍按既有语义落（不因为不再派生四列而丢失）。
-    assert json.loads(row["usage"])["model"] == "model-CHANGED"
+    # usage JSON 与回执同源，且都是定格值（不因为改了后台配置而漂移）。
+    assert json.loads(row["usage"])["model"] == "model-original"
+    assert events[-1].data["model"] == "model-original"
     assert row["error_code"] == ""
 
 
@@ -313,54 +335,81 @@ def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice):
 
 
 def test_db_snapshot_event_reads_back_immutable_fields(alice):
-    """运行时未命中时，DB 兜底快照能读回请求参数、配置快照与技能包身份。"""
-    with session_scope() as session:
-        job = GenerationJobRepository(session).create(
-            alice,
-            "prd",
-            None,
-            doc_kind="prd",
-            request_params={"summary": "重连时还要看得见"},
-            config_snapshot={"active_provider": {"model": "m1"}},
-            skill_refs=[{"name": "s1"}],
+    """运行时未命中时，DB 兜底快照能读回请求参数、配置快照与技能包身份。
+
+    归位后走「登记（不派发）→ `open_stream`」：登记表里没有这支运行时，
+    订阅读的是 DB 兜底路径，正是进程重启后重连的真实场景。
+    """
+    from ticket_support import build_and_register, first_snapshot_event
+
+    registered = build_and_register(
+        owner_id=alice,
+        solution_id=None,
+        kind="prd",
+        request={"summary": "重连时还要看得见"},
+    )
+    # 三块不可变数据由登记落库；这里把它们替换成一条已知的自定义投影，
+    # 证明 DB 兜底快照读的是**库里那一份**，不是运行时内存。
+    with connect() as conn:
+        conn.execute(
+            "UPDATE generation_jobs SET request_params = ?, config_snapshot = ?, "
+            "skill_refs = ? WHERE id = ?",
+            (
+                json.dumps({"summary": "重连时还要看得见"}),
+                json.dumps({"active_provider": {"model": "m1"}}),
+                json.dumps([{"name": "s1"}]),
+                registered.job_id,
+            ),
         )
-        job_id = int(job.id or 0)
+        conn.commit()
 
-    with session_scope() as session:
-        row = GenerationJobRepository(session).get(alice, job_id)
-        assert row is not None
-        data = job_service._db_snapshot_event(row.model_dump()).data  # noqa: SLF001
-
+    data = first_snapshot_event(alice, registered.job_id).data
     assert data["request_params"] == {"summary": "重连时还要看得见"}
     assert data["config_snapshot"] == {"active_provider": {"model": "m1"}}
     assert data["skill_refs"] == [{"name": "s1"}]
     assert data["status"] == "running"
 
 
-def test_db_snapshot_tolerates_corrupt_immutable_json():
+def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
     """新字段里是坏 JSON / 旧行缺字段时，快照逐字段退化为空值，不整条炸掉。"""
-    event = job_service._db_snapshot_event(  # noqa: SLF001 - 测快照构造
-        {
-            "id": 1,
-            "kind": "prd",
-            "status": "failed",
-            "request_params": "{坏掉的 JSON",
-            "config_snapshot": "[1,2,3]",  # 不是对象：也要容错
-            "skill_refs": "{坏掉的 JSON",
-            "usage": "{坏掉的 JSON",
-            "completed_sections": "{坏掉的 JSON",
-            "pending_items": "{坏掉的 JSON",
-        }
+    from ticket_support import build_and_register, first_snapshot_event
+
+    broken = build_and_register(
+        owner_id=alice, solution_id=None, kind="prd", request={}
     )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE generation_jobs SET status = 'failed', "
+            "request_params = '{坏掉的 JSON', config_snapshot = '[1,2,3]', "
+            "skill_refs = '{坏掉的 JSON', usage = '{坏掉的 JSON', "
+            "completed_sections = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' "
+            "WHERE id = ?",
+            (broken.job_id,),
+        )
+        conn.commit()
+
+    event = first_snapshot_event(alice, broken.job_id)
     assert event.data["request_params"] == {}
     assert event.data["config_snapshot"] == {}
     assert event.data["skill_refs"] == []
     assert event.data["status"] == "failed"
 
-    legacy = job_service._db_snapshot_event({"id": 2, "kind": "prd", "status": "completed"})
-    assert legacy.data["request_params"] == {}
-    assert legacy.data["config_snapshot"] == {}
-    assert legacy.data["skill_refs"] == []
+    # 旧行三块新列是空串时同样退化为空容器（登记落库后回填空串复现旧行）。
+    legacy = build_and_register(
+        owner_id=alice, solution_id=None, kind="prd", request={}
+    )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE generation_jobs SET status = 'completed', "
+            "request_params = '', config_snapshot = '', skill_refs = '' WHERE id = ?",
+            (legacy.job_id,),
+        )
+        conn.commit()
+
+    old = first_snapshot_event(alice, legacy.job_id)
+    assert old.data["request_params"] == {}
+    assert old.data["config_snapshot"] == {}
+    assert old.data["skill_refs"] == []
 
 
 # ---------------------------------------------------------------------------

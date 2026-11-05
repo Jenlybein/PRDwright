@@ -33,6 +33,8 @@ from ticket_support import (
     chat_request_from_ticket,
     run_ticket,
     run_ticket_async,
+    run_ticket_events,
+    run_ticket_in_flight,
 )
 
 
@@ -377,38 +379,19 @@ def test_done_carries_clarification_asks_into_the_turn(monkeypatch, client, alic
     这条守的是一个**键名**：对话服务下发的字段叫 `clarification_asks`。
     若收尾时读成 `asks`，不会报任何错，只会每轮都存下空数组——
     界面表现为「选项卡再也没出现过」，而日志里 `asks_count` 明明是 3。
+
+    归位后跨「造单 → 登记 → 派发 → 订阅」：把带选择题的 `done` 作为假事件流在
+    造单时传入（不绕开模型也不摆裸运行时），只断言公开可观察的轮次表。
     """
     owner_id, solution_id = alice
-    _use_llm(monkeypatch, ScriptedLLM(["我先问几个问题。"]))
-
-    from backend.core.contracts import StreamEvent
-
     turns_before = _turns(owner_id, solution_id)
     assert turns_before == []
 
-    # 直接走「建任务 + 手动收尾」，绕开模型：这里只验证事件 → 轮次的映射
-    from backend.services import job_service as js
-
-    payload = {
-        "stage": "requirement",
-        "chat_mode": "continue",
-        "content": "开始吧",
-        "owner_id": owner_id,
-        "solution_id": solution_id,
-    }
-    job_id = js.create_job(
-        owner_id=owner_id, solution_id=solution_id, kind="chat", request=payload
-    )
-    runtime = js.JobRuntime(
-        job_id=job_id,
-        owner_id=owner_id,
-        solution_id=solution_id,
-        kind="chat",
-        request=payload,
-        chat_stage="requirement",
-    )
-    js._apply_event(  # noqa: SLF001 - 这一条测的正是事件到运行时的映射
-        runtime,
+    _, _ = run_ticket_events(
+        owner_id,
+        solution_id,
+        "chat",
+        {"stage": "requirement", "chat_mode": "start", "content": "开始吧"},
         StreamEvent(
             type="done",
             content="",
@@ -421,11 +404,12 @@ def test_done_carries_clarification_asks_into_the_turn(monkeypatch, client, alic
                         "options": [{"label": "A", "title": "运营"}],
                     }
                 ],
-                "tool_calls": [{"id": "call-1", "name": "ask_clarification_questions", "args": {}}],
+                "tool_calls": [
+                    {"id": "call-1", "name": "ask_clarification_questions", "args": {}}
+                ],
             },
         ),
     )
-    js._write_chat_turn(runtime)  # noqa: SLF001
 
     assistant = [t for t in _turns(owner_id, solution_id) if t.role == "assistant"]
     assert len(assistant) == 1
@@ -488,37 +472,39 @@ def test_duplicate_turn_is_idempotent_even_without_the_precheck(alice, monkeypat
     assert count == 1, "只该有一行：幂等写不许留下第二条"
 
 # ---------------------------------------------------------------------------
-# 建任务的边界：没有方案 / 方案不是自己的 / 内存里已有一轮在跑
+# 登记的边界：没有方案 / 方案不是自己的 / 同线程已有一轮在跑
 #
-# 三条都是「不满足前置条件就直接拒」的分支，原先只有库那一路被覆盖；
-# 内存那一路才是权威——进程内的 `_RUNTIMES` 见过一轮时，库里的行可能还没落定。
+# 三条都是「不满足前置条件就直接拒」的分支。归位后全部走公开动作：
+# 「在途」由 `run_ticket_in_flight` 用会卡住的假事件流造出来，不摆内部登记表。
 # ---------------------------------------------------------------------------
 
 
 def test_in_memory_running_turn_blocks_a_second_one(client, alice):
-    """内存里的在途运行时**先于库**被查到：它是权威，库只是重启后的残留证据。
+    """在途任务**先于库**被查到：它是权威，库只是重启后的残留证据。
 
-    只靠库的话，须等第一轮落库才能拦住第二轮；而运行时的登记发生在建任务之后、
-    任何 `await` 之前，正是「协程还没起来、库也没写完」的那个窗口里唯一的判据。
-    少了这一路，同一线程会同时跑两轮，历史被重放一遍。
+    一支第一轮还没跑完（派发了、卡在模型调用里）时再登记第二轮，公开的
+    `register_job_ticket` 必须拒。少了这一路，同一线程会同时跑两轮，历史被重放一遍。
     """
     owner_id, solution_id = alice
-    # 只摆运行时、不建库行：这样唯一可能拦住的只有内存这一路
-    job_service._RUNTIMES[90001] = job_service.JobRuntime(  # noqa: SLF001
-        job_id=90001,
-        owner_id=owner_id,
-        solution_id=solution_id,
-        kind="chat",
-        chat_stage="requirement",
-    )
 
-    with pytest.raises(AppError) as raised:
-        _create(
-            owner_id,
-            solution_id,
-            {"stage": "requirement", "chat_mode": "continue", "content": "第二轮"},
-        )
-    assert "还在生成中" in str(raised.value)
+    def second_registration() -> None:
+        with pytest.raises(AppError) as raised:
+            _create(
+                owner_id,
+                solution_id,
+                {"stage": "requirement", "chat_mode": "continue", "content": "第二轮"},
+            )
+        assert "还在生成中" in str(raised.value)
+
+    run_ticket_in_flight(
+        owner_id,
+        solution_id,
+        "chat",
+        {"stage": "requirement", "chat_mode": "continue", "content": "第一句"},
+        second_registration,
+        StreamEvent(type="chunk", content="第一轮", data={}),
+        reply="第一轮的回复",
+    )
 
 
 def test_chat_job_requires_a_solution(client, alice):
@@ -558,27 +544,21 @@ def test_chat_turn_is_skipped_when_there_is_nothing_to_write(client, alice):
     """没有线程、或正文一个字都没有时不写轮次：空气泡比没有更糟。
 
     这两个早退是「对话只追加」的另一半——追加的前提是**确实有东西**。
+    跨主接缝造出两种「没什么可写」的任务，断言公开可观察的轮次表为空。
     """
     owner_id, solution_id = alice
 
     # ① 不是对话任务（没有线程）→ 不写
-    job_service._write_chat_turn(  # noqa: SLF001 - 测落点本身
-        job_service.JobRuntime(
-            job_id=1, owner_id=owner_id, solution_id=solution_id, kind="prompts"
-        )
-    )
+    run_ticket_events(owner_id, solution_id, "prompts", {}, reply="接口正文")
     assert _turns(owner_id, solution_id) == []
 
     # ② 线程在，但定稿正文全是空白 → 不写
-    job_service._write_chat_turn(  # noqa: SLF001
-        job_service.JobRuntime(
-            job_id=2,
-            owner_id=owner_id,
-            solution_id=solution_id,
-            kind="chat",
-            chat_stage="requirement",
-            final_reply="  \n\t",
-        )
+    run_ticket_events(
+        owner_id,
+        solution_id,
+        "chat",
+        {"stage": "requirement", "chat_mode": "start", "content": "开始吧"},
+        reply="  \n\t",
     )
     assert _turns(owner_id, solution_id) == []
 
@@ -586,17 +566,18 @@ def test_chat_turn_is_skipped_when_there_is_nothing_to_write(client, alice):
 def test_chat_turn_is_skipped_after_the_solution_is_gone(client, alice):
     """方案已删除时对话收尾也不写轮次：写进一个不存在的方案等于造幽灵数据。"""
     owner_id, solution_id = alice
-    assert solution_service.delete_solution(owner_id, solution_id) is True
 
-    job_service._write_chat_turn(  # noqa: SLF001 - 测落点本身
-        job_service.JobRuntime(
-            job_id=3,
-            owner_id=owner_id,
-            solution_id=solution_id,
-            kind="chat",
-            chat_stage="requirement",
-            final_reply="已经说完了",
-        )
+    def delete_while_in_flight() -> None:
+        assert solution_service.delete_solution(owner_id, solution_id) is True
+
+    run_ticket_in_flight(
+        owner_id,
+        solution_id,
+        "chat",
+        {"stage": "requirement", "chat_mode": "start", "content": "开始吧"},
+        delete_while_in_flight,
+        StreamEvent(type="chunk", content="已经说完了", data={}),
+        reply="已经说完了",
     )
     assert _turns(owner_id, solution_id) == []
 
@@ -610,32 +591,32 @@ def test_failed_turn_write_does_not_turn_a_finished_chat_into_a_failure(
     更不该让用户看到「生成失败」而其实内容都在。
     """
     owner_id, solution_id = alice
-    request = {"stage": "requirement", "chat_mode": "continue", "content": "你好"}
-    job_id = _create(owner_id, solution_id, request)
-    runtime = job_service.JobRuntime(
-        job_id=job_id,
-        owner_id=owner_id,
-        solution_id=solution_id,
-        kind="chat",
-        chat_stage="requirement",
-        final_reply="这一轮的回复",
-        # 真实对话运行时里增量也进了整篇缓冲：`_draft` 取的是它，不是 `final_reply`
-        live_buffer="这一轮的回复",
-    )
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("考核点：写轮次时库出错")
 
-    monkeypatch.setattr(ChatTurnRepository, "create", _boom)
+    def break_turn_write() -> None:
+        # 登记阶段也要写一条「用户输入」轮次：补丁必须在登记**之后**才装上，
+        # 否则整笔登记事务会一起回滚，测不到「收尾写轮次失败」这一条。
+        monkeypatch.setattr(ChatTurnRepository, "create", _boom)
 
-    job_service._finalize(runtime, "completed")  # noqa: SLF001 - 收尾是待测行为
+    registered, events = run_ticket_in_flight(
+        owner_id,
+        solution_id,
+        "chat",
+        {"stage": "requirement", "chat_mode": "continue", "content": "你好"},
+        break_turn_write,
+        StreamEvent(type="chunk", content="这一轮的回复", data={}),
+        reply="这一轮的回复",
+    )
 
-    assert runtime.status == "completed"
-    row = job_get(owner_id, job_id)
+    assert events[-1].data["status"] == "completed"
+    row = job_get(owner_id, registered.job_id)
     assert row is not None
     assert row["status"] == "completed"
     assert row["draft_content"] == "这一轮的回复"
-    assert [turn for turn in _turns(owner_id, solution_id) if turn.role == "assistant"] == []
+    # 输入轮次已经落库，只是助手回复「升格成轮次」这一步失败。
+    assert [turn.role for turn in _turns(owner_id, solution_id)] == ["user"]
 
 
 # ---------------------------------------------------------------------------
