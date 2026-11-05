@@ -210,7 +210,181 @@ export function entryModeForDisplay(mode: EntryMode | null): EntryMode {
   return mode ?? UNSELECTED_ENTRY_MODE
 }
 
-/** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`） */
+// ----------------------------------------------------------------------------
+// 入口模式登记表
+//
+// **一行一个入口，七类资料为列**。原来按入口写死的表（进度步骤、三个布尔、完成所需文档、
+// 落页、模式名、返回与改需求文案）都改成「先查这一行」，未迁入的入口回落到旧表。
+// 目标形态见 `docs/architecture/ARCHITECTURE.md` §5.8；本票（#46）只填「完整流程」一行。
+// ----------------------------------------------------------------------------
+
+/** ① 键、组别与卡片文案：入口页上那张卡片怎么说 */
+export interface EntryCardSpec {
+  /** 组别 id（入口页分两组：从零创建 / 导入已有素材） */
+  readonly groupId: string
+  /** 组标题 */
+  readonly groupTitle: string
+  /** 组说明 */
+  readonly groupDescription: string
+  /** 卡片标题（也就是列表里的入口名） */
+  readonly title: string
+  /** 卡片上的一句说明 */
+  readonly description: string
+}
+
+/**
+ * ② 落页：选中入口后落在哪一页，以及两个「回去」动作跳哪一页。
+ *
+ * 三者都随入口变化，所以都在这一列；按**视图状态**选渲染组件的链条不在这里。
+ */
+export interface EntryLandingSpec {
+  /** 选中这个入口后直接进入的界面 */
+  readonly onSelect: ViewState
+  /** 对话页「改需求 / 改描述」回到哪一页 */
+  readonly editRequirements: ViewState
+  /** 审阅页 / 交付页的「返回」回到哪一页（录入页） */
+  readonly backToInput: ViewState
+}
+
+/** ⑥ 文案：列表里的模式名、两个「回去」按钮的文案 */
+export interface EntryCopySpec {
+  /** 方案列表里显示的模式名 */
+  readonly modeLabel: string
+  /** 审阅页 / 交付页「返回录入」按钮的文案 */
+  readonly backLabel: string
+  /** 对话页「改需求」按钮的文案 */
+  readonly editRequirementsLabel: string
+}
+
+/**
+ * ⑦ 录入字段：一个字段的登记项。
+ *
+ * `defaultValue` 是**未填写时的初值**；`countsAsContent` 表示它非空就算「录入页已有内容」
+ * （决定要不要为这份录入建一份方案）。
+ */
+export interface EntryInputField {
+  readonly key: string
+  readonly label: string
+  readonly defaultValue: string
+  readonly countsAsContent: boolean
+}
+
+/** ⑦ 录入字段：这一行的录入内容挂在哪个字段上、落到快照的哪一列、有哪些字段 */
+export interface EntryInputSpec {
+  /** 录入内容在 workflow store 上的持有者 */
+  readonly stateField: 'summary' | 'quickInput' | 'debugPrdText' | 'pastePairInput'
+  /** 快照里承载它的列（`solutions.state.<列>`）；与后端契约同名 */
+  readonly stateColumn: string
+  readonly fields: readonly EntryInputField[]
+}
+
+/**
+ * 一个入口模式的全部资料：七类为列，一行填齐才算一个入口。
+ *
+ * 缺列在 `#48` 会变成当场失败；本票（`#46`）先落地结构并只填「完整流程」一行。
+ */
+export interface EntrySpec {
+  /** ① 键 */
+  readonly mode: EntryMode
+  /** ① 组别与卡片文案 */
+  readonly card: EntryCardSpec
+  /** ② 落页 */
+  readonly landing: EntryLandingSpec
+  /** ③ 进度条步骤（顺序沿用 `STEPS`） */
+  readonly steps: readonly StepId[]
+  /** ④ 录入页是否就在进度条上 */
+  readonly inputPageOnBar: boolean
+  /** ④ 是否需要需求澄清对话 */
+  readonly needsRequirementChat: boolean
+  /** ④ 是否需要审核 / 改写 */
+  readonly needsDocumentReview: boolean
+  /** ⑤ 完成所需文档 */
+  readonly requiredDocs: readonly DocType[]
+  /** ⑥ 文案 */
+  readonly copy: EntryCopySpec
+  /** ⑦ 录入字段 */
+  readonly input: EntryInputSpec
+}
+
+/** 结构化表单的字段：与 `RequirementsForm.vue` 的分节一一对应 */
+const STRUCTURED_INPUT_FIELDS: readonly EntryInputField[] = [
+  { key: 'product_name', label: '产品名称', defaultValue: '', countsAsContent: true },
+  { key: 'product_goal', label: '核心目标', defaultValue: '', countsAsContent: true },
+  { key: 'target_users', label: '目标用户', defaultValue: '', countsAsContent: true },
+  { key: 'platform', label: '平台', defaultValue: '', countsAsContent: true },
+  { key: 'mvp_features', label: 'MVP 功能', defaultValue: '', countsAsContent: true },
+  { key: 'v2_features', label: '未来规划', defaultValue: '', countsAsContent: true },
+  { key: 'ui_pages', label: '页面结构', defaultValue: '', countsAsContent: true },
+  { key: 'key_interactions', label: '关键交互', defaultValue: '', countsAsContent: true },
+  { key: 'tech_auth', label: '用户认证', defaultValue: '', countsAsContent: true },
+  { key: 'tech_storage', label: '数据存储', defaultValue: '', countsAsContent: true },
+  { key: 'tech_frontend', label: '前端技术', defaultValue: '', countsAsContent: true },
+  { key: 'tech_backend', label: '后端技术', defaultValue: '', countsAsContent: true },
+  { key: 'tech_deployment', label: '部署方式', defaultValue: '', countsAsContent: true },
+  { key: 'llm_usage', label: 'LLM 使用说明', defaultValue: '', countsAsContent: true },
+  { key: 'nf_security', label: '安全要求', defaultValue: '', countsAsContent: true },
+  { key: 'nf_performance', label: '性能要求', defaultValue: '', countsAsContent: true },
+  { key: 'nf_availability', label: '可用性要求', defaultValue: '', countsAsContent: true },
+  { key: 'scope_in', label: '在范围内', defaultValue: '', countsAsContent: true },
+  { key: 'scope_out', label: '不在范围内', defaultValue: '', countsAsContent: true },
+]
+
+/**
+ * 入口模式登记表：一行一个入口。
+ *
+ * **未填的入口不是「默认值」，而是「还没迁入」**：查不到这一行的调用方回落到旧表
+ * （`MODE_STEP_IDS` / `REQUIRED_DOCS` / `MODE_LANDING` / `MODE_LABELS` 与几处按模式写死的
+ * if 链）。旧表在 `#47` 四个入口全部迁入后才退役，`#48` 再把回落改成失败。
+ *
+ * 类型写成 `Partial<Record<EntryMode, EntrySpec>>` 就是为了让「只填一部分」在类型上是合法的：
+ * 缺行是一个**已知的中间状态**，不是一个被默认值悄悄补上的洞。
+ */
+export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
+  structured: {
+    mode: 'structured',
+    card: {
+      groupId: 'from-scratch',
+      groupTitle: '从零创建 PRD',
+      groupDescription: '还没有任何材料，从这里把需求说清楚。',
+      title: '完整流程',
+      description: '逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。',
+    },
+    landing: {
+      onSelect: 'form',
+      // 对话页「改需求」回到结构化表单；审阅页「返回」回到对话页
+      editRequirements: 'form',
+      backToInput: 'chatting',
+    },
+    steps: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
+    inputPageOnBar: true,
+    needsRequirementChat: true,
+    needsDocumentReview: true,
+    requiredDocs: ['prd', 'api-docs', 'prompts'],
+    copy: {
+      modeLabel: '完整流程',
+      backLabel: '返回对话',
+      editRequirementsLabel: '改需求',
+    },
+    input: {
+      // 结构化表单整份落在快照的 `summary` 列（`RequirementsSummary` 对象）
+      stateField: 'summary',
+      stateColumn: 'summary',
+      fields: STRUCTURED_INPUT_FIELDS,
+    },
+  },
+}
+
+/**
+ * 查这一行登记表；未迁入的入口返回 `undefined`，由调用方回落到旧表。
+ *
+ * 未选择（`null`）先经 {@link entryModeForDisplay} 归一成完整流程再查——「未选择」是
+ * 合法状态，不是缺行。未知入口键的失败路径属于 `#48` 的完整性校验，不在这里。
+ */
+export function entrySpecFor(mode: EntryMode | null): EntrySpec | undefined {
+  return ENTRY_REGISTRY[entryModeForDisplay(mode)]
+}
+
+/** 各入口模式在进度条上展示的步骤（顺序沿用 `STEPS`）；旧表，未迁入的入口仍用它 */
 const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
   // 完整流程：六步齐全（最后一步是交付）
   structured: ['form', 'chatting', 'review-prd', 'review-api-docs', 'review-prompts', 'done'],
@@ -236,6 +410,8 @@ const MODE_STEP_IDS: Record<EntryMode, readonly StepId[]> = {
  * 得多（多给一条点进去只能自说自话的线程，比少给一条更糟）。
  */
 export function hasRequirementChat(mode: EntryMode | null): boolean {
+  const spec = entrySpecFor(mode)
+  if (spec) return spec.needsRequirementChat
   return entryModeForDisplay(mode) === 'structured'
 }
 
@@ -250,6 +426,8 @@ export function hasRequirementChat(mode: EntryMode | null): boolean {
  * 漏配的代价只是多等一会儿；反过来则悄悄把产出质量降了一档。
  */
 export function hasDocumentReview(mode: EntryMode | null): boolean {
+  const spec = entrySpecFor(mode)
+  if (spec) return spec.needsDocumentReview
   return entryModeForDisplay(mode) !== 'prd-quick'
 }
 
@@ -263,6 +441,8 @@ export function hasDocumentReview(mode: EntryMode | null): boolean {
  * 因此审阅页必须保留一个「返回」按钮，否则用户改不了贴进来的材料，直接成了死路。
  */
 export function inputPageOnBar(mode: EntryMode | null): boolean {
+  const spec = entrySpecFor(mode)
+  if (spec) return spec.inputPageOnBar
   const display = entryModeForDisplay(mode)
   return display === 'structured' || display === 'prd-quick'
 }
@@ -272,7 +452,8 @@ export function inputPageOnBar(mode: EntryMode | null): boolean {
  * `mode` 为 `null`（还没选入口 / 旧快照）时经 {@link entryModeForDisplay} 按完整流程处理。
  */
 export function stepsForMode(mode: EntryMode | null): readonly Step[] {
-  const ids = MODE_STEP_IDS[entryModeForDisplay(mode)]
+  const spec = entrySpecFor(mode)
+  const ids = spec ? spec.steps : MODE_STEP_IDS[entryModeForDisplay(mode)]
   return STEPS.filter((step) => ids.includes(step.id))
 }
 
@@ -526,7 +707,9 @@ export function hasRequiredDocuments(
     'api-docs': docs.apiDocs,
     prompts: docs.prompts,
   }
-  return REQUIRED_DOCS[entryModeForDisplay(mode)].every((type) => byType[type].trim() !== '')
+  const spec = entrySpecFor(mode)
+  const required = spec ? spec.requiredDocs : REQUIRED_DOCS[entryModeForDisplay(mode)]
+  return required.every((type) => byType[type].trim() !== '')
 }
 
 /** 判断任意值是否为合法聊天消息 */

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { ChatMessage, RequirementsSummary, SessionDataV2 } from '@/types'
 import {
+  ENTRY_REGISTRY,
   canGeneratePrdFrom,
   chatStageForDocument,
   docKindOfGeneratingState,
@@ -615,5 +616,106 @@ describe('未选择入口（null）按完整流程的展示口径', () => {
     // 只齐一份时，两条口径都判「未完成」
     const oneDoc = { prd: '# prd', apiDocs: '', prompts: '' }
     expect(hasRequiredDocuments(null, oneDoc)).toBe(false)
+  })
+})
+
+/**
+ * 入口模式登记表的第一行。
+ *
+ * 登记表**一行一个入口、七类资料为列**。这一步只填「完整流程」一行，其余三个入口仍走
+ * 旧路（旧表还在，见下一个 describe）。这里的期望值取自票面与架构文档的口径，
+ * 不是把实现再算一遍：六步、三份文档、要澄清、要审核、落结构化表单、列表名「完整流程」。
+ */
+describe('入口模式登记表：完整流程一行', () => {
+  it('只填了「完整流程」一行，其余三个入口尚未迁入', () => {
+    expect(ENTRY_REGISTRY.structured).toBeDefined()
+    // 本票只迁一行：另外三个入口必须仍是「缺行」，由旧表兜住，行为一点不变
+    expect(ENTRY_REGISTRY['prd-quick']).toBeUndefined()
+    expect(ENTRY_REGISTRY['prompt-debug']).toBeUndefined()
+    expect(ENTRY_REGISTRY['prd-and-api-paste']).toBeUndefined()
+  })
+
+  it('七类资料为列，每一列都填了「完整流程」的答案', () => {
+    const spec = ENTRY_REGISTRY.structured
+    if (!spec) throw new Error('登记表缺「完整流程」一行')
+
+    // ① 键、组别与卡片文案：与入口页上那张卡一致
+    expect(spec.mode).toBe('structured')
+    expect(spec.card.groupId).toBe('from-scratch')
+    expect(spec.card.groupTitle).toBe('从零创建 PRD')
+    expect(spec.card.groupDescription).toBe('还没有任何材料，从这里把需求说清楚。')
+    expect(spec.card.title).toBe('完整流程')
+    expect(spec.card.description).toBe('逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。')
+
+    // ② 落页：选中落在结构化表单；「改需求」回表单；审阅页「返回」回对话页
+    expect(spec.landing.onSelect).toBe('form')
+    expect(spec.landing.editRequirements).toBe('form')
+    expect(spec.landing.backToInput).toBe('chatting')
+
+    // ③ 进度条步骤：六步齐全
+    expect(spec.steps).toEqual([
+      'form',
+      'chatting',
+      'review-prd',
+      'review-api-docs',
+      'review-prompts',
+      'done',
+    ])
+
+    // ④ 三个布尔：录入页在进度条上、要需求澄清、要审核改写
+    expect(spec.inputPageOnBar).toBe(true)
+    expect(spec.needsRequirementChat).toBe(true)
+    expect(spec.needsDocumentReview).toBe(true)
+
+    // ⑤ 完成所需文档：三份齐备
+    expect(spec.requiredDocs).toEqual(['prd', 'api-docs', 'prompts'])
+
+    // ⑥ 文案：列表模式名、返回按钮、改需求按钮
+    expect(spec.copy.modeLabel).toBe('完整流程')
+    expect(spec.copy.backLabel).toBe('返回对话')
+    expect(spec.copy.editRequirementsLabel).toBe('改需求')
+
+    // ⑦ 录入字段：结构化表单落在快照的 `summary` 这一列，字段非空才算「有内容」
+    expect(spec.input.stateField).toBe('summary')
+    expect(spec.input.stateColumn).toBe('summary')
+    expect(spec.input.fields.map((field) => field.key)).toEqual([
+      'product_name',
+      'product_goal',
+      'target_users',
+      'platform',
+      'mvp_features',
+      'v2_features',
+      'ui_pages',
+      'key_interactions',
+      'tech_auth',
+      'tech_storage',
+      'tech_frontend',
+      'tech_backend',
+      'tech_deployment',
+      'llm_usage',
+      'nf_security',
+      'nf_performance',
+      'nf_availability',
+      'scope_in',
+      'scope_out',
+    ])
+    expect(spec.input.fields.every((field) => field.countsAsContent)).toBe(true)
+    expect(spec.input.fields.find((field) => field.key === 'product_name')?.label).toBe('产品名称')
+  })
+
+  it('结构化入口的问询都从这一行取答案（与旧表口径一致，行为不变）', () => {
+    const spec = ENTRY_REGISTRY.structured
+    if (!spec) throw new Error('登记表缺「完整流程」一行')
+    // 这一条是接缝：登记表真的被问询读到，而不是写了一份没人用的数据
+    expect(stepsForMode('structured').map((step) => step.id)).toEqual([...spec.steps])
+    expect(hasRequirementChat('structured')).toBe(spec.needsRequirementChat)
+    expect(hasDocumentReview('structured')).toBe(spec.needsDocumentReview)
+    expect(inputPageOnBar('structured')).toBe(spec.inputPageOnBar)
+    expect(
+      hasRequiredDocuments('structured', { prd: '# prd', apiDocs: '# api', prompts: '# prompts' }),
+    ).toBe(true)
+    expect(hasRequiredDocuments('structured', { prd: '# prd', apiDocs: '', prompts: '' })).toBe(
+      false,
+    )
   })
 })
