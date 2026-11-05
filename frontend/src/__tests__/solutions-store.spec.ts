@@ -398,17 +398,17 @@ describe('标题规则', () => {
 })
 
 // ============================================================================
-// 列表里的模式名
+// 列表里的模式名与阶段名
 // ============================================================================
 
 /**
  * 侧栏 / 列表里显示的模式名。
  *
  * ⚠️ 这一条只能断言在 store 层：`solutions.modeLabel` 目前全仓没有组件消费它
- * （侧栏没有展示入口模式的那一栏），因此「四个入口都对」这件事没有屏幕落点可断言。
+ * （侧栏只显示阶段名，没有展示入口模式的那一栏），因此「四个入口都对」这件事没有屏幕落点可断言。
  * 期望值写死成用户会看到的字样本身，不跟实现走——改错一个字就该红。
  */
-describe('列表模式名', () => {
+describe('列表模式名与阶段名', () => {
   it('四个入口各有自己的模式名，「未选择」按完整流程展示', () => {
     expect(solutions.modeLabel('structured')).toBe('完整流程')
     expect(solutions.modeLabel('prd-quick')).toBe('快捷流程')
@@ -416,6 +416,18 @@ describe('列表模式名', () => {
     expect(solutions.modeLabel('prd-and-api-paste')).toBe('导入 PRD + 接口文档')
     // 后端把「未选择」存成空串：它与 null 共用同一个出口，按完整流程展示
     expect(solutions.modeLabel('')).toBe('完整流程')
+  })
+
+  it('阶段名按视图状态给，四个入口的录入页各有自己的说法', () => {
+    // 阶段名由「视图状态」决定（全局映射，不随入口模式分叉）：入口不同，落的录入页不同，
+    // 侧栏里读到的阶段名也就不同。这一条钉住四个入口各会看到的那一格。
+    expect(solutions.stageLabel('form')).toBe('填写需求')
+    expect(solutions.stageLabel('prd-quick')).toBe('描述需求')
+    expect(solutions.stageLabel('prompt-debug')).toBe('粘贴 PRD')
+    expect(solutions.stageLabel('prd-and-api-paste')).toBe('粘贴 PRD 与接口文档')
+    // 收尾与陌生的阶段名
+    expect(solutions.stageLabel('done')).toBe('已完成')
+    expect(solutions.stageLabel('一个没见过的阶段')).toBe('进行中')
   })
 })
 
