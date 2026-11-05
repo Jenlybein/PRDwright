@@ -242,7 +242,7 @@ def test_writer_review_switch_is_live():
 def test_task_snapshot_does_not_drift():
     """任务开始后改配置，这次任务读到的仍是派发那一刻的快照。
 
-    `dispatch` 取一份快照，`run_job` 用 `use_config` 冻进上下文。少了它，
+    「造单」定格一份配置/供应商快照，后台任务用 `use_config` 冻进上下文。少了它，
     一次 20 分钟的生成跑到一半就会换参数——表现为章节乱序或正文重复。
     """
     rc.invalidate()

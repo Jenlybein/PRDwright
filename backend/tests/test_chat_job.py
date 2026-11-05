@@ -26,7 +26,7 @@ from backend.core.engine import session_scope
 from backend.core.errors import AppError
 from backend.core.models import ChatTurn
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.services import conversation_service, job_service, solution_service
+from backend.services import conversation_service, job_service, job_runtime, solution_service
 from fakes import ScriptedLLM
 from ticket_support import (
     build_and_register,
@@ -41,11 +41,11 @@ from ticket_support import (
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """清空进程内运行时与任务集合，避免用例互相污染。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ def _create(owner_id: int, solution_id: int, request: dict) -> int:
     """造单 → 登记一条对话任务（不派发），返回 job_id。
 
     只造单不派发的边界用例（单写者、方案归属等）走公开正门的登记语义，
-    不再借旧入口 `create_job`。
+    不再借任何旧入口。
     """
     return build_and_register(
         owner_id=owner_id,

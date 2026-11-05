@@ -40,11 +40,13 @@ from backend.services import (
     document_store,
     job_drain,
     job_service,
+    job_runtime,
     llm_factory,
     prd_section_writer,
     solution_service,
 )
 from backend.services.job_bus import job_bus
+from backend.services.job_snapshot import parse_usage
 from backend.services.job_ticket import start_registered_job
 from backend.services.prd_section_writer import PRD_SECTIONS
 from fakes import ScriptedLLM
@@ -109,13 +111,13 @@ def clean_job_state():
     排空标志一并复位：它是**进程内单例**，上一个用例排空完之后若不复位，
     下一个用例的就绪探针会继承那个 503——那是「测试顺序污染」，不是被测行为。
     """
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     job_drain.drain_controller.reset()
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     job_drain.drain_controller.reset()
 
@@ -461,7 +463,7 @@ def test_new_job_supersedes_previous_running(alice):
     """登记：同一 owner + solution + kind 至多一个 running：登记前旧 running 被取代。
 
     跨公开动作断言「顶替库行」：两次 `build_and_register` 之后旧行 `failed +
-    SUPERSEDED`、新行 running。只造单不派发的旧入口 `create_job` 不再承担这条语义。
+    SUPERSEDED`、新行 running。这条语义由「登记」承担，不再有第二个建任务入口。
     """
     old = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
     new = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
@@ -1962,12 +1964,12 @@ def test_usage_parsing_tolerates_legacy_and_broken_values():
     这一列早年恒为 `NULL`、将来也可能改结构；读不出来时正确反应是「这条任务没有
     用量可展示」，而不是让整个任务列表 500。
     """
-    assert job_service.parse_usage(None) is None
-    assert job_service.parse_usage("") is None
-    assert job_service.parse_usage({"total_calls": 3}) == {"total_calls": 3}
-    assert job_service.parse_usage('{"total_calls": 4}') == {"total_calls": 4}
-    assert job_service.parse_usage("[1, 2]") is None
-    assert job_service.parse_usage("{坏掉的 JSON") is None
+    assert parse_usage(None) is None
+    assert parse_usage("") is None
+    assert parse_usage({"total_calls": 3}) == {"total_calls": 3}
+    assert parse_usage('{"total_calls": 4}') == {"total_calls": 4}
+    assert parse_usage("[1, 2]") is None
+    assert parse_usage("{坏掉的 JSON") is None
 
 
 def test_db_snapshot_tolerates_corrupt_columns(alice):

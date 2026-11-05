@@ -15,9 +15,9 @@
 是造单时传入的**运行时环境**；「技能包身份」是造单时算好的**数据**随单走；
 「方案是否仍存在」是登记与收尾的**当场查询**，不冻结在单上。
 
-本模块是新旧并存期的**新入口**：`job_service.create_job` / `dispatch` 两个旧名字
-原样保留、行为逐项不变（见 `job_service.py`），任何调用方都不必改。本票不删旧名、
-不改调用方；`parse_usage` / `JobRuntime` 两个仍被生产使用的名字也未动。
+本模块是生成任务的公开正门：造单、登记、派发按新职责命名，旧入口与再导出
+已删、不设兼容期；`parse_usage` 归 `job_snapshot`、`JobRuntime` 归 `job_runtime`。
+包外只经三步公开动作与 `job_service` 的有限动作进入，内部实现名不越过接口。
 
 为什么两张单都是 frozen
 -----------------------
@@ -32,9 +32,10 @@ from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
-from backend.services import job_service
+from backend.services import job_service_impl
+from backend.services.job_product_kind import _target_product_kind
 
-# 「生成事件流来源」：环境侧给的函数，签名与 `job_service._build_event_stream` 一致。
+# 「生成事件流来源」：环境侧给的函数，签名与 `job_service_impl._build_event_stream` 一致。
 EventStreamSource = Callable[[str, Mapping[str, Any]], Any]
 
 
@@ -138,11 +139,11 @@ def build_job_ticket(
     from backend.core import runtime_config as rc
 
     frozen_config = config if config is not None else rc.get_runtime_config()
-    projection = job_service._immutable_projection(  # noqa: SLF001 - 复用 #34 的定格
+    projection = job_service_impl._immutable_projection(  # noqa: SLF001 - 包内互引
         kind, params, config=frozen_config
     )
     if event_stream_source is None:
-        event_stream_source = job_service._build_event_stream  # noqa: SLF001 - 生产真值
+        event_stream_source = job_service_impl._build_event_stream  # noqa: SLF001 - 生产真值
 
     stage = str(params.get("stage") or "") if kind == "chat" else ""
     tool_result = params.get("tool_result")
@@ -159,7 +160,7 @@ def build_job_ticket(
         runtime_config=frozen_config,
         # 输入指纹是路由层算好的**数据**（仅 prd 有值），登记时随单落列。
         input_fingerprint=input_fingerprint,
-        doc_kind=job_service._target_product_kind(kind, params) or "",  # noqa: SLF001
+        doc_kind=_target_product_kind(kind, params) or "",
         chat_stage=stage,
         chat_mode=str(params.get("chat_mode") or "continue"),
         chat_content=str(params.get("content") or ""),
@@ -172,7 +173,7 @@ def register_job_ticket(ticket: JobTicket) -> RegisteredJobTicket:
 
     事务边界沿用 `session_scope()`：中途失败时单①丢弃、不产生单②、不派发、
     不留半截 running 行。内存里旧运行时的顶替标记在事务**提交之后**才置，
-    失败时不会留下「协程停了、库里还在跑」的错位（与旧入口同一口径）。
+    失败时不会留下「协程停了、库里还在跑」的错位（与登记事务同一口径）。
     """
     from backend.services.job_registration import register_in_transaction
 

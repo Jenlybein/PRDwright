@@ -15,8 +15,8 @@ docstring 里提到 `_RUNTIMES`、夹具里的 `_RUNTIMES.clear()` 与「空登�
 - 夹具清理：`_RUNTIMES.clear()` / `_TASKS.clear()` / `_RUNTIMES.pop(...)`；
 - 「没有任务被派发」的空登记表断言：`_RUNTIMES == {}`。
 
-旧入口 `create_job` / `dispatch` 不在本守卫范围内：它们是新旧并存期的**公开旧入口**，
-`test_job_ticket_three_steps.py` 的两条对拍用例刻意留到票 #40 删旧入口时一并处理。
+旧入口已随票 #40 删除，不设兼容期；本守卫只管「用例不摆内部状态」，
+主接缝覆盖由 `test_cleanup_dead_code.py` 的覆盖守卫兜底。
 """
 
 from __future__ import annotations

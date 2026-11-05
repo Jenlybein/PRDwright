@@ -4,7 +4,7 @@
 
 | 接缝 | 断言的可观察行为 |
 | --- | --- |
-| `POST /api/jobs` | 只造一次单、登记一次、派发一次；旧 `create_job` / `dispatch` 两个入口不再被生产调用 |
+| `POST /api/jobs` | 只造一次单、登记一次、派发一次；旧入口已删、不设兼容期 |
 | `GET /api/jobs/{id}/stream` | 任务真的被派发，首帧仍是 snapshot（流式事件形状不变） |
 | `generation_jobs` 行 | 输入指纹（仅 prd）、`doc_kind`、请求参数投影都还在 |
 | `POST /api/jobs`（chat + tool_result） | 嵌套结构能一路走完登记与轮次落库（深还原的生产路径） |
@@ -27,7 +27,7 @@ from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.services import (
     conversation_service,
     document_service,
-    job_service,
+    job_runtime,
     job_ticket,
     llm_factory,
     prd_section_writer,
@@ -52,12 +52,12 @@ def _alice_id() -> int:
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """清空进程内运行时、任务集合与总线订阅，避免用例互相污染。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
 
 
@@ -92,8 +92,8 @@ def _fake_conversation_service(monkeypatch, pieces: list[str]) -> None:
 
 
 def _spy_three_steps(monkeypatch) -> dict[str, int]:
-    """给三步公开动作装计数器（仍委托原实现），并拦住两个旧入口。"""
-    calls = {"build": 0, "register": 0, "start": 0, "legacy": 0}
+    """给三步公开动作装计数器（仍委托原实现）。"""
+    calls = {"build": 0, "register": 0, "start": 0}
     original = {
         name: getattr(job_ticket, name)
         for name in ("build_job_ticket", "register_job_ticket", "start_registered_job")
@@ -111,15 +111,9 @@ def _spy_three_steps(monkeypatch) -> dict[str, int]:
         calls["start"] += 1
         return original["start_registered_job"](*args, **kwargs)
 
-    def legacy(*args, **kwargs):  # noqa: ANN002, ANN003
-        calls["legacy"] += 1
-        raise AssertionError("生产路由不该再把同一份参数交给旧的两个入口")
-
     monkeypatch.setattr(job_ticket, "build_job_ticket", build)
     monkeypatch.setattr(job_ticket, "register_job_ticket", register_ticket)
     monkeypatch.setattr(job_ticket, "start_registered_job", start)
-    monkeypatch.setattr(job_service, "create_job", legacy)
-    monkeypatch.setattr(job_service, "dispatch", legacy)
     return calls
 
 
@@ -146,10 +140,10 @@ def _seed_solution(client, title: str = "路由方案") -> int:
 
 
 def test_production_route_builds_exactly_one_ticket(client, monkeypatch):
-    """POST /api/jobs 只造一张单①、登记一次、派发一次；两个旧入口一次都不碰。
+    """POST /api/jobs 只造一张单①、登记一次、派发一次。
 
-    旧形状把同一份摊平参数同时交给 `create_job` 与 `dispatch`（后者还会被
-    chat 路径原地改写）。切到三步之后，参数只在造单时交出一次，回执形状不变。
+    旧形状把同一份摊平参数同时交给两个旧入口（后者还会被 chat 路径原地改写）；
+    切到三步之后参数只在造单时交出一次，回执形状不变。
     """
     register(client)
     _fake_document_service(monkeypatch, ScriptedLLM(["章节正文"]))
@@ -164,7 +158,7 @@ def test_production_route_builds_exactly_one_ticket(client, monkeypatch):
     body = response.json()
     assert body["status"] == "running"
     assert body["job_id"] > 0
-    assert calls == {"build": 1, "register": 1, "start": 1, "legacy": 0}
+    assert calls == {"build": 1, "register": 1, "start": 1}
 
     # 任务真的被派发：订阅流首帧仍是 snapshot（流式事件形状不变）。
     stream = client.get(f"/api/jobs/{body['job_id']}/stream")
@@ -263,7 +257,7 @@ def test_production_route_still_rejects_invalid_payload_before_building(client, 
 
     assert response.status_code == 400
     assert response.json()["code"] == "INVALID_REQUEST"
-    assert calls == {"build": 0, "register": 0, "start": 0, "legacy": 0}
+    assert calls == {"build": 0, "register": 0, "start": 0}
 
 
 def test_production_auto_clarify_route_keeps_pending_sections_in_the_prompt(

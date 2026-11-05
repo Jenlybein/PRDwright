@@ -1,12 +1,12 @@
 """任务单的登记事务与派发实现（票 #36）。
 
-本模块是 `job_ticket.py` 三步公开动作的内部实现：`build_job_ticket` 不碰库，
-`register_job_ticket` 把「当场查方案 / 顶替双标记 / 落库投影 / 写 chat 输入轮次」
-收进**一个** `session_scope()`，`start_registered_job` 只认单②。
+本模块是「造单 → 登记 → 派发」三步的内部实现，不设兼容期、不保留旧入口；
+`build_job_ticket` 不碰库，`register_job_ticket` 把「当场查方案 / 顶替双标记 /
+落库投影 / 写 chat 输入轮次」收进**一个** `session_scope()`，`start_registered_job`
+只认单②。
 
-新旧并存：`job_service.create_job` / `dispatch` 两个旧入口原样保留、行为逐项不变；
-本模块不修改它们，也不改任何调用方。派发复用与旧入口同一套 `JobRuntime` /
-`run_job` / `_RUNTIMES` / `_TASKS`，因此 SSE 事件种类与编码、重连先快照后 live、
+派发直接复用同一包内的 `JobRuntime` / `run_job` / `_RUNTIMES` / `_TASKS`
+（包内互引私有名合法），因此 SSE 事件种类与编码、重连先快照后 live、
 失败不覆写、被取代与已取消分开、排空顺序与 30 秒等既有语义一条都不变。
 """
 
@@ -24,7 +24,9 @@ from backend.core.request_context import current_request_id
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import job_service
+from backend.services import job_service_impl
+from backend.services.job_service_impl import run_job
+from backend.services.job_runtime import _RUNTIMES, _TASKS, JobRuntime
 from backend.services.job_ticket import (
     JobTicket,
     RegisteredJobTicket,
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
     """把单①登记成单②：一个事务完成全部落库动作，产出新的不可变对象。
 
-    顺序与旧入口对齐：先校验 chat 线程/并发、当场查方案是否仍存在；文档任务
+    顺序按新三步行事：先校验 chat 线程/并发、当场查方案是否仍存在；文档任务
     在同一事务里 `supersede_active` + `create`，chat 任务在同一事务里 `create`
     + 写输入轮次。`GenerationJobRepository.create` 沿用 #34 的签名，
     `request_params` / `config_snapshot` / `skill_refs` / 供应商四列一次写全。
@@ -56,7 +58,7 @@ def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
         # 「方案是否仍存在」是**登记当场查询**：与库写在同一事务里，不冻结在单上。
         _check_solution_exists(session, ticket)
         if ticket.kind == "chat":
-            # 单写者：内存权威 + 库残留，与旧入口同一判据。
+            # 单写者：内存权威 + 库残留，与登记的准入判据一致。
             _check_chat_single_writer(session, ticket)
         if ticket.kind != "chat":
             # 库行顶替：与内存 `_mark_superseded` 是同一判据，两处不能分叉。
@@ -102,8 +104,8 @@ def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
             )
 
     if ticket.kind != "chat":
-        # 事务提交之后才置内存标记：与旧 `create_job` 的「落库之后才置」同一口径。
-        job_service._mark_superseded(  # noqa: SLF001 - 包内互引私有名合法
+        # 事务提交之后才置内存标记：与登记事务「落库之后才置」同一口径。
+        job_service_impl._mark_superseded(  # noqa: SLF001 - 包内互引私有名合法
             ticket.owner_id, solution_id=ticket.solution_id, kind=ticket.kind
         )
 
@@ -123,7 +125,7 @@ def _check_solution_exists(session: Any, ticket: JobTicket) -> None:
 
 
 def _validate_chat(ticket: JobTicket) -> None:
-    """chat 线程与方案归属的准入校验（与旧 `_create_chat_job` 逐项一致）。"""
+    """chat 线程与方案归属的准入校验（登记阶段逐项完成）。"""
     if not is_valid_stage(ticket.chat_stage):
         raise AppError(
             ErrorCode.INVALID_REQUEST,
@@ -135,8 +137,8 @@ def _validate_chat(ticket: JobTicket) -> None:
 
 
 def _check_chat_single_writer(session: Any, ticket: JobTicket) -> None:
-    """单写者：同一线程同时只允许一轮在跑（内存权威 + 库残留，与旧入口一致）。"""
-    for runtime in job_service._RUNTIMES.values():  # noqa: SLF001 - 包内互引
+    """单写者：同一线程同时只允许一轮在跑（内存权威 + 库残留）。"""
+    for runtime in _RUNTIMES.values():  # noqa: SLF001 - 包内互引
         if (
             runtime.owner_id == ticket.owner_id
             and runtime.solution_id == ticket.solution_id
@@ -165,8 +167,6 @@ def dispatch_registered(ticket: RegisteredJobTicket) -> None:
     kind / protocol / model / config_id / name 全部取自单②里那份定格值，
     派发侧**不再**自行 `get_runtime_config()` 各取一次；生成中途改后台配置不漂移。
     """
-    from backend.services.job_runtime import _RUNTIMES, _TASKS
-
     config = ticket.runtime_config
     # 计量器四格取深还原后的普通容器：与单②同源，且下游不必认识只读映射。
     active = thaw_object(ticket.config_snapshot).get("active_provider") or {}
@@ -178,7 +178,7 @@ def dispatch_registered(ticket: RegisteredJobTicket) -> None:
         name=str(active.get("provider_name") or ""),
     )
     request = as_event_request(ticket)
-    runtime = job_service.JobRuntime(
+    runtime = JobRuntime(
         job_id=ticket.job_id,
         owner_id=ticket.owner_id,
         solution_id=ticket.solution_id,
@@ -195,7 +195,7 @@ def dispatch_registered(ticket: RegisteredJobTicket) -> None:
 
     # 复用唯一的 `run_job` 循环（事件应用 / 同步广播 / 合并写 / 收尾 / finally
     # 关总线与摘运行时都只有一份实现），只把造单定格的事件流来源递进去。
-    task = asyncio.create_task(job_service.run_job(runtime, ticket.event_stream_source))
+    task = asyncio.create_task(run_job(runtime, ticket.event_stream_source))
     runtime.task = task
     # 先登记运行时再登记任务：两者都在 create_task 之后、任何 await 之前完成，
     # 因此「任务真正开始跑」之前运行时一定已可见（重连/订阅不会落空）。

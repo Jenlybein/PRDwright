@@ -7,7 +7,7 @@
 | 接缝 | 断言的可观察行为 |
 | --- | --- |
 | `GenerationJobRepository.create` | 建任务后立刻读得到三块不可变数据 |
-| `job_service.create_job` | 生产入口把同一份请求/配置/技能包定格进 DB 行 |
+| `build_job_ticket` → `register_job_ticket` | 造单定格、登记落库：请求/配置/技能包一次写进 DB 行 |
 | `job_finalize._finalize` | 收尾后供应商四列与建任务时定格的值一致 |
 | `_db_snapshot_event` | 运行时未命中时 DB 兜底快照读得到新字段，坏数据不炸 |
 | `head_revision` | 迁移链 head 正确、旧库升级后 `alembic_version` 为真源 |
@@ -30,7 +30,7 @@ from dbsupport import connect
 from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services import job_service
+from backend.services import job_service, job_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypa
 
     monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
     monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
-    job_service._RUNTIMES.clear()  # noqa: SLF001 - 清掉别的用例留下的运行时
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001 - 清掉别的用例留下的运行时
     job_bus._subscribers.clear()  # noqa: SLF001
 
     registered, events = run_ticket(

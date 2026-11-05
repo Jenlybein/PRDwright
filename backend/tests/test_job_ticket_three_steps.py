@@ -8,7 +8,6 @@
 | `register_job_ticket` | 一个事务：当场查方案、顶替双标记、落库投影、写对话输入轮次 |
 | `start_registered_job` | 只认后一张单；事件形状、终态、回执与旧形状一致 |
 | `open_stream` | 订阅先快照后 live，事件种类与编码不变 |
-| `create_job` / `dispatch` | 旧入口仍可用、行为逐项不变（同一 dict 原地补全） |
 
 假环境在造单时传入（生产真值 / 测试假值），不开测试专用私有缝。
 不碰 SSE 事件种类与编码、`[DONE]`、单 worker + 进程内运行时、重连先快照后 live、
@@ -31,7 +30,7 @@ from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services import conversation_service, document_service, job_service, solution_service
+from backend.services import conversation_service, document_service, job_service, job_runtime, solution_service
 from backend.services.job_bus import job_bus
 from fakes import ScriptedLLM
 
@@ -58,12 +57,12 @@ def alice(client):
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """清空进程内运行时、任务集合与总线订阅，避免用例互相污染。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
 
 
@@ -249,7 +248,7 @@ def test_dispatch_only_accepts_second_ticket(alice, monkeypatch):
     with pytest.raises(TypeError):
         _ticket_module().start_registered_job(draft)  # type: ignore[arg-type]
     assert _row_count() == 0
-    assert job_service._RUNTIMES == {}  # noqa: SLF001 - 只断言「没有任务被派发」
+    assert job_runtime._RUNTIMES == {}  # noqa: SLF001 - 只断言「没有任务被派发」
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +581,7 @@ def test_registration_failure_leaves_no_half_running_row(client, alice, monkeypa
         _ticket_module().register_job_ticket(draft)
 
     assert _row_count() == 0  # 没有半截 running 行
-    assert job_service._RUNTIMES == {}  # noqa: SLF001 - 没有任务被派发
+    assert job_runtime._RUNTIMES == {}  # noqa: SLF001 - 没有任务被派发
     with connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM chat_turns").fetchone()[0] == 0
 
@@ -649,75 +648,3 @@ def test_registration_is_one_transaction_for_supersede_and_create(alice, monkeyp
     assert _row_count() == 1
 
 
-# ---------------------------------------------------------------------------
-# 八、旧入口行为逐项不变
-#
-# 这两条是新旧并存期的「旧入口事件序列对拍」用例，刻意以 `create_job` + `dispatch`
-# 为对照面，验证新三步的事件形状 / 终态与旧入口逐项相同。票 #39 不删、不改写成新
-# 入口（那样就失去对拍意义）；票 #40 删除旧入口时应连同这两条一起处理。
-# ---------------------------------------------------------------------------
-
-
-def test_legacy_entry_still_mutates_shared_request_dict(client, alice, monkeypatch):
-    """旧 `create_job` + `dispatch` 仍可用：chat 的四个派生键照样原地注入共享 dict。"""
-    solution_id = _seed_solution(client)
-    _use_chat_llm(monkeypatch, ["旧入口照跑"])
-    payload = {
-        "stage": "requirement",
-        "chat_mode": "continue",
-        "content": "旧入口",
-        "form_data": {},
-    }
-
-    async def scenario():
-        job_id = job_service.create_job(
-            owner_id=alice, solution_id=solution_id, kind="chat", request=payload
-        )
-        job_service.dispatch(
-            job_id,
-            owner_id=alice,
-            solution_id=solution_id,
-            kind="chat",
-            request=payload,
-        )
-        return job_id, [event async for event in job_service.open_stream(alice, job_id)]
-
-    job_id, events = asyncio.run(scenario())
-    assert {"input_turn_id", "job_id", "owner_id", "solution_id"} <= payload.keys()
-    assert payload["job_id"] == job_id
-    assert payload["owner_id"] == alice
-    assert payload["solution_id"] == solution_id
-    assert payload["input_turn_id"] > 0
-    assert any(event.type == "done" for event in events)
-    assert events[-1].type == "run_summary"
-    assert _raw(job_id)["status"] == "completed"
-
-
-def test_legacy_document_entry_matches_new_shape_events(alice, monkeypatch):
-    """同一最小任务分别走旧入口与新三步，事件类型序列与终态逐项相同。"""
-    _use_prd_llm(monkeypatch, ["同一段正文"])
-
-    async def legacy():
-        request = {"requirements": "逐项相同", "product_name": "对照"}
-        job_id = job_service.create_job(
-            owner_id=alice, solution_id=None, kind="prd", request=request
-        )
-        job_service.dispatch(
-            job_id,
-            owner_id=alice,
-            solution_id=None,
-            kind="prd",
-            request=request,
-        )
-        return [
-            event.type
-            async for event in job_service.open_stream(alice, job_id)
-        ]
-
-    legacy_types = asyncio.run(legacy())
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    _use_prd_llm(monkeypatch, ["同一段正文"])
-    _, _, new_events = _end_to_end(alice, {"requirements": "逐项相同", "product_name": "对照"})
-
-    assert [event.type for event in new_events] == legacy_types
-    assert new_events[-1].data["status"] == "completed"

@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 from conftest import register, users
 
-from backend.services import document_service, document_store, job_service, llm_factory, prd_section_writer
+from backend.services import document_service, document_store, job_service, job_runtime, llm_factory, prd_section_writer
 from backend.services.job_bus import job_bus
 from backend.services.pending_items import BEGIN_SENTINEL, END_SENTINEL
 from fakes import ScriptedLLM
@@ -47,12 +47,12 @@ def no_real_llm(monkeypatch):
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """每个用例前后清空进程内运行时与任务集合，避免用例互相污染。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
 
 

@@ -30,6 +30,7 @@ from backend.services import (
     conversation_service,
     document_service,
     job_service,
+    job_runtime,
     llm_factory,
     prd_section_writer,
 )
@@ -59,12 +60,12 @@ def alice(client):
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """清空进程内运行时、任务集合与总线订阅，避免用例互相污染。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
 
 

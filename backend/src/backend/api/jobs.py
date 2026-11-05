@@ -33,6 +33,7 @@ from backend.services import job_service, job_ticket, quota_service
 from backend.services.auth_service import User
 from backend.services.job_drain import drain_controller
 from backend.services.job_fingerprint import compute_input_fingerprint
+from backend.services.job_snapshot import parse_usage
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -139,7 +140,7 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
 
 def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
     """把 DB 行（含未对外暴露的列）收敛成 `JobStatus`（不含 draft_content）。"""
-    usage = job_service.parse_usage(row.get("usage"))
+    usage = parse_usage(row.get("usage"))
     return schemas.JobStatus(
         id=int(row.get("id", 0)),
         kind=str(row.get("kind", "")),

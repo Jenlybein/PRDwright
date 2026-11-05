@@ -33,6 +33,7 @@ from backend.core.request_context import reset_request_id, set_request_id
 from backend.services import (
     document_service,
     job_service,
+    job_runtime,
     llm_factory,
     prd_section_writer,
 )
@@ -74,11 +75,11 @@ def no_real_llm(monkeypatch):
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """用例前后清空进程内运行时，避免串扰。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
 
 
 def _rows() -> list[dict]:

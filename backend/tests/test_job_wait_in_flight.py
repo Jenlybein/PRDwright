@@ -28,7 +28,7 @@ import pytest
 from conftest import register, users
 
 from backend.core.contracts import StreamEvent
-from backend.services import job_drain, job_service, job_ticket, job_wait
+from backend.services import job_drain, job_service, job_runtime, job_ticket, job_wait
 from backend.services.job_bus import job_bus
 from dbsupport import connect
 
@@ -55,13 +55,13 @@ def alice(client):
 @pytest.fixture(autouse=True)
 def clean_job_state():
     """每个用例前后清空进程内运行时、任务集合、总线与排空标志。"""
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     job_drain.drain_controller.reset()
     yield
-    job_service._RUNTIMES.clear()  # noqa: SLF001
-    job_service._TASKS.clear()  # noqa: SLF001
+    job_runtime._RUNTIMES.clear()  # noqa: SLF001
+    job_runtime._TASKS.clear()  # noqa: SLF001
     job_bus._subscribers.clear()  # noqa: SLF001
     job_drain.drain_controller.reset()
 
