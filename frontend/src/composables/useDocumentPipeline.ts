@@ -49,7 +49,7 @@ import {
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
-  entrySpecFor,
+  entrySpecForDisplay,
   fromBackendJobKind,
   generatingStateFor,
   jobDocumentKind,
@@ -1344,48 +1344,24 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /**
    * 回到本次入口的录入页，并清空文档生成相关的错误与流式残留。
-   * 返回目标随入口模式而变：完整流程回对话，快捷入口回描述，调试入口回 PRD。
+   * 返回目标随入口模式而变，答案在登记表的 `landing.backToInput` 列：
+   * 完整流程回对话、快捷流程回描述、两个导入入口回各自的粘贴页。
    *
    * ⚠️ 两个从零创建的入口（完整流程 / 快捷流程）**不再渲染**这个按钮——它们的录入页
    * 就在进度条上，点第 1 步即可（见 `inputPageOnBar`）。这里仍保留正确的落点，
    * 因为「回到我的录入页」是一个独立于按钮是否存在的动作。
    */
   function backToInput(): void {
-    // 先查登记表这一行；未迁入的入口仍回落到按模式写死的落点
-    const spec = entrySpecFor(entryMode.value)
-    if (spec) {
-      goTo(spec.landing.backToInput)
-      return
-    }
-    if (entryMode.value === 'prd-quick') {
-      goTo('prd-quick')
-      return
-    }
-    if (entryMode.value === 'prompt-debug') {
-      goTo('prompt-debug')
-      return
-    }
-    if (entryMode.value === 'prd-and-api-paste') {
-      goTo('prd-and-api-paste')
-      return
-    }
-    goTo('chatting')
+    goTo(entrySpecForDisplay(entryMode.value).landing.backToInput)
   }
 
   /**
-   * 「返回」按钮的文案；与 `backToInput` 的落点保持一一对应。
+   * 「返回」按钮的文案；与 `backToInput` 的落点保持一一对应（登记表的 `copy.backLabel` 列）。
    *
    * 只为两个**导入**入口而存在：它们的录入页不在进度条上，审阅页 / 交付页必须留一个
-   * 出口。两个从零创建的入口不渲染这个按钮（`hideBack`），因此这里也不再给它们文案。
+   * 出口。两个从零创建的入口不渲染这个按钮（`hideBack`），因此那里也给的是「返回对话」。
    */
-  const backLabel = computed(() => {
-    // 登记表这一行优先；未迁入的入口仍回落到按模式写死的文案
-    const spec = entrySpecFor(entryMode.value)
-    if (spec) return spec.copy.backLabel
-    if (entryMode.value === 'prompt-debug') return '返回 PRD'
-    if (entryMode.value === 'prd-and-api-paste') return '返回素材'
-    return '返回对话'
-  })
+  const backLabel = computed(() => entrySpecForDisplay(entryMode.value).copy.backLabel)
 
   /**
    * 结构化表单的返回落点。

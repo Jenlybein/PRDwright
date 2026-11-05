@@ -33,7 +33,7 @@ import {
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
-  entrySpecFor,
+  entrySpecForDisplay,
   fromBackendJobKind,
   generatingStateFor,
   hasDocumentReview,
@@ -781,31 +781,24 @@ async function handleStartConversation(value: RequirementsSummary): Promise<void
 }
 
 /**
- * 对话页「改需求」的落点随入口模式而变：完整流程回结构化表单，快捷流程回极简描述页。
+ * 对话页「改需求」的落点随入口模式而变，答案在登记表的 `landing.editRequirements` 列：
+ * 完整流程回结构化表单，快捷流程回极简描述页，两个导入入口回各自的粘贴页。
  *
- * 两处的按钮文案也一并对齐（`editRequirementsLabel`）——同一个「返回」按钮把用户送到
- * 一个完全不同的页面，却还写着「改需求」，会让人以为表单被弄丢了。
+ * 落点与按钮文案（`editRequirementsLabel`）同出一行——同一个「返回」按钮把用户送到一个完全
+ * 不同的页面，却还写着「改需求」，会让人以为表单被弄丢了。
  *
  * ⚠️ 快捷流程现在**没有**需求澄清线程（见 `chatTabs`），所以这个分支正常情况下走不到；
  * 留着是为了**旧快照**：在这次改动之前存的快捷流程方案里可能有需求对话，恢复后那条线程
  * 仍会渲染，此时「改需求」必须回到极简录入页而不是结构化表单。
  */
 function handleEditRequirements(): void {
-  // 登记表这一行优先；未迁入的入口仍回落到按模式写死的落点
-  const spec = entrySpecFor(store.entryMode)
-  if (spec) {
-    goTo(spec.landing.editRequirements)
-    return
-  }
-  goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+  goTo(entrySpecForDisplay(store.entryMode).landing.editRequirements)
 }
 
-/** 「改需求」按钮的文案；与 `handleEditRequirements` 的落点一一对应 */
-const editRequirementsLabel = computed(() => {
-  const spec = entrySpecFor(store.entryMode)
-  if (spec) return spec.copy.editRequirementsLabel
-  return store.entryMode === 'prd-quick' ? '改描述' : '改需求'
-})
+/** 「改需求」按钮的文案；与 `handleEditRequirements` 的落点一一对应（同一行的 `copy` 列） */
+const editRequirementsLabel = computed(
+  () => entrySpecForDisplay(store.entryMode).copy.editRequirementsLabel,
+)
 
 /**
  * 对话页展示哪几条线程。
@@ -866,13 +859,13 @@ function handleRestart(): void {
  * 点击进度条中已到达的步骤，跳回对应阶段查看之前的内容。
  *
  * 步骤 id 与同名阶段一一对应（`StepId` 是 `ViewState` 的子集），**只有第 1 步例外**：
- * 「描述产品」是两个从零创建入口共用的一格，实际录入页由入口模式决定
- * （结构化表单 / 或一段话）。不映射的话，快捷流程点它会被送到结构化表单——
- * 而这一格正是「删掉『返回描述』按钮」的替代品，送错地方就等于没给退路。
+ * 「描述产品」是两个从零创建入口共用的一格，实际录入页由入口模式决定。落点取登记表的
+ * `landing.editRequirements`（它正是「回到这一条的录入页」那一列）。不映射的话，快捷流程
+ * 点它会被送到结构化表单——而这一格正是「删掉『返回描述』按钮」的替代品，送错地方就等于没给退路。
  */
 function handleStepClick(stepId: StepId): void {
   if (stepId === 'form') {
-    goTo(store.entryMode === 'prd-quick' ? 'prd-quick' : 'form')
+    goTo(entrySpecForDisplay(store.entryMode).landing.editRequirements)
     return
   }
   goTo(stepId)
