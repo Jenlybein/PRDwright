@@ -1040,10 +1040,11 @@ export interface CreateJobPayload {
   kind: DocKind
   solutionId?: number | null
   /**
-   * 本次任务**作用在**哪一份产物上；只有 `optimize` 需要。
+   * 本次任务**作用在**哪一份产物上；`optimize` / `clarify` / `auto-clarify` 三种就地动作都要带。
    *
-   * `kind` 回答「做了什么」（生成 / 优化），`docKind` 回答「改的是哪一份」——
+   * `kind` 回答「做了什么」（生成 / 优化 / 改写），`docKind` 回答「改的是哪一份」——
    * 后端要落库就得知道后者。漏传时后端**不会**猜一个默认值，而是拒绝落库。
+   * 取值是**前端口径**（`api-docs`），下发给后端时由 `toBackendKind` 转成 `api_docs`。
    */
   docKind?: DocumentKind
   summary?: RequirementsSummary | null
@@ -1136,7 +1137,10 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     ;({ data } = await http.post<{ job_id: number; status: string }>('/api/jobs', {
     kind: toBackendKind(payload.kind),
     solution_id: payload.solutionId ?? null,
-    doc_kind: payload.docKind ?? null,
+    // `docKind` 与 `kind` 一样要跨命名口径。漏转时后端拿到的是 `api-docs`，
+    // Pydantic 直接 422（`doc_kind：Input should be 'prd', 'api_docs' or 'prompts'`）——
+    // 表现就是「接口文档上点任何就地动作（AI 自行澄清 / 按澄清改写 / AI 优化）都失败」。
+    doc_kind: payload.docKind ? toBackendKind(payload.docKind) : null,
     summary: payload.summary ?? null,
     requirements: payload.requirements ?? '',
     product_name: payload.productName ?? '',

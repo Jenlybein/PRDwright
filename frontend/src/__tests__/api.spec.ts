@@ -418,6 +418,30 @@ describe('生成任务接口（jobs）', () => {
     expect(created).toEqual({ jobId: 11, status: 'running' })
   })
 
+  it('createJob 把 docKind 也转成后端下划线口径（api-docs → api_docs）', async () => {
+    // `docKind` 是「改的是哪一份」，与 `kind` 一样要跨命名口径。漏转时后端读到的
+    // 是 `api-docs`，Pydantic 直接 422（`Input should be 'prd', 'api_docs' or 'prompts'`），
+    // 于是「AI 自行澄清」在接口文档上一点就失败。
+    const post = vi
+      .spyOn(http, 'post')
+      .mockResolvedValue({ data: { job_id: 12, status: 'running' } } as never)
+
+    await createJob({
+      kind: 'auto-clarify',
+      solutionId: 3,
+      docKind: 'api-docs',
+      document: '# 接口文档',
+      pendingItems: [
+        { id: 'p-1', question: '分页参数怎么定？', sections: [], decider: '', importance: 'P0' },
+      ],
+    })
+
+    const [, body] = post.mock.calls[0] ?? []
+    const payload = body as Record<string, unknown>
+    expect(payload.kind).toBe('auto_clarify')
+    expect(payload.doc_kind).toBe('api_docs')
+  })
+
   it('readJobStream 以 GET 订阅任务流，带凭据、带中止信号且不带 Content-Type', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       streamResponse([
