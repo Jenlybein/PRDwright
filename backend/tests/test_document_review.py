@@ -19,6 +19,7 @@ from langchain_core.messages.ai import AIMessageChunk
 
 from backend.services.document_review import (
     DocumentReviewResult,
+    ProductContext,
     ReviewOutcome,
     review_whole_document,
     rewrite_whole_document_messages,
@@ -86,11 +87,13 @@ def _drain(
             async for event in stream_review_and_rewrite(
                 llm,
                 document=document,
-                writing_rules="规范",
-                requirements="PRD",
-                doc_type="api_doc",
-                kind="api_docs",
-                label="接口文档",
+                context=ProductContext(
+                    doc_kind="api_docs",
+                    doc_type="api_doc",
+                    label="接口文档",
+                    writing_rules="规范",
+                    upstream="PRD",
+                ),
                 outcome=holder,
                 review_llm=review_llm,
                 section_titles=section_titles,

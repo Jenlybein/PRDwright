@@ -138,6 +138,38 @@ def format_freeform_requirements(requirements: str, product_name: str = "") -> s
     )
 
 
+def format_requirements_text(
+    summary: dict[str, Any] | None,
+    requirements: str = "",
+    product_name: str = "",
+) -> str:
+    """把两种需求输入归一成**给模型看的需求文本**；两者都空时返回空串。
+
+    **唯一优先级：结构化摘要 > 自由文本**，且两处都先渲染再交给提示词。
+
+    为什么必须只此一处：同一件事（「需求到底是什么」）此前有三份实现，优先级还相反——
+    按方案解析的那份把自由文本排在前面（它拿去做输入指纹），分章撰写与重审那份把摘要
+    排在前面，旧整篇通道那份干脆不渲染自由文本。于是「同一份方案，生成时用的需求」
+    与「指纹记下的需求」可以不是一回事，而两份都自称权威。
+
+    摘要优先的依据：摘要才是用户逐字段确认过的结构化输入；自由文本是快捷入口的替代
+    形态，两者同时存在时（先快捷填过、后又走了完整流程）以摘要为准。
+
+    Args:
+        summary: 结构化需求摘要；空 dict / None 视为没有。
+        requirements: 自由文本需求（快捷入口那一段话）。
+        product_name: 快捷入口单独填的产品名，只进自由文本那份渲染。
+
+    Returns:
+        可整段放进提示词的需求文本；两者都空时为空串（降级文案由调用方给）。
+    """
+    if summary:
+        return format_summary_as_requirements(summary)
+    if (requirements or "").strip():
+        return format_freeform_requirements(requirements, product_name)
+    return ""
+
+
 def format_conversation(history: list[dict[str, Any]] | None) -> str:
     """把对话历史（`{role, content}` 列表）拼成易读的 Markdown 文本。
 

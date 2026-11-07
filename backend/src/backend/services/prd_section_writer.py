@@ -93,8 +93,7 @@ from backend.services.prd_skill import (
     build_prd_system_prompt,
     format_conversation,
     format_field_contract,
-    format_freeform_requirements,
-    format_summary_as_requirements,
+    format_requirements_text,
     load_prd_skill_artifacts,
 )
 from backend.services.doc_skeleton import (
@@ -1189,14 +1188,12 @@ def _requirements_text(
 ) -> str:
     """把两种需求输入归一成**给模型看的需求文本**；两者都空时返回空串。
 
-    生成与重审共用这一处：重审要核对「有没有编造」，它拿到的需求文本必须与当初撰写
-    时**同一份**，否则「有据 / 无据」的判定会跟着入口形态漂。
+    唯一实现在 `prd_skill.format_requirements_text`：生成、重审、旧整篇通道与输入指纹
+    都调它，因此「同一份方案用哪份需求」只有一个答案（摘要优先，其次自由文本）。
+    重审要核对「有没有编造」，它拿到的需求文本必须与当初撰写时**同一份**，否则
+    「有据 / 无据」的判定会跟着入口形态漂。
     """
-    if summary:
-        return format_summary_as_requirements(summary)
-    if requirements.strip():
-        return format_freeform_requirements(requirements, product_name)
-    return ""
+    return format_requirements_text(summary, requirements, product_name)
 
 
 def _review_requirements_text(
