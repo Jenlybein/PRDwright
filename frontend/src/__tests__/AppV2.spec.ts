@@ -9,6 +9,7 @@ import AppBadge from '../components/ui/AppBadge.vue'
 import ChatStage from '../components/stages/ChatStage.vue'
 import EntryStage from '../components/stages/EntryStage.vue'
 import ReviewStage from '../components/stages/ReviewStage.vue'
+import ReviewConclusionPanel from '../components/ui/ReviewConclusionPanel.vue'
 import * as api from '../services/api'
 import * as authService from '../services/authService'
 import * as documentApi from '../services/documentService'
@@ -682,6 +683,8 @@ function makeDocumentRecord(
     runSummary,
     pendingItems,
     review,
+    // 「这一版上次重审没跑成」的时间：落库事实（US3），默认没有
+    reviewFailedAt: null,
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
     versionNo: 0,
@@ -3188,6 +3191,7 @@ describe('AppV2 的版本预览与删除', () => {
       content: '# 第二版正文\n\n内容',
       pendingItems: [],
       runSummary: null,
+      reviewFailedAt: null,
       updatedAt: '2026-10-16T00:00:00',
       ...overrides,
     }
@@ -3776,9 +3780,13 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     })
 
     const wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
-    // 重审失败不写结论（C-R1）：后端那份记录里这一版仍然没有 review
+    // 重审失败不写结论（C-R1），但**失败本身是落库事实**（US3）：后端这版记录
+    // 没有 review，却带着 review_failed_at
     vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
-      makeDocumentRecord('api-docs', FIXED, null, [], null),
+      {
+        ...makeDocumentRecord('api-docs', FIXED, null, [], null),
+        reviewFailedAt: '2026-11-08T00:00:00',
+      },
     ])
 
     await clickButton(wrapper, '修复')
@@ -3886,3 +3894,73 @@ describe('AppV2 错误边界：外壳接缝上失败也不静默', () => {
     }
   })
 })
+
+/**
+ * 审核失败是**落库事实**（US3）：刷新之后仍然读得到。
+ *
+ * 上面的四态用例守的是「状态与按钮」；这一条守的是「失败活过了刷新」——重新挂载
+ * （= 刷新 / 换设备）之后，文档记录里的 `review_failed_at` 让面板仍旧是「审核失败」，
+ * 而不是退化成「未审核」。行为断言一律跨应用外壳：真 router + 读文档记录 + 屏幕结果。
+ */
+describe('AppV2 刷新后的审核失败', () => {
+  /** 一份「有问题」的旧结论：失败态必须把它盖掉，而不是并排展示 */
+  const staleConclusion: ReviewConclusion = {
+    kind: 'prd',
+    verdict: 'revise',
+    summary: '2 章完成，2 个待处理问题',
+    issues: [
+      { severity: 'high', detail: '出现了输入中没有的性能指标', sectionTitle: '产品概述' },
+    ],
+    rewritten: false,
+    failedSections: [],
+    reviewedAt: '2026-10-13T00:00:00',
+  }
+
+  /** 打开停在 PRD 审阅页的方案，PRD 记录带上给定的审核记录 */
+  async function mountPrdRecord(
+    review: ReviewConclusion | null,
+    reviewFailedAt: string | null,
+  ): Promise<VueWrapper> {
+    const record: DocumentRecord = {
+      ...makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n内容'),
+      review,
+      reviewFailedAt,
+    }
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [record])
+    await flushPromises()
+    return wrapper
+  }
+
+  /** 面板里文案等于 `text` 的那个按钮 */
+  function panelButton(wrapper: VueWrapper, text: string): DOMWrapper<Element> {
+    const panel = wrapper.findComponent(ReviewConclusionPanel)
+    expect(panel.exists(), '审阅页应当渲染结论面板').toBe(true)
+    const button = panel.findAll('button').find((item) => item.text().trim() === text)
+    if (!button) throw new Error(`未找到面板按钮：${text}`)
+    return button
+  }
+
+  it('失败时间落库 → 刷新后仍显示「审核失败（时间）」，且不渲染旧结论', async () => {
+    const wrapper = await mountPrdRecord(
+      staleConclusion,
+      new Date(Date.now() - 2 * 60_000).toISOString(),
+    )
+
+    expect(wrapper.text()).toContain('审核失败')
+    expect(wrapper.text()).toContain('失败于')
+    // 旧结论是上一次的事实，摆在「审核失败」下面会被读成本次结果（B4）
+    expect(wrapper.text()).not.toContain('出现了输入中没有的性能指标')
+    expect(wrapper.text()).not.toContain('2 章完成，2 个待处理问题')
+    // 失败态可补审一次，「修复」仍不可点
+    expect((panelButton(wrapper, '重新审核').element as HTMLButtonElement).disabled).toBe(false)
+    expect((panelButton(wrapper, '修复').element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('旧数据（没有失败时间）读回来仍是「未审核」：失败不能凭空出现', async () => {
+    const wrapper = await mountPrdRecord(null, null)
+
+    expect(wrapper.text()).toContain('未审核')
+    expect(wrapper.text()).not.toContain('失败于')
+  })
+})
+

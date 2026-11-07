@@ -32,6 +32,14 @@ function isCollapsed(wrapper: ReturnType<typeof mount>): boolean {
   return !body(wrapper).exists()
 }
 
+/**
+ * 纯渲染的嗅觉级用例。
+ *
+ * 只回答「给这份面板一组 props，它画出来对不对」：徽标、问题条数、折叠、追溯信息。
+ * **状态判定与按钮可用性不在这里**——那是行为，断言在应用外壳（`AppV2.spec.ts`：
+ * 真 router + 点按钮 + 屏幕结果）。组件直挂 props 的用例看不出「点下去到底发生了什么」，
+ * 也测不到「状态从哪来」。
+ */
 describe('ReviewConclusionPanel', () => {
   it('默认收起：结论可见，明细不占地方', () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
@@ -133,10 +141,15 @@ describe('ReviewConclusionPanel', () => {
     // 失败不写结论（C-R1），所以面板上留着的是**上一次**那条。把它逐条列在
     // 「审核失败」下面，读起来就是「本次审出来的结果」——最误导人的一种排法。
     const wrapper = mount(ReviewConclusionPanel, {
-      props: { review: review(), failed: true },
+      props: {
+        review: review(),
+        reviewFailedAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+      },
     })
 
     expect(wrapper.text()).toContain('审核失败')
+    // 失败时间来自落库的 `reviewFailedAt`（US3）：刷新后仍然有
+    expect(wrapper.text()).toContain('失败于')
     // 收起态：连问题条数都不该来自上一次那条结论
     expect(wrapper.text()).not.toContain('2 个待处理问题')
 
@@ -160,7 +173,7 @@ describe('ReviewConclusionPanel', () => {
 
   it('没有审核时间就不编一个：未审核 / 审核失败时不显示「审于」', async () => {
     const wrapper = mount(ReviewConclusionPanel, {
-      props: { review: null, failed: true, versionNo: 2 },
+      props: { review: null, reviewFailedAt: '2026-10-13T00:00:00', versionNo: 2 },
     })
 
     expect(wrapper.text()).toContain('第 2 版')

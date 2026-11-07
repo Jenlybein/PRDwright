@@ -70,6 +70,15 @@ class JobBus:
             except asyncio.QueueFull:  # pragma: no cover
                 continue
 
+    def reset_for_tests(self) -> None:
+        """清空全部订阅表（**测试夹具专用**）。
+
+        生产代码没有调用点：进程内单例本来就没有「全清」这个业务动作。留一个公开口子
+        是为了让用例不必去摸 `_subscribers` 这个私有名——与 `core.engine.reset_engine`
+        / `core.logging_setup.reset_logging` 同一套写法。
+        """
+        self._subscribers.clear()
+
 
 # 模块级单例：进程内唯一的任务事件总线
 job_bus = JobBus()

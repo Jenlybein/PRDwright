@@ -139,3 +139,14 @@ class JobRuntime:
     chat_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     # 被用户中途停止：收尾时保留已生成的部分，并给轮次打上标记
     chat_interrupted: bool = False
+
+
+def reset_for_tests() -> None:
+    """清空进程内运行时表与保活集合（**测试夹具专用**）。
+
+    生产代码没有调用点：正常收尾已经会把运行时 `pop` 掉（见 `run_job` 的 finally）。
+    留一个公开口子是为了让用例不必去摸 `_RUNTIMES` / `_TASKS` 这两个私有名——与
+    `core.engine.reset_engine` / `core.logging_setup.reset_logging` 同一套写法。
+    """
+    _RUNTIMES.clear()
+    _TASKS.clear()

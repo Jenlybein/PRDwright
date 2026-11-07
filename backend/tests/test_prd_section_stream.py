@@ -53,8 +53,11 @@ class FakeLLM:
         self._reviews = list(review_replies or [])
         self.section_calls = 0
         self.review_calls = 0
-        # 每次调用的**用户消息**：供「改写提示词里装了什么 / 没装什么」这类断言
+        # 每次调用的**用户消息**：供「改写提示词里装了什么 / 没装什么」这类断言。
+        # 按角色分开记，用例不必再靠「提示词里有没有某个章节标题」来筛消息。
         self.user_messages: list[str] = []
+        self.write_user_messages: list[str] = []
+        self.review_user_messages: list[str] = []
 
     def _pick(self, pool: list[str | BaseException], count: int) -> str | BaseException:
         """取第 `count` 条回复；预设用完后一直复用最后一条。"""
@@ -66,9 +69,11 @@ class FakeLLM:
         system = str(messages[0].content)
         self.user_messages.append(str(messages[-1].content))
         if REVIEW_MARKER in system:
+            self.review_user_messages.append(str(messages[-1].content))
             text = self._pick(self._reviews, self.review_calls)
             self.review_calls += 1
         else:
+            self.write_user_messages.append(str(messages[-1].content))
             text = self._pick(self._sections, self.section_calls)
             self.section_calls += 1
         # 预设成异常时在**吐第一个字之前**失败：这正是「调用失败」分支的形态
@@ -384,8 +389,39 @@ _SUMMARY: dict[str, Any] = {
     "ui_pages": [{"name": "问卷列表", "modules": ["筛选"], "interactions": ["点击新建"]}],
     "technical_constraints": ["后端用 Python", "前端用 Vue", "部署在云服务器"],
 }
-# 审核提示词里才有的那一节标题，用来把审核消息从撰写消息里挑出来
-_REVIEW_SECTION_MARKER = "## 四、待审章节"
+
+
+class FactAwareReviewLLM:
+    """审核**只看手里的事实**：两条需求事实都在就判通过，缺一条就判「有问题」。
+
+    这样「审核有没有拿到完整需求」从**提示词原文断言**变成**结论断言**：提示词怎么措辞、
+    章节标题怎么写都不影响这条用例，而「审核看到的材料被骨架化成了空壳」必然让它变红。
+
+    撰写 / 审核按调用**奇偶**分流：串行链路里每章都是「先撰写、再审核」，因此偶数次是
+    撰写、奇数次是审核。不读提示词里的任何原文。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.review_calls = 0
+
+    async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
+        self.calls += 1
+        if self.calls % 2 == 1:
+            yield AIMessageChunk(content="本章正文内容")
+            return
+        self.review_calls += 1
+        user = str(messages[-1].content)
+        has_facts = "问卷星Plus" in user and "后端用 Python" in user
+        if has_facts:
+            yield AIMessageChunk(content=json.dumps({"verdict": "pass", "issues": []}))
+            return
+        yield AIMessageChunk(
+            content=json.dumps(
+                {"verdict": "revise", "issues": [{"severity": "high", "detail": "输入里没有"}]},
+                ensure_ascii=False,
+            )
+        )
 
 
 def _collect_summary(writer: PrdSectionWriter) -> list[StreamEvent]:
@@ -405,17 +441,22 @@ def test_review_sees_the_whole_requirements_not_a_skeleton() -> None:
     那时审核对着空材料判定，凡正文里出现具体内容都符合「输入里没有的技术栈」这条
     high 定义——真实存在的事实被整片误判成编造。
 
-    提示词那边已经写了「先取证再判定」，但取证的前提是**手里真有材料**。
+    提示词那边已经写了「先取证再判定」，但取证的前提是**手里真有材料**。断言落在
+    **结论**上：假模型只在两条事实都到手时判通过，因此 verdict=pass 就是外部证据。
     """
-    pass_reply = json.dumps({"verdict": "pass", "issues": []}, ensure_ascii=False)
-    llm = FakeLLM(section_replies=["本章正文内容"], review_replies=[pass_reply])
-    _collect_summary(PrdSectionWriter(llm=llm, review_enabled=True))
 
-    review_messages = [msg for msg in llm.user_messages if _REVIEW_SECTION_MARKER in msg]
-    assert len(review_messages) == len(PRD_SECTIONS), "审核调用数不对"
-    for message in review_messages:
-        assert "问卷星Plus" in message, "审核没拿到需求输入里的产品名"
-        assert "后端用 Python" in message, "审核没拿到需求输入里的技术约束"
+    async def drain() -> tuple[list[StreamEvent], FactAwareReviewLLM]:
+        llm = FactAwareReviewLLM()
+        writer = PrdSectionWriter(llm=llm, review_enabled=True)
+        return [event async for event in writer.stream(summary=_SUMMARY)], llm
+
+    events, llm = asyncio.run(drain())
+    conclusions = [event for event in events if event.type == "review"]
+    assert len(conclusions) == 1, "PRD 的结论是汇总的一条"
+    assert llm.review_calls == len(PRD_SECTIONS), "每章都审了一次"
+    assert conclusions[0].data["verdict"] == "pass", (
+        "审核没拿到需求输入里的事实（产品名 / 技术约束），把有据的内容判成了编造"
+    )
 
     # 对照：骨架化会把这些事实全部丢掉——写出来是为了让这条用例在退化时必然变红
     from backend.services.doc_skeleton import skeletonize
@@ -433,7 +474,7 @@ def test_generation_prompt_carries_compacted_field_contract() -> None:
     llm = FakeLLM(section_replies=["本章正文内容"])
     _collect_summary(PrdSectionWriter(llm=llm, review_enabled=False))
 
-    write_messages = [msg for msg in llm.user_messages if _REVIEW_SECTION_MARKER not in msg]
+    write_messages = llm.write_user_messages
     assert write_messages
     for message in write_messages:
         assert "必填（缺失即按「缺失信息处理」标注待确认）" in message
