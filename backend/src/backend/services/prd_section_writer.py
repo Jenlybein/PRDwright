@@ -115,9 +115,11 @@ from backend.services.prompts import (
     PRD_SECTION_REWRITE_PROMPT,
 )
 from backend.services.review_defects import (
+    defects_count_text,
     finalize_verdict,
     issues_text as defects_text,
     normalize_issues,
+    render_category_rules,
     render_pending_section,
 )
 from backend.services.stream_reply import astream_text, collect_reply, error_event
@@ -339,10 +341,12 @@ class SectionReview:
         )
 
     def issues_text(self) -> str:
-        """把问题列表渲染成提示词里的编号清单（带上类别与 `where` 定位）。"""
-        if not self.issues:
-            return "（审核未给出具体问题）"
-        return defects_text(self.issues)
+        """把问题列表渲染成提示词里的编号清单（`[severity] where：detail`）。
+
+        空清单的占位句是这条链路的既有口径；`detail` 不截断（章节链路的正文本来就短），
+        实现在 `review_defects.issues_text` 一处（与整篇链路共用）。
+        """
+        return defects_text(self.issues, empty_text="（审核未给出具体问题）")
 
     def summary(self) -> str:
         """给前端一句话展示的改写原因：优先取第一条 high 问题。"""
@@ -1125,6 +1129,8 @@ class PrdSectionWriter:
             section_heading=section.heading,
             section_text=section_text,
             section_titles=section_titles,
+            # 五类判据与整篇审核同一份生成点（见 `review_defects.render_category_rules`）
+            category_rules=render_category_rules(),
             pending_section=pending_section,
         )
         return _build_messages(PRD_SECTION_REVIEW_SYSTEM_PROMPT, user_content)
@@ -1322,6 +1328,10 @@ def build_prd_conclusion(
     结果是同一份 PRD 的结论会随「走的哪条路」变一句措辞，而结论是要落库、要给人看
     的一条记录。
 
+    总结**按类别计数**（`6 章已审，缺陷 3 处（编造 1 · 结构不符 2）`）：它显示在
+    「文档缺陷」面板里，术语表在那一处禁用「问题」——那是待确认清单的词，指「未决」；
+    结论里的每一条都是缺陷，不能被读成「还缺什么」。
+
     Args:
         total: 本次 PRD 的章节总数。
         issues: 汇总后的逐条问题（用 `section_issue` 生成）。
@@ -1334,14 +1344,17 @@ def build_prd_conclusion(
     failed = list(failed_sections or [])
     completed = total - len(failed)
     verdict = "revise" if issues else "pass"
-    conclusion = f"{completed} 章完成，{len(issues)} 个待处理问题"
+    summary = f"{completed} 章已审，缺陷 {len(issues)} 处"
+    counts = defects_count_text(issues)
+    if counts:
+        summary = f"{summary}（{counts}）"
     return StreamEvent(
         type="review",
-        content=conclusion,
+        content=summary,
         data=review_data(
             "prd",
             verdict=verdict,
-            summary=conclusion,
+            summary=summary,
             issues=issues,
             rewritten=rewritten,
             failed_sections=failed,

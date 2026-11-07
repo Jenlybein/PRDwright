@@ -56,6 +56,7 @@ from backend.services.review_defects import (
     finalize_verdict,
     issues_text as defects_text,
     normalize_issues,
+    render_category_rules,
     render_pending_list,
     render_pending_section,
 )
@@ -145,17 +146,26 @@ class DocumentReviewResult:
         return False
 
     def issues_text(self) -> str:
-        """把问题清单排成给改写提示词用的编号列表（带上类别与 `where` 定位）。"""
-        if not self.issues:
-            return "（审核未给出逐条问题）"
-        return defects_text(self.issues, clip=_clip)
+        """把问题清单排成给改写提示词用的编号列表（`[severity] where：detail`）。
+
+        空清单的占位句与 `detail` 的截断（60 字）是这条链路的既有口径，
+        实现在 `review_defects.issues_text` 一处（与 PRD 章节链路共用）。
+        """
+        return defects_text(
+            self.issues, empty_text="（审核未给出逐条问题）", clip=_clip
+        )
 
     def summary(self) -> str:
-        """一句话结论：优先第一条 high，否则第一条问题。"""
+        """一句话结论：优先第一条 high，否则第一条问题；没有问题时给明「未发现缺陷」。
+
+        没有问题的结论不能留空：`review` 事件的 `content` 与落库的 `summary` 都是这一句
+        （界面在通过态下直接显示它）。空串读起来像「没审」，与「审过且没问题」混在一起。
+        生成时被服务端丢光的条目也走这里——那时判定已降成 `pass`，这句就是唯一说明。
+        """
         for issue in self.issues:
             if str(issue.get("severity") or "") == "high":
                 return str(issue.get("detail") or "")
-        return str(self.issues[0].get("detail") or "") if self.issues else ""
+        return str(self.issues[0].get("detail") or "") if self.issues else "未发现缺陷"
 
 
 @dataclass
@@ -227,6 +237,8 @@ def review_messages(
             requirements=requirements or "（未提供上游材料）",
             section_titles=section_titles.strip() or "（未能识别章节标题，无法定位的问题请写空串）",
             document=text,
+            # 五类判据与 PRD 单章审核同一份生成点（见 `review_defects.render_category_rules`）
+            category_rules=render_category_rules(),
             pending_section=pending_section,
         ),
     )
