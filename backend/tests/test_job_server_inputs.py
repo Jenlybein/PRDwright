@@ -20,7 +20,7 @@ import json
 from typing import Any
 
 import pytest
-from conftest import register
+from conftest import register, users
 
 from backend.core.engine import session_scope
 from backend.repositories.chat_turn_repo import ChatTurnRepository
@@ -106,10 +106,8 @@ def _seed_requirement_turn(solution_id: int, content: str) -> None:
     """在需求澄清线程里落一条用户轮次（PRD 生成的上游之一）。
 
     这只是**准备材料**：生产里这条轮次由对话任务写入同一张表；
-    断言仍在 HTTP 主链路上，不去读这张表。
+    断言仍在 HTTP 主链路上，不去读这张表。用例里注册的用户都是 alice。
     """
-    from conftest import users
-
     user = users.get_by_username("alice")
     assert user is not None
     with session_scope() as session:
@@ -145,8 +143,8 @@ def _drain(client, job_id: int) -> list[dict[str, Any]]:
     return events
 
 
-def _run_to_completion(client, payload: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
-    """建任务 → 订阅到结束，返回 (job_id, 事件)。
+def _run_to_completion(client, payload: dict[str, Any]) -> None:
+    """建任务 → 订阅到结束；终态不是 completed 就当场判失败。
 
     假 LLM 太快，订阅往往晚于收尾：此时首帧快照已是终态，`done` 只在订阅期间才发。
     因此终态判据取 `run_summary`（终态任务会由 `open_stream` 补发一份），
@@ -156,7 +154,6 @@ def _run_to_completion(client, payload: dict[str, Any]) -> tuple[int, list[dict[
     events = _drain(client, job_id)
     summary = next(event for event in events if event["type"] == "run_summary")
     assert summary["data"]["status"] == "completed", summary
-    return job_id, events
 
 
 def _generation_prompt(llm: ScriptedLLM) -> str:
