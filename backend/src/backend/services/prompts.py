@@ -563,8 +563,6 @@ PRD_SECTION_REWRITE_PROMPT = """你正在**改写**一篇 PRD 里某一个章节
 - 逐条修正上面的问题；与问题无关的内容保持稳定，不要顺带改写。
 - 输出**完整**的本章节正文（含章节标题行），不要只输出修改片段。
 - 输入中没有的信息不要编造：按写作规范的「缺失信息处理」标注「待确认」或「不适用」。
-- **不得为缺失编造**：缺就写「待确认」并登记清单，不要填一个像样的默认值——
-  那会把「未决」变成「编造」，比留着洞更糟。
 - 直接输出 Markdown 正文，不要解释你改了什么。
 
 ## 八、待确认问题（清单式，非章节正文）
@@ -586,7 +584,7 @@ PRD_SECTION_REVIEW_SYSTEM_PROMPT = """你是一位严格的产品文档评审员
 输出必须是**一个 JSON 对象**：不要输出 Markdown 代码块围栏，不要输出任何解释文字。"""
 
 # 占位符：writing_rules、requirements、prior_sections、section_heading、section_text、
-#          section_titles、pending_section
+#          section_titles、category_rules、pending_section
 #
 # 四条设计取舍（ADR 0003）：
 #
@@ -601,6 +599,9 @@ PRD_SECTION_REVIEW_SYSTEM_PROMPT = """你是一位严格的产品文档评审员
 # 4. **两个时点靠占位符区分**。生成时 `{pending_section}` 是空串（清单还没抽出来，
 #    第六类与清单都不出现）；重审 / 修复后的重审填「第六类 + 当前版本清单」。同一套
 #    解析，不复制第二份提示词。
+#
+# 类别表（`{category_rules}`）**不在这里手写**：五类判据由 `review_defects.render_category_rules`
+# 生成，与整篇审核（`DOC_REVIEW_PROMPT`）共用同一份；再抄一遍就会漂移。
 PRD_SECTION_REVIEW_PROMPT = """## 一、写作规范（评审依据，逐条核对）
 
 {writing_rules}
@@ -631,16 +632,7 @@ PRD_SECTION_REVIEW_PROMPT = """## 一、写作规范（评审依据，逐条核�
 
 只有**下面列出的类别**才记问题，严重度由类别决定，**不要自行升降**：
 
-1. **编造**（high，`category` 写 `fabrication`）：写了具体的数据、时间节点、技术栈或
-   第三方服务，而第二节里检索不到出处。
-2. **矛盾**（high，`category` 写 `contradiction`）：与第二节的需求输入冲突，或与第三节的
-   上游章节口径冲突（产品名、编号、范围）。
-3. **结构不符**（medium，`category` 写 `structure`）：标题层级、表格列、条目编号与写作
-   规范 / 模板不一致。
-4. **空泛**（medium，`category` 写 `vague`）：出现无法直接开工的描述。
-5. **推断未标注**（medium，`category` 写 `unlabeled_inference`）：**只判形式**——属于推断的
-   内容没有标「（建议）」，或没有给出一句依据。依据本身够不够、偏不偏弱**不判**：
-   那是主观，也是同一件事被反复报的来源。
+{category_rules}
 
 {pending_section}
 
@@ -652,15 +644,13 @@ PRD_SECTION_REVIEW_PROMPT = """## 一、写作规范（评审依据，逐条核�
 
 只输出一个 JSON 对象（不要 Markdown 代码块围栏，不要任何解释文字）：
 
-{{"verdict": "revise", "issues": [{{"where": "### 2.1 MVP 功能", "category": "fabrication", "severity": "high", "detail": "……"}}], "instruction": "……"}}
+{{"verdict": "revise", "issues": [{{"where": "### 2.1 MVP 功能", "category": "（类别表里的英文标识）", "severity": "……", "detail": "……"}}], "instruction": "……"}}
 
 - `verdict`：`pass` 或 `revise`。
 - `issues`：逐条写清「哪一处、什么类别、什么问题」，没有时为空数组。每条四个字段：
   - `where`：问题所在的小节标题，**必须逐字取自第五节清单**；整章性问题写空串。
-  - `category`：问题类别，**逐字写上一节点名的那一类对应的英文标识**（编造 = `fabrication`、
-    矛盾 = `contradiction`、结构不符 = `structure`、空泛 = `vague`、推断未标注 =
-    `unlabeled_inference`）。
-  - `severity`：`high` 或 `medium`，与上面的类别对应（编造、矛盾写 `high`，其余写 `medium`）。
+  - `category`：问题类别，**逐字写上面类别表给出的英文标识**（不要翻译、不要自拟）。
+  - `severity`：`high` 或 `medium`，与类别表里那一类对应（服务端会按类别覆写）。
   - `detail`：不超过 40 字，只写「什么问题」。
     **严禁摘录、复述或引用章节正文原文**——那些字你已经读过了，再抄一遍
     不会让判定更准，只会让这一步慢一倍。
@@ -688,9 +678,10 @@ DOC_REVIEW_SYSTEM_PROMPT = """你是一位严格的技术文档评审员，负�
 
 输出必须是**一个 JSON 对象**：不要输出 Markdown 代码块围栏，不要输出任何解释文字。"""
 
-# 占位符：writing_rules、requirements、document、section_titles、pending_section
+# 占位符：writing_rules、requirements、document、section_titles、category_rules、pending_section
 # 说明：与 PRD 的单章审核同一套类别与两时点口径（见 `review_defects` 模块说明）——
-# 三份产物用同一套类别集，否则同一份判断在两条链路上立刻分叉。
+# 三份产物用同一套类别集，否则同一份判断在两条链路上立刻分叉。五类判据由
+# `render_category_rules` 生成，这里只留占位符。
 DOC_REVIEW_PROMPT = """## 一、产出规范（评审依据，逐条核对）
 
 {writing_rules}
@@ -714,13 +705,7 @@ DOC_REVIEW_PROMPT = """## 一、产出规范（评审依据，逐条核对）
 
 只有**下面列出的类别**才记问题，严重度由类别决定，**不要自行升降**：
 
-1. **编造**（high，`category` 写 `fabrication`）：出现上游材料里没有的接口、字段、功能
-   或具体数据。
-2. **矛盾**（high，`category` 写 `contradiction`）：命名、路径、范围口径与上游材料不一致。
-3. **结构不符**（medium，`category` 写 `structure`）：章节、分区、条目与产出规范不一致。
-4. **空泛**（medium，`category` 写 `vague`）：出现无法直接执行的描述。
-5. **推断未标注**（medium，`category` 写 `unlabeled_inference`）：**只判形式**——属于推断的
-   内容没有标「（建议）」，或没有给出一句依据。依据够不够、偏不偏弱**不判**。
+{category_rules}
 
 {pending_section}
 
@@ -732,7 +717,7 @@ DOC_REVIEW_PROMPT = """## 一、产出规范（评审依据，逐条核对）
 
 只输出一个 JSON 对象，形如：
 
-{{"verdict": "pass", "issues": [{{"where": "## 2. 接口列表", "category": "fabrication", "severity": "high", "detail": "……"}}], "instruction": "……"}}
+{{"verdict": "pass", "issues": [{{"where": "## 2. 接口列表", "category": "（类别表里的英文标识）", "severity": "……", "detail": "……"}}], "instruction": "……"}}
 
 字段说明：
 - `verdict`：`pass` 或 `revise`。
@@ -740,10 +725,8 @@ DOC_REVIEW_PROMPT = """## 一、产出规范（评审依据，逐条核对）
   - `where`：问题所在的章节标题，**必须逐字取自上面第三节的清单**。
     这是后续「只重写受影响章节」的定位依据，写错就等于改错了地方。
     跨章节或无法定位的问题写空串。
-  - `category`：问题类别，**逐字写上一节点名的那一类对应的英文标识**（编造 = `fabrication`、
-    矛盾 = `contradiction`、结构不符 = `structure`、空泛 = `vague`、推断未标注 =
-    `unlabeled_inference`）。
-  - `severity`：`high` 或 `medium`，与上面的类别对应（编造、矛盾写 `high`，其余写 `medium`）。
+  - `category`：问题类别，**逐字写上面类别表给出的英文标识**（不要翻译、不要自拟）。
+  - `severity`：`high` 或 `medium`，与类别表里那一类对应（服务端会按类别覆写）。
   - `detail`：不超过 40 字，只写「什么问题」。
     **严禁摘录、复述或引用正文原文**。
 - `instruction`：给撰写者的修改指令，要具体到可直接执行；`verdict` 为 `pass` 时留空串。"""

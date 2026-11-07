@@ -33,7 +33,7 @@ export const DEFECT_CATEGORIES = [
 export const DEFECT_CATEGORY_LABELS: Record<string, string> = {
   fabrication: '编造',
   contradiction: '矛盾',
-  structure: '结构',
+  structure: '结构不符',
   vague: '空泛',
   unlabeled_inference: '推断未标注',
   missing_pending: '清单漏登记',

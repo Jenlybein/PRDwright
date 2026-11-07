@@ -184,8 +184,8 @@
 
 ### 7.5 落地与复测（`ticket/63-review-defects-impl`，基于 `integration/spec-63` 的 `6c6e4bc`）
 
-- **代码落点**：唯一口径模块 `backend/src/backend/services/review_defects.py`（类别→固定严重度、两时点开关、清单注入文本、旧形状归一）；`document_review`（接口文档 / 提示词整篇）与 `prd_section_writer`（PRD 逐章 + 重审）共用同一套提示词与解析，提示词只有一份、靠 `{pending_section}` 占位符区分生成与重审两态；`job_inputs` 在建任务那一刻取当前版本的待确认清单（重审 / 修复各一处），生成链路不带。前端：`ReviewConclusionPanel` 标题改「文档缺陷」、折叠头分类计数、展开按类分组（类内 high 在前、未分类垫底），`types/index.ts::ReviewIssue.category` 与 `utils/review.ts::parseReview` 归一。
-- **七条验收各有用例**（`backend/tests/test_review_defects.py` 八条，覆盖七条验收 + PRD 空清单仍开第六类；前端 `ReviewConclusionPanel.spec.ts` / `review.spec.ts` 守标题、计数、分组、未分类与解析归一）。
-- **复测**（前后端分开跑，全流程离线、零 LLM Key）：后端 `uv run pytest` **1243 passed**；`frontend` 的 `test:unit -- --run` **752 passed / 41 文件**、`type-check` 通过；`frontend_admin` 的 `test:unit -- --run` **117 passed / 13 文件**（管理端零改动，只做回归）。用例基线按 `--collect-only -q` 现取：**1243 收集 / 1065 文本计数 / 178 差额**（口径见 [`../agents/conventions.md`](../agents/conventions.md) §10）。
+- **代码落点**：唯一口径模块 `backend/src/backend/services/review_defects.py`（类别→固定严重度、别名归一、两时点开关、清单注入文本、旧形状归一、`issues_text` 与 `defects_count_text`、条目被丢光后的 `finalize_verdict`）；`document_review`（接口文档 / 提示词整篇）与 `prd_section_writer`（PRD 逐章 + 重审）共用同一套提示词与解析，提示词只有一份、靠 `{pending_section}` 占位符区分生成与重审两态；`job_inputs` 在建任务那一刻取当前版本的待确认清单（重审 / 修复各一处），生成链路不带。前端：`ReviewConclusionPanel` 标题改「文档缺陷」、折叠头分类计数、展开按类分组（类内 high 在前、未分类垫底），`types/index.ts::ReviewIssue.category` 与 `utils/review.ts::parseReview` 归一，标签与后端 `CATEGORY_LABELS` 逐项逐序一致（有跨端对拍用例）。
+- **七条验收各有用例**（`backend/tests/test_review_defects.py` **23 个用例函数 / 25 条收集项**，覆盖七条验收 + PRD 空清单仍开第六类 + 别名与旧形状分路；B1 / B2 / B3 与 C1 / C2 的收口各有守卫；前端 `ReviewConclusionPanel.spec.ts` / `review.spec.ts` 守标题、计数、分组、未分类与解析归一）。
+- **复测**（前后端分开跑，全流程离线、零 LLM Key）：后端 `uv run pytest` **1260 passed**；`frontend` 的 `test:unit -- --run` **752 passed / 41 文件**、`type-check` 通过；`frontend_admin` 的 `test:unit -- --run` **117 passed / 13 文件**（管理端零改动，只做回归）。用例基线按 `--collect-only -q` 现取：**1260 收集 / 1080 文本计数 / 180 差额**（口径见 [`../agents/conventions.md`](../agents/conventions.md) §10）。
 - **未执行**：push 与合并（由用户确认）；发布与线上三点验证不在本轮。
 

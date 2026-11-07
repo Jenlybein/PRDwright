@@ -260,7 +260,9 @@ def _review_inputs(
     """
     kind = _ensure_product_kind(doc_kind, action="重新审核")
 
-    contents = _document_contents(owner_id, solution_id)
+    # 一次读齐：正文、结论、清单都住同一批行上，别为清单再扫一遍同一张表
+    rows = document_store.list_documents(owner_id, solution_id)
+    contents = _contents_of(rows)
     solution = _require_solution(owner_id, solution_id)
     document = _first_non_empty(contents.get(kind, ""))
     if not document:
@@ -274,7 +276,7 @@ def _review_inputs(
         "document": document,
         # 当前版本的待确认清单：重审要读它才判得出「清单漏登记」，也才分得清
         # 「已登记过的不算缺陷」（ADR 0003 的「两时点两套口径」）。
-        "pending_items": _current_pending_items(owner_id, solution_id, kind),
+        "pending_items": _pending_items_of(rows, kind),
     }
     if kind == "prd":
         # 需求输入整条链路都可能为空（导入的历史方案）：给了就用，没给就留空降级
@@ -314,7 +316,7 @@ def _fix_inputs(
     kind = _ensure_product_kind(doc_kind, action="按结论修复")
 
     rows = document_store.list_documents(owner_id, solution_id)
-    contents = {row["kind"]: str(row.get("content") or "") for row in rows}
+    contents = _contents_of(rows)
     reviews = {row["kind"]: row.get("review") for row in rows}
     solution = _require_solution(owner_id, solution_id)
     label = _DOC_KIND_LABELS.get(kind, kind)
@@ -335,7 +337,7 @@ def _fix_inputs(
         "review_conclusion": conclusion,
         # 修复提示词里要摆出「已经登记过哪些」：否则模型会把同一条再登记一遍，
         # 或者更糟——拿一个像样的默认值把「缺」填上（见 DOC_FIX_PROMPT 的硬约束）。
-        "pending_items": _current_pending_items(owner_id, solution_id, kind),
+        "pending_items": _pending_items_of(rows, kind),
     }
     if kind == "prd":
         # PRD 的上下文窗口：结构化摘要 / 自由文本需求 + 两条澄清线程 + 当前正文 + 结论。
@@ -440,25 +442,26 @@ def _thread_history(owner_id: int, solution_id: int, stage: str) -> list[dict[st
 
 def _document_contents(owner_id: int, solution_id: int) -> dict[str, str]:
     """读方案下三份产物的当前正文（按 kind 索引；没有的产物缺席）。"""
-    return {
-        row["kind"]: str(row.get("content") or "")
-        for row in document_store.list_documents(owner_id, solution_id)
-    }
+    return _contents_of(document_store.list_documents(owner_id, solution_id))
 
 
-def _current_pending_items(
-    owner_id: int, solution_id: int, kind: str
-) -> list[dict[str, Any]]:
-    """读某份产物**当前版本**的待确认清单。
+def _contents_of(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """把一批文档行投影成「kind → 当前正文」；同一批行也带着清单与结论。"""
+    return {row["kind"]: str(row.get("content") or "") for row in rows}
+
+
+def _pending_items_of(rows: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    """从**已经读到的**文档行里取某份产物当前版本的待确认清单。
 
     审核与修复都要看它（ADR 0003）：不读清单，审核既判不出「该登记却没登记」，
     也分不清「正文里已经如实写了待确认」与「写错了」；修复则会把已登记过的项
     再登记一遍，或者拿默认值把「缺」填成「编造」。
 
     读不到（产物缺席 / 旧数据没有清单）就是空列表——与「本版没有登记任何待确认项」
-    同义，审核仍可报第六类。
+    同义，审核仍可报第六类。**行由调用方一次性读好再传进来**：清单与正文住同一张表，
+    为它再发一次查询只是白多一次事务。
     """
-    for row in document_store.list_documents(owner_id, solution_id):
+    for row in rows:
         if row.get("kind") == kind:
             items = row.get("pending_items")
             return items if isinstance(items, list) else []

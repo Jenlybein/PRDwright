@@ -23,13 +23,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import string
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 import pytest
 from conftest import register
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
-from backend.services import document_service, job_runtime, llm_factory, prd_section_writer
+from backend.services import (
+    document_service,
+    document_store,
+    job_runtime,
+    llm_factory,
+    prd_section_writer,
+    prompts,
+    review_defects,
+)
+from backend.services.document_review import DocumentReviewResult
 from backend.services.job_bus import job_bus
 
 # 两套审核人设的系统提示词特征词（与 `test_review_fix` / `test_review_job` 同口径）
@@ -541,4 +553,480 @@ def test_prd_rereview_also_opens_the_sixth_category_with_an_empty_list(
     assert issue["severity"] == "medium"
     # 汇总结论按章定位，`section_title` 是章节名（与生成链路的汇总形状同一份）
     assert issue["section_title"] == prd_section_writer.PRD_SECTIONS[0].title
+
+
+# ---------------------------------------------------------------------------
+# 四、类别键名不是软闸：别名归一、旧形状与新输出分开、六类锁定
+# ---------------------------------------------------------------------------
+
+
+def test_category_table_is_locked_to_six_keys_and_fixed_severity():
+    """锁六类键名与固定严重度（ADR 0003 决策 2）：改键名或改档位必须红。
+
+    期望值抄自 ADR 0003 的决策表，**不是**从被测常量反算——反算的断言永远为真。
+    """
+    assert list(review_defects.CATEGORY_SEVERITY.items()) == [
+        ("fabrication", "high"),
+        ("contradiction", "high"),
+        ("structure", "medium"),
+        ("vague", "medium"),
+        ("unlabeled_inference", "medium"),
+        ("missing_pending", "medium"),
+    ]
+    assert list(review_defects.CATEGORY_LABELS.items()) == [
+        ("fabrication", "编造"),
+        ("contradiction", "矛盾"),
+        ("structure", "结构不符"),
+        ("vague", "空泛"),
+        ("unlabeled_inference", "推断未标注"),
+        ("missing_pending", "清单漏登记"),
+    ]
+
+
+def _prd_header(body: str = "正文内容") -> str:
+    """一份最小可审的 PRD 正文（H1 + 第一章），供「需要上游 PRD」的产物准备材料。"""
+    heading = prd_section_writer.PRD_SECTIONS[0].heading
+    return f"# 演示产品 产品需求文档（PRD）\n\n{heading}\n\n{body}\n"
+
+
+def test_chinese_category_label_is_normalized_and_still_forces_high(client, monkeypatch):
+    """模型把类别写成中文「编造」→ 仍按类别抬成 high 并触发一次改写。
+
+    这是 A1 的核心：类别键名一旦是软闸，「AC4 的抬/压档」与「AC3 的服务端丢弃」
+    都能被一个别名绕过。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+
+    reply = _review_json(
+        {
+            "where": "## 一、概述",
+            "category": "编造",
+            "severity": "medium",
+            "detail": "凭空补了鉴权方式",
+        }
+    )
+    llm = FakeLLM(
+        writers=[_API_DOCS_BODY, _API_DOCS_BODY + "\n## 二、鉴权\n\n已按上游补齐。\n"],
+        reviewer=lambda prompt: reply,
+    )
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(
+        client, {"kind": "api_docs", "solution_id": solution_id}
+    )
+
+    assert status == "completed"
+    conclusion = _review_events(events)[0]
+    issue = conclusion["issues"][0]
+    assert issue["category"] == "fabrication"
+    assert issue["severity"] == "high", "中文类别也必须被认出来并按类别抬档"
+    assert llm.writer_calls == 2, "认得出类别 = 编造，所以改写一次"
+
+
+@pytest.mark.parametrize("raw_category", ["missing-pending", "missing pending", "清单漏登记"])
+def test_missing_pending_spelling_variants_are_dropped_during_generation(
+    client, monkeypatch, raw_category
+):
+    """换成连字符 / 空格 / 中文标签，生成链路照样丢掉这一条（时点口径不能被绕过）。"""
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+
+    reply = json.dumps(
+        {
+            "verdict": "revise",
+            "issues": [
+                {
+                    "where": "## 一、概述",
+                    "category": raw_category,
+                    "severity": "high",
+                    "detail": "登录方式该登记未登记",
+                }
+            ],
+            "instruction": "把缺的条目登记进待确认清单",
+        },
+        ensure_ascii=False,
+    )
+    llm = FakeLLM(writers=[_API_DOCS_BODY], reviewer=lambda prompt: reply)
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(
+        client, {"kind": "api_docs", "solution_id": solution_id}
+    )
+
+    assert status == "completed"
+    conclusion = _review_events(events)[0]
+    assert conclusion["issues"] == [], "生成过程中报的清单漏登记必须被丢掉"
+    assert conclusion["verdict"] == "pass"
+    assert conclusion["summary"] != ""
+    assert llm.writer_calls == 1, "被丢掉的条目不该触发改写"
+
+
+def test_unknown_category_in_new_output_is_kept_as_medium_and_never_rewrites(
+    client, monkeypatch
+):
+    """新输出有 `category` 键但归不到六类 → 条目留着、severity 强制 medium、不触发改写。
+
+    理由：认不出的类别按最低可改写档处理，宁可只报不改；绝不采信模型自报的 high。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+
+    reply = _review_json(
+        {
+            "where": "## 一、概述",
+            "category": "coverage_gap",
+            "severity": "high",
+            "detail": "少了一节验收标准",
+        }
+    )
+    llm = FakeLLM(writers=[_API_DOCS_BODY], reviewer=lambda prompt: reply)
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(
+        client, {"kind": "api_docs", "solution_id": solution_id}
+    )
+
+    assert status == "completed"
+    conclusion = _review_events(events)[0]
+    issue = conclusion["issues"][0]
+    assert issue["category"] is None
+    assert issue["severity"] == "medium", "认不出的新输出不采信模型自报的 high"
+    assert conclusion["verdict"] == "revise", "条目仍然保留，判定不因它升级"
+    assert llm.writer_calls == 1, "medium 只报不改"
+
+
+def test_legacy_item_with_empty_severity_is_medium_on_both_products(client, monkeypatch):
+    """同一份旧形状输出（无类别、无 severity）在两份产物里严重度相同：都是 medium。
+
+    从前接口文档存空串（界面空徽标、排序垫底），PRD 经 `section_issue` 补 medium——
+    两条路的归一必须同源，否则「同一份模型输出」在两份产物里读出不同档位。
+    """
+    legacy = json.dumps(
+        {
+            "verdict": "revise",
+            "issues": [{"where": "## 一、概述", "detail": "凭空补了鉴权方式"}],
+            "instruction": "删掉编造的鉴权",
+        },
+        ensure_ascii=False,
+    )
+
+    # ① 接口文档（整篇审核，生成链路）
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+    llm = FakeLLM(writers=[_API_DOCS_BODY], reviewer=lambda prompt: legacy)
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(
+        client, {"kind": "api_docs", "solution_id": solution_id}
+    )
+    assert status == "completed"
+    whole_issue = _review_events(events)[0]["issues"][0]
+    assert whole_issue["severity"] == "medium", "空 severity 不许原样存成空徽标"
+
+    # ② PRD（逐章重审，汇总链路经 `section_issue`）
+    solution_id = _create_solution(client)
+    _seed_requirements(client, solution_id)
+    _seed_document(client, solution_id, "prd", _prd_header())
+    llm = FakeLLM(reviewer=lambda prompt: legacy)
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
+    assert status == "completed"
+    prd_issue = _review_events(events)[0]["issues"][0]
+    assert prd_issue["severity"] == whole_issue["severity"], (
+        "同一份模型输出在两份产物里严重度必须相同"
+    )
+    assert prd_issue["severity"] == "medium"
+
+
+# ---------------------------------------------------------------------------
+# 五、第六类判据要含定位；三份产物同一套类别；提示词产物也要守
+# ---------------------------------------------------------------------------
+
+
+def test_sixth_category_rule_demands_the_section_and_the_missing_class(client, monkeypatch):
+    """第六类判据必须要求写清「在哪一节、缺的是哪一类」；服务端拿到的条目里带定位。
+
+    假模型只能证明「服务端收得下这个形状」，所以同时断言提示词规则本身要求了它——
+    否则模型没有理由给出定位，这条 AC 就只靠夹具撑着。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+    _seed_document(client, solution_id, "api_docs", _API_DOCS_BODY + _INFERRED_WITH_MARK)
+
+    reply = _missing_pending_json(where="## 一、概述", detail="登录方式未登记")
+    llm = FakeLLM(reviewer=lambda prompt: reply)
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
+
+    assert status == "completed"
+    prompt = llm.reviewer_prompts[0]
+    assert "在哪一节" in prompt and "哪一类" in prompt, "判据要含定位与缺项类别"
+    assert "40 字" in prompt, "detail 仍 ≤40 字，允许 where 承担定位"
+
+    issue = _review_events(events)[0]["issues"][0]
+    assert issue["where"] == "## 一、概述"
+    assert "登录方式" in issue["detail"]
+
+
+_PROMPTS_BODY = "## 一、角色设定\n\n你是一位资深产品经理。\n"
+
+
+def test_prompts_rereview_opens_all_six_categories_and_injects_the_list(
+    client, monkeypatch
+):
+    """提示词产物的重审：六类同样生效、清单漏登记可报、清单被注入。"""
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+    _seed_document(client, solution_id, "prompts", _PROMPTS_BODY)
+
+    reply = _missing_pending_json(where="## 一、角色设定")
+    llm = FakeLLM(reviewer=lambda prompt: reply)
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(client, _review_payload(solution_id, "prompts"))
+
+    assert status == "completed"
+    prompt = llm.reviewer_prompts[0]
+    for label in review_defects.CATEGORY_LABELS.values():
+        assert label in prompt, f"提示词产物的重审提示词缺了「{label}」这一类"
+    assert "本版没有登记任何待确认项" in prompt, "空清单也要显式注入"
+
+    issue = _review_events(events)[0]["issues"][0]
+    assert issue["category"] == "missing_pending"
+    assert issue["severity"] == "medium"
+
+
+# ---------------------------------------------------------------------------
+# 六、PRD 的汇总结论按类别计数（不再出现「待处理问题」）
+# ---------------------------------------------------------------------------
+
+
+def test_prd_summary_counts_defects_by_category(client, monkeypatch):
+    """PRD 的 summary 是「N 章已审，缺陷 M 处（类别计数）」——术语表禁用「问题」于此。"""
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_requirements(client, solution_id)
+    first = prd_section_writer.PRD_SECTIONS[0].heading
+    second = prd_section_writer.PRD_SECTIONS[1].heading
+    _seed_document(
+        client,
+        solution_id,
+        "prd",
+        f"# 演示产品 产品需求文档（PRD）\n\n{first}\n\n正文内容\n\n{second}\n\n正文内容\n",
+    )
+
+    reply = _review_json(
+        {
+            "where": "",
+            "category": "fabrication",
+            "severity": "high",
+            "detail": "凭空补了鉴权方式",
+        }
+    )
+    llm = FakeLLM(reviewer=lambda prompt: reply)
+    _fake_service(monkeypatch, llm)
+    _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
+
+    assert status == "completed"
+    summary = _review_events(events)[0]["summary"]
+    assert summary == "2 章已审，缺陷 2 处（编造 2）"
+    assert "待处理问题" not in summary
+
+
+# ---------------------------------------------------------------------------
+# 七、五类表只有一个生成点（两条产物链都从 `review_defects` 取）
+# ---------------------------------------------------------------------------
+
+
+def _rendered(template: str, **extra: str) -> str:
+    """把模板里所有占位符填成可辨认的值，用于断言某一节真的进了最终提示词。"""
+    names = {field for _, field, _, _ in string.Formatter().parse(template) if field}
+    values = {name: f"<{name}>" for name in names} | extra
+    return template.format(**values)
+
+
+def test_both_review_prompts_share_one_generated_category_table():
+    """五类表只许有一份生成点：模板里不得再手写类别标识，两链都从同一个函数取。"""
+    table = review_defects.render_category_rules()
+    assert table.strip(), "共用的类别表不能是空串"
+    assert "fabrication" in table and "unlabeled_inference" in table
+
+    assert table in _rendered(prompts.PRD_SECTION_REVIEW_PROMPT, category_rules=table)
+    assert table in _rendered(prompts.DOC_REVIEW_PROMPT, category_rules=table)
+
+    # 模板里再手写一份类别表就会与生成点漂移：这里直接把它排除
+    for template in (prompts.PRD_SECTION_REVIEW_PROMPT, prompts.DOC_REVIEW_PROMPT):
+        for identifier in review_defects.CATEGORY_SEVERITY:
+            assert identifier not in template, (
+                f"提示词模板里还写着类别标识 `{identifier}`——类别表必须只有一个生成点"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 八、跨端标签对拍（后端为准）
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FRONTEND_REVIEW_TS = _REPO_ROOT / "frontend" / "src" / "utils" / "review.ts"
+
+_LABELS_BLOCK = re.compile(
+    r"export const DEFECT_CATEGORY_LABELS[^{]*\{(?P<body>[^}]*)\}"
+)
+_LABEL_ENTRY = re.compile(
+    r"^\s*(?P<key>[a-z_]+)\s*:\s*'(?P<label>[^']*)'", re.MULTILINE
+)
+_CATEGORIES_BLOCK = re.compile(
+    r"export const DEFECT_CATEGORIES = \[(?P<body>[^\]]*)\]"
+)
+_CATEGORY_ENTRY = re.compile(r"^\s*'(?P<key>[a-z_]+)'", re.MULTILINE)
+
+
+def test_frontend_defect_labels_match_the_backend_one_to_one():
+    """前端类别标签与后端 `CATEGORY_LABELS` 逐项相等，键序也相等（后端为准）。
+
+    跨端的取值域只能有一份：前端漏改一个标签，用户就会在「文档缺陷」面板里读到
+    两个名字指同一类，而没有任何一处会报错（仓库对错误码已有同款对拍守卫）。
+    """
+    if not _FRONTEND_REVIEW_TS.exists():
+        pytest.skip("前端源码目录不存在，跳过跨端守卫检查")
+
+    source = _FRONTEND_REVIEW_TS.read_text(encoding="utf-8")
+
+    labels_block = _LABELS_BLOCK.search(source)
+    assert labels_block is not None, "没在 review.ts 里找到 DEFECT_CATEGORY_LABELS 常量表"
+    entries = [
+        (entry["key"], entry["label"])
+        for entry in _LABEL_ENTRY.finditer(labels_block.group("body"))
+    ]
+    assert entries, "常量表解析出 0 个条目——正则需要跟着表结构一起更新"
+    assert entries == list(review_defects.CATEGORY_LABELS.items()), (
+        "前端类别标签与后端 CATEGORY_LABELS 不一致（键名、文案或键序）"
+    )
+
+    categories_block = _CATEGORIES_BLOCK.search(source)
+    assert categories_block is not None, "没在 review.ts 里找到 DEFECT_CATEGORIES 常量表"
+    categories = [
+        entry["key"] for entry in _CATEGORY_ENTRY.finditer(categories_block.group("body"))
+    ]
+    assert categories == list(review_defects.CATEGORY_SEVERITY), (
+        "前端类别顺序与后端 CATEGORY_SEVERITY 的键序不一致"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 九、回退三处蔓延（B1 / B2 / B3）
+# ---------------------------------------------------------------------------
+
+
+def test_prd_rewrite_prompt_has_no_fix_only_constraint_but_fix_prompt_keeps_it():
+    """「不得为缺失编造」只留修复提示词（ADR 0003 决策 6），不蔓延到生成期改写。"""
+    assert "不得为缺失编造" in prompts.DOC_FIX_PROMPT
+    assert "不得为缺失编造" not in prompts.PRD_SECTION_REWRITE_PROMPT
+
+
+def test_rewrite_prompt_gets_plain_severity_not_the_chinese_category_label(
+    client, monkeypatch
+):
+    """改写提示词里的问题行回到 `[severity] where：detail`——类别只留给结论 JSON / 界面。"""
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+
+    reply = _review_json(
+        {
+            "where": "## 一、概述",
+            "category": "fabrication",
+            "severity": "high",
+            "detail": "凭空补了鉴权方式",
+        }
+    )
+    llm = FakeLLM(writers=[_API_DOCS_BODY, _API_DOCS_BODY], reviewer=lambda prompt: reply)
+    _fake_service(monkeypatch, llm)
+    _job_id, _events, status = _run_job(
+        client, {"kind": "api_docs", "solution_id": solution_id}
+    )
+
+    assert status == "completed"
+    rewrite_prompt = llm.writer_prompts[1]
+    assert "[high] ## 一、概述：" in rewrite_prompt
+    assert "编造" not in rewrite_prompt, "中文类别标签不该进改写提示词"
+    assert "high·" not in rewrite_prompt
+
+
+def test_verdict_falls_back_to_pass_only_when_filtering_emptied_the_list():
+    """`finalize_verdict` 只为「条目被时点口径丢光」这一件事服务（AC3）。"""
+    assert review_defects.finalize_verdict(
+        "revise", issues=[], instruction="把缺的条目登记进待确认清单", dropped=1
+    ) == ("pass", "")
+
+    # 还有条目 → 判定与指令都不动（哪怕有别的条目被丢掉了）
+    kept = [{"severity": "high", "detail": "凭空补了鉴权方式"}]
+    assert review_defects.finalize_verdict(
+        "revise", issues=kept, instruction="删掉编造的鉴权", dropped=1
+    ) == ("revise", "删掉编造的鉴权")
+
+    # 没有丢弃 → 只给了指令的结论照样保留（不顺手清空无关的 instruction）
+    assert review_defects.finalize_verdict(
+        "revise", issues=[], instruction="按指令逐条修正", dropped=0
+    ) == ("revise", "按指令逐条修正")
+
+
+# ---------------------------------------------------------------------------
+# 十、坏味：两个 `issues_text` 薄壳共用同一份实现（C2）
+# ---------------------------------------------------------------------------
+
+
+def test_issues_text_keeps_placeholder_and_clipping_at_both_call_sites():
+    """两处薄壳各自只有「占位句」与「是否截断」不同，实现只有一份。"""
+    long_detail = "很长" * 40
+
+    whole = DocumentReviewResult(
+        verdict="revise",
+        issues=[{"severity": "high", "where": "## 一、概述", "detail": long_detail}],
+    )
+    text = whole.issues_text()
+    assert text.startswith("1. [high] ## 一、概述：")
+    assert text.endswith("…"), "整篇链路的 detail 仍按 60 字截断（口径不变）"
+    assert long_detail not in text
+
+    section = prd_section_writer.SectionReview(
+        verdict="revise",
+        issues=[{"severity": "low", "detail": long_detail}],
+    )
+    text = section.issues_text()
+    assert long_detail in text, "PRD 章节链路的 detail 不做截断（口径不变）"
+
+    assert DocumentReviewResult(verdict="pass").issues_text() == "（审核未给出逐条问题）"
+    assert prd_section_writer.SectionReview(verdict="pass").issues_text() == "（审核未给出具体问题）"
+
+
+# ---------------------------------------------------------------------------
+# 十一、坏味：重审输入不再重扫同一张表（C1）
+# ---------------------------------------------------------------------------
+
+
+def test_review_job_reads_the_document_rows_once(client, monkeypatch):
+    """重审的输入解析只读一次文档行：清单就从同一批行里取，不再多扫一张表。"""
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "prd", _prd_header())
+    _seed_document(client, solution_id, "api_docs", _API_DOCS_BODY)
+
+    calls: list[tuple[int, int]] = []
+    original = document_store.list_documents
+
+    def counting(owner_id: int, solution_id_arg: int):  # noqa: ANN202
+        calls.append((owner_id, solution_id_arg))
+        return original(owner_id, solution_id_arg)
+
+    monkeypatch.setattr(document_store, "list_documents", counting)
+
+    llm = FakeLLM(reviewer=lambda prompt: _PASS_JSON)
+    _fake_service(monkeypatch, llm)
+    _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
+
+    assert status == "completed"
+    assert len(calls) == 1, f"重审输入解析读了 {len(calls)} 次文档行（应只读 1 次）"
 
