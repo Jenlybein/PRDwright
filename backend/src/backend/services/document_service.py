@@ -900,6 +900,7 @@ class DocumentService:
         requirements: str = "",
         product_name: str = "",
         history: list[dict[str, Any]] | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """**重新审核**一份已有文档：只产结论，不产正文（重新审核任务的唯一入口）。
 
@@ -921,6 +922,9 @@ class DocumentService:
             requirements: 自由文本需求（PRD 用）。
             product_name: 产品名（PRD 用）。
             history: 需求澄清对话（PRD 用）。
+            pending_items: **当前版本**的待确认清单（由任务层从库里取）。重审是「六类全开」
+                的那个时点：没有它既判不出「清单漏登记」，也分不清已登记过的项
+                （ADR 0003 的「两时点两套口径」）。
 
         Yields:
             `stage(reviewing)` → 若干 `stage_chunk` → 一条 `review`。
@@ -938,6 +942,7 @@ class DocumentService:
                 requirements=requirements,
                 product_name=product_name,
                 history=history,
+                pending_items=pending_items,
             ):
                 yield event
             return
@@ -953,6 +958,7 @@ class DocumentService:
             context=context,
             document=document,
             section_titles="\n".join(extract_headings(document)),
+            pending_items=pending_items,
         ):
             yield event
 
@@ -1093,6 +1099,7 @@ class DocumentService:
         product_name: str = "",
         history: list[dict[str, Any]] | None = None,
         clarify_history: list[dict[str, Any]] | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """**按审核结论修复**一份已有文档（`review_fix` 任务，票 #56）。
 
@@ -1123,6 +1130,8 @@ class DocumentService:
             product_name: 产品名（PRD 用）。
             history: 需求澄清线程（`requirement`，PRD 用）。
             clarify_history: PRD 澄清线程（`prd-clarify`，PRD 用）。
+            pending_items: **当前版本**的待确认清单（任务层从库里取）。修复提示词要摆出
+                「已经登记过哪些」：否则模型会重复登记，或用默认值把「缺」填成「编造」。
 
         Yields:
             `stage(writing)` → 若干 `chunk` → `part{replace}`（干净正文）→
@@ -1167,6 +1176,7 @@ class DocumentService:
                     review=review,
                     writing_rules=context.writing_rules,
                     upstream=context.upstream,
+                    pending_items=pending_items,
                 ),
             ):
                 chunks.append(delta)
@@ -1214,6 +1224,8 @@ class DocumentService:
             requirements=requirements,
             product_name=product_name,
             history=history,
+            # 修复后的重审看的是**新正文**的清单：刚补登记进来的项不能算漏登记
+            pending_items=items,
         ):
             yield event
 
@@ -1232,6 +1244,7 @@ class DocumentService:
         requirements: str,
         product_name: str,
         history: list[dict[str, Any]] | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """修复后的**重审**：只审不改，失败降级成「没有结论」而不是判任务失败。
 
@@ -1246,6 +1259,10 @@ class DocumentService:
         `history` 是需求澄清线程：与「重新审核」同口径进提示词（见
         `PrdSectionWriter.review_document`）。修复看得见的事实，重审也必须看得见，
         否则同一份正文会因为「走的是修复还是重审」得到两种判定。
+
+        `pending_items` 是**刚重写出来的那一版**的待确认清单（`extract` 的产物）：
+        修复后的重审同样六类全开，清单必须是新正文的那一份——拿修复前那份去比，
+        「刚补登记进来的项」会被当成漏登记。
         """
         try:
             if context.doc_kind == "prd":
@@ -1256,6 +1273,7 @@ class DocumentService:
                     requirements=requirements,
                     product_name=product_name,
                     history=history,
+                    pending_items=pending_items,
                 ):
                     yield event
                 return
@@ -1272,6 +1290,7 @@ class DocumentService:
                 ),
                 document=document,
                 section_titles="\n".join(extract_headings(document)),
+                pending_items=pending_items,
             ):
                 yield event
         except Exception:  # noqa: BLE001 - 正文已经写好了，这次重审是加成，不该连坐
@@ -1536,6 +1555,7 @@ async def review_document_stream(
     requirements: str = "",
     product_name: str = "",
     history: list[dict[str, Any]] | None = None,
+    pending_items: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """重新审核一份已有文档的流式入口（`review` 任务走这里，只审不改）。"""
     async for event in get_service().review_document_stream(
@@ -1547,6 +1567,7 @@ async def review_document_stream(
         requirements=requirements,
         product_name=product_name,
         history=history,
+        pending_items=pending_items,
     ):
         yield event
 
@@ -1563,6 +1584,7 @@ async def fix_document_stream(
     product_name: str = "",
     history: list[dict[str, Any]] | None = None,
     clarify_history: list[dict[str, Any]] | None = None,
+    pending_items: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """按审核结论修复一份已有文档的流式入口（`review_fix` 任务走这里）。"""
     async for event in get_service().fix_document_stream(
@@ -1576,6 +1598,7 @@ async def fix_document_stream(
         product_name=product_name,
         history=history,
         clarify_history=clarify_history,
+        pending_items=pending_items,
     ):
         yield event
 

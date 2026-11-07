@@ -3576,7 +3576,7 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     conclusion({
       verdict: 'revise',
       summary: '1 个待处理问题',
-      issues: [{ severity: 'high', detail: '编造了鉴权方式' }],
+      issues: [{ severity: 'high', category: 'fabrication', detail: '编造了鉴权方式' }],
     })
 
   const REVIEW_STATE: Record<DocumentRecord['kind'], string> = {
@@ -3615,18 +3615,19 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
   it('四态各自可见：通过 / 有问题 / 审核失败 / 未审核，且没结论不等于通过', async () => {
     // ① 通过（结论来自文档记录，因此刷新后还在——这条用例本来就是「重新打开」）
     const passed = await mountReviewPage('prd', conclusion())
-    expect(passed.text()).toContain('审核结论')
+    expect(passed.text()).toContain('文档缺陷')
     expect(passed.text()).toContain('通过')
 
     // ② 有问题
     const revised = await mountReviewPage('prd', REVISE())
     expect(revised.text()).toContain('有问题')
     expect(revised.text()).not.toContain('通过')
-    expect(revised.text()).toContain('1 个待处理问题')
+    // 收起时按类别计数：这一条是「编造」，一眼看出是哪一类在等着处理
+    expect(revised.text()).toContain('编造 1')
 
     // ③ 未审核：没有结论也渲染面板——否则「没有面板」会被读成「没问题」
     const unreviewed = await mountReviewPage('api-docs', null)
-    expect(unreviewed.text()).toContain('审核结论')
+    expect(unreviewed.text()).toContain('文档缺陷')
     expect(unreviewed.text()).toContain('未审核')
     expect(unreviewed.text()).not.toContain('通过')
 
@@ -3657,7 +3658,7 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     const revised = await mountReviewPage('prd', REVISE())
     expect(rereviewButton(revised).attributes('disabled')).toBeDefined()
     // 「有问题」时的解释写在面板里（只靠 title 太隐蔽）
-    const toggle = revised.findAll('button').find((item) => item.text().includes('审核结论'))
+    const toggle = revised.findAll('button').find((item) => item.text().includes('文档缺陷'))
     if (!toggle) throw new Error('未找到结论面板的展开开关')
     await toggle.trigger('click')
     expect(revised.text()).toContain('把它们修好之后再来重新审核')
@@ -3684,7 +3685,7 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
       kind: 'api_docs',
       verdict: 'revise',
       summary: '1 个待处理问题',
-      issues: [{ severity: 'high', detail: '编造了鉴权方式' }],
+      issues: [{ severity: 'high', category: 'fabrication', detail: '编造了鉴权方式' }],
     })
     let wrapper: VueWrapper | null = null
     let stateDuringRun = ''

@@ -652,6 +652,14 @@ export interface PrdStageProgress {
 /** 一条审核问题（PRD 单章审核与下游整篇审核共用展示结构） */
 export interface ReviewIssue {
   severity: string
+  /**
+   * 缺陷类别（ADR 0003 六类之一）：`fabrication` / `contradiction` / `structure` /
+   * `vague` / `unlabeled_inference` / `missing_pending`。
+   *
+   * **旧结论没有类别 → `null`**：界面归「未分类」，不推断、不重分类（ADR 0003 决策 7）。
+   * 归一化只在 `utils/review.ts::parseReview` 一处做，两处数据源不会分叉。
+   */
+  category?: string | null
   /** 问题所在章节 id（PRD 用；下游整篇审核可能为空） */
   sectionId?: string
   /** 问题所在章节名（展示用） */

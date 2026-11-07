@@ -270,7 +270,12 @@ def _review_inputs(
             "请先生成这一份文档，再来审阅页重审。",
         )
 
-    inputs: dict[str, Any] = {"document": document}
+    inputs: dict[str, Any] = {
+        "document": document,
+        # 当前版本的待确认清单：重审要读它才判得出「清单漏登记」，也才分得清
+        # 「已登记过的不算缺陷」（ADR 0003 的「两时点两套口径」）。
+        "pending_items": _current_pending_items(owner_id, solution_id, kind),
+    }
     if kind == "prd":
         # 需求输入整条链路都可能为空（导入的历史方案）：给了就用，没给就留空降级
         history = _thread_history(owner_id, solution_id, _REQUIREMENT_STAGE)
@@ -325,7 +330,13 @@ def _fix_inputs(
     # 好让门口就 400，而不是等任务跑起来、模型都调完了才发现不该修。
     conclusion_to_review(conclusion, label=label)
 
-    inputs: dict[str, Any] = {"document": document, "review_conclusion": conclusion}
+    inputs: dict[str, Any] = {
+        "document": document,
+        "review_conclusion": conclusion,
+        # 修复提示词里要摆出「已经登记过哪些」：否则模型会把同一条再登记一遍，
+        # 或者更糟——拿一个像样的默认值把「缺」填上（见 DOC_FIX_PROMPT 的硬约束）。
+        "pending_items": _current_pending_items(owner_id, solution_id, kind),
+    }
     if kind == "prd":
         # PRD 的上下文窗口：结构化摘要 / 自由文本需求 + 两条澄清线程 + 当前正文 + 结论。
         # 需求输入整条链路都可能为空（导入的历史方案），给了就用、没给由提示词显式降级。
@@ -433,6 +444,25 @@ def _document_contents(owner_id: int, solution_id: int) -> dict[str, str]:
         row["kind"]: str(row.get("content") or "")
         for row in document_store.list_documents(owner_id, solution_id)
     }
+
+
+def _current_pending_items(
+    owner_id: int, solution_id: int, kind: str
+) -> list[dict[str, Any]]:
+    """读某份产物**当前版本**的待确认清单。
+
+    审核与修复都要看它（ADR 0003）：不读清单，审核既判不出「该登记却没登记」，
+    也分不清「正文里已经如实写了待确认」与「写错了」；修复则会把已登记过的项
+    再登记一遍，或者拿默认值把「缺」填成「编造」。
+
+    读不到（产物缺席 / 旧数据没有清单）就是空列表——与「本版没有登记任何待确认项」
+    同义，审核仍可报第六类。
+    """
+    for row in document_store.list_documents(owner_id, solution_id):
+        if row.get("kind") == kind:
+            items = row.get("pending_items")
+            return items if isinstance(items, list) else []
+    return []
 
 
 # ---------------------------------------------------------------------------

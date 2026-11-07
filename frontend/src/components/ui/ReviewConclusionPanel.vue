@@ -2,14 +2,29 @@
 import { computed, ref, useId } from 'vue'
 
 import AppButton from '@/components/ui/AppButton.vue'
-import type { ReviewConclusion } from '@/types'
+import type { ReviewConclusion, ReviewIssue } from '@/types'
 import { relativeTime } from '@/utils/time'
+import {
+  DEFECT_CATEGORIES,
+  DEFECT_CATEGORY_LABELS,
+  UNCATEGORIZED_LABEL,
+} from '@/utils/review'
 
 /**
- * 审核结论面板（四态：通过 / 有问题 / 审核失败 / 未审核）。
+ * **文档缺陷**面板（四态：通过 / 有问题 / 审核失败 / 未审核）。
  *
  * 位置由 `ReviewStage` 决定：待确认清单**之下**、正文**之上**——先看「还差什么」，
  * 再看「审出了什么」，最后才是正文本身。
+ *
+ * ## 为什么标题是「文档缺陷」而不是「审核结论」
+ *
+ * 审核只报**缺陷**——可验证为错的地方（编造 / 矛盾 / 结构不符 / 空泛 / 推断未标注 /
+ * 清单漏登记）；「缺什么、该怎么定」是**未决**，归待确认清单（ADR 0003 / C-R5）。
+ * 标题照实说这件事，用户才不会把它读成「审核说这里少了什么」而与清单对照两遍。
+ *
+ * 折叠头给**分类计数**（`编造 1 · 结构 2 · 未分类 3`），收起时就能看出「有几条、哪一类」；
+ * 展开按类分组、类内 `high` 在前——严重度决定「先修哪一条」，它由类别固定，不由模型升降。
+ * **旧结论没有类别** → 归「未分类」，不推断、不重分类（不追溯历史）。
  *
  * ## 数据从哪来
  *
@@ -130,6 +145,73 @@ const showsReview = computed(() => state.value !== 'failed')
 const issues = computed(() => (showsReview.value ? props.review?.issues ?? [] : []))
 const issueCount = computed(() => issues.value.length)
 
+/**
+ * 严重度排序权重。改写门槛只认 `high`（`REVIEW_REWRITE_MIN_SEVERITY`），所以「先看 high」
+ * 与「先修哪一条」是同一件事。
+ */
+const SEVERITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 }
+
+/** 组内排序：`high` 在前，未知严重度垫底；同档保持结论里的原序（`sort` 是稳定的） */
+function highFirst(a: ReviewIssue, b: ReviewIssue): number {
+  return (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9)
+}
+
+/** 一组同类缺陷（`category` 为空的是「未分类」组，排在最后） */
+interface IssueGroup {
+  /** 类别标识；未分类组的 key 是空串（模板里 `key` 需要非空时用 `||` 兜底） */
+  key: string
+  label: string
+  issues: ReviewIssue[]
+}
+
+/**
+ * 类别按固定顺序分桶，类内 `high` 在前。
+ *
+ * 只认契约里的六类：解析器已把不认识的字符串归一成 `null`，这里再兜一次底——分组
+ * 的取值域是**有限的**，否则一条错别字就会在界面上多出一个分组。
+ */
+const issueGroups = computed<IssueGroup[]>(() => {
+  const known = new Set<string>(DEFECT_CATEGORIES)
+  const buckets = new Map<string, ReviewIssue[]>()
+  for (const issue of issues.value) {
+    const raw = issue.category
+    const key = typeof raw === 'string' && known.has(raw) ? raw : ''
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(issue)
+    else buckets.set(key, [issue])
+  }
+
+  const groups: IssueGroup[] = []
+  for (const category of DEFECT_CATEGORIES) {
+    const bucket = buckets.get(category)
+    if (!bucket?.length) continue
+    groups.push({
+      key: category,
+      label: DEFECT_CATEGORY_LABELS[category] ?? category,
+      issues: [...bucket].sort(highFirst),
+    })
+  }
+  const uncategorized = buckets.get('')
+  if (uncategorized?.length) {
+    groups.push({
+      key: '',
+      label: UNCATEGORIZED_LABEL,
+      issues: [...uncategorized].sort(highFirst),
+    })
+  }
+  return groups
+})
+
+/**
+ * 折叠头的分类计数：`编造 1 · 结构 2 · 未分类 3`。
+ *
+ * 各项之和就是问题总数，因此不必再单独写一个「N 个待处理问题」——两个数字摆在一起
+ * 只会让人核对一遍它们对不对。
+ */
+const categoryCounts = computed(() =>
+  issueGroups.value.map((group) => `${group.label} ${group.issues.length}`).join(' · '),
+)
+
 /** 结论的一句话总结；「审核失败 / 未审核」时没有可展示的东西 */
 const summary = computed(() => (showsReview.value ? props.review?.summary ?? '' : ''))
 
@@ -208,15 +290,16 @@ const fixHint = computed(() =>
         :aria-controls="bodyId"
         @click="expanded = !expanded"
       >
-        <h3 class="text-sm font-semibold text-fg">审核结论</h3>
+        <h3 class="text-sm font-semibold text-fg">文档缺陷</h3>
         <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="stateClass">
           {{ stateLabel }}
         </span>
         <span
           v-if="issueCount"
           class="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-muted"
+          :title="`按类别统计：${categoryCounts}`"
         >
-          {{ issueCount }} 个待处理问题
+          {{ categoryCounts }}
         </span>
         <span
           v-if="rewritten"
@@ -289,30 +372,39 @@ const fixHint = computed(() =>
 
       <p v-if="summary" class="text-xs leading-relaxed text-subtle">{{ summary }}</p>
 
-      <ul v-if="issues.length" class="mt-3 space-y-1.5">
-        <li
-          v-for="(issue, index) in issues"
-          :key="index"
-          class="flex items-start gap-2 text-xs leading-relaxed text-muted"
-        >
-          <span
-            class="mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium"
-            :class="
-              issue.severity === 'high'
-                ? 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300'
-                : issue.severity === 'medium'
-                  ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
-                  : 'bg-surface-2 text-subtle'
-            "
-          >
-            {{ severityLabel(issue.severity) }}
-          </span>
-          <span>
-            <template v-if="issue.sectionTitle">{{ issue.sectionTitle }}：</template>
-            {{ issue.detail }}
-          </span>
-        </li>
-      </ul>
+      <!-- 展开：按类分组，类内 high 在前（严重度由类别固定，见 ADR 0003）。未分类组在最后。 -->
+      <div v-if="issueGroups.length" class="mt-3 space-y-3">
+        <section v-for="group in issueGroups" :key="group.key || 'uncategorized'">
+          <h4 class="flex items-baseline gap-1.5 text-xs font-semibold text-fg">
+            {{ group.label }}
+            <span class="text-[11px] font-normal text-subtle">{{ group.issues.length }}</span>
+          </h4>
+          <ul class="mt-1.5 space-y-1.5">
+            <li
+              v-for="(issue, index) in group.issues"
+              :key="index"
+              class="flex items-start gap-2 text-xs leading-relaxed text-muted"
+            >
+              <span
+                class="mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium"
+                :class="
+                  issue.severity === 'high'
+                    ? 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300'
+                    : issue.severity === 'medium'
+                      ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
+                      : 'bg-surface-2 text-subtle'
+                "
+              >
+                {{ severityLabel(issue.severity) }}
+              </span>
+              <span>
+                <template v-if="issue.sectionTitle">{{ issue.sectionTitle }}：</template>
+                {{ issue.detail }}
+              </span>
+            </li>
+          </ul>
+        </section>
+      </div>
 
       <!-- 「有问题」时把两个动作的分工写在面板里：只靠 title 太隐蔽 -->
       <p
