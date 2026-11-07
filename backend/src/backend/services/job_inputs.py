@@ -49,12 +49,17 @@ from backend.core.errors import AppError, ErrorCode
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.solution_repo import SolutionRepository
 from backend.services import document_store
+from backend.services.document_review import conclusion_to_review
+from backend.services.job_product_kind import _ensure_product_kind
 
 logger = logging.getLogger(__name__)
 
-# 需要方案、且输入由服务端解析的任务种类。`chat` 不在此列：它的上下文是对话线程本身，
-# 由 `job_service_impl._chat_events` 从 `chat_turns` 拼。
-DOCUMENT_KINDS: tuple[str, ...] = (
+# 需要方案、且输入由服务端解析的**任务种类**（8 个，含动作）。
+# 与 `core.contracts.DOCUMENT_KINDS`（3 个**产物**）同名异义，因此名字里带 `JOB`：
+# 这里回答「哪几种任务要按方案取输入」，那里回答「有哪三份产物」。
+# `chat` 不在此列：它的上下文是对话线程本身，由 `job_service_impl._chat_events` 从
+# `chat_turns` 拼。
+DOCUMENT_JOB_KINDS: tuple[str, ...] = (
     "prd",
     "api_docs",
     "prompts",
@@ -77,7 +82,7 @@ _KIND_LABELS: dict[str, str] = {
     "review_fix": "按结论修复",
 }
 
-# 文档类型 → 它自己的那条澄清线程（四条线程之一，见 `core/chat_kinds.py`）。
+# 文档**种类** → 它自己的那条澄清线程（四条线程之一，见 `core/chat_kinds.py`）。
 _CLARIFY_STAGES: dict[str, str] = {
     "prd": "prd-clarify",
     "api_docs": "api-docs-clarify",
@@ -140,7 +145,7 @@ def resolve_runtime_inputs(
         AppError: 缺方案（`INVALID_REQUEST`）、方案不可见（`SOLUTION_NOT_FOUND`）、
             或服务端取不到必需材料（`INVALID_REQUEST`，文案说明缺什么）。
     """
-    if kind not in DOCUMENT_KINDS:
+    if kind not in DOCUMENT_JOB_KINDS:
         return {}
     if solution_id is None:
         raise AppError(
@@ -253,13 +258,7 @@ def _review_inputs(
     上游只是对照材料；缺了它会按「仅依据正文与写作规范核对」降级（提示词里写明），
     而「历史方案也能补审」是明确的用户故事，不该被生成侧那条硬校验挡在门外。
     """
-    kind = str(doc_kind or "")
-    if kind not in ("prd", "api_docs", "prompts"):
-        # 措辞与 `clarify` 的同名校验一致：不猜默认产物，猜错等于把结论记到别人头上
-        raise AppError(
-            ErrorCode.INVALID_REQUEST,
-            "重新审核必须指定 doc_kind（prd / api_docs / prompts）",
-        )
+    kind = _ensure_product_kind(doc_kind, action="重新审核")
 
     contents = _document_contents(owner_id, solution_id)
     solution = _require_solution(owner_id, solution_id)
@@ -307,13 +306,7 @@ def _fix_inputs(
     上游缺失不硬拦（PRD 尤其可能没有需求输入），由提示词里那句「未提供」显式降级；
     但接口文档 / 提示词缺 PRD 时仍然 400——没有 PRD 就没有事实来源，重写等于编造。
     """
-    kind = str(doc_kind or "")
-    if kind not in ("prd", "api_docs", "prompts"):
-        # 措辞与 `clarify` / `review` 的同名校验一致：不猜默认产物
-        raise AppError(
-            ErrorCode.INVALID_REQUEST,
-            "按结论修复必须指定 doc_kind（prd / api_docs / prompts）",
-        )
+    kind = _ensure_product_kind(doc_kind, action="按结论修复")
 
     rows = document_store.list_documents(owner_id, solution_id)
     contents = {row["kind"]: str(row.get("content") or "") for row in rows}
@@ -328,15 +321,9 @@ def _fix_inputs(
             f"{label}还没有正文，无法按结论修复。请先生成这一份文档，再来审阅页修复。",
         )
     conclusion = reviews.get(kind)
-    verdict = ""
-    if isinstance(conclusion, dict):
-        verdict = str(conclusion.get("verdict") or "").strip().lower()
-    if verdict != "revise":
-        raise AppError(
-            ErrorCode.INVALID_REQUEST,
-            f"{label}当前版本的审核结论不是「有问题」，无法按结论修复。"
-            "请先重新审核，确认确实有问题后再修复。",
-        )
+    # 「结论必须是『有问题』」只有一处把关（`conclusion_to_review`）：这里先调一次，
+    # 好让门口就 400，而不是等任务跑起来、模型都调完了才发现不该修。
+    conclusion_to_review(conclusion, label=label)
 
     inputs: dict[str, Any] = {"document": document, "review_conclusion": conclusion}
     if kind == "prd":
@@ -392,12 +379,9 @@ def _clarify_history(owner_id: int, solution_id: int, doc_kind: str | None) -> l
     镜像落后一版（刷新没拉全 / 另一台设备聊过）时，模型就会对着旧结论改写。
     这里按 `doc_kind` 定位线程，投影成 `{role, content}`——与前端当初回传的形状一致。
     """
-    stage = _CLARIFY_STAGES.get(str(doc_kind or ""))
-    if stage is None:
-        raise AppError(
-            ErrorCode.INVALID_REQUEST,
-            "按澄清结果改写必须指定 doc_kind（prd / api_docs / prompts）",
-        )
+    stage = _CLARIFY_STAGES[
+        _ensure_product_kind(doc_kind, action="按澄清结果改写")
+    ]
     turns = _thread_history(owner_id, solution_id, stage)
     history = [{"role": item["role"], "content": item["content"]} for item in turns]
     if not any(str(item["content"]).strip() for item in history):
@@ -480,7 +464,7 @@ def _first_non_empty(*candidates: str) -> str:
 
 
 __all__ = [
-    "DOCUMENT_KINDS",
+    "DOCUMENT_JOB_KINDS",
     "prd_requirement_text",
     "resolve_runtime_inputs",
 ]

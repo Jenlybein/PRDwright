@@ -87,7 +87,7 @@ describe('SSE 事件解析', () => {
     const chunks: string[] = []
     const stages: StreamStageEvent[] = []
     const result = await generatePrdFromSummaryStream(
-      { summary: SUMMARY, history: [] },
+      { solutionId: 7 },
       { onChunk: (chunk) => chunks.push(chunk.text), onStage: (event) => stages.push(event) },
     )
 
@@ -139,7 +139,7 @@ describe('SSE 事件解析', () => {
 
     const parts: StreamDocumentPart[] = []
     const result = await generatePrdFromSummaryStream(
-      { summary: SUMMARY },
+      { solutionId: 7 },
       { onPart: (part) => parts.push(part) },
     )
 
@@ -172,7 +172,7 @@ describe('SSE 事件解析', () => {
 
     const parts: StreamDocumentPart[] = []
     const result = await generatePrdFromSummaryStream(
-      { summary: SUMMARY },
+      { solutionId: 7 },
       { onPart: (part) => parts.push(part) },
     )
 
@@ -193,7 +193,7 @@ describe('SSE 事件解析', () => {
 
     const stages: StreamStageEvent[] = []
     const result = await generatePrdFromSummaryStream(
-      { summary: SUMMARY },
+      { solutionId: 7 },
       { onStage: (event) => stages.push(event) },
     )
 
@@ -217,7 +217,7 @@ describe('SSE 事件解析', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(generatePrdFromSummaryStream({ summary: SUMMARY })).rejects.toThrow('生成失败：被截断')
+    await expect(generatePrdFromSummaryStream({ solutionId: 7 })).rejects.toThrow('生成失败：被截断')
   })
 
   it('把 stage_chunk 映射成阶段输出增量：带上归属阶段，且不污染正文 chunk', async () => {
@@ -271,15 +271,20 @@ describe('SSE 事件解析', () => {
 
     await generateApiDocsStream({ solutionId: 7 })
     await generatePromptsStream({ solutionId: 8 })
+    await generatePrdFromSummaryStream({ solutionId: 9 })
 
     const bodies = fetchMock.mock.calls.map(
       (call) => JSON.parse(String((call[1] as RequestInit | undefined)?.body ?? '{}')) as Record<string, unknown>,
     )
     expect(bodies[0]).toEqual({ solution_id: 7 })
     expect(bodies[1]).toEqual({ solution_id: 8 })
+    // 第三条（PRD）同样是「只点名方案」：需求正文由服务端按方案取
+    expect(bodies[2]).toEqual({ solution_id: 9 })
     for (const payload of bodies) {
       expect(payload).not.toHaveProperty('prd_content')
       expect(payload).not.toHaveProperty('api_docs_content')
+      expect(payload).not.toHaveProperty('requirements')
+      expect(payload).not.toHaveProperty('history')
     }
   })
 })
@@ -295,7 +300,7 @@ describe('SSE error 事件的错误码', () => {
   /** 跑一次流式请求并把抛出的异常交回来（而不是让断言卡在 rejects 的匹配上） */
   async function catchStreamError(blocks: string[]): Promise<unknown> {
     vi.stubGlobal('fetch', vi.fn(async () => streamResponse(blocks)))
-    return generatePrdFromSummaryStream({ summary: SUMMARY }).catch((error: unknown) => error)
+    return generatePrdFromSummaryStream({ solutionId: 7 }).catch((error: unknown) => error)
   }
 
   it('error 事件带 code 时抛 ApiError，错误码原样保留', async () => {
@@ -381,7 +386,7 @@ describe('登录凭据与未登录处理', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await generatePrdFromSummaryStream({ summary: SUMMARY })
+    await generatePrdFromSummaryStream({ solutionId: 7 })
 
     const [firstCall] = fetchMock.mock.calls
     expect(firstCall?.[1]).toMatchObject({ credentials: 'same-origin' })
@@ -392,7 +397,7 @@ describe('登录凭据与未登录处理', () => {
     onUnauthorized((message) => messages.push(message))
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })))
 
-    await expect(generatePrdFromSummaryStream({ summary: SUMMARY })).rejects.toBeInstanceOf(
+    await expect(generatePrdFromSummaryStream({ solutionId: 7 })).rejects.toBeInstanceOf(
       UnauthorizedError,
     )
     expect(messages).toEqual(['请先登录后再使用该功能'])

@@ -191,6 +191,12 @@ const props = defineProps<{
    * 「审核失败」，而不是把没审成的文档当成审过了。
    */
   reviewFailed?: boolean
+  /**
+   * 这份文档的**当前版本号**（结论面板用它回答「这条结论是哪一版的」）。
+   *
+   * `0` / 不传表示未知（旧数据或还没拉过文档）：面板此时不显示版本号，不猜一个。
+   */
+  reviewVersionNo?: number
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -453,6 +459,7 @@ function submitOptimize(): void {
     <ReviewConclusionPanel
       :review="review ?? null"
       :failed="reviewFailed"
+      :version-no="reviewVersionNo ?? 0"
       @fix="emit('fix')"
       @rereview="emit('rereview')"
     />

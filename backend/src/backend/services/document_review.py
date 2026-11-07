@@ -330,7 +330,7 @@ def fix_messages(
         document: 上一版全文（被修的那一版，含各级标题）。
         review: 由**落库的结论**还原出的判定（见 `conclusion_to_review`）。
         writing_rules: 该产物的产出规范（技能包整段注入）。
-        upstream: 上游材料全文（按目标产物拼，见 `document_service._fix_context`）。
+        upstream: 上游材料全文（按目标产物拼，见 `document_service._product_context`）。
     """
     return _build_messages(
         _REWRITE_SYSTEM_PROMPT,
@@ -345,18 +345,26 @@ def fix_messages(
     )
 
 
-def conclusion_to_review(conclusion: dict[str, Any] | None) -> DocumentReviewResult:
+def conclusion_to_review(
+    conclusion: dict[str, Any] | None, *, label: str = ""
+) -> DocumentReviewResult:
     """把**落库的审核结论**还原成修复用的判定；不是「有问题」就 400。
 
     为什么必须校验而不是「有多少条问题就改多少」：修复的唯一起点是那条结论
     （「有问题」才可点，见 ARCHITECTURE §3.8）。没有这条校验，一次迟到的请求
     也能把一份**审核通过**的正文悄悄换掉——用户只会看到正文变了，却不知道为什么。
 
+    **这道把关只有一处**：建任务那一刻（`job_inputs._fix_inputs`）与真正开跑那一刻
+    （`document_service.fix_document_stream`）都调它，不各自再写一遍 `verdict == revise`——
+    两处写法一旦漂移，就会出现「门口放行、开跑时拒绝」这种自相矛盾的表现。
+
     结论里没有 `instruction` 这一列（落库形状见 `review_data`），这里用一句话总结兜底：
     逐条问题仍然原样喂给提示词，那才是模型真正要改的东西。
 
     Args:
         conclusion: `document_versions.review` 解出来的对象；`None` 表示这一版没审过。
+        label: 产物名（「接口文档」等），用来让文案直接说清是哪一份不能修；空串时用
+            「当前版本」这种通用说法。
 
     Returns:
         可直接喂给 `fix_messages` 的判定（`verdict` 恒为 `revise`）。
@@ -367,9 +375,10 @@ def conclusion_to_review(conclusion: dict[str, Any] | None) -> DocumentReviewRes
     data = conclusion if isinstance(conclusion, dict) else {}
     verdict = str(data.get("verdict") or "").strip().lower()
     if verdict != "revise":
+        subject = label or "当前版本"
         raise AppError(
             ErrorCode.INVALID_REQUEST,
-            "当前版本的审核结论不是「有问题」，无法按结论修复。请先重新审核，"
+            f"{subject}的审核结论不是「有问题」，无法按结论修复。请先重新审核，"
             "确认确实有问题后再修复。",
         )
     issues: list[dict[str, Any]] = []

@@ -147,7 +147,7 @@ def test_part_is_emitted_only_after_rewriting_finishes() -> None:
 
     # 每章撰写一次 + 首章额外改写一次
     assert llm.section_calls == len(PRD_SECTIONS) + 1
-    # 审核每章**恰好一次**：改写后不再复审（与整篇链路「审一次 → 改一次，不复审」同口径）。
+    # 审核每章**恰好一次**：改写后不再重审（与整篇链路「审一次 → 改一次，不重审」同口径）。
     # 从前首章会多审一次，那条多出来的调用价值很低——改完大概率过，却要多等一整轮。
     assert llm.review_calls == len(PRD_SECTIONS)
 
@@ -212,6 +212,24 @@ def _parse_sse(text: str) -> list[dict[str, Any]]:
     return events
 
 
+def _create_solution_with_requirements(client, requirements: str) -> int:  # noqa: ANN001
+    """建一份带自由文本需求的方案（旧通道的需求输入同样由服务端按方案取）。
+
+    路由只收 `solution_id`（spec #51 / C-R3）：需求住在方案上，请求体里没有它。
+    """
+    created = client.post(
+        "/api/solutions",
+        json={
+            "title": "旧通道用例",
+            "mode": "structured",
+            "stage": "review-prd",
+            "state": {"quick_requirements": requirements},
+        },
+    )
+    assert created.status_code == 201, created.text
+    return int(created.json()["id"])
+
+
 def test_sse_endpoint_emits_parts_that_reassemble_into_reply(client, monkeypatch) -> None:
     """端到端：真实路由 + 真实 SSE 编码下，`part` 按序拼接即 `done.reply`。
 
@@ -227,9 +245,10 @@ def test_sse_endpoint_emits_parts_that_reassemble_into_reply(client, monkeypatch
     )
 
     assert register(client).status_code == 200
+    solution_id = _create_solution_with_requirements(client, "做一个演示产品")
     response = client.post(
         "/api/conversation/generate-prd-from-summary-stream",
-        json={"requirements": "做一个演示产品"},
+        json={"solution_id": solution_id},
     )
     assert response.status_code == 200
 
@@ -276,9 +295,9 @@ def test_medium_severity_does_not_trigger_rewrite() -> None:
 
 
 def test_high_severity_rewrites_once_without_re_review() -> None:
-    """high 触发一次改写，且**改完不再复审**。
+    """high 触发一次改写，且**改完不再重审**。
 
-    第二条 `{"verdict":"pass"}` 永远不会被消费——复审被去掉了。
+    第二条 `{"verdict":"pass"}` 永远不会被消费——重审被去掉了。
     """
     revise = json.dumps(
         {
@@ -296,7 +315,7 @@ def test_high_severity_rewrites_once_without_re_review() -> None:
     assert "rewriting" in stages
     # 每章撰写一次 + 首章改写一次
     assert llm.section_calls == len(PRD_SECTIONS) + 1
-    # 审核每章恰好一次：改写后不复审（与整篇链路同口径）
+    # 审核每章恰好一次：改写后不重审（与整篇链路同口径）
     assert llm.review_calls == len(PRD_SECTIONS)
 
     first_part = next(event for event in _parts(events) if event.data.get("section_id"))

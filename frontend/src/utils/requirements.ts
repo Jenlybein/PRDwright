@@ -15,9 +15,10 @@ import type {
  *    `format_form_data` 把 key 还原成题目文案再交给模型（见
  *    `core/question_config.json`）。因此这里把字段映射到**已有题目的字段名**上，
  *    让模型看到的是自然的中文题面而不是原始 key。
- * 2. `POST /api/conversation/generate-prd-stream` 收 `requirements` 文本，
- *    会拼进技能包提示词作为「需求输入」。字段契约本身也在提示词里，所以这里
- *    直接给与 schema 完全一致的结构化 JSON。
+ * 2. 生成 PRD 的入口（任务通道 `kind=prd`，以及两条旧的 `generate-prd-*-stream`
+ *    路由）**不再收需求正文**：只点名方案，需求输入由服务端按方案从库里取
+ *    （结构化摘要住在方案的 `summary` 列上）。因此这里不再为它拼一份载荷——
+ *    前端手里的副本一旦落后一版，就会变成第二个真源。
  */
 
 /** 单个 MVP 功能 → 一行可读文本 */

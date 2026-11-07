@@ -16,6 +16,7 @@ function review(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
     ],
     rewritten: false,
     failedSections: [],
+    reviewedAt: '2026-10-13T00:00:00',
     ...overrides,
   }
 }
@@ -126,5 +127,43 @@ describe('ReviewConclusionPanel', () => {
     await wrapper.find('button').trigger('click')
     expect(body(wrapper).text()).toContain('本次有 1 章生成失败')
     expect(body(wrapper).text()).toContain('页面设计')
+  })
+
+  it('审核失败时不渲染上一次结论的内容：失败下面是「这次没有结论」', async () => {
+    // 失败不写结论（C-R1），所以面板上留着的是**上一次**那条。把它逐条列在
+    // 「审核失败」下面，读起来就是「本次审出来的结果」——最误导人的一种排法。
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: { review: review(), failed: true },
+    })
+
+    expect(wrapper.text()).toContain('审核失败')
+    // 收起态：连问题条数都不该来自上一次那条结论
+    expect(wrapper.text()).not.toContain('2 个待处理问题')
+
+    await wrapper.find('button').trigger('click')
+    expect(wrapper.text()).not.toContain('出现了输入中没有的性能指标')
+    expect(wrapper.text()).not.toContain('缺少异常流程')
+    expect(wrapper.text()).not.toContain('2 章完成，2 个待处理问题')
+    // 该说的是「这次没跑成」，而且不提旧结论
+    expect(body(wrapper).text()).toContain('这次审核没有跑成')
+  })
+
+  it('显示「第几版、什么时候审的」：结论能追溯到被审的那一版', () => {
+    const reviewedAt = new Date(Date.now() - 5 * 60_000).toISOString()
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: { review: review({ reviewedAt }), versionNo: 3 },
+    })
+
+    expect(wrapper.text()).toContain('第 3 版')
+    expect(wrapper.text()).toContain('5 分钟前')
+  })
+
+  it('没有审核时间就不编一个：未审核 / 审核失败时不显示「审于」', async () => {
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: { review: null, failed: true, versionNo: 2 },
+    })
+
+    expect(wrapper.text()).toContain('第 2 版')
+    expect(wrapper.text()).not.toContain('审于')
   })
 })

@@ -684,6 +684,7 @@ function makeDocumentRecord(
     review,
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
+    versionNo: 0,
     derivedFrom: null,
   }
 }
@@ -2206,7 +2207,23 @@ describe('AppV2 交付页入口', () => {
     expect(wrapper.text()).toContain('生成接口文档')
   })
 
-  it('提示按方案各给一次：换方案会再提示，回到原方案不重复提示', async () => {
+  it('导入入口齐备时不弹「三份文档已齐备」：那句话只说三份', async () => {
+    // 规格只要求「三份齐备时全应用提示一次」。两个导入入口只要一份提示词，
+    // 对它们说「已齐备」是不可见的谎话；入口照旧是进度条那一格（下一条用例在点它）。
+    const wrapper = await mountExistingSolution(
+      { ...reviewSnapshot('review-prompts'), entryMode: 'prompt-debug' },
+      1,
+      [makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n内容')],
+    )
+
+    expect(wrapper.text()).not.toContain('可在进度条进入交付页')
+    // 交付格照旧可点：不弹提示不等于把入口锁上
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+    expect(storeOf(wrapper).viewState).toBe('done')
+  })
+
+  it('提示按方案各给一次：换到三份齐备的方案会提示，回到导入入口不再提示', async () => {
     vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([
       sidebarItem(1, '方案一'),
       sidebarItem(2, '方案二'),
@@ -2226,17 +2243,14 @@ describe('AppV2 交付页入口', () => {
         : allDocuments(),
     )
 
-    const wrapper = await mountEntry('/v2/1')
-    expect(wrapper.text()).toContain('三份文档已齐备，可在进度条进入交付页')
+    // 从导入入口开始：只有一份提示词，不提示
+    const wrapper = await mountEntry('/v2/2')
+    expect(wrapper.text()).not.toContain('可在进度条进入交付页')
 
-    // 换到方案二（导入入口，只有提示词也算齐备）：换方案可以再提示，文案随入口模式变
-    await clickSolutionInSidebar(wrapper, '方案二')
-    expect(wrapper.text()).toContain('提示词套件已生成，可在进度条进入交付页')
-
-    // 回到方案一：同一方案在同一会话里不再提示——提示位仍是方案二那句，
-    // 没有被换回「三份文档已齐备」（否则等于又提示了一次）
+    // 换到三份齐备的方案：这时才弹那条提示
     await clickSolutionInSidebar(wrapper, '方案一')
-    expect(wrapper.text()).not.toContain('三份文档已齐备，可在进度条进入交付页')
+    expect(wrapper.text()).toContain('三份文档已齐备，可在进度条进入交付页')
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
   })
 })
 
@@ -3549,6 +3563,7 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
       issues: [],
       rewritten: false,
       failedSections: [],
+      reviewedAt: '2026-10-13T00:00:00',
       ...overrides,
     }
   }
@@ -3718,7 +3733,7 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
       'review-fix': async (handlers) => {
         stateDuringRun = wrapper ? storeOf(wrapper).viewState : ''
         handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
-        // 修复后的复审结论随流到达：面板据此即时更新（落库那条由收尾的 reload 拉回）
+        // 修复后的重审结论随流到达：面板据此即时更新（落库那条由收尾的 reload 拉回）
         handlers.onReview?.(refreshed)
         // 收尾摘要到达 → 前端重新拉一次文档（后端在此之前已写好新版本与新结论）
         handlers.onRunSummary?.(makeRunSummary({ kind: 'review-fix' }))
@@ -3741,19 +3756,19 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     expect(payload?.document).toBeUndefined()
 
     expect(stateDuringRun).toBe('generating-api-docs')
-    // 收尾回到审阅页：新正文写回工作副本，结论面板换成复审那条
+    // 收尾回到审阅页：新正文写回工作副本，结论面板换成重审那条
     expect(storeOf(wrapper).viewState).toBe('review-api-docs')
     expect(documentsOf(wrapper).contentOf('api-docs')).toBe(FIXED)
     expect(wrapper.text()).toContain('通过')
   })
 
-  it('复审失败：新正文照旧落到审阅页，面板显示「审核失败」且可再点重新审核', async () => {
+  it('重审失败：新正文照旧落到审阅页，面板显示「审核失败」且可再点重新审核', async () => {
     const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
     const FIXED = '# 接口文档\n\n## 一、概述\n统一响应结构\n\n## 二、鉴权\n已补齐鉴权'
     mockJobStream({
       'review-fix': async (handlers) => {
         handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
-        // 复审没跑成：后端给一条判定空串的 `review` 事件（不是「通过」）
+        // 重审没跑成：后端给一条判定空串的 `review` 事件（不是「通过」）
         handlers.onReview?.(conclusion({ kind: 'api_docs', verdict: '', summary: '审核未完成' }))
         handlers.onRunSummary?.(makeRunSummary({ kind: 'review-fix' }))
         return { conversationId: '', reply: FIXED, asks: [] }
@@ -3761,7 +3776,7 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     })
 
     const wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
-    // 复审失败不写结论（C-R1）：后端那份记录里这一版仍然没有 review
+    // 重审失败不写结论（C-R1）：后端那份记录里这一版仍然没有 review
     vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
       makeDocumentRecord('api-docs', FIXED, null, [], null),
     ])

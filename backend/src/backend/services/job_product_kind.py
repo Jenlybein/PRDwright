@@ -12,6 +12,35 @@ from __future__ import annotations
 from typing import Any
 
 from backend.core.contracts import DOCUMENT_KINDS
+from backend.core.errors import AppError, ErrorCode
+
+
+def _ensure_product_kind(value: str | None, *, action: str) -> str:
+    """校验「对哪一份产物做事」的取值，不合法即 400。
+
+    为什么收成一处：`review` / `review_fix` / `clarify` 三条动作链都要在**建任务那一刻**
+    拒掉缺 `doc_kind` 或取值非法的请求（猜一个默认产物会把结论、改写结果记到别人头上），
+    而这句话的措辞此前在五个地方各写了一遍——改一处忘一处，用户就会看到两种说法的
+    同一个错误。
+
+    Args:
+        value: 请求体里的 `doc_kind`。
+        action: 这次动作的中文名（「重新审核」「按结论修复」「按澄清结果改写」），
+            用来把「谁必须指定」说清楚。
+
+    Returns:
+        合法的产物种类（`prd` / `api_docs` / `prompts`）。
+
+    Raises:
+        AppError: 缺值或取值不在 `DOCUMENT_KINDS` 里（`INVALID_REQUEST`，400）。
+    """
+    kind = str(value or "")
+    if kind in DOCUMENT_KINDS:
+        return kind
+    raise AppError(
+        ErrorCode.INVALID_REQUEST,
+        f"{action}必须指定 doc_kind（prd / api_docs / prompts），收到：{kind or '（空）'}",
+    )
 
 
 def _target_product_kind(kind: str, request: dict[str, Any]) -> str | None:

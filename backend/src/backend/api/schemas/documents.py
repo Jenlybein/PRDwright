@@ -54,6 +54,13 @@ class DocumentItem(BaseModel):
             "「未审核 / 审核失败」。刷新与换会话后它是唯一来源。"
         ),
     )
+    version_no: int = Field(
+        default=0,
+        description=(
+            "当前版本序号（从 1 开始）。结论面板用它回答「这条结论是哪一版的」；"
+            "0 表示还没有版本（旧数据 / 尚未生成），界面不显示版本号。"
+        ),
+    )
     updated_at: str = Field(default="", description="最近更新时间（UTC ISO 8601）")
     stale: bool = Field(
         default=False,
