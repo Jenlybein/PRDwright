@@ -295,6 +295,9 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             content,
             pending_items=runtime.pending_items,
             run_summary=summary,
+            # 审核结论与正文**同批写入**：它描述的就是这一版正文，分两次写就会出现
+            # 「正文换了、结论还是旧的那条」。没审成时是 `None`，不写占位。
+            review=runtime.review,
             # `append_version=True`（整篇生成）同时意味着「追加新版本」；
             # `False`（optimize / clarify）就是就地改当前版本。下游不再删除，
             # 是否过期由读取侧比较 derived_from 得出。

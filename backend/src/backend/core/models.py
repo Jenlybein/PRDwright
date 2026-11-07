@@ -338,6 +338,16 @@ class DocumentVersion(SQLModel, table=True):
     )
     created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+    # 审核结论（票 #52）：**一版一条**，被审的那一版正文配一条结论。JSON 文本，
+    # 形状与 SSE `review` 事件的数据一致（判定 / 逐条问题 / 总结 / 是否改写 /
+    # 失败章节 / 审核时间）。**审核没跑成就是 NULL**——没有结论不等于通过，
+    # 旧版本与旧数据读出来是「未审核」。
+    #
+    # ⚠️ 必须声明在**最后**：迁移 0006 用 `ALTER TABLE ... ADD COLUMN` 追加这一列，
+    # 物理列序就是「老列 + review」。模型这边换个位置，`create_all` 建出来的库列序
+    # 就与迁移建的不同，`test_schema_migration` 的整份快照对比会因此转红。
+    # ⚠️ 不设 `server_default`：MySQL 的 TEXT 不接受字面量默认值。
+    review: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
 
 # ---------------------------------------------------------------------------
