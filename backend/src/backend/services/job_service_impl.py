@@ -609,6 +609,21 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
             product_name=request.get("product_name", "") or "",
             history=request.get("history") or None,
         )
+    if kind == "review_fix":
+        # 按结论修复：被修的正文、那条结论与上游材料同样由服务端解析（`_fix_inputs`）。
+        # 上游对 PRD 是两条澄清线程、对其余两份是上游全文（ADR 0002 的上下文窗口）。
+        return document_service.fix_document_stream(
+            doc_kind=_target_product_kind(kind, request) or "",
+            document=request.get("document", "") or "",
+            conclusion=request.get("review_conclusion"),
+            prd_content=request.get("prd_content", "") or "",
+            api_docs_content=request.get("api_docs_content", "") or "",
+            summary=request.get("summary"),
+            requirements=request.get("requirements", "") or "",
+            product_name=request.get("product_name", "") or "",
+            history=request.get("history") or None,
+            clarify_history=request.get("clarify_history") or None,
+        )
     if kind == "chat":
         return _chat_event_stream(request)
     raise ValueError(f"未知的生成任务类型：{kind}")

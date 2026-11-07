@@ -1420,6 +1420,54 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 审阅页「修复」：按当前版本的结论**重写整篇**，由后端追加一个新版本。
+   *
+   * 与 `rereview` 同形（拦重入 → 切生成态 → 起任务 → 收尾回审阅页），差别有三处：
+   *
+   * - **载荷仍只有 `docKind`**：被修的正文、那条结论、上游材料（PRD 全文 / PRD + 接口文档 /
+   *   需求输入与两条澄清线程）全由服务端从库里取（C-R3）。前端递任何一份都会复活双真源；
+   * - **收尾要看 `reply`**：修复产出的是新正文，必须像生成一样写回工作副本（`finishDoc`）。
+   *   重审不产出正文，所以它不走这条路；
+   * - **失败留在生成态**：改写失败时后端**不动库**（正文与版本都还是原样），错误由
+   *   生成页的错误区说明——与「按澄清改写 / AI 自行澄清」同一条口径。
+   *
+   * 复审失败**不是失败**（那是后端的事）：任务照旧成功，只是结论留空，界面显示
+   * 「审核失败」，可以再点一次「重新审核」补上。
+   */
+  async function fixDocument(): Promise<void> {
+    if (isRunInFlight()) return
+    const target = docKindOfState(viewState.value)
+    if (!target) return
+    // 修复的起点就是「有问题」那条结论：面板已按它把关，这里再兜一层，
+    // 免得一次迟到的点击发出一个注定被 400 的请求
+    if (documents.reviewOf(target)?.verdict !== 'revise') return
+    const generating = generatingStateFor(target)
+    if (!generating) return
+
+    resetDocTransient()
+    prdBoard.value = null
+    // 阶段先于任务切（理由见 `autoClarify` / `rereview`）：登记运行态之后 `goTo` 会被忙拦下
+    goTo(generating)
+    // 整篇重写是最长的一步：先把阶段条点亮，别让用户在等后端 `stage` 事件时盯着空白
+    docPhase.value = 'writing'
+    const epochAtStart = solutions.sessionEpoch
+    const { reply, ok, aborted, run } = await job.start(
+      'review-fix',
+      { docKind: target },
+      handlersForKind('review-fix', epochAtStart),
+    )
+    // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    if (!ok) {
+      docError.value = job.error.value || '按结论修复失败'
+      return
+    }
+    // 成功：落点（回这份文档的审阅页）与「写回新正文」都由 `finishDoc` 负责；
+    // 结论由随后的 `documents.reload()` 拉回（后端在广播 `run_summary` 之前就写好了）
+    finishDoc('review-fix', reply, target, epochAtStart)
+  }
+
+  /**
    * 我有 PRD入口：用用户贴入的 PRD 直接生成提示词套件。
    *
    * 刻意不把这份 PRD 交付给文档 store：那是「本工具生成的 PRD」的位置，混进用户
@@ -1707,6 +1755,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     updateStaleDocument,
     autoClarify,
     rereview,
+    fixDocument,
     handleGeneratePromptsFromDebugPrd,
     handleGeneratePromptsFromPair,
     backToInput,

@@ -580,6 +580,7 @@ const {
   updateStaleDocument,
   autoClarify,
   rereview,
+  fixDocument,
   handleGeneratePromptsFromDebugPrd,
   handleGeneratePromptsFromPair,
   backToInput,
@@ -1218,6 +1219,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @navigate="goTo"
         @return-to-chat="handleReturnToChat"
         @auto-clarify="autoClarify"
+        @fix="fixDocument"
         @rereview="rereview"
       />
 

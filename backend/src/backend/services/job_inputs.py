@@ -27,7 +27,9 @@
 - 按澄清结果改写 → 该文档那条澄清线程（`prd-clarify` / `api-docs-clarify` /
   `prompts-clarify`）；
 - 导入入口（我有 PRD / 我有 PRD + 接口文档）→ 方案上保存的录入文本列；
-- 重新审核 → 被审的那一份当前正文 + 与生成时同一份上游材料（只审不改，见 ADR 0002）。
+- 重新审核 → 被审的那一份当前正文 + 与生成时同一份上游材料（只审不改，见 ADR 0002）；
+- 按结论修复 → 被修的那一份当前正文 + **当前版本那条结论** + 上游材料全文
+  （与重新审核同源，但上游不做骨架化：修复要照着原文改，见 ADR 0002）。
 
 **取不到就 400**：请求体里那一份不再参与（#53 的过渡兜底在本票删除），否则双真源
 只是换了个地方复活。唯一的例外是「重新审核的**上游**」：它只是判定时的对照材料，
@@ -60,6 +62,7 @@ DOCUMENT_KINDS: tuple[str, ...] = (
     "clarify",
     "auto_clarify",
     "review",
+    "review_fix",
 )
 
 # 任务种类 → 给人看的名字（缺材料时的提示要能直接读懂缺的是哪一步）。
@@ -71,6 +74,7 @@ _KIND_LABELS: dict[str, str] = {
     "clarify": "按澄清结果改写",
     "auto_clarify": "AI 自行澄清",
     "review": "重新审核",
+    "review_fix": "按结论修复",
 }
 
 # 文档类型 → 它自己的那条澄清线程（四条线程之一，见 `core/chat_kinds.py`）。
@@ -122,14 +126,15 @@ def resolve_runtime_inputs(
 
     只认文档类任务：`chat` 返回空（它的上下文由对话服务从轮次表拼）。`optimize` /
     `auto_clarify` 的输入（要改的那份正文、指令、清单）仍由调用方给——它们描述的是
-    「这一次要做什么」，不是「上游是谁」。`clarify` 的对话记录与 `review` 的被审正文
-    同属上游，一律在这里取。
+    「这一次要做什么」，不是「上游是谁」。`clarify` 的对话记录、`review` 的被审正文与
+    `review_fix` 的被修正文（外加那条结论）同属上游，一律在这里取。
 
     Args:
         kind: 任务种类。
         owner_id: 当前用户；读取一律带它，越权与不存在等价。
         solution_id: 方案 id；文档类任务必填，缺了就是 400。
-        doc_kind: 目标产物（`clarify` 用它定位澄清线程，`review` 用它决定审哪一份）。
+        doc_kind: 目标产物（`clarify` 用它定位澄清线程；`review` / `review_fix` 用它决定
+            审 / 修哪一份，`review_fix` 还用它决定注入哪一份上游全文）。
 
     Raises:
         AppError: 缺方案（`INVALID_REQUEST`）、方案不可见（`SOLUTION_NOT_FOUND`）、
@@ -153,6 +158,8 @@ def resolve_runtime_inputs(
         return {"history": _clarify_history(owner_id, solution_id, doc_kind)}
     if kind == "review":
         return _review_inputs(owner_id, solution_id, doc_kind)
+    if kind == "review_fix":
+        return _fix_inputs(owner_id, solution_id, doc_kind)
     return {}
 
 
@@ -278,6 +285,81 @@ def _review_inputs(
         )
     else:
         inputs["prd_content"] = _picked_prd(contents, solution)
+        if kind == "prompts":
+            inputs["api_docs_content"] = _picked_api_docs(contents, solution)
+    return inputs
+
+
+def _fix_inputs(
+    owner_id: int, solution_id: int, doc_kind: str | None
+) -> dict[str, Any]:
+    """**按审核结论修复**的输入：被修的那一版正文 + 那条结论 + 上游材料全文。
+
+    与 `_review_inputs` 同构（同一份「当前版本」+ 同一份上游），只多一格**结论**，
+    却因此多出两条硬校验——修复不是「再写一遍」，它只对一件事开放：
+
+    - **这一份必须已经有正文**：没有正文就没有「被审的那一版」，也就不存在修复对象；
+    - **当前版本的结论必须是「有问题」**：修复入口在界面上就只对「有问题」开放
+      （ARCHITECTURE §3.8）。这里同样把关，是因为**界面的可用条件不是权限**——
+      一次迟到的、或绕过界面发来的请求，否则会把一份审核通过的正文悄悄换掉。
+
+    上游一律**全文**（不是审核侧那份骨架）：修复要照着上游改，骨架会丢掉散文里的事实。
+    上游缺失不硬拦（PRD 尤其可能没有需求输入），由提示词里那句「未提供」显式降级；
+    但接口文档 / 提示词缺 PRD 时仍然 400——没有 PRD 就没有事实来源，重写等于编造。
+    """
+    kind = str(doc_kind or "")
+    if kind not in ("prd", "api_docs", "prompts"):
+        # 措辞与 `clarify` / `review` 的同名校验一致：不猜默认产物
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "按结论修复必须指定 doc_kind（prd / api_docs / prompts）",
+        )
+
+    rows = document_store.list_documents(owner_id, solution_id)
+    contents = {row["kind"]: str(row.get("content") or "") for row in rows}
+    reviews = {row["kind"]: row.get("review") for row in rows}
+    solution = _require_solution(owner_id, solution_id)
+    label = _DOC_KIND_LABELS.get(kind, kind)
+
+    document = _first_non_empty(contents.get(kind, ""))
+    if not document:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"{label}还没有正文，无法按结论修复。请先生成这一份文档，再来审阅页修复。",
+        )
+    conclusion = reviews.get(kind)
+    verdict = ""
+    if isinstance(conclusion, dict):
+        verdict = str(conclusion.get("verdict") or "").strip().lower()
+    if verdict != "revise":
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"{label}当前版本的审核结论不是「有问题」，无法按结论修复。"
+            "请先重新审核，确认确实有问题后再修复。",
+        )
+
+    inputs: dict[str, Any] = {"document": document, "review_conclusion": conclusion}
+    if kind == "prd":
+        # PRD 的上下文窗口：结构化摘要 / 自由文本需求 + 两条澄清线程 + 当前正文 + 结论。
+        # 需求输入整条链路都可能为空（导入的历史方案），给了就用、没给由提示词显式降级。
+        inputs.update(
+            {
+                "summary": solution.summary,
+                "requirements": str(solution.quick_requirements or ""),
+                "product_name": solution.quick_product_name,
+                "history": _thread_history(owner_id, solution_id, _REQUIREMENT_STAGE) or None,
+                "clarify_history": _thread_history(owner_id, solution_id, "prd-clarify") or None,
+            }
+        )
+    else:
+        prd = _picked_prd(contents, solution)
+        if not prd:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{label}修复缺少上游 PRD：库里没有 PRD 当前版本，方案上也没有保存的 PRD 材料。"
+                f"{_SAVE_MATERIAL_HINT}",
+            )
+        inputs["prd_content"] = prd
         if kind == "prompts":
             inputs["api_docs_content"] = _picked_api_docs(contents, solution)
     return inputs
