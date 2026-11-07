@@ -17,7 +17,8 @@
 - 接口文档 → PRD 当前版本全文；
 - 提示词 → PRD 与接口文档当前版本全文；
 - PRD → 方案上的结构化需求摘要、快捷流程的自由文本需求、需求澄清线程（`requirement`）；
-- 导入入口（我有 PRD / 我有 PRD + 接口文档）→ 方案上保存的录入文本列（库内产物为空时）。
+- 导入入口（我有 PRD / 我有 PRD + 接口文档）→ 方案上保存的录入文本列（库内产物为空时）；
+- 重新审核 → 被审的那一份当前正文 + 与生成时同一份上游材料（只审不改，见 ADR 0002）。
 
 **取不到时沿用请求体里的值**：本票只做「扩」，缺材料的 400 归下一票 #54。这条兜底
 刻意只写在本模块一处——#54 要删的就是它。
@@ -63,8 +64,9 @@ def resolve_runtime_inputs(
 ) -> dict[str, Any]:
     """按任务种类解析上游输入，返回**要合进运行时请求参数**的那几格。
 
-    只认三种整篇生成：`optimize` / `clarify` / `auto_clarify` 的输入（要改的那份正文、
-    指令、清单）仍由调用方给——它们描述的是「这一次要做什么」，不是「上游是谁」。
+    只认三种整篇生成 + 重新审核：`optimize` / `clarify` / `auto_clarify` 的输入
+    （要改的那份正文、指令、清单）仍由调用方给——它们描述的是「这一次要做什么」，
+    不是「上游是谁」。
     """
     if solution_id is None:
         # 没有方案就没有服务端上游可查（如「无方案」逃生口）：请求体原样用，
@@ -76,6 +78,8 @@ def resolve_runtime_inputs(
         return {"prd_content": _api_docs_prd(owner_id, solution_id, request)}
     if kind == "prompts":
         return _prompts_inputs(owner_id, solution_id, request)
+    if kind == "review":
+        return _review_inputs(owner_id, solution_id, request)
     return {}
 
 
@@ -140,6 +144,34 @@ def _prompts_inputs(
             str(request.get("api_docs_content") or ""),
         ),
     }
+
+
+def _review_inputs(
+    owner_id: int, solution_id: int, request: dict[str, Any]
+) -> dict[str, Any]:
+    """重新审核的输入：**被审的那一份当前正文** + 它比对用的上游材料。
+
+    三份产物的上游材料各按生成时的同一口径取（C-R3：输入只来自服务端）：
+
+    - PRD → 结构化摘要 / 自由文本需求 + 需求澄清历史（按章重审要拿它核对「有没有编造」）；
+    - 接口文档 → PRD 当前版本全文；
+    - 提示词 → PRD 与接口文档当前版本全文。
+
+    `document` 一格是**被审的正文**：与上游材料不同，它不参与生成，只作为审核对象。
+    取不到（库里还没有这一份）时留空串，由审核链路给出明确的失败原因——
+    绝不回退到请求体：重审的请求体本来就不携带正文。
+    """
+    doc_kind = str(request.get("doc_kind") or "")
+    inputs: dict[str, Any] = {
+        "document": _document_contents(owner_id, solution_id).get(doc_kind, "")
+    }
+    if doc_kind == "prd":
+        inputs.update(_prd_inputs(owner_id, solution_id, request))
+    elif doc_kind == "api_docs":
+        inputs["prd_content"] = _api_docs_prd(owner_id, solution_id, request)
+    elif doc_kind == "prompts":
+        inputs.update(_prompts_inputs(owner_id, solution_id, request))
+    return inputs
 
 
 def _prd_inputs(

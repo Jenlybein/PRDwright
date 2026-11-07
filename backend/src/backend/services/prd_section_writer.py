@@ -80,6 +80,7 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import StreamEvent
+from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
 from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
 from backend.services.llm_utils import extract_json_object
@@ -96,8 +97,18 @@ from backend.services.prd_skill import (
     format_summary_as_requirements,
     load_prd_skill_artifacts,
 )
-from backend.services.doc_skeleton import extract_headings, skeletonize
-from backend.services.document_review import reaches_severity, review_data
+from backend.services.doc_skeleton import (
+    DocSection,
+    extract_headings,
+    normalize_heading,
+    skeletonize,
+    split_sections,
+)
+from backend.services.document_review import (
+    reaches_severity,
+    review_data,
+    stage_chunk_event,
+)
 from backend.services.prompts import (
     PRD_SECTION_GENERATION_PROMPT,
     PRD_SECTION_REVIEW_PROMPT,
@@ -524,6 +535,147 @@ class PrdSectionWriter:
             # 还在跑（并行链路尤其明显：六个章节的模型调用都还挂着）。
             await lane.aclose()
 
+    async def review_document(
+        self,
+        *,
+        document: str,
+        summary: dict[str, Any] | None = None,
+        requirements: str = "",
+        product_name: str = "",
+        history: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """**重新审核**一份已有的 PRD：逐章审当前正文，汇总成一条结论（只审不改）。
+
+        为什么按章而不是整篇审一次
+        --------------------------
+        写作规范与审核口径都是**按章**写的（每章有各自的焦点与检查项），生成时的结论
+        也正是逐章审核汇总出来的。整篇再审一次会得到另一套判定口径，用户看到的
+        「这一版被审成什么样」就会随「是生成时审的还是重审的」而变。这里复用单章审核的
+        提示词与解析，连汇总形状都与生成链路一致（`review_data` 是唯一构造点）。
+
+        与生成的差别只有三点：
+
+        - **不撰写、不改写**：正文一个字都不碰（C-R2），`rewritten` 恒为 `False`；
+        - 章节来自**当前正文**（`split_sections`），不是模板：用户手改出模板外的章节，
+          照样会被审到；模板里的章节如果在正文里不存在，也不会凭空审一个空章；
+        - 审核失败**判失败**，不按通过处理（C-R1：没有结论 ≠ 通过）。
+
+        Args:
+            document: 当前版本的 PRD 全文（含 H1 文档头）。
+            summary: 结构化需求摘要（与生成时同一份）。
+            requirements: 自由文本需求（快捷流程）。
+            product_name: 产品名（只有自由文本需求时用得上）。
+            history: 需求澄清对话；本轮不参与提示词，保留参数是为了与生成入口对齐口径。
+
+        Yields:
+            `stage(reviewing)`（每章一条）→ 若干 `stage_chunk` → 一条 `review`（汇总结论）。
+
+        Raises:
+            AppError: 正文为空、切不出章节、技能资源缺失、审核调用失败或回的不是 JSON。
+                三种都是「没审成」，调用方（任务层）据此把任务判失败、不写结论。
+        """
+        del history  # 单章审核的提示词里没有对话历史这一节，保留参数只为与生成入口同形
+        text = (document or "").strip()
+        if not text:
+            raise AppError(ErrorCode.INVALID_REQUEST, "这份文档还没有正文，无法重新审核")
+
+        artifacts = load_prd_skill_artifacts()
+        if artifacts is None:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST, "PRD 技能包未加载，无法按章重新审核"
+            )
+        writing_rules = artifacts["writing_rules"]
+        requirements_text = _requirements_text(summary, requirements, product_name) or (
+            "（未提供需求输入，仅依据正文与写作规范核对）"
+        )
+
+        _preamble, sections = split_sections(text)
+        if not sections:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "这份 PRD 里没有可定位的章节（缺少「## 」一级标题），无法按章重新审核",
+            )
+
+        total = len(sections)
+        yield StreamEvent(
+            type="stage",
+            content=f"正在逐章审核 PRD（共 {total} 章）…",
+            data={"stage": "reviewing", "doc_type": "prd"},
+        )
+
+        issues: list[dict[str, Any]] = []
+        written: list[str] = []
+        for index, section in enumerate(sections):
+            target = _section_meta(section, index)
+            yield _section_stage_event("reviewing", target, index, total)
+            messages = self._review_messages(
+                section=target,
+                section_text=section.body,
+                writing_rules=writing_rules,
+                requirements=requirements_text,
+                prior_sections=_join_prior(written),
+            )
+            raw_chunks: list[str] = []
+            try:
+                async for delta in astream_text(self.review_llm, messages):
+                    raw_chunks.append(delta)
+                    yield stage_chunk_event("reviewing", delta, "prd")
+            except Exception as exc:  # noqa: BLE001 - 统一转成任务失败，绝不报成通过
+                logger.warning(
+                    "PRD 第 %d 章重新审核失败",
+                    index + 1,
+                    exc_info=True,
+                    extra={"event": "prd.rereview_failed"},
+                )
+                raise AppError(
+                    ErrorCode.LLM_UPSTREAM_ERROR,
+                    f"PRD 审核没有跑成（{section.heading}）：{exc}",
+                ) from exc
+
+            raw = "".join(raw_chunks)
+            if extract_json_object(raw) is None:
+                logger.warning(
+                    "PRD 第 %d 章重新审核返回的不是合法 JSON，判本次失败",
+                    index + 1,
+                    extra={"event": "prd.rereview_invalid_json"},
+                )
+                raise AppError(
+                    ErrorCode.LLM_UPSTREAM_ERROR,
+                    f"PRD 审核返回的判定无法解析（{section.heading}），请再试一次",
+                )
+
+            review = self._parse_review(raw, where=target.heading)
+            # 汇总口径与两条生成链路逐字一致：只收「判定为有问题」的章节的逐条问题，
+            # `where` 不进汇总（按章定位不需要它）
+            if review.needs_revision:
+                for issue in review.issues:
+                    issues.append(
+                        {
+                            "section_id": target.id,
+                            "section_title": target.title,
+                            "severity": str(issue.get("severity") or "medium"),
+                            "detail": str(issue.get("detail") or ""),
+                        }
+                    )
+            written.append(section.body)
+
+        verdict = "revise" if issues else "pass"
+        conclusion = f"{total} 章完成，{len(issues)} 个待处理问题"
+        yield StreamEvent(
+            type="review",
+            content=conclusion,
+            data=review_data(
+                "prd",
+                verdict=verdict,
+                summary=conclusion,
+                issues=issues,
+                # 重审只审不改：这一位恒为 False，与生成链路的「如实汇总」并不矛盾——
+                # 那边记的是「本次真的改写过」，这边本来就没有改写这一步。
+                rewritten=False,
+                failed_sections=[],
+            ),
+        )
+
     def _prepare_inputs(
         self,
         *,
@@ -552,14 +704,10 @@ class PrdSectionWriter:
         if artifacts is None:
             raise RuntimeError("PRD 技能资源不可用，无法分章节生成")
 
-        if summary:
-            requirements_text = format_summary_as_requirements(summary)
-            name = str(summary.get("product_name") or "").strip() or product_name
-        elif requirements.strip():
-            requirements_text = format_freeform_requirements(requirements, product_name)
-            name = product_name
-        else:
+        requirements_text = _requirements_text(summary, requirements, product_name)
+        if not requirements_text:
             raise ValueError("summary 与 requirements 至少需要提供一个")
+        name = _product_name(summary, product_name)
 
         writing_rules = artifacts["writing_rules"]
         # 需求输入**原样**交给审核，不做骨架化。
@@ -977,6 +1125,30 @@ class PrdSectionWriter:
         审核走**小输出窗口**的实例（`review_llm`）：它只吐一个 JSON 批注，
         用不着撰写级的上限。
         """
+        messages = self._review_messages(
+            section=section,
+            section_text=section_text,
+            writing_rules=writing_rules,
+            requirements=requirements,
+            prior_sections=prior_sections,
+        )
+        raw = await self._collect(messages, llm=self.review_llm)
+        return self._parse_review(raw, where=section.id)
+
+    def _review_messages(
+        self,
+        *,
+        section: PrdSection,
+        section_text: str,
+        writing_rules: str,
+        requirements: str,
+        prior_sections: str,
+    ) -> list[BaseMessage]:
+        """组装「审核某一章」的消息——生成与重新审核共用同一份提示词。
+
+        单独一格是为了让重审能**流式**吐出审核输出（那一步要实时展示进展），
+        而不必复制粘贴一遍提示词拼装。
+        """
         # 本章的小节标题清单，作为 `where` 的取值域——让模型从里挑，
         # 而不是自由发挥写一个文档里不存在的章节名
         section_titles = "\n".join(
@@ -990,14 +1162,21 @@ class PrdSectionWriter:
             section_text=section_text,
             section_titles=section_titles,
         )
-        messages = _build_messages(PRD_SECTION_REVIEW_SYSTEM_PROMPT, user_content)
-        raw = await self._collect(messages, llm=self.review_llm)
+        return _build_messages(PRD_SECTION_REVIEW_SYSTEM_PROMPT, user_content)
 
+    @staticmethod
+    def _parse_review(raw: str, *, where: str = "") -> SectionReview:
+        """把模型的审核输出解析成判定（**永不抛**：解析不出来按通过处理）。
+
+        生成链路里这一步「解析失败 = 通过」是有意的：审核是锦上添花，不能因为它
+        把已经生成好的正文丢掉。**重新审核**（唯一产出就是判定）不能用这条口径，
+        它自己先判一次 JSON，糊掉的判定按失败处理（见 `review_document`）。
+        """
         parsed = extract_json_object(raw)
         if parsed is None:
             logger.warning(
                 "章节 %s 审核未返回合法 JSON，按通过处理。原始输出：%s",
-                section.id,
+                where or "（未知）",
                 raw[:500],
                 extra={"event": "prd.review_invalid_json"},
             )
@@ -1026,6 +1205,49 @@ def _build_messages(system_prompt: str, user_content: str) -> list[BaseMessage]:
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_content),
     ]
+
+
+def _section_meta(section: DocSection, index: int) -> PrdSection:
+    """把「当前正文里的一节」映射成 `PrdSection`（供单章审核提示词使用）。
+
+    命中模板章节（按归一化标题比）时复用模板里那份元信息：`id` 是前端累积与定位
+    章节的稳定键，汇总结论里的 `section_id` 因此与生成时**同一套取值**，界面上
+    「哪一章有问题」不会因为「是生成时审的还是重审的」而换名字。
+
+    没命中时（用户手改出模板外的章节）就地造一个：`id` 用下标而不是标题，
+    标题改一个字不该让「同一章」变成另一章。
+    """
+    for known in PRD_SECTIONS:
+        if normalize_heading(known.heading) == normalize_heading(section.heading):
+            return known
+    return PrdSection(
+        id=f"custom-{index}",
+        heading=section.heading,
+        title=section.heading.lstrip("#").strip(),
+        focus="",
+    )
+
+
+def _requirements_text(
+    summary: dict[str, Any] | None, requirements: str, product_name: str
+) -> str:
+    """把两种需求输入归一成**给模型看的需求文本**；两者都空时返回空串。
+
+    生成与重审共用这一处：重审要核对「有没有编造」，它拿到的需求文本必须与当初撰写
+    时**同一份**，否则「有据 / 无据」的判定会跟着入口形态漂。
+    """
+    if summary:
+        return format_summary_as_requirements(summary)
+    if requirements.strip():
+        return format_freeform_requirements(requirements, product_name)
+    return ""
+
+
+def _product_name(summary: dict[str, Any] | None, product_name: str) -> str:
+    """文档头用的产品名：结构化摘要里的优先，其次调用方给的那个。"""
+    if not summary:
+        return product_name
+    return str(summary.get("product_name") or "").strip() or product_name
 
 
 def _join_prior(written: list[str]) -> str:

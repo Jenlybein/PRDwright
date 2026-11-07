@@ -63,6 +63,9 @@ import { jobDocumentKind } from '@/utils/workflow'
  * `auto-clarify` 也返回 null，但**调用方会自己先切到 `generating-<kind>`**：
  * 它要跑几十秒且输出整篇正文，留在审阅页只能干等，因此复用生成态的流式预览
  * （见 `useDocumentPipeline.autoClarify`）。切阶段放在调用方，是因为它知道目标产物是谁。
+ *
+ * `review`（重新审核）同理：它不产出正文，只是「审核这一份」，阶段由调用方先切到
+ * `generating-<kind>`（见 `useDocumentPipeline.rereview`）。
  */
 const GENERATING_STATE: Record<DocKind, ViewState | null> = {
   prd: 'generating-prd',
@@ -71,6 +74,7 @@ const GENERATING_STATE: Record<DocKind, ViewState | null> = {
   optimize: null,
   clarify: null,
   'auto-clarify': null,
+  review: null,
   // 对话不切阶段：用户本来就停在对话页，切走反而看不到正在流的内容。
   // 它是「就地生成」，和 optimize / clarify 同一种形态。
   chat: null,

@@ -80,6 +80,13 @@ const emit = defineEmits<{
    * 按默认值决策。两者并排出现，用户不必先聊一轮才知道还有别的选择。
    */
   autoClarify: []
+  /**
+   * 重新审核这份文档：只审不改，结论覆盖当前版本那一条。
+   *
+   * 由结论面板的折叠头发出——它属于「这份结论上的动作」，与底栏那些「对文档做的事」
+   * 不是一类，因此不占底栏。
+   */
+  rereview: []
 }>()
 
 const props = defineProps<{
@@ -151,10 +158,18 @@ const props = defineProps<{
    */
   stale?: boolean
   /**
-   * 本次生成的审核结论。**不持久化**：只在本次生成后的内存里，刷新即失。
-   * 没有（直接打开旧方案、未发生本次生成）时不渲染该区块。
+   * 这份文档**当前版本**的审核结论（后端随文档列表返回，刷新后仍在）。
+   *
+   * `null` 表示这一版没审过（**不等于通过**）——面板照样渲染，显示「未审核」。
    */
   review?: ReviewConclusion | null
+  /**
+   * 本次会话里最近一次审核是否没跑成。
+   *
+   * 审核失败不写结论，因此它只可能是「刚亲眼看到的那次失败」；面板据此显示
+   * 「审核失败」，而不是把没审成的文档当成审过了。
+   */
+  reviewFailed?: boolean
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -371,8 +386,13 @@ function submitOptimize(): void {
          归「内容本身」而不是「对文档做的事」，所以不进底栏；面板自身默认只铺开前 3 条。 -->
     <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
 
-    <!-- 审核结论：待确认清单之下、正文之上——先看“还差什么”，再看“审出了什么” -->
-    <ReviewConclusionPanel v-if="review" :review="review" />
+    <!-- 审核结论：待确认清单之下、正文之上——先看“还差什么”，再看“审出了什么”。
+         没有结论也渲染（四态之一「未审核」），否则「没有面板」会被读成「没有问题」。 -->
+    <ReviewConclusionPanel
+      :review="review ?? null"
+      :failed="reviewFailed"
+      @rereview="emit('rereview')"
+    />
 
     <!-- 文档卡片：只有头部与正文，工具全部下沉到下面的底栏 -->
     <DocumentReview

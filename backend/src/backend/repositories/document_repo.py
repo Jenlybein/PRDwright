@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import delete, func, literal, select
+from sqlalchemy import delete, func, literal, select, update
 from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
@@ -393,6 +393,43 @@ class DocumentRepository:
         document.updated_at = now
         self.session.flush()
         return version
+
+    def replace_current_review(
+        self, owner_id: int, solution_id: int, kind: str, *, review: str
+    ) -> bool:
+        """**只**更新当前版本的审核结论列，成功返回 True。
+
+        重新审核（`kind='review'`）的唯一落点：它不碰正文、不追加版本（ADR 0002 第 2 条），
+        因此这里刻意**不动** `content` / `content_sha` / `pending_items` /
+        `last_run_summary` / `metadata`——结论与正文是同一版上的两个事实，重审只刷新前者。
+
+        判据与动作收在**同一条 SQL** 里（`document_versions.id == documents.current_version_id`
+        的子查询），而不是「先查当前版本、再按 id 更新」：两次查询之间若发生别的写入（另一个
+        标签页刚好恢复了一版），先查后改就会把结论写到**已经不再是当前版本**的那一行上。
+
+        归属仍经 `documents → solutions` 两级过滤：越权与不存在一样「写不进」。
+
+        ⚠️ 不更新 `documents.updated_at`：它表示「这份文档的当前内容什么时候变的」，
+        重审没有改变这件事（与 `delete_version` 同一口径）。版本行的 `updated_at` 要更新，
+        它表示「这一版的那条记录什么时候变的」。
+        """
+        now = utc_now_text()
+        current_of_doc = (
+            select(Document.current_version_id)
+            .join(Solution, Solution.id == Document.solution_id)
+            .where(
+                Solution.user_id == owner_id,
+                Document.solution_id == solution_id,
+                Document.kind == kind,
+            )
+            .scalar_subquery()
+        )
+        result = self.session.execute(
+            update(DocumentVersion)
+            .where(DocumentVersion.id == current_of_doc)
+            .values(review=review, updated_at=now)
+        )
+        return int(result.rowcount or 0) == 1
 
     def update_current_version(
         self,

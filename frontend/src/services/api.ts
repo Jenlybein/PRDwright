@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 import { normalizeImportance } from '@/utils/pendingItems'
+import { parseReview } from '@/utils/review'
 import { normalizeRunSummary } from '@/utils/runSummary'
 import { fromBackendKind } from '@/utils/workflow'
 import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
@@ -442,31 +443,12 @@ function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
 }
 
 /**
- * 把 `review` 事件的 `data` 归一成 `ReviewConclusion`。
+ * 把后端审核结论的 `data` 归一成 `ReviewConclusion`——**唯一的解析实现**在
+ * `@/utils/review`（SSE 事件与 `documents.review` 共用它，两处形状不会分叉）。
  *
- * 与其它解析器同一口径：坏字段退化为默认值，不让一条脏数据打断整条流。
+ * 这里只是再导出：调用方从 `api` 或 `utils/review` 拿到的都是同一份逻辑。
  */
-function parseReviewEvent(data: Record<string, unknown>): ReviewConclusion {
-  const issues = readObjectArray(data, 'issues').map((item) => ({
-    severity: readString(item, 'severity'),
-    sectionId: readString(item, 'section_id'),
-    sectionTitle: readString(item, 'section_title'),
-    detail: readString(item, 'detail'),
-  }))
-  const failedSections = readObjectArray(data, 'failed_sections').map((item) => ({
-    sectionId: readString(item, 'section_id'),
-    title: readString(item, 'title'),
-    reason: readString(item, 'reason'),
-  }))
-  return {
-    kind: readString(data, 'kind'),
-    verdict: readString(data, 'verdict'),
-    summary: readString(data, 'summary'),
-    issues,
-    rewritten: data.rewritten === true,
-    failedSections,
-  }
-}
+export { parseReview }
 
 /**
  * 把任务流 `snapshot` 事件的 `data` 归一成 `JobSnapshot`。
@@ -687,9 +669,12 @@ async function readStreamRequest(
         if (summary) handlers.onRunSummary?.(summary)
         break
       }
-      case 'review':
-        handlers.onReview?.(parseReviewEvent(event.data))
+      case 'review': {
+        // 解析不出对象就当没这条：一条空壳结论会被读成「未审核」，比不显示更误导
+        const review = parseReview(event.data)
+        if (review) handlers.onReview?.(review)
         break
+      }
       case 'error':
         // 文案（message）照旧给人和日志看，分支判断走 code：
         // 缺失或取值未知时降级为 INTERNAL_ERROR，绝不因为不认识的码而漏判

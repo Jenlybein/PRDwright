@@ -262,7 +262,20 @@ _EXPECTED_SCHEMAS_FIELDS = {
 }
 
 # 两个类型别名不是模型，但同样是调用方可见的契约。
-_EXPECTED_JOB_KINDS = ("prd", "api_docs", "prompts", "optimize", "clarify", "auto_clarify", "chat")
+#
+# `review`（票 #55）是**有意**新增的一项：重审是独立的任务种类（只审不改），
+# 与 `review_fix` 一起构成 ADR 0002 的两个动作。加它必须改这一行——这条守卫的意义
+# 正是「契约变了要有人看见」，不是「永远不许变」。
+_EXPECTED_JOB_KINDS = (
+    "prd",
+    "api_docs",
+    "prompts",
+    "optimize",
+    "clarify",
+    "auto_clarify",
+    "review",
+    "chat",
+)
 _EXPECTED_DOCUMENT_KINDS = ("prd", "api_docs", "prompts")
 
 

@@ -601,6 +601,19 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
             pending_items=request.get("pending_items") or [],
             doc_kind=_target_product_kind(kind, request) or "",
         )
+    if kind == "review":
+        # 只审不改：被审的正文与它比对的上游材料都在 `run_job` 开流前由服务端解析好
+        # （`job_inputs.resolve_runtime_inputs`），这里只按目标产物分派。
+        return document_service.review_document_stream(
+            doc_kind=_target_product_kind(kind, request) or "",
+            document=request.get("document", "") or "",
+            prd_content=request.get("prd_content", "") or "",
+            api_docs_content=request.get("api_docs_content", "") or "",
+            summary=request.get("summary"),
+            requirements=request.get("requirements", "") or "",
+            product_name=request.get("product_name", "") or "",
+            history=request.get("history") or None,
+        )
     if kind == "chat":
         return _chat_event_stream(request)
     raise ValueError(f"未知的生成任务类型：{kind}")

@@ -663,6 +663,7 @@ describe('openSolution', () => {
         content: '# PRD',
         runSummary: null,
         pendingItems: [],
+        review: null,
         updatedAt: '',
         stale: false,
         derivedFrom: null,

@@ -9,6 +9,11 @@
 审核失败不阻断生成、改写失败保留初稿：这两步是锦上添花，不能因为它们挂掉就把已经
 生成的正文丢掉。但「不阻断」不等于「报成通过」——审核没跑成时结论判定为空串、
 落库侧不写结论（没有结论 ≠ 通过，见 ADR 0002）。
+
+两个入口，一段审核代码：
+- `stream_review_and_rewrite`：生成链路（审一次 → 有问题改写一次）；
+- `stream_review_only`：**重新审核**链路（只产结论，不写正文）。后者把「审核失败」
+  当失败处理——它的唯一产出就是判定，把没审成报成通过会落一条假记录。
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.clock import utc_now_text
 from backend.core.contracts import StreamEvent
+from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
 from backend.services.doc_skeleton import (
     DocSection,
@@ -806,3 +812,83 @@ async def stream_review_and_rewrite(
 
 def _build_messages(system_prompt: str, user_content: str) -> list[BaseMessage]:
     return [SystemMessage(content=system_prompt), HumanMessage(content=user_content)]
+
+
+async def stream_review_only(
+    llm: StreamingChatModel,
+    *,
+    document: str,
+    writing_rules: str,
+    requirements: str,
+    doc_type: str,
+    kind: str,
+    label: str,
+    section_titles: str = "",
+) -> AsyncIterator[StreamEvent]:
+    """**只审不改**：整篇审核一次，产出结论，不产生任何正文（重新审核专用）。
+
+    与 `stream_review_and_rewrite` 的关系
+    ------------------------------------
+    同一段审核（同一条提示词、同一个解析、同一个 `review_event` 构造），差别只有三处：
+
+    - **不进入改写**：无论判定如何都不调用模型去改稿（C-R2：重审只更新结论）；
+    - **不复用「审核失败按通过处理」**：生成链路里审核是锦上添花，失败可以放行；而一条
+      只做审核的任务，失败就是失败——把「没审成」报成 `pass` 会落一条假结论（C-R1）。
+      因此这里抛 `AppError`，由任务层转成 `error` 事件（任务判失败、不写结论）；
+    - 事件只有 `stage(reviewing)` / `stage_chunk` / `review`，没有 `part`：调用方据此知道
+      「这次没有正文可写」。
+
+    Args:
+        llm: 审核用的**小输出窗口**实例（只吐 JSON 批注）。
+        document: 待审正文（当前版本全文）。
+        writing_rules: 该产物的产出规范（技能包整段注入）。
+        requirements: 上游材料（**调用方应先骨架化**）。
+        doc_type: 事件 `data.doc_type`，取 `api_doc` / `prompts`。
+        kind: `review` 事件的产物类型，取 `api_docs` / `prompts`。
+        label: 阶段文案里的产物名，如「接口文档」。
+        section_titles: 本文档的章节标题清单，作为审核 `where` 的取值域。
+
+    Raises:
+        AppError: 正文为空、调用失败或返回的不是合法 JSON。三种都是「没审成」，
+            而不是「审了没问题」。
+    """
+    messages = review_messages(
+        document=document,
+        writing_rules=writing_rules,
+        requirements=requirements,
+        section_titles=section_titles,
+    )
+    if messages is None:
+        raise AppError(ErrorCode.INVALID_REQUEST, "这份文档还没有正文，无法重新审核")
+
+    yield StreamEvent(
+        type="stage",
+        content=f"正在审核{label}…",
+        data={"stage": "reviewing", "doc_type": doc_type},
+    )
+    raw_chunks: list[str] = []
+    try:
+        async for delta in astream_text(llm, messages):
+            raw_chunks.append(delta)
+            yield stage_chunk_event("reviewing", delta, doc_type)
+    except Exception as exc:  # noqa: BLE001 - 统一转成任务失败，绝不报成通过
+        logger.warning(
+            "%s重新审核失败", label, exc_info=True, extra={"event": "doc.rereview_failed"}
+        )
+        raise AppError(
+            ErrorCode.LLM_UPSTREAM_ERROR, f"{label}审核没有跑成：{exc}"
+        ) from exc
+
+    raw = "".join(raw_chunks)
+    if extract_json_object(raw) is None:
+        # 与生成链路不同：那边「解析不出来 = 通过」是为了不为难已经生成好的正文，
+        # 而这里唯一的产出就是判定，糊掉的判定不能当成没有意见。
+        logger.warning(
+            "%s重新审核返回的不是合法 JSON，判本次失败",
+            label,
+            extra={"event": "doc.rereview_invalid_json"},
+        )
+        raise AppError(
+            ErrorCode.LLM_UPSTREAM_ERROR, f"{label}审核返回的判定无法解析，请再试一次"
+        )
+    yield review_event(kind, parse_review_text(raw))

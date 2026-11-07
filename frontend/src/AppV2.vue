@@ -565,6 +565,7 @@ const {
   docPhase,
   docStageText,
   reviewConclusion,
+  reviewFailed,
   runSummary,
   pendingItems,
   elapsedMs,
@@ -577,6 +578,7 @@ const {
   handleGenerateApiDocs,
   handleGeneratePrompts,
   autoClarify,
+  rereview,
   handleGeneratePromptsFromDebugPrd,
   handleGeneratePromptsFromPair,
   backToInput,
@@ -1198,6 +1200,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :pending-items="pendingItems"
         :stale="documentStale"
         :review="reviewConclusion"
+        :review-failed="reviewFailed"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
         :hide-back="inputPageOnBar(store.entryMode)"
@@ -1212,6 +1215,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @navigate="goTo"
         @return-to-chat="handleReturnToChat"
         @auto-clarify="autoClarify"
+        @rereview="rereview"
       />
 
       <!-- 全部完成 -->
