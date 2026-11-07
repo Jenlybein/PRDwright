@@ -3381,8 +3381,9 @@ describe('AppV2 下游过期的一键更新', () => {
     // 走的是既有整篇生成入口：只起一个接口文档任务，不连带更新下游
     expect(jobCount('api-docs')).toBe(1)
     expect(jobCount('prompts')).toBe(0)
-    // 交给入口的上游是库里当前那一版 PRD（改过的需求），不是打开方案时的旧副本
-    expect(jobPayload('api-docs')?.prdContent).toContain('改过的需求')
+    // 「用当前上游」不再是前端递上去的那份副本（票 #54）：请求体里没有 PRD 正文，
+    // 后端按方案取库里当前那一版（改过的需求）——双真源就此消失
+    expect(jobPayload('api-docs')).not.toHaveProperty('prdContent')
 
     release()
     await flushPromises()
@@ -3439,8 +3440,9 @@ describe('AppV2 下游过期的一键更新', () => {
     // 目标由「眼前是哪一份」决定：错发就会静默地多花一次整篇生成
     expect(jobCount('prompts')).toBe(1)
     expect(jobCount('api-docs')).toBe(0)
-    // 交给生成入口的上游就是库里当前那一版 PRD（改过的需求）
-    expect(jobPayload('prompts')?.prdContent).toContain('改过的需求')
+    // 上游（PRD + 接口文档）由后端按方案取，前端不再递副本（票 #54）
+    expect(jobPayload('prompts')).not.toHaveProperty('prdContent')
+    expect(jobPayload('prompts')).not.toHaveProperty('apiDocsContent')
     expect(storeOf(wrapper).viewState).toBe('review-prompts')
     expect(documentsOf(wrapper).contentOf('prompts')).toContain('按新接口重写')
     expect(documentsOf(wrapper).contentOf('api-docs')).toContain('旧内容')
