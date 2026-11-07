@@ -225,6 +225,11 @@ def _review_event(events: list[dict[str, Any]]) -> dict[str, Any]:
     return matches[0]["data"]
 
 
+def _review_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """本次订阅里全部 `review` 结论（给「一条都不该有」的断言用）。"""
+    return [event["data"] for event in events if event["type"] == "review"]
+
+
 def _documents(client, solution_id: int) -> dict[str, dict[str, Any]]:  # noqa: ANN001
     """读文档列表，按产物类型索引。"""
     response = client.get(f"/api/solutions/{solution_id}/documents")
@@ -382,11 +387,15 @@ def test_conclusion_is_still_there_in_a_new_session(client, monkeypatch):
     assert again == first
 
 
-def test_failed_review_leaves_the_version_unreviewed(client, monkeypatch):
-    """审核调用挂掉：正文照旧落库，但**没有结论**（不是「通过」）。
+def test_failed_generation_review_is_persisted_on_the_version(client, monkeypatch):
+    """生成时审核试过但没跑成：正文照旧落库，**失败本身也落库**（#61）。
 
-    订阅期间那条 `review` 事件仍要说明「没审成」（判定为空串），界面据此标
-    「审核失败」；落库那一列必须为空，读出来是「未审核」。
+    与「重新审核失败」同一列、同一展示（`review_failed_at`）：订阅期间那条 `review`
+    事件仍说明「没审成」（判定空串），而刷新 / 换一个会话之后面板读到的仍是
+    「审核失败（时间）」，而不是退化成「未审核」——后者会让用户以为自己从没审过。
+
+    区分「没审」与「审失败」靠后端显式的「尝试过」标记，不靠判定空串去猜：关闭审核
+    的入口（快捷流程）连 `review` 事件都不发，那一版就不该有任何失败记录。
     """
     register(client)
     solution_id = _create_solution(client)
@@ -406,12 +415,66 @@ def test_failed_review_leaves_the_version_unreviewed(client, monkeypatch):
 
     doc = _documents(client, solution_id)["api_docs"]
     assert "初稿正文" in doc["content"]
-    assert doc["review"] is None
+    assert doc["review"] is None, "失败不写结论（没有结论 ≠ 通过）"
+    assert doc["review_failed_at"], "生成时的审核失败也要落库，否则刷新后就消失了"
 
     versions = _versions(client, solution_id, "api_docs")
     assert len(versions) == 1
     detail = _version_detail(client, solution_id, "api_docs", versions[0]["version_id"])
     assert detail["review"] is None
+    assert detail["review_failed_at"] == doc["review_failed_at"], "失败时间挂在被审的那一版上"
+
+    # 「刷新 / 换设备」= 换一个会话重新读：失败是库里的事实，不是内存里的记忆
+    client.cookies.clear()
+    login(client)
+    again = _documents(client, solution_id)["api_docs"]
+    assert again["review"] is None
+    assert again["review_failed_at"] == doc["review_failed_at"]
+
+    # 补审一次：拿到结论的同时清掉失败时间（两者描述同一版，不能并存）
+    _fake_service(
+        monkeypatch,
+        RoutingDocLLM(
+            document=[_DRAFT_DOC],
+            review=[json.dumps({"verdict": "pass", "issues": []})],
+        ),
+    )
+    _run_job(client, _api_docs_payload(solution_id))
+    refreshed = _documents(client, solution_id)["api_docs"]
+    assert refreshed["review"]["verdict"] == "pass"
+    assert refreshed["review_failed_at"] is None
+
+
+def test_review_disabled_generation_leaves_no_failure_mark(client, monkeypatch):
+    """显式关闭审核（快捷流程口径）连「尝试过」都没有：那一版仍是「未审核」。
+
+    判据不能是「没有结论就是失败」：关闭审核的入口本来就不审，给它写一条
+    `review_failed_at` 会凭空造出一次失败，用户会去点「重新审核」补一个从没跑过的东西。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_prd(client, solution_id)
+    # 审核池子给的是异常：一旦真的调了审核，这条用例就会红——它证明「没审」不是「审失败」
+    _fake_service(
+        monkeypatch,
+        RoutingDocLLM(
+            document=[_DRAFT_DOC],
+            review=[ConnectionError("审核不该被调用")],
+        ),
+    )
+
+    _job_id, events = _run_job(client, _api_docs_payload(solution_id, review_enabled=False))
+    assert _review_events(events) == [], "关闭审核时连 review 事件都不发（报「通过」是假信号）"
+
+    doc = _documents(client, solution_id)["api_docs"]
+    assert "初稿正文" in doc["content"]
+    assert doc["review"] is None
+    assert doc["review_failed_at"] is None, "没审 ≠ 审失败，不该写失败时间"
+
+    versions = _versions(client, solution_id, "api_docs")
+    detail = _version_detail(client, solution_id, "api_docs", versions[0]["version_id"])
+    assert detail["review"] is None
+    assert detail["review_failed_at"] is None
 
 
 def test_old_versions_without_a_review_read_as_unreviewed(client, monkeypatch):

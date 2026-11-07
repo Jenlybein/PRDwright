@@ -817,77 +817,22 @@ export async function syncSummaryFromConversation(payload: {
 }
 
 // ============================================================================
-// 文档流式生成（SSE）
+// 非任务 SSE：文档就地优化
+//
+// 生成（PRD / 接口文档 / 提示词）没有直连通道，只有下面那组任务接口。
 // ============================================================================
 
 
-/** 文档流式生成的结果：仅关心完整正文，会话 ID 恒为空串 */
+/** 流式请求的结果：仅关心完整正文，会话 ID 恒为空串 */
 export type DocumentStreamResult = StreamResult
-
-/**
- * 按方案生成 PRD（SSE 流式接收正文）。
- * 对应后端 `POST /api/conversation/generate-prd-from-summary-stream`。
- *
- * **只下发方案 id**（spec #51 / C-R3）：需求输入（结构化摘要 / 快捷流程那段自由文本 /
- * 需求澄清历史）由后端按方案从库里取，与 `kind=prd` 的任务通道用的是同一份上游。
- * 请求体里不再有 `summary` / `requirements` / `history`——递过去就是第二条真相。
- *
- * 流式过程中下发两类事件：`stage`（`onStage`）展示「写到第几章、是否在改写」，
- * `part`（`onPart`）在每段正文定稿时给出**可直接追加**的权威文本——预览由
- * 「已定稿部分 + 当前章实时缓冲」拼成，因此与最终 `reply` 逐字一致。
- */
-export function generatePrdFromSummaryStream(
-  payload: { solutionId: number },
-  handlers?: StreamHandlers,
-): Promise<DocumentStreamResult> {
-  return readStream(
-    '/api/conversation/generate-prd-from-summary-stream',
-    { solution_id: payload.solutionId },
-    handlers,
-  )
-}
-
-/**
- * 按方案生成接口文档，SSE 流式接收正文。
- * 对应后端 `POST /api/conversation/generate-api-docs-stream`。
- *
- * **只下发方案 id**（spec #51 / 票 #54）：上游 PRD 由后端从库里取（PRD 当前版本，
- * 其次方案上保存的录入文本）。团队接口规范由技能包全量注入，前端不再检索、也不再
- * 随请求下发命中。
- */
-export function generateApiDocsStream(
-  payload: { solutionId: number },
-  handlers?: StreamHandlers,
-): Promise<DocumentStreamResult> {
-  return readStream(
-    '/api/conversation/generate-api-docs-stream',
-    {
-      solution_id: payload.solutionId,
-    },
-    handlers,
-  )
-}
-
-/**
- * 按方案生成提示词套件，SSE 流式接收正文。
- * 对应后端 `POST /api/conversation/generate-prompts-stream`。
- *
- * 与接口文档同理：PRD 与可选的接口文档都由后端按方案取。
- */
-export function generatePromptsStream(
-  payload: { solutionId: number },
-  handlers?: StreamHandlers,
-): Promise<DocumentStreamResult> {
-  return readStream(
-    '/api/conversation/generate-prompts-stream',
-    { solution_id: payload.solutionId },
-    handlers,
-  )
-}
 
 /**
  * 按用户指令优化文档，SSE 流式接收优化后的正文。
  * 对应后端 `POST /api/conversation/optimize-document-stream`。
+ *
+ * 三份产物的**生成**不走这里：它们只有任务通道（`/api/jobs` + `/api/jobs/{id}/stream`）。
+ * 四条旧直连生成通道（`generate-prd-from-summary-stream` / `generate-api-docs-stream` /
+ * `generate-prompts-stream` / `generate-prd-stream`）已随 #61 退役，连同它们的封装。
  */
 export function optimizeDocumentStream(
   payload: { document: string; instruction: string },

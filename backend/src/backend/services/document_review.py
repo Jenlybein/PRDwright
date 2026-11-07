@@ -427,6 +427,7 @@ def review_data(
     issues: list[dict[str, Any]] | None = None,
     rewritten: bool = False,
     failed_sections: list[dict[str, Any]] | None = None,
+    attempted: bool = True,
 ) -> dict[str, Any]:
     """构造审核结论的数据形状——**事件与入库共用同一份**。
 
@@ -441,6 +442,11 @@ def review_data(
         issues: 逐条问题与严重度。
         rewritten: 本次是否真的执行了改写。
         failed_sections: 生成失败的章节（PRD 并行链路才会非空）。
+        attempted: 这次审核**有没有真的试过**。它是「审失败」与「没审」的分界：
+            调用挂了、回的不是 JSON 都是「试过但没成」；`review_enabled=false` 的
+            入口（快捷流程）连事件都不发，压根不存在这个字段。**别靠判定空串去猜**：
+            空串是「没审成」的结果，而不是「试过」的证据（空正文那条路同样是空串，
+            但它不是失败）。
 
     Returns:
         可 JSON 序列化的结论对象，含审核时间 `reviewed_at`（UTC ISO 8601）。
@@ -453,6 +459,7 @@ def review_data(
         "rewritten": bool(rewritten),
         "failed_sections": list(failed_sections or []),
         "reviewed_at": utc_now_text(),
+        "attempted": bool(attempted),
     }
 
 
@@ -462,12 +469,16 @@ def review_event(
     *,
     rewritten: bool = False,
     failed_sections: list[dict[str, Any]] | None = None,
+    attempted: bool = True,
 ) -> StreamEvent:
     """构造 `review` 事件（订阅期间的即时展示；落库另走收尾）。
 
     `review is None` 表示**没审成**：判定给空串、总结说「审核未完成」。
     它**绝不能报成 `pass`**——把失败伪装成通过是最误导人的一条假记录，
     而落库侧也据此不写结论（没有结论 ≠ 通过，界面标「审核失败」）。
+
+    `attempted=False` 只给「没什么可审」那条路（正文为空）：它同样没有结论，但
+    **不是一次失败**，因此收尾不写 `review_failed_at`（见 `review_data` 的同名参数）。
     """
     if review is None:
         summary = "审核未完成"
@@ -480,6 +491,7 @@ def review_event(
                 summary=summary,
                 rewritten=rewritten,
                 failed_sections=failed_sections,
+                attempted=attempted,
             ),
         )
     summary = review.summary()
@@ -493,6 +505,7 @@ def review_event(
             issues=review.issues,
             rewritten=rewritten,
             failed_sections=failed_sections,
+            attempted=attempted,
         ),
     )
 
@@ -845,8 +858,9 @@ async def stream_review_and_rewrite(
         section_titles=section_titles,
     )
     if messages is None:
-        # 正文为空：没什么可审的，直接给一个「通过」结论收场
-        yield review_event(context.doc_kind, None)
+        # 正文为空：没什么可审的。给一条「没审成」的结论收场（不写一条「通过」——
+        # 没有结论 ≠ 通过），但 `attempted=False`：这不是一次失败，收尾不该记失败时间。
+        yield review_event(context.doc_kind, None, attempted=False)
         return
 
     yield StreamEvent(

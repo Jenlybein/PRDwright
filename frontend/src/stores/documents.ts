@@ -80,7 +80,7 @@ export interface ReviewSnapshot {
   /** 当前版本那一条结论；`null` = 这一版没审过或没审成（**不等于通过**） */
   review: ReviewConclusion | null
   /**
-   * 「这一版上一次重审没跑成」的时间；`null` = 没有失败记录。
+   * 「这一版上一次审核试过但没跑成」的时间；`null` = 没有失败记录。
    *
    * 它是**落库事实**（后端 `document_versions.review_failed_at`），因此刷新、换设备后
    * 仍读得到——「审核失败」不再只活在一次会话里。

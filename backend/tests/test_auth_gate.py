@@ -21,12 +21,11 @@ PROTECTED_POST_ENDPOINTS = [
     "/api/conversation/start-stream",
     "/api/conversation/continue-stream",
     "/api/conversation/sync-summary-from-conversation",
-    "/api/conversation/retrieve-api-docs-rag",
-    "/api/conversation/generate-prd-stream",
-    "/api/conversation/generate-prd-from-summary-stream",
-    "/api/conversation/generate-api-docs-stream",
-    "/api/conversation/generate-prompts-stream",
     "/api/conversation/optimize-document-stream",
+    # 生成任务：三份产物的生成**只剩这一条通道**（四条旧直连路由已随 #61 退役）。
+    # 它的订阅口 `GET /api/jobs/{id}/stream` 由下面的不变量测试按 OpenAPI 覆盖，
+    # 两条一起守住「生成一定要登录」。
+    "/api/jobs",
     # 方案接口：新增时**没有**做任何鉴权相关的工作，它们是被中间件默认拦下的。
     # 这条清单只用于逐个断言，真正兜底的是下面的不变量测试。
     "/api/solutions",

@@ -33,6 +33,12 @@ export const BACKEND_ERROR_CODES = {
   LLM_UPSTREAM_ERROR: 'LLM_UPSTREAM_ERROR',
   /** 其余服务端故障；同时是遇到未知码时的降级值（HTTP 500 / SSE error） */
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  /** 重新审核要写的目标（当前版本）已不存在：没有「哪一版被审成什么样」可记
+   *  （任务终态 / SSE error，该通道上没有状态码） */
+  REVIEW_TARGET_MISSING: 'REVIEW_TARGET_MISSING',
+  /** 重新审核的正文在审的过程中被改过：条件写不命中，本次结论一个字都没写
+   *  （任务终态 / SSE error，该通道上没有状态码） */
+  CONTENT_CHANGED: 'CONTENT_CHANGED',
 } as const
 
 /** 后端错误码的联合类型 */

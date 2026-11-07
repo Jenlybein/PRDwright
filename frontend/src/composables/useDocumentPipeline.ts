@@ -233,7 +233,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   })
 
   /**
-   * 这份文档**当前版本**上一次重审没跑成的时间（`null` = 没有失败记录）。
+   * 这份文档**当前版本**上一次审核试过但没跑成的时间（`null` = 没有失败记录）。
    *
    * 它是**落库事实**（后端 `document_versions.review_failed_at`），不是会话内状态：
    * 审核失败不写结论（C-R1：没有结论 ≠ 通过），但「失败」本身要刷新后仍看得见，

@@ -340,15 +340,17 @@ class DocumentVersion(SQLModel, table=True):
     updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     # 审核结论（票 #52）：**一版一条**，被审的那一版正文配一条结论。JSON 文本，
     # 形状与 SSE `review` 事件的数据一致（判定 / 逐条问题 / 总结 / 是否改写 /
-    # 失败章节 / 审核时间）。**审核没跑成就是 NULL**——没有结论不等于通过，
-    # 旧版本与旧数据读出来是「未审核」。
+    # 失败章节 / 审核时间 / 这次试没试过）。**审核没跑成就是 NULL**——没有结论不等于
+    # 通过，旧版本与旧数据读出来是「未审核」。
     #
     # ⚠️ 声明顺序 = 物理列序：迁移 0006 追加 `review`、0007 追加 `review_failed_at`，
     # 所以这两列都必须在老列之后、且保持这个先后。模型这边换个位置，`create_all`
     # 建出来的库列序就与迁移建的不同，`test_schema_migration` 的整份快照对比会转红。
     # ⚠️ 不设 `server_default`：MySQL 的 TEXT 不接受字面量默认值。
     review: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
-    # 「这一版上一次重审没跑成」的时间（UTC ISO 8601 文本）；NULL = 没有失败记录。
+    # 「这一版上一次审核试过但没跑成」的时间（UTC ISO 8601 文本）；NULL = 没有失败记录。
+    # 生成时的审核失败与修复后的重审失败写同一列（#61）：两者都是「这份正文被审过、
+    # 而且没审成」，界面与读侧不必分两套。
     #
     # 它是**落库事实**，不是会话内状态：审核失败不写结论（没有结论 ≠ 通过），但
     # 「这次没审成」本身必须刷新后还看得见，否则界面退化成「未审核」——用户会以为

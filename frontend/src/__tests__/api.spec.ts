@@ -5,12 +5,12 @@ import http, {
   continueConversationStream,
   createJob,
   fetchActiveJobs,
-  generateApiDocsStream,
-  generatePrdFromSummaryStream,
-  generatePromptsStream,
   onUnauthorized,
+  optimizeDocumentStream,
   readJobStream,
   UnauthorizedError,
+  type DocumentStreamResult,
+  type StreamHandlers,
 } from '../services/api'
 import { ApiError } from '../services/errors'
 import type {
@@ -52,6 +52,17 @@ function sseFrame(type: string, payload: Record<string, unknown>): string {
 
 const SUMMARY = { product_name: 'PRDwright' } as RequirementsSummary
 
+/**
+ * 走一次非任务 SSE 请求（`readStream` 那条通道）。
+ *
+ * 三份产物的**生成**已只剩任务通道（四条旧直连路由随 #61 退役），因此这里拿仍然存在
+ * 的 `optimizeDocumentStream` 当接缝：这组用例测的是**事件解析与传输语义**，
+ * 与「请求打到哪条路由」无关。
+ */
+function streamOnce(handlers?: StreamHandlers): Promise<DocumentStreamResult> {
+  return optimizeDocumentStream({ document: '# 待优化', instruction: '压缩一下' }, handlers)
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -86,10 +97,10 @@ describe('SSE 事件解析', () => {
 
     const chunks: string[] = []
     const stages: StreamStageEvent[] = []
-    const result = await generatePrdFromSummaryStream(
-      { solutionId: 7 },
-      { onChunk: (chunk) => chunks.push(chunk.text), onStage: (event) => stages.push(event) },
-    )
+    const result = await streamOnce({
+      onChunk: (chunk) => chunks.push(chunk.text),
+      onStage: (event) => stages.push(event),
+    })
 
     expect(chunks.join('')).toBe('# 标题\n\n## 2. 功能需求\n\n正文')
     expect(result.reply).toBe('完整正文')
@@ -138,10 +149,7 @@ describe('SSE 事件解析', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const parts: StreamDocumentPart[] = []
-    const result = await generatePrdFromSummaryStream(
-      { solutionId: 7 },
-      { onPart: (part) => parts.push(part) },
-    )
+    const result = await streamOnce({ onPart: (part) => parts.push(part) })
 
     expect(parts).toHaveLength(2)
     // 文档头不属于任何章节：章节字段全部退化为默认值
@@ -171,10 +179,7 @@ describe('SSE 事件解析', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const parts: StreamDocumentPart[] = []
-    const result = await generatePrdFromSummaryStream(
-      { solutionId: 7 },
-      { onPart: (part) => parts.push(part) },
-    )
+    const result = await streamOnce({ onPart: (part) => parts.push(part) })
 
     expect(parts).toHaveLength(1)
     expect(parts[0]?.text).toBe('')
@@ -192,10 +197,7 @@ describe('SSE 事件解析', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const stages: StreamStageEvent[] = []
-    const result = await generatePrdFromSummaryStream(
-      { solutionId: 7 },
-      { onStage: (event) => stages.push(event) },
-    )
+    const result = await streamOnce({ onStage: (event) => stages.push(event) })
 
     expect(stages).toHaveLength(1)
     expect(stages[0]).toEqual({
@@ -217,7 +219,7 @@ describe('SSE 事件解析', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(generatePrdFromSummaryStream({ solutionId: 7 })).rejects.toThrow('生成失败：被截断')
+    await expect(streamOnce()).rejects.toThrow('生成失败：被截断')
   })
 
   it('把 stage_chunk 映射成阶段输出增量：带上归属阶段，且不污染正文 chunk', async () => {
@@ -239,14 +241,11 @@ describe('SSE 事件解析', () => {
     const body: string[] = []
     const stageChunks: StreamStageChunk[] = []
     const phases: string[] = []
-    const result = await generateApiDocsStream(
-      { solutionId: 3 },
-      {
-        onChunk: (chunk) => body.push(chunk.text),
-        onStage: (event) => phases.push(event.stage),
-        onStageChunk: (chunk) => stageChunks.push(chunk),
-      },
-    )
+    const result = await streamOnce({
+      onChunk: (chunk) => body.push(chunk.text),
+      onStage: (event) => phases.push(event.stage),
+      onStageChunk: (chunk) => stageChunks.push(chunk),
+    })
 
     // 阶段序列以 writing 开头：进度条要能立刻亮起
     expect(phases).toEqual(['writing', 'reviewing'])
@@ -259,32 +258,25 @@ describe('SSE 事件解析', () => {
     expect(result.reply).toBe('# 接口文档')
   })
 
-  it('旧的非任务通道只下发方案 id，不再带上游正文（票 #54）', async () => {
-    // 这两个通道是「没有任务框架之前」的入口：它们从前直接吃 PRD 正文。
-    // 上游改由服务端按方案取之后，请求体里只剩 `solution_id`——前端那份副本
-    // 一旦落后一版，生成就会对着旧上游写，而没人能发现。
+  it('仅存的非任务通道只递「要改哪一份」，不带上游与需求正文（C-R3）', async () => {
+    // 三份产物的生成已只剩任务通道（四条旧直连路由随 #61 退役）。留下的是就地优化：
+    // 它递的是**目标**正文（用户眼前那一份，可能含还没落库的手改），而上游与需求正文
+    // 一律由服务端取——请求体里一旦出现它们，双真源就又复活了。
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
         streamResponse([sseFrame('done', { type: 'done', content: '', data: { reply: '# ok' } })]),
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await generateApiDocsStream({ solutionId: 7 })
-    await generatePromptsStream({ solutionId: 8 })
-    await generatePrdFromSummaryStream({ solutionId: 9 })
+    await streamOnce()
 
-    const bodies = fetchMock.mock.calls.map(
-      (call) => JSON.parse(String((call[1] as RequestInit | undefined)?.body ?? '{}')) as Record<string, unknown>,
-    )
-    expect(bodies[0]).toEqual({ solution_id: 7 })
-    expect(bodies[1]).toEqual({ solution_id: 8 })
-    // 第三条（PRD）同样是「只点名方案」：需求正文由服务端按方案取
-    expect(bodies[2]).toEqual({ solution_id: 9 })
-    for (const payload of bodies) {
-      expect(payload).not.toHaveProperty('prd_content')
-      expect(payload).not.toHaveProperty('api_docs_content')
-      expect(payload).not.toHaveProperty('requirements')
-      expect(payload).not.toHaveProperty('history')
+    const [firstCall] = fetchMock.mock.calls
+    const body = JSON.parse(
+      String((firstCall?.[1] as RequestInit | undefined)?.body ?? '{}'),
+    ) as Record<string, unknown>
+    expect(body).toEqual({ document: '# 待优化', instruction: '压缩一下' })
+    for (const key of ['prd_content', 'api_docs_content', 'requirements', 'history', 'summary']) {
+      expect(body).not.toHaveProperty(key)
     }
   })
 })
@@ -300,7 +292,9 @@ describe('SSE error 事件的错误码', () => {
   /** 跑一次流式请求并把抛出的异常交回来（而不是让断言卡在 rejects 的匹配上） */
   async function catchStreamError(blocks: string[]): Promise<unknown> {
     vi.stubGlobal('fetch', vi.fn(async () => streamResponse(blocks)))
-    return generatePrdFromSummaryStream({ solutionId: 7 }).catch((error: unknown) => error)
+    return optimizeDocumentStream({ document: '# 待优化', instruction: '压缩一下' }).catch(
+      (error: unknown) => error,
+    )
   }
 
   it('error 事件带 code 时抛 ApiError，错误码原样保留', async () => {
@@ -386,7 +380,7 @@ describe('登录凭据与未登录处理', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await generatePrdFromSummaryStream({ solutionId: 7 })
+    await streamOnce()
 
     const [firstCall] = fetchMock.mock.calls
     expect(firstCall?.[1]).toMatchObject({ credentials: 'same-origin' })
@@ -397,9 +391,7 @@ describe('登录凭据与未登录处理', () => {
     onUnauthorized((message) => messages.push(message))
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })))
 
-    await expect(generatePrdFromSummaryStream({ solutionId: 7 })).rejects.toBeInstanceOf(
-      UnauthorizedError,
-    )
+    await expect(streamOnce()).rejects.toBeInstanceOf(UnauthorizedError)
     expect(messages).toEqual(['请先登录后再使用该功能'])
   })
 

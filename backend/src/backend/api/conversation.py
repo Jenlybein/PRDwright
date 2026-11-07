@@ -2,6 +2,10 @@
 
 **本层只做参数解析与响应封装，不写业务逻辑**，具体实现委托给
 `conversation_service` 与 `document_service`。
+
+三份产物的**生成**不在本文件：它们只有任务通道（`POST /api/jobs`）。这里保留的是
+对话（含需求澄清）与「按指令就地优化」这条非任务流——前者有内存会话的降级重试，
+后者吃的正文来自用户眼前那一份（见 §3.3 的例外）。
 """
 
 from __future__ import annotations
@@ -10,11 +14,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from backend.api import schemas
-from backend.api.deps import acting_user
 from backend.api.sse import (  # noqa: F401 - SSE_DONE/SSE_HEADERS/make_sse_generator 仅作再导出
     SSE_DONE,
     SSE_HEADERS,
@@ -22,9 +25,7 @@ from backend.api.sse import (  # noqa: F401 - SSE_DONE/SSE_HEADERS/make_sse_gene
     sse_response,
 )
 from backend.core.errors import AppError, ErrorCode
-from backend.services import conversation_service, document_service, job_inputs
-from backend.services.auth_service import User
-from backend.services.prd_skill import format_requirements_text
+from backend.services import conversation_service, document_service
 
 router = APIRouter(prefix="/api/conversation", tags=["conversation"])
 
@@ -168,114 +169,17 @@ async def continue_conversation_stream(
 
 
 # ============================================================================
-# 文档流式生成（document_service 的 *_stream 方法，SSE 流式返回）
+# 文档就地改写（document_service 的 optimize 入口，SSE 流式返回）
 # ============================================================================
-
-
-@router.post("/generate-prd-stream", summary="按方案生成 PRD（整篇，SSE 流式返回）")
-async def generate_prd_stream(
-    payload: schemas.GeneratePrdStreamRequest,
-    user: User = Depends(acting_user),
-) -> StreamingResponse:
-    """按方案生成 PRD（**整篇**那条旧链路），流式返回 PRD 正文。
-
-    与另三条旧通道同形（spec #51 / C-R3）：**只收方案**。它从前收的是前端已经拼好的
-    需求文本（`requirements` + `history`），于是「需求正文」有了两个来源；现在需求输入
-    （结构化摘要 / 快捷入口那段自由文本 / 需求澄清线程）由 `job_inputs` 按方案从库里
-    解析，请求体里一个字段都不带——与 `/generate-prd-from-summary-stream` 用的是同一份
-    上游，差别只在服务方法（这条走整篇生成，那条走分章节 + 审核）。
-
-    事件序列：`status` → 若干 `chunk` → `done`（`data` 带完整 `reply` 与
-    `doc_type=prd`）；出错时为 `error`。
-    """
-    # 解析在**构造 SSE 之前**：进了流之后状态码恒为 200，缺需求就只能读成「生成失败」
-    inputs = job_inputs.resolve_runtime_inputs("prd", user.id, payload.solution_id)
-    events = document_service.generate_prd_stream(
-        requirements=_prd_requirements_text(inputs),
-        history=inputs.get("history") or None,
-    )
-    return sse_response(events)
-
-
-def _prd_requirements_text(inputs: dict[str, Any]) -> str:
-    """把服务端解析出的 PRD 输入折成「整篇生成」那条链路要的一段需求文本。
-
-    两条 PRD 入口的差别只在输入怎么来，而**整篇**链路的提示词只认一段 `requirements`
-    文本（分章节链路才有结构化摘要与两条线程的插槽）。折叠规则只有一处：
-    `prd_skill.format_requirements_text`（结构化摘要优先，其次自由文本，两处都先渲染）。
-    从前这里自己写了一份「摘要优先、否则原文」，与分章链路那份（会渲染自由文本）和
-    输入指纹那份（自由文本优先）三份各不相同——同一次生成，三处读到的「需求」不是一个东西。
-    线程原样交给 `history`。
-    """
-    return format_requirements_text(
-        inputs.get("summary"),
-        str(inputs.get("requirements") or ""),
-        str(inputs.get("product_name") or ""),
-    )
-
-
-@router.post(
-    "/generate-prd-from-summary-stream",
-    summary="按方案生成 PRD（SSE 流式返回）",
-)
-async def generate_prd_from_summary_stream(
-    payload: schemas.GeneratePrdFromSummaryStreamRequest,
-    user: User = Depends(acting_user),
-) -> StreamingResponse:
-    """按方案生成 PRD（需求输入由服务端取），流式返回 PRD 正文。
-
-    与接口文档 / 提示词两条旧通道同形（spec #51 / C-R3）：**只收方案**。需求输入
-    （结构化摘要 / 快捷入口那段自由文本 / 需求澄清线程）由 `job_inputs` 按方案从库里
-    解析，请求体里一个字段都不带。因此它和任务通道（`kind=prd`）走的是同一份上游，
-    只是少了任务框架——两条路不会因为「谁递的需求」而写出不同的 PRD。
-
-    事件序列：`status` → `chunk`（文档头）→ 若干 `stage`/`chunk`（每章）→
-    `stage: done` → `done`（`data` 带完整 `reply` 与 `doc_type=prd`）；出错时为 `error`。
-    """
-    # 解析在**构造 SSE 之前**：进了流之后状态码恒为 200，缺需求就只能读成「生成失败」
-    inputs = job_inputs.resolve_runtime_inputs("prd", user.id, payload.solution_id)
-    events = document_service.generate_prd_from_summary_stream(
-        summary=inputs.get("summary"),
-        requirements=str(inputs.get("requirements") or ""),
-        product_name=str(inputs.get("product_name") or ""),
-        history=inputs.get("history") or None,
-    )
-    return sse_response(events)
-
-
-@router.post("/generate-api-docs-stream", summary="根据 PRD 生成接口文档（SSE 流式返回）")
-async def generate_api_docs_stream(
-    payload: schemas.GenerateApiDocsStreamRequest,
-    user: User = Depends(acting_user),
-) -> StreamingResponse:
-    """按方案生成接口文档正文（上游 PRD 由服务端取）。
-
-    团队接口规范（统一响应结构、错误码、分页、鉴权等）由 `api-docs-generator` 技能包
-    整段注入提示词，要求模型按团队约定对齐——不再做「按 PRD 关键词检索挑几条」的 RAG。
-
-    **只收方案**（spec #51 / 票 #54）：请求体里不再有 `prd_content`。上游缺失时
-    `resolve_runtime_inputs` 在**构造 SSE 之前**抛 400——进了流之后状态码恒为 200，
-    前端就只能把「还没有 PRD」读成「生成失败」。
-    """
-    inputs = job_inputs.resolve_runtime_inputs("api_docs", user.id, payload.solution_id)
-    events = document_service.generate_api_docs_stream(
-        prd_content=str(inputs.get("prd_content") or ""),
-    )
-    return sse_response(events)
-
-
-@router.post("/generate-prompts-stream", summary="根据 PRD 生成提示词套件（SSE 流式返回）")
-async def generate_prompts_stream(
-    payload: schemas.GeneratePromptsStreamRequest,
-    user: User = Depends(acting_user),
-) -> StreamingResponse:
-    """按方案生成提示词套件（PRD 与可选的接口文档都由服务端取）。"""
-    inputs = job_inputs.resolve_runtime_inputs("prompts", user.id, payload.solution_id)
-    events = document_service.generate_prompts_stream(
-        prd_content=str(inputs.get("prd_content") or ""),
-        api_docs_content=str(inputs.get("api_docs_content") or ""),
-    )
-    return sse_response(events)
+#
+# 三份产物的**生成**不在这里：它们只有任务通道一条路（`POST /api/jobs` +
+# `GET /{id}/stream`）。旧的四条直连生成路由（`generate-prd-stream` /
+# `generate-prd-from-summary-stream` / `generate-api-docs-stream` /
+# `generate-prompts-stream`）已随 #61 退役——它们的服务方法仍被对应任务复用，
+# 死掉的只是「同一条生成能力有第二个入口」这件事（见 ARCHITECTURE.md §2.2 / §5.10）。
+#
+# `optimize` 留在这里是有意的：它吃的是**用户眼前的正文**（可能含还没落库的手改），
+# 属于「就地改写的目标」，不是上游，也不产出新版本（见 §3.3）。
 
 
 @router.post("/optimize-document-stream", summary="优化文档（SSE 流式返回）")

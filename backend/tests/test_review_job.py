@@ -29,6 +29,7 @@ from conftest import login, register, users
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
 from backend.core.engine import session_scope
+from backend.core.errors import ErrorCode
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.services import document_service, document_store, job_runtime, llm_factory, prd_section_writer
 from backend.services.job_bus import job_bus
@@ -522,9 +523,13 @@ def test_rereview_fails_when_the_body_changed_midway(client, monkeypatch):
 @pytest.mark.parametrize(
     ("outcome", "code", "message"),
     [
-        ("content_changed", "CONTENT_CHANGED", "正文已变更，本次审核结论未写入，请重新审核"),
-        ("missing", "REVIEW_TARGET_MISSING", "已不存在"),
-        ("raise", "INTERNAL_ERROR", "写入失败"),
+        (
+            "content_changed",
+            ErrorCode.CONTENT_CHANGED.value,
+            "正文已变更，本次审核结论未写入，请重新审核",
+        ),
+        ("missing", ErrorCode.REVIEW_TARGET_MISSING.value, "已不存在"),
+        ("raise", ErrorCode.INTERNAL_ERROR.value, "写入失败"),
     ],
     ids=["条件写未命中", "目标缺失", "写入抛异常"],
 )

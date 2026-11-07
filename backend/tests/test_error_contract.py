@@ -77,12 +77,17 @@ def _foreign_solution_404(client):
 
 
 def _empty_input_400(client):
-    """请求语义不合法：方案上还没有任何需求输入可生成 PRD。"""
+    """请求语义不合法：方案上还没有任何需求输入可生成 PRD。
+
+    走任务通道（`POST /api/jobs`）：三份产物的生成只剩这一条路（四条旧直连路由已随
+    #61 退役）。「缺材料」必须在**建任务那一刻**就是 400 —— 开流才报错的话，状态码
+    已经是 200，前端只能把「没需求」读成「生成失败」。
+    """
     register(client)
     created = client.post("/api/solutions", json=_SOLUTION_PAYLOAD)
     return client.post(
-        "/api/conversation/generate-prd-from-summary-stream",
-        json={"solution_id": created.json()["id"]},
+        "/api/jobs",
+        json={"kind": "prd", "solution_id": created.json()["id"]},
     )
 
 

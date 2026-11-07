@@ -19,7 +19,7 @@
 | 模块 | 职责 |
 | --- | --- |
 | `conversation` | 会话创建 / 接续、工具结果回灌、摘要回填、对话轮次 |
-| `streams` | 文档流式生成的请求体（PRD / 接口文档 / 提示词 / 优化） |
+| `streams` | 非任务 SSE 通道的请求体（就地优化） |
 | `auth` | 登录、注册、登出与用户信息 |
 | `admin` | 管理端：账号与额度、邀请码、审计、日志、统计、任务监控 |
 | `admin_config` | 系统配置项与模型供应商配置 |
@@ -54,10 +54,6 @@ from .conversation import (
 )
 
 from .streams import (
-    GenerateApiDocsStreamRequest,
-    GeneratePrdFromSummaryStreamRequest,
-    GeneratePrdStreamRequest,
-    GeneratePromptsStreamRequest,
     OptimizeDocumentStreamRequest,
 )
 
@@ -207,10 +203,6 @@ __all__ = [
     "DocumentVersionDetail",
     "DocumentVersionItem",
     "DocumentVersionListResponse",
-    "GenerateApiDocsStreamRequest",
-    "GeneratePrdFromSummaryStreamRequest",
-    "GeneratePrdStreamRequest",
-    "GeneratePromptsStreamRequest",
     "JobCancelResponse",
     "JobCreateRequest",
     "JobCreated",

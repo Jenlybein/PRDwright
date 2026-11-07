@@ -37,6 +37,16 @@ describe('死代码清理', () => {
     expect('generatePrdStream' in api).toBe(false)
   })
 
+  it('旧直连生成通道的封装随路由一并退役（#61）', () => {
+    // 三份产物的生成只剩任务通道（`createJob` + `readJobStream`）。这层封装留着
+    // 就会有人接着用它——而后端那四条路由已经没有了，症状是线上 404 而不是编译错误。
+    expect('generatePrdFromSummaryStream' in api).toBe(false)
+    expect('generateApiDocsStream' in api).toBe(false)
+    expect('generatePromptsStream' in api).toBe(false)
+    // 非任务通道只剩就地优化这一条（它递的是「要改哪一份」，不是上游）
+    expect('optimizeDocumentStream' in api).toBe(true)
+  })
+
   it('快照类型只留仍在使用的 SessionDataV2', () => {
     expect(typesSource).not.toMatch(/export interface SessionData\s*\{/)
     expect(typesSource).toMatch(/export interface SessionDataV2\s*\{/)
