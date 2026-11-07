@@ -369,7 +369,7 @@ export interface DocumentRecord {
    */
   review: ReviewConclusion | null
   /**
-   * **当前版本**上一次重审没跑成的时间（UTC ISO 8601）；`null` = 没有失败记录。
+   * **当前版本**上一次审核试过但没跑成的时间（UTC ISO 8601）；`null` = 没有失败记录。
    *
    * 它是**落库事实**（后端 `document_versions.review_failed_at`）：审核失败不写结论
    * （没有结论 ≠ 通过），但「这次没审成」本身刷新后仍要看得见——否则界面会退化成
@@ -440,7 +440,7 @@ export interface DocumentVersionDetail {
   /** 该版本当时的用量回执；缺失为 null */
   runSummary: RunSummary | null
   /**
-   * 该版本「上一次重审没跑成」的时间；`null` = 没有失败记录。
+   * 该版本「上一次审核试过但没跑成」的时间；`null` = 没有失败记录。
    *
    * 与 `DocumentRecord.reviewFailedAt` 同一个后端列（`review_failed_at`）：
    * 版本详情里也能回答「这一版失败过没有」。

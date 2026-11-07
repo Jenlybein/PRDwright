@@ -49,17 +49,18 @@ class DocumentItem(BaseModel):
         default=None,
         description=(
             "**当前版本**那一条审核结论（一版一条，形状与 SSE `review` 事件的数据一致："
-            "kind / verdict / summary / issues / rewritten / failed_sections / reviewed_at）。"
-            "`None` 表示这一版没审过或审核没跑成——**不等于通过**，界面照实标"
+            "kind / verdict / summary / issues / rewritten / failed_sections / reviewed_at / "
+            "attempted）。`None` 表示这一版没审过或审核没跑成——**不等于通过**，界面照实标"
             "「未审核 / 审核失败」。刷新与换会话后它是唯一来源。"
         ),
     )
     review_failed_at: str | None = Field(
         default=None,
         description=(
-            "**当前版本**上一次重审没跑成的时间（UTC ISO 8601）；`None` = 没有失败记录。"
-            "它是落库事实：失败不写结论（没有结论 ≠ 通过），但刷新后仍要能显示"
-            "「审核失败（时间）」，否则界面会退化成「未审核」。拿到新结论时清空。"
+            "**当前版本**上一次审核试过但没跑成的时间（UTC ISO 8601）；`None` = 没有失败记录。"
+            "生成时的审核失败与修复后的重审失败写的是同一列。它是落库事实：失败不写结论"
+            "（没有结论 ≠ 通过），但刷新后仍要能显示「审核失败（时间）」，否则界面会退化成"
+            "「未审核」。拿到新结论时清空。"
         ),
     )
     version_no: int = Field(
@@ -145,7 +146,7 @@ class DocumentVersionDetail(BaseModel):
     review_failed_at: str | None = Field(
         default=None,
         description=(
-            "该版本上一次重审没跑成的时间；`None` = 没有失败记录。"
+            "该版本上一次审核试过但没跑成的时间；`None` = 没有失败记录。"
             "形状与 `DocumentItem.review_failed_at` 相同。"
         ),
     )

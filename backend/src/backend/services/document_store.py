@@ -16,6 +16,7 @@
   结论过期，见 ADR 0002）。
 - `commit_generated(append_version=True)`：**整篇生成**。追加一条新版本，并让下游产物
   失效（见 `DOWNSTREAM_KINDS`）；正文 + 清单 + 回执 + **审核结论**同批写入新版本。
+  这一版审核**试过但没跑成**时，同批写入的是一条 `review_failed_at` 而不是结论。
 - `commit_generated(append_version=False)`：**`optimize` / `clarify` 的就地改写**。
   就地改当前版本，不新增条目、不删下游；但正文 + 清单 + 回执仍是同批替换——
   它们产自同一次模型调用栈，分开写就会各自漂移。
@@ -169,9 +170,10 @@ def commit_generated(
         review: 这一版正文的审核结论（形状与 SSE `review` 事件的数据一致）。
             **只在追加版本时写入**——结论与它描述的那一版正文同批落库；`None`
             表示这次没审成（或本来就不审），写进去的列留空 = 读侧「未审核」。
-        review_failed_at: 这一版「上一次重审没跑成」的时间。只由**修复**链路在
-            「重写成功、重审失败」时给出：正文照落库，但失败要落成事实（US3），
-            刷新后面板才仍旧显示「审核失败（时间）」。
+        review_failed_at: 这一版「上一次审核试过但没跑成」的时间。两种链路同一列：
+            **生成时**的审核失败（PRD / 接口文档 / 提示词）与**修复后**的重审失败——
+            两种都是「正文照落库、但这次没审成」，成功时间（`reviewed_at`）的对应物
+            就是它。显式关闭审核的入口（快捷流程）不写：那一次压根没审过。
         append_version: `True` 追加一条新版本并让下游失效（整篇生成）；
             `False` 就地改写当前版本、不牵动下游（`optimize` / `clarify`）。
         source: 版本来源标签；缺省取产物类型（`prd` / `api_docs` / `prompts`）。
@@ -441,7 +443,7 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
         "review": _load_json(row.review, dict, None),
-        # 「这一版上一次重审没跑成」的时间；`None` = 没有失败记录（不是「没审过」）
+        # 「这一版上一次审核试过但没跑成」的时间；`None` = 没有失败记录（不是「没审过」）
         "review_failed_at": row.review_failed_at,
         # 当前版本序号：结论面板据此说清「这条结论是哪一版的」（后端已有这一列，
         # 只是在版本行里、从前没随文档下发）。没有版本时是 0。

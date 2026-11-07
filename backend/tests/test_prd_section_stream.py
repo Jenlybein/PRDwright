@@ -18,6 +18,8 @@ from langchain_core.messages import AIMessageChunk, BaseMessage
 
 from backend.api.schemas import StreamEvent
 from backend.core.config import get_settings
+from backend.services import job_runtime
+from backend.services.job_bus import job_bus
 from backend.services.prd_section_writer import PRD_SECTIONS, PrdSectionWriter
 
 # 审核人设提示词里的特征词：用它区分「审核调用」与「撰写调用」
@@ -35,6 +37,16 @@ def _serial_pipeline(monkeypatch):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clean_job_state():
+    """任务通道用例前后清空进程内运行时与订阅（任务在后台跑，状态会跨用例残留）。"""
+    job_runtime.reset_for_tests()
+    job_bus.reset_for_tests()
+    yield
+    job_runtime.reset_for_tests()
+    job_bus.reset_for_tests()
 
 
 class FakeLLM:
@@ -100,6 +112,26 @@ def _collect(writer: PrdSectionWriter, **request: Any) -> list[StreamEvent]:
 def _parts(events: list[StreamEvent]) -> list[StreamEvent]:
     """取出全部 `part` 事件。"""
     return [event for event in events if event.type == "part"]
+
+
+class _PacedService:
+    """把文档服务的 PRD 入口包一层：**第一个事件之前**先等一会。
+
+    任务通道与浏览器连接解耦：`POST /api/jobs` 一返回就 201，事件只广播给**此刻
+    已经挂上**的订阅者（不重放）。真实模型第一次调用要等好几秒，而假模型瞬时答完——
+    不先等这一下，`GET /{id}/stream` 挂上去时连文档头的 `part` 都已经发过去了
+    （它发生在第一次模型调用之前），这条流里就只剩半截。
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def generate_prd_from_summary_stream(
+        self, **kwargs: Any
+    ) -> AsyncIterator[StreamEvent]:
+        await asyncio.sleep(0.1)
+        async for event in self._inner.generate_prd_from_summary_stream(**kwargs):
+            yield event
 
 
 def test_part_events_reassemble_into_the_final_reply() -> None:
@@ -218,14 +250,15 @@ def _parse_sse(text: str) -> list[dict[str, Any]]:
 
 
 def _create_solution_with_requirements(client, requirements: str) -> int:  # noqa: ANN001
-    """建一份带自由文本需求的方案（旧通道的需求输入同样由服务端按方案取）。
+    """建一份带自由文本需求的方案（需求输入由服务端按方案取）。
 
-    路由只收 `solution_id`（spec #51 / C-R3）：需求住在方案上，请求体里没有它。
+    任务请求体只表达「做什么、对哪一份」（spec #51 / C-R3）：需求住在方案上，
+    请求体里没有它。
     """
     created = client.post(
         "/api/solutions",
         json={
-            "title": "旧通道用例",
+            "title": "任务通道用例",
             "mode": "structured",
             "stage": "review-prd",
             "state": {"quick_requirements": requirements},
@@ -236,28 +269,31 @@ def _create_solution_with_requirements(client, requirements: str) -> int:  # noq
 
 
 def test_sse_endpoint_emits_parts_that_reassemble_into_reply(client, monkeypatch) -> None:
-    """端到端：真实路由 + 真实 SSE 编码下，`part` 按序拼接即 `done.reply`。
+    """端到端：真实路由 + 真实 SSE 分帧下，`part` 按序拼接即 `done.reply`。
 
-    只替换 LLM，鉴权、路由、SSE 分帧、schema 序列化全部走真实实现——单元测试守的是
-    「内部怎么算」，这条守的是「前端实际收到什么」。
+    接缝是**任务通道**（`POST /api/jobs` → `GET /{id}/stream`）：三份产物的生成只剩
+    这一条路（四条旧直连路由已随 #61 退役）。只替换 LLM，鉴权、路由、SSE 分帧、
+    schema 序列化全部走真实实现——单元测试守的是「内部怎么算」，这条守的是
+    「前端实际收到什么」。
     """
     from backend.services import document_service
 
     monkeypatch.setattr(
         document_service,
         "get_service",
-        lambda: document_service.DocumentService(llm=FakeLLM(["章节正文"])),
+        lambda: _PacedService(
+            document_service.DocumentService(llm=FakeLLM(["章节正文"]))
+        ),
     )
 
     assert register(client).status_code == 200
     solution_id = _create_solution_with_requirements(client, "做一个演示产品")
-    response = client.post(
-        "/api/conversation/generate-prd-from-summary-stream",
-        json={"solution_id": solution_id},
-    )
-    assert response.status_code == 200
+    created = client.post("/api/jobs", json={"kind": "prd", "solution_id": solution_id})
+    assert created.status_code == 201, created.text
+    stream = client.get(f"/api/jobs/{created.json()['job_id']}/stream")
+    assert stream.status_code == 200
 
-    events = _parse_sse(response.text)
+    events = _parse_sse(stream.text)
     parts = [event for event in events if event.get("type") == "part"]
     reply = next(event["data"]["reply"] for event in events if event.get("type") == "done")
 

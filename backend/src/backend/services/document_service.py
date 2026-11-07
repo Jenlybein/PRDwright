@@ -1513,9 +1513,10 @@ async def generate_prompts_stream(
     api_docs_content: str = "",
     review_enabled: bool | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    """生成提示词套件的流式入口。
+    """生成提示词套件的流式入口（`prompts` 任务走这里）。
 
-    `api_docs_content` 可选：老的 `/generate-prompts-stream` 通道不传，按「只有 PRD」处理。
+    `api_docs_content` 可选：只有 PRD 的方案按「只有 PRD」处理（例如导入入口只录了
+    PRD 的情况）。这条入口没有直连路由——三份产物的生成只有任务通道（#61）。
     """
     async for event in get_service().generate_prompts_stream(
         prd_content=prd_content,

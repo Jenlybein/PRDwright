@@ -39,7 +39,7 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
     - `stage` → 更新 phase（**同时同步给计量器**，计量器据此把调用归到 `类型:阶段` 这一步），
       换阶段时清空上一阶段的输出；章节级 `writing` / `rewriting` 清掉该章半成品；
     - `stage_chunk` → 追加到当前阶段的输出（审核意见 / 改写稿），与正文缓冲互不干扰；
-    - `review` → 记下本次审核结论，收尾时随正文写进被审的那一版（一版一条）；
+    - `review` → 记下本次审核结论与「这次试没试过」，收尾时随正文写进被审的那一版（一版一条）；
     - `error` → 标记失败并记下错误码 / 文案；
     - `done` → 记下权威完整正文。
     """
@@ -152,7 +152,12 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         # 审核结论：只认真正跑出来的判定（pass / revise）。空串是「没审成」，
         # 收尾时**不写结论**——没有结论 ≠ 通过，写个占位就是一条假记录。
         # 同一任务内只会有一条（PRD 汇总结论 / 整篇文档那一条），后到覆盖先到即可。
+        #
+        # `attempted` 是「这次到底试没试」的**显式标记**（#61）：审失败要落
+        # `review_failed_at`，而「根本没审」不许落。两者都不能靠空串去猜。
+        # 取「或」而不是直接赋值：同一任务里只要试过一次，就算试过。
         data = event.data if isinstance(event.data, dict) else {}
+        runtime.review_attempted = runtime.review_attempted or bool(data.get("attempted"))
         verdict = str(data.get("verdict") or "").strip().lower()
         runtime.review = dict(data) if verdict in ("pass", "revise") else None
     elif event_type == "error":

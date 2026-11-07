@@ -6,7 +6,7 @@
 | --- | --- |
 | `POST /api/jobs` | 文档类任务必须带方案；缺方案 / 缺材料是**明确的 400**，且不留下一个空跑的任务 |
 | `POST /api/jobs`（旧前端） | 请求体里多带上游正文与需求正文**被忽略**，既不是 422、也不参与生成 |
-| `POST /api/conversation/generate-api-docs-stream` / `...-prompts-stream` / `...-prd-stream` / `...-prd-from-summary-stream` | 四条旧的非任务通道一律改收 `solution_id`，上游与需求输入由服务端取 |
+| `POST /api/conversation/generate-*`（四条旧直连通道） | **已退役**（#61）：旧路径对客户端是 404，生成只剩任务通道一条路 |
 | `POST /api/jobs`（clarify） | 澄清对话由服务端按线程取；请求体里不再有 `history` |
 
 「不空跑一次生成」用 `GET /api/jobs` 判：400 之后任务列表仍是空的——被拒的请求
@@ -161,19 +161,6 @@ def _all_prompts(llm: ScriptedLLM) -> str:
         for call in llm.calls
         for message in call
     )
-
-
-def _sse_payloads(response) -> list[dict[str, Any]]:
-    """把一次 SSE 响应拆成事件列表（旧的非任务通道用）。"""
-    events: list[dict[str, Any]] = []
-    for line in response.text.splitlines():
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:") :].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        events.append(json.loads(payload))
-    return events
 
 
 def _assert_rejected(client, payload: dict[str, Any], *fragments: str) -> str:
@@ -340,109 +327,51 @@ def test_prompts_job_only_needs_the_prd(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 四、旧的非任务生成通道：改收方案
+# 四、生成能力只剩任务通道：四条旧直连路由已退役（#61）
 # ---------------------------------------------------------------------------
+#
+# 旧的四条非任务通道（`generate-prd-stream` / `...-from-summary-stream` /
+# `...-api-docs-stream` / `...-prompts-stream`）已删，它们的服务方法仍被任务复用。
+# 这些用例从前拿那四条**真实路由 + 真实 SSE 分帧**当接缝；接缝迁到任务通道后，
+# 覆盖落在三处，本文件不重复：
+#
+# - **SSE 端到端**（`part` 按序拼回 `done.reply`）：`test_prd_section_stream.py`；
+# - **请求体只表达「做什么、对哪一份」**（旧字段被忽略、缺材料 400）：本文件一~三节；
+# - **鉴权门禁**：`test_auth_gate.py` 的清单与 OpenAPI 不变量。
+#
+# 这里补两件只属于「退役」的事：旧路径对客户端确实不存在，以及迁移中唯一没被别处
+# 覆盖的一条行为——提示词任务同时看得见 PRD 与接口文档两份上游。
+
+# 已退役的四条旧直连生成路由（OpenAPI 守卫在 `test_cleanup_dead_code.py`）
+_RETIRED_GENERATION_PATHS = (
+    "/api/conversation/generate-prd-stream",
+    "/api/conversation/generate-prd-from-summary-stream",
+    "/api/conversation/generate-api-docs-stream",
+    "/api/conversation/generate-prompts-stream",
+)
 
 
-def test_legacy_api_docs_channel_takes_a_solution(client, monkeypatch):
-    """`/generate-api-docs-stream` 只收 `solution_id`，PRD 由服务端取。"""
-    register(client)
-    llm = ScriptedLLM(["# 接口文档"])
-    _fake_service(monkeypatch, llm)
-    solution_id = _create_solution(client)
-    _put_document(client, solution_id, "prd", "# 库里的 PRD")
+@pytest.mark.parametrize("path", _RETIRED_GENERATION_PATHS)
+def test_retired_generation_paths_are_not_found(client, path):
+    """旧前端仍照发这四条路：拿到的是 404，而不是「悄悄地又生成了一次」。
 
-    response = client.post(
-        "/api/conversation/generate-api-docs-stream",
-        json={"solution_id": solution_id},
-    )
-    assert response.status_code == 200, response.text
-    events = _sse_payloads(response)
-    assert any(event["type"] == "done" for event in events), events
-    assert "# 库里的 PRD" in _generation_prompt(llm)
-
-
-def test_legacy_api_docs_channel_no_longer_accepts_plain_text(client):
-    """旧通道不再收上游正文：只给 `prd_content` 的请求连门都进不去（422）。"""
-    register(client)
-
-    response = client.post(
-        "/api/conversation/generate-api-docs-stream",
-        json={"prd_content": "# 前端手里的 PRD"},
-    )
-    assert response.status_code == 422, response.text
-
-
-def test_legacy_prd_channel_takes_a_solution(client, monkeypatch):
-    """`/generate-prd-from-summary-stream` 也只收方案：需求输入由服务端按方案取。
-
-    它与 `/generate-prd-stream` 是同一族的两条旧通道（一条吃摘要 / 自由文本，一条吃
-    拼好的需求文本），此前都收需求正文。两条一起改收方案之后，「请求体里不再有上游
-    与需求正文」这条契约才真正没有例外——否则同一份需求有两份真源，只是换了一条路由。
+    只断言「没有 200」不够：200 的 SSE 流里报错时，前端只能把「路由没了」读成
+    「生成失败」。这里是货真价实的 404——路由不存在，与任务通道无关。
     """
     register(client)
-    llm = ScriptedLLM(["# 库里的需求写出来的 PRD"])
-    _fake_service(monkeypatch, llm)
-    solution_id = _create_solution(client, {"quick_requirements": "做一个演示产品"})
 
-    response = client.post(
-        "/api/conversation/generate-prd-from-summary-stream",
-        json={"solution_id": solution_id},
-    )
-    assert response.status_code == 200, response.text
-    events = _sse_payloads(response)
-    assert any(event["type"] == "done" for event in events), events
-    # 需求文本取自方案（库里那一份），不是请求体
-    assert "做一个演示产品" in _all_prompts(llm)
+    response = client.post(path, json={"solution_id": 1})
+
+    assert response.status_code == 404, response.text
 
 
-def test_legacy_prd_channel_no_longer_accepts_requirement_text(client):
-    """旧字段不再被接收：只给 `summary` / `requirements` 的请求连门都进不去（422）。"""
-    register(client)
+def test_prompts_job_sees_both_upstreams(client, monkeypatch):
+    """提示词任务同时看得见 PRD 与接口文档全文（上游由服务端取，C-R3）。
 
-    response = client.post(
-        "/api/conversation/generate-prd-from-summary-stream",
-        json={"summary": {"product_name": "演示产品"}, "requirements": "前端手里的那段话"},
-    )
-    assert response.status_code == 422, response.text
-
-
-def test_legacy_prd_stream_channel_takes_a_solution(client, monkeypatch):
-    """`/generate-prd-stream` 同样是「只点名方案」：需求文本由服务端按方案取。
-
-    这条通道比 `/generate-prd-from-summary-stream` 更老：它从前收的是**已经拼好的
-    需求文本**（`requirements` + `history`）。与后者一起改收方案之后，四条非任务通道
-    才真正同形——C-R3「生成输入只来自服务端」也就不再有一条能绕过库的路。
+    这条从前由旧通道 `/generate-prompts-stream` 的用例守着：它把两份上游都放进
+    提示词。接缝迁到任务通道之后，这份覆盖不能跟着路由一起消失——它要证明的是
+    「服务端会取全两份材料」，与走哪条路由无关。
     """
-    register(client)
-    llm = ScriptedLLM(["# 库里的需求写出来的 PRD"])
-    _fake_service(monkeypatch, llm)
-    solution_id = _create_solution(client, {"quick_requirements": "做一个演示产品"})
-
-    response = client.post(
-        "/api/conversation/generate-prd-stream",
-        json={"solution_id": solution_id},
-    )
-    assert response.status_code == 200, response.text
-    events = _sse_payloads(response)
-    assert any(event["type"] == "done" for event in events), events
-    # 需求文本取自方案（库里那一份），不是请求体
-    assert "做一个演示产品" in _all_prompts(llm)
-
-
-def test_legacy_prd_stream_channel_no_longer_accepts_requirement_text(client):
-    """`requirements` 不再是这条通道的入参：只给它的请求连门都进不去（422）。"""
-    register(client)
-
-    response = client.post(
-        "/api/conversation/generate-prd-stream",
-        json={"requirements": "前端手里的那段话"},
-    )
-    assert response.status_code == 422, response.text
-
-
-def test_legacy_prompts_channel_takes_a_solution(client, monkeypatch):
-    """`/generate-prompts-stream` 同样改收方案，两份上游都由服务端取。"""
     register(client)
     llm = ScriptedLLM(["# 提示词套件"])
     _fake_service(monkeypatch, llm)
@@ -450,16 +379,12 @@ def test_legacy_prompts_channel_takes_a_solution(client, monkeypatch):
     _put_document(client, solution_id, "prd", "# 库里的 PRD")
     _put_document(client, solution_id, "api_docs", "# 库里的接口文档")
 
-    response = client.post(
-        "/api/conversation/generate-prompts-stream",
-        json={"solution_id": solution_id},
-    )
-    assert response.status_code == 200, response.text
-    events = _sse_payloads(response)
-    assert any(event["type"] == "done" for event in events), events
+    _run_to_completion(client, {"kind": "prompts", "solution_id": solution_id})
+
     prompt = _generation_prompt(llm)
     assert "# 库里的 PRD" in prompt
     assert "# 库里的接口文档" in prompt
+    assert _documents(client, solution_id)["prompts"]["content"] == "# 提示词套件"
 
 
 # ---------------------------------------------------------------------------

@@ -108,6 +108,13 @@ class JobRuntime:
     # `None` 表示没审成（或这次不审）：**绝不写一个「通过」占位**——没有结论
     # 不等于通过，界面据此标「审核失败」。
     review: dict[str, Any] | None = None
+    # 本次任务**有没有真的试过**审核（由 `review` 事件上的 `attempted` 显式标记）。
+    #
+    # 它只回答一个问题：「没结论」是因为**审失败了**，还是因为**压根没审**？
+    # 两者在库里长得一模一样（都只有空列），但含义相反：前者要落 `review_failed_at`
+    # （刷新后仍显示「审核失败」），后者必须保持「未审核」（快捷流程关掉了审核）。
+    # ⚠️ 不要用「结论为空」推它：空正文那条路同样没有结论，但那不是失败。
+    review_attempted: bool = False
     # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
     # 收尾也**不写**文档——见 `delete_solution_and_cancel_jobs` / `_finalize`。
     cancelled: bool = False

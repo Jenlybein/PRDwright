@@ -63,7 +63,7 @@ class DocumentRow:
     pending_items: str | None
     last_run_summary: str | None
     review: str | None
-    # 这一版上一次重审没跑成的时间；NULL = 没有失败记录（见 US3）
+    # 这一版上一次审核试过但没跑成的时间；NULL = 没有失败记录（见 US3）
     review_failed_at: str | None
     source: str | None
     metadata: str | None
@@ -96,7 +96,7 @@ class VersionDetail:
     last_run_summary: str | None
     # 该版本的审核结论（JSON 文本）。NULL = 没审成 / 历史数据，读侧翻成「未审核」。
     review: str | None
-    # 这一版上一次重审没跑成的时间（UTC ISO 8601）；与结论同一行、同一版。
+    # 这一版上一次审核试过但没跑成的时间（UTC ISO 8601）；与结论同一行、同一版。
     review_failed_at: str | None
     source: str
     note: str | None

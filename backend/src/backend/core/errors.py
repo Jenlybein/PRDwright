@@ -30,7 +30,7 @@ class ErrorCode(str, Enum):
     `BACKEND_ERROR_CODES` 与之严格一致；改名或增删都要两侧同步，否则前端的类型
     守卫会静默失配。
 
-    成员数量刻意保持在 9 个：只覆盖前端真正需要**区分对待**的分支，
+    成员数量刻意保持在 11 个：只覆盖前端真正需要**区分对待**的分支，
     其余一律归入 `INTERNAL_ERROR`，避免错误码膨胀成第二套异常体系。
     """
 
@@ -58,6 +58,15 @@ class ErrorCode(str, Enum):
     # 其余服务端故障（问卷配置缺失或非法 JSON、检索失败、SSE 兜底）。
     # HTTP 500 / SSE error，同时是前端遇到未知 code 时的降级值。
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # 重新审核要写的目标（当前版本）已经不存在：没有「哪一版被审成什么样」可记。
+    # 只出现在任务终态与 SSE error 事件里（收尾时才发现，那时状态码已是 200）。
+    REVIEW_TARGET_MISSING = "REVIEW_TARGET_MISSING"
+    # 重新审核的正文在「建任务那一刻的快照」与「收尾写入」之间被改过：条件写不命中，
+    # 本次结论一个字都不写（C-R1）。同样只出现在任务终态与 SSE error 事件里。
+    #
+    # 与 `REVIEW_TARGET_MISSING` 分开的理由和第二组两个 4xx 一样：前端要能分辨
+    # 「重审一次就好」与「这份文档没了」，合成一个码就只能给同一句话。
+    CONTENT_CHANGED = "CONTENT_CHANGED"
 
 
 # ============================================================================
@@ -65,7 +74,8 @@ class ErrorCode(str, Enum):
 # ============================================================================
 
 # 缺省状态码。只收录「以 HTTP 响应体为载体」的错误码：
-# `SESSION_NOT_FOUND` 不在其中，它只出现在 HTTP 200 的 SSE 流内，没有对应的状态码。
+# `SESSION_NOT_FOUND` / `REVIEW_TARGET_MISSING` / `CONTENT_CHANGED` 不在其中——
+# 它们只出现在 HTTP 200 的 SSE 流内与任务终态里，没有对应的状态码。
 DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.FORBIDDEN: 403,
@@ -77,9 +87,10 @@ DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.INTERNAL_ERROR: 500,
 }
 
-# `DEFAULT_STATUS` 未收录的错误码（当前只有 `SESSION_NOT_FOUND`）被当作 HTTP 异常
-# 抛出时的兜底状态码。正常链路里不会发生——它只用于「有人误把流内错误码拿去抛
-# HTTP 异常」时，让请求以明确的 500 失败，而不是让服务端崩在查表上。
+# `DEFAULT_STATUS` 未收录的错误码（`SESSION_NOT_FOUND` / `REVIEW_TARGET_MISSING` /
+# `CONTENT_CHANGED`）被当作 HTTP 异常抛出时的兜底状态码。正常链路里不会发生——它只用
+# 于「有人误把流内 / 任务终态的错误码拿去抛 HTTP 异常」时，让请求以明确的 500 失败，
+# 而不是让服务端崩在查表上。
 _FALLBACK_STATUS = 500
 
 

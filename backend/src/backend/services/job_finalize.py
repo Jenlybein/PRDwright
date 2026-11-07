@@ -37,7 +37,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class _ReviewWriteFailure:
-    """重审收尾没能把结论写进去时，任务该报的失败码与文案。"""
+    """重审收尾没能把结论写进去时，任务该报的失败码与文案。
+
+    `error_code` 存的是 `ErrorCode` 的**取值**（`str`）：任务终态列与 SSE 的
+    `error.code` 都是纯字符串，而前端码表按值逐字镜像后端枚举（见 `core/errors.py`）。
+    构造处一律写 `ErrorCode.XXX.value`，不在这一层再拼一份字面量。
+    """
 
     error_code: str
     error_message: str
@@ -364,13 +369,13 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             # 审核结论与正文**同批写入**：它描述的就是这一版正文，分两次写就会出现
             # 「正文换了、结论还是旧的那条」。没审成时是 `None`，不写占位。
             review=runtime.review,
-            # 修复的重审没跑成时，正文照落库、结论留空——但「这一版审核失败」要落成
-            # 事实（`review_failed_at`），刷新后面板才仍旧显示「审核失败（时间）」，
-            # 而不是退化成「未审核」。其它链路没审成不算失败（生成时审核是可降级的加成）。
+            # 「审核试过但没跑成」要把失败本身落成事实（`review_failed_at`）：
+            # 刷新后面板才仍旧显示「审核失败（时间）」，而不是退化成「未审核」。
+            # 两条链路同一列、同一展示：生成时审核失败（PRD / 接口文档 / 提示词）
+            # 与修复后的重审失败。判据是运行态上那个**显式的「试过」标记**——
+            # 显式关闭审核的入口（快捷流程）连 `review` 事件都不发，因此不写。
             review_failed_at=(
-                utc_now_text()
-                if runtime.kind == "review_fix" and runtime.review is None
-                else None
+                utc_now_text() if runtime.review is None and runtime.review_attempted else None
             ),
             # `append_version=True`（整篇生成）同时意味着「追加新版本」；
             # `False`（optimize / clarify）就是就地改当前版本。下游不再删除，
@@ -455,7 +460,7 @@ def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
         return _ReviewWriteFailure(
-            "REVIEW_TARGET_MISSING",
+            ErrorCode.REVIEW_TARGET_MISSING.value,
             "这份文档已不存在或还没有正文，本次审核结论未写入，请重新生成后再审核",
         )
     if runtime.review is None:
@@ -484,7 +489,7 @@ def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
             },
         )
         return _ReviewWriteFailure(
-            "CONTENT_CHANGED", "正文已变更，本次审核结论未写入，请重新审核"
+            ErrorCode.CONTENT_CHANGED.value, "正文已变更，本次审核结论未写入，请重新审核"
         )
     reviewed = str(runtime.request.get("document") or "")
     expected_sha = content_fingerprint(reviewed) if reviewed.strip() else None
@@ -526,7 +531,7 @@ def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
             },
         )
         return _ReviewWriteFailure(
-            "CONTENT_CHANGED", "正文已变更，本次审核结论未写入，请重新审核"
+            ErrorCode.CONTENT_CHANGED.value, "正文已变更，本次审核结论未写入，请重新审核"
         )
     logger.warning(
         "重新审核结论未写入：目标不存在（%s）",
@@ -540,6 +545,6 @@ def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
         },
     )
     return _ReviewWriteFailure(
-        "REVIEW_TARGET_MISSING",
+        ErrorCode.REVIEW_TARGET_MISSING.value,
         "这份文档已不存在或还没有正文，本次审核结论未写入，请重新生成后再审核",
     )

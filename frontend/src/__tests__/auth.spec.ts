@@ -22,9 +22,6 @@ vi.mock('../services/api', () => ({
   onUnauthorized: vi.fn(),
   startConversationStream: vi.fn(),
   continueConversationStream: vi.fn(),
-  generatePrdFromSummaryStream: vi.fn(),
-  generateApiDocsStream: vi.fn(),
-  generatePromptsStream: vi.fn(),
   optimizeDocumentStream: vi.fn(),
   syncSummaryFromConversation: vi.fn(),
   // 生成任务接口：登录门禁用例不会触发，但整体 mock 一个模块时应列全，

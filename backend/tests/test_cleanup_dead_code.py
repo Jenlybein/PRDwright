@@ -145,6 +145,58 @@ def test_job_service_public_surface_exposes_only_actions() -> None:
         assert callable(getattr(module, name)), f"公开动作 {name} 不可调用"
 
 
+# 四条旧的非任务生成通道（#61 退役）。它们的**服务方法**仍被对应的生成任务复用，
+# 死的是「路由 + 请求模型 + 前端封装」这一层：还挂在那里就等于同一条生成能力
+# 有第二个入口，而 C-R3「输入只来自服务端」不该靠调用方自觉。
+_RETIRED_GENERATION_ROUTES = (
+    "/api/conversation/generate-prd-stream",
+    "/api/conversation/generate-prd-from-summary-stream",
+    "/api/conversation/generate-api-docs-stream",
+    "/api/conversation/generate-prompts-stream",
+)
+
+# 退役后必须**还在**的服务入口：`_build_event_stream` 直接调，`prd` 任务另有
+# 「分章节降级为整篇」的兜底调用。删路由不等于删能力（约束：不删业务服务方法）。
+_SURVIVING_GENERATION_METHODS = (
+    "generate_prd_stream",
+    "generate_prd_from_summary_stream",
+    "generate_api_docs_stream",
+    "generate_prompts_stream",
+)
+
+
+def test_retired_generation_routes_are_gone_from_openapi() -> None:
+    """四条旧直连通道不许再出现在 OpenAPI 里（#61 的退役结果）。
+
+    为什么用 OpenAPI 而不是 `hasattr`：这四条是**路由**，它们的「存在」体现为
+    OpenAPI 里的一条 path operation 与一组请求模型；文件里还留着一个同名函数却没挂
+    router，同样是死代码。反过来，路由删干净时 OpenAPI 是唯一权威的清单。
+    """
+    from backend.main import app
+
+    paths = set(app.openapi()["paths"])
+    leaked = [route for route in _RETIRED_GENERATION_ROUTES if route in paths]
+    assert leaked == [], (
+        "旧的非任务生成通道又挂回来了："
+        f"{leaked}；它们与 `POST /api/jobs` 是同一个能力的两个入口，"
+        "按 ARCHITECTURE.md §5.5 三条判据应当只留任务通道。"
+    )
+
+
+def test_generation_service_methods_survive_route_retirement() -> None:
+    """退役只删路由层：四个服务方法仍在（任务通道还在直接调它们）。
+
+    这条与上一条成对：只有「路由没了」才可能是删漏了业务逻辑，只有「方法还在」
+    也说明不了路由有没有清干净。两条一起才钉住「删路由不删能力」。
+    """
+    from backend.services import document_service
+
+    missing = [
+        name for name in _SURVIVING_GENERATION_METHODS if not callable(getattr(document_service, name, None))
+    ]
+    assert missing == [], f"退役误伤了服务方法（生成任务会当场跑不起来）：{missing}"
+
+
 def _external_python_files() -> list[Path]:
     """包外调用方：接口层 / 启动流程 / 其它服务 / 全部测试。"""
     root = Path(__file__).resolve().parents[2] / "backend"

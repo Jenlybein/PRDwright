@@ -131,7 +131,7 @@ function toRecord(data: unknown): DocumentRecord | null {
     // SSE 的 `review` 事件，两处共用 `parseReview`，形状不会分叉）。
     // 解析不出来 → null，界面显示「未审核」，绝不替它猜一个「通过」。
     review: parseReview(raw.review),
-    // 「这一版上一次重审没跑成」的时间：失败是落库事实（US3），刷新后据此显示
+    // 「这一版上一次审核试过但没跑成」的时间：失败是落库事实（US3），刷新后据此显示
     // 「审核失败（时间）」，而不是退化成「未审核」。
     reviewFailedAt: typeof raw.review_failed_at === 'string' ? raw.review_failed_at : null,
     // 当前版本号：结论面板用它回答「这条结论是哪一版的」（后端随文档行返回）
