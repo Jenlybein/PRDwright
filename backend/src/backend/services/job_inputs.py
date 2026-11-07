@@ -1,4 +1,4 @@
-"""生成任务的上游输入：一律由服务端按任务种类从库里取（spec #51 / 票 #53）。
+"""文档类任务的输入解析：**一律由服务端按方案从库里取**（spec #51 / 票 #53 / #54）。
 
 为什么归服务端
 --------------
@@ -8,19 +8,28 @@
 
 解析时机
 --------
-**建事件流那一刻**（`run_job` 开流之前）把结果合进运行时手里的那份请求参数。
-落库的 `request_params`（票 #34 的不可变投影）一个字都不动：它记录的是「调用方当时发了
-什么」，这里回答的是「这一刻库里是什么」——两者不同是设计如此，不是没同步。
+**建任务那一刻**（`POST /api/jobs` 里、造单之前），结果随任务单定格、派发时合进运行时
+手里的那份请求参数。落库的 `request_params`（票 #34 的不可变投影）一个字都不动：
+它记录的是「调用方当时发了什么」，这里回答的是「这一刻库里是什么」——两者不同是设计
+如此，不是没同步。
 
-取哪些
-------
-- 接口文档 → PRD 当前版本全文；
-- 提示词 → PRD 与接口文档当前版本全文；
+为什么要建任务那一刻而不是开流那一刻（#54 的取舍）
+--------------------------------------------------
+「缺方案 / 缺材料」必须是**明确的 400**，而不是「任务建起来了、随后在流里失败」：后者
+会在用户的任务列表里留下一条失败记录，还白占一次额度。因此解析提前到请求线程里做，
+出错就是一次货真价实的 HTTP 400（不空跑一次生成）。
+
+取哪些（不存在兜底）
+--------------------
+- 接口文档 → PRD 当前版本全文，其次方案上保存的录入文本；
+- 提示词 → PRD 与接口文档当前版本全文（接口文档可选），其次录入文本；
 - PRD → 方案上的结构化需求摘要、快捷流程的自由文本需求、需求澄清线程（`requirement`）；
-- 导入入口（我有 PRD / 我有 PRD + 接口文档）→ 方案上保存的录入文本列（库内产物为空时）。
+- 按澄清结果改写 → 该文档那条澄清线程（`prd-clarify` / `api-docs-clarify` /
+  `prompts-clarify`）；
+- 导入入口（我有 PRD / 我有 PRD + 接口文档）→ 方案上保存的录入文本列。
 
-**取不到时沿用请求体里的值**：本票只做「扩」，缺材料的 400 归下一票 #54。这条兜底
-刻意只写在本模块一处——#54 要删的就是它。
+**取不到就 400**：请求体里那一份不再参与（#53 的过渡兜底在本票删除），否则双真源
+只是换了个地方复活。
 """
 
 from __future__ import annotations
@@ -31,14 +40,47 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.core.engine import session_scope
+from backend.core.errors import AppError, ErrorCode
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.solution_repo import SolutionRepository
 from backend.services import document_store
 
 logger = logging.getLogger(__name__)
 
-# 需求澄清线程的标识（四条线程之一，见 `core/chat_kinds.py`）。
+# 需要方案、且输入由服务端解析的任务种类。`chat` 不在此列：它的上下文是对话线程本身，
+# 由 `job_service_impl._chat_events` 从 `chat_turns` 拼。
+DOCUMENT_KINDS: tuple[str, ...] = (
+    "prd",
+    "api_docs",
+    "prompts",
+    "optimize",
+    "clarify",
+    "auto_clarify",
+)
+
+# 任务种类 → 给人看的名字（缺材料时的提示要能直接读懂缺的是哪一步）。
+_KIND_LABELS: dict[str, str] = {
+    "prd": "PRD 生成",
+    "api_docs": "接口文档生成",
+    "prompts": "提示词生成",
+    "optimize": "文档优化",
+    "clarify": "按澄清结果改写",
+    "auto_clarify": "AI 自行澄清",
+}
+
+# 文档类型 → 它自己的那条澄清线程（四条线程之一，见 `core/chat_kinds.py`）。
+_CLARIFY_STAGES: dict[str, str] = {
+    "prd": "prd-clarify",
+    "api_docs": "api-docs-clarify",
+    "prompts": "prompts-clarify",
+}
+
+# 需求澄清线程的标识（PRD 的上游之一）。
 _REQUIREMENT_STAGE = "requirement"
+
+# 缺材料时的下一步：生成上游，或（导入入口）把材料存到方案上。
+# 「请先保存材料」是验收标准逐字要求出现在提示里的那一句，别改写。
+_SAVE_MATERIAL_HINT = "请先生成 PRD；若走导入入口，请先保存材料。"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,40 +101,53 @@ class _SolutionInputs:
 
 
 def resolve_runtime_inputs(
-    kind: str, owner_id: int, solution_id: int | None, request: dict[str, Any]
+    kind: str,
+    owner_id: int,
+    solution_id: int | None,
+    doc_kind: str | None = None,
 ) -> dict[str, Any]:
-    """按任务种类解析上游输入，返回**要合进运行时请求参数**的那几格。
+    """按任务种类解析输入，返回**要合进运行时请求参数**的那几格；缺材料即 400。
 
-    只认三种整篇生成：`optimize` / `clarify` / `auto_clarify` 的输入（要改的那份正文、
-    指令、清单）仍由调用方给——它们描述的是「这一次要做什么」，不是「上游是谁」。
+    只认文档类任务：`chat` 返回空（它的上下文由对话服务从轮次表拼）。`optimize` /
+    `auto_clarify` 的输入（要改的那份正文、指令、清单）仍由调用方给——它们描述的是
+    「这一次要做什么」，不是「上游是谁」。
+
+    Args:
+        kind: 任务种类。
+        owner_id: 当前用户；读取一律带它，越权与不存在等价。
+        solution_id: 方案 id；文档类任务必填，缺了就是 400。
+        doc_kind: 目标产物（`clarify` 用它定位澄清线程）。
+
+    Raises:
+        AppError: 缺方案（`INVALID_REQUEST`）、方案不可见（`SOLUTION_NOT_FOUND`）、
+            或服务端取不到必需材料（`INVALID_REQUEST`，文案说明缺什么）。
     """
-    if solution_id is None:
-        # 没有方案就没有服务端上游可查（如「无方案」逃生口）：请求体原样用，
-        # 与引入本模块之前的行为一致。
+    if kind not in DOCUMENT_KINDS:
         return {}
+    if solution_id is None:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"{_KIND_LABELS.get(kind, kind)}必须关联一份方案（solution_id）",
+        )
+
     if kind == "prd":
-        return _prd_inputs(owner_id, solution_id, request)
+        return _prd_inputs(owner_id, solution_id)
     if kind == "api_docs":
-        return {"prd_content": _api_docs_prd(owner_id, solution_id, request)}
+        return {"prd_content": _upstream_prd(owner_id, solution_id, "接口文档生成")}
     if kind == "prompts":
-        return _prompts_inputs(owner_id, solution_id, request)
+        return _prompts_inputs(owner_id, solution_id)
+    if kind == "clarify":
+        return {"history": _clarify_history(owner_id, solution_id, doc_kind)}
     return {}
 
 
-def prd_requirement_text(
-    owner_id: int, solution_id: int | None, request: dict[str, Any]
-) -> str:
-    """取用于计算输入指纹的需求文本——**与真正喂给模型的那份同源**。
+def prd_requirement_text(resolved: dict[str, Any]) -> str:
+    """从**已解析**的输入里取用于计算输入指纹的需求文本。
 
-    指纹若仍按请求体算，就会出现「内容取自库里、指纹取自前端副本」这种自相矛盾的
-    记录：上游改过一版，指纹却还是旧的。取法沿用既有口径：自由文本优先，
-    否则用结构化摘要的 JSON。
+    与真正喂给模型的那份同源：指纹若仍按请求体算，就会出现「内容取自库里、指纹取自
+    前端副本」这种自相矛盾的记录——上游改过一版，指纹却还是旧的。取法沿用既有口径：
+    自由文本优先，否则用结构化摘要的 JSON。
     """
-    resolved = (
-        request
-        if solution_id is None
-        else _prd_requirement_inputs(owner_id, solution_id, request)
-    )
     requirements = str(resolved.get("requirements") or "")
     if requirements.strip():
         return requirements
@@ -107,77 +162,86 @@ def prd_requirement_text(
 # ---------------------------------------------------------------------------
 
 
-def _api_docs_prd(owner_id: int, solution_id: int, request: dict[str, Any]) -> str:
-    """接口文档的上游 PRD：库内当前版本 → 方案上的录入文本 → 请求体（过渡兜底）。"""
+def _upstream_prd(owner_id: int, solution_id: int, label: str) -> str:
+    """接口文档 / 提示词的上游 PRD：库内当前版本 → 方案上的录入文本 → 400。"""
     contents = _document_contents(owner_id, solution_id)
-    solution = _solution_inputs(owner_id, solution_id)
-    return _first_non_empty(
-        contents.get("prd", ""),
-        solution.pasted_prd if solution is not None else "",
-        str(request.get("prd_content") or ""),
-    )
+    solution = _require_solution(owner_id, solution_id)
+    prd = _first_non_empty(contents.get("prd", ""), solution.pasted_prd)
+    if not prd:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"{label}缺少上游 PRD：库里没有 PRD 当前版本，方案上也没有保存的 PRD 材料。"
+            f"{_SAVE_MATERIAL_HINT}",
+        )
+    return prd
 
 
-def _prompts_inputs(
-    owner_id: int, solution_id: int, request: dict[str, Any]
-) -> dict[str, Any]:
-    """提示词的上游：PRD 与接口文档两份当前版本，各自独立解析。
+def _prompts_inputs(owner_id: int, solution_id: int) -> dict[str, Any]:
+    """提示词的上游：PRD 与接口文档两份，各自独立解析。
 
-    导入入口（我有 PRD / 我有 PRD + 接口文档）没有库内产物，材料就在方案行的录入文本里；
-    两份各自回退，避免「PRD 取到了、接口文档却因为没生成过而留空」。
+    接口文档是**可选**材料（「我有 PRD」入口就只有 PRD），缺了按「只有 PRD」处理；
+    PRD 缺了则没有可写的提示词，直接 400。
     """
     contents = _document_contents(owner_id, solution_id)
-    solution = _solution_inputs(owner_id, solution_id)
-    pasted_prd = solution.pasted_prd if solution is not None else ""
-    pasted_api_docs = solution.pasted_api_docs if solution is not None else ""
+    solution = _require_solution(owner_id, solution_id)
+    prd = _first_non_empty(contents.get("prd", ""), solution.pasted_prd)
+    if not prd:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "提示词生成缺少上游 PRD：库里没有 PRD 当前版本，方案上也没有保存的 PRD 材料。"
+            f"{_SAVE_MATERIAL_HINT}",
+        )
     return {
-        "prd_content": _first_non_empty(
-            contents.get("prd", ""), pasted_prd, str(request.get("prd_content") or "")
-        ),
+        "prd_content": prd,
+        # 可选材料：取不到就是空串，生成按「只有 PRD」处理（与从前口径一致）
         "api_docs_content": _first_non_empty(
-            contents.get("api_docs", ""),
-            pasted_api_docs,
-            str(request.get("api_docs_content") or ""),
+            contents.get("api_docs", ""), solution.pasted_api_docs
         ),
     }
 
 
-def _prd_inputs(
-    owner_id: int, solution_id: int, request: dict[str, Any]
-) -> dict[str, Any]:
+def _prd_inputs(owner_id: int, solution_id: int) -> dict[str, Any]:
     """PRD 的上游：结构化摘要 / 自由文本需求 + 需求澄清历史。"""
-    inputs = dict(_prd_requirement_inputs(owner_id, solution_id, request))
-    history = _requirement_history(owner_id, solution_id)
-    if not history:
-        # 方案上没有澄清轮次（快捷流程本来就不问问题；旧快照里可能还留着当时的结论）
-        history = _request_history(request)
-    inputs["history"] = history or None
-    return inputs
-
-
-def _prd_requirement_inputs(
-    owner_id: int, solution_id: int, request: dict[str, Any]
-) -> dict[str, Any]:
-    """PRD 的需求输入三格（摘要 / 自由文本 / 产品名），不读澄清历史。
-
-    单独一格的用处是输入指纹：它只需要需求文本，没必要为它多查一次轮次表。
-    """
-    solution = _solution_inputs(owner_id, solution_id)
-    summary = solution.summary if solution is not None else None
-    requirements = solution.quick_requirements if solution is not None else ""
-    if not summary and not str(requirements).strip():
-        # 服务端还没有需求输入：退回请求体（#54 会把这条兜底换成明确 400）
-        raw_summary = request.get("summary")
-        summary = raw_summary if isinstance(raw_summary, dict) and raw_summary else None
-        requirements = str(request.get("requirements") or "")
-    product_name = (solution.quick_product_name if solution is not None else "") or str(
-        request.get("product_name") or ""
-    )
+    solution = _require_solution(owner_id, solution_id)
+    requirements = str(solution.quick_requirements or "")
+    if not solution.summary and not requirements.strip():
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "PRD 生成缺少需求输入：方案上既没有结构化摘要，也没有自由文本需求。"
+            "请先填写需求后再生成。",
+        )
+    history = _thread_history(owner_id, solution_id, _REQUIREMENT_STAGE)
     return {
-        "summary": summary,
-        "requirements": str(requirements or ""),
-        "product_name": product_name,
+        "summary": solution.summary,
+        "requirements": requirements,
+        "product_name": solution.quick_product_name,
+        # 结构化摘要里也可能带产品名：摘要是权威，这里只把方案上的那一列递过去
+        "history": history or None,
     }
+
+
+def _clarify_history(owner_id: int, solution_id: int, doc_kind: str | None) -> list[dict[str, Any]]:
+    """按澄清结果改写的上游：该文档那条澄清线程的全部轮次。
+
+    从前这条对话由前端随请求体回传。问题与上游正文同构：前端只是服务端轮次的镜像，
+    镜像落后一版（刷新没拉全 / 另一台设备聊过）时，模型就会对着旧结论改写。
+    这里按 `doc_kind` 定位线程，投影成 `{role, content}`——与前端当初回传的形状一致。
+    """
+    stage = _CLARIFY_STAGES.get(str(doc_kind or ""))
+    if stage is None:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "按澄清结果改写必须指定 doc_kind（prd / api_docs / prompts）",
+        )
+    turns = _thread_history(owner_id, solution_id, stage)
+    history = [{"role": item["role"], "content": item["content"]} for item in turns]
+    if not any(str(item["content"]).strip() for item in history):
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"按澄清结果改写需要这条文档的澄清对话，但它还没有任何记录（线程 {stage}）。"
+            "请先在对话页把待确认问题聊出结论。",
+        )
+    return history
 
 
 # ---------------------------------------------------------------------------
@@ -185,32 +249,32 @@ def _prd_requirement_inputs(
 # ---------------------------------------------------------------------------
 
 
-def _solution_inputs(owner_id: int, solution_id: int) -> _SolutionInputs | None:
-    """读方案行上与生成上游有关的几列；方案不可见时返回 None。"""
+def _require_solution(owner_id: int, solution_id: int) -> _SolutionInputs:
+    """读方案行上与生成上游有关的几列；方案不可见时按 404 报「方案不存在」。
+
+    与登记那一步的判据逐字一致（`id + owner`）：不在这里区分「不存在」与「不是你的」。
+    """
     with session_scope() as session:
         row = SolutionRepository(session).get(owner_id, solution_id)
         if row is None:
-            return None
-        pasted_prd = _first_non_empty(row.paste_prd_text or "", row.draft_prd_text or "")
+            raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "方案不存在")
         return _SolutionInputs(
             summary=_parse_summary(row.summary_json),
             quick_requirements=str(row.quick_requirements or ""),
             quick_product_name=str(row.quick_product_name or ""),
-            pasted_prd=pasted_prd,
+            pasted_prd=_first_non_empty(row.paste_prd_text or "", row.draft_prd_text or ""),
             pasted_api_docs=str(row.paste_api_docs_text or ""),
         )
 
 
-def _requirement_history(owner_id: int, solution_id: int) -> list[dict[str, Any]]:
-    """读需求澄清线程的全部轮次，转成提示词认识的历史项。
+def _thread_history(owner_id: int, solution_id: int, stage: str) -> list[dict[str, Any]]:
+    """读某条澄清线程的全部轮次，转成提示词认识的历史项。
 
-    整条线程都算上游：开场白（`system`，含问卷答案）、用户补充、AI 追问与作答
-    （`tool`）都是「这次需求是怎么定的」的一部分，只取用户那几条会丢掉结论。
+    整条线程都算上游：开场白（`system`，含问卷答案 / 文档与待确认清单）、用户补充、
+    AI 追问与作答（`tool`）都是「这件事是怎么定的」的一部分，只取用户那几条会丢掉结论。
     """
     with session_scope() as session:
-        turns = ChatTurnRepository(session).list_thread(
-            owner_id, solution_id, _REQUIREMENT_STAGE
-        )
+        turns = ChatTurnRepository(session).list_thread(owner_id, solution_id, stage)
         return [to_history_item(turn) for turn in turns]
 
 
@@ -250,14 +314,8 @@ def _first_non_empty(*candidates: str) -> str:
     return ""
 
 
-def _request_history(request: dict[str, Any]) -> list[dict[str, Any]]:
-    """把请求体里的历史摊成普通 list（缺失 / 形状不对时为空）。"""
-    raw = request.get("history")
-    if isinstance(raw, (list, tuple)):
-        return [dict(item) for item in raw if isinstance(item, dict)]
-    if isinstance(raw, dict):
-        return [dict(raw)]
-    return []
-
-
-__all__ = ["prd_requirement_text", "resolve_runtime_inputs"]
+__all__ = [
+    "DOCUMENT_KINDS",
+    "prd_requirement_text",
+    "resolve_runtime_inputs",
+]

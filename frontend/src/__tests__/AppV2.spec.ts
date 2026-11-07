@@ -313,6 +313,36 @@ function jobPayload(kind: string): api.CreateJobPayload | undefined {
   return calls[calls.length - 1]?.[0]
 }
 
+/**
+ * 落库过的方案状态（新建 + 更新的全部载荷，按发生顺序）。
+ *
+ * 上游正文不再随任务下发（spec #51 / 票 #54）：贴入的 PRD / 接口文档先落进方案状态，
+ * 任务创建时后端按方案自己取。因此「材料真的送到了后端」这条断言的新落点是**这里**，
+ * 而不是 `createJob` 的载荷——后者只应该出现「做什么、对哪一份」。
+ */
+function savedSolutionStates(): Record<string, unknown>[] {
+  const states: Record<string, unknown>[] = []
+  for (const call of vi.mocked(solutionApi.createSolution).mock.calls) {
+    const state = call[0]?.state
+    if (state) states.push({ ...state } as Record<string, unknown>)
+  }
+  for (const call of vi.mocked(solutionApi.updateSolution).mock.calls) {
+    const state = call[1]?.state
+    if (state) states.push({ ...state } as Record<string, unknown>)
+  }
+  return states
+}
+
+/** 方案状态里某一列是否出现过这段正文（对象列按 JSON 串比对） */
+function savedStateContains(field: string, fragment: string): boolean {
+  return savedSolutionStates().some((state) => {
+    const value = state[field]
+    if (value == null) return false
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    return text.includes(fragment)
+  })
+}
+
 /** 造一份任务快照（刷新重连时后端首发的事件） */
 function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
   return {
@@ -900,15 +930,14 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('项目背景')
 
-    // PRD 生成拿到的是与 field-schema 对齐的结构化 JSON（走 createJob 下发）
+    // PRD 任务只带「要不要复核」：摘要与对话历史由后端按方案取（票 #54），
+    // 前端不再把自己手里那份副本递过去（上游改过时它可能已经落后一版）
     const payload = jobPayload('prd')
     expect(payload?.kind).toBe('prd')
-    // 直接下发结构化摘要字典，需求文本由后端统一格式化
-    expect(payload?.summary?.product_name).toBe('PRDwright')
-    expect(payload?.summary?.mvp_features?.[0]?.name).toBe('问卷填写')
-    // 对话历史一并带上：首轮只有 AI 那条回复（需求本身走 summary 传入）
-    expect(payload?.history?.length).toBe(1)
-    expect(payload?.history?.[0]?.role).toBe('assistant')
+    expect(payload).not.toHaveProperty('summary')
+    expect(payload).not.toHaveProperty('history')
+    // 与 field-schema 对齐的结构化 JSON 随方案状态落库，后端按方案取
+    expect(savedStateContains('summary', 'PRDwright')).toBe(true)
   })
 
   it('点「生成 PRD」先弹摘要确认面板，确认后把回填结果写回摘要再生成', async () => {
@@ -956,9 +985,10 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(jobCount('prd')).toBe(1)
     const prdPayload = jobPayload('prd')
-    // 回填结果已写回摘要，并作为生成输入下发
-    expect(prdPayload?.summary?.target_users).toContain('小团队产品经理')
-    expect(prdPayload?.summary?.mvp_features?.[0]?.user_value).toBe('省时间')
+    // PRD 任务只带「要不要复核」；回填后的摘要随方案状态落库，由后端按方案取（票 #54）
+    expect(prdPayload).not.toHaveProperty('summary')
+    expect(savedStateContains('summary', '小团队产品经理')).toBe(true)
+    expect(savedStateContains('summary', '省时间')).toBe(true)
   })
 
   /**
@@ -1846,11 +1876,13 @@ describe('AppV2 入口模式', () => {
     expect(jobCount('prd')).toBe(1)
 
     const payload = jobPayload('prd')
-    expect(payload?.requirements).toBe('做一个记账 App，支持多人共享账本。')
-    expect(payload?.productName).toBe('小账本')
-    // 没有结构化摘要，也没有对话历史（这条路根本不聊）
-    expect(payload?.summary ?? null).toBeNull()
-    expect(payload?.history ?? []).toEqual([])
+    // 需求不随任务下发（票 #54）：它先随方案状态落库，后端按方案取
+    expect(payload).not.toHaveProperty('requirements')
+    expect(payload).not.toHaveProperty('productName')
+    expect(payload).not.toHaveProperty('summary')
+    expect(payload).not.toHaveProperty('history')
+    expect(savedStateContains('quick_requirements', '做一个记账 App，支持多人共享账本。')).toBe(true)
+    expect(savedStateContains('quick_product_name', '小账本')).toBe(true)
     // 输入只有一段话，逐章复核的边际收益低：生成时只撰写、不审不改
     expect(payload?.reviewEnabled).toBe(false)
 
@@ -1932,7 +1964,9 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     const payload = jobPayload('prompts')
-    expect(payload?.prdContent).toContain('家庭记账工具')
+    // 任务只带「做什么」；贴入的 PRD 先落进方案状态，由后端按方案取
+    expect(payload).not.toHaveProperty('prdContent')
+    expect(savedStateContains('draft_prd_text', '家庭记账工具')).toBe(true)
     expect(wrapper.text()).toContain('提示词套件')
     expect(wrapper.text()).toContain('角色设定')
 
@@ -1980,9 +2014,11 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     const payload = jobPayload('prompts')
-    expect(payload?.prdContent).toContain('家庭记账工具')
-    // 这一条入口的全部意义：接口文档也要真的送到后端
-    expect(payload?.apiDocsContent).toContain('POST /api/ledgers')
+    // 这一条入口的全部意义：接口文档也要真的到后端——但它走的是方案状态，不是请求体
+    expect(payload).not.toHaveProperty('prdContent')
+    expect(payload).not.toHaveProperty('apiDocsContent')
+    expect(savedStateContains('paste_prd_text', '家庭记账工具')).toBe(true)
+    expect(savedStateContains('paste_api_docs_text', 'POST /api/ledgers')).toBe(true)
     expect(wrapper.text()).toContain('提示词套件')
 
     // 自带的两份材料**不算**本工具的产物：返回目标也是录入页，且不出现「查看 PRD」
@@ -2000,7 +2036,11 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     expect(jobCount('prompts')).toBe(1)
-    expect(jobPayload('prompts')?.apiDocsContent).toBe('')
+    // 接口文档是选填：方案状态里没有这一份，请求体里也不该凭空多出正文
+    expect(jobPayload('prompts')).not.toHaveProperty('apiDocsContent')
+    expect(savedSolutionStates().some((state) => String(state.paste_api_docs_text ?? ''))).toBe(
+      false,
+    )
   })
 
   it('我有 PRD + 接口文档：未贴 PRD 时不能提交，缺失提示常驻', async () => {
@@ -2639,9 +2679,11 @@ describe('AppV2 文档澄清', () => {
 
     const payload = jobPayload('clarify')
     expect(payload?.docKind).toBe('prd')
-    // 对话记录随请求一起交给后端——改写依据就是它，后端不可能自己猜到
-    expect(payload?.history?.[0]?.content).toContain('分页上限取多少？')
+    // 对话记录**不再随请求下发**：后端按 `docKind` 定位那条澄清线程自己读（票 #54）。
+    // 前端只保证「这条线程确实聊过」，改写依据住在服务端的 `chat_turns` 里。
+    expect(payload).not.toHaveProperty('history')
     expect(payload?.document).toContain('分页上限：待确认')
+    expect(wrapper.text()).toContain('PRD 文档')
 
     // 改写完成 → 回到 PRD 的审阅页，并且正文已经是新的
     expect(wrapper.text()).toContain('PRD 文档')

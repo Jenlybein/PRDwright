@@ -171,13 +171,41 @@ def _create_solution(client) -> int:
     return int(response.json()["id"])
 
 
-def _run_job(owner_id: int, solution_id: int | None, kind: str, request: dict) -> tuple[int, list]:
+def _run_job(
+    owner_id: int,
+    solution_id: int | None,
+    kind: str,
+    request: dict,
+    resolved_inputs: dict | None = None,
+) -> tuple[int, list]:
     """造单 → 登记 → 派发 → 一路订阅到结束，返回 (job_id, 全部事件)。
 
-    假环境（生成事件流来源、配置快照）在造单时传入；这里用生产真值，
-    模型边界仍用既有的离线假 LLM（零 token）。
+    `request` 只放「调用方发了什么」；上游正文 / 需求正文放 `resolved_inputs`
+    （生产由路由按方案解析，票 #54）。假环境（生成事件流来源、配置快照）在造单时
+    传入；这里用生产真值，模型边界仍用既有的离线假 LLM（零 token）。
     """
-    return run_ticket_to_completion(owner_id, solution_id, kind, request)
+    return run_ticket_to_completion(
+        owner_id, solution_id, kind, request, resolved_inputs=resolved_inputs
+    )
+
+
+def _create_solution_with_requirements(client) -> int:
+    """建一份带需求输入的方案：PRD 任务的上游由服务端从这一份取。"""
+    response = client.post(
+        "/api/solutions",
+        json={
+            "title": "演示方案",
+            "mode": "structured",
+            "stage": "review-prd",
+            "state": {
+                "entry_mode": "prd-quick",
+                "quick_product_name": "演示产品",
+                "quick_requirements": "做一个演示产品",
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +221,11 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     _seed_provider()
 
     job_id, events = _run_job(
-        alice, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"}
+        alice,
+        solution_id,
+        "prd",
+        {},
+        resolved_inputs={"requirements": "做一个演示产品", "product_name": "演示产品"},
     )
 
     # 首事件必为 snapshot（重连补全正文的落点）
@@ -345,7 +377,11 @@ def test_failure_event_marks_job_failed_and_keeps_partial(alice, monkeypatch):
     _fake_service(monkeypatch, ScriptedLLM(["第一段正文", "第二段"], raise_at=1))
 
     job_id, events = _run_job(
-        alice, None, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"}
+        alice,
+        None,
+        "prd",
+        {},
+        resolved_inputs={"requirements": "做一个演示产品", "product_name": "演示产品"},
     )
 
     error = next(event for event in events if event.type == "error")
@@ -582,10 +618,11 @@ def test_create_job_returns_201_and_persists(client, monkeypatch):
     register(client)
     uid = _alice_id()
     _fake_service(monkeypatch, ScriptedLLM(["正文"]))
+    solution_id = _create_solution_with_requirements(client)
 
     response = client.post(
         "/api/jobs",
-        json={"kind": "prd", "requirements": "做一个演示产品", "product_name": "演示"},
+        json={"kind": "prd", "solution_id": solution_id},
     )
     assert response.status_code == 201, response.text
     body = response.json()
@@ -600,13 +637,18 @@ def test_create_job_returns_201_and_persists(client, monkeypatch):
 
 
 def test_create_job_validates_required_input_by_kind(client):
-    """按 kind 校验必填：缺输入返回 400 INVALID_REQUEST（不是 422）。"""
+    """按 kind 校验必填：缺输入返回 400 INVALID_REQUEST（不是 422）。
+
+    文档类任务的前两条现在都栽在**缺方案**上（输入由服务端按方案取），
+    后两条仍缺动作自己的输入。缺材料（方案存在、库里没有上游）的 400
+    由 `test_job_contract.py` 逐个种类覆盖。
+    """
     register(client)
 
     for payload in (
-        {"kind": "prd"},  # summary 与 requirements 皆空
-        {"kind": "api_docs"},  # 缺 prd_content
-        {"kind": "prompts"},  # 缺 prd_content
+        {"kind": "prd"},  # 缺方案（需求输入也由服务端取）
+        {"kind": "api_docs"},  # 缺方案（上游 PRD 也由服务端取）
+        {"kind": "prompts"},  # 缺方案
         {"kind": "optimize", "document": "x"},  # 缺 instruction
         {"kind": "optimize", "instruction": "改一下"},  # 缺 document
     ):
@@ -616,22 +658,29 @@ def test_create_job_validates_required_input_by_kind(client):
 
 
 def test_create_prompts_job_accepts_optional_api_docs(client, monkeypatch):
-    """`api_docs_content` 是**可选**入参：带上它不该被门口挡掉。
+    """接口文档是**可选**材料：方案上存了两份就都用，只有 PRD 也能建任务。
 
-    「我有 PRD + 接口文档」入口比「我有 PRD」多带一份材料，两者走的是同一个 `prompts`
-    任务类型。这里只守「带上了也能建任务」这一件事——材料怎么走到模型面前由
-    `test_prompts_input.py` 单独覆盖。
+    「我有 PRD + 接口文档」入口比「我有 PRD」多一份材料，两者走的是同一个 `prompts`
+    任务类型。材料由服务端从方案上取（票 #54），请求体里不再有它们。
     """
     register(client)
     _fake_service(monkeypatch, ScriptedLLM(["# 提示词套件"]))
+    solution_id = client.post(
+        "/api/solutions",
+        json={
+            "title": "导入方案",
+            "state": {
+                "entry_mode": "prd-and-api-paste",
+                "paste_prd_text": "# PRD 正文",
+                "paste_api_docs_text": "# 接口文档正文",
+            },
+        },
+    )
+    assert solution_id.status_code == 201, solution_id.text
 
     response = client.post(
         "/api/jobs",
-        json={
-            "kind": "prompts",
-            "prd_content": "# PRD 正文",
-            "api_docs_content": "# 接口文档正文",
-        },
+        json={"kind": "prompts", "solution_id": int(solution_id.json()["id"])},
     )
 
     assert response.status_code == 201, response.text
@@ -692,26 +741,28 @@ def test_list_jobs_filters_by_status_and_kind(client):
     assert ids == [running_prompts]
 
 
-def test_create_job_without_solution_id_is_allowed(client):
-    """solution_id 可空（快捷入口逃生口），能建且落库为 NULL。"""
+def test_create_job_without_solution_id_is_rejected(client):
+    """`solution_id` 不再是可空的逃生口：文档类任务缺方案就是 400（票 #54）。
+
+    从前它可空，靠请求体里的正文照样能跑；输入搬回服务端之后没有这条路了。
+    「不留下空跑任务」由 `test_document_job_without_solution_is_not_created` 守。
+    """
     register(client)
-    uid = _alice_id()
 
     response = client.post("/api/jobs", json={"kind": "prompts", "prd_content": "# PRD"})
-    assert response.status_code == 201
-    row = job_get(uid, response.json()["job_id"])
-    assert row is not None
-    assert row["solution_id"] is None
+    assert response.status_code == 400
+    assert "方案" in response.json()["detail"]
 
 
 def test_stream_endpoint_emits_snapshot_first(client, monkeypatch):
     """端到端：GET /api/jobs/{id}/stream 首事件是 snapshot（SSE 分帧走真实实现）。"""
     register(client)
     _fake_service(monkeypatch, ScriptedLLM(["正文"]))
+    solution_id = _create_solution_with_requirements(client)
 
     created = client.post(
         "/api/jobs",
-        json={"kind": "prd", "requirements": "做一个演示产品", "product_name": "演示产品"},
+        json={"kind": "prd", "solution_id": solution_id},
     )
     job_id = created.json()["job_id"]
 
@@ -788,7 +839,13 @@ def test_completed_api_docs_job_writes_its_own_kind(client, monkeypatch):
     solution_id = _create_solution(client)
     _fake_service(monkeypatch, ScriptedLLM(["接口正文"]))
 
-    _run_job(uid, solution_id, "api_docs", {"prd_content": "# 演示产品 PRD"})
+    _run_job(
+        uid,
+        solution_id,
+        "api_docs",
+        {},
+        resolved_inputs={"prd_content": "# 演示产品 PRD"},
+    )
 
     assert document_store.get_document(uid, solution_id, "api_docs") is not None
     assert document_store.get_document(uid, solution_id, "prd") is None
@@ -803,7 +860,13 @@ def test_failed_job_keeps_previous_document(client, monkeypatch):
 
     # 第一段吐完即断
     _fake_service(monkeypatch, ScriptedLLM(["第一段正文", "第二段"], raise_at=1))
-    _job_id, events = _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品"})
+    _job_id, events = _run_job(
+        uid,
+        solution_id,
+        "prd",
+        {},
+        resolved_inputs={"requirements": "做一个演示产品"},
+    )
 
     assert events[-1].data["status"] == "failed"
     doc = document_store.get_document(uid, solution_id, "prd")
@@ -811,16 +874,22 @@ def test_failed_job_keeps_previous_document(client, monkeypatch):
     assert doc["content"] == "# 上一版 PRD"
 
 
-def test_job_without_solution_does_not_write_document(client, monkeypatch):
-    """没有方案可挂（`solution_id=None`）时任务照常成功，只是没有文档可写。"""
+def test_document_job_without_solution_is_not_created(client, monkeypatch):
+    """没有方案 → 400，而且**不留下一个空跑的任务**（票 #54 收口）。
+
+    从前 `solution_id=None` 是「逃生口」：靠请求体里的正文照样能跑一趟生成。
+    输入搬回服务端之后这条路没有了——方案是取上游的前提。HTTP 面上是 400、
+    任务列表里一条记录都不留；同一断言在 `test_job_contract.py` 里按种类逐个守过。
+    """
     register(client)
     uid = _alice_id()
     _fake_service(monkeypatch, ScriptedLLM(["正文"]))
 
-    job_id, events = _run_job(uid, None, "prompts", {"prd_content": "# PRD"})
+    response = client.post("/api/jobs", json={"kind": "prompts"})
 
-    assert events[-1].data["status"] == "completed"
-    assert job_get(uid, job_id)["status"] == "completed"
+    assert response.status_code == 400
+    assert "方案" in response.json()["detail"]
+    assert job_list_by_owner(uid) == []
 
 
 def test_regenerating_prd_keeps_downstream_documents(client, monkeypatch):
@@ -838,7 +907,13 @@ def test_regenerating_prd_keeps_downstream_documents(client, monkeypatch):
     document_store.save_document(uid, solution_id, "prompts", "# 旧提示词")
 
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
-    _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
+    _run_job(
+        uid,
+        solution_id,
+        "prd",
+        {},
+        resolved_inputs={"requirements": "做一个演示产品", "product_name": "演示产品"},
+    )
 
     kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
     assert kinds == {"prd", "api_docs", "prompts"}
@@ -854,7 +929,7 @@ def test_regenerating_api_docs_keeps_all_documents(client, monkeypatch):
     document_store.save_document(uid, solution_id, "prompts", "# 旧提示词")
 
     _fake_service(monkeypatch, ScriptedLLM(["接口正文"]))
-    _run_job(uid, solution_id, "api_docs", {"prd_content": "# PRD"})
+    _run_job(uid, solution_id, "api_docs", {}, resolved_inputs={"prd_content": "# PRD"})
 
     kinds = {doc["kind"] for doc in document_store.list_documents(uid, solution_id)}
     assert kinds == {"prd", "api_docs", "prompts"}
@@ -1042,7 +1117,13 @@ def test_completed_generation_appends_a_version(client, monkeypatch):
     solution_id = _create_solution(client)
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
 
-    _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
+    _run_job(
+        uid,
+        solution_id,
+        "prd",
+        {},
+        resolved_inputs={"requirements": "做一个演示产品", "product_name": "演示产品"},
+    )
 
     versions = _versions(uid, solution_id, "prd")
     assert [v["version_no"] for v in versions] == [1]
@@ -1060,7 +1141,13 @@ def test_regenerating_prd_appends_version_and_keeps_downstream_versions(client, 
     assert len(_versions(uid, solution_id, "prompts")) == 1
 
     _fake_service(monkeypatch, ScriptedLLM(["章节正文"]))
-    _run_job(uid, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"})
+    _run_job(
+        uid,
+        solution_id,
+        "prd",
+        {},
+        resolved_inputs={"requirements": "做一个演示产品", "product_name": "演示产品"},
+    )
 
     assert [v["version_no"] for v in _versions(uid, solution_id, "prd")] == [2, 1]
     # 下游保留：不再是空列表，旧版本仍在（是否过期由 stale 标记）
@@ -1106,11 +1193,9 @@ def test_clarify_rewrites_current_version_without_new_entry(client, monkeypatch)
         uid,
         solution_id,
         "clarify",
-        {
-            "document": "# 原 PRD",
-            "history": [{"role": "user", "content": "登录方式确定为手机号"}],
-            "doc_kind": "prd",
-        },
+        {"document": "# 原 PRD", "doc_kind": "prd"},
+        # 对话由服务端从那条文档线程取（生产路径），这里直接给它同样的形状
+        resolved_inputs={"history": [{"role": "user", "content": "登录方式确定为手机号"}]},
     )
 
     assert len(_versions(uid, solution_id, "prd")) == before
@@ -1803,7 +1888,11 @@ def test_skill_registry_failure_degrades_visibility_not_the_job(
     solution_id = _create_solution(client)
 
     job_id, events = _run_job(
-        alice, solution_id, "prd", {"requirements": "做一个演示产品", "product_name": "演示产品"}
+        alice,
+        solution_id,
+        "prd",
+        {},
+        resolved_inputs={"requirements": "做一个演示产品", "product_name": "演示产品"},
     )
 
     summary = events[-1].data
@@ -1825,7 +1914,9 @@ def test_pipeline_app_error_keeps_its_own_code(alice, monkeypatch):
 
     monkeypatch.setattr(document_service, "generate_prd_from_summary_stream", _boom)
 
-    job_id, events = _run_job(alice, None, "prd", {"requirements": "做一个演示产品"})
+    job_id, events = _run_job(
+        alice, None, "prd", {}, resolved_inputs={"requirements": "做一个演示产品"}
+    )
 
     row = job_get(alice, job_id)
     assert row is not None
@@ -1942,7 +2033,8 @@ def test_prompts_version_records_both_upstreams(client, monkeypatch):
         uid,
         solution_id,
         "prompts",
-        {"prd_content": "# PRD 正文", "api_docs_content": "# 接口文档正文"},
+        {},
+        resolved_inputs={"prd_content": "# PRD 正文", "api_docs_content": "# 接口文档正文"},
     )
 
     doc = document_store.get_document(uid, solution_id, "prompts")
