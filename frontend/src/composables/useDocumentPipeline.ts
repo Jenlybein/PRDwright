@@ -70,11 +70,12 @@ export interface PipelineHooks {
 /**
  * 文档生成、审阅与摘要确认闸门。
  *
- * 覆盖从「点击生成 PRD」到「进入完成页」的全部编排：文档流式生成与优化、
- * 摘要回填 Diff 确认、下载与完成守卫。
+ * 覆盖从「点击生成 PRD」到「三份文档各自待确认」的全部编排：文档流式生成与优化、
+ * 摘要回填 Diff 确认、下载。进交付页的判据不在这里（见本文件里那节说明）。
  *
- * **按入口模式分流**只体现在三个地方：需求从哪来（结构化摘要 / 一段话）、
- * 「返回」回到哪个录入页、以及完成所需的最低文档集合；生成链路本身完全共用。
+ * **按入口模式分流**只体现在两个地方：需求从哪来（结构化摘要 / 一段话）、
+ * 「返回」回到哪个录入页；生成链路本身完全共用。交付判据（哪几份文档齐备才能进交付页）
+ * 不在这里，它在 `stores/workflow` 的 `requiredDocsReady`。
  *
  * 阶段本身（`viewState`）落在 workflow store，三份产物正文落在 documents store
  * （后端 `documents` 表在前端的工作副本）。这里只持有「这一次请求 / 这一次确认」的
@@ -102,7 +103,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     pastePairInput,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
-    canFinish: canFinishTask,
     canGeneratePrd,
   } = storeToRefs(store)
 
@@ -1403,13 +1403,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const formBackLabel = computed(() => (messages.value.length > 0 ? '返回对话' : '返回入口'))
 
   /**
-   * 进入完成页：校验三份文档齐备后切到 `done`。
-   * 不满足条件时不跳转（前置守卫），保证不会落到空白的完成态。
+   * 进入交付页的入口**不在这里**。
+   *
+   * 交付页不再由审阅页的「完成」按钮把关（那个按钮连同它的守卫一起撤了）：入口是进度条的
+   * 「交付」格，可点条件由 `stores/workflow` 的 `requiredDocsReady` 决定。这条流水线只负责
+   * 「把一份文档生成 / 改好」，不负责「什么时候可以交付」。
    */
-  function handleEndTask(): void {
-    if (!canFinishTask.value) return
-    goTo('done')
-  }
 
   /** 当前审阅阶段对应的文档标题 */
   const activeDocTitle = computed(() => {
@@ -1447,7 +1446,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 都为空或含非法字符时由 `buildDocFilename` 兜底。
    *
    * `content` 给出时以它为准：审阅页必须取**组件里的草稿**（`DocumentReview` 暴露的
-   * `draftContent`），它可能比 store 的工作副本更新（还在 800ms 防抖窗口里）；完成页不传，
+   * `draftContent`），它可能比 store 的工作副本更新（还在 800ms 防抖窗口里）；交付页不传，
    * 读工作副本即可。
    */
   function downloadDocument(docType: DocType, content?: string): void {
@@ -1584,7 +1583,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     isGenerating,
     isGeneratingPhase,
     isReviewing,
-    canFinishTask,
     activeDocTitle,
     activeDocContent,
     backLabel,
@@ -1618,7 +1616,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     handleGeneratePromptsFromPair,
     backToInput,
     backFromForm,
-    handleEndTask,
     downloadDocument,
     onDownloadDocument,
     downloadBundle,
