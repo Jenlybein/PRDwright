@@ -72,7 +72,9 @@ class JobRuntime:
     stage_text: str = ""
     # 已定稿章节的结构化记录（供快照恢复时定位「写到第几章」）
     completed_sections: list[dict[str, Any]] = field(default_factory=list)
-    # 原样保存的请求参数，供 `_build_event_stream` 重建生成
+    # 请求参数：派发时是单②摊平后的原样一份，`run_job` 开流前会把**服务端解析出的
+    # 上游输入**合进来（见 `job_inputs`）。`_build_event_stream` / `_build_derived_from`
+    # 都读这一份；落库的 `request_params` 投影不受影响。
     request: dict[str, Any] = field(default_factory=dict)
     # 本任务的**配置快照**（派发那一刻取的）。`run_job` 用 `use_config` 把它冻进上下文，
     # 于是整条链路（含并行子任务）读到的是同一份：既满足「改了下次生成生效」，
