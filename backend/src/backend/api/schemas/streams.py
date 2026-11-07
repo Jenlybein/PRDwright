@@ -7,24 +7,20 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from .conversation import MessageItem
-
 # ============================================================================
 # 文档流式生成（对应 document_service 的 *_stream 方法）
 # ============================================================================
 
 
 class GeneratePrdStreamRequest(BaseModel):
-    """生成 PRD 的流式请求。"""
+    """按方案生成 PRD 的流式请求（**整篇**那条旧通道）。
 
-    requirements: str = Field(
-        min_length=1,
-        description="需求澄清结果（问卷答案整理成的文本）",
-    )
-    history: list[MessageItem] = Field(
-        default_factory=list,
-        description="补充对话记录；为空则按无对话处理",
-    )
+    **只收方案**，与另外三条旧通道同形（spec #51 / C-R3）：需求输入（结构化摘要 /
+    自由文本需求 / 需求澄清线程）由服务端按方案从库里取。请求体里不再有
+    `requirements` / `history`——需求正文只允许有一个来源。
+    """
+
+    solution_id: int = Field(gt=0, description="方案 id：需求输入（摘要 / 自由文本 / 澄清线程）从它取")
 
 
 class GeneratePrdFromSummaryStreamRequest(BaseModel):

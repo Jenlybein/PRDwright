@@ -233,7 +233,7 @@ _EXPECTED_SCHEMAS_FIELDS = {
     "DocumentVersionListResponse": {"versions"},
     "GenerateApiDocsStreamRequest": {"solution_id"},
     "GeneratePrdFromSummaryStreamRequest": {"solution_id"},
-    "GeneratePrdStreamRequest": {"history", "requirements"},
+    "GeneratePrdStreamRequest": {"solution_id"},
     "GeneratePromptsStreamRequest": {"solution_id"},
     "JobCancelResponse": {"cancelled", "ok"},
     "JobCreateRequest": {"chat_mode", "content", "doc_kind", "document", "form_data", "instruction", "kind", "pending_items", "profile_key", "review_enabled", "solution_id", "stage", "tool_result"},

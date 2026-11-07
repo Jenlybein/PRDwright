@@ -24,6 +24,7 @@ from backend.api.sse import (  # noqa: F401 - SSE_DONE/SSE_HEADERS/make_sse_gene
 from backend.core.errors import AppError, ErrorCode
 from backend.services import conversation_service, document_service, job_inputs
 from backend.services.auth_service import User
+from backend.services.prd_skill import format_summary_as_requirements
 
 router = APIRouter(prefix="/api/conversation", tags=["conversation"])
 
@@ -171,22 +172,43 @@ async def continue_conversation_stream(
 # ============================================================================
 
 
-@router.post("/generate-prd-stream", summary="根据对话生成 PRD（SSE 流式返回）")
+@router.post("/generate-prd-stream", summary="按方案生成 PRD（整篇，SSE 流式返回）")
 async def generate_prd_stream(
     payload: schemas.GeneratePrdStreamRequest,
+    user: User = Depends(acting_user),
 ) -> StreamingResponse:
-    """根据需求澄清结果与补充对话，流式返回 PRD 正文。
+    """按方案生成 PRD（**整篇**那条旧链路），流式返回 PRD 正文。
+
+    与另三条旧通道同形（spec #51 / C-R3）：**只收方案**。它从前收的是前端已经拼好的
+    需求文本（`requirements` + `history`），于是「需求正文」有了两个来源；现在需求输入
+    （结构化摘要 / 快捷入口那段自由文本 / 需求澄清线程）由 `job_inputs` 按方案从库里
+    解析，请求体里一个字段都不带——与 `/generate-prd-from-summary-stream` 用的是同一份
+    上游，差别只在服务方法（这条走整篇生成，那条走分章节 + 审核）。
 
     事件序列：`status` → 若干 `chunk` → `done`（`data` 带完整 `reply` 与
     `doc_type=prd`）；出错时为 `error`。
     """
-    # 空列表视为「无补充对话」
-    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    # 解析在**构造 SSE 之前**：进了流之后状态码恒为 200，缺需求就只能读成「生成失败」
+    inputs = job_inputs.resolve_runtime_inputs("prd", user.id, payload.solution_id)
     events = document_service.generate_prd_stream(
-        requirements=payload.requirements,
-        history=history,
+        requirements=_prd_requirements_text(inputs),
+        history=inputs.get("history") or None,
     )
     return sse_response(events)
+
+
+def _prd_requirements_text(inputs: dict[str, Any]) -> str:
+    """把服务端解析出的 PRD 输入折成「整篇生成」那条链路要的一段需求文本。
+
+    两条 PRD 入口的差别只在输入怎么来，而**整篇**链路的提示词只认一段 `requirements`
+    文本（分章节链路才有结构化摘要与两条线程的插槽）。因此这里做一次同口径的折叠：
+    有结构化摘要就渲染成需求文本（与分章节链路 `format_summary_as_requirements` 同一份
+    渲染），否则用快捷入口那段自由文本；线程原样交给 `history`。
+    """
+    summary = inputs.get("summary")
+    if summary:
+        return format_summary_as_requirements(summary)
+    return str(inputs.get("requirements") or "")
 
 
 @router.post(
