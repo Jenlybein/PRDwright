@@ -44,4 +44,4 @@ issue 与规格住在 GitHub Issues（`Jenlybein/PRDwright`，public），一律
 
 ### Domain docs
 
-单上下文：根目录一份 `GLOSSARY.md`。架构现状只有一版 [`docs/architecture/ARCHITECTURE.md`](./docs/architecture/ARCHITECTURE.md)（含「取舍」节与契约）；**架构决策**单独归档在 [`docs/adr/`](./docs/adr/)，编号从 0001 重新开始（目前只有 0001）。[`docs/architecture/README.md`](./docs/architecture/README.md) 是时间线真源，[`docs/architecture/roadmap.md`](./docs/architecture/roadmap.md) 是现状排期。见 [`docs/agents/domain.md`](./docs/agents/domain.md)。
+单上下文：根目录一份 `GLOSSARY.md`。架构现状只有一版 [`docs/architecture/ARCHITECTURE.md`](./docs/architecture/ARCHITECTURE.md)（含「取舍」节与契约）；**架构决策**单独归档在 [`docs/adr/`](./docs/adr/)，编号从 0001 重新开始（现有 0001 文档重组、0002 审核结论与修复）。[`docs/architecture/README.md`](./docs/architecture/README.md) 是时间线真源，[`docs/architecture/roadmap.md`](./docs/architecture/roadmap.md) 是现状排期。见 [`docs/agents/domain.md`](./docs/agents/domain.md)。
