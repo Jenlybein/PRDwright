@@ -5,6 +5,7 @@ import type { EntrySpec } from '@/utils/workflow'
 import {
   ENTRY_REGISTRY,
   EntrySpecMissingError,
+  announcesDeliveryReady,
   assertEntrySpecComplete,
   canGeneratePrdFrom,
   chatStageForDocument,
@@ -265,6 +266,17 @@ describe('守卫', () => {
     expect(hasRequiredDocuments('structured', { prd: 'a', apiDocs: 'b', prompts: '' })).toBe(false)
     expect(hasRequiredDocuments('structured', { prd: 'a', apiDocs: 'b', prompts: 'c' })).toBe(true)
     expect(hasRequiredDocuments('structured', { prd: 'a', apiDocs: '  ', prompts: 'c' })).toBe(false)
+  })
+
+  it('只有三份齐备的入口才弹「已齐备」提示：导入入口只要一份提示词', () => {
+    // 规格只说「三份齐备时全应用提示一次」。对只要一份提示词的人说「三份文档已齐备」
+    // 是假话，所以这条提示的**触发条件**与交付格的**可点条件**不是同一个判据。
+    expect(announcesDeliveryReady('structured')).toBe(true)
+    expect(announcesDeliveryReady('prd-quick')).toBe(true)
+    expect(announcesDeliveryReady('prompt-debug')).toBe(false)
+    expect(announcesDeliveryReady('prd-and-api-paste')).toBe(false)
+    // 「未选择」按完整流程展示（与 hasRequiredDocuments 同口径）：三份，仍然提示
+    expect(announcesDeliveryReady(null)).toBe(true)
   })
 })
 

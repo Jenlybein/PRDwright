@@ -416,7 +416,27 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const hasChat = computed(() => messages.value.length > 0 || summary.value !== null)
 
   /**
-   * 已到达的最远步骤下标（进度条可点击范围），解锁依据是**产物有没有内容**。
+   * 当前入口模式「交付」所需的文档是否齐备。
+   *
+   * 要哪几份由登记表的 `requiredDocs` 列回答：完整流程与快捷流程都是三份齐备，
+   * 两个导入入口只要提示词套件。这里不再写一份「快捷入口只要 PRD」的旧说法——那是
+   * 早就作废的口径，与三份齐备的判据相冲突。
+   *
+   * 它同时是**交付页的入口判据**：齐备后进度条「交付」格可点（见 `reachedStepIndex`），
+   * 齐备那一刻上层给一次全应用提示。交付页不再由「完成」按钮把关，因此这里不再派生出
+   * 一个「可以完成」的判据——那等于给同一个条件起两个名字。
+   */
+  const requiredDocsReady = computed(() =>
+    hasRequiredDocuments(entryMode.value, {
+      prd: documents.contents.prd,
+      apiDocs: documents.contents['api-docs'],
+      prompts: documents.contents.prompts,
+    }),
+  )
+
+  /**
+   * 已到达的最远步骤下标（进度条可点击范围），解锁依据是**产物有没有内容**，
+   * 外加「所需文档齐备后「交付」那一格可点」。
    *
    * `hasMessages` 的语义是「**任意**线程聊过」——从前只有需求澄清一条线程时它与
    * 「需求聊过」等价；四条线程合流后依然等价：文档线程必然发生在需求线程之后
@@ -430,6 +450,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
       hasApiDocs: documents.hasApiDocs,
       hasPrompts: documents.hasPrompts,
       currentStepIndex: currentStepIndex.value,
+      deliveryReady: requiredDocsReady.value,
     }),
   )
 
@@ -465,24 +486,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
 
   /** 当前是否处于「文档待确认」阶段 */
   const reviewing = computed(() => isDocReviewPhase(viewState.value))
-
-  /**
-   * 当前入口模式「完成」所需的文档是否齐备。
-   *
-   * 要哪几份由登记表的 `requiredDocs` 列回答：完整流程与快捷流程都是三份齐备，
-   * 两个导入入口只要提示词套件。这里不再写一份「快捷入口只要 PRD」的旧说法——那是
-   * 早就作废的口径，与三份齐备的判据相冲突。
-   */
-  const requiredDocsReady = computed(() =>
-    hasRequiredDocuments(entryMode.value, {
-      prd: documents.contents.prd,
-      apiDocs: documents.contents['api-docs'],
-      prompts: documents.contents.prompts,
-    }),
-  )
-
-  /** 是否允许进入完成页：所需文档齐备且没有进行中的请求 */
-  const canFinish = computed(() => requiredDocsReady.value && !busy.value)
 
   /**
    * 对话阶段是否满足「生成 PRD」条件。
@@ -671,7 +674,6 @@ export const useWorkflowStore = defineStore('workflow', () => {
     generating,
     reviewing,
     requiredDocsReady,
-    canFinish,
     canGeneratePrd,
     availableChatTabs,
     activeChatTab,

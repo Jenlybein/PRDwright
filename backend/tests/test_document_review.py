@@ -2,7 +2,8 @@
 
 守住四条：
 1. 合法 JSON 能识别出 `revise` 与逐条问题；
-2. 非法 JSON / 调用失败一律按「通过」处理，不能把任务判失败；
+2. 非法 JSON 按「通过」处理（宁可漏审，也不丢正文）；**调用失败不报成通过**
+   （判定为空串 = 未审成，收尾不写结论）；
 3. 改写提示词必须同时带上「问题清单」与「上一版全文」；
 4. 审核与改写的模型输出必须**实时流出去**（`stage_chunk`），否则用户在整篇量级的
    调用里只能干等，看不出任务到底卡没卡死。
@@ -18,6 +19,7 @@ from langchain_core.messages.ai import AIMessageChunk
 
 from backend.services.document_review import (
     DocumentReviewResult,
+    ProductContext,
     ReviewOutcome,
     review_whole_document,
     rewrite_whole_document_messages,
@@ -85,11 +87,13 @@ def _drain(
             async for event in stream_review_and_rewrite(
                 llm,
                 document=document,
-                writing_rules="规范",
-                requirements="PRD",
-                doc_type="api_doc",
-                kind="api_docs",
-                label="接口文档",
+                context=ProductContext(
+                    doc_kind="api_docs",
+                    doc_type="api_doc",
+                    label="接口文档",
+                    writing_rules="规范",
+                    upstream="PRD",
+                ),
                 outcome=holder,
                 review_llm=review_llm,
                 section_titles=section_titles,
@@ -245,12 +249,18 @@ def test_rewrite_is_streamed_and_replaces_body_with_clean_text() -> None:
     assert review.data["rewritten"] is True
 
 
-def test_review_failure_is_streamed_as_pass() -> None:
-    """审核调用挂掉：按「通过」给结论，绝不因此丢掉已生成好的正文。"""
+def test_review_failure_is_reported_as_not_completed() -> None:
+    """审核调用挂掉：正文照旧可用，但结论**不报成通过**。
+
+    从前这里发一条 `verdict=pass` 的结论。那是把失败伪装成判定——落库之后就会变成
+    「这一版审过了、没问题」的假记录（票 #52）。现在判定是空串（未审成），
+    收尾侧据此不写结论；正文不受影响，任务也不算失败。
+    """
     events, outcome = _drain(ScriptedLLM([], raise_at=0))
 
     assert events[-1].type == "review"
-    assert events[-1].data["verdict"] == "pass"
+    assert events[-1].data["verdict"] == ""
+    assert "未完成" in events[-1].data["summary"]
     assert not [event for event in events if event.type == "part"]
     assert outcome.final_reply == "# 文档"
 

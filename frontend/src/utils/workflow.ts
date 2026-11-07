@@ -6,7 +6,7 @@
  * 我有 PRD + 接口文档）复用。
  *
  * **入口模式（`EntryMode`）在这里体现为三件事**：进度条展示哪几步、当前在第几步、
- * 以及「完成」需要哪几份文档。三件事都由模式推导，组件与 store 不再各写一套判断。
+ * 以及「进交付页」需要哪几份文档。三件事都由模式推导，组件与 store 不再各写一套判断。
  */
 
 import { CHAT_STAGES, STEP_OF_STATE, STEPS } from '@/types'
@@ -106,6 +106,8 @@ export function isDocKind(value: unknown): value is DocKind {
     value === 'optimize' ||
     value === 'clarify' ||
     value === 'auto-clarify' ||
+    value === 'review' ||
+    value === 'review-fix' ||
     value === 'chat'
   )
 }
@@ -121,6 +123,11 @@ export function fromBackendJobKind(kind: unknown): DocKind | null {
   if (kind === 'optimize') return 'optimize'
   if (kind === 'clarify') return 'clarify'
   if (kind === 'auto_clarify' || kind === 'auto-clarify') return 'auto-clarify'
+  // 重新审核是**动作**（不产出文档）：它只在任务种类里出现，产物要看 `doc_kind`
+  if (kind === 'review') return 'review'
+  // 按结论修复同样是**动作**（产物是它追加的那一版），产物同样看 `doc_kind`；
+  // 后端用 `review_fix`，前端用连字符 `review-fix`（转换只此一处）
+  if (kind === 'review_fix' || kind === 'review-fix') return 'review-fix'
   // 对话是**动作**（不产出文档），因此只能在这里认，不能放进 `fromBackendKind`
   // ——那个函数只回答「这是哪一份产物」，让它认 chat 会破坏「东西 / 动作」的分界。
   if (kind === 'chat') return 'chat'
@@ -940,6 +947,13 @@ export interface ReachedStepInput {
   hasPrompts: boolean
   /** 当前阶段对应的步骤下标（已按模式裁剪） */
   currentStepIndex: number
+  /**
+   * 本入口所需文档是否齐备（判据见 {@link hasRequiredDocuments}）。
+   *
+   * 它是「交付」那一格的**唯一**解锁条件：齐备即可进入交付页，未齐备时那一格点不动。
+   * 缺省为 `false`，因此只关心「产物走到哪了」的调用方不必知道它。
+   */
+  deliveryReady?: boolean
 }
 
 /**
@@ -961,9 +975,9 @@ export function farthestContentStepIndex(
     'review-prd': input.hasPrd,
     'review-api-docs': input.hasApiDocs,
     'review-prompts': input.hasPrompts,
-    // 「交付」不按产物解锁：文档齐备只代表“可以完成”，不代表已经进了交付页。
-    // 它由 `currentStepIndex` 在用户点「完成」后打开（`reachedStepIndex` 取两者较大者），
-    // 保持「最远里程碑」仍然描述产物流水线，而不是把“可交付”说成“已交付”。
+    // 「交付」不按产物解锁：文档齐备只代表“可以交付”，不代表已经进了交付页。
+    // 它由 {@link reachedStepIndex} 按「所需文档齐备」单独放开——这样列表里的
+    // 「这份做到哪了」仍停在最后一份产物上，而进度条那一格已经能点。
     done: false,
   }
 
@@ -979,9 +993,20 @@ export function farthestContentStepIndex(
  *
  * 以「已生成内容 + 当前所处」的最远位置为准，而非当前所处步骤——这样回看前面的阶段后，
  * 已经生成好的后续阶段依然能点回去。
+ *
+ * 另有两处例外：
+ * - 当前就在 `done`（用户已经进了交付页）时当然可点；
+ * - **所需文档齐备时「交付」那一格就可点**（`deliveryReady`）。交付页不再由「完成」按钮
+ *   把关，进度条那一格就是它的入口，所以它的解锁条件不是「产物走到哪」而是「齐备没有」。
+ *   齐备却没去过交付页时，`farthestContentStepIndex` 仍停在最后一份产物上——列表里的
+ *   「这份做到哪了」不该因为“可以交付”就自称“已交付”。
  */
 export function reachedStepIndex(input: ReachedStepInput): number {
-  return Math.max(farthestContentStepIndex(input), input.currentStepIndex)
+  const content = farthestContentStepIndex(input)
+  const reached = Math.max(content, input.currentStepIndex)
+  if (!input.deliveryReady) return reached
+  const deliveryIndex = stepsForMode(input.mode).findIndex((step) => step.id === 'done')
+  return Math.max(reached, deliveryIndex)
 }
 
 /** 对话是否已具备「生成 PRD」的条件：至少一轮 AI 回复，且当前没有进行中的请求 */
@@ -991,13 +1016,13 @@ export function canGeneratePrdFrom(messages: readonly ChatMessage[], busy: boole
 }
 
 /**
- * 当前入口模式下「完成」所需的最低文档是否齐备。
+ * 当前入口模式下「交付」所需的文档是否齐备。
  *
  * 各模式的交付物不同：完整流程与快捷流程都要三份齐全，两个导入入口只要提示词。
  * 用统一的口径判断，可以避免「只想拿一份文档的人被另外两份挡住」。
  *
- * 完整流程 / 快捷流程的判定与旧版完全等价，
- * 因此这里只保留这一个函数，不再另开一个只服务单一口径的封装。
+ * 它是**交付页的判据**（进度条「交付」格的可点条件），不再是「完成按钮」的判据：
+ * 齐备即可进入交付页，没有别的关卡。
  *
  * 要哪几份文档在登记表的 `requiredDocs` 列。
  */
@@ -1011,6 +1036,29 @@ export function hasRequiredDocuments(
     prompts: docs.prompts,
   }
   return entrySpecForDisplay(mode).requiredDocs.every((type) => byType[type].trim() !== '')
+}
+
+/**
+ * 齐备那一刻要不要弹「已齐备」这条全应用提示。
+ *
+ * 与 `hasRequiredDocuments`（交付格的**可点条件**）刻意分开：规格只要求「**三份**齐备时
+ * 提示一次」。两个导入入口只要一份提示词，它们齐备时说「三份文档已齐备」是假话——
+ * 那时不提示，但进度条「交付」格照旧可点。
+ */
+export function announcesDeliveryReady(mode: EntryMode | null): boolean {
+  return entrySpecForDisplay(mode).requiredDocs.length > 1
+}
+
+/**
+ * 「三份文档已齐备，可以进交付页了」这句提示的文案。
+ *
+ * 只有三份齐备的入口会说这句话（触发条件见 `announcesDeliveryReady`），因此措辞是
+ * 固定的——不再按入口分两句：按份数换文案，等于让「导入入口也提示」这件事继续存在。
+ *
+ * 它只出现在**全应用浮层**里（`AppV2` 的那次提示），不改变当前页面。
+ */
+export function deliveryReadyNotice(): string {
+  return '三份文档已齐备，可在进度条进入交付页'
 }
 
 /** 判断任意值是否为合法聊天消息 */

@@ -77,9 +77,13 @@ def _foreign_solution_404(client):
 
 
 def _empty_input_400(client):
-    """请求语义不合法：summary 与 requirements 都没给。"""
+    """请求语义不合法：方案上还没有任何需求输入可生成 PRD。"""
     register(client)
-    return client.post("/api/conversation/generate-prd-from-summary-stream", json={})
+    created = client.post("/api/solutions", json=_SOLUTION_PAYLOAD)
+    return client.post(
+        "/api/conversation/generate-prd-from-summary-stream",
+        json={"solution_id": created.json()["id"]},
+    )
 
 
 def _validation_422(client):
@@ -98,7 +102,7 @@ def _validation_422(client):
         ("注册失败 400", _register_400),
         ("登录失败 401", _login_401),
         ("方案越权 404", _foreign_solution_404),
-        ("参数全空 400", _empty_input_400),
+        ("需求输入全空 400", _empty_input_400),
         ("字段校验 422", _validation_422),
     ],
 )

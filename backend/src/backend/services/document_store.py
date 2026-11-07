@@ -12,13 +12,16 @@
 
 - `save_document`：**用户手改**。就地改当前版本的正文，不新增版本条目；
   `pending_items` 与 `last_run_summary` 原样保留——清单是模型产出的元数据，
-  用户改几个字不构成「清单过期」。
+  用户改几个字不构成「清单过期」。审核结论同样原样保留（本轮不按正文变化判定
+  结论过期，见 ADR 0002）。
 - `commit_generated(append_version=True)`：**整篇生成**。追加一条新版本，并让下游产物
-  失效（见 `DOWNSTREAM_KINDS`）；正文 + 清单 + 回执同批写入新版本。
+  失效（见 `DOWNSTREAM_KINDS`）；正文 + 清单 + 回执 + **审核结论**同批写入新版本。
 - `commit_generated(append_version=False)`：**`optimize` / `clarify` 的就地改写**。
   就地改当前版本，不新增条目、不删下游；但正文 + 清单 + 回执仍是同批替换——
   它们产自同一次模型调用栈，分开写就会各自漂移。
 - `checkpoint` / `restore`：用户主动「存为新版本」/「恢复某一版」。两者都**追加新版本**。
+- `commit_review`：**重新审核**的收尾。只更新当前版本的 `review` 列，
+  不追加版本、不改正文、不动清单与回执（ADR 0002 第 2 条）。
 
 ## 事务（v6 / T16.7）
 
@@ -33,6 +36,7 @@ import json
 import logging
 from typing import Any, Literal
 
+from backend.core.clock import utc_now_text
 from backend.core.digest import content_fingerprint
 from backend.core.engine import session_scope
 from backend.repositories.document_repo import (
@@ -147,6 +151,8 @@ def commit_generated(
     *,
     pending_items: list[dict[str, Any]] | None = None,
     run_summary: dict[str, Any] | None = None,
+    review: dict[str, Any] | None = None,
+    review_failed_at: str | None = None,
     append_version: bool = True,
     source: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -160,6 +166,12 @@ def commit_generated(
         content: 已剥离标记块的正文。
         pending_items: 本次产出的待确认清单；`None` 视为空清单。
         run_summary: 本次生成的用量回执；`None` 表示该版本没有回执。
+        review: 这一版正文的审核结论（形状与 SSE `review` 事件的数据一致）。
+            **只在追加版本时写入**——结论与它描述的那一版正文同批落库；`None`
+            表示这次没审成（或本来就不审），写进去的列留空 = 读侧「未审核」。
+        review_failed_at: 这一版「上一次重审没跑成」的时间。只由**修复**链路在
+            「重写成功、重审失败」时给出：正文照落库，但失败要落成事实（US3），
+            刷新后面板才仍旧显示「审核失败（时间）」。
         append_version: `True` 追加一条新版本并让下游失效（整篇生成）；
             `False` 就地改写当前版本、不牵动下游（`optimize` / `clarify`）。
         source: 版本来源标签；缺省取产物类型（`prd` / `api_docs` / `prompts`）。
@@ -174,6 +186,7 @@ def commit_generated(
     pending_json = json.dumps(pending_items or [], ensure_ascii=False)
     summary_json = json.dumps(run_summary, ensure_ascii=False) if run_summary is not None else None
     metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata is not None else "{}"
+    review_json = json.dumps(review, ensure_ascii=False) if review is not None else None
     content_sha = content_fingerprint(content)
 
     with session_scope() as session:
@@ -186,6 +199,8 @@ def commit_generated(
                 content_sha=content_sha,
                 pending_items=pending_json,
                 last_run_summary=summary_json,
+                review=review_json,
+                review_failed_at=review_failed_at,
                 source=source,
                 metadata=metadata_json,
                 # 下游不再删除：上游换版后下游保留，由读取侧的 `stale` 提示用户。
@@ -211,6 +226,78 @@ def commit_generated(
 # ---------------------------------------------------------------------------
 # 版本链：读列表 / 读详情 / 打里程碑 / 恢复
 # ---------------------------------------------------------------------------
+
+
+# 「重新审核」收尾写入的结果。**机器判据**，任务层据此决定是成功还是失败：
+# - `ok`              已写入当前版本的 `review` 列
+# - `missing`         这份文档不存在 / 方案不可见 / 还没有任何正文
+# - `content_changed` 当前版本的正文已经不是「被审的那一份」（指纹不一致）——不写
+ReviewCommitOutcome = Literal["ok", "missing", "content_changed"]
+
+
+def commit_review(
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    review: dict[str, Any],
+    *,
+    expected_content_sha: str | None = None,
+) -> ReviewCommitOutcome:
+    """**重新审核**收尾：只更新当前版本的审核结论（不追加版本、不动正文）。
+
+    为什么单独一个入口而不是复用 `commit_generated`：后者的语义是「写正文」——它要么追加
+    版本，要么就地重写正文，两条路都会改变「这一版是什么」。重审只刷新这一版的一条判定，
+    正文与清单一个字都不该动（ADR 0002 第 2 条）。
+
+    `expected_content_sha` 是**被审那一份正文**的指纹（建任务那一刻快照的）。给出时走
+    条件写：当前版本的指纹与它不一致就**一个字都不写**，返回 `content_changed`。
+    这道闸门的理由见 §3.8：结论是「这一版被审成什么样」的记录，写到一个没被审过的
+    版本上不会报错，只会变成一条看着正常、实则指向别的正文的假记录。
+
+    Args:
+        owner_id: 文档所属用户。
+        solution_id: 文档所属方案。
+        kind: 产物类型（`prd` / `api_docs` / `prompts`）。
+        review: 本次结论（形状与 SSE `review` 事件的数据一致，见 `document_review.review_data`）。
+        expected_content_sha: 被审正文的内容指纹；`None` 表示不做比对（仅供不关心
+            「写之前正文是否变过」的内部调用）。
+
+    Returns:
+        见 `ReviewCommitOutcome`；没有正文就没有「被审的那一版」，写一条无主结论只会
+        让读侧以为审过（`missing`）。
+    """
+    review_json = json.dumps(review, ensure_ascii=False)
+    with session_scope() as session:
+        repo = DocumentRepository(session)
+        ok = repo.replace_current_review(
+            owner_id,
+            solution_id,
+            kind,
+            review=review_json,
+            expected_content_sha=expected_content_sha,
+        )
+        if ok:
+            return "ok"
+        # 没能写入：区分「根本没有这一版」与「有，但正文已经换了」
+        row = repo.get(owner_id, solution_id, kind)
+        if row is None or row.current_version_id is None:
+            return "missing"
+        return "content_changed"
+
+
+def mark_review_failed(owner_id: int, solution_id: int, kind: str) -> bool:
+    """把「这次重审没跑成」记到当前版本上（时间戳），返回是否写进去了。
+
+    为什么这条事实要落库：重审的唯一产出就是判定，而「没审成」不是「没审过」——
+    只说在会话内存里的话，刷新之后界面会退化成「未审核」，用户再也看不出这份正文
+    被审过、且没审成（US3）。拿不到当前版本时返回 `False`（没有「哪一版失败」可言）。
+
+    与结论同一行：失败描述的就是这一版；`commit_review` 写入成功时会把它清空。
+    """
+    with session_scope() as session:
+        return DocumentRepository(session).mark_review_failed(
+            owner_id, solution_id, kind, at=utc_now_text()
+        )
 
 
 def list_versions(owner_id: int, solution_id: int, kind: str) -> list[dict[str, Any]]:
@@ -335,10 +422,12 @@ def delete_version(
 
 
 def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dict[str, Any]:
-    """把「文档行 + 当前版本行」的合并投影裁成对外结构，并把两个 JSON 文本列解成对象。
+    """把「文档行 + 当前版本行」的合并投影裁成对外结构，并把三个 JSON 文本列解成对象。
 
-    解析一律容错（脏数据退化为空清单 / 空回执）：这两个列是**展示用**的附加信息，
-    读不动它不该让整份文档读不出来——正文才是主角。
+    解析一律容错（脏数据退化为空清单 / 空回执 / 无结论）：这些列是**展示用**的附加
+    信息，读不动它不该让整份文档读不出来——正文才是主角。
+    `review` 是当前版本那一条审核结论（一版一条）；`None` 表示这一版没审过 / 没审成，
+    界面据此显示「未审核 / 审核失败」，绝不替它猜一个「通过」。
     `stale` 由 `metadata.derived_from` 记录的上游指纹与上游**当前**指纹比较得出：
     相等即同源，不等即“上游改过了”。没有记录（旧数据、PRD 本身）恒为 false。
     """
@@ -351,6 +440,12 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         "content": row.content or "",
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
+        "review": _load_json(row.review, dict, None),
+        # 「这一版上一次重审没跑成」的时间；`None` = 没有失败记录（不是「没审过」）
+        "review_failed_at": row.review_failed_at,
+        # 当前版本序号：结论面板据此说清「这条结论是哪一版的」（后端已有这一列，
+        # 只是在版本行里、从前没随文档下发）。没有版本时是 0。
+        "version_no": int(row.version_no or 0),
         "updated_at": row.updated_at,
         "derived_from": derived,
         "stale": _is_stale(derived, sha_by_kind or {}),
@@ -394,6 +489,8 @@ def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
         "content": row.content or "",
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
+        "review": _load_json(row.review, dict, None),
+        "review_failed_at": row.review_failed_at,
         "source": row.source,
         "note": row.note or "",
         "created_at": row.created_at,

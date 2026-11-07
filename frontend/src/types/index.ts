@@ -235,10 +235,14 @@ export type EntryMode =
  * - `prd` / `api-docs` / `prompts`：三份文档的**整篇生成**；
  * - `optimize`：按用户指令对某一份已有文档的就地优化；
  * - `clarify`：按澄清对话对某一份已有文档的就地改写；
- * - `auto-clarify`：AI 自行拍板待确认问题后就地改写（用户不出面）。
+ * - `auto-clarify`：AI 自行拍板待确认问题后就地改写（用户不出面）；
+ * - `review`：**重新审核**某一份已有文档——只审不改，不产出正文。
+ * - `review-fix`：**按审核结论修复**某一份已有文档——整篇重写并**追加版本**，
+ *   同一任务内只再重审一次、不再改写。
  *
- * 后三者是「对已有文档做的一件事」，因此**必须**额外带 `docKind` 说明作用在哪一份上——
- * 少了它后端不会猜默认值，而是拒绝落库。
+ * 后五者（`optimize` / `clarify` / `auto-clarify` / `review` / `review-fix`）是
+ * 「对已有文档做的一件事」，因此**必须**额外带 `docKind` 说明作用在哪一份上——少了它
+ * 后端不会猜默认值：`review` / `review-fix` 直接 400，其余拒绝落库。
  *
  * 注意命名口径：后端用下划线（`api_docs` / `auto_clarify`），前端用连字符，
  * 转换收口在 `services/api.ts`。
@@ -250,6 +254,20 @@ export type DocKind =
   | 'optimize'
   | 'clarify'
   | 'auto-clarify'
+  /**
+   * 重新审核：只产结论、不产正文（`docKind` 必须是三份产物之一）。
+   *
+   * 它与生成共用同一条任务通道，因此「切走不断」「刷新接回」不需要任何新机制；
+   * 收尾也不写正文——结论由后端写进**被审的那一版**，前端随后重新读文档列表。
+   */
+  | 'review'
+  /**
+   * 按审核结论修复：整篇重写 + 只重审一次，由后端**追加一个新版本**。
+   *
+   * 与 `review` 分成两个种类而不是一个带开关的动作：两者的版本策略相反
+   * （修复追加、重审不动），靠隐藏开关分叉会让「这一版是哪来的」变得不可解释。
+   */
+  | 'review-fix'
   /**
    * 对话的一轮：不产出文档，只产出一条 `chat_turns` 轮次。
    *
@@ -341,6 +359,30 @@ export interface DocumentRecord {
    * 因此不存在「换了正文却忘了重算清单」的可能。
    */
   pendingItems: PendingItem[]
+  /**
+   * **当前版本**那一条审核结论（一版一条，后端 `document_versions.review`）。
+   *
+   * 它是审阅页的**唯一真源**：刷新、换设备、重连之后读到的都是这一条。SSE 的
+   * `review` 事件只在订阅期间做即时更新（落库发生在任务收尾，晚一步才出现在这里）。
+   *
+   * `null` 表示这一版没审过或审核没跑成——**不等于通过**，界面据此显示「未审核」。
+   */
+  review: ReviewConclusion | null
+  /**
+   * **当前版本**上一次重审没跑成的时间（UTC ISO 8601）；`null` = 没有失败记录。
+   *
+   * 它是**落库事实**（后端 `document_versions.review_failed_at`）：审核失败不写结论
+   * （没有结论 ≠ 通过），但「这次没审成」本身刷新后仍要看得见——否则界面会退化成
+   * 「未审核」，用户会以为自己从没审过。拿到新结论时后端会清空它。
+   */
+  reviewFailedAt: string | null
+  /**
+   * 当前版本号（从 1 开始；后端文档行带上来的）。
+   *
+   * 审核结论面板用它回答「这条结论是哪一版的」——同一个数字在版本抽屉里也看得到，
+   * 两处显示的是同一件事。0 表示后端没给（旧数据），界面不显示版本号。
+   */
+  versionNo: number
   /** 最近更新时间（UTC ISO 8601） */
   updatedAt: string
   /** 这份下游文档是否基于旧版上游（后端按 `derivedFrom` 的指纹比较得出） */
@@ -397,6 +439,13 @@ export interface DocumentVersionDetail {
   pendingItems: PendingItem[]
   /** 该版本当时的用量回执；缺失为 null */
   runSummary: RunSummary | null
+  /**
+   * 该版本「上一次重审没跑成」的时间；`null` = 没有失败记录。
+   *
+   * 与 `DocumentRecord.reviewFailedAt` 同一个后端列（`review_failed_at`）：
+   * 版本详情里也能回答「这一版失败过没有」。
+   */
+  reviewFailedAt: string | null
   /** 这一版的来源（见 `DocumentVersionSummary.source`） */
   source: string
   /** 备注 */
@@ -618,10 +667,13 @@ export interface FailedSection {
 }
 
 /**
- * 一次审核结论。
+ * 一次审核结论（判定 + 逐条问题 + 是否改写 + 失败章节 + 审核时间）。
  *
- * **不持久化**：只在本次生成订阅内展示，刷新即失。因此不进 `runSummary`、不进
- * `documents.metadata`——那会变成第二个真源，且与“刷新后结论消失”的预期打架。
+ * 它随**文档版本**保存（一版一条）：刷新后从 `DocumentRecord.review` 读回来，
+ * 订阅期间则由 SSE 的 `review` 事件即时更新同一份形状——两处共用一个解析器
+ * （`api.parseReview`），因此「流里看到的」与「刷新后看到的」不会长得不一样。
+ *
+ * `verdict` 为空串表示**没审成**（不是通过）：界面据此显示「审核失败」。
  */
 export interface ReviewConclusion {
   /** `prd` / `api_docs` / `prompts` */
@@ -630,9 +682,16 @@ export interface ReviewConclusion {
   verdict: string
   summary: string
   issues: ReviewIssue[]
-  /** 本次是否真的执行了改写（下游「有问题 → 改写一次」） */
+  /** 本次是否真的执行了改写（重审恒为 false：只审不改） */
   rewritten: boolean
   failedSections: FailedSection[]
+  /**
+   * 审核时间（后端 UTC ISO 8601）。
+   *
+   * 面板与当前版本号一起显示，回答「哪一版、什么时候审的」（US16）。旧数据 / 没审成
+   * 时为空串——此时不显示时间，绝不拿「上一次的审核时间」冒充本次。
+   */
+  reviewedAt: string
 }
 
 /** 下游文档（接口文档 / 提示词）生成中的阶段 */
@@ -769,7 +828,7 @@ export interface PrdBoardState {
   headerText: string
   /** 章节卡片，恒按 index 升序 */
   sections: PrdSectionCard[]
-  /** 本次审核结论；不持久化 */
+  /** 本次审核结论（生成过程中的看板用；落库的那条见 `DocumentRecord.review`） */
   review: ReviewConclusion | null
   /** 是否有章节失败后被占位 */
   partial: boolean

@@ -16,8 +16,9 @@ import { formatDuration, formatTokens } from '@/utils/metering'
  * 文档「待确认」阶段视图（PRD / 接口文档 / 提示词共用）。
  *
  * 三份文档的审阅区完全一致，差异只在底栏右端的后续操作：按顺序推进（PRD → 接口文档 →
- * 提示词）、回看已生成的其它文档、三份齐备后进入完成页。这些差异由 `viewState`
- * 与三个布尔量驱动，组件自身不持有流程状态。
+ * 提示词）、回看已生成的其它文档。进交付页的入口不在这里——那是进度条上的「交付」格
+ * （判据在 `stores/workflow` 的 `requiredDocsReady`），审阅页不再有「完成」按钮。
+ * 这些差异由 `viewState` 与三个布尔量驱动，组件自身不持有流程状态。
  *
  * ## 底栏两行，各自职责单一
  *
@@ -26,7 +27,7 @@ import { formatDuration, formatTokens } from '@/utils/metering'
  *   因此并邻、复制在下载左边）。
  *   点「AI 优化」后原地换成指令输入，文档全程可见（改成弹窗就看不到了，而写优化指令时恰恰要
  *   对着文档）。
- * - **流程行**：这份文档之后往哪走——返回、生成下一份、完成。
+ * - **流程行**：这份文档之后往哪走——返回、生成下一份、查看已生成的其它文档。
  *
  * 内容行**没有「保存」按钮**：手改正文由 `DocumentReview` 的草稿变化事件驱动、自动防抖落库
  * （800ms，见 `stores/documents.ts`），不需要用户记得点一下；原来那个位置改成「下载」，
@@ -65,8 +66,6 @@ const emit = defineEmits<{
   generatePrompts: []
   /** 跳到某个文档的审阅阶段 */
   navigate: [state: ViewState]
-  /** 进入完成页 */
-  finish: []
   /**
    * 去对话页澄清这份文档的待确认项（三种审阅页共用）。
    *
@@ -81,6 +80,27 @@ const emit = defineEmits<{
    * 按默认值决策。两者并排出现，用户不必先聊一轮才知道还有别的选择。
    */
   autoClarify: []
+  /**
+   * 重新审核这份文档：只审不改，结论覆盖当前版本那一条。
+   *
+   * 由结论面板的折叠头发出——它属于「这份结论上的动作」，与底栏那些「对文档做的事」
+   * 不是一类，因此不占底栏。
+   */
+  rereview: []
+  /**
+   * 按这条结论**修复**这份文档：重写整篇并追加一个新版本（后端 `review_fix`）。
+   *
+   * 与 `rereview` 同在结论面板的折叠头、且两者互斥：有问题时只能修复，
+   * 其余三态只能重审。前端只说「按这条结论改这一份」——依据与上游都由服务端取。
+   */
+  fix: []
+  /**
+   * 过期黄条上的「一键更新」：用当前上游重新整篇生成这一份。
+   *
+   * 与「生成接口文档 / 生成提示词套件」是**同一条入口**（同一个任务种类、同一份请求体），
+   * 因此这里只说「现在就更新这一份」；上游正文由服务端取，组件不碰。
+   */
+  updateStale: []
 }>()
 
 const props = defineProps<{
@@ -92,8 +112,6 @@ const props = defineProps<{
   error?: string
   /** 当前所处的审阅阶段 */
   viewState: ViewState
-  /** 所需文档齐备且无请求进行中，可进入完成页 */
-  canFinish: boolean
   /** 是否已有 PRD 正文（决定「查看 PRD」入口是否出现） */
   hasPrd: boolean
   /** 是否已有接口文档正文（决定「查看接口文档」入口是否出现） */
@@ -150,14 +168,41 @@ const props = defineProps<{
    * 这份下游文档是否基于旧版上游。
    *
    * PRD 没有上游，恒为 false；接口文档 / 提示词由后端按内容指纹比较得出。
-   * 这里只负责展示黄条，不阻断编辑、下载与进入完成页。
+   * 这里只负责展示黄条（与上面的「一键更新」），不阻断编辑与下载。
    */
   stale?: boolean
   /**
-   * 本次生成的审核结论。**不持久化**：只在本次生成后的内存里，刷新即失。
-   * 没有（直接打开旧方案、未发生本次生成）时不渲染该区块。
+   * 这份文档是否正被写（就地优化 / 改写这类不切阶段的动作）。
+   *
+   * 黄条上的「一键更新」在生成期间不可点：同一份文档只需要一个在途任务，
+   * 再点一次只会叠加第二个。
+   */
+  updateBusy?: boolean
+  /**
+   * 这份文档**当前版本**的审核结论（后端随文档列表返回，刷新后仍在）。
+   *
+   * `null` 表示这一版没审过（**不等于通过**）——面板照样渲染，显示「未审核」。
    */
   review?: ReviewConclusion | null
+  /**
+   * 本次会话里最近一次审核是否没跑成。
+   *
+   * 审核失败不写结论，因此它只可能是「刚亲眼看到的那次失败」；面板据此显示
+   * 「审核失败」，而不是把没审成的文档当成审过了。
+   */
+  /**
+   * 这一版上一次重审没跑成的时间（`null` = 没有失败记录）。
+   *
+   * 它是**落库事实**（后端 `document_versions.review_failed_at`）：失败不写结论，
+   * 但「这次没审成」刷新后仍要看得见（US3），否则界面会退化成「未审核」。
+   */
+  reviewFailedAt?: string | null
+  /**
+   * 这份文档的**当前版本号**（结论面板用它回答「这条结论是哪一版的」）。
+   *
+   * `0` / 不传表示未知（旧数据或还没拉过文档）：面板此时不显示版本号，不猜一个。
+   */
+  reviewVersionNo?: number
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -253,6 +298,41 @@ function confirmAutoClarify(): void {
   emit('autoClarify')
 }
 
+/**
+ * 「一键更新」的确认弹窗是否打开。
+ *
+ * 它会用当前上游**整篇重生成**这一份（旧版本留在版本历史，但眼前这份正文会换掉），
+ * 一次点击就发生太轻了——先把「用哪份上游、旧版本去哪、下游不动」说清楚。
+ * 与「AI 自行澄清」的确认窗同一套写法：先问、后做。
+ */
+const updateConfirmOpen = ref(false)
+
+/** 要重新生成的是哪一份（确认窗文案用） */
+const updateTargetLabel = computed(() =>
+  props.viewState === 'review-prompts' ? '提示词套件' : '接口文档',
+)
+
+/**
+ * 用哪份上游重新生成。
+ *
+ * 与服务端实际取的上游同口径（C-R3：老上游正文由服务端取，前端不递），
+ * 因此这里只描述**事实**，不承诺前端传了什么。
+ */
+const updateUpstreamLabel = computed(() =>
+  props.viewState === 'review-prompts' ? '当前 PRD 与接口文档' : '当前 PRD',
+)
+
+/** 点黄条上的「一键更新」：先弹确认，不直接发任务 */
+function askUpdateStale(): void {
+  updateConfirmOpen.value = true
+}
+
+/** 确认窗里点了「重新生成」：关窗，再把动作交给上层（走该文档现有的整篇生成入口） */
+function confirmUpdateStale(): void {
+  updateConfirmOpen.value = false
+  emit('updateStale')
+}
+
 /** 用户输入的优化指令 */
 const instruction = ref('')
 
@@ -294,8 +374,14 @@ function submitOptimize(): void {
       <span>{{ error }}</span>
     </p>
 
-    <!-- 下游产物基于旧版上游：只提示，不阻断编辑与下载 -->
-    <StaleArtifactBanner v-if="stale" />
+    <!-- 下游产物基于旧版上游：只提示，不阻断编辑与下载。
+         「一键更新」用当前上游重新生成这一份；PRD 没有上游，那一页连黄条都不出现
+         ——「上游文档已更新」这句话在 PRD 上没有意义，按钮更不该有。 -->
+    <StaleArtifactBanner
+      v-if="stale && viewState !== 'review-prd'"
+      :busy="updateBusy"
+      @update="askUpdateStale"
+    />
 
     <!-- 最近一次生成的只读用量回执：耗时 / token / 请求号。
          请求号是报障时「念给维护者」的那串字，用 select-all 让它可选中复制——刻意不加按钮，
@@ -374,8 +460,15 @@ function submitOptimize(): void {
          归「内容本身」而不是「对文档做的事」，所以不进底栏；面板自身默认只铺开前 3 条。 -->
     <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
 
-    <!-- 审核结论：待确认清单之下、正文之上——先看“还差什么”，再看“审出了什么” -->
-    <ReviewConclusionPanel v-if="review" :review="review" />
+    <!-- 审核结论：待确认清单之下、正文之上——先看“还差什么”，再看“审出了什么”。
+         没有结论也渲染（四态之一「未审核」），否则「没有面板」会被读成「没有问题」。 -->
+    <ReviewConclusionPanel
+      :review="review ?? null"
+      :review-failed-at="reviewFailedAt ?? null"
+      :version-no="reviewVersionNo ?? 0"
+      @fix="emit('fix')"
+      @rereview="emit('rereview')"
+    />
 
     <!-- 文档卡片：只有头部与正文，工具全部下沉到下面的底栏 -->
     <DocumentReview
@@ -509,7 +602,7 @@ function submitOptimize(): void {
         </div>
       </template>
 
-      <!-- 流程行：左「返回 / 澄清组」，右按顺序推进 / 查看其它文档 / 完成。
+      <!-- 流程行：左「返回 / 澄清组」，右按顺序推进 / 查看其它文档。
            三段式顺序与「主操作永远最右且唯一」都不动，新入口进的是次操作组。 -->
       <template #secondary>
         <!-- 「返回」只在**录入页不在进度条上**时出现（`hideBack` 为假）。两个从零创建的入口
@@ -636,11 +729,6 @@ function submitOptimize(): void {
       >
         查看提示词
       </AppButton>
-
-      <!-- 完成入口：三份文档齐备才可用 -->
-      <AppButton variant="primary" size="md" :disabled="!canFinish" @click="emit('finish')">
-        完成
-      </AppButton>
     </AppActionBar>
 
     <!-- 「AI 自行澄清」的确认弹窗。
@@ -674,6 +762,32 @@ function submitOptimize(): void {
           </AppButton>
           <AppButton variant="primary" size="md" @click="confirmAutoClarify">
             开始澄清
+          </AppButton>
+        </div>
+      </template>
+    </AppDialog>
+
+    <!-- 「一键更新」的确认弹窗。
+         它会用当前上游把这一份**整篇重生成**（不是就地改）：当前正文会被新的一版替换，
+         旧版本留在版本历史里。因此先说清三件事：用哪份上游、旧版本去哪、会不会连带下游。 -->
+    <AppDialog v-model="updateConfirmOpen" :title="`重新生成${updateTargetLabel}？`">
+      <div class="space-y-3 text-sm leading-relaxed">
+        <p class="text-body">
+          将用{{ updateUpstreamLabel }} 重新生成{{ updateTargetLabel }}。当前正文会被新的一版替换。
+        </p>
+        <ul class="list-disc space-y-1.5 pl-5 text-muted">
+          <li>旧版本保留在版本历史里，完成后可以对照，也可以恢复回去。</li>
+          <li>只更新这一份：下游文档不会被连带更新，它自己会按过期规则提示。</li>
+        </ul>
+        <p class="text-xs text-subtle">会消耗一次模型调用，并切到这份文档的生成进度。</p>
+      </div>
+      <template #footer>
+        <div class="flex items-center justify-end gap-2">
+          <AppButton variant="secondary" size="md" @click="updateConfirmOpen = false">
+            取消
+          </AppButton>
+          <AppButton variant="primary" size="md" @click="confirmUpdateStale">
+            重新生成
           </AppButton>
         </div>
       </template>

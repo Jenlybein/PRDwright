@@ -134,6 +134,23 @@ def _seed_solution(client, title: str = "路由方案") -> int:
     return int(created.json()["id"])
 
 
+def _create_solution_with_requirements(client, title: str = "路由方案") -> int:
+    """建一份带需求输入的方案（PRD 任务的上游由服务端从这一份取）。"""
+    created = client.post(
+        "/api/solutions",
+        json={
+            "title": title,
+            "state": {
+                "entry_mode": "prd-quick",
+                "quick_product_name": "演示产品",
+                "quick_requirements": "做一个演示产品",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    return int(created.json()["id"])
+
+
 # ---------------------------------------------------------------------------
 # 一、生产路由只经手一次造单
 # ---------------------------------------------------------------------------
@@ -148,10 +165,11 @@ def test_production_route_builds_exactly_one_ticket(client, monkeypatch):
     register(client)
     _fake_document_service(monkeypatch, ScriptedLLM(["章节正文"]))
     calls = _spy_three_steps(monkeypatch)
+    solution_id = _create_solution_with_requirements(client)
 
     response = client.post(
         "/api/jobs",
-        json={"kind": "prd", "requirements": "做一个演示产品", "product_name": "演示"},
+        json={"kind": "prd", "solution_id": solution_id},
     )
 
     assert response.status_code == 201, response.text
@@ -171,10 +189,12 @@ def test_production_route_builds_exactly_one_ticket(client, monkeypatch):
     first = next(payload for payload in payloads if payload and payload != "[DONE]")
     assert json.loads(first)["type"] == "snapshot"
 
-    # 前置语义不变：仅 prd 计算输入指纹；请求参数仍是完整投影。
+    # 前置语义不变：仅 prd 计算输入指纹；请求参数投影**不再含上游需求正文**
+    # （它记的是「调用方发了什么」，服务端取到的需求只在运行时里，见票 #54）。
     row = _row(body["job_id"])
     assert row["input_fingerprint"]
-    assert json.loads(row["request_params"])["requirements"] == "做一个演示产品"
+    params = json.loads(row["request_params"])
+    assert "requirements" not in params and "summary" not in params
     assert row["doc_kind"] == "prd"
 
 
@@ -271,11 +291,13 @@ def test_production_auto_clarify_route_keeps_pending_sections_in_the_prompt(
     register(client)
     llm = ScriptedLLM(["# PRD\n\n改写后的正文"])
     _fake_document_service(monkeypatch, llm)
+    solution_id = _seed_solution(client)
 
     created = client.post(
         "/api/jobs",
         json={
             "kind": "auto_clarify",
+            "solution_id": solution_id,
             "document": "# PRD\n\n原文",
             "doc_kind": "prd",
             "pending_items": [

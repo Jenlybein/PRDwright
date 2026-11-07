@@ -52,6 +52,8 @@ from backend.services.prd_section_writer import (
     _section_chunk_event,
     _section_stage_event,
     build_document_header,
+    build_prd_conclusion,
+    section_issue,
 )
 from backend.services.stream_reply import error_event
 
@@ -73,6 +75,8 @@ class _SectionState:
     failed: bool = False
     reason: str = ""
     review: SectionReview | None = None
+    # 本章是否真的改写并采用了新正文（汇总结论的 `rewritten` 如实取它）
+    rewritten: bool = False
     pending_items: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -255,7 +259,7 @@ class ParallelSectionRun:
     async def _section_task(self, idx: int, draft: str, prior: str) -> None:
         """审核 +（可选）改写一章，然后定稿并发 `part`。
 
-        与串行链路同口径：审一次 → 至多改一次，**改写后不再复审**；单章的审核 /
+        与串行链路同口径：审一次 → 至多改一次，**改写后不再重审**；单章的审核 /
         改写失败各自降级（保留正文 / 保留改写前版本），不判失败。
         """
         st = self._states[idx]
@@ -311,6 +315,7 @@ class ParallelSectionRun:
                     new_draft = ""
                 if new_draft and new_draft.strip():
                     draft = new_draft
+                    st.rewritten = True
 
         text = _ensure_heading(draft, st.section.heading)
         clean_text, items = extract(text, id_prefix=st.section.id)
@@ -417,34 +422,19 @@ class ParallelSectionRun:
         issues: list[dict[str, Any]] = []
         for st in self._states:
             if st.review and st.review.needs_revision:
-                for issue in st.review.issues:
-                    issues.append(
-                        {
-                            "section_id": st.section.id,
-                            "section_title": st.section.title,
-                            "severity": str(issue.get("severity") or "medium"),
-                            "detail": str(issue.get("detail") or ""),
-                        }
-                    )
+                issues.extend(section_issue(st.section, issue) for issue in st.review.issues)
         # 没开审核就不发结论：这一轮没有任何章节被核对过，报一句
         # 「0 个待处理问题」会被读成「审过了、没问题」，那是假的。
+        # 形状与串行链路、PRD 重审共用 `build_prd_conclusion`（唯一的汇总结论构造点）。
         if self._writer._review_enabled:
-            verdict = "revise" if issues else "pass"
-            conclusion = (
-                f"{total - len(failed_sections)} 章完成，{len(issues)} 个待处理问题"
-            )
             await self._emit(
-                StreamEvent(
-                    type="review",
-                    content=conclusion,
-                    data={
-                        "kind": "prd",
-                        "verdict": verdict,
-                        "summary": conclusion,
-                        "issues": issues,
-                        "rewritten": False,
-                        "failed_sections": failed_sections,
-                    },
+                build_prd_conclusion(
+                    total=total,
+                    issues=issues,
+                    # 如实汇总：任意一章真的改写并采用了新正文就算改过。
+                    # 从前这里恒为 False，于是「PRD 能不能修复」随并发度配置漂。
+                    rewritten=any(st.rewritten for st in self._states),
+                    failed_sections=failed_sections,
                 )
             )
 

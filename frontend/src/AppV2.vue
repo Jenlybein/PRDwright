@@ -29,7 +29,9 @@ import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import {
+  announcesDeliveryReady,
   chatStageForDocument,
+  deliveryReadyNotice,
   docKindOfGeneratingState,
   docKindOfState,
   documentKindOfChatStage,
@@ -63,7 +65,7 @@ import {
  *      接口文档也进那次请求，提示词因此能对齐真实的接口路径与字段名。
  *
  * 四条入口在「生成 → 审阅 → 下载」这段完全共用，模式的差异（进度条显示哪几步、
- * 完成需要哪几份文档、返回按钮回到哪里）由 `utils/workflow.ts` 与 store 推导。
+ * 交付需要哪几份文档、返回按钮回到哪里）由 `utils/workflow.ts` 与 store 推导。
  *
  * 完整流程有一道**确认闸门**：生成 PRD 前先确认「对话补充信息回填到摘要」的 Diff。
  * 这道闸门只属于完整流程。
@@ -138,7 +140,7 @@ const runs = useRunsStore()
  *
  * 正文不在 workflow store 里：所有权属于后端 `documents` 表，这里只是一份工作副本
  * （见 `stores/documents.ts`）。本文件需要它的地方有四处——审阅页「查看」入口
- * 是否可用（`has*`）、完成页的下载列表（`contents`）、「按澄清结果改写」是否有
+ * 是否可用（`has*`）、交付页的下载列表（`contents`）、「按澄清结果改写」是否有
  * 可改写的内容，以及监听 `saveError` 给手改落库失败闪提示。
  */
 const documents = useDocumentsStore()
@@ -474,6 +476,40 @@ watch(
   },
 )
 
+// ---------------------------------------------------------------------------
+// 交付页入口的提示
+//
+// 交付页不再由审阅页的「完成」按钮把关：所需文档齐备（判据由入口模式决定）后，
+// 进度条「交付」格就可点。齐备那一刻在这里给一次全应用提示，**只提示、不跳页**——
+// 用户可能正在改稿，把他带走比多一次提示糟得多。
+// ---------------------------------------------------------------------------
+
+/**
+ * 本会话里已经提示过「可以交付」的方案（按**文档归属**的方案 id 记）。
+ *
+ * 为什么要记：齐备不是一次性事件。切走再切回来、或正文被重新拉取，`requiredDocsReady`
+ * 会再次由假变真；没有这本账，同一份方案每过一遍就提示一次。
+ *
+ * 为什么它只在内存里（不进快照）：口径是「每个方案每次会话一次」。刷新算新会话，
+ * 重新提示一次可以接受——那正是用户重新回到「这份东西能交付了吗」的时刻。
+ */
+const deliveryNoticeShown = new Set<number | null>()
+
+watch(
+  [() => documents.solutionId, () => documents.loading, () => store.requiredDocsReady],
+  ([solutionId, loading, ready]) => {
+    // 加载中不作数：那一刻 `documents` 里的正文本还是上一份方案的，据此提示会把
+    // 「别人的三份」算到这份头上（而且紧接着就会被这次响应改掉）。
+    if (loading || !ready) return
+    // 只有三份齐备的入口弹这条提示（`announcesDeliveryReady`）：两个导入入口只要一份
+    // 提示词，对它们说「三份文档已齐备」是假话——它们的入口照旧是进度条那一格。
+    if (!announcesDeliveryReady(store.entryMode)) return
+    if (deliveryNoticeShown.has(solutionId)) return
+    deliveryNoticeShown.add(solutionId)
+    flashSavedTip(deliveryReadyNotice())
+  },
+)
+
 /**
  * 地址里的 id 变化时切换方案（含浏览器前进后退）。
  *
@@ -522,7 +558,6 @@ const {
   isGenerating,
   isGeneratingPhase,
   isReviewing,
-  canFinishTask,
   activeDocTitle,
   activeDocContent,
   backLabel,
@@ -534,6 +569,8 @@ const {
   docPhase,
   docStageText,
   reviewConclusion,
+  reviewFailedAt,
+  reviewVersionNo,
   runSummary,
   pendingItems,
   elapsedMs,
@@ -545,12 +582,14 @@ const {
   onAiOptimize,
   handleGenerateApiDocs,
   handleGeneratePrompts,
+  updateStaleDocument,
   autoClarify,
+  rereview,
+  fixDocument,
   handleGeneratePromptsFromDebugPrd,
   handleGeneratePromptsFromPair,
   backToInput,
   backFromForm,
-  handleEndTask,
   downloadDocument,
   onDownloadDocument,
   downloadBundle,
@@ -1161,14 +1200,16 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :content="activeDocContent"
         :error="docError"
         :view-state="viewState"
-        :can-finish="canFinishTask"
         :has-prd="hasPrd"
         :has-api-docs="hasApiDocs"
         :has-prompts="hasPrompts"
         :run-summary="runSummary"
         :pending-items="pendingItems"
         :stale="documentStale"
+        :update-busy="isGeneratingCurrentDoc"
         :review="reviewConclusion"
+        :review-failed-at="reviewFailedAt"
+        :review-version-no="reviewVersionNo"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
         :hide-back="inputPageOnBar(store.entryMode)"
@@ -1180,10 +1221,12 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @back="backToInput"
         @generate-api-docs="handleGenerateApiDocs"
         @generate-prompts="handleGeneratePrompts"
+        @update-stale="updateStaleDocument"
         @navigate="goTo"
-        @finish="handleEndTask"
         @return-to-chat="handleReturnToChat"
         @auto-clarify="autoClarify"
+        @fix="fixDocument"
+        @rereview="rereview"
       />
 
       <!-- 全部完成 -->

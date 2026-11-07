@@ -64,6 +64,7 @@ function detail(versionId: number, versionNo: number, content: string): Document
     content,
     pendingItems: [],
     runSummary: null,
+    reviewFailedAt: null,
     updatedAt: '2026-10-16T02:00:00',
   }
 }
@@ -75,8 +76,11 @@ function makeRecord(kind: DocumentKind, content: string): DocumentRecord {
     content,
     runSummary: null,
     pendingItems: [],
+    review: null,
+    reviewFailedAt: null,
     updatedAt: '2026-10-16T00:00:00',
     stale: false,
+    versionNo: 0,
     derivedFrom: null,
   }
 }

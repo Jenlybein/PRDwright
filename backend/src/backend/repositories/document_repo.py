@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import delete, func, literal, select
+from sqlalchemy import delete, func, literal, select, update
 from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
@@ -62,6 +62,9 @@ class DocumentRow:
     content_sha: str | None
     pending_items: str | None
     last_run_summary: str | None
+    review: str | None
+    # 这一版上一次重审没跑成的时间；NULL = 没有失败记录（见 US3）
+    review_failed_at: str | None
     source: str | None
     metadata: str | None
 
@@ -91,6 +94,10 @@ class VersionDetail:
     content_sha: str | None
     pending_items: str | None
     last_run_summary: str | None
+    # 该版本的审核结论（JSON 文本）。NULL = 没审成 / 历史数据，读侧翻成「未审核」。
+    review: str | None
+    # 这一版上一次重审没跑成的时间（UTC ISO 8601）；与结论同一行、同一版。
+    review_failed_at: str | None
     source: str
     note: str | None
     metadata: str | None
@@ -120,6 +127,8 @@ def _merged_select():
             DocumentVersion.content_sha.label("content_sha"),
             DocumentVersion.pending_items.label("pending_items"),
             DocumentVersion.last_run_summary.label("last_run_summary"),
+            DocumentVersion.review.label("review"),
+            DocumentVersion.review_failed_at.label("review_failed_at"),
             DocumentVersion.source.label("source"),
             DocumentVersion.meta.label("metadata"),
         )
@@ -220,6 +229,8 @@ class DocumentRepository:
                 DocumentVersion.content_sha.label("content_sha"),
                 DocumentVersion.pending_items.label("pending_items"),
                 DocumentVersion.last_run_summary.label("last_run_summary"),
+                DocumentVersion.review.label("review"),
+                DocumentVersion.review_failed_at.label("review_failed_at"),
                 DocumentVersion.source.label("source"),
                 DocumentVersion.note.label("note"),
                 DocumentVersion.meta.label("metadata"),
@@ -246,6 +257,8 @@ class DocumentRepository:
             content_sha=row["content_sha"],
             pending_items=row["pending_items"],
             last_run_summary=row["last_run_summary"],
+            review=row["review"],
+            review_failed_at=row["review_failed_at"],
             source=row["source"],
             note=row["note"],
             metadata=row["metadata"],
@@ -309,6 +322,8 @@ class DocumentRepository:
         source: str,
         note: str = "",
         metadata: str = "{}",
+        review: str | None = None,
+        review_failed_at: str | None = None,
         invalidate: tuple[str, ...] = (),
     ) -> DocumentVersion | None:
         """追加一条新版本并把它设为当前版本；返回新版本**模型对象**，方案不可见时返回 None。
@@ -325,6 +340,11 @@ class DocumentRepository:
 
         全程**不提交**：提交由调用方 `session_scope()` 在四步都成功之后一次性完成，
         因此任何一步抛异常都不会留下「新版本已写、指针没动」的中间态。
+
+        `review` 是这一版正文的审核结论（JSON 文本，形状见 `document_review.review_data`）。
+        它与正文**同批写入**：结论描述的就是这一版正文，分两次写就会出现「正文换了、
+        结论还是旧的」这种无主记录。没有审核结论（没审成 / 该任务本来就不审）时为
+        `None`——**不写占位**，读侧据此显示「未审核」。
         """
         now = utc_now_text()
 
@@ -366,6 +386,8 @@ class DocumentRepository:
             content_sha=content_sha,
             pending_items=pending_items,
             last_run_summary=last_run_summary,
+            review=review,
+            review_failed_at=review_failed_at,
             source=source,
             note=note,
             meta=metadata,
@@ -380,6 +402,90 @@ class DocumentRepository:
         document.updated_at = now
         self.session.flush()
         return version
+
+    def replace_current_review(
+        self,
+        owner_id: int,
+        solution_id: int,
+        kind: str,
+        *,
+        review: str,
+        expected_content_sha: str | None = None,
+    ) -> bool:
+        """**只**更新当前版本的审核结论列，成功返回 True。
+
+        重新审核（`kind='review'`）的唯一落点：它不碰正文、不追加版本（ADR 0002 第 2 条），
+        因此这里刻意**不动** `content` / `content_sha` / `pending_items` /
+        `last_run_summary` / `metadata`——结论与正文是同一版上的两个事实，重审只刷新前者。
+
+        判据与动作收在**同一条 SQL** 里（`document_versions.id == documents.current_version_id`
+        的子查询），而不是「先查当前版本、再按 id 更新」：两次查询之间若发生别的写入（另一个
+        标签页刚好恢复了一版），先查后改就会把结论写到**已经不再是当前版本**的那一行上。
+
+        `expected_content_sha` 给出时再加一道条件写：只有当这一版的正文指纹**仍是**
+        「被审的那一份」才写（B3）。没有它，「审的是 A、写结论时正文已经是 B」这件事
+        就只能靠上层的事前比较发现；而结论一旦落在 B 上，它看起来完全正常，却是错的。
+
+        归属仍经 `documents → solutions` 两级过滤：越权与不存在一样「写不进」。
+
+        ⚠️ 不更新 `documents.updated_at`：它表示「这份文档的当前内容什么时候变的」，
+        重审没有改变这件事（与 `delete_version` 同一口径）。版本行的 `updated_at` 要更新，
+        它表示「这一版的那条记录什么时候变的」。
+        """
+        now = utc_now_text()
+        current_of_doc = (
+            select(Document.current_version_id)
+            .join(Solution, Solution.id == Document.solution_id)
+            .where(
+                Solution.user_id == owner_id,
+                Document.solution_id == solution_id,
+                Document.kind == kind,
+            )
+            .scalar_subquery()
+        )
+        statement = update(DocumentVersion).where(DocumentVersion.id == current_of_doc)
+        if expected_content_sha is not None:
+            statement = statement.where(
+                DocumentVersion.content_sha == expected_content_sha
+            )
+        # 拿到新结论即清掉「上次没跑成」的时间戳：两者描述同一版，不能并存
+        # （并存会让面板同时说「通过」和「审核失败」）。
+        result = self.session.execute(
+            statement.values(review=review, review_failed_at=None, updated_at=now)
+        )
+        return int(result.rowcount or 0) == 1
+
+    def mark_review_failed(
+        self, owner_id: int, solution_id: int, kind: str, *, at: str
+    ) -> bool:
+        """把「这一版上一次重审没跑成」的时间写到**当前版本**上，成功返回 True。
+
+        与 `replace_current_review` 同一道同步子句（当前版本在 SQL 里判定），
+        因此「查的时候是当前版本、写的时候已经不是」的窗口不存在。
+
+        **不碰 `review`**：没有结论 ≠ 通过，失败不写占位；已有结论原样保留（它描述的
+        仍是这一份正文），只是面板按「失败优先于旧结论」显示失败（见 §3.8）。
+
+        同样不更新 `documents.updated_at`：正文没变，变的只是这一版的审核记录；
+        版本行的 `updated_at` 要更新。
+        """
+        now = utc_now_text()
+        current_of_doc = (
+            select(Document.current_version_id)
+            .join(Solution, Solution.id == Document.solution_id)
+            .where(
+                Solution.user_id == owner_id,
+                Document.solution_id == solution_id,
+                Document.kind == kind,
+            )
+            .scalar_subquery()
+        )
+        result = self.session.execute(
+            update(DocumentVersion)
+            .where(DocumentVersion.id == current_of_doc)
+            .values(review_failed_at=at, updated_at=now)
+        )
+        return int(result.rowcount or 0) == 1
 
     def update_current_version(
         self,

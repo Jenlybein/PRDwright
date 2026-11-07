@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from backend.core.contracts import DOCUMENT_KINDS
+from backend.core.clock import utc_now_text
+from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
+from backend.core.digest import content_fingerprint
 from backend.core.engine import session_scope
 from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
@@ -30,6 +33,14 @@ if TYPE_CHECKING:
     from backend.services.job_runtime import JobRuntime
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewWriteFailure:
+    """重审收尾没能把结论写进去时，任务该报的失败码与文案。"""
+
+    error_code: str
+    error_message: str
 
 
 def _finalize(runtime: JobRuntime, status: str) -> None:
@@ -85,6 +96,28 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             runtime.failed = True
             runtime.error_code = abort_code
             runtime.error_message = abort_message
+        elif runtime.kind == "review":
+            # B3：重审的唯一产出就是判定，结论写不进去等于这次什么也没产出。两道条件写
+            # （事前比较 `_review_body_changed` + 写入 SQL 的 `expected_content_sha`）任一
+            # 命中，就在这里把任务翻成失败——只记日志会让任务报 completed，而用户看到的
+            # 是一份「成功但结论没变」的记录，比报错更糟：他没有任何线索该重审。
+            gate = _write_review(runtime)
+            if gate is not None:
+                status = "failed"
+                runtime.failed = True
+                runtime.error_code = gate.error_code
+                runtime.error_message = gate.error_message
+                # 此刻订阅者还连着：补一条 `error` 事件，前端才拿得到原因。这一步在收尾里
+                # 才发现（正文是在收尾时比的），不像普通失败那样有异常可抛。
+                job_bus.publish(
+                    runtime.job_id,
+                    StreamEvent(
+                        type="error",
+                        content=runtime.error_message,
+                        data={"error_type": "JobFailed"},
+                        code=runtime.error_code,
+                    ),
+                )
 
     runtime.status = status
     draft = _draft(runtime)
@@ -146,6 +179,11 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
+        if runtime.kind == "review":
+            # 重审没跑成也要**落成事实**（US3）：面板据此显示「审核失败（时间）」，
+            # 刷新之后仍是失败而不是退化成「未审核」。取不到当前版本时静默跳过
+            # （正文都没了，没有「哪一版失败」可言）。
+            _mark_review_failed(runtime)
 
     # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`
     # 后会去拉轮次表，晚一步就会拉到「还没有这一轮」的空列表，表现为
@@ -154,6 +192,27 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
         _write_chat_turn(runtime)
 
     job_bus.publish(runtime.job_id, _run_summary_event(summary))
+
+
+def _review_body_changed(runtime: JobRuntime) -> bool:
+    """重审的正文在「建任务那一刻」与「收尾写结论」之间被改过没有。
+
+    被审的那一份正文由 `job_inputs._review_inputs` 在建任务那一刻从库里取，随任务单进
+    `runtime.request["document"]`；而结论只能写到「此刻的当前版本」上。两处指纹不一致，
+    就说明用户在这段时间里手改过——此时写结论等于**给一份没审过的正文发判定**。
+
+    取不到当前版本（文档被删、方案没了）时返回 `False`：那属于「写不进去」，
+    由 `commit_review` 的 `missing` 分支处理，不该在这里报「正文已变更」。
+    """
+    kind = _document_kind(runtime)
+    if kind is None or runtime.solution_id is None:
+        return False
+    meta = document_store.current_version_meta(runtime.owner_id, runtime.solution_id, kind)
+    if meta is None:
+        return False
+    reviewed_sha = content_fingerprint(str(runtime.request.get("document") or ""))
+    current_sha = str(meta.get("content_sha") or "")
+    return bool(current_sha) and reviewed_sha != current_sha
 
 
 def _write_chat_turn(runtime: JobRuntime) -> None:
@@ -219,7 +278,7 @@ def _write_chat_turn(runtime: JobRuntime) -> None:
 
 
 def _regenerates_whole_document(kind: str) -> bool:
-    """这次任务是否是「整篇重生成上游产物」——只有它会连带作废下游、且追加新版本。
+    """这次任务是否是「整篇重生成上游产物」——只有它会追加新版本并重算上游锚点。
 
     依据是产物依赖链（`document_store.DOWNSTREAM_KINDS`）：下游由上游正文推导而来，
     上游换了一版，下游就不再成立。反过来，`optimize`（按指令就地优化）与 `clarify`
@@ -227,12 +286,16 @@ def _regenerates_whole_document(kind: str) -> bool:
     不该被顺手删掉。
 
     这个判断现在同时驱动两件事，且二者**恒等**（故合成一个 `append_version` 标志）：
-    整篇生成 → 追加新版本 + 删下游；就地改写 → 改当前版本、不删下游。
+    整篇生成 → 追加新版本 + 重算锚点；就地改写 → 改当前版本、不动锚点。
+
+    **`review_fix` 也算整篇重生成**：它重写的是整篇正文，语义上换了一版产物，
+    因此同样追加版本、重算 `derived_from`——下游据此按既有规则亮出过期黄条
+    （C-R2：修复追加新版本）。
 
     ⚠️ 这条判断以前是隐式的（一律 `invalidate_downstream=True`），后果是「优化接口文档」
     会把基于它生成的提示词悄悄删掉——用户看不到任何提示，只是下次打开方案时东西不见了。
     """
-    return kind in DOCUMENT_KINDS
+    return kind in DOCUMENT_KINDS or kind == "review_fix"
 
 
 def _document_kind(runtime: JobRuntime) -> str | None:
@@ -279,6 +342,9 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
 
     写库本身出意外也只记日志：正文已经在 `generation_jobs.draft_content` 里存了一份，
     丢的只是「升格成文档」这一步，不该把整个任务判失败。
+
+    **重新审核（`kind='review'`）不走这里**：它不产出正文，收尾要做的是「把结论写进
+    被审的那一版」，而那一步必须在置终态**之前**做完才能判失败（见 `_write_review`）。
     """
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
@@ -295,6 +361,17 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             content,
             pending_items=runtime.pending_items,
             run_summary=summary,
+            # 审核结论与正文**同批写入**：它描述的就是这一版正文，分两次写就会出现
+            # 「正文换了、结论还是旧的那条」。没审成时是 `None`，不写占位。
+            review=runtime.review,
+            # 修复的重审没跑成时，正文照落库、结论留空——但「这一版审核失败」要落成
+            # 事实（`review_failed_at`），刷新后面板才仍旧显示「审核失败（时间）」，
+            # 而不是退化成「未审核」。其它链路没审成不算失败（生成时审核是可降级的加成）。
+            review_failed_at=(
+                utc_now_text()
+                if runtime.kind == "review_fix" and runtime.review is None
+                else None
+            ),
             # `append_version=True`（整篇生成）同时意味着「追加新版本」；
             # `False`（optimize / clarify）就是就地改当前版本。下游不再删除，
             # 是否过期由读取侧比较 derived_from 得出。
@@ -325,3 +402,144 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
                 "solution_id": runtime.solution_id,
             },
         )
+
+
+def _mark_review_failed(runtime: JobRuntime) -> None:
+    """把「这次重审没跑成」记到当前版本上（US3：失败是持久化事实）。
+
+    为什么值得一次写库：失败只说在会话内存里，刷新后就退化成「未审核」——用户再也
+    看不出这份正文被审过、且没审成。时间戳落在**被审的那一版**上（与结论同一行），
+    重审成功或拿到新结论时由 `commit_review` 清空。
+
+    取不到当前版本（文档被删）时静默跳过：没有「哪一版失败」可言，任务失败本身已经
+    写进 `generation_jobs`。
+    """
+    kind = _document_kind(runtime)
+    if kind is None or runtime.solution_id is None:
+        return
+    try:
+        document_store.mark_review_failed(runtime.owner_id, runtime.solution_id, kind)
+    except Exception:  # noqa: BLE001 - 记失败不该把收尾再炸一次
+        logger.warning(
+            "记录审核失败时间失败（面板刷新后会退化成未审核）",
+            extra={
+                "event": "job.review_failed_not_recorded",
+                "job_id": runtime.job_id,
+                "kind": kind,
+            },
+            exc_info=True,
+        )
+
+
+def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
+    """重新审核收尾：把结论写进**当前版本**的 `review` 列（不追加版本、不改正文）。
+
+    返回 `None` 表示写成功了；否则返回任务该报的失败码与文案——**调用方据此把任务判失败**，
+    并且此刻会补一条 `error` 事件给仍在线的订阅者。
+
+    为什么失败必须让任务失败（而不是只记日志）：重审的**唯一产出就是判定**。结论没写进去，
+    用户看到「任务成功、结论还是上一次那条」，会以为这次审过了——那是最误导人的结果
+    （C-R1：没有结论 ≠ 通过）。
+
+    三处口径：
+
+    - **没有结论就不写**（`runtime.review is None`）：审核没跑成不是「通过」，
+      写个占位就是一条假记录（C-R1）；
+    - 归属不符 / 目标缺失（`commit_review` 返回 `missing`）：结论无处可写，同样判失败；
+    - 写库出意外：判失败。这一次的结论确实没落库，报成功就是撒谎。
+
+    两道条件写各司其职：`_review_body_changed` 是**事前比较**（建任务那一刻的快照
+    vs 收尾时的当前版本），`expected_content_sha` 是**写入 SQL 里的条件**（关掉「比较之后、
+    写入之前」那点时间窗）。两道都要判失败，结论也都原样保留。
+    """
+    kind = _document_kind(runtime)
+    if kind is None or runtime.solution_id is None:
+        return _ReviewWriteFailure(
+            "REVIEW_TARGET_MISSING",
+            "这份文档已不存在或还没有正文，本次审核结论未写入，请重新生成后再审核",
+        )
+    if runtime.review is None:
+        logger.warning(
+            "重新审核没有给出结论，本次不写入（没有结论 ≠ 通过）",
+            extra={
+                "event": "job.review_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+        return _ReviewWriteFailure(
+            ErrorCode.LLM_UPSTREAM_ERROR.value,
+            "重新审核没有给出结论，本次审核结论未写入，请重新审核",
+        )
+    if _review_body_changed(runtime):
+        # 结论一旦落在没审过的正文上，它看起来完全正常，却是错的（见 §3.8 / C-R1）。
+        logger.warning(
+            "重新审核的正文在审的过程中被改过，本次不写入",
+            extra={
+                "event": "job.review_body_changed",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+        return _ReviewWriteFailure(
+            "CONTENT_CHANGED", "正文已变更，本次审核结论未写入，请重新审核"
+        )
+    reviewed = str(runtime.request.get("document") or "")
+    expected_sha = content_fingerprint(reviewed) if reviewed.strip() else None
+    try:
+        outcome = document_store.commit_review(
+            runtime.owner_id,
+            runtime.solution_id,
+            kind,
+            runtime.review,
+            expected_content_sha=expected_sha,
+        )
+    except Exception:  # noqa: BLE001 - 落库意外同样是「这次没写成」，任务照实失败
+        logger.warning(
+            "重新审核结论写入失败",
+            extra={
+                "event": "job.review_write_failed",
+                "job_id": runtime.job_id,
+                "kind": kind,
+            },
+            exc_info=True,
+        )
+        return _ReviewWriteFailure(
+            ErrorCode.INTERNAL_ERROR.value,
+            "审核结论写入失败，本次审核结论未写入，请重新审核",
+        )
+    if outcome == "ok":
+        return None
+    if outcome == "content_changed":
+        # 第二道闸门命中：比较之后、写入之前，正文被改过。与事前比较同一句文案，
+        # 用户不必分辨「是哪一道拦下的」。
+        logger.warning(
+            "重新审核结论未写入：条件写未命中（正文在写入前变了）",
+            extra={
+                "event": "job.review_write_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+                "outcome": outcome,
+            },
+        )
+        return _ReviewWriteFailure(
+            "CONTENT_CHANGED", "正文已变更，本次审核结论未写入，请重新审核"
+        )
+    logger.warning(
+        "重新审核结论未写入：目标不存在（%s）",
+        outcome,
+        extra={
+            "event": "job.review_write_skipped",
+            "job_id": runtime.job_id,
+            "kind": kind,
+            "solution_id": runtime.solution_id,
+            "outcome": outcome,
+        },
+    )
+    return _ReviewWriteFailure(
+        "REVIEW_TARGET_MISSING",
+        "这份文档已不存在或还没有正文，本次审核结论未写入，请重新生成后再审核",
+    )

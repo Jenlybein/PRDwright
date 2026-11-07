@@ -21,7 +21,7 @@
 - **路径扫描白名单**：终检按类别排除三类写法，别误判成悬空路径——`backend/secrets/master.key` / `deploy/.env` 是运行时生成物（`.gitignore` 排除）、`README.md` / `SKILL.md` 是文档内简写（相对当前文档 / 技能包目录）、`frontend/*.html` / `frontend/src/**` / `scripts/deploy/{backup,restore,release,smoke}.py` 是通配或明确标注「从未落盘」的历史叙述。依据与守卫见 `backend/tests/test_closeout_docs.py`。
 - **用例基线现取现算**：收口时按 `--collect-only -q` 的当前收集数现取，连「`def test_` 文本计数 / 参数化展开差额」整段一起重算，不沿用旧总数；本轮实测数字见 §10。
 - **加列不是单向门**：单向门指删列 / 退役列（回滚靠备份库文件、不设兼容期）；新增列属于加列，评审不拿迁移成本当架构理由。
-- **一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后；与 `docs/architecture/ARCHITECTURE.md` §1 目标 / §4.3 及 `docs/architecture/roadmap.md` §0.6 同口径。
+- **一次改动要收口**：代码、架构文档、路线图三者同步，谁都不滞后；与 `docs/architecture/ARCHITECTURE.md` §1 目标 / §4 契约及 `docs/architecture/roadmap.md` §0.6 同口径。
 
 ## 2. 后端分层与数据层
 
@@ -66,14 +66,14 @@
 
 ## 5. 生成与审核管线
 
-- `PRD_PIPELINE_CONCURRENCY=1` 是串行回滚路径（不发 `review`、不产生 `partial`）；`>1` 并行（生成车道严格按章序、每章派生审核 + 改写任务、一个信号量罩住全部 LLM 调用）。并行牺牲跨章一致性，`review` 只聚合各章结论。
+- `PRD_PIPELINE_CONCURRENCY=1` 是串行回滚路径（不产生 `partial`；汇总结论照发，否则「PRD 能不能修复」会随这个配置漂）；`>1` 并行（生成车道严格按章序、每章派生审核 + 改写任务、一个信号量罩住全部 LLM 调用）。并行牺牲跨章一致性，`review` 只聚合各章结论。
 - 两条轨：`chunk` 是过程字（可能缺标题）、`part` 是权威正文（整段覆盖该章）；分章 `chunk` 必须带 `section_id` + `index`。
 - `part` 带 `index`、可乱序：看板装配与 `done.reply` 一律按 index 排序；并行必须关闭逐字 `chunk`（已交付的增量撤不回来）。
 - `stage(writing)` 放在单章重试循环内；按章分缓冲 `live_by_index`；`part` 只清该章；`_draft` 按 index 交错归并。
 - 失败语义：单章每阶段按 `PRD_SECTION_MAX_RETRIES` 重试；撰写用尽写占位继续、仍 `completed` 且 `partial=true`，审核用尽保留正文，改写用尽保留改写前版本，全部章节失败才 `error`。
 - `review_enabled=False` 时连 `review` 事件都不发（报「0 个待处理问题」会被读成「审过了、没问题」）。
 - `review_enabled` 对三份产物都生效：PRD 关逐章审核，接口 / 提示词关「整篇审 + 改写」；默认口径不同——PRD 取 `PRD_SECTION_REVIEW_ENABLED`，另两份 `None` 视为开（只有 `False` 才是关）。
-- 只有 `high` 触发改写（`REVIEW_REWRITE_MIN_SEVERITY`，两链共用）；`verdict` 如实报、只是不动笔；改写后不复审。
+- 只有 `high` 触发改写（`REVIEW_REWRITE_MIN_SEVERITY`，两链共用）；`verdict` 如实报、只是不动笔；改写后不重审。
 - 审核写批注、不复述正文：problem 条目带 `where`（标题路径，取值域由提示词枚举的章节清单限定）、禁止摘录原文、`detail` 限长（解析时截断）；severity 是改写门槛唯一输入，不设 `low`。
 - 审核的 max_tokens 只能靠换实例生效（`astream(..., max_tokens=)` 不生效）：落点是 `DocumentService.review_llm` / `PrdSectionWriter.review_llm` 两个惰性 property，都在后台配置页、不在 `.env`。
 - 整篇链路分节改写：只重写 `where` 命中的节、按标题拼回；`part{replace}` 必须发拼好的完整正文（前端无条件整段覆盖）；两条兜底退回整篇重写——`where` 一条都定位不到、拼回后短于 `_MIN_KEPT_RATIO`；`DOC_SECTION_REWRITE_ENABLED` 一键回退。
@@ -86,10 +86,14 @@
 - 澄清改写走 `clarify` 任务（复用 job 框架，不是裸 SSE）→ `apply_clarification_stream`；「只动涉及章节」只能靠提示词约束（代码保证不了），提示词里写「逐字保留」。
 - 技能包：归属与资源由 `skill.yaml` 自述（`applies_to` / `references[]`），加包 = 加目录、别加中心注册表；唯一入口 `load_skill_artifacts(kind)`，缺件返回 `None` 降级且降级要在回执上看得见；规范整段注入、不检索，改写 / 澄清按白名单 `format_rewrite_reference`。
 - `prompts` 生成线的占位符（`prd_content` / `api_docs_content` / `pending_spec`）是跨文件契约：技能包版与 `prompts.py` 兜底版少一个不是「那节空着」而是 `KeyError`；留空填 `NO_API_DOCS_NOTE`。
-- `optimize` / `clarify` / `auto-clarify` 的 `kind` 只说「做了什么」，目标产物取 `doc_kind`（回执与落库共用 `_target_product_kind()`）；资源存在性不进缓存。
+- `optimize` / `clarify` / `auto-clarify` 的 `kind` 只说「做了什么」，目标产物取 `doc_kind`（回执与落库共用 `_target_product_kind()`）；资源存在性不进缓存。`review_fix`（修复：追加版本）与 `review`（重审：只更新该版本结论）同口径，前者 `doc_kind` 还决定「注入哪份上游全文」，后者不改正文。
+- 生成 / 修复的输入只从服务端取：库内产物取当前版本正文，导入入口的材料取方案上保存的录入文本，PRD 的需求输入同理由服务端取。请求体不再携带上游正文与需求正文；缺方案或材料未落库 → 明确 400，不空跑。**解析发生在建任务那一刻**（`POST /api/jobs` 里、造单之前，结果随任务单走、**不进** `request_params`）：开流时才查库会把「缺材料」变成一条流内错误，而那时状态码已经是 200。按澄清结果改写（`clarify`）的对话同样归服务端——按 `doc_kind` 定位 `prd-clarify` / `api-docs-clarify` / `prompts-clarify` 那条线程从 `chat_turns` 取，前端不再回传 `history`；**四条旧的非任务通道**（`generate-api-docs-stream` / `generate-prompts-stream` / `generate-prd-stream` / `generate-prd-from-summary-stream`）一律**只收 `solution_id`**、都走 `acting_user`，上游与需求输入都由 `job_inputs` 从库解析——别漏改任何一条，落单的那条就是双真源的入口。这四条的服务方法仍被对应任务复用（`_build_event_stream` 直接调，`generate_prd_stream` 另有「分章节降级为整篇」的兜底调用），删路由属清理票（先迁用例接缝，再按 §5.5 三条判据删）。**就地改写的三个动作例外**：`optimize` / `clarify` / `auto_clarify` 的「被改正文」仍随请求体带来（`document` 字段）——它吃的是**目标**，可能含用户还没落库的手改；归服务端的只有上游与 `clarify` 的对话线程，别把这层收口顺手扩到 `document`。
 - 交付：`GET /api/solutions/{id}/export` → ZIP = 三份 md + `README.md`；只导用户看得见的；目录名必须消毒（`_safe_name` 抹 `..`、拦 `con` / `nul`）；上限 50MB、CSV 带 BOM。
 - 上游正文变化（含手改，按 `content_sha`）只让下游 `stale=true` 亮黄条：不删除、仍可交付、只汇总提示不硬拦。
-- 接口 / 提示词：整篇生成 → 审一次 → 有问题改写一次；`review` 结论不持久化（刷新即失），展示在「待确认问题」之下、正文之上（`ReviewConclusionPanel`）。
+- 接口 / 提示词：整篇生成 → 审一次 → 有问题改写一次；**审核结论随版本保存、一版一条**，SSE `review` 只负责订阅期间的即时展示，刷新后从文档接口读；**审核失败不写结论**（没有结论 ≠ 通过，界面标「审核失败」）。面板在「待确认问题」之下、正文之上（`ReviewConclusionPanel`），**四态恒渲染**：通过 / 有问题 / 审核失败 / 未审核；两个动作都在折叠头常驻、不可点时**置灰并说明原因**——「修复」只在「有问题」可点，「重新审核」只在失败 / 未审核 / 通过可点（别把按钮藏起来，也别猜默认值）。面板同时显示**审核时间**（`reviewed_at`）与**当前版本号**：结论要能回答「哪一版、什么时候审的」。失败态只显示「这次为什么没有结论」，**不渲染 `props.review` 的 summary / issues**（那是上一次的结论，摆在「审核失败」下面会被读成本次结果）。
+- 结论面板的数据源是**文档记录**（`DocumentRecord.review` + `reviewFailedAt`），`review` 事件只做即时更新（`documents.setReview` / `setReviewFailed`）；解析器唯一实现是 `frontend/src/utils/review.ts::parseReview`（`services/api.ts` 只再导出，`documentService` 直接从 utils 引——反向 import `api` 会成环）。「审核失败」是**落库事实**：失败时间写在被审那一版的 `document_versions.review_failed_at` 上（US3，迁移 0007），拿到新结论时清空，因此刷新 / 换设备后仍显示「审核失败（时间）」；读侧三格（结论 / 失败时间 / 版本号）在 `stores/documents.ts` 收成**一张记录表** `reviewSnapshots`，别再拆回三张平行 `Record`。唯一例外是生成链路的审核降级：它不是「重审失败」、不落库，只在本次会话里显示。
+- 重新审核（`kind=review`）= 只审不改的独立任务：输入由 `job_inputs._review_inputs` 取（`document` 是被审正文 + 与生成同一套上游），PRD 走 `PrdSectionWriter.review_document` 逐章审当前正文并汇总，接口 / 提示词走 `document_review.stream_review_only`；收尾走 `document_store.commit_review`（只写当前版本的 `review` 列）。**审核失败判任务失败、绝不按通过处理**——生成链路那条「审核失败按通过」的口径不适用于「唯一的产出就是判定」的重审。**结论只写到被审的那一份正文上**：被审正文在建任务那一刻快照，收尾时用**条件写**（`expected_content_sha`）比对当前版本指纹；不一致 → 任务失败（`error_code=CONTENT_CHANGED`）、文案「正文已变更，本次审核结论未写入，请重新审核」、**已有结论原样保留**。事前比较（`job_finalize._review_body_changed`）与写入 SQL 各一道，**两道都判失败**（不是只记日志：写不进去却报 completed，用户看到的是一条「成功但结论没变」的记录）；目标缺失（`missing`）同理。失败本身写进 `review_failed_at`（US3）。**需求澄清线程与生成侧同一份内容口径进重审提示词**（PRD 的审核提示词里带一节「需求澄清对话」）：少了它，用户拍板过的细节会被判成编造。
+- 三种「没审成 / 没修成」的边界分开写，别混成一个失败：**重审**没跑成 → 任务失败、结论不写（唯一产出就是判定）；**修复的重写**没跑成 → 任务失败、正文与版本都不动；**修复的重写成功而重审没跑成** → 正文照落库、结论留空（任务仍成功，失败时间落进新版本的 `review_failed_at`，面板标「审核失败（时间）」）。三种都不写占位结论。**重审缺上游不 400**：PRD 按「仅依据正文与写作规范核对」，接口 / 提示词在提示词里写「未提供上游材料」——「历史方案也能补审」是用户故事，不该被生成侧那条硬校验挡住。
 - 澄清提问上限 1-2 个，两处落点必须同步改：后端 `conversation_service.REQUIREMENTS_WRAPPER`（首轮开场白，是最后一条 user 消息）+ 前端 `useClarificationChat.ts::CLARIFICATION_SYSTEM_PROMPT`（开场白更靠后更具体、会盖过系统提示词）；口径由 `test_conversation_prompt.py` 锁死。
 - MVP 留空时按 `ui_pages` 推断候选功能清单，逐条在功能点名称后加「（建议）」，优先级 / 验收写「待确认」，`ui_pages` 也为空才退回「待确认」；改这条要同时改 5 处（`writing-rules.md §4`、`prd-template.md 2.1/6.1`、`SKILL.md` 阶段一/四、`field-schema.json` 的 `mvp_features.description`、`prd_section_writer.py` 的 `features` / `scope` / `pending` 三处 `focus`）。
 - 未填的题由 `format_form_data` 在已答项后汇总一行「以下题目用户未填写：…」，空串与「键不存在」同等看待；配置读不出来记 warning（降级要看得见）。
@@ -104,9 +108,11 @@
 - 加 `ViewState` 同步四处：`ViewState` / `VIEW_STATES` / `STEP_OF_STATE` / `STATE_DOWNGRADE`，漏一处只表现为进度条算错或刷新后进不去。
 - 快捷流程 = 同一管线、六步齐全：登记表的 `requiredDocs` 列与 `structured` 一致（三份文档齐备才算完成）、`STEP_OF_STATE['prd-quick']='form'`；`hasRequirementChat()` 只认 `structured`；「AI 对话」那格不能省（找不到就归零 → 停在对话页却高亮「描述产品」）；它不问问题，缺的信息靠「待确认」+ 审阅页「AI 自行澄清」。`frontend/src/stores/workflow.ts` 里「快捷入口只要 PRD」的旧注释与三份齐备的判据互相冲突，该注释已随代码票删除（#47）。
 - 进度条「AI 对话」摘到最左、用竖线隔开（纯呈现，`stepsForMode` / `stepIndexOf` / `reachedStepIndex` 未动）：高亮与可点一律按「原始下标」；分隔线用 `border-r`、别插 div；`li` 数量仍为 5。
-- `DocKind` 含 `optimize` / `clarify` / `auto-clarify` / `chat`（动作），`DocumentKind` 只三份（东西），`isDocKind` 必须认 `chat`；前端 `api-docs`（连字符）/ 后端 `api_docs`（下划线），唯一转换点在 `documentService.ts` 与 `api.ts`。
+- 交付页不再由「完成」按钮把关：`requiredDocsReady` 为真时进度条「交付」格可点，审阅页没有完成按钮；**只有三份齐备的入口**弹那条「三份文档已齐备」提示（每个方案每次会话只弹一次，且不自动跳转——正在改稿时跳页比多点一次更糟）；两个导入入口只要一份提示词，齐备时**不弹**这条提示（对只要一份的人说「三份」是假的），入口照旧是进度条那一格。
+- `DocKind` 含 `optimize` / `clarify` / `auto-clarify` / `review` / `review-fix` / `chat`（动作），`DocumentKind` 只三份（东西），`isDocKind` 必须认 `chat`；前端 `api-docs`（连字符）/ 后端 `api_docs`（下划线），唯一转换点在 `documentService.ts` 与 `api.ts`。
 - 四条澄清线程（需求 / PRD / 接口 / 提示词）全在同一对话页：单 `messages` + 每条打 `stage`，只渲染当前标签那一条；`chatTab`（意图）与 `activeChatTab`（实际显示）必须分开、后者绝不回写；回填只取 `requirement`；`ProgressSteps.canClick` 必须含「当前步骤」；线程作废只在整篇重生成。
 - 澄清改写 / AI 自行澄清切到 `generating-<kind>`，完成回审阅；当前实现先以 `isRunInFlight()` 提前拦重入，再 `goTo('generating-prd')` 后 `await generatePrd()`（见 `frontend/src/composables/useDocumentPipeline.ts`）。写这个顺序是因为先切到生成视图、再让这次发起成为唯一发起，而**不是**因为旧 `docGenerating` 忙碌闸门会拦跳转：那个闸门已随 `frontend/src/stores/runs.ts` 退役，`goTo()` 不因忙拒绝跳转（见 §6 运行态条目）。旧文里的 `clarifyTarget` 字段也已删，源码只剩退役说明；改写失败也留在生成视图。
+- 「修复」与「重新审核」同为任务动作：都先 `isRunInFlight()` 拦重入、切到 `generating-<kind>` 看流式进度，收尾回审阅；修复只追加版本，重审不碰正文。黄条「一键更新」先弹确认（写明旧版本保留在版本历史），再走同一份整篇生成入口。
 - 澄清上限与分级 = 后端共享常量 `CLARIFICATION_QUESTION_RULE`，各档案整段引用、别各写数字；等级没有兜底（`IMPORTANCE_ORDER` 是 P0..P6，缺失或非法一律丢弃）；未注册档案名 → 400。
 - 澄清选项卡挂 `ChatMessage.asks`（不加顶层快照字段）；无选项时不写 `asks` 字段（恒带 `[]` 会撞破形状断言）；选项说明不许空；卡片里不放输入框；多选答案按选项序拼、不按点选序；写回会话历史的必须是剥离后的干净正文；可交互判据 =「当前线程最后一条消息」。
 - `stores/runs.ts` 是「有没有任务在跑」的唯一真源，三层判据 `jobId`·`sessionEpoch`·`docKind`，不许猜默认值；`goTo()` 不因「忙」拒绝跳转、入口切换仍拦；`runs.begin` 不清预览（只 `resetDocTransient()` 清）；`applyJobSnapshot` 的 PRD 守卫按「看板有没有卡片」判，`onChunk` 参数是对象 `{text,sectionId,index}`、整体转发。
@@ -127,11 +133,13 @@
 ## 7. 持久化与版本链
 
 - 三份正文只在后端；正文只住 `document_versions`（`documents` 只剩身份 + `current_version_id` 指针），读当前一律 `LEFT JOIN`。
-- 写入语义：整篇生成 = 追加新版本（不再删下游）；`optimize` / `clarify` / 手改 = 就地改当前版本；checkpoint / restore = 追加新版本，恢复绝不把指针拨回去（历史只增不改）。
+- 写入语义：整篇生成 = 追加新版本（不再删下游）；`optimize` / `clarify` / 手改 = 就地改当前版本；**修复** = 追加新版本（正文与结论同批写入）；checkpoint / restore = 追加新版本，恢复绝不把指针拨回去（历史只增不改）。
+- 审核结论住在版本上（一版一条，`review` 列），重审覆盖同一条、不追加版本；读取面随文档列表与版本详情返回，SSE 事件不是真源。**审核失败时间**同样住在版本上（`review_failed_at`，迁移 0007）。
+- 版本来源取值（`document_versions.source`）必须**全部**在 `frontend/src/utils/versions.ts` 有中文说法：它直接取 `runtime.kind`（`prd` / `api_docs` / `prompts` / `optimize` / `clarify` / `auto_clarify` / `review_fix`）或写入口（`manual` / `checkpoint` / `restore` / `migrated`），漏一个版本历史里就出现裸标识符。`review` 不追加版本，因此不会出现在版本行上。
 - 「是否追加版本」与「是否删下游」恒等（都由「是不是整篇重生成」决定），`job_service` 收成一个 `append_version` 标志。
 - 环形外键：先空指针插 `documents` 行 → 插版本 → 回填指针（`_ensure_document()`）。
 - 写正文唯一入口 = job 成功收尾（`_write_document` → `commit_generated`）：正文 + 清单 + 回执同批写入、失败不覆写；新增产出正文的路径不要自己写库，接进 `_build_event_stream` 的 `done`。
-- `save_content`（手改）与 `commit_generated`（整批写入）别互相顶替；`optimize` / `clarify` 落地靠请求体 `doc_kind`，取不到 → 不落库也不猜默认值。
+- `save_content`（手改）与 `commit_generated`（整批写入）别互相顶替；`optimize` / `clarify` / `auto_clarify` / `review_fix` 落地靠请求体 `doc_kind`，取不到 → 不落库也不猜默认值；`review` 只更新当前版本的结论列。
 - 版本路由挂 solution 作用域（`.../{kind}/versions`、`.../versions/{vid}`、`POST .../{kind}/checkpoint`、`POST .../{kind}/restore`）；版本不存在复用 `SOLUTION_NOT_FOUND`(404) 不新增错误码：「方案不可见」404、「还没有任何版本」200 + 空列表。
 - 删除只删历史版本，当前版本回 400 `INVALID_REQUEST`；守卫写在仓储 SQL 的 `WHERE`（`v.id != COALESCE(d.current_version_id, -1)`），不是「先查后删」。
 - 删除只重拉列表、不重拉当前文档；checkpoint / restore 相反（要 `documents.reload()` + 重拉列表）。
@@ -182,7 +190,7 @@
 
 ## 10. 测试
 
-- **用例基线现取现算**：报基线前先 `cd backend && uv run pytest --collect-only -q` 取当前收集数，不沿用任何旧总数。**本轮终检实测（集成分支 `fc7a40e` 起、加入终检守卫前）**：收集数 **1175**；`git grep -c 'def test_' -- backend/tests` 的文本计数 **1005**；参数化展开差额 **170**（1175 − 1005，即一条 `def test_` 被参数化展开成多条收集项后的净增）。加入 `test_closeout_docs.py` 的 4 条守卫后，终值为收集数 **1179** / 文本计数 **1009** / 差额 **170**；#44 再补一条「登记表结论落在指定落点」守卫后为 **1180 / 1010 / 170**；#49 终检复测同值 **1180 / 1010 / 170**（#45~#48 只加前端用例，后端收集数未变），三个数都是现取的，不是抄上一张票的；以后收口仍按 `--collect-only -q` 现取，别抄这里的数字。默认 `addopts = "-n auto"`，全量 ~100 秒；单文件调试加 `-n0`。旧口径里的 975 / 863 / 867 / 999 / 1006 / 1014 / 1089，以及 955 / 134、1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 等中间数全是过时数字，别再用。
+- **用例基线现取现算**：报基线前先 `cd backend && uv run pytest --collect-only -q` 取当前收集数，不沿用任何旧总数。**本轮终检实测（分支 `fix/spec-51-review-2`，基于 `integration/spec-51` 的 `1e58cbc`）**：收集数 **1238**；`git grep -c 'def test_' -- backend/tests` 逐文件计数求和得文本计数 **1059**；参数化展开差额 **179**（1238 − 1059，即一条 `def test_` 被参数化展开成多条收集项后的净增）。三个数都是现取的：第二轮评审修复补了三条用例（重审第二道闸门失败 → 任务 failed + error 事件 ×3 参数化，失败时间落库与清空），把上一轮的 1234 / 1057 / 177 抬到这一组；以后收口仍按 `--collect-only -q` 现取。默认 `addopts = "-n auto"`，全量 ~100 秒；单文件调试加 `-n0`。旧口径里的 1234 / 1057 / 177、1228 / 1051、975 / 863 / 867 / 999 / 1006 / 1014 / 1089，以及 955 / 134、1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175 / 1179 / 1180 等中间数全是过时数字，别再用。
 - 退出码不可信时用 `uv run pytest --junit-xml=...` 判成败（沙箱可能拦 `%TEMP%`；必要时加 `--basetemp=<项目外可写目录>`）。
 - 两个人同时跑全量会互相污染（单条从 0.5s 涨到 3s+，`LogStoreHandler.close()` 超时后写进下一用例的库 → `total != 25` 偶发红）。
 - 别在 `test_admin_logs.py` 断「全表行数」：每请求都异步写一条 `request.completed`，与 `total==N` 赛跑（单文件绿、全量红）。
@@ -222,7 +230,7 @@
 - `PRD_SECTION_REWRITE_APPENDIX`：已退役（改写改用 `PRD_SECTION_REWRITE_PROMPT`）。
 - `clarification_ask.render_ask_spec()` 这个旧名：已退役，现名 `render_ask_tool_instruction()`。
 - 测试建库用 `init_schema()` 或每用例 `create_all`：被「`tests/dbsupport.py` 模板库 + 每用例拷贝」取代。
-- 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006、1014 / 986、1089、1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175（及配套的「文本计数 955 / 差额 134」）：全部作废。本轮终检按 `--collect-only -q` 现取，连文本计数与参数化展开差额一起重算，实测口径见 §10。
+- 用例数基线 93 / 217、477 / 588、863 / 867、975、999、1006、1014 / 986、1089、1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175、1234 / 1057 / 177（及配套的「文本计数 955 / 差额 134」）：全部作废。本轮终检按 `--collect-only -q` 现取，连文本计数与参数化展开差额一起重算，实测口径见 §10。
 - v3 期的排期只是当时的口径，别当现状真源；按层路线图已随九层目录一并删除。现行排期看 `docs/architecture/roadmap.md`；决策与取舍看 `docs/architecture/ARCHITECTURE.md` 的「取舍」节与 `docs/adr/`。
 - 原有的按层决策记录文件与按层时间线记录文件**均已删除**（决策记录目录随后也整体移除）；按层文档目录随后也整体移除，独有内容并入 `docs/architecture/ARCHITECTURE.md` 附录、`docs/architecture/README.md` 与 `docs/adr/0001-architecture-docs-consolidation.md`；按旧路径引用一律无效。
 - **本轮收口作废的旧口径**（正向条文只写一次，见 §1「先文档、后代码 / 文件边界以接缝为依据 / 数字先复核再写 / 用例基线现取现算 / 加列不是单向门」、§3「加列不是单向门」、§10「基线现取现算」）：「按单文件 > 1200 行阈值拆文件」（取代 v8 附录 A §5 W1，见 `docs/architecture/ARCHITECTURE.md` §5.4）、「报告里的约数可直接抄」（对外动作、再导出名、入口模式同步点、外部引用条数）、「用例基线沿用旧总数」（1089 / 1100 / 1110 / 1127 / 1136 / 1140 / 1149 / 1150 / 1175 及文本计数 955 / 差额 134 整段）、「25 行再导出块 / 11 个对外动作 / 十来处入口同步」（#40 后为 9 个对外动作、再导出块删空；入口模式人工清单整段退役，改为一张登记表、一行一个入口，旧「约 20 处同步点 / 170 个文件:行号落点」按实测更正为 154 行 / 23 文件，四入口字面量在 `frontend/src/__tests__` 下为 151 行 / 13 文件，快照字段同步至少 8 处）、「加列是单向门」（单向门指删列 / 退役列），以及「#31~#33 与代码票可并行」「#44 之后可跳过文档直接改代码」「入口用 exact」「`goTo` 早于发起任务是因为旧忙碌闸门会拦」（旧闸门已拆、`goTo()` 不因忙拒绝跳转）「`clarifyTarget` 仍在清单里」（字段已删）——全部作废；票序与总原则见 `docs/architecture/roadmap.md` §0 / §1（#44 → #45 → #46 → #47 → #48 → #49 严格串行）。

@@ -72,7 +72,9 @@ class JobRuntime:
     stage_text: str = ""
     # 已定稿章节的结构化记录（供快照恢复时定位「写到第几章」）
     completed_sections: list[dict[str, Any]] = field(default_factory=list)
-    # 原样保存的请求参数，供 `_build_event_stream` 重建生成
+    # 请求参数：派发时是单②摊平后的一份，**服务端解析出的上游输入**在 `as_event_request`
+    # 里已经合进来（见 `job_inputs`：解析发生在建任务那一刻）。`_build_event_stream` /
+    # `_build_derived_from` 都读这一份；落库的 `request_params` 投影不受影响。
     request: dict[str, Any] = field(default_factory=dict)
     # 本任务的**配置快照**（派发那一刻取的）。`run_job` 用 `use_config` 把它冻进上下文，
     # 于是整条链路（含并行子任务）读到的是同一份：既满足「改了下次生成生效」，
@@ -97,6 +99,15 @@ class JobRuntime:
     # 待确认清单：由 `done` 事件带来（生成器在定稿正文里剥离标记块后产出）。
     # 与正文同源、同一次收尾落库，因此「换了正文却忘了重算清单」没有结构落脚点。
     pending_items: list[dict[str, Any]] = field(default_factory=list)
+    # 本次审核结论（来自 `review` 事件；形状与事件 data 一致）。
+    #
+    # 它**只在这里中转一次**：收尾时随正文一起写进被审的那一版 `document_versions`
+    # （`review` 列），成为刷新 / 换设备后的唯一来源。SSE 事件本身不重放，
+    # 所以「订阅晚了一步就看不到结论」不影响落库。
+    #
+    # `None` 表示没审成（或这次不审）：**绝不写一个「通过」占位**——没有结论
+    # 不等于通过，界面据此标「审核失败」。
+    review: dict[str, Any] | None = None
     # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
     # 收尾也**不写**文档——见 `delete_solution_and_cancel_jobs` / `_finalize`。
     cancelled: bool = False
@@ -128,3 +139,14 @@ class JobRuntime:
     chat_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     # 被用户中途停止：收尾时保留已生成的部分，并给轮次打上标记
     chat_interrupted: bool = False
+
+
+def reset_for_tests() -> None:
+    """清空进程内运行时表与保活集合（**测试夹具专用**）。
+
+    生产代码没有调用点：正常收尾已经会把运行时 `pop` 掉（见 `run_job` 的 finally）。
+    留一个公开口子是为了让用例不必去摸 `_RUNTIMES` / `_TASKS` 这两个私有名——与
+    `core.engine.reset_engine` / `core.logging_setup.reset_logging` 同一套写法。
+    """
+    _RUNTIMES.clear()
+    _TASKS.clear()

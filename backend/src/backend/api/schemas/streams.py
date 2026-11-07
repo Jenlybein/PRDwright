@@ -5,11 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
-
-from .conversation import MessageItem
 
 # ============================================================================
 # 文档流式生成（对应 document_service 的 *_stream 方法）
@@ -17,61 +13,46 @@ from .conversation import MessageItem
 
 
 class GeneratePrdStreamRequest(BaseModel):
-    """生成 PRD 的流式请求。"""
+    """按方案生成 PRD 的流式请求（**整篇**那条旧通道）。
 
-    requirements: str = Field(
-        min_length=1,
-        description="需求澄清结果（问卷答案整理成的文本）",
-    )
-    history: list[MessageItem] = Field(
-        default_factory=list,
-        description="补充对话记录；为空则按无对话处理",
-    )
+    **只收方案**，与另外三条旧通道同形（spec #51 / C-R3）：需求输入（结构化摘要 /
+    自由文本需求 / 需求澄清线程）由服务端按方案从库里取。请求体里不再有
+    `requirements` / `history`——需求正文只允许有一个来源。
+    """
+
+    solution_id: int = Field(gt=0, description="方案 id：需求输入（摘要 / 自由文本 / 澄清线程）从它取")
 
 
 class GeneratePrdFromSummaryStreamRequest(BaseModel):
-    """生成 PRD 的流式请求（需求输入二选一）。
+    """按方案生成 PRD 的流式请求（旧的非任务通道）。
 
-    `summary` 与 `requirements` 都必须支持，因为入口不止一个：
+    **只收方案**，与接口文档 / 提示词两条旧通道同形（spec #51 / C-R3）：需求输入
+    （结构化摘要 / 自由文本需求 / 需求澄清线程）由服务端按方案从库里取。请求体里
+    不再有 `summary` / `requirements` / `history`——上游与需求只允许有一个来源，
+    否则「前端副本落后一版」这类错位会换一条路由复活。
 
-    - **完整流程**传 `summary`——与 `field-schema.json` 对齐的结构化摘要；
-    - **PRD 快捷入口**传 `requirements`——用户直接用自然语言写下的一段话。
-
-    两者在服务层汇合到同一条技能包驱动链路（分章节撰写 → 审核 → 改写），
-    因此「入口」只决定输入怎么来，不决定文档怎么写。
+    摘要与自由文本两条入口的差别只体现在**方案上存了哪一列**（`summary_json` 还是
+    `quick_requirements`），与请求形状无关。
     """
 
-    summary: dict[str, Any] | None = Field(
-        default=None,
-        description="结构化需求摘要（与 field-schema.json 对齐）；与 requirements 二选一",
-    )
-    requirements: str = Field(
-        default="",
-        description="自由文本需求（PRD 快捷入口）；仅在未传 summary 时使用",
-    )
-    product_name: str = Field(
-        default="",
-        description=(
-            "产品名称，仅用于 PRD 文档头与 1.1 节；快捷入口传用户填写值。"
-            "摘要里已有 product_name 时以摘要为准"
-        ),
-    )
-    history: list[MessageItem] = Field(
-        default_factory=list,
-        description="补充对话记录；为空则按无对话处理",
-    )
+    solution_id: int = Field(gt=0, description="方案 id：需求输入（摘要 / 自由文本 / 澄清线程）从它取")
 
 
 class GenerateApiDocsStreamRequest(BaseModel):
-    """生成接口文档的流式请求。"""
+    """生成接口文档的流式请求。
 
-    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+    **只收方案**（spec #51 / 票 #54）：上游 PRD 由服务端按方案取（库内当前版本，
+    其次方案上保存的录入文本），请求体里不再有 `prd_content`——那是第二条真相，
+    上游刚改过就会用旧稿。
+    """
+
+    solution_id: int = Field(gt=0, description="方案 id：上游 PRD 从它取")
 
 
 class GeneratePromptsStreamRequest(BaseModel):
-    """生成提示词套件的流式请求。"""
+    """生成提示词套件的流式请求：同样只收方案，PRD 与接口文档都由服务端取。"""
 
-    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+    solution_id: int = Field(gt=0, description="方案 id：上游 PRD 与接口文档从它取")
 
 
 class OptimizeDocumentStreamRequest(BaseModel):
