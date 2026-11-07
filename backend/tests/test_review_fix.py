@@ -7,7 +7,7 @@
 - 同一任务内**只审一次、不再改写**：点一次修复，正文只变一次；
 - 上下文窗口由目标产物决定，且是**全量注入**（不是审核侧那份骨架）：
   接口文档看 PRD 当前版本全文、提示词看 PRD + 接口文档全文、PRD 看需求输入与两条澄清线程；
-- 改写失败 → 正文与版本都不动；改写成功但复审失败 → 正文照落库、结论留空（C-R1）。
+- 改写失败 → 正文与版本都不动；改写成功但重审失败 → 正文照落库、结论留空（C-R1）。
 
 所有用例只跨 HTTP 主接缝：
 
@@ -92,6 +92,8 @@ class FakeLLM:
         self.writer_calls = 0
         self.reviewer_calls = 0
         self.writer_prompts: list[str] = []
+        # 重审那一次收到的提示词：修复内的重审也要看得见需求侧的事实（见 B2 口径）
+        self.reviewer_prompts: list[str] = []
 
     @staticmethod
     def _pick(pool: list[str | BaseException], calls: int) -> str | BaseException:
@@ -103,6 +105,7 @@ class FakeLLM:
         reviewing = _DOC_REVIEW_MARKER in system or _PRD_REVIEW_MARKER in system
         if reviewing:
             self.reviewer_calls += 1
+            self.reviewer_prompts.append(str(messages[-1].content))
             reply = self._pick(self._reviewers, self.reviewer_calls)
         else:
             self.writer_calls += 1
@@ -325,7 +328,7 @@ def test_fix_appends_a_version_carrying_the_new_conclusion(
 
     assert status == "completed"
     assert llm.writer_calls == 1, "修复只重写一次"
-    assert llm.reviewer_calls == 1, "修复后只复审一次"
+    assert llm.reviewer_calls == 1, "修复后只重审一次"
 
     second_conclusion = _review_events(events)[0]
     assert second_conclusion["kind"] == doc_kind
@@ -333,7 +336,7 @@ def test_fix_appends_a_version_carrying_the_new_conclusion(
 
     doc = _documents(client, solution_id)[doc_kind]
     assert doc["content"] == fixed, "正文换成了修复稿"
-    assert doc["review"] == second_conclusion, "新版本带的是修复后复审的那条结论"
+    assert doc["review"] == second_conclusion, "新版本带的是修复后重审的那条结论"
 
     versions = _versions(client, solution_id, doc_kind)
     assert [item["version_no"] for item in versions] == [2, 1], "修复追加一版，旧版仍在"
@@ -424,6 +427,11 @@ def test_fix_of_prd_injects_summary_and_both_clarification_threads(client, monke
     assert "页面清单按三栏布局" in prompt, "PRD 澄清线程也要进修复上下文"
     assert "页面清单见下。" in prompt, "当前正文要进修复上下文"
     assert "页面跳转规则缺失" in prompt, "修复依据是当前版本的审核结论"
+    # 修复内的重审与「重新审核」同口径：需求澄清线程同样要进提示词，否则同一份正文
+    # 会「修的时候看得见、审的时候看不见」，判定跟着流程走
+    assert any(
+        "只支持 Web 端" in item for item in llm.reviewer_prompts
+    ), "需求澄清线程要进重审提示词"
 
     doc = _documents(client, solution_id)["prd"]
     assert doc["content"] == _FIXED_PRD
@@ -432,12 +440,12 @@ def test_fix_of_prd_injects_summary_and_both_clarification_threads(client, monke
 
 
 # ---------------------------------------------------------------------------
-# 三、修复内的复审只审不改：正文只变一次
+# 三、修复内的重审只审不改：正文只变一次
 # ---------------------------------------------------------------------------
 
 
 def test_fix_reviews_without_rewriting_again(client, monkeypatch):
-    """复审即使仍判「有问题」，也**不再触发改写**——正文只变一次（C-R2）。
+    """重审即使仍判「有问题」，也**不再触发改写**——正文只变一次（C-R2）。
 
     假模型准备了两份重写稿：真被改两轮的话，落在库里的会是第二份。
     """
@@ -453,18 +461,18 @@ def test_fix_reviews_without_rewriting_again(client, monkeypatch):
     _job_id, events, status = _run_job(client, _fix_payload(solution_id, "api_docs"))
 
     assert status == "completed"
-    assert llm.writer_calls == 1, "修复内的复审不得再触发改写"
+    assert llm.writer_calls == 1, "修复内的重审不得再触发改写"
     doc = _documents(client, solution_id)["api_docs"]
     assert doc["content"] == _FIXED_API_DOCS
     assert "第二轮才该出现" not in doc["content"]
-    # 复审照实报「仍有问题」：结论是复审那条，不是「修完就自动通过」
+    # 重审照实报「仍有问题」：结论是重审那条，不是「修完就自动通过」
     assert doc["review"]["verdict"] == "revise"
-    assert doc["review"]["rewritten"] is False, "复审不产生改写"
+    assert doc["review"]["rewritten"] is False, "重审不产生改写"
     assert _review_events(events)[0]["verdict"] == "revise"
 
 
 # ---------------------------------------------------------------------------
-# 四、失败边界：改写失败不动库；复审失败只留空结论
+# 四、失败边界：改写失败不动库；重审失败只留空结论
 # ---------------------------------------------------------------------------
 
 
@@ -490,7 +498,7 @@ def test_fix_rewrite_failure_keeps_body_and_versions(client, monkeypatch):
 
 
 def test_fix_keeps_the_new_body_when_the_rereview_fails(client, monkeypatch):
-    """改写成功但复审失败 → 正文照落库、结论留空；随后还能再点「重新审核」补上。"""
+    """改写成功但重审失败 → 正文照落库、结论留空；随后还能再点「重新审核」补上。"""
     register(client)
     solution_id = _create_solution(client)
     _seed_document(client, solution_id, "prd", _PRD_BODY)
@@ -501,15 +509,15 @@ def test_fix_keeps_the_new_body_when_the_rereview_fails(client, monkeypatch):
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _fix_payload(solution_id, "api_docs"))
 
-    assert status == "completed", "复审失败不该把已经落下的新正文判成失败"
+    assert status == "completed", "重审失败不该把已经落下的新正文判成失败"
     # 订阅期间给出的是一条「没审成」的结论（判定空串），界面据此显示「审核失败」
     conclusions = _review_events(events)
-    assert conclusions, "复审失败也要有一条 review 事件，否则界面无从显示「审核失败」"
+    assert conclusions, "重审失败也要有一条 review 事件，否则界面无从显示「审核失败」"
     assert conclusions[-1]["verdict"] == ""
 
     doc = _documents(client, solution_id)["api_docs"]
     assert doc["content"] == _FIXED_API_DOCS, "新正文照落库"
-    assert doc["review"] is None, "没有结论 ≠ 通过：复审失败不写占位"
+    assert doc["review"] is None, "没有结论 ≠ 通过：重审失败不写占位"
     versions = _versions(client, solution_id, "api_docs")
     assert [item["version_no"] for item in versions] == [2, 1]
 

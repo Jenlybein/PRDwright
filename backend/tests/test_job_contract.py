@@ -6,7 +6,7 @@
 | --- | --- |
 | `POST /api/jobs` | 文档类任务必须带方案；缺方案 / 缺材料是**明确的 400**，且不留下一个空跑的任务 |
 | `POST /api/jobs`（旧前端） | 请求体里多带上游正文与需求正文**被忽略**，既不是 422、也不参与生成 |
-| `POST /api/conversation/generate-api-docs-stream` / `...-prompts-stream` | 两个旧的非任务通道改收 `solution_id`，上游由服务端取 |
+| `POST /api/conversation/generate-api-docs-stream` / `...-prompts-stream` / `...-prd-from-summary-stream` | 三个旧的非任务通道一律改收 `solution_id`，上游与需求输入由服务端取 |
 | `POST /api/jobs`（clarify） | 澄清对话由服务端按线程取；请求体里不再有 `history` |
 
 「不空跑一次生成」用 `GET /api/jobs` 判：400 之后任务列表仍是空的——被拒的请求
@@ -369,6 +369,40 @@ def test_legacy_api_docs_channel_no_longer_accepts_plain_text(client):
     response = client.post(
         "/api/conversation/generate-api-docs-stream",
         json={"prd_content": "# 前端手里的 PRD"},
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_legacy_prd_channel_takes_a_solution(client, monkeypatch):
+    """`/generate-prd-from-summary-stream` 也只收方案：需求输入由服务端按方案取。
+
+    这是三条旧通道里最后一条、也是此前唯一还收上游正文的那条（`summary` /
+    `requirements` / `history`）。它与另两条同形之后，「请求体里不再有上游」这条
+    契约才真正没有例外——否则同一份需求有两份真源，只是换了一条路由。
+    """
+    register(client)
+    llm = ScriptedLLM(["# 库里的需求写出来的 PRD"])
+    _fake_service(monkeypatch, llm)
+    solution_id = _create_solution(client, {"quick_requirements": "做一个演示产品"})
+
+    response = client.post(
+        "/api/conversation/generate-prd-from-summary-stream",
+        json={"solution_id": solution_id},
+    )
+    assert response.status_code == 200, response.text
+    events = _sse_payloads(response)
+    assert any(event["type"] == "done" for event in events), events
+    # 需求文本取自方案（库里那一份），不是请求体
+    assert "做一个演示产品" in _all_prompts(llm)
+
+
+def test_legacy_prd_channel_no_longer_accepts_requirement_text(client):
+    """旧字段不再被接收：只给 `summary` / `requirements` 的请求连门都进不去（422）。"""
+    register(client)
+
+    response = client.post(
+        "/api/conversation/generate-prd-from-summary-stream",
+        json={"summary": {"product_name": "演示产品"}, "requirements": "前端手里的那段话"},
     )
     assert response.status_code == 422, response.text
 

@@ -244,6 +244,17 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   })
 
   /**
+   * 这份文档的**当前版本号**（结论面板用它回答「这条结论是哪一版的」）。
+   *
+   * 与结论同一口径：由 `viewState` 反推产物种类，读文档记录里的版本号；0 表示未知
+   * （旧数据或还没拉过文档），面板此时不显示版本号，不猜一个。
+   */
+  const reviewVersionNo = computed<number>(() => {
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.versionNoOf(kind) : 0
+  })
+
+  /**
    * 分章节生成的看板；不是 PRD 生成态时恒为 `null`。
    *
    * 判据用**阶段**而不是「当前正在处理哪一份」：PRD 生成必然处在 `generating-prd`，
@@ -995,12 +1006,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
     // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
     if (kind === 'review') {
-      // 重审不产出正文：收尾只有「回审阅页 + 让面板反映这次结果」两件事。
+      // 重审不产出正文：收尾只有「回审阅页 + 让面板反映这次结果」两件事，
+      // 与刚点下去那条路共用 `settleRereview`（同一份收尾逻辑只有一个落点）。
       // 成功时结论已随 `review` 事件写进文档记录，`onRunSummary` 还会再拉一次对齐。
-      if (!ok || snap?.status === 'failed') documents.setReviewFailed(target)
-      prdBoard.value = null
-      goTo(reviewStateFor(target))
-      if (!ok) docError.value = job.error.value || '重新审核失败'
+      settleRereview(target, !ok || snap?.status === 'failed')
       return
     }
     if (!ok) {
@@ -1411,12 +1420,30 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     )
     // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
-    if (!ok) documents.setReviewFailed(target)
+    settleRereview(target, !ok)
+  }
+
+  /**
+   * 「重新审核」的收尾——**唯一一处**：无论这次是刚点下去的、还是刷新后重连上来的，
+   * 成败都从这里回到审阅页，结果只落在结论面板上。
+   *
+   * 三件事按这个顺序：
+   *
+   * 1. **没跑成就标记失败**（`documents.setReviewFailed`）：重审的唯一产出就是判定，
+   *    没审成不能留成「未审核」，更不能拿上一条结论冒充本次结果；
+   * 2. **清掉 PRD 看板**：重审不产出正文，看板若还留着，看起来像一份「生成了一半的稿」；
+   * 3. **回审阅页**：留在生成页只剩一片空白（这次没有正文可长）。
+   *
+   * 失败原因写进 `docError`（面板只说明「审核失败」，为什么由这里说）。
+   *
+   * `failed` 由调用方给出而不是在这里判 `ok`：重连路径上「流读完了、任务终态却是
+   * failed」也是失败（例如正文在审的过程中被改过），那时 `ok` 仍是 `true`。
+   */
+  function settleRereview(target: DocumentKind, failed: boolean): void {
+    if (failed) documents.setReviewFailed(target)
+    prdBoard.value = null
     goTo(reviewStateFor(target))
-    if (!ok) {
-      // 失败原因要留在眼前（面板只说明「审核失败」，不说明为什么）
-      docError.value = `重新审核失败：${job.error.value || '请稍后重试'}`
-    }
+    if (failed) docError.value = job.error.value || '重新审核失败'
   }
 
   /**
@@ -1431,7 +1458,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * - **失败留在生成态**：改写失败时后端**不动库**（正文与版本都还是原样），错误由
    *   生成页的错误区说明——与「按澄清改写 / AI 自行澄清」同一条口径。
    *
-   * 复审失败**不是失败**（那是后端的事）：任务照旧成功，只是结论留空，界面显示
+   * 重审失败**不是失败**（那是后端的事）：任务照旧成功，只是结论留空，界面显示
    * 「审核失败」，可以再点一次「重新审核」补上。
    */
   async function fixDocument(): Promise<void> {
@@ -1541,14 +1568,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 表单返回按钮的文案，与 `backFromForm` 的落点保持一一对应 */
   const formBackLabel = computed(() => (messages.value.length > 0 ? '返回对话' : '返回入口'))
-
-  /**
-   * 进入交付页的入口**不在这里**。
-   *
-   * 交付页不再由审阅页的「完成」按钮把关（那个按钮连同它的守卫一起撤了）：入口是进度条的
-   * 「交付」格，可点条件由 `stores/workflow` 的 `requiredDocsReady` 决定。这条流水线只负责
-   * 「把一份文档生成 / 改好」，不负责「什么时候可以交付」。
-   */
 
   /** 当前审阅阶段对应的文档标题 */
   const activeDocTitle = computed(() => {
@@ -1739,6 +1758,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   docStageText,
   reviewConclusion,
   reviewFailed,
+  reviewVersionNo,
   elapsedMs: job.elapsedMs,
     summaryChanges,
     summarySyncing,

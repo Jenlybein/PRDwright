@@ -395,7 +395,13 @@ class DocumentRepository:
         return version
 
     def replace_current_review(
-        self, owner_id: int, solution_id: int, kind: str, *, review: str
+        self,
+        owner_id: int,
+        solution_id: int,
+        kind: str,
+        *,
+        review: str,
+        expected_content_sha: str | None = None,
     ) -> bool:
         """**只**更新当前版本的审核结论列，成功返回 True。
 
@@ -406,6 +412,10 @@ class DocumentRepository:
         判据与动作收在**同一条 SQL** 里（`document_versions.id == documents.current_version_id`
         的子查询），而不是「先查当前版本、再按 id 更新」：两次查询之间若发生别的写入（另一个
         标签页刚好恢复了一版），先查后改就会把结论写到**已经不再是当前版本**的那一行上。
+
+        `expected_content_sha` 给出时再加一道条件写：只有当这一版的正文指纹**仍是**
+        「被审的那一份」才写（B3）。没有它，「审的是 A、写结论时正文已经是 B」这件事
+        就只能靠上层的事前比较发现；而结论一旦落在 B 上，它看起来完全正常，却是错的。
 
         归属仍经 `documents → solutions` 两级过滤：越权与不存在一样「写不进」。
 
@@ -424,11 +434,12 @@ class DocumentRepository:
             )
             .scalar_subquery()
         )
-        result = self.session.execute(
-            update(DocumentVersion)
-            .where(DocumentVersion.id == current_of_doc)
-            .values(review=review, updated_at=now)
-        )
+        statement = update(DocumentVersion).where(DocumentVersion.id == current_of_doc)
+        if expected_content_sha is not None:
+            statement = statement.where(
+                DocumentVersion.content_sha == expected_content_sha
+            )
+        result = self.session.execute(statement.values(review=review, updated_at=now))
         return int(result.rowcount or 0) == 1
 
     def update_current_version(

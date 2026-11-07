@@ -14,7 +14,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from backend.core.contracts import DOCUMENT_KINDS
+from backend.core.contracts import DOCUMENT_KINDS, StreamEvent
+from backend.core.digest import content_fingerprint
 from backend.core.engine import session_scope
 from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
@@ -85,6 +86,24 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             runtime.failed = True
             runtime.error_code = abort_code
             runtime.error_message = abort_message
+        elif runtime.kind == "review" and _review_body_changed(runtime):
+            # B3：被审的正文变了，本次结论无处可写。判失败而不是「写完再说」——结论一旦
+            # 落在没审过的正文上，它看起来完全正常，却是错的（见 §3.8 / C-R1）。
+            status = "failed"
+            runtime.failed = True
+            runtime.error_code = "CONTENT_CHANGED"
+            runtime.error_message = "正文已变更，本次审核结论未写入，请重新审核"
+            # 此刻订阅者还连着：补一条 `error` 事件，前端才拿得到原因。这一步在收尾里
+            # 才发现（正文是在收尾时比的），不像普通失败那样有异常可抛。
+            job_bus.publish(
+                runtime.job_id,
+                StreamEvent(
+                    type="error",
+                    content=runtime.error_message,
+                    data={"error_type": "JobFailed"},
+                    code=runtime.error_code,
+                ),
+            )
 
     runtime.status = status
     draft = _draft(runtime)
@@ -154,6 +173,27 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
         _write_chat_turn(runtime)
 
     job_bus.publish(runtime.job_id, _run_summary_event(summary))
+
+
+def _review_body_changed(runtime: JobRuntime) -> bool:
+    """重审的正文在「建任务那一刻」与「收尾写结论」之间被改过没有。
+
+    被审的那一份正文由 `job_inputs._review_inputs` 在建任务那一刻从库里取，随任务单进
+    `runtime.request["document"]`；而结论只能写到「此刻的当前版本」上。两处指纹不一致，
+    就说明用户在这段时间里手改过——此时写结论等于**给一份没审过的正文发判定**。
+
+    取不到当前版本（文档被删、方案没了）时返回 `False`：那属于「写不进去」，
+    由 `commit_review` 的 `missing` 分支处理，不该在这里报「正文已变更」。
+    """
+    kind = _document_kind(runtime)
+    if kind is None or runtime.solution_id is None:
+        return False
+    meta = document_store.current_version_meta(runtime.owner_id, runtime.solution_id, kind)
+    if meta is None:
+        return False
+    reviewed_sha = content_fingerprint(str(runtime.request.get("document") or ""))
+    current_sha = str(meta.get("content_sha") or "")
+    return bool(current_sha) and reviewed_sha != current_sha
 
 
 def _write_chat_turn(runtime: JobRuntime) -> None:
@@ -352,7 +392,11 @@ def _write_review(runtime: JobRuntime, kind: str) -> None:
     - 写库出意外只记日志——结论丢一次比把任务判失败更可取，用户重审一次即可。
 
     与写正文的差别是**没有正文可写**：这一步不看 `runtime.final_reply`，
-    重审链路本来就不产出正文（只产结论）。
+    重审链路本来就不产正文（只产结论）。
+
+    写入带**条件**（`expected_content_sha` = 被审那一份的指纹）：路径上已经有一道
+    事前比较（`_review_body_changed`），这里再收一道，保证「比较之后、写入之前」
+    那一点点时间窗也不会把结论写到别的正文上。
     """
     if runtime.review is None:
         logger.warning(
@@ -365,9 +409,15 @@ def _write_review(runtime: JobRuntime, kind: str) -> None:
             },
         )
         return
+    reviewed = str(runtime.request.get("document") or "")
+    expected_sha = content_fingerprint(reviewed) if reviewed.strip() else None
     try:
-        written = document_store.commit_review(
-            runtime.owner_id, runtime.solution_id, kind, runtime.review
+        outcome = document_store.commit_review(
+            runtime.owner_id,
+            runtime.solution_id,
+            kind,
+            runtime.review,
+            expected_content_sha=expected_sha,
         )
     except Exception:  # noqa: BLE001 - 落结论不该把已成功的任务判失败
         logger.warning(
@@ -380,13 +430,16 @@ def _write_review(runtime: JobRuntime, kind: str) -> None:
             exc_info=True,
         )
         return
-    if written is None:
-        logger.warning(
-            "重新审核结论未能写入（方案不存在、归属不符或这一份还没有正文）",
-            extra={
-                "event": "job.review_write_skipped",
-                "job_id": runtime.job_id,
-                "kind": kind,
-                "solution_id": runtime.solution_id,
-            },
-        )
+    if outcome == "ok":
+        return
+    logger.warning(
+        "重新审核结论没有写入（%s）",
+        outcome,
+        extra={
+            "event": "job.review_write_skipped",
+            "job_id": runtime.job_id,
+            "kind": kind,
+            "solution_id": runtime.solution_id,
+            "outcome": outcome,
+        },
+    )

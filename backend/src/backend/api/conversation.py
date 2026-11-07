@@ -191,34 +191,29 @@ async def generate_prd_stream(
 
 @router.post(
     "/generate-prd-from-summary-stream",
-    summary="根据需求（结构化摘要或自由文本）生成 PRD（SSE 流式返回）",
+    summary="按方案生成 PRD（SSE 流式返回）",
 )
 async def generate_prd_from_summary_stream(
     payload: schemas.GeneratePrdFromSummaryStreamRequest,
+    user: User = Depends(acting_user),
 ) -> StreamingResponse:
-    """根据结构化需求摘要**或**自由文本需求，流式返回 PRD 正文。
+    """按方案生成 PRD（需求输入由服务端取），流式返回 PRD 正文。
 
-    相比 `/generate-prd-stream`（入参是已整理好的需求文本，走整篇生成），这里直接吃
-    与 `field-schema.json` 对齐的摘要字典或快捷入口的一段话，服务层按输入形态选格式化
-    函数后统一走「分章节撰写 → 审核 → 改写」链路——「需求 → PRD」在后端是一个自洽的
-    能力，可被多个入口复用，前端不必自己拼需求文本。
+    与接口文档 / 提示词两条旧通道同形（spec #51 / C-R3）：**只收方案**。需求输入
+    （结构化摘要 / 快捷入口那段自由文本 / 需求澄清线程）由 `job_inputs` 按方案从库里
+    解析，请求体里一个字段都不带。因此它和任务通道（`kind=prd`）走的是同一份上游，
+    只是少了任务框架——两条路不会因为「谁递的需求」而写出不同的 PRD。
 
     事件序列：`status` → `chunk`（文档头）→ 若干 `stage`/`chunk`（每章）→
     `stage: done` → `done`（`data` 带完整 `reply` 与 `doc_type=prd`）；出错时为 `error`。
     """
-    if not payload.summary and not payload.requirements.strip():
-        raise AppError(
-            ErrorCode.INVALID_REQUEST,
-            "summary 与 requirements 至少需要提供一个",
-        )
-
-    # 空列表视为「无补充对话」
-    history = [{"role": m.role, "content": m.content} for m in payload.history] or None
+    # 解析在**构造 SSE 之前**：进了流之后状态码恒为 200，缺需求就只能读成「生成失败」
+    inputs = job_inputs.resolve_runtime_inputs("prd", user.id, payload.solution_id)
     events = document_service.generate_prd_from_summary_stream(
-        summary=payload.summary,
-        requirements=payload.requirements,
-        product_name=payload.product_name,
-        history=history,
+        summary=inputs.get("summary"),
+        requirements=str(inputs.get("requirements") or ""),
+        product_name=str(inputs.get("product_name") or ""),
+        history=inputs.get("history") or None,
     )
     return sse_response(events)
 

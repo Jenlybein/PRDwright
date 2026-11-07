@@ -821,59 +821,28 @@ export async function syncSummaryFromConversation(payload: {
 // ============================================================================
 
 
-/**
- * 生成 PRD 的请求体（需求输入二选一）。
- *
- * `summary` 与 `requirements` 对应两条入口：完整流程传结构化摘要，
- * 快捷流程入口传用户写下的一段话。后端把它们汇合到同一条生成链路，
- * 因此前端只需要按入口填其中一个字段。
- */
-export interface GeneratePrdFromSummaryPayload {
-  /** 结构化需求摘要（与 field-schema.json 对齐）；与 requirements 二选一 */
-  summary?: RequirementsSummary
-  /** 自由文本需求（快捷流程入口） */
-  requirements?: string
-  /** 产品名称，仅用于 PRD 文档头；摘要里已有 product_name 时以摘要为准 */
-  productName?: string
-  /** 补充对话记录；为空则按无对话处理 */
-  history?: ChatMessage[]
-  /**
-   * 是否逐章审核 + 改写。不传取服务端配置；快捷流程传 `false`（只撰写、不审不改）。
-   *
-   * 它是**行为开关**而不是提示词：前端只说「这次要不要复核」，复核怎么做由后端决定。
-   */
-  reviewEnabled?: boolean
-}
-
 /** 文档流式生成的结果：仅关心完整正文，会话 ID 恒为空串 */
 export type DocumentStreamResult = StreamResult
 
 /**
- * 由**需求**生成 PRD，SSE 流式接收正文。
+ * 按方案生成 PRD（SSE 流式接收正文）。
  * 对应后端 `POST /api/conversation/generate-prd-from-summary-stream`。
  *
- * 需求可以是结构化摘要（完整流程）或自由文本（快捷流程入口），后端按输入形态
- * 选格式化函数后走同一条「分章节撰写 → 审核 → 改写」链路——「需求 → PRD」
- * 只有一个实现，多入口复用同一份契约。
+ * **只下发方案 id**（spec #51 / C-R3）：需求输入（结构化摘要 / 快捷流程那段自由文本 /
+ * 需求澄清历史）由后端按方案从库里取，与 `kind=prd` 的任务通道用的是同一份上游。
+ * 请求体里不再有 `summary` / `requirements` / `history`——递过去就是第二条真相。
  *
  * 流式过程中下发两类事件：`stage`（`onStage`）展示「写到第几章、是否在改写」，
  * `part`（`onPart`）在每段正文定稿时给出**可直接追加**的权威文本——预览由
  * 「已定稿部分 + 当前章实时缓冲」拼成，因此与最终 `reply` 逐字一致。
  */
 export function generatePrdFromSummaryStream(
-  payload: GeneratePrdFromSummaryPayload,
+  payload: { solutionId: number },
   handlers?: StreamHandlers,
 ): Promise<DocumentStreamResult> {
   return readStream(
     '/api/conversation/generate-prd-from-summary-stream',
-    {
-      // 二选一只下发有值的那个字段：显式传 null 会让后端的两条分支都要处理空对象
-      summary: payload.summary ?? null,
-      requirements: payload.requirements ?? '',
-      product_name: payload.productName ?? '',
-      // 只保留后端认识的 role / content 两个字段
-      history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
-    },
+    { solution_id: payload.solutionId },
     handlers,
   )
 }

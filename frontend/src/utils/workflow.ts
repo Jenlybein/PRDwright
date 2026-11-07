@@ -1039,17 +1039,26 @@ export function hasRequiredDocuments(
 }
 
 /**
- * 「所需文档已齐备，可以进交付页了」这句提示的文案。
+ * 齐备那一刻要不要弹「已齐备」这条全应用提示。
  *
- * 三份齐备的入口说得出口「三份」；两个导入入口只要一份提示词，对它们说「三份文档已齐备」
- * 就是假的，因此按登记表 `requiredDocs` 的实际份数措辞。
- *
- * 这份文案只出现在**全应用浮层**里（`AppV2` 的那次提示），不改变当前页面。
+ * 与 `hasRequiredDocuments`（交付格的**可点条件**）刻意分开：规格只要求「**三份**齐备时
+ * 提示一次」。两个导入入口只要一份提示词，它们齐备时说「三份文档已齐备」是假话——
+ * 那时不提示，但进度条「交付」格照旧可点。
  */
-export function deliveryReadyNotice(mode: EntryMode | null): string {
+export function announcesDeliveryReady(mode: EntryMode | null): boolean {
   return entrySpecForDisplay(mode).requiredDocs.length > 1
-    ? '三份文档已齐备，可在进度条进入交付页'
-    : '提示词套件已生成，可在进度条进入交付页'
+}
+
+/**
+ * 「三份文档已齐备，可以进交付页了」这句提示的文案。
+ *
+ * 只有三份齐备的入口会说这句话（触发条件见 `announcesDeliveryReady`），因此措辞是
+ * 固定的——不再按入口分两句：按份数换文案，等于让「导入入口也提示」这件事继续存在。
+ *
+ * 它只出现在**全应用浮层**里（`AppV2` 的那次提示），不改变当前页面。
+ */
+export function deliveryReadyNotice(): string {
+  return '三份文档已齐备，可在进度条进入交付页'
 }
 
 /** 判断任意值是否为合法聊天消息 */

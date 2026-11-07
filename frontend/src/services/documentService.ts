@@ -131,6 +131,8 @@ function toRecord(data: unknown): DocumentRecord | null {
     // SSE 的 `review` 事件，两处共用 `parseReview`，形状不会分叉）。
     // 解析不出来 → null，界面显示「未审核」，绝不替它猜一个「通过」。
     review: parseReview(raw.review),
+    // 当前版本号：结论面板用它回答「这条结论是哪一版的」（后端随文档行返回）
+    versionNo: typeof raw.version_no === 'number' ? raw.version_no : 0,
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
     stale: raw.stale === true,
     derivedFrom: toDerivedFrom(raw.derived_from),

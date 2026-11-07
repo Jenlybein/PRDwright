@@ -78,6 +78,7 @@ function makeRecord(kind: DocumentKind, content: string): DocumentRecord {
     review: null,
     updatedAt: '2026-10-16T00:00:00',
     stale: false,
+    versionNo: 0,
     derivedFrom: null,
   }
 }

@@ -3,6 +3,7 @@ import { computed, ref, useId } from 'vue'
 
 import AppButton from '@/components/ui/AppButton.vue'
 import type { ReviewConclusion } from '@/types'
+import { relativeTime } from '@/utils/time'
 
 /**
  * 审核结论面板（四态：通过 / 有问题 / 审核失败 / 未审核）。
@@ -19,6 +20,17 @@ import type { ReviewConclusion } from '@/types'
  * `failed` 是「本次会话里最近一次审核没跑成」——审核失败不写结论（没有结论 ≠ 通过），
  * 所以库里没有这条记录，只能由调用方按亲眼所见的那次失败告诉我们。
  *
+ * ## 为什么失败态不展示 `review` 的内容
+ *
+ * 重审失败时库里仍留着上一次那条结论（它描述的是同一份正文，但**不是本次结果**）。
+ * 把它逐条列在「审核失败」下面，读起来就是「这次审出来的问题」——那是最误导人的
+ * 一种排法。失败态只讲「这次没跑成、可以重审」，旧结论一个字都不显示。
+ *
+ * ## 追溯：哪一版、什么时候审的
+ *
+ * 结论上带了审核时间（`reviewedAt`），文档列表还带着当前版本号（`versionNo`）：
+ * 两样一起显示在折叠头，用户不必靠回忆「这条结论是什么时候的」。
+ *
  * ## 为什么动作只在折叠头、且各守一种状态
  *
  * 这份结论上有两个动作，都在折叠头、「有问题」与「其余三态」各开一个：
@@ -28,6 +40,9 @@ import type { ReviewConclusion } from '@/types'
  * - **重新审核**（`review`）：只审不改、不追加版本。只有「审核失败 / 未审核 / 通过」时
  *   可点：有问题时先修复，顺序反了只会得到同一条结论、白烧一次调用。
  *
+ * 两个按钮**恒在场**、不可点时置灰并用 `title` 说明原因（不把入口藏起来：藏起来
+ * 等于让人猜「这里本来有没有东西」）。
+ *
  * 收起时留下的那一行必须仍然能回答「这份文档能不能交付」：结论徽标 + 问题条数。
  * 展开状态是**纯组件内状态**：与待确认清单同口径，界面折叠态没有持久化先例。
  */
@@ -36,6 +51,8 @@ const props = defineProps<{
   review: ReviewConclusion | null
   /** 本次会话里最近一次审核是否没跑成（失败不写结论，只能由调用方告知） */
   failed?: boolean
+  /** 当前版本号（`DocumentRecord.versionNo`）；未知时不显示「第几版」 */
+  versionNo?: number
 }>()
 
 const emit = defineEmits<{
@@ -95,18 +112,44 @@ const expanded = ref(false)
 /** 折叠体的 id：`aria-controls` 要指向它，用 `useId()` 避免同页多份时撞号 */
 const bodyId = useId()
 
+/**
+ * 失败态是否还展示 `review` 的内容。
+ *
+ * 只有「通过 / 有问题」这两种状态是**本次看得出的事实**；失败态下 `review` 里那条
+ * 是上一次的记录（失败不写结论，见 C-R1），它不属于这次结果。
+ */
+const showsReview = computed(() => state.value !== 'failed')
+
 /** 收起时也要看得到的计数：没有它，收起就等于把问题藏了 */
-const issues = computed(() => props.review?.issues ?? [])
+const issues = computed(() => (showsReview.value ? props.review?.issues ?? [] : []))
 const issueCount = computed(() => issues.value.length)
 
 /** 结论的一句话总结；「审核失败 / 未审核」时没有可展示的东西 */
-const summary = computed(() => props.review?.summary ?? '')
+const summary = computed(() => (showsReview.value ? props.review?.summary ?? '' : ''))
 
 /** 本次是否真的改写过（重审恒为 false——只审不改） */
-const rewritten = computed(() => props.review?.rewritten === true)
+const rewritten = computed(() => showsReview.value && props.review?.rewritten === true)
 
 /** 生成失败的章节（PRD 并行链路才会非空） */
-const failedSections = computed(() => props.review?.failedSections ?? [])
+const failedSections = computed(() =>
+  showsReview.value ? props.review?.failedSections ?? [] : [],
+)
+
+/** 「第几版」：结论归属的版本号（未知时不显示，别猜一个） */
+const versionLabel = computed(() =>
+  typeof props.versionNo === 'number' && props.versionNo > 0 ? `第 ${props.versionNo} 版` : '',
+)
+
+/**
+ * 「什么时候审的」：只对**本次读得到的那条结论**显示。
+ *
+ * 失败 / 未审核时 `reviewedAt` 为空或不属于本次结果——此时不显示时间，
+ * 免得把上一次的审核时间读成「刚刚审过」。
+ */
+const reviewedLabel = computed(() => {
+  if (!showsReview.value) return ''
+  return relativeTime(props.review?.reviewedAt ?? '')
+})
 
 /** 「有问题」时不可点：先按结论修复，再回来确认 */
 const canRereview = computed(() => state.value !== 'revise')
@@ -127,7 +170,7 @@ const canFix = computed(() => state.value === 'revise')
 
 const fixHint = computed(() =>
   canFix.value
-    ? '按这条结论重写整篇：追加一个新版本，并自动再复审一次（复审不再改写）'
+    ? '按这条结论重写整篇：追加一个新版本，并自动再重审一次（重审不再改写）'
     : '只有「有问题」的结论才能按结论修复',
 )
 </script>
@@ -165,6 +208,9 @@ const fixHint = computed(() =>
         >
           已改写一次
         </span>
+        <!-- 追溯：这条结论属于哪一版、什么时候审的（收起时也看得到） -->
+        <span v-if="versionLabel" class="text-[11px] text-subtle">{{ versionLabel }}</span>
+        <span v-if="reviewedLabel" class="text-[11px] text-subtle">· 审于 {{ reviewedLabel }}</span>
         <svg
           class="h-4 w-4 shrink-0 text-subtle transition-transform"
           :class="expanded ? 'rotate-180' : ''"

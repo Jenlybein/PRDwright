@@ -25,9 +25,11 @@ import json
 from typing import Any, AsyncIterator
 
 import pytest
-from conftest import login, register
+from conftest import login, register, users
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
+from backend.core.engine import session_scope
+from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.services import document_service, job_runtime, llm_factory, prd_section_writer
 from backend.services.job_bus import job_bus
 
@@ -79,8 +81,9 @@ class WholeDocReviewLLM:
     条目为异常时在**吐第一个字之前**抛出——那正是「调用失败」的真实形态。
     """
 
-    def __init__(self, replies: list[str | BaseException]) -> None:
+    def __init__(self, replies: list[str | BaseException], *, delay: float = 0.2) -> None:
         self._replies = list(replies)
+        self._delay = delay
         self.calls = 0
 
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
@@ -89,7 +92,7 @@ class WholeDocReviewLLM:
         # 让出一点真实时间：真实模型不是瞬时返回的，而「建任务 → 订阅」这两步之间
         # 任务必须仍在跑，否则本次订阅拿不到 `review` 事件（它按设计不重放），
         # 用例也就无从断言「订阅期间即时看到结论」（与 `test_review_persistence` 同口径）。
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(self._delay)
         reply = self._replies[min(self.calls - 1, len(self._replies) - 1)]
         if isinstance(reply, BaseException):
             raise reply
@@ -101,11 +104,15 @@ class WholeDocReviewLLM:
 
 
 class SectionReviewLLM:
-    """PRD 单章审核的假模型：指定章节判 revise，其余判 pass。"""
+    """PRD 单章审核的假模型：指定章节判 revise，其余判 pass。
+
+    同时记下每次调用收到的用户消息：重审提示词里到底装了什么，只能从这里看。
+    """
 
     def __init__(self, *, revise_heading: str) -> None:
         self._revise_heading = revise_heading
         self.calls = 0
+        self.prompts: list[str] = []
 
     @staticmethod
     def _heading(user: str) -> str:
@@ -118,6 +125,7 @@ class SectionReviewLLM:
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
         assert _PRD_REVIEW_MARKER in str(messages[0].content)
         self.calls += 1
+        self.prompts.append(str(messages[-1].content))
         await asyncio.sleep(0.2)
         heading = self._heading(str(messages[-1].content))
         if heading == self._revise_heading:
@@ -238,6 +246,24 @@ def _seed_requirements(client, solution_id: int) -> None:  # noqa: ANN001
         },
     )
     assert saved.status_code == 200, saved.text
+
+
+def _seed_requirement_turn(solution_id: int, content: str) -> None:
+    """在需求澄清线程里落一条用户轮次（PRD 生成 / 重审共用的上游之一）。
+
+    这只是**准备材料**：生产里这条轮次由对话任务写入同一张表；
+    断言仍走 HTTP 主链路。用例里注册的用户都是 alice。
+    """
+    user = users.get_by_username("alice")
+    assert user is not None
+    with session_scope() as session:
+        ChatTurnRepository(session).create(
+            int(user["id"]),
+            solution_id,
+            stage="requirement",
+            role="user",
+            content=content,
+        )
 
 
 def _review_payload(solution_id: int, doc_kind: str) -> dict[str, Any]:
@@ -362,9 +388,41 @@ def test_rereview_of_prd_reviews_the_current_body_section_by_section(client, mon
 
 
 # ---------------------------------------------------------------------------
-# 三、没审成 ≠ 通过：任务判失败，且不写结论
+# 三、需求澄清线程进重审提示词：与生成侧同一份内容口径
 # ---------------------------------------------------------------------------
 
+
+def test_rereview_of_prd_feeds_the_requirement_thread_into_the_prompt(client, monkeypatch):
+    """重审提示词里要带上需求澄清线程——它是「这一段有据还是编造」的另一半事实来源。
+
+    只给摘要 / 自由文本时，用户在对话里拍板的细节（本例：支付方式）在模型眼里就是
+    「需求输入里查不到」，于是正文里如实写了也会被判成编造。生成侧一直带着这条线程，
+    重审不带，同一份正文会因为「是生成时审的还是重审的」得到不同结论。
+
+    断言用的是**正文里没有、只在线程里出现过**的那句话，否则「它本来就在章节正文里」
+    会让这条用例永远通过。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    heading = prd_section_writer.PRD_SECTIONS[0].heading
+    body = f"# 演示产品 产品需求文档（PRD）\n\n{heading}\n\n1.1 产品名称：演示产品\n"
+    _seed_requirements(client, solution_id)
+    _seed_requirement_turn(solution_id, "支付方式确定为只做微信支付，不做支付宝")
+    _seed_document(client, solution_id, "prd", body)
+
+    llm = SectionReviewLLM(revise_heading="## 不在正文里的一章")
+    _fake_service(monkeypatch, llm)
+    _job_id, _events, status = _run_job(client, _review_payload(solution_id, "prd"))
+
+    assert status == "completed"
+    assert llm.prompts, "重审应当至少调用一次模型"
+    for prompt in llm.prompts:
+        assert "只做微信支付" in prompt, "需求澄清线程要进重审提示词"
+
+
+# ---------------------------------------------------------------------------
+# 四、没审成 ≠ 通过：任务判失败，且不写结论
+# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "reply",
@@ -391,8 +449,56 @@ def test_failed_rereview_writes_no_conclusion(client, monkeypatch, reply):
     assert len(_versions(client, solution_id, "api_docs")) == 1
 
 
+def test_rereview_fails_when_the_body_changed_midway(client, monkeypatch):
+    """审到一半正文被改 → 任务失败、结论不写、旧结论原样保留（B3）。
+
+    为什么必须失败：重审的正文是**建任务那一刻**的快照，结论却要写到「此刻的当前版本」
+    上。两者之间用户手改一次，结论就落在一份**没审过的正文**上——它看起来完全正常，
+    却是错的。宁可判失败、让用户重审一次，也不能写一条指向别的正文的结论。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    _seed_document(client, solution_id, "api_docs", _API_DOCS_BODY)
+
+    # 先有一条真结论（「通过」）：B3 要求不一致时**不覆盖**已有结论
+    _fake_service(monkeypatch, WholeDocReviewLLM([_PASS_JSON]))
+    _job_id, _first_events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
+    assert status == "completed"
+    baseline = _documents(client, solution_id)["api_docs"]["review"]
+    assert baseline["verdict"] == "pass"
+
+    # 第二次重审：建任务（快照）之后、收尾之前，用户把正文改了
+    _fake_service(monkeypatch, WholeDocReviewLLM([_REVISE_JSON], delay=0.6))
+    created = client.post("/api/jobs", json=_review_payload(solution_id, "api_docs"))
+    assert created.status_code == 201, created.text
+    job_id = int(created.json()["job_id"])
+
+    edited = _API_DOCS_BODY + "\n## 二、鉴权\n\n手改追加的一节。\n"
+    saved = client.put(
+        f"/api/solutions/{solution_id}/documents/api_docs", json={"content": edited}
+    )
+    assert saved.status_code == 200, saved.text
+
+    stream = client.get(f"/api/jobs/{job_id}/stream")
+    assert stream.status_code == 200, stream.text
+    events = _events(stream)
+    # 订阅者还连着：失败原因要能当场读到（否则前端只看到「流读完、任务却失败」）
+    errors = [event for event in events if event["type"] == "error"]
+    assert errors, "正文已变更的失败必须发一条 error 事件"
+    assert "正文已变更" in errors[-1]["content"]
+
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "failed", "被审的正文变了，本次结论无处可写"
+    assert "正文已变更" in job["error_message"]
+    assert "重新审核" in job["error_message"]
+
+    doc = _documents(client, solution_id)["api_docs"]
+    assert doc["content"] == edited, "手改的正文照旧保留"
+    assert doc["review"] == baseline, "结论不写到没审过的正文上，也不覆盖已有结论"
+
+
 # ---------------------------------------------------------------------------
-# 四、入口校验：目标产物、方案与被审正文都是必填
+# 五、入口校验：目标产物、方案与被审正文都是必填
 # ---------------------------------------------------------------------------
 
 

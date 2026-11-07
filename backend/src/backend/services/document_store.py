@@ -222,36 +222,61 @@ def commit_generated(
 # ---------------------------------------------------------------------------
 
 
+# 「重新审核」收尾写入的结果。**机器判据**，任务层据此决定是成功还是失败：
+# - `ok`              已写入当前版本的 `review` 列
+# - `missing`         这份文档不存在 / 方案不可见 / 还没有任何正文
+# - `content_changed` 当前版本的正文已经不是「被审的那一份」（指纹不一致）——不写
+ReviewCommitOutcome = Literal["ok", "missing", "content_changed"]
+
+
 def commit_review(
     owner_id: int,
     solution_id: int,
     kind: str,
     review: dict[str, Any],
-) -> dict[str, Any] | None:
+    *,
+    expected_content_sha: str | None = None,
+) -> ReviewCommitOutcome:
     """**重新审核**收尾：只更新当前版本的审核结论（不追加版本、不动正文）。
 
     为什么单独一个入口而不是复用 `commit_generated`：后者的语义是「写正文」——它要么追加
     版本，要么就地重写正文，两条路都会改变「这一版是什么」。重审只刷新这一版的一条判定，
     正文与清单一个字都不该动（ADR 0002 第 2 条）。
 
+    `expected_content_sha` 是**被审那一份正文**的指纹（建任务那一刻快照的）。给出时走
+    条件写：当前版本的指纹与它不一致就**一个字都不写**，返回 `content_changed`。
+    这道闸门的理由见 §3.8：结论是「这一版被审成什么样」的记录，写到一个没被审过的
+    版本上不会报错，只会变成一条看着正常、实则指向别的正文的假记录。
+
     Args:
         owner_id: 文档所属用户。
         solution_id: 文档所属方案。
         kind: 产物类型（`prd` / `api_docs` / `prompts`）。
         review: 本次结论（形状与 SSE `review` 事件的数据一致，见 `document_review.review_data`）。
+        expected_content_sha: 被审正文的内容指纹；`None` 表示不做比对（仅供不关心
+            「写之前正文是否变过」的内部调用）。
 
     Returns:
-        更新后的文档；方案不可见、或这一份还没有任何正文（无当前版本）时返回 None
-        ——没有正文就没有「被审的那一版」，写一条无主结论只会让读侧以为审过。
+        见 `ReviewCommitOutcome`；没有正文就没有「被审的那一版」，写一条无主结论只会
+        让读侧以为审过（`missing`）。
     """
     review_json = json.dumps(review, ensure_ascii=False)
     with session_scope() as session:
-        ok = DocumentRepository(session).replace_current_review(
-            owner_id, solution_id, kind, review=review_json
+        repo = DocumentRepository(session)
+        ok = repo.replace_current_review(
+            owner_id,
+            solution_id,
+            kind,
+            review=review_json,
+            expected_content_sha=expected_content_sha,
         )
-        if not ok:
-            return None
-        return _read_document(session, owner_id, solution_id, kind)
+        if ok:
+            return "ok"
+        # 没能写入：区分「根本没有这一版」与「有，但正文已经换了」
+        row = repo.get(owner_id, solution_id, kind)
+        if row is None or row.current_version_id is None:
+            return "missing"
+        return "content_changed"
 
 
 def list_versions(owner_id: int, solution_id: int, kind: str) -> list[dict[str, Any]]:
@@ -395,6 +420,9 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
         "review": _load_json(row.review, dict, None),
+        # 当前版本序号：结论面板据此说清「这条结论是哪一版的」（后端已有这一列，
+        # 只是在版本行里、从前没随文档下发）。没有版本时是 0。
+        "version_no": int(row.version_no or 0),
         "updated_at": row.updated_at,
         "derived_from": derived,
         "stale": _is_stale(derived, sha_by_kind or {}),

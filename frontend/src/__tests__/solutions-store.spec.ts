@@ -666,6 +666,7 @@ describe('openSolution', () => {
         review: null,
         updatedAt: '',
         stale: false,
+        versionNo: 0,
         derivedFrom: null,
       },
     ])

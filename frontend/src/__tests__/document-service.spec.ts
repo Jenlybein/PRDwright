@@ -83,7 +83,7 @@ describe('fetchDocuments', () => {
     vi.mocked(http.get).mockResolvedValue({
       data: {
         documents: [
-          backendDocument(),
+          backendDocument({ version_no: 3 }),
           backendDocument({ kind: 'api_docs', content: '# 接口文档' }),
           backendDocument({ kind: 'prompts', content: '# 提示词套件' }),
         ],
@@ -96,6 +96,9 @@ describe('fetchDocuments', () => {
     expect(records.map((item) => item.kind)).toEqual(['prd', 'api-docs', 'prompts'])
     expect(records[1]?.content).toBe('# 接口文档')
     expect(records[0]?.updatedAt).toBe('2026-10-13T00:00:00')
+    // 版本号：结论面板用它回答「这条结论是哪一版的」；后端没给时退化为 0（不猜）
+    expect(records[0]?.versionNo).toBe(3)
+    expect(records[1]?.versionNo).toBe(0)
   })
 
   it('回执按不透明对象透传（结构合格时原样带出）', async () => {

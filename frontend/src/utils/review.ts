@@ -57,5 +57,7 @@ export function parseReview(raw: unknown): ReviewConclusion | null {
     issues,
     rewritten: data.rewritten === true,
     failedSections,
+    // 审核时间：面板据此回答「什么时候审的」。缺失时为空串（不猜一个时间）
+    reviewedAt: readString(data, 'reviewed_at'),
   }
 }

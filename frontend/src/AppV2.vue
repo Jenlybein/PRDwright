@@ -29,6 +29,7 @@ import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
 import {
+  announcesDeliveryReady,
   chatStageForDocument,
   deliveryReadyNotice,
   docKindOfGeneratingState,
@@ -500,9 +501,12 @@ watch(
     // 加载中不作数：那一刻 `documents` 里的正文本还是上一份方案的，据此提示会把
     // 「别人的三份」算到这份头上（而且紧接着就会被这次响应改掉）。
     if (loading || !ready) return
+    // 只有三份齐备的入口弹这条提示（`announcesDeliveryReady`）：两个导入入口只要一份
+    // 提示词，对它们说「三份文档已齐备」是假话——它们的入口照旧是进度条那一格。
+    if (!announcesDeliveryReady(store.entryMode)) return
     if (deliveryNoticeShown.has(solutionId)) return
     deliveryNoticeShown.add(solutionId)
-    flashSavedTip(deliveryReadyNotice(store.entryMode))
+    flashSavedTip(deliveryReadyNotice())
   },
 )
 
@@ -566,6 +570,7 @@ const {
   docStageText,
   reviewConclusion,
   reviewFailed,
+  reviewVersionNo,
   runSummary,
   pendingItems,
   elapsedMs,
@@ -1204,6 +1209,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :update-busy="isGeneratingCurrentDoc"
         :review="reviewConclusion"
         :review-failed="reviewFailed"
+        :review-version-no="reviewVersionNo"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
         :hide-back="inputPageOnBar(store.entryMode)"

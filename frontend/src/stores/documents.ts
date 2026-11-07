@@ -69,6 +69,11 @@ function emptyReviewFailures(): Record<DocumentKind, boolean> {
   return { prd: false, 'api-docs': false, prompts: false }
 }
 
+/** 三种产物「当前版本号」的空值（0 = 后端没给，界面不显示版本号） */
+function emptyVersionNos(): Record<DocumentKind, number> {
+  return { prd: 0, 'api-docs': 0, prompts: 0 }
+}
+
 export const useDocumentsStore = defineStore('documents', () => {
   /** 三份正文的工作副本 */
   const contents = ref<Record<DocumentKind, string>>(emptyContents())
@@ -110,6 +115,14 @@ export const useDocumentsStore = defineStore('documents', () => {
    * 真的失败过，重审一次就好；而把旧结论冒充成本次结果才是误导。
    */
   const reviewFailures = ref<Record<DocumentKind, boolean>>(emptyReviewFailures())
+
+  /**
+   * 三份文档各自的**当前版本号**。
+   *
+   * 结论面板用它回答「这条结论是哪一版的」（US16）。它随 `GET .../documents` 回来，
+   * 不额外发请求：版本详情里那个 `version_no` 与它是同一个数。
+   */
+  const versionNos = ref<Record<DocumentKind, number>>(emptyVersionNos())
 
   /** 这批内容属于哪份方案；`null` 表示还没有归属（新建中） */
   const solutionId = ref<number | null>(null)
@@ -204,6 +217,7 @@ export const useDocumentsStore = defineStore('documents', () => {
       const nextStale = emptyStale()
       const nextDerived = emptyDerived()
       const nextReviews = emptyReviews()
+      const nextVersionNos = emptyVersionNos()
       for (const record of records) {
         nextContents[record.kind] = record.content
         nextSummaries[record.kind] = record.runSummary
@@ -211,6 +225,7 @@ export const useDocumentsStore = defineStore('documents', () => {
         nextStale[record.kind] = record.stale
         nextDerived[record.kind] = record.derivedFrom
         nextReviews[record.kind] = record.review
+        nextVersionNos[record.kind] = record.versionNo
       }
       // 尚未落库的手改优先：它们在时间上更新于这次响应
       for (const [kind, content] of pending) nextContents[kind] = content
@@ -220,6 +235,7 @@ export const useDocumentsStore = defineStore('documents', () => {
       stale.value = nextStale
       derivedFrom.value = nextDerived
       reviews.value = nextReviews
+      versionNos.value = nextVersionNos
     } catch (error) {
       if (token !== loadToken) return
       if (error instanceof DocumentsNotFoundError) {
@@ -229,6 +245,7 @@ export const useDocumentsStore = defineStore('documents', () => {
         stale.value = emptyStale()
         derivedFrom.value = emptyDerived()
         reviews.value = emptyReviews()
+        versionNos.value = emptyVersionNos()
         reviewFailures.value = emptyReviewFailures()
       }
       saveError.value = error instanceof Error ? error.message : '无法读取文档'
@@ -405,6 +422,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     stale.value = emptyStale()
     derivedFrom.value = emptyDerived()
     reviews.value = emptyReviews()
+    versionNos.value = emptyVersionNos()
     reviewFailures.value = emptyReviewFailures()
     solutionId.value = null
     saveError.value = ''
@@ -449,6 +467,11 @@ export const useDocumentsStore = defineStore('documents', () => {
     return reviewFailures.value[kind]
   }
 
+  /** 这份文档的当前版本号（0 = 后端没给，界面不显示） */
+  function versionNoOf(kind: DocumentKind): number {
+    return versionNos.value[kind]
+  }
+
   const hasPrd = computed(() => contents.value.prd.trim() !== '')
   const hasApiDocs = computed(() => contents.value['api-docs'].trim() !== '')
   const hasPrompts = computed(() => contents.value.prompts.trim() !== '')
@@ -465,6 +488,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     derivedFrom,
     reviews,
     reviewFailures,
+    versionNos,
     solutionId,
     loading,
     saveError,
@@ -493,5 +517,6 @@ export const useDocumentsStore = defineStore('documents', () => {
     derivedFromOf,
     reviewOf,
     reviewFailedOf,
+    versionNoOf,
   }
 })

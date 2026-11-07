@@ -85,19 +85,15 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
             raise AppError(ErrorCode.INVALID_REQUEST, "auto_clarify 需要提供待确认清单（pending_items）")
     elif payload.kind == "review":
         # 重审**既不收正文也不收上游**：要审的那一份、以及它比对的材料都由服务端从库里取
-        # （C-R3）。因此这里只校验「哪一份」与「在哪」，两样缺一个都没法跑。
+        # （C-R3）。因此这里只校验「哪一份」——「在哪」已由开头那条统一校验挡掉了
+        # （文档类任务必须带方案），分支里再判一次 `solution_id is None` 是死代码。
         if payload.doc_kind is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "review 必须指定 doc_kind")
-        if payload.solution_id is None:
-            # 没有方案就没有可读的正文，也没有可写结论的位置
-            raise AppError(ErrorCode.INVALID_REQUEST, "review 必须关联一份方案")
     elif payload.kind == "review_fix":
         # 修复同理：被修的正文、那条结论、上游材料全由服务端取（C-R3）；
         # `doc_kind` 还决定注入哪份上游全文，缺了既不指导哪一份、也拼不出上下文。
         if payload.doc_kind is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "review_fix 必须指定 doc_kind")
-        if payload.solution_id is None:
-            raise AppError(ErrorCode.INVALID_REQUEST, "review_fix 必须关联一份方案")
         # 结论是不是「有问题」由 `job_inputs._fix_inputs` 在建任务时查库判定：
         # 那一步本来就要读当前版本，再读一次结论不会多一次往返。
     elif payload.kind == "chat":
