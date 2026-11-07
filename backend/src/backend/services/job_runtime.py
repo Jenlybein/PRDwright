@@ -99,6 +99,15 @@ class JobRuntime:
     # 待确认清单：由 `done` 事件带来（生成器在定稿正文里剥离标记块后产出）。
     # 与正文同源、同一次收尾落库，因此「换了正文却忘了重算清单」没有结构落脚点。
     pending_items: list[dict[str, Any]] = field(default_factory=list)
+    # 本次审核结论（来自 `review` 事件；形状与事件 data 一致）。
+    #
+    # 它**只在这里中转一次**：收尾时随正文一起写进被审的那一版 `document_versions`
+    # （`review` 列），成为刷新 / 换设备后的唯一来源。SSE 事件本身不重放，
+    # 所以「订阅晚了一步就看不到结论」不影响落库。
+    #
+    # `None` 表示没审成（或这次不审）：**绝不写一个「通过」占位**——没有结论
+    # 不等于通过，界面据此标「审核失败」。
+    review: dict[str, Any] | None = None
     # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
     # 收尾也**不写**文档——见 `delete_solution_and_cancel_jobs` / `_finalize`。
     cancelled: bool = False

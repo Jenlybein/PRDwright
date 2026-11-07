@@ -97,7 +97,7 @@ from backend.services.prd_skill import (
     load_prd_skill_artifacts,
 )
 from backend.services.doc_skeleton import extract_headings, skeletonize
-from backend.services.document_review import reaches_severity
+from backend.services.document_review import reaches_severity, review_data
 from backend.services.prompts import (
     PRD_SECTION_GENERATION_PROMPT,
     PRD_SECTION_REVIEW_PROMPT,
@@ -608,8 +608,8 @@ class PrdSectionWriter:
             history: 补充对话记录（`{role, content}` 列表），可为空。
 
         Yields:
-            `status` → `part`（文档头）→ 每章 `stage`/`chunk`…/`part` → `stage: done` → `done`；
-            中途失败时产出 `error` 并结束（已流出的内容保留在前端）。
+            `status` → `part`（文档头）→ 每章 `stage`/`chunk`…/`part` → `review`（汇总结论）
+            → `stage: done` → `done`；中途失败时产出 `error` 并结束（已流出的内容保留在前端）。
 
         Raises:
             ValueError: 两种需求输入都为空——没有需求就不该产出文档，宁可报错也不编。
@@ -648,6 +648,11 @@ class PrdSectionWriter:
         # 待确认清单：跨章节累加，最终随 `done` 事件交给编排层落库。
         # 每条的 id 由后端按「章节 + 序号」分配，保证全文档唯一、稳定。
         pending_items: list[dict[str, Any]] = []
+
+        # 汇总结论的素材：逐条问题 + 「这次到底改没改」。并行链路也汇总同样两样，
+        # 两条链路必须给出**同形**的结论——否则「PRD 能不能修复」会随并发度配置漂。
+        issues: list[dict[str, Any]] = []
+        rewritten = False
 
         for index, section in enumerate(PRD_SECTIONS):
             section_template = template_sections.get(section.heading, "")
@@ -696,6 +701,18 @@ class PrdSectionWriter:
                     requirements=requirements_text,
                     prior_sections=_join_prior(written),
                 )
+                # 汇总口径与并行链路逐字一致：只收「判定为有问题」的章节的逐条问题，
+                # `where` 不进汇总结论（串行链路按章定位，不需要它）。
+                if review is not None and review.needs_revision:
+                    for issue in review.issues:
+                        issues.append(
+                            {
+                                "section_id": section.id,
+                                "section_title": section.title,
+                                "severity": str(issue.get("severity") or "medium"),
+                                "detail": str(issue.get("detail") or ""),
+                            }
+                        )
                 # `max_rewrites` 为 0 时仍是「只审不改」的有效开关；> 0 时最多改一次
                 if (
                     review is not None
@@ -734,6 +751,9 @@ class PrdSectionWriter:
                     if trailing:
                         yield _section_chunk_event(trailing, section, index)
                     section_text = "".join(buffer).strip()
+                    # 「是否改写」如实记：只有真的产出了新正文才算改过。
+                    # 恒假会让「PRD 能不能修复」随并发度配置漂（并行链路曾硬编码 False）。
+                    rewritten = rewritten or bool(section_text)
 
             # 定稿后剥离标记块：正文落 `part` / `done.reply` / `documents.content` 三处
             # 天然不含哨兵；清单按本章节累加（id 前缀用章节 id，跨章节不重号）。
@@ -748,6 +768,26 @@ class PrdSectionWriter:
                 part = f"{clean_text}\n\n"
                 parts.append(part)
                 yield _part_event(part, section=section, index=index, total=total)
+
+        # 汇总结论：串行链路此前**不发** `review`，于是同一份 PRD 在并发度 1 与 >1
+        # 下「有没有结论」不一样——结论入库后就成了一条会随配置凭空消失的记录。
+        # 形状与并行链路一致（`review_data` 是唯一构造点），没开审核则一条都不发：
+        # 报「0 个待处理问题」会被读成「审过了、没问题」。
+        if self._review_enabled:
+            verdict = "revise" if issues else "pass"
+            conclusion = f"{total} 章完成，{len(issues)} 个待处理问题"
+            yield StreamEvent(
+                type="review",
+                content=conclusion,
+                data=review_data(
+                    "prd",
+                    verdict=verdict,
+                    summary=conclusion,
+                    issues=issues,
+                    rewritten=rewritten,
+                    failed_sections=[],
+                ),
+            )
 
         yield StreamEvent(
             type="stage",

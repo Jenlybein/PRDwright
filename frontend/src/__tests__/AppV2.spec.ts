@@ -3289,6 +3289,195 @@ describe('AppV2 的版本预览与删除', () => {
 })
 
 /**
+ * 下游过期黄条上的「一键更新」。
+ *
+ * 只跨应用外壳断言：真 router + 点按钮 + 屏幕结果（另加 `createJob` 的调用记录——
+ * 「这一份会不会被重写、写的是哪一份」最终就落在它上面）。五条行为：
+ * 有上游且过期才有按钮、点下去先确认、确认后走与该文档**现有整篇生成相同的入口**、
+ * 不连带更新下游、生成期间点不动。
+ */
+describe('AppV2 下游过期的一键更新', () => {
+  /** 造一份「基于旧版上游」的文档记录（过期判定由后端算，前端只读这个标记） */
+  function staleDocument(kind: DocumentRecord['kind'], content: string): DocumentRecord {
+    return { ...makeDocumentRecord(kind, content), stale: true }
+  }
+
+  /** 上游改过了：PRD 是新的，接口文档与提示词还停在旧版上 */
+  function staleRecords(): DocumentRecord[] {
+    return [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n改过的需求'),
+      staleDocument('api-docs', '# 接口文档\n\n## 一、概述\n旧内容'),
+      staleDocument('prompts', '# 提示词套件\n\n## 一、角色设定\n旧内容'),
+    ]
+  }
+
+  /** 打开一份「下游都过期」的方案，停在哪一页由调用方给 */
+  async function mountStale(viewState: string): Promise<VueWrapper> {
+    const wrapper = await mountExistingSolution(reviewSnapshot(viewState), 1, staleRecords())
+    await flushPromises()
+    return wrapper
+  }
+
+  it('过期的下游黄条上出现「一键更新」；PRD 没有上游，那一页没有这个入口', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      // PRD 自己也标成过期（后端不会这么做）：用来证明「有没有上游」才是判据，
+      // 而不是「那份的 stale 恰好是假」。
+      staleDocument('prd', '# 产品需求文档\n\n## 1. 项目背景\n改过的需求'),
+      staleDocument('api-docs', '# 接口文档\n\n## 一、概述\n旧内容'),
+      staleDocument('prompts', '# 提示词套件\n\n## 一、角色设定\n旧内容'),
+    ])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('上游文档已更新')
+    expect(wrapper.text()).toContain('一键更新')
+
+    // 回 PRD 审阅页：PRD 没有上游，黄条与按钮都不该出现
+    await clickStep(wrapper, 'PRD')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('一键更新')
+    expect(wrapper.text()).not.toContain('上游文档已更新')
+  })
+
+  it('点「一键更新」先弹确认：取消什么都不发生，确认后才切到这一份的生成态', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n\n## 一、概述\n', sectionId: '', index: -1 })
+        await gate
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n新上游内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+    expect(jobCount('api-docs')).toBe(0)
+
+    await clickButton(wrapper, '一键更新', true)
+    await flushPromises()
+
+    // 确认窗（Teleport 到 body）要说清两件事：用哪份上游、旧版本去哪
+    expect(document.body.textContent).toContain('当前 PRD')
+    expect(document.body.textContent).toContain('重新生成接口文档')
+    expect(document.body.textContent).toContain('旧版本保留在版本历史')
+    // 只是弹确认，还没有发起任务——「先问后做」的证据就在这一行
+    expect(jobCount('api-docs')).toBe(0)
+
+    await clickButtonInDialog('取消')
+    await nextTick()
+    expect(document.body.textContent).not.toContain('旧版本保留在版本历史')
+    expect(jobCount('api-docs')).toBe(0)
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+
+    // 再点一次，这回确认
+    await clickButton(wrapper, '一键更新', true)
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 切到这份文档的生成态：审阅页与黄条都不在了，按钮自然也不可点
+    expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
+    expect(wrapper.text()).not.toContain('一键更新')
+    // 走的是既有整篇生成入口：只起一个接口文档任务，不连带更新下游
+    expect(jobCount('api-docs')).toBe(1)
+    expect(jobCount('prompts')).toBe(0)
+    // 交给入口的上游是库里当前那一版 PRD（改过的需求），不是打开方案时的旧副本
+    expect(jobPayload('api-docs')?.prdContent).toContain('改过的需求')
+
+    release()
+    await flushPromises()
+  })
+
+  it('更新完成后这一份换成新版本，下游一律不动（它自己亮过期黄条）', async () => {
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n\n## 一、概述\n', sectionId: '', index: -1 })
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n新上游内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+
+    await clickButton(wrapper, '一键更新', true)
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 回到这一份的审阅页，正文换成新的一版（整篇生成的版本语义由后端落地：旧版进历史）
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('新上游内容')
+
+    // 只更新这一份：提示词没有被重写，也没有被前端清掉
+    expect(jobCount('prompts')).toBe(0)
+    expect(documentsOf(wrapper).contentOf('prompts')).toContain('旧内容')
+
+    // 下游自己按过期规则提示
+    await clickStep(wrapper, '提示词')
+    await flushPromises()
+    expect(wrapper.text()).toContain('上游文档已更新')
+  })
+
+  it('提示词过期时更新的是提示词套件（不回头重生成接口文档）', async () => {
+    mockJobStream({
+      prompts: async () => ({
+        conversationId: '',
+        reply: '# 提示词套件\n\n## 一、角色设定\n按新接口重写',
+        asks: [],
+      }),
+    })
+
+    const wrapper = await mountStale('review-prompts')
+    await clickButton(wrapper, '一键更新', true)
+    await flushPromises()
+
+    // 确认窗说的是这一份、以及它的两份上游
+    expect(document.body.textContent).toContain('当前 PRD 与接口文档')
+    expect(document.body.textContent).toContain('提示词套件')
+
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 目标由「眼前是哪一份」决定：错发就会静默地多花一次整篇生成
+    expect(jobCount('prompts')).toBe(1)
+    expect(jobCount('api-docs')).toBe(0)
+    // 交给生成入口的上游就是库里当前那一版 PRD（改过的需求）
+    expect(jobPayload('prompts')?.prdContent).toContain('改过的需求')
+    expect(storeOf(wrapper).viewState).toBe('review-prompts')
+    expect(documentsOf(wrapper).contentOf('prompts')).toContain('按新接口重写')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('旧内容')
+  })
+
+  it('生成中「一键更新」不可点：同一份文档只跟一个在途任务', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockJobStream({
+      optimize: async () => {
+        await gate
+        return { conversationId: '', reply: '# 接口文档\n\n优化后的内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+    // 就地优化不切阶段：审阅页、黄条与按钮都还看得见
+    await clickButton(wrapper, 'AI 优化')
+    await byId(wrapper, 'document-optimize-instruction').setValue('压缩到 500 字')
+    await clickButton(wrapper, '开始优化')
+    await flushPromises()
+
+    const busyButton = wrapper.findAll('button').find((item) => item.text().trim() === '一键更新')
+    expect(busyButton).toBeDefined()
+    expect(busyButton?.attributes('disabled')).toBeDefined()
+
+    release()
+    await flushPromises()
+
+    const idleButton = wrapper.findAll('button').find((item) => item.text().trim() === '一键更新')
+    expect(idleButton?.attributes('disabled')).toBeUndefined()
+  })
+})
+
+/**
  * 失败可见：该块界面不可用，而不是整页白屏。
  *
  * 这是「漏改不报错」根治的最后一段：前面几条用例管「当场失败」，这一条管**失败之后

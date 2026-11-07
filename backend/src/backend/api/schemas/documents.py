@@ -45,6 +45,15 @@ class DocumentItem(BaseModel):
             "两者并存；前端已有容错解析器，后端强校验只会把能显示的回执变成 500。"
         ),
     )
+    review: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "**当前版本**那一条审核结论（一版一条，形状与 SSE `review` 事件的数据一致："
+            "kind / verdict / summary / issues / rewritten / failed_sections / reviewed_at）。"
+            "`None` 表示这一版没审过或审核没跑成——**不等于通过**，界面照实标"
+            "「未审核 / 审核失败」。刷新与换会话后它是唯一来源。"
+        ),
+    )
     updated_at: str = Field(default="", description="最近更新时间（UTC ISO 8601）")
     stale: bool = Field(
         default=False,
@@ -110,6 +119,13 @@ class DocumentVersionDetail(BaseModel):
     )
     last_run_summary: dict[str, Any] | None = Field(
         default=None, description="该版本当时的用量回执；缺失为 null"
+    )
+    review: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "该版本的审核结论（一版一条）；历史版本 / 没审成时为 null（「未审核」）。"
+            "形状与 `DocumentItem.review` 相同。"
+        ),
     )
     source: str = Field(description="这一版的来源（见 DocumentVersionItem.source）")
     note: str = Field(default="", description="备注")

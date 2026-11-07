@@ -80,6 +80,13 @@ const emit = defineEmits<{
    * 按默认值决策。两者并排出现，用户不必先聊一轮才知道还有别的选择。
    */
   autoClarify: []
+  /**
+   * 过期黄条上的「一键更新」：用当前上游重新整篇生成这一份。
+   *
+   * 与「生成接口文档 / 生成提示词套件」是**同一条入口**（同一个任务种类、同一份请求体），
+   * 因此这里只说「现在就更新这一份」；上游正文由服务端取，组件不碰。
+   */
+  updateStale: []
 }>()
 
 const props = defineProps<{
@@ -147,9 +154,16 @@ const props = defineProps<{
    * 这份下游文档是否基于旧版上游。
    *
    * PRD 没有上游，恒为 false；接口文档 / 提示词由后端按内容指纹比较得出。
-   * 这里只负责展示黄条，不阻断编辑与下载。
+   * 这里只负责展示黄条（与上面的「一键更新」），不阻断编辑与下载。
    */
   stale?: boolean
+  /**
+   * 这份文档是否正被写（就地优化 / 改写这类不切阶段的动作）。
+   *
+   * 黄条上的「一键更新」在生成期间不可点：同一份文档只需要一个在途任务，
+   * 再点一次只会叠加第二个。
+   */
+  updateBusy?: boolean
   /**
    * 本次生成的审核结论。**不持久化**：只在本次生成后的内存里，刷新即失。
    * 没有（直接打开旧方案、未发生本次生成）时不渲染该区块。
@@ -250,6 +264,41 @@ function confirmAutoClarify(): void {
   emit('autoClarify')
 }
 
+/**
+ * 「一键更新」的确认弹窗是否打开。
+ *
+ * 它会用当前上游**整篇重生成**这一份（旧版本留在版本历史，但眼前这份正文会换掉），
+ * 一次点击就发生太轻了——先把「用哪份上游、旧版本去哪、下游不动」说清楚。
+ * 与「AI 自行澄清」的确认窗同一套写法：先问、后做。
+ */
+const updateConfirmOpen = ref(false)
+
+/** 要重新生成的是哪一份（确认窗文案用） */
+const updateTargetLabel = computed(() =>
+  props.viewState === 'review-prompts' ? '提示词套件' : '接口文档',
+)
+
+/**
+ * 用哪份上游重新生成。
+ *
+ * 与服务端实际取的上游同口径（C-R3：老上游正文由服务端取，前端不递），
+ * 因此这里只描述**事实**，不承诺前端传了什么。
+ */
+const updateUpstreamLabel = computed(() =>
+  props.viewState === 'review-prompts' ? '当前 PRD 与接口文档' : '当前 PRD',
+)
+
+/** 点黄条上的「一键更新」：先弹确认，不直接发任务 */
+function askUpdateStale(): void {
+  updateConfirmOpen.value = true
+}
+
+/** 确认窗里点了「重新生成」：关窗，再把动作交给上层（走该文档现有的整篇生成入口） */
+function confirmUpdateStale(): void {
+  updateConfirmOpen.value = false
+  emit('updateStale')
+}
+
 /** 用户输入的优化指令 */
 const instruction = ref('')
 
@@ -291,8 +340,14 @@ function submitOptimize(): void {
       <span>{{ error }}</span>
     </p>
 
-    <!-- 下游产物基于旧版上游：只提示，不阻断编辑与下载 -->
-    <StaleArtifactBanner v-if="stale" />
+    <!-- 下游产物基于旧版上游：只提示，不阻断编辑与下载。
+         「一键更新」用当前上游重新生成这一份；PRD 没有上游，那一页连黄条都不出现
+         ——「上游文档已更新」这句话在 PRD 上没有意义，按钮更不该有。 -->
+    <StaleArtifactBanner
+      v-if="stale && viewState !== 'review-prd'"
+      :busy="updateBusy"
+      @update="askUpdateStale"
+    />
 
     <!-- 最近一次生成的只读用量回执：耗时 / token / 请求号。
          请求号是报障时「念给维护者」的那串字，用 select-all 让它可选中复制——刻意不加按钮，
@@ -666,6 +721,32 @@ function submitOptimize(): void {
           </AppButton>
           <AppButton variant="primary" size="md" @click="confirmAutoClarify">
             开始澄清
+          </AppButton>
+        </div>
+      </template>
+    </AppDialog>
+
+    <!-- 「一键更新」的确认弹窗。
+         它会用当前上游把这一份**整篇重生成**（不是就地改）：当前正文会被新的一版替换，
+         旧版本留在版本历史里。因此先说清三件事：用哪份上游、旧版本去哪、会不会连带下游。 -->
+    <AppDialog v-model="updateConfirmOpen" :title="`重新生成${updateTargetLabel}？`">
+      <div class="space-y-3 text-sm leading-relaxed">
+        <p class="text-body">
+          将用{{ updateUpstreamLabel }} 重新生成{{ updateTargetLabel }}。当前正文会被新的一版替换。
+        </p>
+        <ul class="list-disc space-y-1.5 pl-5 text-muted">
+          <li>旧版本保留在版本历史里，完成后可以对照，也可以恢复回去。</li>
+          <li>只更新这一份：下游文档不会被连带更新，它自己会按过期规则提示。</li>
+        </ul>
+        <p class="text-xs text-subtle">会消耗一次模型调用，并切到这份文档的生成进度。</p>
+      </div>
+      <template #footer>
+        <div class="flex items-center justify-end gap-2">
+          <AppButton variant="secondary" size="md" @click="updateConfirmOpen = false">
+            取消
+          </AppButton>
+          <AppButton variant="primary" size="md" @click="confirmUpdateStale">
+            重新生成
           </AppButton>
         </div>
       </template>
