@@ -486,15 +486,9 @@ def test_migration_head_and_old_db_upgrade(isolated_db, tmp_path):  # noqa: ARG0
     try:
         cfg = _alembic_config(f"sqlite+pysqlite:///{path}")
         command.upgrade(cfg, previous)
-        conn = engine.connect()
-        before_cols = {
-            row[1] for row in conn.exec_driver_sql(
-                "PRAGMA table_info(generation_jobs)"
-            ).fetchall()
-        }
-        assert "request_params" not in before_cols
-        conn.close()
-        conn = None
+        # 「停在上一版」以 `alembic_version` 为据，不拿某一列当探针：
+        # 每加一条迁移，「上一版刚加了哪些列」都会变，列名断言会随迁移链漂。
+        assert current_revision(engine) == previous
 
         revision = prepare_schema(engine)
         assert revision == head

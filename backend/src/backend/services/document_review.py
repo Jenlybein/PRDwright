@@ -6,8 +6,9 @@
 两者共用「结构化 JSON 判定」的形态，但上下文与调用位置不同，混在一起会让
 `prd_section_writer` 的章节循环更难读。
 
-审核失败一律按「通过」处理、改写失败一律保留初稿：这两步是锦上添花，
-不能因为它们挂掉就把已经生成的正文丢掉。
+审核失败不阻断生成、改写失败保留初稿：这两步是锦上添花，不能因为它们挂掉就把已经
+生成的正文丢掉。但「不阻断」不等于「报成通过」——审核没跑成时结论判定为空串、
+落库侧不写结论（没有结论 ≠ 通过，见 ADR 0002）。
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from backend.core.clock import utc_now_text
 from backend.core.contracts import StreamEvent
 from backend.core.runtime_config import get_runtime_config
 from backend.services.doc_skeleton import (
@@ -302,6 +304,43 @@ def section_rewrite_messages(
     )
 
 
+def review_data(
+    kind: str,
+    *,
+    verdict: str,
+    summary: str,
+    issues: list[dict[str, Any]] | None = None,
+    rewritten: bool = False,
+    failed_sections: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """构造审核结论的数据形状——**事件与入库共用同一份**。
+
+    为什么必须有这一个函数：SSE 的 `review` 事件负责订阅期间的即时展示，落库那条
+    才是刷新 / 换设备后的唯一来源。两处各拼一份 dict 的后果不是报错，而是「同一次
+    审核在界面上与刷新后长得不一样」——那种偏差只能靠人眼发现。
+
+    Args:
+        kind: 产物类型（`prd` / `api_docs` / `prompts`）。
+        verdict: `pass` / `revise`；**空串表示没审成**（不是通过）。
+        summary: 一句话结论。
+        issues: 逐条问题与严重度。
+        rewritten: 本次是否真的执行了改写。
+        failed_sections: 生成失败的章节（PRD 并行链路才会非空）。
+
+    Returns:
+        可 JSON 序列化的结论对象，含审核时间 `reviewed_at`（UTC ISO 8601）。
+    """
+    return {
+        "kind": kind,
+        "verdict": verdict,
+        "summary": summary,
+        "issues": list(issues or []),
+        "rewritten": bool(rewritten),
+        "failed_sections": list(failed_sections or []),
+        "reviewed_at": utc_now_text(),
+    }
+
+
 def review_event(
     kind: str,
     review: DocumentReviewResult | None,
@@ -309,21 +348,37 @@ def review_event(
     rewritten: bool = False,
     failed_sections: list[dict[str, Any]] | None = None,
 ) -> StreamEvent:
-    """构造不持久化的 `review` 事件（前端只在本次订阅内展示）。"""
-    verdict = review.verdict if review else "pass"
-    issues = review.issues if review else []
-    summary = review.summary() if review else "审核未完成，按通过处理"
+    """构造 `review` 事件（订阅期间的即时展示；落库另走收尾）。
+
+    `review is None` 表示**没审成**：判定给空串、总结说「审核未完成」。
+    它**绝不能报成 `pass`**——把失败伪装成通过是最误导人的一条假记录，
+    而落库侧也据此不写结论（没有结论 ≠ 通过，界面标「审核失败」）。
+    """
+    if review is None:
+        summary = "审核未完成"
+        return StreamEvent(
+            type="review",
+            content=summary,
+            data=review_data(
+                kind,
+                verdict="",
+                summary=summary,
+                rewritten=rewritten,
+                failed_sections=failed_sections,
+            ),
+        )
+    summary = review.summary()
     return StreamEvent(
         type="review",
         content=summary,
-        data={
-            "kind": kind,
-            "verdict": verdict,
-            "summary": summary,
-            "issues": issues,
-            "rewritten": rewritten,
-            "failed_sections": failed_sections or [],
-        },
+        data=review_data(
+            kind,
+            verdict=review.verdict,
+            summary=summary,
+            issues=review.issues,
+            rewritten=rewritten,
+            failed_sections=failed_sections,
+        ),
     )
 
 
@@ -648,7 +703,7 @@ async def stream_review_and_rewrite(
     - `stage(reviewing)` → 若干 `stage_chunk`（审核意见原文）
     - 需要改写时 `stage(rewriting)` → 若干 `stage_chunk`（改写稿原文）
     - 改写成功时 `part{replace}`（定稿正文，整段覆盖初稿）
-    - 末尾一条 `review`（结论，不持久化）
+    - 末尾一条 `review`（结论；订阅期间即时展示，收尾时随正文一起落库）
 
     改写优先走**分节改写**（只重写受影响的章节），定位不到或面太大时退回整篇重写
     （见 `plan_section_rewrites`）。
