@@ -27,6 +27,7 @@ import type {
   EntryMode,
   JobSnapshot,
   RequirementsSummary,
+  ReviewConclusion,
   RunSummary,
   StreamDocumentPart,
   StreamStageEvent,
@@ -673,12 +674,14 @@ function makeDocumentRecord(
   content: string,
   runSummary: RunSummary | null = null,
   pendingItems: DocumentRecord['pendingItems'] = [],
+  review: DocumentRecord['review'] = null,
 ): DocumentRecord {
   return {
     kind,
     content,
     runSummary,
     pendingItems,
+    review,
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
     derivedFrom: null,
@@ -3529,6 +3532,156 @@ describe('AppV2 错误边界：子组件渲染失败时该块界面不可用', (
  * 注入方式：先登记一行**填全**的第五入口（入口页会把每一行都查一遍才画卡片，半填的行连卡片
  * 都画不出来），等卡片已经出现在屏幕上，再抽掉一列：卡片看得见、点得着，一点就炸。
  */
+/**
+ * 审阅页的「审核结论」面板（票 #55）：四态 + 重新审核。
+ *
+ * 只跨应用外壳：真 router + 点按钮 + 屏幕结果。结论的数据来源是**文档记录**
+ * （`fetchDocuments` 返回的 `review`），所以「刷新后仍在」在这条缝上就是
+ * 「打开方案时后端把那条结论一起返回了」——不依赖任何一次订阅。
+ */
+describe('审阅页的审核结论面板：四态与重新审核', () => {
+  /** 一条结论（形状与后端 `review_data` 一致） */
+  function conclusion(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
+    return {
+      kind: 'prd',
+      verdict: 'pass',
+      summary: '6 章完成，0 个待处理问题',
+      issues: [],
+      rewritten: false,
+      failedSections: [],
+      ...overrides,
+    }
+  }
+
+  const REVISE = (): ReviewConclusion =>
+    conclusion({
+      verdict: 'revise',
+      summary: '1 个待处理问题',
+      issues: [{ severity: 'high', detail: '编造了鉴权方式' }],
+    })
+
+  const REVIEW_STATE: Record<DocumentRecord['kind'], string> = {
+    prd: 'review-prd',
+    'api-docs': 'review-api-docs',
+    prompts: 'review-prompts',
+  }
+
+  /** 打开某份文档的审阅页；`review` 是后端随文档记录返回的那条结论 */
+  async function mountReviewPage(
+    kind: DocumentRecord['kind'],
+    review: ReviewConclusion | null,
+    content = '# 文档正文\n\n## 一、概述\n内容',
+  ): Promise<VueWrapper> {
+    const wrapper = await mountExistingSolution(reviewSnapshot(REVIEW_STATE[kind]), 1, [
+      makeDocumentRecord(kind, content, null, [], review),
+    ])
+    await flushPromises()
+    return wrapper
+  }
+
+  /** 折叠头上的「重新审核」按钮（与展开开关是同一行上的两枚不同按钮） */
+  function rereviewButton(wrapper: VueWrapper): DOMWrapper<Element> {
+    const button = wrapper.findAll('button').find((item) => item.text().trim() === '重新审核')
+    if (!button) throw new Error('未找到「重新审核」按钮')
+    return button
+  }
+
+  it('四态各自可见：通过 / 有问题 / 审核失败 / 未审核，且没结论不等于通过', async () => {
+    // ① 通过（结论来自文档记录，因此刷新后还在——这条用例本来就是「重新打开」）
+    const passed = await mountReviewPage('prd', conclusion())
+    expect(passed.text()).toContain('审核结论')
+    expect(passed.text()).toContain('通过')
+
+    // ② 有问题
+    const revised = await mountReviewPage('prd', REVISE())
+    expect(revised.text()).toContain('有问题')
+    expect(revised.text()).not.toContain('通过')
+    expect(revised.text()).toContain('1 个待处理问题')
+
+    // ③ 未审核：没有结论也渲染面板——否则「没有面板」会被读成「没问题」
+    const unreviewed = await mountReviewPage('api-docs', null)
+    expect(unreviewed.text()).toContain('审核结论')
+    expect(unreviewed.text()).toContain('未审核')
+    expect(unreviewed.text()).not.toContain('通过')
+
+    // ④ 审核失败：起一次重审、任务失败 → 面板显示「审核失败」，绝不冒充通过
+    let wrapper: VueWrapper | null = null
+    mockJobStream({
+      review: async () => {
+        throw new Error('审核上游挂了')
+      },
+    })
+    // 上一版结论是「通过」：失败之后仍要显示「审核失败」，不能用旧结论回答问题
+    wrapper = await mountReviewPage('api-docs', conclusion({ kind: 'api_docs' }))
+    await clickButton(wrapper, '重新审核')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('审核失败')
+    expect(wrapper.text()).not.toContain('通过')
+    wrapper.unmount()
+  })
+
+  it('「有问题」时重新审核不可点，其余三种状态都可点', async () => {
+    const passed = await mountReviewPage('prd', conclusion())
+    expect(rereviewButton(passed).attributes('disabled')).toBeUndefined()
+
+    const unreviewed = await mountReviewPage('prd', null)
+    expect(rereviewButton(unreviewed).attributes('disabled')).toBeUndefined()
+
+    const revised = await mountReviewPage('prd', REVISE())
+    expect(rereviewButton(revised).attributes('disabled')).toBeDefined()
+    // 「有问题」时的解释写在面板里（只靠 title 太隐蔽），且**不**渲染修复按钮（那是另一票）
+    const toggle = revised.findAll('button').find((item) => item.text().includes('审核结论'))
+    if (!toggle) throw new Error('未找到结论面板的展开开关')
+    await toggle.trigger('click')
+    expect(revised.text()).toContain('把它们修好之后再来重新审核')
+    expect(revised.findAll('button').some((item) => item.text().trim() === '修复')).toBe(false)
+  })
+
+  it('点「重新审核」：只带 docKind，期间在生成态，收尾回审阅页并换上新的结论', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    // 结论里的 `kind` 是后端口径（下划线），它决定这条结论记到哪一份文档上
+    const refreshed = conclusion({
+      kind: 'api_docs',
+      verdict: 'revise',
+      summary: '1 个待处理问题',
+      issues: [{ severity: 'high', detail: '编造了鉴权方式' }],
+    })
+    let wrapper: VueWrapper | null = null
+    let stateDuringRun = ''
+
+    mockJobStream({
+      review: async (handlers) => {
+        // 运行期间应当停在这份文档的**生成态**（用户看得见进展）
+        stateDuringRun = wrapper ? storeOf(wrapper).viewState : ''
+        handlers.onReview?.(refreshed)
+        return { conversationId: '', reply: '', asks: [] }
+      },
+    })
+
+    wrapper = await mountReviewPage('api-docs', null, BODY)
+    // 任务收尾会重新拉一次文档：把「重审后的结论」摆进后端那份记录里
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeDocumentRecord('api-docs', BODY, null, [], refreshed),
+    ])
+
+    await clickButton(wrapper, '重新审核')
+    await flushPromises()
+
+    // 请求体只表达「做什么、对哪一份」：正文与上游由服务端从库里取（C-R3）
+    const payload = jobPayload('review')
+    expect(payload?.docKind).toBe('api-docs')
+    expect(payload?.document).toBeUndefined()
+
+    expect(stateDuringRun).toBe('generating-api-docs')
+    // 收尾回到审阅页，并且换成重审后的那条结论
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(wrapper.text()).toContain('有问题')
+    // 正文逐字未变（重审只审不改）
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(BODY)
+  })
+})
+
 describe('AppV2 错误边界：外壳接缝上失败也不静默', () => {
   it('第五个入口一点就当场失败 → 屏幕出现「暂时不可用」，而不是「点了没反应」', async () => {
     const key = 'fifth-entry' as EntryMode

@@ -91,6 +91,8 @@
 - 交付：`GET /api/solutions/{id}/export` → ZIP = 三份 md + `README.md`；只导用户看得见的；目录名必须消毒（`_safe_name` 抹 `..`、拦 `con` / `nul`）；上限 50MB、CSV 带 BOM。
 - 上游正文变化（含手改，按 `content_sha`）只让下游 `stale=true` 亮黄条：不删除、仍可交付、只汇总提示不硬拦。
 - 接口 / 提示词：整篇生成 → 审一次 → 有问题改写一次；**审核结论随版本保存、一版一条**，SSE `review` 只负责订阅期间的即时展示，刷新后从文档接口读；**审核失败不写结论**（没有结论 ≠ 通过，界面标「审核失败」）。面板在「待确认问题」之下、正文之上（`ReviewConclusionPanel`），四态：通过 / 有问题 / 审核失败 / 未审核；「修复」只在「有问题」可点，「重新审核」只在失败 / 未审核 / 通过可点。
+- 结论面板的数据源是**文档记录**（`DocumentRecord.review`），`review` 事件只做即时更新（`documents.setReview` / `setReviewFailed`）；解析器唯一实现是 `frontend/src/utils/review.ts::parseReview`（`services/api.ts` 只再导出，`documentService` 直接从 utils 引——反向 import `api` 会成环）。「审核失败」是**会话内**状态（`documents.reviewFailures`）：库里没有这条记录，失败后刷新会退化成「未审核」或上一次那条，别把它伪造成落库事实。
+- 重新审核（`kind=review`）= 只审不改的独立任务：输入由 `job_inputs._review_inputs` 取（`document` 是被审正文 + 与生成同一套上游），PRD 走 `PrdSectionWriter.review_document` 逐章审当前正文并汇总，接口 / 提示词走 `document_review.stream_review_only`；收尾走 `document_store.commit_review`（只写当前版本的 `review` 列）。**审核失败判任务失败、绝不按通过处理**——生成链路那条「审核失败按通过」的口径不适用于「唯一的产出就是判定」的重审。
 - 澄清提问上限 1-2 个，两处落点必须同步改：后端 `conversation_service.REQUIREMENTS_WRAPPER`（首轮开场白，是最后一条 user 消息）+ 前端 `useClarificationChat.ts::CLARIFICATION_SYSTEM_PROMPT`（开场白更靠后更具体、会盖过系统提示词）；口径由 `test_conversation_prompt.py` 锁死。
 - MVP 留空时按 `ui_pages` 推断候选功能清单，逐条在功能点名称后加「（建议）」，优先级 / 验收写「待确认」，`ui_pages` 也为空才退回「待确认」；改这条要同时改 5 处（`writing-rules.md §4`、`prd-template.md 2.1/6.1`、`SKILL.md` 阶段一/四、`field-schema.json` 的 `mvp_features.description`、`prd_section_writer.py` 的 `features` / `scope` / `pending` 三处 `focus`）。
 - 未填的题由 `format_form_data` 在已答项后汇总一行「以下题目用户未填写：…」，空串与「键不存在」同等看待；配置读不出来记 warning（降级要看得见）。

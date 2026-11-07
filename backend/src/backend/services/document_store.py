@@ -20,6 +20,8 @@
   就地改当前版本，不新增条目、不删下游；但正文 + 清单 + 回执仍是同批替换——
   它们产自同一次模型调用栈，分开写就会各自漂移。
 - `checkpoint` / `restore`：用户主动「存为新版本」/「恢复某一版」。两者都**追加新版本**。
+- `commit_review`：**重新审核**的收尾。只更新当前版本的 `review` 列，
+  不追加版本、不改正文、不动清单与回执（ADR 0002 第 2 条）。
 
 ## 事务（v6 / T16.7）
 
@@ -218,6 +220,38 @@ def commit_generated(
 # ---------------------------------------------------------------------------
 # 版本链：读列表 / 读详情 / 打里程碑 / 恢复
 # ---------------------------------------------------------------------------
+
+
+def commit_review(
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    review: dict[str, Any],
+) -> dict[str, Any] | None:
+    """**重新审核**收尾：只更新当前版本的审核结论（不追加版本、不动正文）。
+
+    为什么单独一个入口而不是复用 `commit_generated`：后者的语义是「写正文」——它要么追加
+    版本，要么就地重写正文，两条路都会改变「这一版是什么」。重审只刷新这一版的一条判定，
+    正文与清单一个字都不该动（ADR 0002 第 2 条）。
+
+    Args:
+        owner_id: 文档所属用户。
+        solution_id: 文档所属方案。
+        kind: 产物类型（`prd` / `api_docs` / `prompts`）。
+        review: 本次结论（形状与 SSE `review` 事件的数据一致，见 `document_review.review_data`）。
+
+    Returns:
+        更新后的文档；方案不可见、或这一份还没有任何正文（无当前版本）时返回 None
+        ——没有正文就没有「被审的那一版」，写一条无主结论只会让读侧以为审过。
+    """
+    review_json = json.dumps(review, ensure_ascii=False)
+    with session_scope() as session:
+        ok = DocumentRepository(session).replace_current_review(
+            owner_id, solution_id, kind, review=review_json
+        )
+        if not ok:
+            return None
+        return _read_document(session, owner_id, solution_id, kind)
 
 
 def list_versions(owner_id: int, solution_id: int, kind: str) -> list[dict[str, Any]]:

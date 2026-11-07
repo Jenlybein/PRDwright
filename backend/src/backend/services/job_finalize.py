@@ -279,9 +279,16 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
 
     写库本身出意外也只记日志：正文已经在 `generation_jobs.draft_content` 里存了一份，
     丢的只是「升格成文档」这一步，不该把整个任务判失败。
+
+    **重新审核（`kind='review'`）走另一条分支**：它不产出正文，成功收尾要做的是
+    「把结论写进被审的那一版」，而不是「写正文」。两条分支共用同一个收尾入口，
+    因此「什么时候写库」只有一处判断（见 `_write_review`）。
     """
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
+        return
+    if runtime.kind == "review":
+        _write_review(runtime, kind)
         return
     content = runtime.final_reply
     if not content.strip():
@@ -323,6 +330,57 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             "生成任务收尾未能写入文档（方案不存在或归属不符）",
             extra={
                 "event": "job.document_write_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+
+
+def _write_review(runtime: JobRuntime, kind: str) -> None:
+    """重新审核收尾：把结论写进**当前版本**的 `review` 列（不追加版本、不改正文）。
+
+    三处与 `_write_document` 一致的口径：
+
+    - **没有结论就不写**（`runtime.review is None`）：审核没跑成不是「通过」，
+      写个占位就是一条假记录（C-R1）；
+    - 归属不符（方案已删 / 不是本人的）静默跳过，不把成功的任务判失败；
+    - 写库出意外只记日志——结论丢一次比把任务判失败更可取，用户重审一次即可。
+
+    与写正文的差别是**没有正文可写**：这一步不看 `runtime.final_reply`，
+    重审链路本来就不产出正文（只产结论）。
+    """
+    if runtime.review is None:
+        logger.warning(
+            "重新审核没有给出结论，本次不写入（没有结论 ≠ 通过）",
+            extra={
+                "event": "job.review_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+        return
+    try:
+        written = document_store.commit_review(
+            runtime.owner_id, runtime.solution_id, kind, runtime.review
+        )
+    except Exception:  # noqa: BLE001 - 落结论不该把已成功的任务判失败
+        logger.warning(
+            "重新审核结论写入失败",
+            extra={
+                "event": "job.review_write_failed",
+                "job_id": runtime.job_id,
+                "kind": kind,
+            },
+            exc_info=True,
+        )
+        return
+    if written is None:
+        logger.warning(
+            "重新审核结论未能写入（方案不存在、归属不符或这一份还没有正文）",
+            extra={
+                "event": "job.review_write_skipped",
                 "job_id": runtime.job_id,
                 "kind": kind,
                 "solution_id": runtime.solution_id,

@@ -24,7 +24,13 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { DocumentsNotFoundError, fetchDocuments, saveDocument } from '@/services/documentService'
-import type { DerivedFrom, DocumentKind, PendingItem, RunSummary } from '@/types'
+import type {
+  DerivedFrom,
+  DocumentKind,
+  PendingItem,
+  ReviewConclusion,
+  RunSummary,
+} from '@/types'
 
 /** 手改的防抖时长：比方案快照短一些，让「保存」这件事显得更跟手 */
 export const DOCUMENT_SAVE_DEBOUNCE_MS = 800
@@ -53,6 +59,16 @@ function emptyDerived(): Record<DocumentKind, DerivedFrom | null> {
   return { prd: null, 'api-docs': null, prompts: null }
 }
 
+/** 三种产物「当前版本的审核结论」的空值（null = 未审核） */
+function emptyReviews(): Record<DocumentKind, ReviewConclusion | null> {
+  return { prd: null, 'api-docs': null, prompts: null }
+}
+
+/** 三种产物「本次会话里最近一次审核没跑成」的空值 */
+function emptyReviewFailures(): Record<DocumentKind, boolean> {
+  return { prd: false, 'api-docs': false, prompts: false }
+}
+
 export const useDocumentsStore = defineStore('documents', () => {
   /** 三份正文的工作副本 */
   const contents = ref<Record<DocumentKind, string>>(emptyContents())
@@ -73,6 +89,27 @@ export const useDocumentsStore = defineStore('documents', () => {
 
   /** 三份文档的上游锚点（用于提示条上说明「基于哪一版」） */
   const derivedFrom = ref<Record<DocumentKind, DerivedFrom | null>>(emptyDerived())
+
+  /**
+   * 三份文档**当前版本**的审核结论（一版一条）。
+   *
+   * 它是审阅页结论面板的**唯一真源**：随 `GET .../documents` 返回，因此刷新、换设备、
+   * 重连之后读到的仍是同一条。订阅期间收到的 `review` 事件只做**即时更新**
+   * （`setReview`）——落库发生在任务收尾，晚一步才出现在下一次 `loadAll` 里。
+   */
+  const reviews = ref<Record<DocumentKind, ReviewConclusion | null>>(emptyReviews())
+
+  /**
+   * 三份文档「本次会话里最近一次审核没跑成」。
+   *
+   * 为什么它不是持久化数据：审核失败**不写结论**（C-R1：没有结论 ≠ 通过），所以库里
+   * 没有「失败」这一条记录可读。界面要区分「未审核」与「审核失败」，只能靠这一次会话
+   * 里亲眼看到的失败（任务报错，或 `review` 事件给的是空判定）。
+   *
+   * 因此刷新之后它会退化成「未审核」——那是库里的真话，不是丢信息：
+   * 真的失败过，重审一次就好；而把旧结论冒充成本次结果才是误导。
+   */
+  const reviewFailures = ref<Record<DocumentKind, boolean>>(emptyReviewFailures())
 
   /** 这批内容属于哪份方案；`null` 表示还没有归属（新建中） */
   const solutionId = ref<number | null>(null)
@@ -166,12 +203,14 @@ export const useDocumentsStore = defineStore('documents', () => {
       const nextPending = emptyPending()
       const nextStale = emptyStale()
       const nextDerived = emptyDerived()
+      const nextReviews = emptyReviews()
       for (const record of records) {
         nextContents[record.kind] = record.content
         nextSummaries[record.kind] = record.runSummary
         nextPending[record.kind] = record.pendingItems
         nextStale[record.kind] = record.stale
         nextDerived[record.kind] = record.derivedFrom
+        nextReviews[record.kind] = record.review
       }
       // 尚未落库的手改优先：它们在时间上更新于这次响应
       for (const [kind, content] of pending) nextContents[kind] = content
@@ -180,6 +219,7 @@ export const useDocumentsStore = defineStore('documents', () => {
       pendingItems.value = nextPending
       stale.value = nextStale
       derivedFrom.value = nextDerived
+      reviews.value = nextReviews
     } catch (error) {
       if (token !== loadToken) return
       if (error instanceof DocumentsNotFoundError) {
@@ -188,6 +228,8 @@ export const useDocumentsStore = defineStore('documents', () => {
         pendingItems.value = emptyPending()
         stale.value = emptyStale()
         derivedFrom.value = emptyDerived()
+        reviews.value = emptyReviews()
+        reviewFailures.value = emptyReviewFailures()
       }
       saveError.value = error instanceof Error ? error.message : '无法读取文档'
     } finally {
@@ -235,6 +277,31 @@ export const useDocumentsStore = defineStore('documents', () => {
    */
   function markContentWritten(): void {
     contentWriteTick.value += 1
+  }
+
+  // ------------------------------------------------------------------
+  // 审核结论（订阅期间的即时更新；落库那条以 `loadAll` 为准）
+  // ------------------------------------------------------------------
+
+  /**
+   * 收到一条**真正跑出来的**结论（`pass` / `revise`）：立刻显示，并清掉「上次没跑成」。
+   *
+   * 它是 `review` 事件的落点——落库发生在任务收尾，比这条事件晚一步；不即时更新的话，
+   * 用户要等一次 `reload` 往返才看得到结论（表现是「审核完了，面板还是空的」）。
+   */
+  function setReview(kind: DocumentKind, review: ReviewConclusion): void {
+    reviews.value[kind] = review
+    reviewFailures.value[kind] = false
+  }
+
+  /**
+   * 记一次**没跑成**的审核（`review` 事件判定为空串，或重审任务失败）。
+   *
+   * 不写结论：库里没有「失败」这一条（C-R1），这条标记只活在本会话里，
+   * 作用是把界面从「未审核」改成「审核失败」，别让用户把没审过的当成审过了。
+   */
+  function setReviewFailed(kind: DocumentKind): void {
+    reviewFailures.value[kind] = true
   }
 
   /**
@@ -337,6 +404,8 @@ export const useDocumentsStore = defineStore('documents', () => {
     pendingItems.value = emptyPending()
     stale.value = emptyStale()
     derivedFrom.value = emptyDerived()
+    reviews.value = emptyReviews()
+    reviewFailures.value = emptyReviewFailures()
     solutionId.value = null
     saveError.value = ''
     // 让在途的加载结果作废：它的响应属于上一份方案，落地会把空内容又填回去
@@ -370,6 +439,16 @@ export const useDocumentsStore = defineStore('documents', () => {
     return derivedFrom.value[kind]
   }
 
+  /** 某份文档当前版本的审核结论；`null` 表示这一版没审过（不等于通过） */
+  function reviewOf(kind: DocumentKind): ReviewConclusion | null {
+    return reviews.value[kind]
+  }
+
+  /** 本次会话里，这份文档最近一次审核是否**没跑成** */
+  function reviewFailedOf(kind: DocumentKind): boolean {
+    return reviewFailures.value[kind]
+  }
+
   const hasPrd = computed(() => contents.value.prd.trim() !== '')
   const hasApiDocs = computed(() => contents.value['api-docs'].trim() !== '')
   const hasPrompts = computed(() => contents.value.prompts.trim() !== '')
@@ -384,6 +463,8 @@ export const useDocumentsStore = defineStore('documents', () => {
     pendingItems,
     stale,
     derivedFrom,
+    reviews,
+    reviewFailures,
     solutionId,
     loading,
     saveError,
@@ -399,6 +480,8 @@ export const useDocumentsStore = defineStore('documents', () => {
     setLocal,
     save,
     markContentWritten,
+    setReview,
+    setReviewFailed,
     flushPendingSave,
     hasPendingSave,
     clear,
@@ -408,5 +491,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     pendingItemsOf,
     staleOf,
     derivedFromOf,
+    reviewOf,
+    reviewFailedOf,
   }
 })

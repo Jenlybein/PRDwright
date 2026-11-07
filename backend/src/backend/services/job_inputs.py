@@ -26,10 +26,13 @@
 - PRD → 方案上的结构化需求摘要、快捷流程的自由文本需求、需求澄清线程（`requirement`）；
 - 按澄清结果改写 → 该文档那条澄清线程（`prd-clarify` / `api-docs-clarify` /
   `prompts-clarify`）；
-- 导入入口（我有 PRD / 我有 PRD + 接口文档）→ 方案上保存的录入文本列。
+- 导入入口（我有 PRD / 我有 PRD + 接口文档）→ 方案上保存的录入文本列；
+- 重新审核 → 被审的那一份当前正文 + 与生成时同一份上游材料（只审不改，见 ADR 0002）。
 
 **取不到就 400**：请求体里那一份不再参与（#53 的过渡兜底在本票删除），否则双真源
-只是换了个地方复活。
+只是换了个地方复活。唯一的例外是「重新审核的**上游**」：它只是判定时的对照材料，
+缺了还能按「仅依据正文与写作规范核对」降级（见 `_review_inputs`）——而「旧方案也能补审」
+是明确的用户故事，不该被一条与生成共用的硬校验挡在门外。
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ DOCUMENT_KINDS: tuple[str, ...] = (
     "optimize",
     "clarify",
     "auto_clarify",
+    "review",
 )
 
 # 任务种类 → 给人看的名字（缺材料时的提示要能直接读懂缺的是哪一步）。
@@ -66,6 +70,7 @@ _KIND_LABELS: dict[str, str] = {
     "optimize": "文档优化",
     "clarify": "按澄清结果改写",
     "auto_clarify": "AI 自行澄清",
+    "review": "重新审核",
 }
 
 # 文档类型 → 它自己的那条澄清线程（四条线程之一，见 `core/chat_kinds.py`）。
@@ -73,6 +78,13 @@ _CLARIFY_STAGES: dict[str, str] = {
     "prd": "prd-clarify",
     "api_docs": "api-docs-clarify",
     "prompts": "prompts-clarify",
+}
+
+# 产物类型 → 给人看的名字（「这一份还没有正文」这类提示要能直接读懂说的是谁）。
+_DOC_KIND_LABELS: dict[str, str] = {
+    "prd": "PRD",
+    "api_docs": "接口文档",
+    "prompts": "提示词套件",
 }
 
 # 需求澄清线程的标识（PRD 的上游之一）。
@@ -110,13 +122,14 @@ def resolve_runtime_inputs(
 
     只认文档类任务：`chat` 返回空（它的上下文由对话服务从轮次表拼）。`optimize` /
     `auto_clarify` 的输入（要改的那份正文、指令、清单）仍由调用方给——它们描述的是
-    「这一次要做什么」，不是「上游是谁」。
+    「这一次要做什么」，不是「上游是谁」。`clarify` 的对话记录与 `review` 的被审正文
+    同属上游，一律在这里取。
 
     Args:
         kind: 任务种类。
         owner_id: 当前用户；读取一律带它，越权与不存在等价。
         solution_id: 方案 id；文档类任务必填，缺了就是 400。
-        doc_kind: 目标产物（`clarify` 用它定位澄清线程）。
+        doc_kind: 目标产物（`clarify` 用它定位澄清线程，`review` 用它决定审哪一份）。
 
     Raises:
         AppError: 缺方案（`INVALID_REQUEST`）、方案不可见（`SOLUTION_NOT_FOUND`）、
@@ -138,6 +151,8 @@ def resolve_runtime_inputs(
         return _prompts_inputs(owner_id, solution_id)
     if kind == "clarify":
         return {"history": _clarify_history(owner_id, solution_id, doc_kind)}
+    if kind == "review":
+        return _review_inputs(owner_id, solution_id, doc_kind)
     return {}
 
 
@@ -162,11 +177,24 @@ def prd_requirement_text(resolved: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _picked_prd(contents: dict[str, str], solution: _SolutionInputs) -> str:
+    """上游 PRD 的取法（**不校验**）：库内当前版本优先，其次方案上保存的录入文本。
+
+    单独一格是给「重新审核」用的：那里上游只是对照材料，缺了按降级处理而不是 400。
+    """
+    return _first_non_empty(contents.get("prd", ""), solution.pasted_prd)
+
+
+def _picked_api_docs(contents: dict[str, str], solution: _SolutionInputs) -> str:
+    """上游接口文档的取法（可选材料）：库内当前版本优先，其次方案上的录入文本。"""
+    return _first_non_empty(contents.get("api_docs", ""), solution.pasted_api_docs)
+
+
 def _upstream_prd(owner_id: int, solution_id: int, label: str) -> str:
     """接口文档 / 提示词的上游 PRD：库内当前版本 → 方案上的录入文本 → 400。"""
     contents = _document_contents(owner_id, solution_id)
     solution = _require_solution(owner_id, solution_id)
-    prd = _first_non_empty(contents.get("prd", ""), solution.pasted_prd)
+    prd = _picked_prd(contents, solution)
     if not prd:
         raise AppError(
             ErrorCode.INVALID_REQUEST,
@@ -184,7 +212,7 @@ def _prompts_inputs(owner_id: int, solution_id: int) -> dict[str, Any]:
     """
     contents = _document_contents(owner_id, solution_id)
     solution = _require_solution(owner_id, solution_id)
-    prd = _first_non_empty(contents.get("prd", ""), solution.pasted_prd)
+    prd = _picked_prd(contents, solution)
     if not prd:
         raise AppError(
             ErrorCode.INVALID_REQUEST,
@@ -194,10 +222,65 @@ def _prompts_inputs(owner_id: int, solution_id: int) -> dict[str, Any]:
     return {
         "prd_content": prd,
         # 可选材料：取不到就是空串，生成按「只有 PRD」处理（与从前口径一致）
-        "api_docs_content": _first_non_empty(
-            contents.get("api_docs", ""), solution.pasted_api_docs
-        ),
+        "api_docs_content": _picked_api_docs(contents, solution),
     }
+
+
+def _review_inputs(
+    owner_id: int, solution_id: int, doc_kind: str | None
+) -> dict[str, Any]:
+    """重新审核的输入：**被审的那一份当前正文** + 它比对用的上游材料。
+
+    `document` 一格是被审的正文；它与「上游材料」不同——不参与生成本身，只作为审核对象。
+    **取不到就直接 400**：没有正文就没有「被审的那一版」，结论也无处可写
+    （`document_store.commit_review` 写的是当前版本上的那一列）。这里刻意**不**回退到
+    方案上的录入文本：那份材料还没有变成任何一版正文，审它等于给一条不存在的正文发结论。
+
+    上游材料按三份产物各自的口径取（C-R3：只来自服务端）：
+
+    - PRD → 结构化摘要 / 自由文本需求 + 需求澄清历史（按章重审要拿它核对「有没有编造」）；
+    - 接口文档 → PRD 当前版本全文（其次方案上的录入文本）；
+    - 提示词 → PRD 与接口文档当前版本全文（其次方案上的录入文本）。
+
+    与生成的区别只有一点：**上游缺失不 400**。重审的产出是「这一版被审成什么样」，
+    上游只是对照材料；缺了它会按「仅依据正文与写作规范核对」降级（提示词里写明），
+    而「历史方案也能补审」是明确的用户故事，不该被生成侧那条硬校验挡在门外。
+    """
+    kind = str(doc_kind or "")
+    if kind not in ("prd", "api_docs", "prompts"):
+        # 措辞与 `clarify` 的同名校验一致：不猜默认产物，猜错等于把结论记到别人头上
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "重新审核必须指定 doc_kind（prd / api_docs / prompts）",
+        )
+
+    contents = _document_contents(owner_id, solution_id)
+    solution = _require_solution(owner_id, solution_id)
+    document = _first_non_empty(contents.get(kind, ""))
+    if not document:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"{_DOC_KIND_LABELS.get(kind, kind)}还没有正文，无法重新审核。"
+            "请先生成这一份文档，再来审阅页重审。",
+        )
+
+    inputs: dict[str, Any] = {"document": document}
+    if kind == "prd":
+        # 需求输入整条链路都可能为空（导入的历史方案）：给了就用，没给就留空降级
+        history = _thread_history(owner_id, solution_id, _REQUIREMENT_STAGE)
+        inputs.update(
+            {
+                "summary": solution.summary,
+                "requirements": str(solution.quick_requirements or ""),
+                "product_name": solution.quick_product_name,
+                "history": history or None,
+            }
+        )
+    else:
+        inputs["prd_content"] = _picked_prd(contents, solution)
+        if kind == "prompts":
+            inputs["api_docs_content"] = _picked_api_docs(contents, solution)
+    return inputs
 
 
 def _prd_inputs(owner_id: int, solution_id: int) -> dict[str, Any]:

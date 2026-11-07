@@ -47,6 +47,7 @@ import {
   documentKindOfChatStage,
   entrySpecForDisplay,
   fromBackendJobKind,
+  fromBackendKind,
   generatingStateFor,
   hasDocumentReview,
   jobDocumentKind,
@@ -217,12 +218,30 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const docStageText = previewField('stageText')
 
   /**
-   * 本次生成的审核结论。
+   * 当前审阅阶段那份文档的**审核结论**（当前版本那一条）。
    *
-   * **只在内存里**：后端不发 `run_summary` 之外的第二份、也不落库；刷新后不会补发，
-   * 结论随之消失。这样「结论不持久化」不需要任何清理逻辑，只靠不存储即可。
+   * 来源是**文档记录**（`documents.review`），不是某一次订阅：刷新、换设备、重连之后
+   * 读到的仍是同一条。订阅期间的 `review` 事件只负责即时更新同一个格子
+   * （见 `handleReview`）——因此「流里看到的」与「刷新后看到的」是同一份数据。
+   *
+   * 与 `runSummary` / `pendingItems` 同一口径：由 `viewState` 反推产物种类；
+   * 非审阅态返回 `null`（那时不展示结论面板）。
    */
-  const reviewConclusion = previewField('review')
+  const reviewConclusion = computed<ReviewConclusion | null>(() => {
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.reviewOf(kind) : null
+  })
+
+  /**
+   * 这份文档本次会话里**最近一次审核没跑成**。
+   *
+   * 它不是一个持久化事实（审核失败不写结论，见 C-R1），而是「我刚亲眼看到它失败了」：
+   * 面板据此把「未审核」改成「审核失败」，免得没审过的文档被当成审过了。
+   */
+  const reviewFailed = computed<boolean>(() => {
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.reviewFailedOf(kind) : false
+  })
 
   /**
    * 分章节生成的看板；不是 PRD 生成态时恒为 `null`。
@@ -490,9 +509,22 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     runs.resetPreview()
   }
 
-  /** 审核结论：只存内存，供审阅页展示；刷新后自然消失。 */
+  /**
+   * 收到一条 `review` 事件：**即时更新**文档记录里的结论（落库那条才是刷新后的来源）。
+   *
+   * 判定为空串表示「没审成」——那时按「审核失败」记，绝不更新成一条通过：
+   * 没有结论 ≠ 通过（C-R1）。落库侧同样不写，两边的口径一致。
+   */
   function handleReview(review: ReviewConclusion): void {
-    reviewConclusion.value = review
+    const kind = fromBackendKind(review.kind)
+    if (kind !== null) {
+      if (review.verdict === 'pass' || review.verdict === 'revise') {
+        documents.setReview(kind, review)
+      } else {
+        documents.setReviewFailed(kind)
+      }
+    }
+    // PRD 生成过程中的看板也留一份（它只服务于生成页，与本面板不是同一处展示）
     if (prdBoard.value) prdBoard.value.review = review
   }
 
@@ -962,6 +994,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 下游阶段与阶段输出由 `applyJobSnapshot` 在**快照那一刻**回填（那是唯一正确的时机：
     // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
     // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
+    if (kind === 'review') {
+      // 重审不产出正文：收尾只有「回审阅页 + 让面板反映这次结果」两件事。
+      // 成功时结论已随 `review` 事件写进文档记录，`onRunSummary` 还会再拉一次对齐。
+      if (!ok || snap?.status === 'failed') documents.setReviewFailed(target)
+      prdBoard.value = null
+      goTo(reviewStateFor(target))
+      if (!ok) docError.value = job.error.value || '重新审核失败'
+      return
+    }
     if (!ok) {
       docError.value = job.error.value || '生成失败'
       prdBoard.value = null
@@ -1338,6 +1379,47 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 审阅页「重新审核」：起一个**只审不改**的任务，回来只刷新结论。
+   *
+   * 三处与其它动作同形、一处不同：
+   *
+   * - 先 `isRunInFlight()` 拦重入，再 `goTo(generating-<kind>)`，最后 `job.start`——
+   *   顺序不能换（`goTo` 必须在登记运行态之前，见 `autoClarify`）；
+   * - 载荷只带 `docKind`：被审的正文与比对用的上游都由服务端从库里取（C-R3），
+   *   前端不再递正文——递了就是第二个真源；
+   * - 收尾**不看 `reply`**：重审不产出正文，`finishDoc` 那条「把正文写回工作副本」的
+   *   路径对它不成立；
+   * - 成败都回审阅页：这次动作的唯一结果就是「结论面板上那一条」，留在生成页只剩一片
+   *   空白。失败时把「这次没跑成」记在文档 store 上，面板显示「审核失败」。
+   */
+  async function rereview(): Promise<void> {
+    if (isRunInFlight()) return
+    const target = docKindOfState(viewState.value)
+    if (!target) return
+    // 没有正文就没有可审的东西：面板的可用条件已经挡了一道，这里再兜一层
+    if (!documents.contentOf(target).trim()) return
+    const generating = generatingStateFor(target)
+    if (!generating) return
+
+    resetDocTransient()
+    goTo(generating)
+    const epochAtStart = solutions.sessionEpoch
+    const { ok, aborted, run } = await job.start(
+      'review',
+      { docKind: target },
+      handlersForKind('review', epochAtStart),
+    )
+    // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    if (!ok) documents.setReviewFailed(target)
+    goTo(reviewStateFor(target))
+    if (!ok) {
+      // 失败原因要留在眼前（面板只说明「审核失败」，不说明为什么）
+      docError.value = `重新审核失败：${job.error.value || '请稍后重试'}`
+    }
+  }
+
+  /**
    * 我有 PRD入口：用用户贴入的 PRD 直接生成提示词套件。
    *
    * 刻意不把这份 PRD 交付给文档 store：那是「本工具生成的 PRD」的位置，混进用户
@@ -1608,6 +1690,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   docPhase,
   docStageText,
   reviewConclusion,
+  reviewFailed,
   elapsedMs: job.elapsedMs,
     summaryChanges,
     summarySyncing,
@@ -1623,6 +1706,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     handleGeneratePrompts,
     updateStaleDocument,
     autoClarify,
+    rereview,
     handleGeneratePromptsFromDebugPrd,
     handleGeneratePromptsFromPair,
     backToInput,

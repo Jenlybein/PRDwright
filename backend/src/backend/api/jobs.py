@@ -83,6 +83,14 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
         # 没有清单就没有可拍板的东西，跑一次只会把正文原样吐回来（还烧一次 token）
         if not payload.pending_items:
             raise AppError(ErrorCode.INVALID_REQUEST, "auto_clarify 需要提供待确认清单（pending_items）")
+    elif payload.kind == "review":
+        # 重审**既不收正文也不收上游**：要审的那一份、以及它比对的材料都由服务端从库里取
+        # （C-R3）。因此这里只校验「哪一份」与「在哪」，两样缺一个都没法跑。
+        if payload.doc_kind is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "review 必须指定 doc_kind")
+        if payload.solution_id is None:
+            # 没有方案就没有可读的正文，也没有可写结论的位置
+            raise AppError(ErrorCode.INVALID_REQUEST, "review 必须关联一份方案")
     elif payload.kind == "chat":
         # 线程标识决定「这轮回复记到谁头上」，猜错等于把 A 线程的对话记到 B 线程；
         # 四条线程的人设与上下文完全不同，因此不给默认值，缺了就 400。
