@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, status
@@ -29,7 +28,7 @@ from backend.api.deps import acting_user
 from backend.api.sse import sse_response
 from backend.core.chat_kinds import CHAT_STAGES, is_valid_stage
 from backend.core.errors import AppError, ErrorCode
-from backend.services import job_service, job_ticket, quota_service
+from backend.services import job_inputs, job_service, job_ticket, quota_service
 from backend.services.auth_service import User
 from backend.services.job_drain import drain_controller
 from backend.services.job_fingerprint import compute_input_fingerprint
@@ -46,17 +45,22 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
 
     与 `document_service` 的入口校验口径一致——字段格式没问题、只是「这个类型缺输入」，
     因此用 400 而不是 422。
+
+    ⚠️ 文档类任务的上游正文（PRD / 接口文档 / 需求）**已由服务端按方案自取**
+    （spec #51 / 票 #53），所以这里只拦「请求体没给、又没有方案可查」这种两边都空的情况：
+    带了方案就先放行，缺材料由服务端解析时兜底（明确 400 的语义归下一票 #54）。
     """
     if payload.kind == "prd":
         has_summary = bool(payload.summary)
         has_requirements = bool(payload.requirements.strip())
-        if not has_summary and not has_requirements:
+        if not has_summary and not has_requirements and payload.solution_id is None:
             raise AppError(
                 ErrorCode.INVALID_REQUEST,
                 "summary 与 requirements 至少需要提供一个",
             )
     elif payload.kind in ("api_docs", "prompts"):
-        if not payload.prd_content.strip():
+        # `prompts` 的接口文档是可选材料，这里和从前一样只拦 PRD 那一份
+        if not payload.prd_content.strip() and payload.solution_id is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "prd_content 不能为空")
     elif payload.kind == "optimize":
         if not payload.document.strip():
@@ -101,13 +105,18 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
             raise AppError(ErrorCode.INVALID_REQUEST, "续聊需要提供 content 或 tool_result")
 
 
-def _requirements_text(payload: schemas.JobCreateRequest) -> str:
-    """取用于计算指纹的需求文本：优先自由文本，其次结构化摘要的 JSON。"""
-    if payload.requirements.strip():
-        return payload.requirements
-    if payload.summary:
-        return json.dumps(payload.summary, ensure_ascii=False)
-    return ""
+def _requirements_text(payload: schemas.JobCreateRequest, owner_id: int) -> str:
+    """取用于计算指纹的需求文本：**与服务端实际喂给模型的那一份同源**。
+
+    从前的取法是「自由文本，其次结构化摘要的 JSON」；现在同一份判断住在
+    `job_inputs.prd_requirement_text`，它先看方案上存着的需求，再回退到请求体。
+    指纹若仍按请求体算，就会出现「内容取自库里、指纹取自前端副本」的记录。
+    """
+    return job_inputs.prd_requirement_text(
+        owner_id,
+        payload.solution_id,
+        {"summary": payload.summary, "requirements": payload.requirements},
+    )
 
 
 def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
@@ -198,7 +207,7 @@ async def create_job(
 
     fingerprint = None
     if payload.kind == "prd":
-        fingerprint = compute_input_fingerprint(_requirements_text(payload))
+        fingerprint = compute_input_fingerprint(_requirements_text(payload, user.id))
 
     # 摊平参数只算一次，并且**只交给造单这一个入口**：单①把请求参数、配置/供应商
     # 快照与技能包身份一次定格成不可变数据，登记产出单②，派发只认单②。旧形状把同一份
