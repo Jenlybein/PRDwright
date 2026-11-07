@@ -323,10 +323,26 @@ def test_api_rejects_without_creating_a_job_row(client: TestClient, isolated_db)
     _set_quota(user_id, daily_task_limit=1, daily_token_limit=-1, max_running=-1)
     _job(user_id, status="completed")
 
+    # 请求本身要合法，否则门口的参数校验会先于额度检查把它拒掉（400 而不是 429）：
+    # 文档类任务从票 #54 起必须带方案，输入也由服务端按方案取。
+    created = client.post(
+        "/api/solutions",
+        json={
+            "title": "额度方案",
+            "state": {
+                "entry_mode": "prd-quick",
+                "quick_product_name": "演示产品",
+                "quick_requirements": "做一个演示产品",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    solution_id = int(created.json()["id"])
+
     before = client.get("/api/jobs").json()["jobs"]
     response = client.post(
         "/api/jobs",
-        json={"kind": "prd", "requirements": "做一个演示产品", "product_name": "演示"},
+        json={"kind": "prd", "solution_id": solution_id},
     )
     assert response.status_code == 429
     # 文案要能直接给用户看（前端 describeJobError 会原样显示字符串 detail）

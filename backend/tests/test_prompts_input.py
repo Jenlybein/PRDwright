@@ -16,9 +16,9 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator
 
+from conftest import register, users
 from fakes import ScriptedLLM
 
-from backend.api import jobs, schemas
 from backend.services import prompts as prompts_module
 from backend.services.document_service import DocumentService
 from backend.services.prompts import NO_API_DOCS_NOTE
@@ -125,21 +125,46 @@ def test_whitespace_only_api_docs_counts_as_missing() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 任务入参
+# 任务入参：第二份材料由服务端按方案取（票 #54）
 # ---------------------------------------------------------------------------
 
 
-def test_job_request_carries_the_optional_input() -> None:
-    """路由把请求体摊平时不能漏掉它——漏了的表现是「用户贴了但模型没看到」。"""
-    payload = schemas.JobCreateRequest(
-        kind="prompts",
-        prd_content="# PRD",
-        api_docs_content="# 接口文档",
+def test_job_takes_the_optional_input_from_the_saved_solution(client):
+    """「我有 PRD + 接口文档」入口：第二份材料从方案上的录入列来，缺了按「未提供」处理。
+
+    这一条守的仍是「用户贴了但模型没看到」——只是材料的上游换成了服务端：
+    请求体里不再有 `api_docs_content`，它必须能从方案行上被解析出来并真的进提示词。
+    """
+    from backend.services import job_inputs
+
+    register(client)
+    created = client.post(
+        "/api/solutions",
+        json={
+            "title": "提示词方案",
+            "state": {
+                "entry_mode": "prd-and-api-paste",
+                "paste_prd_text": "# 贴入的 PRD",
+                "paste_api_docs_text": "# 贴入的接口文档",
+            },
+        },
     )
-    assert jobs._build_request(payload)["api_docs_content"] == "# 接口文档"  # noqa: SLF001
+    assert created.status_code == 201, created.text
+    solution_id = int(created.json()["id"])
+    owner = users.get_by_username("alice")
+    assert owner is not None
 
+    resolved = job_inputs.resolve_runtime_inputs("prompts", int(owner["id"]), solution_id)
+    assert resolved["prd_content"] == "# 贴入的 PRD"
+    assert resolved["api_docs_content"] == "# 贴入的接口文档"
 
-def test_job_request_defaults_the_optional_input_to_empty() -> None:
-    """老客户端（不传这个字段）照旧可用：缺省是空串，不是必填。"""
-    payload = schemas.JobCreateRequest(kind="prompts", prd_content="# PRD")
-    assert jobs._build_request(payload)["api_docs_content"] == ""  # noqa: SLF001
+    # 只存 PRD 的方案：第二份材料缺席时是空串，生成按「只有 PRD」处理（不是 400）
+    only_prd = client.post(
+        "/api/solutions",
+        json={"title": "只有 PRD", "state": {"paste_prd_text": "# 只有 PRD"}},
+    )
+    assert only_prd.status_code == 201
+    resolved_only_prd = job_inputs.resolve_runtime_inputs(
+        "prompts", int(owner["id"]), int(only_prd.json()["id"])
+    )
+    assert resolved_only_prd["api_docs_content"] == ""

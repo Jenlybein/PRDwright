@@ -87,7 +87,7 @@
 - 技能包：归属与资源由 `skill.yaml` 自述（`applies_to` / `references[]`），加包 = 加目录、别加中心注册表；唯一入口 `load_skill_artifacts(kind)`，缺件返回 `None` 降级且降级要在回执上看得见；规范整段注入、不检索，改写 / 澄清按白名单 `format_rewrite_reference`。
 - `prompts` 生成线的占位符（`prd_content` / `api_docs_content` / `pending_spec`）是跨文件契约：技能包版与 `prompts.py` 兜底版少一个不是「那节空着」而是 `KeyError`；留空填 `NO_API_DOCS_NOTE`。
 - `optimize` / `clarify` / `auto-clarify` 的 `kind` 只说「做了什么」，目标产物取 `doc_kind`（回执与落库共用 `_target_product_kind()`）；资源存在性不进缓存。`review_fix`（修复：追加版本）与 `review`（重审：只更新该版本结论）同口径，前者 `doc_kind` 还决定「注入哪份上游全文」，后者不改正文。
-- 生成 / 修复的输入只从服务端取：库内产物取当前版本正文，导入入口的材料取方案上保存的录入文本，PRD 的需求输入同理由服务端取。请求体不再携带上游正文与需求正文；缺方案或材料未落库 → 明确 400，不空跑。
+- 生成 / 修复的输入只从服务端取：库内产物取当前版本正文，导入入口的材料取方案上保存的录入文本，PRD 的需求输入同理由服务端取。请求体不再携带上游正文与需求正文；缺方案或材料未落库 → 明确 400，不空跑。**解析发生在建任务那一刻**（`POST /api/jobs` 里、造单之前，结果随任务单走、**不进** `request_params`）：开流时才查库会把「缺材料」变成一条流内错误，而那时状态码已经是 200。按澄清结果改写（`clarify`）的对话同样归服务端——按 `doc_kind` 定位 `prd-clarify` / `api-docs-clarify` / `prompts-clarify` 那条线程从 `chat_turns` 取，前端不再回传 `history`；两个旧的非任务通道（`generate-api-docs-stream` / `generate-prompts-stream`）只收 `solution_id`。
 - 交付：`GET /api/solutions/{id}/export` → ZIP = 三份 md + `README.md`；只导用户看得见的；目录名必须消毒（`_safe_name` 抹 `..`、拦 `con` / `nul`）；上限 50MB、CSV 带 BOM。
 - 上游正文变化（含手改，按 `content_sha`）只让下游 `stale=true` 亮黄条：不删除、仍可交付、只汇总提示不硬拦。
 - 接口 / 提示词：整篇生成 → 审一次 → 有问题改写一次；**审核结论随版本保存、一版一条**，SSE `review` 只负责订阅期间的即时展示，刷新后从文档接口读；**审核失败不写结论**（没有结论 ≠ 通过，界面标「审核失败」）。面板在「待确认问题」之下、正文之上（`ReviewConclusionPanel`），四态：通过 / 有问题 / 审核失败 / 未审核；「修复」只在「有问题」可点，「重新审核」只在失败 / 未审核 / 通过可点。

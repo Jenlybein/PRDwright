@@ -894,35 +894,39 @@ export function generatePrdFromSummaryStream(
 }
 
 /**
- * 根据 PRD 正文生成接口文档，SSE 流式接收正文。
+ * 按方案生成接口文档，SSE 流式接收正文。
  * 对应后端 `POST /api/conversation/generate-api-docs-stream`。
  *
- * 团队接口规范由技能包全量注入，前端不再检索、也不再随请求下发命中。
+ * **只下发方案 id**（spec #51 / 票 #54）：上游 PRD 由后端从库里取（PRD 当前版本，
+ * 其次方案上保存的录入文本）。团队接口规范由技能包全量注入，前端不再检索、也不再
+ * 随请求下发命中。
  */
 export function generateApiDocsStream(
-  payload: { prdContent: string },
+  payload: { solutionId: number },
   handlers?: StreamHandlers,
 ): Promise<DocumentStreamResult> {
   return readStream(
     '/api/conversation/generate-api-docs-stream',
     {
-      prd_content: payload.prdContent,
+      solution_id: payload.solutionId,
     },
     handlers,
   )
 }
 
 /**
- * 根据 PRD 正文生成提示词套件，SSE 流式接收正文。
+ * 按方案生成提示词套件，SSE 流式接收正文。
  * 对应后端 `POST /api/conversation/generate-prompts-stream`。
+ *
+ * 与接口文档同理：PRD 与可选的接口文档都由后端按方案取。
  */
 export function generatePromptsStream(
-  payload: { prdContent: string },
+  payload: { solutionId: number },
   handlers?: StreamHandlers,
 ): Promise<DocumentStreamResult> {
   return readStream(
     '/api/conversation/generate-prompts-stream',
-    { prd_content: payload.prdContent },
+    { solution_id: payload.solutionId },
     handlers,
   )
 }
@@ -1035,7 +1039,13 @@ function toJobStatus(data: unknown): JobStatusSummary {
   }
 }
 
-/** `createJob` 入参：`kind` + 各类型各自的字段（无关字段留空即可） */
+/**
+ * `createJob` 入参：`kind` + 各类型各自的字段（无关字段留空即可）。
+ *
+ * ⚠️ **没有上游正文与需求正文字段**（spec #51 / 票 #54）：PRD、接口文档、需求摘要、
+ * 需求澄清历史一并由后端按方案从库里取。前端只表达「做什么、对哪一份」——
+ * 那两份正文是不是最新的，不再由前端手里那份副本决定。
+ */
 export interface CreateJobPayload {
   kind: DocKind
   solutionId?: number | null
@@ -1047,16 +1057,6 @@ export interface CreateJobPayload {
    * 取值是**前端口径**（`api-docs`），下发给后端时由 `toBackendKind` 转成 `api_docs`。
    */
   docKind?: DocumentKind
-  summary?: RequirementsSummary | null
-  requirements?: string
-  productName?: string
-  history?: ChatMessage[]
-  prdContent?: string
-  /**
-   * 接口文档正文；只有 `prompts` 用得上（「我有 PRD + 接口文档」入口）。
-   * 不传表示没有这份材料，生成按「只有 PRD」处理。
-   */
-  apiDocsContent?: string
   document?: string
   instruction?: string
   /**
@@ -1141,13 +1141,6 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     // Pydantic 直接 422（`doc_kind：Input should be 'prd', 'api_docs' or 'prompts'`）——
     // 表现就是「接口文档上点任何就地动作（AI 自行澄清 / 按澄清改写 / AI 优化）都失败」。
     doc_kind: payload.docKind ? toBackendKind(payload.docKind) : null,
-    summary: payload.summary ?? null,
-    requirements: payload.requirements ?? '',
-    product_name: payload.productName ?? '',
-    // 只保留后端认识的 role / content 两个字段
-    history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
-    prd_content: payload.prdContent ?? '',
-    api_docs_content: payload.apiDocsContent ?? '',
     document: payload.document ?? '',
     instruction: payload.instruction ?? '',
     // 结构化清单原样透传：提示词在后端，前端不拼任何一句话

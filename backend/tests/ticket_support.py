@@ -45,8 +45,14 @@ def build_and_register(
     request: dict[str, Any],
     event_stream_source: EventStreamSource | None = None,
     config: Any | None = None,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> RegisteredJobTicket:
-    """造单 → 登记：假环境在造单时传入，返回唯一权威的单②。"""
+    """造单 → 登记：假环境在造单时传入，返回唯一权威的单②。
+
+    `request` 只放「调用方发了什么」（`POST /api/jobs` 的请求体），`resolved_inputs`
+    放**服务端解析出的上游输入**（生产里由路由调 `job_inputs` 得来，票 #54）。
+    两者分开传，正是为了让伪造的单与生产同形：请求体里没有上游正文。
+    """
     draft = build_job_ticket(
         owner_id=owner_id,
         solution_id=solution_id,
@@ -54,6 +60,7 @@ def build_and_register(
         request=request,
         event_stream_source=event_stream_source,
         config=config,
+        resolved_inputs=resolved_inputs,
     )
     return register_job_ticket(draft)
 
@@ -72,11 +79,13 @@ async def run_ticket_async(
     request: dict[str, Any],
     event_stream_source: EventStreamSource | None = None,
     config: Any | None = None,
+    resolved_inputs: dict[str, Any] | None = None,
     before_open: Callable[[int], Any] | None = None,
     on_event: Callable[[StreamEvent], Any] | None = None,
 ) -> tuple[RegisteredJobTicket, list[StreamEvent]]:
     """造单 → 登记 → 派发 → 一路订阅到结束，返回 (单②, 全部事件)。
 
+    `resolved_inputs`：服务端解析出的上游输入（生产由路由在建任务时给出）。
     `before_open`：派发之后、订阅之前插入的动作（如「等第一段落库」「进 request
     上下文」），拿到的是公开可观察的 `job_id`。
     `on_event`：每收到一个事件回调一次（如「收到第一段增量就按停止」）。
@@ -89,6 +98,7 @@ async def run_ticket_async(
         request=request,
         event_stream_source=event_stream_source,
         config=config,
+        resolved_inputs=resolved_inputs,
     )
     start_registered_job(registered)
     if before_open is not None:
@@ -114,6 +124,7 @@ def run_ticket_to_completion(
     *,
     event_stream_source: EventStreamSource | None = None,
     config: Any | None = None,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> tuple[int, list[StreamEvent]]:
     """兼容既有 `_run_job` 的返回形状 (job_id, 全部事件)。"""
     registered, events = run_ticket(
@@ -123,6 +134,7 @@ def run_ticket_to_completion(
         request=request,
         event_stream_source=event_stream_source,
         config=config,
+        resolved_inputs=resolved_inputs,
     )
     return registered.job_id, events
 
@@ -136,6 +148,7 @@ def fake_registered_ticket(
     job_id: int = 999,
     event_stream_source: EventStreamSource | None = None,
     config: Any | None = None,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> RegisteredJobTicket:
     """走公开正门造假单②：造单不登记，用 `with_registered_identity` 补登记身份。
 
@@ -149,6 +162,7 @@ def fake_registered_ticket(
         request=request,
         event_stream_source=event_stream_source,
         config=config,
+        resolved_inputs=resolved_inputs,
     )
     return with_registered_identity(draft, job_id=job_id, input_turn_id=0)
 
@@ -198,6 +212,7 @@ def run_ticket_in_flight(
     *events: StreamEvent,
     reply: str = "",
     config: Any | None = None,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> tuple[RegisteredJobTicket, list[StreamEvent]]:
     """派发一支在途任务，在它仍在跑时执行 `while_running`，再放开流收尾。
 
@@ -224,6 +239,7 @@ def run_ticket_in_flight(
             request=request,
             event_stream_source=stream,
             config=config,
+            resolved_inputs=resolved_inputs,
             before_open=act_while_in_flight,
         )
 
@@ -246,6 +262,7 @@ def run_ticket_events(
     *events: StreamEvent,
     reply: str = "",
     done_data: dict[str, Any] | None = None,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> tuple[RegisteredJobTicket, list[StreamEvent]]:
     """登记 → 派发 → 订阅到结束：假事件流在造单时传入，返回单②与全部事件。"""
     return run_ticket(
@@ -254,6 +271,7 @@ def run_ticket_events(
         kind=kind,
         request=request,
         event_stream_source=scripted_stream(*events, reply=reply, done_data=done_data),
+        resolved_inputs=resolved_inputs,
     )
 
 
@@ -265,6 +283,7 @@ def run_ticket_snapshot(
     *events: StreamEvent,
     reply: str = "",
     done_data: dict[str, Any] | None = None,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> tuple[RegisteredJobTicket, StreamEvent, list[StreamEvent]]:
     """跨主接缝读「任务仍在途时」的内存快照，返回 (单②, 首份快照, 全部事件)。
 
@@ -299,6 +318,7 @@ def run_ticket_snapshot(
             kind=kind,
             request=request,
             event_stream_source=stream,
+            resolved_inputs=resolved_inputs,
             before_open=wait_until_produced,
             on_event=unlock_on_first_event,
         )

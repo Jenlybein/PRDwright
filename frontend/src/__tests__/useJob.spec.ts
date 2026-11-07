@@ -143,13 +143,14 @@ describe('useJob.start', () => {
     }
 
     const job = useJob()
-    const result = await job.start('prd', { requirements: '一段需求' }, {})
+    // 请求体只放「做什么、对哪一份」：上游需求由后端按方案取（票 #54）
+    const result = await job.start('prd', { reviewEnabled: false }, {})
 
     // 任务带上了方案 id（第一次 flush 已经把它建出来了）
     expect(api.createJob).toHaveBeenCalledWith({
       kind: 'prd',
       solutionId: 1,
-      requirements: '一段需求',
+      reviewEnabled: false,
     })
     // 前一次 flush 保证有 solution_id，后一次把任务指针写进快照
     expect(solutionApi.createSolution).toHaveBeenCalledTimes(1)
@@ -187,7 +188,7 @@ describe('useJob.start', () => {
     }
 
     const job = useJob()
-    const result = await job.start('prd', { requirements: 'x' }, handlers)
+    const result = await job.start('prd', {}, handlers)
 
     // 透传：调用方拿得到所有事件
     expect(seen).toEqual(['snapshot:# 正文\n', 'chunk:增量'])
@@ -215,7 +216,7 @@ describe('useJob.start', () => {
       return { conversationId: '', reply: '', asks: [] }
     })
 
-    await job.start('prd', { requirements: 'x' }, {})
+    await job.start('prd', {}, {})
 
     // 快照把已用时从 0 锚到 30 秒，收尾摘要把总耗时定在 45 秒
     expect(seen).toEqual([30_000, 45_000])
@@ -229,7 +230,7 @@ describe('useJob.start', () => {
       return { conversationId: '', reply: '', asks: [] }
     })
 
-    await job.start('prd', { requirements: 'x' }, {})
+    await job.start('prd', {}, {})
     expect(job.elapsedMs.value).toBe(9_000)
 
     const duringSecond: number[] = []
@@ -239,7 +240,7 @@ describe('useJob.start', () => {
       return { conversationId: '', reply: '', asks: [] }
     })
 
-    await job.start('prd', { requirements: 'x' }, {})
+    await job.start('prd', {}, {})
 
     // 第二轮起步时是 0（不是上一轮的 9 秒），随后被这一轮的快照锚定
     expect(duringSecond).toEqual([0])
@@ -252,7 +253,7 @@ describe('useJob.start', () => {
       handlers?.onRunSummary?.(runSummary({ durationMs: 1_000 }))
       return { conversationId: '', reply: '', asks: [] }
     })
-    await job.start('prd', { requirements: 'x' }, {})
+    await job.start('prd', {}, {})
     expect(job.runSummary.value).not.toBeNull()
 
     const duringReconnect: unknown[] = []
@@ -296,7 +297,7 @@ describe('useJob.start', () => {
     )
 
     const job = useJob()
-    const result = await job.start('prd', { requirements: 'x' }, {})
+    const result = await job.start('prd', {}, {})
 
     expect(result.ok).toBe(false)
     expect(result.errorCode).toBe('LLM_UPSTREAM_ERROR')
@@ -341,7 +342,7 @@ describe('useJob.detach', () => {
 
     const workflow = useWorkflowStore()
     const job = useJob()
-    const pending = job.start('prd', { requirements: 'x' }, {})
+    const pending = job.start('prd', {}, {})
     // 让 createJob / flush 走完，订阅进入在途状态
     await flushPromises()
     expect(api.readJobStream).toHaveBeenCalledTimes(1)

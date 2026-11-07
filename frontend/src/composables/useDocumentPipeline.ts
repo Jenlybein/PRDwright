@@ -1,12 +1,8 @@
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
-import {
-  syncSummaryFromConversation,
-  type GeneratePrdFromSummaryPayload,
-  type StreamHandlers,
-} from '@/services/api'
-import { useJob, type JobStartInput } from '@/composables/useJob'
+import { syncSummaryFromConversation, type StreamHandlers } from '@/services/api'
+import { useJob } from '@/composables/useJob'
 import { fetchDeliveryZip } from '@/services/documentService'
 import { useDocumentsStore } from '@/stores/documents'
 import { useRunsStore, type ActiveRun, type RunPreview } from '@/stores/runs'
@@ -861,18 +857,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     store.dropChatThread(chatStageForDocument(kind))
   }
 
-  /** 把 PRD 的请求参数折成任务输入 */
-  function prdJobInput(payload: GeneratePrdFromSummaryPayload): JobStartInput {
-    return {
-      summary: payload.summary ?? null,
-      requirements: payload.requirements ?? '',
-      productName: payload.productName ?? '',
-      history: payload.history ?? [],
-      // 只有显式 `false`（快捷流程）才关掉审核；`undefined` 让后端取配置
-      reviewEnabled: payload.reviewEnabled,
-    }
-  }
-
   /**
    * 刷新后静默重连一个进行中的任务：先收快照补全正文，再接 live。
    *
@@ -1005,41 +989,32 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 按当前入口模式组装「生成 PRD」的请求体。
+   * 当前入口模式下**有没有可用的需求输入**（PRD 生成前的本地闸门）。
    *
-   * 两条入口只是需求来源不同，因此这里返回同一个请求结构，交给后端汇合到
-   * 同一条链路；返回 `null` 表示当前模式还没有可用的输入（如快捷入口还没写需求），
-   * 调用方据此直接放弃，不要发出一个注定失败的请求。
+   * 需求本身不随任务下发——后端按方案取（结构化的摘要 / 快捷流程那段自由文本 /
+   * 需求澄清历史，见 spec #51 / 票 #54）。这里只回答「现在点了会发生什么」：
+   * 还没有输入就直接放弃，不要发出一个注定被 400 的请求。
    *
    * 两处差异都是**入口形态**造成的，不涉及「怎么写 PRD」：
    * - 快捷流程的需求是那段自由文本，结构化摘要为空（判据读登记表，见 `requirementIsFreeText`）；
-   * - 快捷流程不跑逐章审核/改写（`reviewEnabled: false`）——输入只有一段话，
+   * - 快捷流程不跑逐章审核/改写（`reviewEnabledForJob` 给它 `false`）——输入只有一段话，
    *   逐章复核的边际收益低，省下的调用直接体现在等待时间上。
    */
-  function buildPrdPayload(): GeneratePrdFromSummaryPayload | null {
-    if (requirementIsFreeText.value) {
-      const { productName, requirements } = quickInput.value
-      if (!requirements.trim()) return null
-      // 快捷流程没有需求澄清对话（一段话直接进生成），`history` 正常是空数组；
-      // 仍照传是为了让**旧快照**里残留的需求对话结论不白丢（那时确实聊过）。
-      return { requirements, productName, history: conversationHistory(), reviewEnabled: false }
-    }
-
-    const current = summary.value
-    if (!current) return null
-    return { summary: current, history: conversationHistory() }
+  function hasPrdInput(): boolean {
+    if (requirementIsFreeText.value) return Boolean(quickInput.value.requirements.trim())
+    return summary.value !== null
   }
 
   /**
-   * 生成 PRD：把需求（结构化摘要或自由文本）与对话历史交给后端，由技能包驱动生成。
+   * 生成 PRD：请求体里只有「这次要不要复核」，需求与澄清历史由后端按方案取。
    *
-   * 走 `/generate-prd-from-summary-stream`——两条入口共用同一份请求契约，需求文本
-   * 由后端统一格式化，前端不需要知道「摘要怎么变成文本」。
+   * 走 `prd` 任务（spec #51 / 票 #54）：上游是方案上的结构化摘要 / 自由文本需求 /
+   * 需求澄清线程，前端不再把自己手里那份副本递过去——上游刚改过时，那份副本可能
+   * 已经落后一版了。
    */
   async function generatePrd(): Promise<void> {
     if (isRunInFlight()) return
-    const payload = buildPrdPayload()
-    if (!payload) return
+    if (!hasPrdInput()) return
     // 重新生成 PRD **不再删除下游**：旧的接口文档 / 提示词会留着，并在收尾后由后端
     // 按 `derived_from` 的指纹比较标成「可能已过期」。因此这里不清本地副本，
     // 交给收尾的 `documents.reload()` 把 stale 标记拉回来。
@@ -1049,7 +1024,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'prd',
-      prdJobInput(payload),
+      { reviewEnabled: reviewEnabledForJob() },
       handlersForKind('prd', epochAtStart),
     )
     // 订阅期间会话被换掉、或这一支已被别的任务顶替：成功 / 失败都不要再写回本文件的状态。
@@ -1066,7 +1041,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     dropThreadsFor('prd')
   }
 
-  /** 生成接口文档：以 PRD 正文为输入，团队接口规范由技能包全量注入，无需前端检索确认 */
+  /**
+   * 生成接口文档：上游是后端按方案取到的 PRD 当前版本（票 #54），
+   * 团队接口规范由技能包全量注入，无需前端检索确认。
+   */
   async function generateApiDocs(): Promise<void> {
     if (isRunInFlight()) return
     // 提示词不再删除：重新生成接口文档后，它只会被标成 stale（见 generatePrd 的说明）
@@ -1080,7 +1058,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const { reply, ok, aborted, run } = await job.start(
       'api-docs',
       // 快捷流程一遍过：整篇生成完就收，不审也不改（见 `reviewEnabledForJob`）
-      { prdContent: documents.contentOf('prd'), reviewEnabled: reviewEnabledForJob() },
+      { reviewEnabled: reviewEnabledForJob() },
       handlersForKind('api-docs', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1094,12 +1072,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 生成提示词套件：以 PRD 正文为输入。
+   * 生成提示词套件：上游是后端按方案取到的 PRD 当前版本与**可选**的接口文档
+   * （票 #54）。前端不再指定「拿哪一份正文当上游」——那正是双真源的入口。
    *
-   * PRD 来源随入口模式而变（完整流程用本次生成的 PRD，调试入口用用户贴入的 PRD），
-   * 因此由调用方把正文传进来，而不是在这里猜该读哪份状态。
+   * 调用方只需保证「此刻确实有可用的材料」（各自的按钮可用条件已经这么做，
+   * 材料也随方案快照先落库，见 `useJob.start` 里的 `flushPendingSave`）。
    */
-  async function generatePrompts(prdText: string, apiDocsText = ''): Promise<void> {
+  async function generatePrompts(): Promise<void> {
     if (isRunInFlight()) return
     resetDocTransient()
     prdBoard.value = null
@@ -1108,8 +1087,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'prompts',
-      // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
-      { prdContent: prdText, apiDocsContent: apiDocsText, reviewEnabled: reviewEnabledForJob() },
+      { reviewEnabled: reviewEnabledForJob() },
       handlersForKind('prompts', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1203,7 +1181,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 对话页主操作「按澄清结果改写」：把当前标签这条线程的对话交给后端，改写对应文档。
+   * 对话页主操作「按澄清结果改写」：让后端按那条线程的对话改写对应文档。
+   *
+   * **对话不再由前端随请求下发**（票 #54）：后端按 `docKind` 定位 `prd-clarify` /
+   * `api-docs-clarify` / `prompts-clarify` 那条线程，自己从 `chat_turns` 读。本地这份
+   * 消息镜像只用来回答「这条线程聊过了吗」——聊过才发任务。
    *
    * 走 `clarify` 任务（而非裸 SSE）：改写可能跑很久，任务化之后刷新 / 断线只断订阅，
    * 后端照跑，重连时凭 `activeJobId` 接上——与三份文档的生成完全同一套机制。
@@ -1241,8 +1223,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'clarify',
-      // 只回传 role / content：后端按同一形状读历史（与 `optimize` 的入参口径一致）
-      { document, history, docKind: target },
+      // 对话不随请求下发：后端按 `docKind` 定位那条澄清线程自己读（票 #54）。
+      // 这里只用本地镜像做「有没有聊过」的前置判断，聊过就够发任务了。
+      { document, docKind: target },
       handlersForKind('clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1291,7 +1274,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function handleGeneratePrompts(): Promise<void> {
     if (!documents.contentOf('api-docs').trim()) return
     goTo('generating-prompts')
-    await generatePrompts(documents.contentOf('prd'))
+    await generatePrompts()
   }
 
   /**
@@ -1368,23 +1351,26 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (entryMode.value !== 'prompt-debug') return
     if (!debugPrdText.value.trim()) return
     goTo('generating-prompts')
-    await generatePrompts(debugPrdText.value)
+    await generatePrompts()
   }
 
   /**
    * 双粘贴入口：用用户贴入的 PRD（+ 可选的接口文档）生成提示词套件。
    *
-   * 与 `handleGeneratePromptsFromDebugPrd` 同源，只多带一份材料。同样**不把这两份正文
-   * 交付给文档 store**：那是「本工具生成的产物」的位置，混进用户自带的内容会让进度、
-   * 完成条件与下载列表都失真。它们只作为本次生成的输入存在。
+   * 与 `handleGeneratePromptsFromDebugPrd` 同源，只多一份材料。这两份正文**先随方案
+   * 快照落库**（`pastePairInput` → 方案状态列），再交给后端按方案取——任务请求体里
+   * 不再带正文（票 #54），`useJob.start` 里的 `flushPendingSave` 保证「点了就有」。
+   *
+   * 同样**不把它们写进文档 store**：那是「本工具生成的产物」的位置，混进用户自带的
+   * 内容会让进度、完成条件与下载列表都失真。它们只作为本次生成的输入存在。
    */
   async function handleGeneratePromptsFromPair(): Promise<void> {
     // 同上：这是「处理器归不归这一页」的键身份判断，登记表没有也不该有这一列。
     if (entryMode.value !== 'prd-and-api-paste') return
-    const { prd, apiDocs } = pastePairInput.value
+    const { prd } = pastePairInput.value
     if (!prd.trim()) return
     goTo('generating-prompts')
-    await generatePrompts(prd, apiDocs)
+    await generatePrompts()
   }
 
   /**

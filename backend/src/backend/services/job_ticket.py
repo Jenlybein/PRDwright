@@ -28,7 +28,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
@@ -83,6 +83,10 @@ class JobTicket:
     event_stream_source: EventStreamSource
     config_snapshot: Mapping[str, Any]
     skill_refs: Sequence[Mapping[str, Any]]
+    # 服务端解析出的上游输入（`job_inputs.resolve_runtime_inputs` 的结果）：
+    # **不落库**——落库的 `request_params` 记的是「调用方发了什么」，这一格回答的是
+    # 「这一刻库里是什么」（spec #51 / 契约 C-R3）。派发时合进运行时请求参数。
+    resolved_inputs: Mapping[str, Any] = field(default_factory=dict)
     # 配置对象本体（供 `use_config` 冻结到任务上下文）：与 config_snapshot 同源。
     runtime_config: Any = None
     input_fingerprint: str | None = None
@@ -111,6 +115,8 @@ class RegisteredJobTicket:
     event_stream_source: EventStreamSource
     config_snapshot: Mapping[str, Any]
     skill_refs: Sequence[Mapping[str, Any]]
+    # 与单①同源的服务端上游输入；派发时合进运行时请求参数，不进 DB 投影。
+    resolved_inputs: Mapping[str, Any] = field(default_factory=dict)
     runtime_config: Any = None
     chat_stage: str = ""
 
@@ -124,6 +130,7 @@ def build_job_ticket(
     event_stream_source: EventStreamSource | None = None,
     config: Any | None = None,
     input_fingerprint: str | None = None,
+    resolved_inputs: Mapping[str, Any] | None = None,
 ) -> JobTicket:
     """造单：公开正门，产出不含 id 的不可变单①。
 
@@ -134,6 +141,10 @@ def build_job_ticket(
     「技能包身份」在造单时**算好作为数据**随单走：复用 #34 的
     `_immutable_projection`，它与 DB 投影、供应商四格、`RunMeter` 四格是同一份值；
     生成中途改后台配置/模板都不会让这一单漂移。
+
+    `resolved_inputs` 是**服务端解析出的上游输入**（`job_inputs.resolve_runtime_inputs`）：
+    生产由路由层在建任务那一刻解析后传进来，测试造假单时可以给真值也可以留空。
+    它不落库——落库的 `request_params` 只记调用方发了什么。
     """
     params = dict(request or {})
     # 配置/供应商快照在造单时一次定格：不给就按生产真值取一份。
@@ -159,6 +170,7 @@ def build_job_ticket(
         event_stream_source=event_stream_source,
         config_snapshot=_freeze_object(projection["config_snapshot"]),
         skill_refs=_freeze_object(projection["skill_refs"]),
+        resolved_inputs=_freeze_object(dict(resolved_inputs or {})),
         runtime_config=frozen_config,
         # 输入指纹是路由层算好的**数据**（仅 prd 有值），登记时随单落列。
         input_fingerprint=input_fingerprint,
@@ -198,12 +210,15 @@ def start_registered_job(ticket: RegisteredJobTicket) -> None:
 
 
 def as_event_request(ticket: RegisteredJobTicket) -> dict[str, Any]:
-    """把单②摊平成事件流认识的 request dict（含四个 chat 派生字段）。
+    """把单②摊平成事件流认识的 request dict（含服务端上游输入与四个 chat 派生字段）。
 
-    每次调用都造一份**新 dict**：事件流只读它，不会把派生字段写回单②，
+    上游输入（`resolved_inputs`）**只在这里出现**：它随单走、进运行时，但不进 DB 投影，
+    也不写回单②。每次调用都造一份**新 dict**：事件流只读它，不会把派生字段写回单②，
     也不会让已发布的事件持有任务单里那份只读映射。
     """
     params = thaw_object(ticket.request_params)
+    # 服务端解析出的上游正文 / 需求输入：生成链路读的就是这一份（契约 C-R3）
+    params.update(thaw_object(ticket.resolved_inputs))
     if ticket.kind == "chat":
         params["input_turn_id"] = ticket.input_turn_id
         params["job_id"] = ticket.job_id

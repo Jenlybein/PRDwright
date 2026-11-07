@@ -11,8 +11,6 @@ from pydantic import BaseModel, Field
 
 from backend.core.contracts import DocumentKind, RunSummary
 
-from .conversation import MessageItem
-
 # ============================================================================
 # 生成任务（generation_jobs）：把一次生成持久化并支持刷新重连
 # ============================================================================
@@ -36,6 +34,11 @@ class JobCreateRequest(BaseModel):
 
     一个模型承载五种任务：必填字段按 `kind` 区分（路由层校验），
     因此不同 `kind` 只用到各自相关的字段，其余留默认值即可。
+
+    ⚠️ **请求体不携带上游正文与需求正文**（spec #51 / 契约 C-R3）：PRD、接口文档、
+    需求摘要、需求澄清历史一律由服务端按方案从库里取（见 `services/job_inputs.py`）。
+    这里只表达「做什么、对哪一份」。旧前端多带那些字段会被忽略（Pydantic 默认丢弃
+    多余键），既不 422、也不参与生成——拆契约不能把还在跑旧版的客户端打断。
     """
 
     kind: JobKind = Field(
@@ -43,7 +46,10 @@ class JobCreateRequest(BaseModel):
     )
     solution_id: int | None = Field(
         default=None,
-        description="关联方案 id；快捷入口等场景可为空（逃生口）",
+        description=(
+            "关联方案 id。**文档类任务必填**：输入要从方案上取，没有方案就没有上游可查，"
+            "缺它直接 400。只有对话任务（`chat`）与「无产物」的场景才会为空。"
+        ),
     )
     doc_kind: DocumentKind | None = Field(
         default=None,
@@ -51,26 +57,6 @@ class JobCreateRequest(BaseModel):
             "本次任务**作用在**哪一份产物上。`optimize` 与 `clarify` 必须给：它们的 `kind`"
             "表达的是「做了一件什么事」，而落库要知道「东西写进哪一份文档」。缺省时不落库"
             "（宁可本次改动只留在会话里，也不猜一个默认值写错位置）。"
-        ),
-    )
-    # --- prd ---
-    summary: dict[str, Any] | None = Field(
-        default=None,
-        description="结构化需求摘要（完整流程）；与 requirements 二选一",
-    )
-    requirements: str = Field(default="", description="自由文本需求（PRD 快捷入口）")
-    product_name: str = Field(default="", description="产品名称，仅用于 PRD 文档头")
-    history: list[MessageItem] = Field(
-        default_factory=list,
-        description="补充对话记录；为空则按无对话处理",
-    )
-    # --- api_docs / prompts ---
-    prd_content: str = Field(default="", description="PRD 正文（接口文档 / 提示词生成输入）")
-    api_docs_content: str = Field(
-        default="",
-        description=(
-            "接口文档正文（仅 `prompts` 可选）。给「我有 PRD + 接口文档」入口用：这两份材料都在"
-            "手上时，提示词可以同时参考它们。留空表示没有这份材料，生成按「只有 PRD」处理。"
         ),
     )
     # --- optimize / clarify ---
