@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 import { normalizeImportance } from '@/utils/pendingItems'
+import { parseReview } from '@/utils/review'
 import { normalizeRunSummary } from '@/utils/runSummary'
 import { fromBackendKind } from '@/utils/workflow'
 import { ApiError, BACKEND_ERROR_CODES, toErrorCode } from '@/services/errors'
@@ -442,31 +443,12 @@ function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
 }
 
 /**
- * 把 `review` 事件的 `data` 归一成 `ReviewConclusion`。
+ * 把后端审核结论的 `data` 归一成 `ReviewConclusion`——**唯一的解析实现**在
+ * `@/utils/review`（SSE 事件与 `documents.review` 共用它，两处形状不会分叉）。
  *
- * 与其它解析器同一口径：坏字段退化为默认值，不让一条脏数据打断整条流。
+ * 这里只是再导出：调用方从 `api` 或 `utils/review` 拿到的都是同一份逻辑。
  */
-function parseReviewEvent(data: Record<string, unknown>): ReviewConclusion {
-  const issues = readObjectArray(data, 'issues').map((item) => ({
-    severity: readString(item, 'severity'),
-    sectionId: readString(item, 'section_id'),
-    sectionTitle: readString(item, 'section_title'),
-    detail: readString(item, 'detail'),
-  }))
-  const failedSections = readObjectArray(data, 'failed_sections').map((item) => ({
-    sectionId: readString(item, 'section_id'),
-    title: readString(item, 'title'),
-    reason: readString(item, 'reason'),
-  }))
-  return {
-    kind: readString(data, 'kind'),
-    verdict: readString(data, 'verdict'),
-    summary: readString(data, 'summary'),
-    issues,
-    rewritten: data.rewritten === true,
-    failedSections,
-  }
-}
+export { parseReview }
 
 /**
  * 把任务流 `snapshot` 事件的 `data` 归一成 `JobSnapshot`。
@@ -687,9 +669,12 @@ async function readStreamRequest(
         if (summary) handlers.onRunSummary?.(summary)
         break
       }
-      case 'review':
-        handlers.onReview?.(parseReviewEvent(event.data))
+      case 'review': {
+        // 解析不出对象就当没这条：一条空壳结论会被读成「未审核」，比不显示更误导
+        const review = parseReview(event.data)
+        if (review) handlers.onReview?.(review)
         break
+      }
       case 'error':
         // 文案（message）照旧给人和日志看，分支判断走 code：
         // 缺失或取值未知时降级为 INTERNAL_ERROR，绝不因为不认识的码而漏判
@@ -894,35 +879,39 @@ export function generatePrdFromSummaryStream(
 }
 
 /**
- * 根据 PRD 正文生成接口文档，SSE 流式接收正文。
+ * 按方案生成接口文档，SSE 流式接收正文。
  * 对应后端 `POST /api/conversation/generate-api-docs-stream`。
  *
- * 团队接口规范由技能包全量注入，前端不再检索、也不再随请求下发命中。
+ * **只下发方案 id**（spec #51 / 票 #54）：上游 PRD 由后端从库里取（PRD 当前版本，
+ * 其次方案上保存的录入文本）。团队接口规范由技能包全量注入，前端不再检索、也不再
+ * 随请求下发命中。
  */
 export function generateApiDocsStream(
-  payload: { prdContent: string },
+  payload: { solutionId: number },
   handlers?: StreamHandlers,
 ): Promise<DocumentStreamResult> {
   return readStream(
     '/api/conversation/generate-api-docs-stream',
     {
-      prd_content: payload.prdContent,
+      solution_id: payload.solutionId,
     },
     handlers,
   )
 }
 
 /**
- * 根据 PRD 正文生成提示词套件，SSE 流式接收正文。
+ * 按方案生成提示词套件，SSE 流式接收正文。
  * 对应后端 `POST /api/conversation/generate-prompts-stream`。
+ *
+ * 与接口文档同理：PRD 与可选的接口文档都由后端按方案取。
  */
 export function generatePromptsStream(
-  payload: { prdContent: string },
+  payload: { solutionId: number },
   handlers?: StreamHandlers,
 ): Promise<DocumentStreamResult> {
   return readStream(
     '/api/conversation/generate-prompts-stream',
-    { prd_content: payload.prdContent },
+    { solution_id: payload.solutionId },
     handlers,
   )
 }
@@ -1035,7 +1024,13 @@ function toJobStatus(data: unknown): JobStatusSummary {
   }
 }
 
-/** `createJob` 入参：`kind` + 各类型各自的字段（无关字段留空即可） */
+/**
+ * `createJob` 入参：`kind` + 各类型各自的字段（无关字段留空即可）。
+ *
+ * ⚠️ **没有上游正文与需求正文字段**（spec #51 / 票 #54）：PRD、接口文档、需求摘要、
+ * 需求澄清历史一并由后端按方案从库里取。前端只表达「做什么、对哪一份」——
+ * 那两份正文是不是最新的，不再由前端手里那份副本决定。
+ */
 export interface CreateJobPayload {
   kind: DocKind
   solutionId?: number | null
@@ -1047,16 +1042,6 @@ export interface CreateJobPayload {
    * 取值是**前端口径**（`api-docs`），下发给后端时由 `toBackendKind` 转成 `api_docs`。
    */
   docKind?: DocumentKind
-  summary?: RequirementsSummary | null
-  requirements?: string
-  productName?: string
-  history?: ChatMessage[]
-  prdContent?: string
-  /**
-   * 接口文档正文；只有 `prompts` 用得上（「我有 PRD + 接口文档」入口）。
-   * 不传表示没有这份材料，生成按「只有 PRD」处理。
-   */
-  apiDocsContent?: string
   document?: string
   instruction?: string
   /**
@@ -1141,13 +1126,6 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     // Pydantic 直接 422（`doc_kind：Input should be 'prd', 'api_docs' or 'prompts'`）——
     // 表现就是「接口文档上点任何就地动作（AI 自行澄清 / 按澄清改写 / AI 优化）都失败」。
     doc_kind: payload.docKind ? toBackendKind(payload.docKind) : null,
-    summary: payload.summary ?? null,
-    requirements: payload.requirements ?? '',
-    product_name: payload.productName ?? '',
-    // 只保留后端认识的 role / content 两个字段
-    history: (payload.history ?? []).map(({ role, content }) => ({ role, content })),
-    prd_content: payload.prdContent ?? '',
-    api_docs_content: payload.apiDocsContent ?? '',
     document: payload.document ?? '',
     instruction: payload.instruction ?? '',
     // 结构化清单原样透传：提示词在后端，前端不拼任何一句话

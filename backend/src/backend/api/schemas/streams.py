@@ -63,15 +63,20 @@ class GeneratePrdFromSummaryStreamRequest(BaseModel):
 
 
 class GenerateApiDocsStreamRequest(BaseModel):
-    """生成接口文档的流式请求。"""
+    """生成接口文档的流式请求。
 
-    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+    **只收方案**（spec #51 / 票 #54）：上游 PRD 由服务端按方案取（库内当前版本，
+    其次方案上保存的录入文本），请求体里不再有 `prd_content`——那是第二条真相，
+    上游刚改过就会用旧稿。
+    """
+
+    solution_id: int = Field(gt=0, description="方案 id：上游 PRD 从它取")
 
 
 class GeneratePromptsStreamRequest(BaseModel):
-    """生成提示词套件的流式请求。"""
+    """生成提示词套件的流式请求：同样只收方案，PRD 与接口文档都由服务端取。"""
 
-    prd_content: str = Field(min_length=1, description="PRD 正文（Markdown）")
+    solution_id: int = Field(gt=0, description="方案 id：上游 PRD 与接口文档从它取")
 
 
 class OptimizeDocumentStreamRequest(BaseModel):

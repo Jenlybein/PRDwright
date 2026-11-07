@@ -41,13 +41,18 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import StreamEvent
+from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
 from backend.services.doc_skeleton import extract_headings, skeletonize
 from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
 from backend.services.llm_utils import extract_json_object
 from backend.services.document_review import (
     ReviewOutcome,
+    conclusion_to_review,
+    fix_messages,
+    review_event,
     stream_review_and_rewrite,
+    stream_review_only,
 )
 from backend.services.pending_items import (
     PendingBlockSuppressor,
@@ -77,7 +82,7 @@ from backend.services.prompts import (
     SYSTEM_PROMPT,
 )
 from backend.services.skill_registry import load_skill_artifacts
-from backend.services.stream_reply import collect_reply, iter_reply_events
+from backend.services.stream_reply import astream_text, collect_reply, iter_reply_events
 
 logger = logging.getLogger(__name__)
 
@@ -858,6 +863,384 @@ class DocumentService:
             else:
                 yield event
 
+    async def review_document_stream(
+        self,
+        *,
+        doc_kind: str,
+        document: str,
+        prd_content: str = "",
+        api_docs_content: str = "",
+        summary: dict[str, Any] | None = None,
+        requirements: str = "",
+        product_name: str = "",
+        history: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """**重新审核**一份已有文档：只产结论，不产正文（重新审核任务的唯一入口）。
+
+        为什么按产物分两条路
+        --------------------
+        PRD 是按章审的（每章有自己的写作要点，结论也按章汇总），接口文档与提示词是整篇
+        生成、整篇审的。两条路复用各自的**生成时**那套提示词与解析，因此「重审得到的结论」
+        与「生成当下得到的结论」形状一致——界面上同一份文档不会有两套结论长相。
+
+        `doc_kind` 必须是三份产物之一：缺了它既不知道审哪一份，也不知道注入哪一套规范，
+        因此直接 400（不猜默认值，与 `clarify` 同口径）。
+
+        Args:
+            doc_kind: 目标产物（`prd` / `api_docs` / `prompts`）；由任务层的 `doc_kind` 给出。
+            document: 被审的当前正文（服务端从库里取，见 C-R3）。
+            prd_content: 上游 PRD 全文（接口文档 / 提示词用）。
+            api_docs_content: 上游接口文档全文（仅提示词用）。
+            summary: 结构化需求摘要（PRD 用）。
+            requirements: 自由文本需求（PRD 用）。
+            product_name: 产品名（PRD 用）。
+            history: 需求澄清对话（PRD 用）。
+
+        Yields:
+            `stage(reviewing)` → 若干 `stage_chunk` → 一条 `review`。
+
+        Raises:
+            AppError: 产物类型未知、正文为空，或审核本身没跑成。
+        """
+        if doc_kind not in ("prd", "api_docs", "prompts"):
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"未知的产物类型：{doc_kind or '（空）'}，无法重新审核",
+            )
+        if doc_kind == "prd":
+            writer = self._get_section_writer(None)
+            async for event in writer.review_document(
+                document=document,
+                summary=summary,
+                requirements=requirements,
+                product_name=product_name,
+                history=history,
+            ):
+                yield event
+            return
+
+        writing_rules, upstream, doc_type, label = self._review_context(
+            doc_kind, prd_content, api_docs_content
+        )
+        async for event in stream_review_only(
+            self.review_llm,
+            document=document,
+            writing_rules=writing_rules,
+            requirements=upstream,
+            doc_type=doc_type,
+            kind=doc_kind,
+            label=label,
+            section_titles="\n".join(extract_headings(document)),
+        ):
+            yield event
+
+    @staticmethod
+    def _review_context(
+        doc_kind: str, prd_content: str, api_docs_content: str
+    ) -> tuple[str, str, str, str]:
+        """整篇审核需要的四格：产出规范、上游材料、事件 `doc_type`、展示名。
+
+        来源与**生成链路逐字一致**：接口文档看 `api-docs-generator` 的团队规范，提示词看
+        `prompts-generator` 的产出要求；上游材料同样先骨架化——审核要核对「有没有编造」，
+        它需要的是事实索引，不是整篇散文（与生成时的 `stream_review_and_rewrite` 同口径）。
+
+        规范缺失时**不报错、留空**：`review_messages` 会把空规范写成一句显式的
+        「按通用规范核对」，降级看得见，而不是让模型以为「没有规范要守」。
+        """
+        if doc_kind == "prompts":
+            artifacts = load_skill_artifacts("prompts")
+            guide = artifacts.get("prompts_guide", "") if artifacts else ""
+            if not guide:
+                logger.warning(
+                    "prompts-generator 技能包未加载，重审将按通用规范核对",
+                    extra={"event": "prompts.review_skill_missing"},
+                )
+            upstream = skeletonize(prd_content)
+            if api_docs_content.strip():
+                upstream = (
+                    f"{upstream}\n\n## 接口文档\n\n{skeletonize(api_docs_content)}"
+                )
+            return guide, upstream, "prompts", "提示词套件"
+
+        artifacts = load_skill_artifacts("api_docs")
+        api_specs = artifacts.get("api_specs", "") if artifacts else ""
+        if not api_specs:
+            logger.warning(
+                "api-docs-generator 技能包未加载，重审将按通用规范核对",
+                extra={"event": "api_docs.review_skill_missing"},
+            )
+        return api_specs, skeletonize(prd_content), "api_doc", "接口文档"
+
+    async def fix_document_stream(
+        self,
+        *,
+        doc_kind: str,
+        document: str,
+        conclusion: dict[str, Any] | None,
+        prd_content: str = "",
+        api_docs_content: str = "",
+        summary: dict[str, Any] | None = None,
+        requirements: str = "",
+        product_name: str = "",
+        history: list[dict[str, Any]] | None = None,
+        clarify_history: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """**按审核结论修复**一份已有文档（`review_fix` 任务，票 #56）。
+
+        三步，顺序不能换：
+
+        1. **整篇重写**：依据是**当前版本那条结论**（问题逐条）+ 上游材料全文。
+           上游由目标产物决定，且一律**整段注入**——接口文档看 PRD 全文，提示词看
+           PRD 与接口文档全文，PRD 看需求输入与两条澄清线程（ADR 0002）。
+        2. **只审一次、不再改写**：审的是刚重写出来的这一版；即便仍判「有问题」，
+           也不进入改写（C-R2）。这一步复用与生成 / 重审**同一段**审核代码。
+        3. 收尾由任务层完成：`done.reply` 与 `review` 结论由 `_write_document`
+           **同批写进新追加的那一版**（版本来源 = `review_fix`）。
+
+        失败边界（与 AC 一一对应）：
+
+        - **重写失败**（调用报错 / 空正文）→ 抛 `AppError`，任务判失败，正文与版本都不动；
+        - **复审失败** → 补一条「没审成」的 `review` 事件（判定空串）后照常收尾：
+          正文落库、结论留空。没有结论 ≠ 通过，界面据此显示「审核失败」。
+
+        Args:
+            doc_kind: 目标产物（`prd` / `api_docs` / `prompts`）；缺了不猜，直接 400。
+            document: 被修的那一版正文（服务端从库里取，见 C-R3）。
+            conclusion: 当前版本的审核结论（`document_versions.review` 解出来的对象）。
+            prd_content: 上游 PRD 全文（接口文档 / 提示词用）。
+            api_docs_content: 上游接口文档全文（仅提示词用）。
+            summary: 结构化需求摘要（PRD 用）。
+            requirements: 自由文本需求（PRD 用）。
+            product_name: 产品名（PRD 用）。
+            history: 需求澄清线程（`requirement`，PRD 用）。
+            clarify_history: PRD 澄清线程（`prd-clarify`，PRD 用）。
+
+        Yields:
+            `stage(writing)` → 若干 `chunk` → `part{replace}`（干净正文）→
+            复审的 `stage(reviewing)` / `stage_chunk` / `review` → `done`。
+
+        Raises:
+            AppError: 产物类型未知、正文为空、结论不是「有问题」、或重写没跑成。
+                前三种是请求错误（400），最后一种按上游故障（任务判失败）。
+        """
+        if doc_kind not in ("prd", "api_docs", "prompts"):
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"未知的产物类型：{doc_kind or '（空）'}，无法按结论修复",
+            )
+        if not (document or "").strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "这份文档还没有正文，无法按结论修复")
+        review = conclusion_to_review(conclusion)
+
+        writing_rules, upstream, doc_type, label = self._fix_context(
+            doc_kind,
+            prd_content=prd_content,
+            api_docs_content=api_docs_content,
+            summary=summary,
+            requirements=requirements,
+            product_name=product_name,
+            history=history,
+            clarify_history=clarify_history,
+        )
+
+        yield StreamEvent(
+            type="stage",
+            content=f"正在按审核结论重写{label}…",
+            data={"stage": "writing", "doc_type": doc_type},
+        )
+
+        # 实时增量先过抑制器：待确认块可能被切在 chunk 边界，漏出去就是正文里多一段哨兵
+        suppressor = PendingBlockSuppressor()
+        chunks: list[str] = []
+        try:
+            async for delta in astream_text(
+                self.llm,
+                fix_messages(
+                    document=document,
+                    review=review,
+                    writing_rules=writing_rules,
+                    upstream=upstream,
+                ),
+            ):
+                chunks.append(delta)
+                clean = suppressor.feed(delta)
+                if clean:
+                    yield StreamEvent(type="chunk", content=clean, data={"doc_type": doc_type})
+            trailing = suppressor.flush()
+            if trailing:
+                yield StreamEvent(type="chunk", content=trailing, data={"doc_type": doc_type})
+        except Exception as exc:  # noqa: BLE001 - 重写失败必须判失败（正文与版本都不动）
+            logger.warning(
+                "%s按结论修复失败，正文与版本都不动",
+                label,
+                exc_info=True,
+                extra={"event": "doc.fix_failed"},
+            )
+            raise AppError(
+                ErrorCode.LLM_UPSTREAM_ERROR, f"{label}修复没有跑成：{exc}"
+            ) from exc
+
+        rewritten = "".join(chunks).strip()
+        if not rewritten:
+            raise AppError(
+                ErrorCode.LLM_UPSTREAM_ERROR, f"{label}修复没有产出正文，请再试一次"
+            )
+        final_reply, items = extract(rewritten)
+        if not final_reply.strip():
+            raise AppError(
+                ErrorCode.LLM_UPSTREAM_ERROR, f"{label}修复产出的正文为空，请再试一次"
+            )
+        # 预览改用**干净正文**：初稿是模型原始输出（可能带待确认块），这里是剥离后的定稿。
+        # 与生成链路的改写同样的整段覆盖语义，前端不会「初稿 + 修稿」叠字。
+        yield StreamEvent(
+            type="part",
+            content="",
+            data={"text": final_reply, "replace": True},
+        )
+
+        async for event in self._rereview_after_fix(
+            doc_kind=doc_kind,
+            document=final_reply,
+            writing_rules=writing_rules,
+            upstream=upstream,
+            doc_type=doc_type,
+            label=label,
+            summary=summary,
+            requirements=requirements,
+            product_name=product_name,
+        ):
+            yield event
+
+        yield StreamEvent(
+            type="done",
+            content="",
+            data={"reply": final_reply, "pending_items": items},
+        )
+
+    async def _rereview_after_fix(
+        self,
+        *,
+        doc_kind: str,
+        document: str,
+        writing_rules: str,
+        upstream: str,
+        doc_type: str,
+        label: str,
+        summary: dict[str, Any] | None,
+        requirements: str,
+        product_name: str,
+    ) -> AsyncIterator[StreamEvent]:
+        """修复后的**复审**：只审不改，失败降级成「没有结论」而不是判任务失败。
+
+        为什么与「重新审核」不同口径：重审的唯一产出就是判定，没审成就是失败（C-R1）；
+        而修复的主要产出是**新正文**——正文已经重写好了，因为复审没跑成就把它丢掉，
+        用户白等一次、还得再点一次修复。这里的代价只是「结论留空」，界面标「审核失败」，
+        再点一次「重新审核」即可补上。
+
+        审核侧仍然只看骨架（与生成 / 重审同口径）——它是核对「有没有编造」，
+        需要的是事实索引；重写那一步看的才是全文。
+        """
+        try:
+            if doc_kind == "prd":
+                writer = self._get_section_writer(None)
+                async for event in writer.review_document(
+                    document=document,
+                    summary=summary,
+                    requirements=requirements,
+                    product_name=product_name,
+                    history=None,
+                ):
+                    yield event
+                return
+            async for event in stream_review_only(
+                self.review_llm,
+                document=document,
+                writing_rules=writing_rules,
+                requirements=skeletonize(upstream),
+                doc_type=doc_type,
+                kind=doc_kind,
+                label=label,
+                section_titles="\n".join(extract_headings(document)),
+            ):
+                yield event
+        except Exception:  # noqa: BLE001 - 正文已经写好了，复审是加成，不该连坐
+            logger.warning(
+                "%s修复后的复审没有跑成：正文照落库，结论留空",
+                label,
+                exc_info=True,
+                extra={"event": "doc.fix_rereview_failed"},
+            )
+            # 判定空串 = 没审成：任务照常成功，但**不写结论**（没有结论 ≠ 通过）
+            yield review_event(doc_kind, None)
+
+    def _fix_context(
+        self,
+        doc_kind: str,
+        *,
+        prd_content: str,
+        api_docs_content: str,
+        summary: dict[str, Any] | None,
+        requirements: str,
+        product_name: str,
+        history: list[dict[str, Any]] | None,
+        clarify_history: list[dict[str, Any]] | None,
+    ) -> tuple[str, str, str, str]:
+        """修复需要的四格：产出规范、**上游材料全文**、事件 `doc_type`、展示名。
+
+        与 `_review_context` 的差别是**不骨架化**：审核要的是事实索引，修复要的是
+        可以直接照抄的原文（见 `fix_messages` 的说明）。三份产物的上游由本函数一处决定，
+        「修复接口文档看得见 PRD 全文」这类要求在代码里只有一个落点。
+        """
+        if doc_kind == "prompts":
+            artifacts = load_skill_artifacts("prompts")
+            guide = artifacts.get("prompts_guide", "") if artifacts else ""
+            if not guide:
+                logger.warning(
+                    "prompts-generator 技能包未加载，修复将按内置提示词规范重写",
+                    extra={"event": "prompts.fix_skill_missing"},
+                )
+                guide = PROMPTS_GENERATION_PROMPT
+            sections = [
+                f"## PRD（当前版本全文）\n\n{prd_content.strip() or '（未提供 PRD 正文）'}"
+            ]
+            if api_docs_content.strip():
+                sections.append(f"## 接口文档（当前版本全文）\n\n{api_docs_content}")
+            return guide, "\n\n".join(sections), "prompts", "提示词套件"
+
+        if doc_kind == "api_docs":
+            artifacts = load_skill_artifacts("api_docs")
+            api_specs = artifacts.get("api_specs", "") if artifacts else ""
+            if not api_specs:
+                logger.warning(
+                    "api-docs-generator 技能包未加载，修复将按通用 REST 规范重写",
+                    extra={"event": "api_docs.fix_skill_missing"},
+                )
+                api_specs = "（团队接口规范未加载，请依据通用 REST 规范与产品 PRD 自行设计）"
+            upstream = f"## PRD（当前版本全文）\n\n{prd_content.strip() or '（未提供 PRD 正文）'}"
+            return api_specs, upstream, "api_doc", "接口文档"
+
+        artifacts = load_prd_skill_artifacts()
+        writing_rules = artifacts["writing_rules"] if artifacts else ""
+        if not writing_rules:
+            logger.warning(
+                "prd-generator 技能包未加载，修复将按通用写作规范重写",
+                extra={"event": "prd.fix_skill_missing"},
+            )
+        requirement_text = (
+            format_summary_as_requirements(summary)
+            if summary
+            else format_freeform_requirements(requirements, product_name)
+        )
+        sections = [
+            "## 需求输入（结构化摘要 / 自由文本）\n\n"
+            + (requirement_text or "（未提供需求输入，仅依据当前正文与审核结论修复）")
+        ]
+        if history:
+            sections.append(f"## 需求澄清对话\n\n{format_conversation(history)}")
+        if clarify_history:
+            sections.append(f"## PRD 澄清对话\n\n{format_conversation(clarify_history)}")
+        return writing_rules, "\n\n".join(sections), "prd", "PRD"
+
     async def optimize_document_stream(
         self,
         document: str,
@@ -1094,6 +1477,60 @@ async def generate_prompts_stream(
         prd_content=prd_content,
         api_docs_content=api_docs_content,
         review_enabled=review_enabled,
+    ):
+        yield event
+
+
+async def review_document_stream(
+    *,
+    doc_kind: str,
+    document: str,
+    prd_content: str = "",
+    api_docs_content: str = "",
+    summary: dict[str, Any] | None = None,
+    requirements: str = "",
+    product_name: str = "",
+    history: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """重新审核一份已有文档的流式入口（`review` 任务走这里，只审不改）。"""
+    async for event in get_service().review_document_stream(
+        doc_kind=doc_kind,
+        document=document,
+        prd_content=prd_content,
+        api_docs_content=api_docs_content,
+        summary=summary,
+        requirements=requirements,
+        product_name=product_name,
+        history=history,
+    ):
+        yield event
+
+
+async def fix_document_stream(
+    *,
+    doc_kind: str,
+    document: str,
+    conclusion: dict[str, Any] | None,
+    prd_content: str = "",
+    api_docs_content: str = "",
+    summary: dict[str, Any] | None = None,
+    requirements: str = "",
+    product_name: str = "",
+    history: list[dict[str, Any]] | None = None,
+    clarify_history: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """按审核结论修复一份已有文档的流式入口（`review_fix` 任务走这里）。"""
+    async for event in get_service().fix_document_stream(
+        doc_kind=doc_kind,
+        document=document,
+        conclusion=conclusion,
+        prd_content=prd_content,
+        api_docs_content=api_docs_content,
+        summary=summary,
+        requirements=requirements,
+        product_name=product_name,
+        history=history,
+        clarify_history=clarify_history,
     ):
         yield event
 

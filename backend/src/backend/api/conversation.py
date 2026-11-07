@@ -10,10 +10,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from backend.api import schemas
+from backend.api.deps import acting_user
 from backend.api.sse import (  # noqa: F401 - SSE_DONE/SSE_HEADERS/make_sse_generator 仅作再导出
     SSE_DONE,
     SSE_HEADERS,
@@ -21,7 +22,8 @@ from backend.api.sse import (  # noqa: F401 - SSE_DONE/SSE_HEADERS/make_sse_gene
     sse_response,
 )
 from backend.core.errors import AppError, ErrorCode
-from backend.services import conversation_service, document_service
+from backend.services import conversation_service, document_service, job_inputs
+from backend.services.auth_service import User
 
 router = APIRouter(prefix="/api/conversation", tags=["conversation"])
 
@@ -224,14 +226,20 @@ async def generate_prd_from_summary_stream(
 @router.post("/generate-api-docs-stream", summary="根据 PRD 生成接口文档（SSE 流式返回）")
 async def generate_api_docs_stream(
     payload: schemas.GenerateApiDocsStreamRequest,
+    user: User = Depends(acting_user),
 ) -> StreamingResponse:
-    """根据 PRD 正文流式返回接口文档。
+    """按方案生成接口文档正文（上游 PRD 由服务端取）。
 
     团队接口规范（统一响应结构、错误码、分页、鉴权等）由 `api-docs-generator` 技能包
     整段注入提示词，要求模型按团队约定对齐——不再做「按 PRD 关键词检索挑几条」的 RAG。
+
+    **只收方案**（spec #51 / 票 #54）：请求体里不再有 `prd_content`。上游缺失时
+    `resolve_runtime_inputs` 在**构造 SSE 之前**抛 400——进了流之后状态码恒为 200，
+    前端就只能把「还没有 PRD」读成「生成失败」。
     """
+    inputs = job_inputs.resolve_runtime_inputs("api_docs", user.id, payload.solution_id)
     events = document_service.generate_api_docs_stream(
-        prd_content=payload.prd_content,
+        prd_content=str(inputs.get("prd_content") or ""),
     )
     return sse_response(events)
 
@@ -239,10 +247,13 @@ async def generate_api_docs_stream(
 @router.post("/generate-prompts-stream", summary="根据 PRD 生成提示词套件（SSE 流式返回）")
 async def generate_prompts_stream(
     payload: schemas.GeneratePromptsStreamRequest,
+    user: User = Depends(acting_user),
 ) -> StreamingResponse:
-    """根据 PRD 正文流式返回提示词套件。"""
+    """按方案生成提示词套件（PRD 与可选的接口文档都由服务端取）。"""
+    inputs = job_inputs.resolve_runtime_inputs("prompts", user.id, payload.solution_id)
     events = document_service.generate_prompts_stream(
-        prd_content=payload.prd_content,
+        prd_content=str(inputs.get("prd_content") or ""),
+        api_docs_content=str(inputs.get("api_docs_content") or ""),
     )
     return sse_response(events)
 

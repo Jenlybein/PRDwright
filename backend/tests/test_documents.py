@@ -449,6 +449,7 @@ def test_document_outward_shape_is_unchanged(client) -> None:
         "content",
         "pending_items",
         "last_run_summary",
+        "review",
         "updated_at",
         "stale",
         "derived_from",

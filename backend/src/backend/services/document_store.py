@@ -12,13 +12,16 @@
 
 - `save_document`：**用户手改**。就地改当前版本的正文，不新增版本条目；
   `pending_items` 与 `last_run_summary` 原样保留——清单是模型产出的元数据，
-  用户改几个字不构成「清单过期」。
+  用户改几个字不构成「清单过期」。审核结论同样原样保留（本轮不按正文变化判定
+  结论过期，见 ADR 0002）。
 - `commit_generated(append_version=True)`：**整篇生成**。追加一条新版本，并让下游产物
-  失效（见 `DOWNSTREAM_KINDS`）；正文 + 清单 + 回执同批写入新版本。
+  失效（见 `DOWNSTREAM_KINDS`）；正文 + 清单 + 回执 + **审核结论**同批写入新版本。
 - `commit_generated(append_version=False)`：**`optimize` / `clarify` 的就地改写**。
   就地改当前版本，不新增条目、不删下游；但正文 + 清单 + 回执仍是同批替换——
   它们产自同一次模型调用栈，分开写就会各自漂移。
 - `checkpoint` / `restore`：用户主动「存为新版本」/「恢复某一版」。两者都**追加新版本**。
+- `commit_review`：**重新审核**的收尾。只更新当前版本的 `review` 列，
+  不追加版本、不改正文、不动清单与回执（ADR 0002 第 2 条）。
 
 ## 事务（v6 / T16.7）
 
@@ -147,6 +150,7 @@ def commit_generated(
     *,
     pending_items: list[dict[str, Any]] | None = None,
     run_summary: dict[str, Any] | None = None,
+    review: dict[str, Any] | None = None,
     append_version: bool = True,
     source: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -160,6 +164,9 @@ def commit_generated(
         content: 已剥离标记块的正文。
         pending_items: 本次产出的待确认清单；`None` 视为空清单。
         run_summary: 本次生成的用量回执；`None` 表示该版本没有回执。
+        review: 这一版正文的审核结论（形状与 SSE `review` 事件的数据一致）。
+            **只在追加版本时写入**——结论与它描述的那一版正文同批落库；`None`
+            表示这次没审成（或本来就不审），写进去的列留空 = 读侧「未审核」。
         append_version: `True` 追加一条新版本并让下游失效（整篇生成）；
             `False` 就地改写当前版本、不牵动下游（`optimize` / `clarify`）。
         source: 版本来源标签；缺省取产物类型（`prd` / `api_docs` / `prompts`）。
@@ -174,6 +181,7 @@ def commit_generated(
     pending_json = json.dumps(pending_items or [], ensure_ascii=False)
     summary_json = json.dumps(run_summary, ensure_ascii=False) if run_summary is not None else None
     metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata is not None else "{}"
+    review_json = json.dumps(review, ensure_ascii=False) if review is not None else None
     content_sha = content_fingerprint(content)
 
     with session_scope() as session:
@@ -186,6 +194,7 @@ def commit_generated(
                 content_sha=content_sha,
                 pending_items=pending_json,
                 last_run_summary=summary_json,
+                review=review_json,
                 source=source,
                 metadata=metadata_json,
                 # 下游不再删除：上游换版后下游保留，由读取侧的 `stale` 提示用户。
@@ -211,6 +220,38 @@ def commit_generated(
 # ---------------------------------------------------------------------------
 # 版本链：读列表 / 读详情 / 打里程碑 / 恢复
 # ---------------------------------------------------------------------------
+
+
+def commit_review(
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    review: dict[str, Any],
+) -> dict[str, Any] | None:
+    """**重新审核**收尾：只更新当前版本的审核结论（不追加版本、不动正文）。
+
+    为什么单独一个入口而不是复用 `commit_generated`：后者的语义是「写正文」——它要么追加
+    版本，要么就地重写正文，两条路都会改变「这一版是什么」。重审只刷新这一版的一条判定，
+    正文与清单一个字都不该动（ADR 0002 第 2 条）。
+
+    Args:
+        owner_id: 文档所属用户。
+        solution_id: 文档所属方案。
+        kind: 产物类型（`prd` / `api_docs` / `prompts`）。
+        review: 本次结论（形状与 SSE `review` 事件的数据一致，见 `document_review.review_data`）。
+
+    Returns:
+        更新后的文档；方案不可见、或这一份还没有任何正文（无当前版本）时返回 None
+        ——没有正文就没有「被审的那一版」，写一条无主结论只会让读侧以为审过。
+    """
+    review_json = json.dumps(review, ensure_ascii=False)
+    with session_scope() as session:
+        ok = DocumentRepository(session).replace_current_review(
+            owner_id, solution_id, kind, review=review_json
+        )
+        if not ok:
+            return None
+        return _read_document(session, owner_id, solution_id, kind)
 
 
 def list_versions(owner_id: int, solution_id: int, kind: str) -> list[dict[str, Any]]:
@@ -335,10 +376,12 @@ def delete_version(
 
 
 def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dict[str, Any]:
-    """把「文档行 + 当前版本行」的合并投影裁成对外结构，并把两个 JSON 文本列解成对象。
+    """把「文档行 + 当前版本行」的合并投影裁成对外结构，并把三个 JSON 文本列解成对象。
 
-    解析一律容错（脏数据退化为空清单 / 空回执）：这两个列是**展示用**的附加信息，
-    读不动它不该让整份文档读不出来——正文才是主角。
+    解析一律容错（脏数据退化为空清单 / 空回执 / 无结论）：这些列是**展示用**的附加
+    信息，读不动它不该让整份文档读不出来——正文才是主角。
+    `review` 是当前版本那一条审核结论（一版一条）；`None` 表示这一版没审过 / 没审成，
+    界面据此显示「未审核 / 审核失败」，绝不替它猜一个「通过」。
     `stale` 由 `metadata.derived_from` 记录的上游指纹与上游**当前**指纹比较得出：
     相等即同源，不等即“上游改过了”。没有记录（旧数据、PRD 本身）恒为 false。
     """
@@ -351,6 +394,7 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         "content": row.content or "",
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
+        "review": _load_json(row.review, dict, None),
         "updated_at": row.updated_at,
         "derived_from": derived,
         "stale": _is_stale(derived, sha_by_kind or {}),
@@ -394,6 +438,7 @@ def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
         "content": row.content or "",
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
+        "review": _load_json(row.review, dict, None),
         "source": row.source,
         "note": row.note or "",
         "created_at": row.created_at,

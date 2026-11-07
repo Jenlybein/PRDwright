@@ -15,6 +15,7 @@
 import axios from 'axios'
 
 import http from '@/services/api'
+import { parseReview } from '@/utils/review'
 import { fromBackendKind, parseRunSummary } from '@/utils/workflow'
 import { normalizeImportance } from '@/utils/pendingItems'
 import type {
@@ -126,6 +127,10 @@ function toRecord(data: unknown): DocumentRecord | null {
     content: typeof raw.content === 'string' ? raw.content : '',
     runSummary: summary,
     pendingItems: toPendingItems(raw.pending_items),
+    // 当前版本那一条审核结论：刷新 / 换设备后它是唯一来源（订阅期间的即时更新走
+    // SSE 的 `review` 事件，两处共用 `parseReview`，形状不会分叉）。
+    // 解析不出来 → null，界面显示「未审核」，绝不替它猜一个「通过」。
+    review: parseReview(raw.review),
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
     stale: raw.stale === true,
     derivedFrom: toDerivedFrom(raw.derived_from),

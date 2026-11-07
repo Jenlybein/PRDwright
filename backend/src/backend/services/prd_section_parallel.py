@@ -40,6 +40,7 @@ from langchain_core.messages import BaseMessage
 
 from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError
+from backend.services.document_review import review_data
 from backend.services.llm_meter import use_step
 from backend.services.pending_items import PendingBlockSuppressor, extract
 from backend.services.prd_section_writer import (
@@ -73,6 +74,8 @@ class _SectionState:
     failed: bool = False
     reason: str = ""
     review: SectionReview | None = None
+    # 本章是否真的改写并采用了新正文（汇总结论的 `rewritten` 如实取它）
+    rewritten: bool = False
     pending_items: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -311,6 +314,7 @@ class ParallelSectionRun:
                     new_draft = ""
                 if new_draft and new_draft.strip():
                     draft = new_draft
+                    st.rewritten = True
 
         text = _ensure_heading(draft, st.section.heading)
         clean_text, items = extract(text, id_prefix=st.section.id)
@@ -437,14 +441,16 @@ class ParallelSectionRun:
                 StreamEvent(
                     type="review",
                     content=conclusion,
-                    data={
-                        "kind": "prd",
-                        "verdict": verdict,
-                        "summary": conclusion,
-                        "issues": issues,
-                        "rewritten": False,
-                        "failed_sections": failed_sections,
-                    },
+                    data=review_data(
+                        "prd",
+                        verdict=verdict,
+                        summary=conclusion,
+                        issues=issues,
+                        # 如实汇总：任意一章真的改写并采用了新正文就算改过。
+                        # 从前这里恒为 False，于是「PRD 能不能修复」随并发度配置漂。
+                        rewritten=any(st.rewritten for st in self._states),
+                        failed_sections=failed_sections,
+                    ),
                 )
             )
 

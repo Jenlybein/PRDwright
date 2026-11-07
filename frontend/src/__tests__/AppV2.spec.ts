@@ -27,6 +27,7 @@ import type {
   EntryMode,
   JobSnapshot,
   RequirementsSummary,
+  ReviewConclusion,
   RunSummary,
   StreamDocumentPart,
   StreamStageEvent,
@@ -311,6 +312,36 @@ function jobCount(kind: string): number {
 function jobPayload(kind: string): api.CreateJobPayload | undefined {
   const calls = vi.mocked(api.createJob).mock.calls.filter((call) => call[0]?.kind === kind)
   return calls[calls.length - 1]?.[0]
+}
+
+/**
+ * 落库过的方案状态（新建 + 更新的全部载荷，按发生顺序）。
+ *
+ * 上游正文不再随任务下发（spec #51 / 票 #54）：贴入的 PRD / 接口文档先落进方案状态，
+ * 任务创建时后端按方案自己取。因此「材料真的送到了后端」这条断言的新落点是**这里**，
+ * 而不是 `createJob` 的载荷——后者只应该出现「做什么、对哪一份」。
+ */
+function savedSolutionStates(): Record<string, unknown>[] {
+  const states: Record<string, unknown>[] = []
+  for (const call of vi.mocked(solutionApi.createSolution).mock.calls) {
+    const state = call[0]?.state
+    if (state) states.push({ ...state } as Record<string, unknown>)
+  }
+  for (const call of vi.mocked(solutionApi.updateSolution).mock.calls) {
+    const state = call[1]?.state
+    if (state) states.push({ ...state } as Record<string, unknown>)
+  }
+  return states
+}
+
+/** 方案状态里某一列是否出现过这段正文（对象列按 JSON 串比对） */
+function savedStateContains(field: string, fragment: string): boolean {
+  return savedSolutionStates().some((state) => {
+    const value = state[field]
+    if (value == null) return false
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    return text.includes(fragment)
+  })
 }
 
 /** 造一份任务快照（刷新重连时后端首发的事件） */
@@ -643,12 +674,14 @@ function makeDocumentRecord(
   content: string,
   runSummary: RunSummary | null = null,
   pendingItems: DocumentRecord['pendingItems'] = [],
+  review: DocumentRecord['review'] = null,
 ): DocumentRecord {
   return {
     kind,
     content,
     runSummary,
     pendingItems,
+    review,
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
     derivedFrom: null,
@@ -900,15 +933,14 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('项目背景')
 
-    // PRD 生成拿到的是与 field-schema 对齐的结构化 JSON（走 createJob 下发）
+    // PRD 任务只带「要不要复核」：摘要与对话历史由后端按方案取（票 #54），
+    // 前端不再把自己手里那份副本递过去（上游改过时它可能已经落后一版）
     const payload = jobPayload('prd')
     expect(payload?.kind).toBe('prd')
-    // 直接下发结构化摘要字典，需求文本由后端统一格式化
-    expect(payload?.summary?.product_name).toBe('PRDwright')
-    expect(payload?.summary?.mvp_features?.[0]?.name).toBe('问卷填写')
-    // 对话历史一并带上：首轮只有 AI 那条回复（需求本身走 summary 传入）
-    expect(payload?.history?.length).toBe(1)
-    expect(payload?.history?.[0]?.role).toBe('assistant')
+    expect(payload).not.toHaveProperty('summary')
+    expect(payload).not.toHaveProperty('history')
+    // 与 field-schema 对齐的结构化 JSON 随方案状态落库，后端按方案取
+    expect(savedStateContains('summary', 'PRDwright')).toBe(true)
   })
 
   it('点「生成 PRD」先弹摘要确认面板，确认后把回填结果写回摘要再生成', async () => {
@@ -956,9 +988,10 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(jobCount('prd')).toBe(1)
     const prdPayload = jobPayload('prd')
-    // 回填结果已写回摘要，并作为生成输入下发
-    expect(prdPayload?.summary?.target_users).toContain('小团队产品经理')
-    expect(prdPayload?.summary?.mvp_features?.[0]?.user_value).toBe('省时间')
+    // PRD 任务只带「要不要复核」；回填后的摘要随方案状态落库，由后端按方案取（票 #54）
+    expect(prdPayload).not.toHaveProperty('summary')
+    expect(savedStateContains('summary', '小团队产品经理')).toBe(true)
+    expect(savedStateContains('summary', '省时间')).toBe(true)
   })
 
   /**
@@ -1846,11 +1879,13 @@ describe('AppV2 入口模式', () => {
     expect(jobCount('prd')).toBe(1)
 
     const payload = jobPayload('prd')
-    expect(payload?.requirements).toBe('做一个记账 App，支持多人共享账本。')
-    expect(payload?.productName).toBe('小账本')
-    // 没有结构化摘要，也没有对话历史（这条路根本不聊）
-    expect(payload?.summary ?? null).toBeNull()
-    expect(payload?.history ?? []).toEqual([])
+    // 需求不随任务下发（票 #54）：它先随方案状态落库，后端按方案取
+    expect(payload).not.toHaveProperty('requirements')
+    expect(payload).not.toHaveProperty('productName')
+    expect(payload).not.toHaveProperty('summary')
+    expect(payload).not.toHaveProperty('history')
+    expect(savedStateContains('quick_requirements', '做一个记账 App，支持多人共享账本。')).toBe(true)
+    expect(savedStateContains('quick_product_name', '小账本')).toBe(true)
     // 输入只有一段话，逐章复核的边际收益低：生成时只撰写、不审不改
     expect(payload?.reviewEnabled).toBe(false)
 
@@ -1903,14 +1938,17 @@ describe('AppV2 入口模式', () => {
     )
   })
 
-  it('快捷流程：交付条件与完整流程一致，只生成 PRD 时「完成」仍不可用', async () => {
+  it('快捷流程：交付条件与完整流程一致，只生成 PRD 时「交付」格点不动', async () => {
     const wrapper = await mountEntry()
     await submitQuickPrd(wrapper)
 
-    // 两条流程都要求三份齐备才算交付完成，快捷流程不降低门槛
-    const finish = wrapper.findAll('button').find((item) => item.text().trim() === '完成')
-    expect(finish).toBeDefined()
-    expect((finish?.element as HTMLButtonElement).disabled).toBe(true)
+    // 两条流程都要求三份齐备才算可交付，快捷流程不降低门槛。
+    // 交付入口是进度条那一格（「完成」按钮已撤），未齐备时点了不该有反应。
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(wrapper.text()).not.toContain('文档已生成完毕')
   })
 
   it('我有 PRD：贴入 PRD 直接生成提示词套件，且不出现「查看 PRD」', async () => {
@@ -1929,7 +1967,9 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     const payload = jobPayload('prompts')
-    expect(payload?.prdContent).toContain('家庭记账工具')
+    // 任务只带「做什么」；贴入的 PRD 先落进方案状态，由后端按方案取
+    expect(payload).not.toHaveProperty('prdContent')
+    expect(savedStateContains('draft_prd_text', '家庭记账工具')).toBe(true)
     expect(wrapper.text()).toContain('提示词套件')
     expect(wrapper.text()).toContain('角色设定')
 
@@ -1937,8 +1977,8 @@ describe('AppV2 入口模式', () => {
     expect(wrapper.text()).not.toContain('查看 PRD')
     expect(wrapper.text()).toContain('返回 PRD')
 
-    // 只有提示词也能完成，且完成页只留这一张卡片
-    await clickButton(wrapper, '完成', true)
+    // 只有提示词也算齐备，点进度条「交付」即进交付页；交付页只留这一张卡片
+    await clickStep(wrapper, '交付')
     await flushPromises()
     expect(wrapper.text()).toContain('文档已生成完毕')
     const doneCards = wrapper.findAll('article')
@@ -1977,9 +2017,11 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     const payload = jobPayload('prompts')
-    expect(payload?.prdContent).toContain('家庭记账工具')
-    // 这一条入口的全部意义：接口文档也要真的送到后端
-    expect(payload?.apiDocsContent).toContain('POST /api/ledgers')
+    // 这一条入口的全部意义：接口文档也要真的到后端——但它走的是方案状态，不是请求体
+    expect(payload).not.toHaveProperty('prdContent')
+    expect(payload).not.toHaveProperty('apiDocsContent')
+    expect(savedStateContains('paste_prd_text', '家庭记账工具')).toBe(true)
+    expect(savedStateContains('paste_api_docs_text', 'POST /api/ledgers')).toBe(true)
     expect(wrapper.text()).toContain('提示词套件')
 
     // 自带的两份材料**不算**本工具的产物：返回目标也是录入页，且不出现「查看 PRD」
@@ -1997,7 +2039,11 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     expect(jobCount('prompts')).toBe(1)
-    expect(jobPayload('prompts')?.apiDocsContent).toBe('')
+    // 接口文档是选填：方案状态里没有这一份，请求体里也不该凭空多出正文
+    expect(jobPayload('prompts')).not.toHaveProperty('apiDocsContent')
+    expect(savedSolutionStates().some((state) => String(state.paste_api_docs_text ?? ''))).toBe(
+      false,
+    )
   })
 
   it('我有 PRD + 接口文档：未贴 PRD 时不能提交，缺失提示常驻', async () => {
@@ -2062,6 +2108,135 @@ describe('AppV2 入口模式', () => {
 
     await clickButton(wrapper, '返回对话', true)
     expect(wrapper.text()).toContain('需求澄清对话')
+  })
+})
+
+/**
+ * 交付页入口：齐备即可进入。
+ *
+ * 交付页不再由「完成」按钮把关——进度条的「交付」格是**唯一**入口，可点条件是
+ * 「本入口所需文档齐备」（完整流程与快捷流程三份、两个导入入口只要提示词）。
+ * 齐备那一刻给一次全应用提示，但**不把用户从当前页面带走**：他可能正在改稿。
+ */
+describe('AppV2 交付页入口', () => {
+  /** 三份产物各一份正文（完整流程 / 快捷流程的齐备条件） */
+  function allDocuments(): DocumentRecord[] {
+    return [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n内容'),
+      makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n内容'),
+      makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n内容'),
+    ]
+  }
+
+  /** 侧栏方案列表里的一行（列表用得到的字段） */
+  function sidebarItem(id: number, title: string) {
+    return {
+      id,
+      title,
+      mode: 'structured',
+      stage: 'done',
+      created_at: '2026-10-13T00:00:00',
+      updated_at: '2026-10-13T00:00:00',
+      content_updated_at: '2026-10-13T00:00:00',
+    }
+  }
+
+  /** 点侧栏方案列表里的某一项（换方案走这条路，与用户操作一致） */
+  async function clickSolutionInSidebar(wrapper: VueWrapper, title: string): Promise<void> {
+    const sidebar = wrapper.find('aside[aria-label="方案列表"]')
+    const item = sidebar.findAll('button').find((button) => button.text().includes(title))
+    if (!item) throw new Error(`侧栏未找到方案：${title}`)
+    await item.trigger('click')
+    await flushPromises()
+    await flushPromises()
+  }
+
+  it('审阅页没有「完成」按钮：齐备后点进度条「交付」格进入交付页', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, allDocuments())
+
+    // 「完成」已经撤掉：交付页的唯一入口是进度条那一格
+    expect(wrapper.findAll('button').some((item) => item.text().trim() === '完成')).toBe(false)
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    expect(storeOf(wrapper).viewState).toBe('done')
+    expect(wrapper.text()).toContain('3 份文档已全部完成')
+  })
+
+  it('所需文档未齐备时「交付」格点不动，页面留在原地', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n内容'),
+    ])
+
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    // 只有 PRD：齐备条件没满足，点它不该把用户送进一个空交付页
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(wrapper.text()).not.toContain('文档已生成完毕')
+  })
+
+  it('导入入口的齐备判据只有提示词：提示词生成完即可进交付页', async () => {
+    const wrapper = await mountExistingSolution(
+      { ...reviewSnapshot('review-prompts'), entryMode: 'prompt-debug' },
+      1,
+      [makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n内容')],
+    )
+
+    // 这条入口的进度条只有「提示词 → 交付」两格
+    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(2)
+
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    expect(storeOf(wrapper).viewState).toBe('done')
+    // 交付页只摆这一份：另外两份本来就不是这条入口的产物
+    expect(wrapper.text()).toContain('文档已生成完毕')
+    expect(wrapper.findAll('article')).toHaveLength(1)
+  })
+
+  it('齐备那一刻只提示一次，不把用户从当前页面带走', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, allDocuments())
+
+    expect(wrapper.text()).toContain('三份文档已齐备，可在进度条进入交付页')
+    // 停在原页：正文还在，交付页没有被自动打开
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(wrapper.text()).toContain('生成接口文档')
+  })
+
+  it('提示按方案各给一次：换方案会再提示，回到原方案不重复提示', async () => {
+    vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([
+      sidebarItem(1, '方案一'),
+      sidebarItem(2, '方案二'),
+    ])
+    vi.mocked(solutionApi.fetchSolution).mockImplementation(async (id: number) =>
+      id === 2
+        ? makeSolutionDetail(
+            2,
+            { ...reviewSnapshot('review-prompts'), entryMode: 'prompt-debug' },
+            { mode: 'prompt-debug' },
+          )
+        : makeSolutionDetail(1, reviewSnapshot('review-prd')),
+    )
+    vi.mocked(documentApi.fetchDocuments).mockImplementation(async (id: number) =>
+      id === 2
+        ? [makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n内容')]
+        : allDocuments(),
+    )
+
+    const wrapper = await mountEntry('/v2/1')
+    expect(wrapper.text()).toContain('三份文档已齐备，可在进度条进入交付页')
+
+    // 换到方案二（导入入口，只有提示词也算齐备）：换方案可以再提示，文案随入口模式变
+    await clickSolutionInSidebar(wrapper, '方案二')
+    expect(wrapper.text()).toContain('提示词套件已生成，可在进度条进入交付页')
+
+    // 回到方案一：同一方案在同一会话里不再提示——提示位仍是方案二那句，
+    // 没有被换回「三份文档已齐备」（否则等于又提示了一次）
+    await clickSolutionInSidebar(wrapper, '方案一')
+    expect(wrapper.text()).not.toContain('三份文档已齐备，可在进度条进入交付页')
   })
 })
 
@@ -2507,9 +2682,11 @@ describe('AppV2 文档澄清', () => {
 
     const payload = jobPayload('clarify')
     expect(payload?.docKind).toBe('prd')
-    // 对话记录随请求一起交给后端——改写依据就是它，后端不可能自己猜到
-    expect(payload?.history?.[0]?.content).toContain('分页上限取多少？')
+    // 对话记录**不再随请求下发**：后端按 `docKind` 定位那条澄清线程自己读（票 #54）。
+    // 前端只保证「这条线程确实聊过」，改写依据住在服务端的 `chat_turns` 里。
+    expect(payload).not.toHaveProperty('history')
     expect(payload?.document).toContain('分页上限：待确认')
+    expect(wrapper.text()).toContain('PRD 文档')
 
     // 改写完成 → 回到 PRD 的审阅页，并且正文已经是新的
     expect(wrapper.text()).toContain('PRD 文档')
@@ -3115,6 +3292,197 @@ describe('AppV2 的版本预览与删除', () => {
 })
 
 /**
+ * 下游过期黄条上的「一键更新」。
+ *
+ * 只跨应用外壳断言：真 router + 点按钮 + 屏幕结果（另加 `createJob` 的调用记录——
+ * 「这一份会不会被重写、写的是哪一份」最终就落在它上面）。五条行为：
+ * 有上游且过期才有按钮、点下去先确认、确认后走与该文档**现有整篇生成相同的入口**、
+ * 不连带更新下游、生成期间点不动。
+ */
+describe('AppV2 下游过期的一键更新', () => {
+  /** 造一份「基于旧版上游」的文档记录（过期判定由后端算，前端只读这个标记） */
+  function staleDocument(kind: DocumentRecord['kind'], content: string): DocumentRecord {
+    return { ...makeDocumentRecord(kind, content), stale: true }
+  }
+
+  /** 上游改过了：PRD 是新的，接口文档与提示词还停在旧版上 */
+  function staleRecords(): DocumentRecord[] {
+    return [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n改过的需求'),
+      staleDocument('api-docs', '# 接口文档\n\n## 一、概述\n旧内容'),
+      staleDocument('prompts', '# 提示词套件\n\n## 一、角色设定\n旧内容'),
+    ]
+  }
+
+  /** 打开一份「下游都过期」的方案，停在哪一页由调用方给 */
+  async function mountStale(viewState: string): Promise<VueWrapper> {
+    const wrapper = await mountExistingSolution(reviewSnapshot(viewState), 1, staleRecords())
+    await flushPromises()
+    return wrapper
+  }
+
+  it('过期的下游黄条上出现「一键更新」；PRD 没有上游，那一页没有这个入口', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      // PRD 自己也标成过期（后端不会这么做）：用来证明「有没有上游」才是判据，
+      // 而不是「那份的 stale 恰好是假」。
+      staleDocument('prd', '# 产品需求文档\n\n## 1. 项目背景\n改过的需求'),
+      staleDocument('api-docs', '# 接口文档\n\n## 一、概述\n旧内容'),
+      staleDocument('prompts', '# 提示词套件\n\n## 一、角色设定\n旧内容'),
+    ])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('上游文档已更新')
+    expect(wrapper.text()).toContain('一键更新')
+
+    // 回 PRD 审阅页：PRD 没有上游，黄条与按钮都不该出现
+    await clickStep(wrapper, 'PRD')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('一键更新')
+    expect(wrapper.text()).not.toContain('上游文档已更新')
+  })
+
+  it('点「一键更新」先弹确认：取消什么都不发生，确认后才切到这一份的生成态', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n\n## 一、概述\n', sectionId: '', index: -1 })
+        await gate
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n新上游内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+    expect(jobCount('api-docs')).toBe(0)
+
+    await clickButton(wrapper, '一键更新', true)
+    await flushPromises()
+
+    // 确认窗（Teleport 到 body）要说清两件事：用哪份上游、旧版本去哪
+    expect(document.body.textContent).toContain('当前 PRD')
+    expect(document.body.textContent).toContain('重新生成接口文档')
+    expect(document.body.textContent).toContain('旧版本保留在版本历史')
+    // 只是弹确认，还没有发起任务——「先问后做」的证据就在这一行
+    expect(jobCount('api-docs')).toBe(0)
+
+    await clickButtonInDialog('取消')
+    await nextTick()
+    expect(document.body.textContent).not.toContain('旧版本保留在版本历史')
+    expect(jobCount('api-docs')).toBe(0)
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+
+    // 再点一次，这回确认
+    await clickButton(wrapper, '一键更新', true)
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 切到这份文档的生成态：审阅页与黄条都不在了，按钮自然也不可点
+    expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
+    expect(wrapper.text()).not.toContain('一键更新')
+    // 走的是既有整篇生成入口：只起一个接口文档任务，不连带更新下游
+    expect(jobCount('api-docs')).toBe(1)
+    expect(jobCount('prompts')).toBe(0)
+    // 「用当前上游」不再是前端递上去的那份副本（票 #54）：请求体里没有 PRD 正文，
+    // 后端按方案取库里当前那一版（改过的需求）——双真源就此消失
+    expect(jobPayload('api-docs')).not.toHaveProperty('prdContent')
+
+    release()
+    await flushPromises()
+  })
+
+  it('更新完成后这一份换成新版本，下游一律不动（它自己亮过期黄条）', async () => {
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n\n## 一、概述\n', sectionId: '', index: -1 })
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n新上游内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+
+    await clickButton(wrapper, '一键更新', true)
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 回到这一份的审阅页，正文换成新的一版（整篇生成的版本语义由后端落地：旧版进历史）
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('新上游内容')
+
+    // 只更新这一份：提示词没有被重写，也没有被前端清掉
+    expect(jobCount('prompts')).toBe(0)
+    expect(documentsOf(wrapper).contentOf('prompts')).toContain('旧内容')
+
+    // 下游自己按过期规则提示
+    await clickStep(wrapper, '提示词')
+    await flushPromises()
+    expect(wrapper.text()).toContain('上游文档已更新')
+  })
+
+  it('提示词过期时更新的是提示词套件（不回头重生成接口文档）', async () => {
+    mockJobStream({
+      prompts: async () => ({
+        conversationId: '',
+        reply: '# 提示词套件\n\n## 一、角色设定\n按新接口重写',
+        asks: [],
+      }),
+    })
+
+    const wrapper = await mountStale('review-prompts')
+    await clickButton(wrapper, '一键更新', true)
+    await flushPromises()
+
+    // 确认窗说的是这一份、以及它的两份上游
+    expect(document.body.textContent).toContain('当前 PRD 与接口文档')
+    expect(document.body.textContent).toContain('提示词套件')
+
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 目标由「眼前是哪一份」决定：错发就会静默地多花一次整篇生成
+    expect(jobCount('prompts')).toBe(1)
+    expect(jobCount('api-docs')).toBe(0)
+    // 上游（PRD + 接口文档）由后端按方案取，前端不再递副本（票 #54）
+    expect(jobPayload('prompts')).not.toHaveProperty('prdContent')
+    expect(jobPayload('prompts')).not.toHaveProperty('apiDocsContent')
+    expect(storeOf(wrapper).viewState).toBe('review-prompts')
+    expect(documentsOf(wrapper).contentOf('prompts')).toContain('按新接口重写')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('旧内容')
+  })
+
+  it('生成中「一键更新」不可点：同一份文档只跟一个在途任务', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockJobStream({
+      optimize: async () => {
+        await gate
+        return { conversationId: '', reply: '# 接口文档\n\n优化后的内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+    // 就地优化不切阶段：审阅页、黄条与按钮都还看得见
+    await clickButton(wrapper, 'AI 优化')
+    await byId(wrapper, 'document-optimize-instruction').setValue('压缩到 500 字')
+    await clickButton(wrapper, '开始优化')
+    await flushPromises()
+
+    const busyButton = wrapper.findAll('button').find((item) => item.text().trim() === '一键更新')
+    expect(busyButton).toBeDefined()
+    expect(busyButton?.attributes('disabled')).toBeDefined()
+
+    release()
+    await flushPromises()
+
+    const idleButton = wrapper.findAll('button').find((item) => item.text().trim() === '一键更新')
+    expect(idleButton?.attributes('disabled')).toBeUndefined()
+  })
+})
+
+/**
  * 失败可见：该块界面不可用，而不是整页白屏。
  *
  * 这是「漏改不报错」根治的最后一段：前面几条用例管「当场失败」，这一条管**失败之后
@@ -3164,6 +3532,274 @@ describe('AppV2 错误边界：子组件渲染失败时该块界面不可用', (
  * 注入方式：先登记一行**填全**的第五入口（入口页会把每一行都查一遍才画卡片，半填的行连卡片
  * 都画不出来），等卡片已经出现在屏幕上，再抽掉一列：卡片看得见、点得着，一点就炸。
  */
+/**
+ * 审阅页的「审核结论」面板（票 #55）：四态 + 重新审核。
+ *
+ * 只跨应用外壳：真 router + 点按钮 + 屏幕结果。结论的数据来源是**文档记录**
+ * （`fetchDocuments` 返回的 `review`），所以「刷新后仍在」在这条缝上就是
+ * 「打开方案时后端把那条结论一起返回了」——不依赖任何一次订阅。
+ */
+describe('审阅页的审核结论面板：四态与重新审核', () => {
+  /** 一条结论（形状与后端 `review_data` 一致） */
+  function conclusion(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
+    return {
+      kind: 'prd',
+      verdict: 'pass',
+      summary: '6 章完成，0 个待处理问题',
+      issues: [],
+      rewritten: false,
+      failedSections: [],
+      ...overrides,
+    }
+  }
+
+  const REVISE = (): ReviewConclusion =>
+    conclusion({
+      verdict: 'revise',
+      summary: '1 个待处理问题',
+      issues: [{ severity: 'high', detail: '编造了鉴权方式' }],
+    })
+
+  const REVIEW_STATE: Record<DocumentRecord['kind'], string> = {
+    prd: 'review-prd',
+    'api-docs': 'review-api-docs',
+    prompts: 'review-prompts',
+  }
+
+  /** 打开某份文档的审阅页；`review` 是后端随文档记录返回的那条结论 */
+  async function mountReviewPage(
+    kind: DocumentRecord['kind'],
+    review: ReviewConclusion | null,
+    content = '# 文档正文\n\n## 一、概述\n内容',
+  ): Promise<VueWrapper> {
+    const wrapper = await mountExistingSolution(reviewSnapshot(REVIEW_STATE[kind]), 1, [
+      makeDocumentRecord(kind, content, null, [], review),
+    ])
+    await flushPromises()
+    return wrapper
+  }
+
+  /** 折叠头上的「重新审核」按钮（与展开开关是同一行上的两枚不同按钮） */
+  function rereviewButton(wrapper: VueWrapper): DOMWrapper<Element> {
+    const button = wrapper.findAll('button').find((item) => item.text().trim() === '重新审核')
+    if (!button) throw new Error('未找到「重新审核」按钮')
+    return button
+  }
+
+  /** 折叠头上的「修复」按钮（票 #56）：只在「有问题」时可点 */
+  function fixButton(wrapper: VueWrapper): DOMWrapper<Element> {
+    const button = wrapper.findAll('button').find((item) => item.text().trim() === '修复')
+    if (!button) throw new Error('未找到「修复」按钮')
+    return button
+  }
+
+  it('四态各自可见：通过 / 有问题 / 审核失败 / 未审核，且没结论不等于通过', async () => {
+    // ① 通过（结论来自文档记录，因此刷新后还在——这条用例本来就是「重新打开」）
+    const passed = await mountReviewPage('prd', conclusion())
+    expect(passed.text()).toContain('审核结论')
+    expect(passed.text()).toContain('通过')
+
+    // ② 有问题
+    const revised = await mountReviewPage('prd', REVISE())
+    expect(revised.text()).toContain('有问题')
+    expect(revised.text()).not.toContain('通过')
+    expect(revised.text()).toContain('1 个待处理问题')
+
+    // ③ 未审核：没有结论也渲染面板——否则「没有面板」会被读成「没问题」
+    const unreviewed = await mountReviewPage('api-docs', null)
+    expect(unreviewed.text()).toContain('审核结论')
+    expect(unreviewed.text()).toContain('未审核')
+    expect(unreviewed.text()).not.toContain('通过')
+
+    // ④ 审核失败：起一次重审、任务失败 → 面板显示「审核失败」，绝不冒充通过
+    let wrapper: VueWrapper | null = null
+    mockJobStream({
+      review: async () => {
+        throw new Error('审核上游挂了')
+      },
+    })
+    // 上一版结论是「通过」：失败之后仍要显示「审核失败」，不能用旧结论回答问题
+    wrapper = await mountReviewPage('api-docs', conclusion({ kind: 'api_docs' }))
+    await clickButton(wrapper, '重新审核')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('审核失败')
+    expect(wrapper.text()).not.toContain('通过')
+    wrapper.unmount()
+  })
+
+  it('「有问题」时重新审核不可点，其余三种状态都可点', async () => {
+    const passed = await mountReviewPage('prd', conclusion())
+    expect(rereviewButton(passed).attributes('disabled')).toBeUndefined()
+
+    const unreviewed = await mountReviewPage('prd', null)
+    expect(rereviewButton(unreviewed).attributes('disabled')).toBeUndefined()
+
+    const revised = await mountReviewPage('prd', REVISE())
+    expect(rereviewButton(revised).attributes('disabled')).toBeDefined()
+    // 「有问题」时的解释写在面板里（只靠 title 太隐蔽）
+    const toggle = revised.findAll('button').find((item) => item.text().includes('审核结论'))
+    if (!toggle) throw new Error('未找到结论面板的展开开关')
+    await toggle.trigger('click')
+    expect(revised.text()).toContain('把它们修好之后再来重新审核')
+  })
+
+  it('「修复」与「重新审核」互斥：只有「有问题」能修复，其余三态只能重审', async () => {
+    const revised = await mountReviewPage('prd', REVISE())
+    expect(fixButton(revised).attributes('disabled')).toBeUndefined()
+    expect(rereviewButton(revised).attributes('disabled')).toBeDefined()
+
+    const passed = await mountReviewPage('prd', conclusion())
+    expect(fixButton(passed).attributes('disabled')).toBeDefined()
+    expect(rereviewButton(passed).attributes('disabled')).toBeUndefined()
+
+    const unreviewed = await mountReviewPage('api-docs', null)
+    expect(fixButton(unreviewed).attributes('disabled')).toBeDefined()
+    expect(rereviewButton(unreviewed).attributes('disabled')).toBeUndefined()
+  })
+
+  it('点「重新审核」：只带 docKind，期间在生成态，收尾回审阅页并换上新的结论', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    // 结论里的 `kind` 是后端口径（下划线），它决定这条结论记到哪一份文档上
+    const refreshed = conclusion({
+      kind: 'api_docs',
+      verdict: 'revise',
+      summary: '1 个待处理问题',
+      issues: [{ severity: 'high', detail: '编造了鉴权方式' }],
+    })
+    let wrapper: VueWrapper | null = null
+    let stateDuringRun = ''
+
+    mockJobStream({
+      review: async (handlers) => {
+        // 运行期间应当停在这份文档的**生成态**（用户看得见进展）
+        stateDuringRun = wrapper ? storeOf(wrapper).viewState : ''
+        handlers.onReview?.(refreshed)
+        return { conversationId: '', reply: '', asks: [] }
+      },
+    })
+
+    wrapper = await mountReviewPage('api-docs', null, BODY)
+    // 任务收尾会重新拉一次文档：把「重审后的结论」摆进后端那份记录里
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeDocumentRecord('api-docs', BODY, null, [], refreshed),
+    ])
+
+    await clickButton(wrapper, '重新审核')
+    await flushPromises()
+
+    // 请求体只表达「做什么、对哪一份」：正文与上游由服务端从库里取（C-R3）
+    const payload = jobPayload('review')
+    expect(payload?.docKind).toBe('api-docs')
+    expect(payload?.document).toBeUndefined()
+
+    expect(stateDuringRun).toBe('generating-api-docs')
+    // 收尾回到审阅页，并且换成重审后的那条结论
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(wrapper.text()).toContain('有问题')
+    // 正文逐字未变（重审只审不改）
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(BODY)
+  })
+
+  /**
+   * 修复（票 #56）：按结论重写整篇并**追加版本**。
+   *
+   * 与重审同一条缝、同一套动作形状（起任务 → 生成态 → 回审阅页），差别在产出：
+   * 它是**有正文**的那一种，收尾要像生成一样把新正文写回工作副本，并把结论换掉。
+   */
+  it('点「修复」：只带 docKind，期间在生成态，收尾回审阅页并刷新结论与正文', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    const FIXED = '# 接口文档\n\n## 一、概述\n统一响应结构\n\n## 二、鉴权\n已补齐鉴权'
+    const refreshed = conclusion({ kind: 'api_docs', verdict: 'pass', summary: '0 个待处理问题' })
+    let wrapper: VueWrapper | null = null
+    let stateDuringRun = ''
+
+    mockJobStream({
+      'review-fix': async (handlers) => {
+        stateDuringRun = wrapper ? storeOf(wrapper).viewState : ''
+        handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+        // 修复后的复审结论随流到达：面板据此即时更新（落库那条由收尾的 reload 拉回）
+        handlers.onReview?.(refreshed)
+        // 收尾摘要到达 → 前端重新拉一次文档（后端在此之前已写好新版本与新结论）
+        handlers.onRunSummary?.(makeRunSummary({ kind: 'review-fix' }))
+        return { conversationId: '', reply: FIXED, asks: [] }
+      },
+    })
+
+    wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
+    // 收尾会重新拉一次文档：把「追加了新版本」的后端记录摆进来（正文 + 新结论）
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeDocumentRecord('api-docs', FIXED, null, [], refreshed),
+    ])
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+
+    // 请求体只表达「做什么、对哪一份」：被修的正文、结论与上游全由服务端取（C-R3）
+    const payload = jobPayload('review-fix')
+    expect(payload?.docKind).toBe('api-docs')
+    expect(payload?.document).toBeUndefined()
+
+    expect(stateDuringRun).toBe('generating-api-docs')
+    // 收尾回到审阅页：新正文写回工作副本，结论面板换成复审那条
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(FIXED)
+    expect(wrapper.text()).toContain('通过')
+  })
+
+  it('复审失败：新正文照旧落到审阅页，面板显示「审核失败」且可再点重新审核', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    const FIXED = '# 接口文档\n\n## 一、概述\n统一响应结构\n\n## 二、鉴权\n已补齐鉴权'
+    mockJobStream({
+      'review-fix': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+        // 复审没跑成：后端给一条判定空串的 `review` 事件（不是「通过」）
+        handlers.onReview?.(conclusion({ kind: 'api_docs', verdict: '', summary: '审核未完成' }))
+        handlers.onRunSummary?.(makeRunSummary({ kind: 'review-fix' }))
+        return { conversationId: '', reply: FIXED, asks: [] }
+      },
+    })
+
+    const wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
+    // 复审失败不写结论（C-R1）：后端那份记录里这一版仍然没有 review
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeDocumentRecord('api-docs', FIXED, null, [], null),
+    ])
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+
+    // 正文照落库（改写是成功的那一半），但结论留空——界面照实标「审核失败」
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(FIXED)
+    expect(documentsOf(wrapper).reviewOf('api-docs')).toBeNull()
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(wrapper.text()).toContain('审核失败')
+    expect(wrapper.text()).not.toContain('通过')
+    // 还能补审一次（「重新审核」在失败态可点）
+    expect(rereviewButton(wrapper).attributes('disabled')).toBeUndefined()
+  })
+
+  it('修复失败：正文与结论都不动，错误留在生成页', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    mockJobStream({
+      'review-fix': async () => {
+        throw new Error('重写上游挂了')
+      },
+    })
+
+    const wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+
+    // 后端在改写失败时不动库（正文与版本都还是原样），前端也不能自作主张写回
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(BODY)
+    expect(documentsOf(wrapper).reviewOf('api-docs')?.verdict).toBe('revise')
+    // 留在生成态说明原因：回审阅页会让人以为「改成功了」
+    expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
+    expect(wrapper.text()).toContain('重写上游挂了')
+  })
+})
+
 describe('AppV2 错误边界：外壳接缝上失败也不静默', () => {
   it('第五个入口一点就当场失败 → 屏幕出现「暂时不可用」，而不是「点了没反应」', async () => {
     const key = 'fifth-entry' as EntryMode

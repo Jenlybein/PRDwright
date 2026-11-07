@@ -219,7 +219,7 @@ def _write_chat_turn(runtime: JobRuntime) -> None:
 
 
 def _regenerates_whole_document(kind: str) -> bool:
-    """这次任务是否是「整篇重生成上游产物」——只有它会连带作废下游、且追加新版本。
+    """这次任务是否是「整篇重生成上游产物」——只有它会追加新版本并重算上游锚点。
 
     依据是产物依赖链（`document_store.DOWNSTREAM_KINDS`）：下游由上游正文推导而来，
     上游换了一版，下游就不再成立。反过来，`optimize`（按指令就地优化）与 `clarify`
@@ -227,12 +227,16 @@ def _regenerates_whole_document(kind: str) -> bool:
     不该被顺手删掉。
 
     这个判断现在同时驱动两件事，且二者**恒等**（故合成一个 `append_version` 标志）：
-    整篇生成 → 追加新版本 + 删下游；就地改写 → 改当前版本、不删下游。
+    整篇生成 → 追加新版本 + 重算锚点；就地改写 → 改当前版本、不动锚点。
+
+    **`review_fix` 也算整篇重生成**：它重写的是整篇正文，语义上换了一版产物，
+    因此同样追加版本、重算 `derived_from`——下游据此按既有规则亮出过期黄条
+    （C-R2：修复追加新版本）。
 
     ⚠️ 这条判断以前是隐式的（一律 `invalidate_downstream=True`），后果是「优化接口文档」
     会把基于它生成的提示词悄悄删掉——用户看不到任何提示，只是下次打开方案时东西不见了。
     """
-    return kind in DOCUMENT_KINDS
+    return kind in DOCUMENT_KINDS or kind == "review_fix"
 
 
 def _document_kind(runtime: JobRuntime) -> str | None:
@@ -279,9 +283,16 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
 
     写库本身出意外也只记日志：正文已经在 `generation_jobs.draft_content` 里存了一份，
     丢的只是「升格成文档」这一步，不该把整个任务判失败。
+
+    **重新审核（`kind='review'`）走另一条分支**：它不产出正文，成功收尾要做的是
+    「把结论写进被审的那一版」，而不是「写正文」。两条分支共用同一个收尾入口，
+    因此「什么时候写库」只有一处判断（见 `_write_review`）。
     """
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
+        return
+    if runtime.kind == "review":
+        _write_review(runtime, kind)
         return
     content = runtime.final_reply
     if not content.strip():
@@ -295,6 +306,9 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             content,
             pending_items=runtime.pending_items,
             run_summary=summary,
+            # 审核结论与正文**同批写入**：它描述的就是这一版正文，分两次写就会出现
+            # 「正文换了、结论还是旧的那条」。没审成时是 `None`，不写占位。
+            review=runtime.review,
             # `append_version=True`（整篇生成）同时意味着「追加新版本」；
             # `False`（optimize / clarify）就是就地改当前版本。下游不再删除，
             # 是否过期由读取侧比较 derived_from 得出。
@@ -320,6 +334,57 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
             "生成任务收尾未能写入文档（方案不存在或归属不符）",
             extra={
                 "event": "job.document_write_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+
+
+def _write_review(runtime: JobRuntime, kind: str) -> None:
+    """重新审核收尾：把结论写进**当前版本**的 `review` 列（不追加版本、不改正文）。
+
+    三处与 `_write_document` 一致的口径：
+
+    - **没有结论就不写**（`runtime.review is None`）：审核没跑成不是「通过」，
+      写个占位就是一条假记录（C-R1）；
+    - 归属不符（方案已删 / 不是本人的）静默跳过，不把成功的任务判失败；
+    - 写库出意外只记日志——结论丢一次比把任务判失败更可取，用户重审一次即可。
+
+    与写正文的差别是**没有正文可写**：这一步不看 `runtime.final_reply`，
+    重审链路本来就不产出正文（只产结论）。
+    """
+    if runtime.review is None:
+        logger.warning(
+            "重新审核没有给出结论，本次不写入（没有结论 ≠ 通过）",
+            extra={
+                "event": "job.review_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+        return
+    try:
+        written = document_store.commit_review(
+            runtime.owner_id, runtime.solution_id, kind, runtime.review
+        )
+    except Exception:  # noqa: BLE001 - 落结论不该把已成功的任务判失败
+        logger.warning(
+            "重新审核结论写入失败",
+            extra={
+                "event": "job.review_write_failed",
+                "job_id": runtime.job_id,
+                "kind": kind,
+            },
+            exc_info=True,
+        )
+        return
+    if written is None:
+        logger.warning(
+            "重新审核结论未能写入（方案不存在、归属不符或这一份还没有正文）",
+            extra={
+                "event": "job.review_write_skipped",
                 "job_id": runtime.job_id,
                 "kind": kind,
                 "solution_id": runtime.solution_id,

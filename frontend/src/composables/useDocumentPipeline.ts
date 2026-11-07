@@ -1,12 +1,8 @@
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
-import {
-  syncSummaryFromConversation,
-  type GeneratePrdFromSummaryPayload,
-  type StreamHandlers,
-} from '@/services/api'
-import { useJob, type JobStartInput } from '@/composables/useJob'
+import { syncSummaryFromConversation, type StreamHandlers } from '@/services/api'
+import { useJob } from '@/composables/useJob'
 import { fetchDeliveryZip } from '@/services/documentService'
 import { useDocumentsStore } from '@/stores/documents'
 import { useRunsStore, type ActiveRun, type RunPreview } from '@/stores/runs'
@@ -51,6 +47,7 @@ import {
   documentKindOfChatStage,
   entrySpecForDisplay,
   fromBackendJobKind,
+  fromBackendKind,
   generatingStateFor,
   hasDocumentReview,
   jobDocumentKind,
@@ -70,11 +67,12 @@ export interface PipelineHooks {
 /**
  * 文档生成、审阅与摘要确认闸门。
  *
- * 覆盖从「点击生成 PRD」到「进入完成页」的全部编排：文档流式生成与优化、
- * 摘要回填 Diff 确认、下载与完成守卫。
+ * 覆盖从「点击生成 PRD」到「三份文档各自待确认」的全部编排：文档流式生成与优化、
+ * 摘要回填 Diff 确认、下载。进交付页的判据不在这里（见本文件里那节说明）。
  *
- * **按入口模式分流**只体现在三个地方：需求从哪来（结构化摘要 / 一段话）、
- * 「返回」回到哪个录入页、以及完成所需的最低文档集合；生成链路本身完全共用。
+ * **按入口模式分流**只体现在两个地方：需求从哪来（结构化摘要 / 一段话）、
+ * 「返回」回到哪个录入页；生成链路本身完全共用。交付判据（哪几份文档齐备才能进交付页）
+ * 不在这里，它在 `stores/workflow` 的 `requiredDocsReady`。
  *
  * 阶段本身（`viewState`）落在 workflow store，三份产物正文落在 documents store
  * （后端 `documents` 表在前端的工作副本）。这里只持有「这一次请求 / 这一次确认」的
@@ -102,7 +100,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     pastePairInput,
     generating: isGeneratingPhase,
     reviewing: isReviewing,
-    canFinish: canFinishTask,
     canGeneratePrd,
   } = storeToRefs(store)
 
@@ -221,12 +218,30 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const docStageText = previewField('stageText')
 
   /**
-   * 本次生成的审核结论。
+   * 当前审阅阶段那份文档的**审核结论**（当前版本那一条）。
    *
-   * **只在内存里**：后端不发 `run_summary` 之外的第二份、也不落库；刷新后不会补发，
-   * 结论随之消失。这样「结论不持久化」不需要任何清理逻辑，只靠不存储即可。
+   * 来源是**文档记录**（`documents.review`），不是某一次订阅：刷新、换设备、重连之后
+   * 读到的仍是同一条。订阅期间的 `review` 事件只负责即时更新同一个格子
+   * （见 `handleReview`）——因此「流里看到的」与「刷新后看到的」是同一份数据。
+   *
+   * 与 `runSummary` / `pendingItems` 同一口径：由 `viewState` 反推产物种类；
+   * 非审阅态返回 `null`（那时不展示结论面板）。
    */
-  const reviewConclusion = previewField('review')
+  const reviewConclusion = computed<ReviewConclusion | null>(() => {
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.reviewOf(kind) : null
+  })
+
+  /**
+   * 这份文档本次会话里**最近一次审核没跑成**。
+   *
+   * 它不是一个持久化事实（审核失败不写结论，见 C-R1），而是「我刚亲眼看到它失败了」：
+   * 面板据此把「未审核」改成「审核失败」，免得没审过的文档被当成审过了。
+   */
+  const reviewFailed = computed<boolean>(() => {
+    const kind = docKindOfState(viewState.value)
+    return kind ? documents.reviewFailedOf(kind) : false
+  })
 
   /**
    * 分章节生成的看板；不是 PRD 生成态时恒为 `null`。
@@ -494,9 +509,22 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     runs.resetPreview()
   }
 
-  /** 审核结论：只存内存，供审阅页展示；刷新后自然消失。 */
+  /**
+   * 收到一条 `review` 事件：**即时更新**文档记录里的结论（落库那条才是刷新后的来源）。
+   *
+   * 判定为空串表示「没审成」——那时按「审核失败」记，绝不更新成一条通过：
+   * 没有结论 ≠ 通过（C-R1）。落库侧同样不写，两边的口径一致。
+   */
   function handleReview(review: ReviewConclusion): void {
-    reviewConclusion.value = review
+    const kind = fromBackendKind(review.kind)
+    if (kind !== null) {
+      if (review.verdict === 'pass' || review.verdict === 'revise') {
+        documents.setReview(kind, review)
+      } else {
+        documents.setReviewFailed(kind)
+      }
+    }
+    // PRD 生成过程中的看板也留一份（它只服务于生成页，与本面板不是同一处展示）
     if (prdBoard.value) prdBoard.value.review = review
   }
 
@@ -861,18 +889,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     store.dropChatThread(chatStageForDocument(kind))
   }
 
-  /** 把 PRD 的请求参数折成任务输入 */
-  function prdJobInput(payload: GeneratePrdFromSummaryPayload): JobStartInput {
-    return {
-      summary: payload.summary ?? null,
-      requirements: payload.requirements ?? '',
-      productName: payload.productName ?? '',
-      history: payload.history ?? [],
-      // 只有显式 `false`（快捷流程）才关掉审核；`undefined` 让后端取配置
-      reviewEnabled: payload.reviewEnabled,
-    }
-  }
-
   /**
    * 刷新后静默重连一个进行中的任务：先收快照补全正文，再接 live。
    *
@@ -978,6 +994,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 下游阶段与阶段输出由 `applyJobSnapshot` 在**快照那一刻**回填（那是唯一正确的时机：
     // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
     // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
+    if (kind === 'review') {
+      // 重审不产出正文：收尾只有「回审阅页 + 让面板反映这次结果」两件事。
+      // 成功时结论已随 `review` 事件写进文档记录，`onRunSummary` 还会再拉一次对齐。
+      if (!ok || snap?.status === 'failed') documents.setReviewFailed(target)
+      prdBoard.value = null
+      goTo(reviewStateFor(target))
+      if (!ok) docError.value = job.error.value || '重新审核失败'
+      return
+    }
     if (!ok) {
       docError.value = job.error.value || '生成失败'
       prdBoard.value = null
@@ -1005,41 +1030,32 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 按当前入口模式组装「生成 PRD」的请求体。
+   * 当前入口模式下**有没有可用的需求输入**（PRD 生成前的本地闸门）。
    *
-   * 两条入口只是需求来源不同，因此这里返回同一个请求结构，交给后端汇合到
-   * 同一条链路；返回 `null` 表示当前模式还没有可用的输入（如快捷入口还没写需求），
-   * 调用方据此直接放弃，不要发出一个注定失败的请求。
+   * 需求本身不随任务下发——后端按方案取（结构化的摘要 / 快捷流程那段自由文本 /
+   * 需求澄清历史，见 spec #51 / 票 #54）。这里只回答「现在点了会发生什么」：
+   * 还没有输入就直接放弃，不要发出一个注定被 400 的请求。
    *
    * 两处差异都是**入口形态**造成的，不涉及「怎么写 PRD」：
    * - 快捷流程的需求是那段自由文本，结构化摘要为空（判据读登记表，见 `requirementIsFreeText`）；
-   * - 快捷流程不跑逐章审核/改写（`reviewEnabled: false`）——输入只有一段话，
+   * - 快捷流程不跑逐章审核/改写（`reviewEnabledForJob` 给它 `false`）——输入只有一段话，
    *   逐章复核的边际收益低，省下的调用直接体现在等待时间上。
    */
-  function buildPrdPayload(): GeneratePrdFromSummaryPayload | null {
-    if (requirementIsFreeText.value) {
-      const { productName, requirements } = quickInput.value
-      if (!requirements.trim()) return null
-      // 快捷流程没有需求澄清对话（一段话直接进生成），`history` 正常是空数组；
-      // 仍照传是为了让**旧快照**里残留的需求对话结论不白丢（那时确实聊过）。
-      return { requirements, productName, history: conversationHistory(), reviewEnabled: false }
-    }
-
-    const current = summary.value
-    if (!current) return null
-    return { summary: current, history: conversationHistory() }
+  function hasPrdInput(): boolean {
+    if (requirementIsFreeText.value) return Boolean(quickInput.value.requirements.trim())
+    return summary.value !== null
   }
 
   /**
-   * 生成 PRD：把需求（结构化摘要或自由文本）与对话历史交给后端，由技能包驱动生成。
+   * 生成 PRD：请求体里只有「这次要不要复核」，需求与澄清历史由后端按方案取。
    *
-   * 走 `/generate-prd-from-summary-stream`——两条入口共用同一份请求契约，需求文本
-   * 由后端统一格式化，前端不需要知道「摘要怎么变成文本」。
+   * 走 `prd` 任务（spec #51 / 票 #54）：上游是方案上的结构化摘要 / 自由文本需求 /
+   * 需求澄清线程，前端不再把自己手里那份副本递过去——上游刚改过时，那份副本可能
+   * 已经落后一版了。
    */
   async function generatePrd(): Promise<void> {
     if (isRunInFlight()) return
-    const payload = buildPrdPayload()
-    if (!payload) return
+    if (!hasPrdInput()) return
     // 重新生成 PRD **不再删除下游**：旧的接口文档 / 提示词会留着，并在收尾后由后端
     // 按 `derived_from` 的指纹比较标成「可能已过期」。因此这里不清本地副本，
     // 交给收尾的 `documents.reload()` 把 stale 标记拉回来。
@@ -1049,7 +1065,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'prd',
-      prdJobInput(payload),
+      { reviewEnabled: reviewEnabledForJob() },
       handlersForKind('prd', epochAtStart),
     )
     // 订阅期间会话被换掉、或这一支已被别的任务顶替：成功 / 失败都不要再写回本文件的状态。
@@ -1066,7 +1082,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     dropThreadsFor('prd')
   }
 
-  /** 生成接口文档：以 PRD 正文为输入，团队接口规范由技能包全量注入，无需前端检索确认 */
+  /**
+   * 生成接口文档：上游是后端按方案取到的 PRD 当前版本（票 #54），
+   * 团队接口规范由技能包全量注入，无需前端检索确认。
+   */
   async function generateApiDocs(): Promise<void> {
     if (isRunInFlight()) return
     // 提示词不再删除：重新生成接口文档后，它只会被标成 stale（见 generatePrd 的说明）
@@ -1080,7 +1099,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const { reply, ok, aborted, run } = await job.start(
       'api-docs',
       // 快捷流程一遍过：整篇生成完就收，不审也不改（见 `reviewEnabledForJob`）
-      { prdContent: documents.contentOf('prd'), reviewEnabled: reviewEnabledForJob() },
+      { reviewEnabled: reviewEnabledForJob() },
       handlersForKind('api-docs', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1094,12 +1113,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 生成提示词套件：以 PRD 正文为输入。
+   * 生成提示词套件：上游是后端按方案取到的 PRD 当前版本与**可选**的接口文档
+   * （票 #54）。前端不再指定「拿哪一份正文当上游」——那正是双真源的入口。
    *
-   * PRD 来源随入口模式而变（完整流程用本次生成的 PRD，调试入口用用户贴入的 PRD），
-   * 因此由调用方把正文传进来，而不是在这里猜该读哪份状态。
+   * 调用方只需保证「此刻确实有可用的材料」（各自的按钮可用条件已经这么做，
+   * 材料也随方案快照先落库，见 `useJob.start` 里的 `flushPendingSave`）。
    */
-  async function generatePrompts(prdText: string, apiDocsText = ''): Promise<void> {
+  async function generatePrompts(): Promise<void> {
     if (isRunInFlight()) return
     resetDocTransient()
     prdBoard.value = null
@@ -1108,8 +1128,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'prompts',
-      // 接口文档是可选的第二份材料：不传等于没有，生成口径与从前一致
-      { prdContent: prdText, apiDocsContent: apiDocsText, reviewEnabled: reviewEnabledForJob() },
+      { reviewEnabled: reviewEnabledForJob() },
       handlersForKind('prompts', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1203,7 +1222,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
-   * 对话页主操作「按澄清结果改写」：把当前标签这条线程的对话交给后端，改写对应文档。
+   * 对话页主操作「按澄清结果改写」：让后端按那条线程的对话改写对应文档。
+   *
+   * **对话不再由前端随请求下发**（票 #54）：后端按 `docKind` 定位 `prd-clarify` /
+   * `api-docs-clarify` / `prompts-clarify` 那条线程，自己从 `chat_turns` 读。本地这份
+   * 消息镜像只用来回答「这条线程聊过了吗」——聊过才发任务。
    *
    * 走 `clarify` 任务（而非裸 SSE）：改写可能跑很久，任务化之后刷新 / 断线只断订阅，
    * 后端照跑，重连时凭 `activeJobId` 接上——与三份文档的生成完全同一套机制。
@@ -1241,8 +1264,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'clarify',
-      // 只回传 role / content：后端按同一形状读历史（与 `optimize` 的入参口径一致）
-      { document, history, docKind: target },
+      // 对话不随请求下发：后端按 `docKind` 定位那条澄清线程自己读（票 #54）。
+      // 这里只用本地镜像做「有没有聊过」的前置判断，聊过就够发任务了。
+      { document, docKind: target },
       handlersForKind('clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1291,7 +1315,31 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function handleGeneratePrompts(): Promise<void> {
     if (!documents.contentOf('api-docs').trim()) return
     goTo('generating-prompts')
-    await generatePrompts(documents.contentOf('prd'))
+    await generatePrompts()
+  }
+
+  /**
+   * 过期黄条上的「一键更新」：用**当前上游**重新整篇生成这一份。
+   *
+   * 与「生成接口文档 / 生成提示词套件」是**同一条入口**——同一个任务种类、同一份请求体，
+   * 因为上游正文由服务端取（C-R3），前端没有「更新专用」的载荷要拼。这里只回答一件事：
+   * 眼前这一份是谁。PRD 没有上游、黄条上不出按钮，因此它不在分发范围内。
+   *
+   * 不连带更新下游：只重生成被点的这一份，下游按过期规则自己亮黄条（下游的正文与版本
+   * 都不动，这一点与整篇生成的版本语义一致）。
+   */
+  async function updateStaleDocument(): Promise<void> {
+    switch (docKindOfState(viewState.value)) {
+      case 'api-docs':
+        await handleGenerateApiDocs()
+        return
+      case 'prompts':
+        await handleGeneratePrompts()
+        return
+      default:
+        // PRD（无上游）与已不在审阅页：没有可更新的下游文档，什么都不做
+        return
+    }
   }
 
   /**
@@ -1331,6 +1379,95 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 审阅页「重新审核」：起一个**只审不改**的任务，回来只刷新结论。
+   *
+   * 三处与其它动作同形、一处不同：
+   *
+   * - 先 `isRunInFlight()` 拦重入，再 `goTo(generating-<kind>)`，最后 `job.start`——
+   *   顺序不能换（`goTo` 必须在登记运行态之前，见 `autoClarify`）；
+   * - 载荷只带 `docKind`：被审的正文与比对用的上游都由服务端从库里取（C-R3），
+   *   前端不再递正文——递了就是第二个真源；
+   * - 收尾**不看 `reply`**：重审不产出正文，`finishDoc` 那条「把正文写回工作副本」的
+   *   路径对它不成立；
+   * - 成败都回审阅页：这次动作的唯一结果就是「结论面板上那一条」，留在生成页只剩一片
+   *   空白。失败时把「这次没跑成」记在文档 store 上，面板显示「审核失败」。
+   */
+  async function rereview(): Promise<void> {
+    if (isRunInFlight()) return
+    const target = docKindOfState(viewState.value)
+    if (!target) return
+    // 没有正文就没有可审的东西：面板的可用条件已经挡了一道，这里再兜一层
+    if (!documents.contentOf(target).trim()) return
+    const generating = generatingStateFor(target)
+    if (!generating) return
+
+    resetDocTransient()
+    goTo(generating)
+    const epochAtStart = solutions.sessionEpoch
+    const { ok, aborted, run } = await job.start(
+      'review',
+      { docKind: target },
+      handlersForKind('review', epochAtStart),
+    )
+    // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    if (!ok) documents.setReviewFailed(target)
+    goTo(reviewStateFor(target))
+    if (!ok) {
+      // 失败原因要留在眼前（面板只说明「审核失败」，不说明为什么）
+      docError.value = `重新审核失败：${job.error.value || '请稍后重试'}`
+    }
+  }
+
+  /**
+   * 审阅页「修复」：按当前版本的结论**重写整篇**，由后端追加一个新版本。
+   *
+   * 与 `rereview` 同形（拦重入 → 切生成态 → 起任务 → 收尾回审阅页），差别有三处：
+   *
+   * - **载荷仍只有 `docKind`**：被修的正文、那条结论、上游材料（PRD 全文 / PRD + 接口文档 /
+   *   需求输入与两条澄清线程）全由服务端从库里取（C-R3）。前端递任何一份都会复活双真源；
+   * - **收尾要看 `reply`**：修复产出的是新正文，必须像生成一样写回工作副本（`finishDoc`）。
+   *   重审不产出正文，所以它不走这条路；
+   * - **失败留在生成态**：改写失败时后端**不动库**（正文与版本都还是原样），错误由
+   *   生成页的错误区说明——与「按澄清改写 / AI 自行澄清」同一条口径。
+   *
+   * 复审失败**不是失败**（那是后端的事）：任务照旧成功，只是结论留空，界面显示
+   * 「审核失败」，可以再点一次「重新审核」补上。
+   */
+  async function fixDocument(): Promise<void> {
+    if (isRunInFlight()) return
+    const target = docKindOfState(viewState.value)
+    if (!target) return
+    // 修复的起点就是「有问题」那条结论：面板已按它把关，这里再兜一层，
+    // 免得一次迟到的点击发出一个注定被 400 的请求
+    if (documents.reviewOf(target)?.verdict !== 'revise') return
+    const generating = generatingStateFor(target)
+    if (!generating) return
+
+    resetDocTransient()
+    prdBoard.value = null
+    // 阶段先于任务切（理由见 `autoClarify` / `rereview`）：登记运行态之后 `goTo` 会被忙拦下
+    goTo(generating)
+    // 整篇重写是最长的一步：先把阶段条点亮，别让用户在等后端 `stage` 事件时盯着空白
+    docPhase.value = 'writing'
+    const epochAtStart = solutions.sessionEpoch
+    const { reply, ok, aborted, run } = await job.start(
+      'review-fix',
+      { docKind: target },
+      handlersForKind('review-fix', epochAtStart),
+    )
+    // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
+    if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    if (!ok) {
+      docError.value = job.error.value || '按结论修复失败'
+      return
+    }
+    // 成功：落点（回这份文档的审阅页）与「写回新正文」都由 `finishDoc` 负责；
+    // 结论由随后的 `documents.reload()` 拉回（后端在广播 `run_summary` 之前就写好了）
+    finishDoc('review-fix', reply, target, epochAtStart)
+  }
+
+  /**
    * 我有 PRD入口：用用户贴入的 PRD 直接生成提示词套件。
    *
    * 刻意不把这份 PRD 交付给文档 store：那是「本工具生成的 PRD」的位置，混进用户
@@ -1344,23 +1481,26 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (entryMode.value !== 'prompt-debug') return
     if (!debugPrdText.value.trim()) return
     goTo('generating-prompts')
-    await generatePrompts(debugPrdText.value)
+    await generatePrompts()
   }
 
   /**
    * 双粘贴入口：用用户贴入的 PRD（+ 可选的接口文档）生成提示词套件。
    *
-   * 与 `handleGeneratePromptsFromDebugPrd` 同源，只多带一份材料。同样**不把这两份正文
-   * 交付给文档 store**：那是「本工具生成的产物」的位置，混进用户自带的内容会让进度、
-   * 完成条件与下载列表都失真。它们只作为本次生成的输入存在。
+   * 与 `handleGeneratePromptsFromDebugPrd` 同源，只多一份材料。这两份正文**先随方案
+   * 快照落库**（`pastePairInput` → 方案状态列），再交给后端按方案取——任务请求体里
+   * 不再带正文（票 #54），`useJob.start` 里的 `flushPendingSave` 保证「点了就有」。
+   *
+   * 同样**不把它们写进文档 store**：那是「本工具生成的产物」的位置，混进用户自带的
+   * 内容会让进度、完成条件与下载列表都失真。它们只作为本次生成的输入存在。
    */
   async function handleGeneratePromptsFromPair(): Promise<void> {
     // 同上：这是「处理器归不归这一页」的键身份判断，登记表没有也不该有这一列。
     if (entryMode.value !== 'prd-and-api-paste') return
-    const { prd, apiDocs } = pastePairInput.value
+    const { prd } = pastePairInput.value
     if (!prd.trim()) return
     goTo('generating-prompts')
-    await generatePrompts(prd, apiDocs)
+    await generatePrompts()
   }
 
   /**
@@ -1403,13 +1543,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const formBackLabel = computed(() => (messages.value.length > 0 ? '返回对话' : '返回入口'))
 
   /**
-   * 进入完成页：校验三份文档齐备后切到 `done`。
-   * 不满足条件时不跳转（前置守卫），保证不会落到空白的完成态。
+   * 进入交付页的入口**不在这里**。
+   *
+   * 交付页不再由审阅页的「完成」按钮把关（那个按钮连同它的守卫一起撤了）：入口是进度条的
+   * 「交付」格，可点条件由 `stores/workflow` 的 `requiredDocsReady` 决定。这条流水线只负责
+   * 「把一份文档生成 / 改好」，不负责「什么时候可以交付」。
    */
-  function handleEndTask(): void {
-    if (!canFinishTask.value) return
-    goTo('done')
-  }
 
   /** 当前审阅阶段对应的文档标题 */
   const activeDocTitle = computed(() => {
@@ -1447,7 +1586,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 都为空或含非法字符时由 `buildDocFilename` 兜底。
    *
    * `content` 给出时以它为准：审阅页必须取**组件里的草稿**（`DocumentReview` 暴露的
-   * `draftContent`），它可能比 store 的工作副本更新（还在 800ms 防抖窗口里）；完成页不传，
+   * `draftContent`），它可能比 store 的工作副本更新（还在 800ms 防抖窗口里）；交付页不传，
    * 读工作副本即可。
    */
   function downloadDocument(docType: DocType, content?: string): void {
@@ -1584,7 +1723,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     isGenerating,
     isGeneratingPhase,
     isReviewing,
-    canFinishTask,
     activeDocTitle,
     activeDocContent,
     backLabel,
@@ -1600,6 +1738,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   docPhase,
   docStageText,
   reviewConclusion,
+  reviewFailed,
   elapsedMs: job.elapsedMs,
     summaryChanges,
     summarySyncing,
@@ -1613,12 +1752,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     onAiOptimize,
     handleGenerateApiDocs,
     handleGeneratePrompts,
+    updateStaleDocument,
     autoClarify,
+    rereview,
+    fixDocument,
     handleGeneratePromptsFromDebugPrd,
     handleGeneratePromptsFromPair,
     backToInput,
     backFromForm,
-    handleEndTask,
     downloadDocument,
     onDownloadDocument,
     downloadBundle,

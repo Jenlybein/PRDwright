@@ -75,6 +75,7 @@ function makeRecord(kind: DocumentKind, content: string): DocumentRecord {
     content,
     runSummary: null,
     pendingItems: [],
+    review: null,
     updatedAt: '2026-10-16T00:00:00',
     stale: false,
     derivedFrom: null,

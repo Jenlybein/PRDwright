@@ -370,6 +370,10 @@ async def run_job(
         # `use_config` 把派发那一刻的配置冻进上下文：整条生成链路（含并行子任务）
         # 读到的是同一份。任务跑到一半有人改配置，也不会让同一次生成前后参数不一致。
         with use_meter(runtime.meter), use_config(runtime.config):
+            # 上游正文归服务端取（spec #51 / 票 #53 / #54）：解析发生在**建任务那一刻**
+            # （路由层），结果随任务单定格、派发时已合进 `runtime.request`。
+            # 这里不再解析：开流时才查库，会让「缺材料」变成一条流内错误而不是明确 400，
+            # 而且与建任务时看到的库状态可能已经不是同一份。
             async for event in event_stream_source(runtime.kind, runtime.request):
                 # 方案在生成途中被删除：下一个事件不再消费。
                 # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，
@@ -591,6 +595,34 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
             # 清单是**结构化数据**：提示词怎么用它由后端决定，前端不参与措辞
             pending_items=request.get("pending_items") or [],
             doc_kind=_target_product_kind(kind, request) or "",
+        )
+    if kind == "review":
+        # 只审不改：被审的正文与它比对的上游材料都在 `run_job` 开流前由服务端解析好
+        # （`job_inputs.resolve_runtime_inputs`），这里只按目标产物分派。
+        return document_service.review_document_stream(
+            doc_kind=_target_product_kind(kind, request) or "",
+            document=request.get("document", "") or "",
+            prd_content=request.get("prd_content", "") or "",
+            api_docs_content=request.get("api_docs_content", "") or "",
+            summary=request.get("summary"),
+            requirements=request.get("requirements", "") or "",
+            product_name=request.get("product_name", "") or "",
+            history=request.get("history") or None,
+        )
+    if kind == "review_fix":
+        # 按结论修复：被修的正文、那条结论与上游材料同样由服务端解析（`_fix_inputs`）。
+        # 上游对 PRD 是两条澄清线程、对其余两份是上游全文（ADR 0002 的上下文窗口）。
+        return document_service.fix_document_stream(
+            doc_kind=_target_product_kind(kind, request) or "",
+            document=request.get("document", "") or "",
+            conclusion=request.get("review_conclusion"),
+            prd_content=request.get("prd_content", "") or "",
+            api_docs_content=request.get("api_docs_content", "") or "",
+            summary=request.get("summary"),
+            requirements=request.get("requirements", "") or "",
+            product_name=request.get("product_name", "") or "",
+            history=request.get("history") or None,
+            clarify_history=request.get("clarify_history") or None,
         )
     if kind == "chat":
         return _chat_event_stream(request)

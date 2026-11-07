@@ -223,20 +223,20 @@ _EXPECTED_SCHEMAS_FIELDS = {
     "ConversationContinueRequest": {"content", "conversation_id", "history", "profile_key", "tool_result"},
     "ConversationCreateRequest": {"answers", "profile_key", "title"},
     "DocumentCheckpointRequest": {"content", "note"},
-    "DocumentItem": {"content", "derived_from", "kind", "last_run_summary", "pending_items", "stale", "updated_at"},
+    "DocumentItem": {"content", "derived_from", "kind", "last_run_summary", "pending_items", "review", "stale", "updated_at"},
     "DocumentListResponse": {"documents"},
     "DocumentRestoreRequest": {"version_id"},
     "DocumentSaveRequest": {"content"},
     "DocumentVersionDeleteResponse": {"ok", "version_id"},
-    "DocumentVersionDetail": {"content", "created_at", "is_current", "last_run_summary", "note", "pending_items", "source", "updated_at", "version_id", "version_no"},
+    "DocumentVersionDetail": {"content", "created_at", "is_current", "last_run_summary", "note", "pending_items", "review", "source", "updated_at", "version_id", "version_no"},
     "DocumentVersionItem": {"content_length", "content_sha", "created_at", "is_current", "note", "source", "version_id", "version_no"},
     "DocumentVersionListResponse": {"versions"},
-    "GenerateApiDocsStreamRequest": {"prd_content"},
+    "GenerateApiDocsStreamRequest": {"solution_id"},
     "GeneratePrdFromSummaryStreamRequest": {"history", "product_name", "requirements", "summary"},
     "GeneratePrdStreamRequest": {"history", "requirements"},
-    "GeneratePromptsStreamRequest": {"prd_content"},
+    "GeneratePromptsStreamRequest": {"solution_id"},
     "JobCancelResponse": {"cancelled", "ok"},
-    "JobCreateRequest": {"api_docs_content", "chat_mode", "content", "doc_kind", "document", "form_data", "history", "instruction", "kind", "pending_items", "prd_content", "product_name", "profile_key", "requirements", "review_enabled", "solution_id", "stage", "summary", "tool_result"},
+    "JobCreateRequest": {"chat_mode", "content", "doc_kind", "document", "form_data", "instruction", "kind", "pending_items", "profile_key", "review_enabled", "solution_id", "stage", "tool_result"},
     "JobCreated": {"job_id", "status"},
     "JobListResponse": {"jobs"},
     "JobStatus": {"chat_stage", "created_at", "doc_kind", "error_code", "error_message", "id", "kind", "partial", "phase", "solution_id", "status", "updated_at", "usage"},
@@ -262,7 +262,21 @@ _EXPECTED_SCHEMAS_FIELDS = {
 }
 
 # 两个类型别名不是模型，但同样是调用方可见的契约。
-_EXPECTED_JOB_KINDS = ("prd", "api_docs", "prompts", "optimize", "clarify", "auto_clarify", "chat")
+#
+# `review`（票 #55）与 `review_fix`（票 #56）都是**有意**新增的：重审只审不改、
+# 修复追加版本，两者一起构成 ADR 0002 的两个动作。加它们必须改这一行——这条守卫的意义
+# 正是「契约变了要有人看见」，不是「永远不许变」。
+_EXPECTED_JOB_KINDS = (
+    "prd",
+    "api_docs",
+    "prompts",
+    "optimize",
+    "clarify",
+    "auto_clarify",
+    "review",
+    "review_fix",
+    "chat",
+)
 _EXPECTED_DOCUMENT_KINDS = ("prd", "api_docs", "prompts")
 
 

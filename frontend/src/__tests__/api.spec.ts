@@ -7,6 +7,7 @@ import http, {
   fetchActiveJobs,
   generateApiDocsStream,
   generatePrdFromSummaryStream,
+  generatePromptsStream,
   onUnauthorized,
   readJobStream,
   UnauthorizedError,
@@ -239,7 +240,7 @@ describe('SSE 事件解析', () => {
     const stageChunks: StreamStageChunk[] = []
     const phases: string[] = []
     const result = await generateApiDocsStream(
-      { prdContent: '# PRD' },
+      { solutionId: 3 },
       {
         onChunk: (chunk) => body.push(chunk.text),
         onStage: (event) => phases.push(event.stage),
@@ -256,6 +257,30 @@ describe('SSE 事件解析', () => {
     // 正文通道只有文档本身，审核 JSON 没有混进去
     expect(body.join('')).toBe('# 接口文档\n')
     expect(result.reply).toBe('# 接口文档')
+  })
+
+  it('旧的非任务通道只下发方案 id，不再带上游正文（票 #54）', async () => {
+    // 这两个通道是「没有任务框架之前」的入口：它们从前直接吃 PRD 正文。
+    // 上游改由服务端按方案取之后，请求体里只剩 `solution_id`——前端那份副本
+    // 一旦落后一版，生成就会对着旧上游写，而没人能发现。
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        streamResponse([sseFrame('done', { type: 'done', content: '', data: { reply: '# ok' } })]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await generateApiDocsStream({ solutionId: 7 })
+    await generatePromptsStream({ solutionId: 8 })
+
+    const bodies = fetchMock.mock.calls.map(
+      (call) => JSON.parse(String((call[1] as RequestInit | undefined)?.body ?? '{}')) as Record<string, unknown>,
+    )
+    expect(bodies[0]).toEqual({ solution_id: 7 })
+    expect(bodies[1]).toEqual({ solution_id: 8 })
+    for (const payload of bodies) {
+      expect(payload).not.toHaveProperty('prd_content')
+      expect(payload).not.toHaveProperty('api_docs_content')
+    }
   })
 })
 
@@ -404,7 +429,6 @@ describe('生成任务接口（jobs）', () => {
     const created = await createJob({
       kind: 'api-docs',
       solutionId: 3,
-      prdContent: '# PRD',
     })
 
     expect(post).toHaveBeenCalledTimes(1)
@@ -414,7 +438,18 @@ describe('生成任务接口（jobs）', () => {
     // 前端用连字符、后端用下划线：转换只在 api.ts 一处发生
     expect(payload.kind).toBe('api_docs')
     expect(payload.solution_id).toBe(3)
-    expect(payload.prd_content).toBe('# PRD')
+    // 请求体里**没有**上游正文与需求正文字段（spec #51 / 票 #54）：
+    // PRD、接口文档、需求摘要、需求澄清历史一律由后端按方案取
+    for (const retired of [
+      'prd_content',
+      'api_docs_content',
+      'summary',
+      'requirements',
+      'product_name',
+      'history',
+    ]) {
+      expect(payload).not.toHaveProperty(retired)
+    }
     expect(created).toEqual({ jobId: 11, status: 'running' })
   })
 

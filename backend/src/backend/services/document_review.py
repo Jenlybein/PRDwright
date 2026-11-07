@@ -6,8 +6,14 @@
 两者共用「结构化 JSON 判定」的形态，但上下文与调用位置不同，混在一起会让
 `prd_section_writer` 的章节循环更难读。
 
-审核失败一律按「通过」处理、改写失败一律保留初稿：这两步是锦上添花，
-不能因为它们挂掉就把已经生成的正文丢掉。
+审核失败不阻断生成、改写失败保留初稿：这两步是锦上添花，不能因为它们挂掉就把已经
+生成的正文丢掉。但「不阻断」不等于「报成通过」——审核没跑成时结论判定为空串、
+落库侧不写结论（没有结论 ≠ 通过，见 ADR 0002）。
+
+两个入口，一段审核代码：
+- `stream_review_and_rewrite`：生成链路（审一次 → 有问题改写一次）；
+- `stream_review_only`：**重新审核**链路（只产结论，不写正文）。后者把「审核失败」
+  当失败处理——它的唯一产出就是判定，把没审成报成通过会落一条假记录。
 """
 
 from __future__ import annotations
@@ -18,7 +24,9 @@ from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from backend.core.clock import utc_now_text
 from backend.core.contracts import StreamEvent
+from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
 from backend.services.doc_skeleton import (
     DocSection,
@@ -38,6 +46,7 @@ from backend.services.pending_items import (
     render_spec,
 )
 from backend.services.prompts import (
+    DOC_FIX_PROMPT,
     DOC_REVIEW_PROMPT,
     DOC_REVIEW_SYSTEM_PROMPT,
     DOC_REWRITE_PROMPT,
@@ -302,6 +311,121 @@ def section_rewrite_messages(
     )
 
 
+def fix_messages(
+    *,
+    document: str,
+    review: DocumentReviewResult,
+    writing_rules: str,
+    upstream: str,
+) -> list[BaseMessage]:
+    """组装「按审核结论修复全文」的消息（`review_fix` 任务的重写那一步）。
+
+    与 `rewrite_whole_document_messages` 的差别只有一处：这里多喂一节**上游材料全文**。
+    生成链路的改写发生在「刚写完、上游就在手边」的时刻；修复则可能发生在几天后，
+    模型手里只剩这一版正文与一条结论——看不见上游，它就会照着结论凭空补，
+    而那正是审核要抓的「编造」。上游因此整段注入，**不走**审核侧那份骨架
+    （骨架是为了省 prefill，代价是丢掉散文里的事实）。
+
+    Args:
+        document: 上一版全文（被修的那一版，含各级标题）。
+        review: 由**落库的结论**还原出的判定（见 `conclusion_to_review`）。
+        writing_rules: 该产物的产出规范（技能包整段注入）。
+        upstream: 上游材料全文（按目标产物拼，见 `document_service._fix_context`）。
+    """
+    return _build_messages(
+        _REWRITE_SYSTEM_PROMPT,
+        DOC_FIX_PROMPT.format(
+            issues=review.issues_text(),
+            instruction=review.instruction or "按问题清单逐条修正",
+            upstream=upstream or "（未提供上游材料，仅依据当前正文与产出规范修复）",
+            writing_rules=writing_rules or "（未提供产出规范，按通用规范核对）",
+            document=document,
+            pending_spec=render_spec(),
+        ),
+    )
+
+
+def conclusion_to_review(conclusion: dict[str, Any] | None) -> DocumentReviewResult:
+    """把**落库的审核结论**还原成修复用的判定；不是「有问题」就 400。
+
+    为什么必须校验而不是「有多少条问题就改多少」：修复的唯一起点是那条结论
+    （「有问题」才可点，见 ARCHITECTURE §3.8）。没有这条校验，一次迟到的请求
+    也能把一份**审核通过**的正文悄悄换掉——用户只会看到正文变了，却不知道为什么。
+
+    结论里没有 `instruction` 这一列（落库形状见 `review_data`），这里用一句话总结兜底：
+    逐条问题仍然原样喂给提示词，那才是模型真正要改的东西。
+
+    Args:
+        conclusion: `document_versions.review` 解出来的对象；`None` 表示这一版没审过。
+
+    Returns:
+        可直接喂给 `fix_messages` 的判定（`verdict` 恒为 `revise`）。
+
+    Raises:
+        AppError: 结论缺失或不是 `revise`（`INVALID_REQUEST`，400）。
+    """
+    data = conclusion if isinstance(conclusion, dict) else {}
+    verdict = str(data.get("verdict") or "").strip().lower()
+    if verdict != "revise":
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "当前版本的审核结论不是「有问题」，无法按结论修复。请先重新审核，"
+            "确认确实有问题后再修复。",
+        )
+    issues: list[dict[str, Any]] = []
+    for item in data.get("issues") or []:
+        if not isinstance(item, dict):
+            continue
+        issue = dict(item)
+        # PRD 的结论按章定位（`section_title`），整篇结论用 `where`；统一到 `where`
+        # 一处，`issues_text()` 才不必知道「这份文档是哪种产物」。
+        if not str(issue.get("where") or "").strip():
+            issue["where"] = str(issue.get("section_title") or "")
+        issues.append(issue)
+    return DocumentReviewResult(
+        verdict="revise",
+        issues=issues,
+        instruction=str(data.get("summary") or "").strip(),
+    )
+
+
+def review_data(
+    kind: str,
+    *,
+    verdict: str,
+    summary: str,
+    issues: list[dict[str, Any]] | None = None,
+    rewritten: bool = False,
+    failed_sections: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """构造审核结论的数据形状——**事件与入库共用同一份**。
+
+    为什么必须有这一个函数：SSE 的 `review` 事件负责订阅期间的即时展示，落库那条
+    才是刷新 / 换设备后的唯一来源。两处各拼一份 dict 的后果不是报错，而是「同一次
+    审核在界面上与刷新后长得不一样」——那种偏差只能靠人眼发现。
+
+    Args:
+        kind: 产物类型（`prd` / `api_docs` / `prompts`）。
+        verdict: `pass` / `revise`；**空串表示没审成**（不是通过）。
+        summary: 一句话结论。
+        issues: 逐条问题与严重度。
+        rewritten: 本次是否真的执行了改写。
+        failed_sections: 生成失败的章节（PRD 并行链路才会非空）。
+
+    Returns:
+        可 JSON 序列化的结论对象，含审核时间 `reviewed_at`（UTC ISO 8601）。
+    """
+    return {
+        "kind": kind,
+        "verdict": verdict,
+        "summary": summary,
+        "issues": list(issues or []),
+        "rewritten": bool(rewritten),
+        "failed_sections": list(failed_sections or []),
+        "reviewed_at": utc_now_text(),
+    }
+
+
 def review_event(
     kind: str,
     review: DocumentReviewResult | None,
@@ -309,21 +433,37 @@ def review_event(
     rewritten: bool = False,
     failed_sections: list[dict[str, Any]] | None = None,
 ) -> StreamEvent:
-    """构造不持久化的 `review` 事件（前端只在本次订阅内展示）。"""
-    verdict = review.verdict if review else "pass"
-    issues = review.issues if review else []
-    summary = review.summary() if review else "审核未完成，按通过处理"
+    """构造 `review` 事件（订阅期间的即时展示；落库另走收尾）。
+
+    `review is None` 表示**没审成**：判定给空串、总结说「审核未完成」。
+    它**绝不能报成 `pass`**——把失败伪装成通过是最误导人的一条假记录，
+    而落库侧也据此不写结论（没有结论 ≠ 通过，界面标「审核失败」）。
+    """
+    if review is None:
+        summary = "审核未完成"
+        return StreamEvent(
+            type="review",
+            content=summary,
+            data=review_data(
+                kind,
+                verdict="",
+                summary=summary,
+                rewritten=rewritten,
+                failed_sections=failed_sections,
+            ),
+        )
+    summary = review.summary()
     return StreamEvent(
         type="review",
         content=summary,
-        data={
-            "kind": kind,
-            "verdict": verdict,
-            "summary": summary,
-            "issues": issues,
-            "rewritten": rewritten,
-            "failed_sections": failed_sections or [],
-        },
+        data=review_data(
+            kind,
+            verdict=review.verdict,
+            summary=summary,
+            issues=review.issues,
+            rewritten=rewritten,
+            failed_sections=failed_sections,
+        ),
     )
 
 
@@ -648,7 +788,7 @@ async def stream_review_and_rewrite(
     - `stage(reviewing)` → 若干 `stage_chunk`（审核意见原文）
     - 需要改写时 `stage(rewriting)` → 若干 `stage_chunk`（改写稿原文）
     - 改写成功时 `part{replace}`（定稿正文，整段覆盖初稿）
-    - 末尾一条 `review`（结论，不持久化）
+    - 末尾一条 `review`（结论；订阅期间即时展示，收尾时随正文一起落库）
 
     改写优先走**分节改写**（只重写受影响的章节），定位不到或面太大时退回整篇重写
     （见 `plan_section_rewrites`）。
@@ -751,3 +891,83 @@ async def stream_review_and_rewrite(
 
 def _build_messages(system_prompt: str, user_content: str) -> list[BaseMessage]:
     return [SystemMessage(content=system_prompt), HumanMessage(content=user_content)]
+
+
+async def stream_review_only(
+    llm: StreamingChatModel,
+    *,
+    document: str,
+    writing_rules: str,
+    requirements: str,
+    doc_type: str,
+    kind: str,
+    label: str,
+    section_titles: str = "",
+) -> AsyncIterator[StreamEvent]:
+    """**只审不改**：整篇审核一次，产出结论，不产生任何正文（重新审核专用）。
+
+    与 `stream_review_and_rewrite` 的关系
+    ------------------------------------
+    同一段审核（同一条提示词、同一个解析、同一个 `review_event` 构造），差别只有三处：
+
+    - **不进入改写**：无论判定如何都不调用模型去改稿（C-R2：重审只更新结论）；
+    - **不复用「审核失败按通过处理」**：生成链路里审核是锦上添花，失败可以放行；而一条
+      只做审核的任务，失败就是失败——把「没审成」报成 `pass` 会落一条假结论（C-R1）。
+      因此这里抛 `AppError`，由任务层转成 `error` 事件（任务判失败、不写结论）；
+    - 事件只有 `stage(reviewing)` / `stage_chunk` / `review`，没有 `part`：调用方据此知道
+      「这次没有正文可写」。
+
+    Args:
+        llm: 审核用的**小输出窗口**实例（只吐 JSON 批注）。
+        document: 待审正文（当前版本全文）。
+        writing_rules: 该产物的产出规范（技能包整段注入）。
+        requirements: 上游材料（**调用方应先骨架化**）。
+        doc_type: 事件 `data.doc_type`，取 `api_doc` / `prompts`。
+        kind: `review` 事件的产物类型，取 `api_docs` / `prompts`。
+        label: 阶段文案里的产物名，如「接口文档」。
+        section_titles: 本文档的章节标题清单，作为审核 `where` 的取值域。
+
+    Raises:
+        AppError: 正文为空、调用失败或返回的不是合法 JSON。三种都是「没审成」，
+            而不是「审了没问题」。
+    """
+    messages = review_messages(
+        document=document,
+        writing_rules=writing_rules,
+        requirements=requirements,
+        section_titles=section_titles,
+    )
+    if messages is None:
+        raise AppError(ErrorCode.INVALID_REQUEST, "这份文档还没有正文，无法重新审核")
+
+    yield StreamEvent(
+        type="stage",
+        content=f"正在审核{label}…",
+        data={"stage": "reviewing", "doc_type": doc_type},
+    )
+    raw_chunks: list[str] = []
+    try:
+        async for delta in astream_text(llm, messages):
+            raw_chunks.append(delta)
+            yield stage_chunk_event("reviewing", delta, doc_type)
+    except Exception as exc:  # noqa: BLE001 - 统一转成任务失败，绝不报成通过
+        logger.warning(
+            "%s重新审核失败", label, exc_info=True, extra={"event": "doc.rereview_failed"}
+        )
+        raise AppError(
+            ErrorCode.LLM_UPSTREAM_ERROR, f"{label}审核没有跑成：{exc}"
+        ) from exc
+
+    raw = "".join(raw_chunks)
+    if extract_json_object(raw) is None:
+        # 与生成链路不同：那边「解析不出来 = 通过」是为了不为难已经生成好的正文，
+        # 而这里唯一的产出就是判定，糊掉的判定不能当成没有意见。
+        logger.warning(
+            "%s重新审核返回的不是合法 JSON，判本次失败",
+            label,
+            extra={"event": "doc.rereview_invalid_json"},
+        )
+        raise AppError(
+            ErrorCode.LLM_UPSTREAM_ERROR, f"{label}审核返回的判定无法解析，请再试一次"
+        )
+    yield review_event(kind, parse_review_text(raw))
