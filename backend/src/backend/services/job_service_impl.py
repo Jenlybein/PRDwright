@@ -48,7 +48,7 @@ from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import conversation_service, document_service, job_inputs
+from backend.services import conversation_service, document_service
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import use_meter
 from backend.services.skill_registry import describe_kind
@@ -370,15 +370,10 @@ async def run_job(
         # `use_config` 把派发那一刻的配置冻进上下文：整条生成链路（含并行子任务）
         # 读到的是同一份。任务跑到一半有人改配置，也不会让同一次生成前后参数不一致。
         with use_meter(runtime.meter), use_config(runtime.config):
-            # 上游正文归服务端取（spec #51 / 票 #53）：在**建事件流之前**解析一次，
-            # 把结果合进运行时手里的这份请求参数。落库的 `request_params` 投影一个字
-            # 都不动——它记的是「调用方当时发了什么」，这里回答的是「此刻库里是什么」。
-            # 只影响生成链路：`_build_event_stream` 与 `_build_derived_from` 读的是同一份。
-            runtime.request.update(
-                job_inputs.resolve_runtime_inputs(
-                    runtime.kind, runtime.owner_id, runtime.solution_id, runtime.request
-                )
-            )
+            # 上游正文归服务端取（spec #51 / 票 #53 / #54）：解析发生在**建任务那一刻**
+            # （路由层），结果随任务单定格、派发时已合进 `runtime.request`。
+            # 这里不再解析：开流时才查库，会让「缺材料」变成一条流内错误而不是明确 400，
+            # 而且与建任务时看到的库状态可能已经不是同一份。
             async for event in event_stream_source(runtime.kind, runtime.request):
                 # 方案在生成途中被删除：下一个事件不再消费。
                 # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，

@@ -75,9 +75,19 @@ def _owner_id() -> int:
 
 
 def _create_solution(client) -> int:
+    """建一份带需求输入的方案（PRD 任务的上游由服务端从这一份取）。"""
     response = client.post(
         "/api/solutions",
-        json={"title": "演示方案", "mode": "structured", "stage": "form", "data": "{}"},
+        json={
+            "title": "演示方案",
+            "mode": "structured",
+            "stage": "form",
+            "state": {
+                "entry_mode": "prd-quick",
+                "quick_product_name": "演示产品",
+                "quick_requirements": "做一个演示产品",
+            },
+        },
     )
     assert response.status_code == 201, response.text
     return int(response.json()["id"])
@@ -86,7 +96,7 @@ def _create_solution(client) -> int:
 def _start_prd_job(client, solution_id: int) -> int:
     response = client.post(
         "/api/jobs",
-        json={"kind": "prd", "solution_id": solution_id, "requirements": "做一个演示产品"},
+        json={"kind": "prd", "solution_id": solution_id},
     )
     assert response.status_code == 201, response.text
     return int(response.json()["job_id"])

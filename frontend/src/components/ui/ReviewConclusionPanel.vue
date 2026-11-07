@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, useId } from 'vue'
 
+import AppButton from '@/components/ui/AppButton.vue'
 import type { ReviewConclusion } from '@/types'
 
 /**
@@ -159,16 +160,18 @@ const rereviewHint = computed(() =>
         </svg>
       </button>
 
-      <!-- 只审不改：正文与版本都不变，因此这个动作随时可以再来一次（「有问题」除外） -->
-      <button
-        type="button"
-        class="shrink-0 rounded-control border border-line-strong bg-surface px-3 py-1 text-xs font-medium text-body transition-colors hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-surface disabled:hover:text-body"
+      <!-- 只审不改：正文与版本都不变，因此这个动作随时可以再来一次（「有问题」除外）。
+           样式走统一按钮件 `AppButton`：这里不手写一套描边样式，否则暗色主题又多一处。 -->
+      <AppButton
+        variant="secondary"
+        size="sm"
+        class="shrink-0"
         :disabled="!canRereview"
         :title="rereviewHint"
         @click="emit('rereview')"
       >
         重新审核
-      </button>
+      </AppButton>
     </div>
 
     <!--

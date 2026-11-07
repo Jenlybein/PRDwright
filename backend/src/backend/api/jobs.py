@@ -46,23 +46,23 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
     与 `document_service` 的入口校验口径一致——字段格式没问题、只是「这个类型缺输入」，
     因此用 400 而不是 422。
 
-    ⚠️ 文档类任务的上游正文（PRD / 接口文档 / 需求）**已由服务端按方案自取**
-    （spec #51 / 票 #53），所以这里只拦「请求体没给、又没有方案可查」这种两边都空的情况：
-    带了方案就先放行，缺材料由服务端解析时兜底（明确 400 的语义归下一票 #54）。
+    **文档类任务必须带方案**（spec #51 / 票 #54）：输入已经从请求体搬到了服务端，
+    没有方案就没有上游可查，缺它直接 400，而不是建一个注定空跑的任务。
+    材料本身有没有（库内当前版本 / 方案上的录入文本）由 `job_inputs.resolve_runtime_inputs`
+    在下面查——那是同一条「说清缺什么」的提示。
     """
+    if payload.kind != "chat" and payload.solution_id is None:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "文档类任务必须关联一份方案（solution_id）：输入由服务端按方案取，缺方案就没有上游可查",
+        )
     if payload.kind == "prd":
-        has_summary = bool(payload.summary)
-        has_requirements = bool(payload.requirements.strip())
-        if not has_summary and not has_requirements and payload.solution_id is None:
-            raise AppError(
-                ErrorCode.INVALID_REQUEST,
-                "summary 与 requirements 至少需要提供一个",
-            )
-    elif payload.kind in ("api_docs", "prompts"):
-        # `prompts` 的接口文档是可选材料，这里和从前一样只拦 PRD 那一份
-        if not payload.prd_content.strip() and payload.solution_id is None:
-            raise AppError(ErrorCode.INVALID_REQUEST, "prd_content 不能为空")
-    elif payload.kind == "optimize":
+        # 需求摘要 / 自由文本 / 澄清历史全部由服务端从方案上取，请求体里没有它们的字段
+        return
+    if payload.kind in ("api_docs", "prompts"):
+        # 上游 PRD（以及可选的接口文档）同样由服务端取；缺材料在解析时给出明确 400
+        return
+    if payload.kind == "optimize":
         if not payload.document.strip():
             raise AppError(ErrorCode.INVALID_REQUEST, "document 不能为空")
         if not payload.instruction.strip():
@@ -74,8 +74,6 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
         # 缺了它就只能「不落库」，那这次澄清等于白做——因此在门口直接拒掉。
         if payload.doc_kind is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "clarify 必须指定 doc_kind")
-        if not payload.history:
-            raise AppError(ErrorCode.INVALID_REQUEST, "clarify 需要提供澄清对话记录（history）")
     elif payload.kind == "auto_clarify":
         if not payload.document.strip():
             raise AppError(ErrorCode.INVALID_REQUEST, "document 不能为空")
@@ -113,30 +111,13 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
             raise AppError(ErrorCode.INVALID_REQUEST, "续聊需要提供 content 或 tool_result")
 
 
-def _requirements_text(payload: schemas.JobCreateRequest, owner_id: int) -> str:
-    """取用于计算指纹的需求文本：**与服务端实际喂给模型的那一份同源**。
-
-    从前的取法是「自由文本，其次结构化摘要的 JSON」；现在同一份判断住在
-    `job_inputs.prd_requirement_text`，它先看方案上存着的需求，再回退到请求体。
-    指纹若仍按请求体算，就会出现「内容取自库里、指纹取自前端副本」的记录。
-    """
-    return job_inputs.prd_requirement_text(
-        owner_id,
-        payload.solution_id,
-        {"summary": payload.summary, "requirements": payload.requirements},
-    )
-
-
 def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
-    """把请求体摊平成 `job_service` 需要的生成参数（history 为空时置 None）。"""
+    """把请求体摊平成 `job_service` 需要的生成参数。
+
+    **只含「做什么、对哪一份」**：上游正文与需求正文由 `job_inputs` 在 `create_job` 里
+    解析后随任务单走（不落进 `request_params`），这里一个都不出现。
+    """
     return {
-        "summary": payload.summary,
-        "requirements": payload.requirements,
-        "product_name": payload.product_name,
-        "history": [message.model_dump() for message in payload.history] or None,
-        "prd_content": payload.prd_content,
-        # 只有 prompts 会用到；其余任务类型忽略（与 prd_content 同一种处理方式）
-        "api_docs_content": payload.api_docs_content,
         "document": payload.document,
         "instruction": payload.instruction,
         # 落库用：`optimize` 靠它知道把结果写进哪一份产物
@@ -213,9 +194,19 @@ async def create_job(
     # `kind=chat` 不受配额管（对话是生成的前置，限了连「为什么被拒」都问不了）。
     quota_service.check(user, payload.kind)
 
+    # 输入一律由服务端按方案取（spec #51 / 契约 C-R3）：在**建任务之前**解析一次。
+    # 放在这里而不是开流时，是为了让「缺方案 / 缺材料」成为一次货真价实的 400——
+    # 而不是「任务建起来了、随后在流里失败」（那会在任务列表里留一条失败记录）。
+    # 解析结果随任务单定格，派发时合进运行时请求参数，落库的 `request_params`
+    # 仍然只记「调用方发了什么」。
+    resolved = job_inputs.resolve_runtime_inputs(
+        payload.kind, user.id, payload.solution_id, payload.doc_kind
+    )
+
     fingerprint = None
     if payload.kind == "prd":
-        fingerprint = compute_input_fingerprint(_requirements_text(payload, user.id))
+        # 指纹与真正喂给模型的需求同源：都取自刚刚解析出来的那一份
+        fingerprint = compute_input_fingerprint(job_inputs.prd_requirement_text(resolved))
 
     # 摊平参数只算一次，并且**只交给造单这一个入口**：单①把请求参数、配置/供应商
     # 快照与技能包身份一次定格成不可变数据，登记产出单②，派发只认单②。旧形状把同一份
@@ -226,6 +217,7 @@ async def create_job(
         solution_id=payload.solution_id,
         kind=payload.kind,
         request=request,
+        resolved_inputs=resolved,
         input_fingerprint=fingerprint,
     )
     registered = job_ticket.register_job_ticket(ticket)

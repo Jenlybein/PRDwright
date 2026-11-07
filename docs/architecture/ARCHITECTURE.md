@@ -85,14 +85,14 @@
 - **审核结论随版本保存，一版一条**（见 §3.8）：`document_versions` 上的一列，读当前文档时随列表返回；重新审核覆盖同一条，不追加版本。
 - 环形外键：先空指针插 `documents` 行 → 插版本 → 回填指针（`_ensure_document()`）。
 - 写正文唯一入口是生成任务成功收尾（`_write_document` → `commit_generated`）：正文 + 待确认清单 + 回执同批写入，失败不覆写正文；新增产出正文的路径接进 `_build_event_stream` 的 `done`。
-- 上游正文变化（含手改，按 `content_sha`）只让下游 `stale=true` 亮黄条：不删除、仍可交付、只汇总提示不硬拦。
+- 上游正文变化（含手改，按 `content_sha`）只让下游 `stale=true` 亮黄条：不删除、仍可交付、只汇总提示不硬拦。黄条上给「**一键更新**」：先确认（写明旧版本保留在版本历史），确认后用当前上游重新整篇生成**被点的那一份**——不新增任务种类、不连带更新下游（下游自己会亮黄条），换不换仍由用户决定。
 - 交付走 `GET /api/solutions/{id}/export`：ZIP = 三份 md + `README.md`；目录名消毒、上限 50MB、CSV 带 BOM。
 
 ### 3.3 生成任务与 SSE 契约
 
 **生成任务**是一次管线运行，有独立生命周期，与「用户是否正连着看」解耦：`POST /api/jobs` 建任务 + `GET /{id}/stream` 订阅；`detach()` 只退订不取消，同一任务绝不并发订阅两次。
 
-- 任务种类：三份整篇生成（`prd` / `api_docs` / `prompts`）、对已有文档就地改写的三个动作（`optimize` / `clarify` / `auto_clarify`）、**按结论修复**（`review_fix`，追加新版本）、**只产结论的重审**（`review`，不碰正文）、以及对话的一轮（`chat`）。文档类任务的方案必填，**生成与修复的输入一律由服务端从库里取**（见 §3.8、§4.3）。
+- 任务种类：三份整篇生成（`prd` / `api_docs` / `prompts`）、对已有文档就地改写的三个动作（`optimize` / `clarify` / `auto_clarify`）、**按结论修复**（`review_fix`，追加新版本）、**只产结论的重审**（`review`，不碰正文）、以及对话的一轮（`chat`）。文档类任务的方案必填，**生成与修复的输入一律由服务端从库里取**（见 §3.8、§4.3）；`clarify` 的对话同样归服务端——按 `doc_kind` 定位那条澄清线程从 `chat_turns` 取，请求体只表达「改写哪一份、依据哪条线程」。解析在**建任务那一刻**完成（缺方案 / 缺材料直接 400，不空跑），结果随任务单走、不进 `request_params`。
 
 - 阶段：需求澄清 → 大纲 → 撰写 → 审核 → 改写。两条并行信息轨是**过程字** `chunk`（可能缺标题）与**权威正文** `part`（整段覆盖该章、`index` 可乱序）；混用会把审核 JSON 写进正文。
 - SSE 分帧唯一实现 `backend/src/backend/api/sse.py::make_sse_generator`（已带 `X-Accel-Buffering: no`）：事件 `status/chunk/part/stage/review/done/error` + 末尾 `data: [DONE]`；`: ping` 心跳只能走这个出口；服务层与路由层两层异常兜底；前端用原生 `fetch` + `ReadableStream`。

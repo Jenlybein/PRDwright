@@ -314,6 +314,36 @@ function jobPayload(kind: string): api.CreateJobPayload | undefined {
   return calls[calls.length - 1]?.[0]
 }
 
+/**
+ * 落库过的方案状态（新建 + 更新的全部载荷，按发生顺序）。
+ *
+ * 上游正文不再随任务下发（spec #51 / 票 #54）：贴入的 PRD / 接口文档先落进方案状态，
+ * 任务创建时后端按方案自己取。因此「材料真的送到了后端」这条断言的新落点是**这里**，
+ * 而不是 `createJob` 的载荷——后者只应该出现「做什么、对哪一份」。
+ */
+function savedSolutionStates(): Record<string, unknown>[] {
+  const states: Record<string, unknown>[] = []
+  for (const call of vi.mocked(solutionApi.createSolution).mock.calls) {
+    const state = call[0]?.state
+    if (state) states.push({ ...state } as Record<string, unknown>)
+  }
+  for (const call of vi.mocked(solutionApi.updateSolution).mock.calls) {
+    const state = call[1]?.state
+    if (state) states.push({ ...state } as Record<string, unknown>)
+  }
+  return states
+}
+
+/** 方案状态里某一列是否出现过这段正文（对象列按 JSON 串比对） */
+function savedStateContains(field: string, fragment: string): boolean {
+  return savedSolutionStates().some((state) => {
+    const value = state[field]
+    if (value == null) return false
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    return text.includes(fragment)
+  })
+}
+
 /** 造一份任务快照（刷新重连时后端首发的事件） */
 function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
   return {
@@ -903,15 +933,14 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(wrapper.text()).toContain('项目背景')
 
-    // PRD 生成拿到的是与 field-schema 对齐的结构化 JSON（走 createJob 下发）
+    // PRD 任务只带「要不要复核」：摘要与对话历史由后端按方案取（票 #54），
+    // 前端不再把自己手里那份副本递过去（上游改过时它可能已经落后一版）
     const payload = jobPayload('prd')
     expect(payload?.kind).toBe('prd')
-    // 直接下发结构化摘要字典，需求文本由后端统一格式化
-    expect(payload?.summary?.product_name).toBe('PRDwright')
-    expect(payload?.summary?.mvp_features?.[0]?.name).toBe('问卷填写')
-    // 对话历史一并带上：首轮只有 AI 那条回复（需求本身走 summary 传入）
-    expect(payload?.history?.length).toBe(1)
-    expect(payload?.history?.[0]?.role).toBe('assistant')
+    expect(payload).not.toHaveProperty('summary')
+    expect(payload).not.toHaveProperty('history')
+    // 与 field-schema 对齐的结构化 JSON 随方案状态落库，后端按方案取
+    expect(savedStateContains('summary', 'PRDwright')).toBe(true)
   })
 
   it('点「生成 PRD」先弹摘要确认面板，确认后把回填结果写回摘要再生成', async () => {
@@ -959,9 +988,10 @@ describe('AppV2 完整流程编排', () => {
     expect(wrapper.text()).toContain('PRD 文档')
     expect(jobCount('prd')).toBe(1)
     const prdPayload = jobPayload('prd')
-    // 回填结果已写回摘要，并作为生成输入下发
-    expect(prdPayload?.summary?.target_users).toContain('小团队产品经理')
-    expect(prdPayload?.summary?.mvp_features?.[0]?.user_value).toBe('省时间')
+    // PRD 任务只带「要不要复核」；回填后的摘要随方案状态落库，由后端按方案取（票 #54）
+    expect(prdPayload).not.toHaveProperty('summary')
+    expect(savedStateContains('summary', '小团队产品经理')).toBe(true)
+    expect(savedStateContains('summary', '省时间')).toBe(true)
   })
 
   /**
@@ -1849,11 +1879,13 @@ describe('AppV2 入口模式', () => {
     expect(jobCount('prd')).toBe(1)
 
     const payload = jobPayload('prd')
-    expect(payload?.requirements).toBe('做一个记账 App，支持多人共享账本。')
-    expect(payload?.productName).toBe('小账本')
-    // 没有结构化摘要，也没有对话历史（这条路根本不聊）
-    expect(payload?.summary ?? null).toBeNull()
-    expect(payload?.history ?? []).toEqual([])
+    // 需求不随任务下发（票 #54）：它先随方案状态落库，后端按方案取
+    expect(payload).not.toHaveProperty('requirements')
+    expect(payload).not.toHaveProperty('productName')
+    expect(payload).not.toHaveProperty('summary')
+    expect(payload).not.toHaveProperty('history')
+    expect(savedStateContains('quick_requirements', '做一个记账 App，支持多人共享账本。')).toBe(true)
+    expect(savedStateContains('quick_product_name', '小账本')).toBe(true)
     // 输入只有一段话，逐章复核的边际收益低：生成时只撰写、不审不改
     expect(payload?.reviewEnabled).toBe(false)
 
@@ -1935,7 +1967,9 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     const payload = jobPayload('prompts')
-    expect(payload?.prdContent).toContain('家庭记账工具')
+    // 任务只带「做什么」；贴入的 PRD 先落进方案状态，由后端按方案取
+    expect(payload).not.toHaveProperty('prdContent')
+    expect(savedStateContains('draft_prd_text', '家庭记账工具')).toBe(true)
     expect(wrapper.text()).toContain('提示词套件')
     expect(wrapper.text()).toContain('角色设定')
 
@@ -1983,9 +2017,11 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     const payload = jobPayload('prompts')
-    expect(payload?.prdContent).toContain('家庭记账工具')
-    // 这一条入口的全部意义：接口文档也要真的送到后端
-    expect(payload?.apiDocsContent).toContain('POST /api/ledgers')
+    // 这一条入口的全部意义：接口文档也要真的到后端——但它走的是方案状态，不是请求体
+    expect(payload).not.toHaveProperty('prdContent')
+    expect(payload).not.toHaveProperty('apiDocsContent')
+    expect(savedStateContains('paste_prd_text', '家庭记账工具')).toBe(true)
+    expect(savedStateContains('paste_api_docs_text', 'POST /api/ledgers')).toBe(true)
     expect(wrapper.text()).toContain('提示词套件')
 
     // 自带的两份材料**不算**本工具的产物：返回目标也是录入页，且不出现「查看 PRD」
@@ -2003,7 +2039,11 @@ describe('AppV2 入口模式', () => {
     await flushPromises()
 
     expect(jobCount('prompts')).toBe(1)
-    expect(jobPayload('prompts')?.apiDocsContent).toBe('')
+    // 接口文档是选填：方案状态里没有这一份，请求体里也不该凭空多出正文
+    expect(jobPayload('prompts')).not.toHaveProperty('apiDocsContent')
+    expect(savedSolutionStates().some((state) => String(state.paste_api_docs_text ?? ''))).toBe(
+      false,
+    )
   })
 
   it('我有 PRD + 接口文档：未贴 PRD 时不能提交，缺失提示常驻', async () => {
@@ -2642,9 +2682,11 @@ describe('AppV2 文档澄清', () => {
 
     const payload = jobPayload('clarify')
     expect(payload?.docKind).toBe('prd')
-    // 对话记录随请求一起交给后端——改写依据就是它，后端不可能自己猜到
-    expect(payload?.history?.[0]?.content).toContain('分页上限取多少？')
+    // 对话记录**不再随请求下发**：后端按 `docKind` 定位那条澄清线程自己读（票 #54）。
+    // 前端只保证「这条线程确实聊过」，改写依据住在服务端的 `chat_turns` 里。
+    expect(payload).not.toHaveProperty('history')
     expect(payload?.document).toContain('分页上限：待确认')
+    expect(wrapper.text()).toContain('PRD 文档')
 
     // 改写完成 → 回到 PRD 的审阅页，并且正文已经是新的
     expect(wrapper.text()).toContain('PRD 文档')
@@ -3246,6 +3288,197 @@ describe('AppV2 的版本预览与删除', () => {
     // 回到列表：窄栏 + 没有 .prose 正文
     expect(wrapper.find('.shell-version-drawer').classes()).toContain('w-[360px]')
     expect(wrapper.find('.shell-version-drawer .prose').exists()).toBe(false)
+  })
+})
+
+/**
+ * 下游过期黄条上的「一键更新」。
+ *
+ * 只跨应用外壳断言：真 router + 点按钮 + 屏幕结果（另加 `createJob` 的调用记录——
+ * 「这一份会不会被重写、写的是哪一份」最终就落在它上面）。五条行为：
+ * 有上游且过期才有按钮、点下去先确认、确认后走与该文档**现有整篇生成相同的入口**、
+ * 不连带更新下游、生成期间点不动。
+ */
+describe('AppV2 下游过期的一键更新', () => {
+  /** 造一份「基于旧版上游」的文档记录（过期判定由后端算，前端只读这个标记） */
+  function staleDocument(kind: DocumentRecord['kind'], content: string): DocumentRecord {
+    return { ...makeDocumentRecord(kind, content), stale: true }
+  }
+
+  /** 上游改过了：PRD 是新的，接口文档与提示词还停在旧版上 */
+  function staleRecords(): DocumentRecord[] {
+    return [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n改过的需求'),
+      staleDocument('api-docs', '# 接口文档\n\n## 一、概述\n旧内容'),
+      staleDocument('prompts', '# 提示词套件\n\n## 一、角色设定\n旧内容'),
+    ]
+  }
+
+  /** 打开一份「下游都过期」的方案，停在哪一页由调用方给 */
+  async function mountStale(viewState: string): Promise<VueWrapper> {
+    const wrapper = await mountExistingSolution(reviewSnapshot(viewState), 1, staleRecords())
+    await flushPromises()
+    return wrapper
+  }
+
+  it('过期的下游黄条上出现「一键更新」；PRD 没有上游，那一页没有这个入口', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      // PRD 自己也标成过期（后端不会这么做）：用来证明「有没有上游」才是判据，
+      // 而不是「那份的 stale 恰好是假」。
+      staleDocument('prd', '# 产品需求文档\n\n## 1. 项目背景\n改过的需求'),
+      staleDocument('api-docs', '# 接口文档\n\n## 一、概述\n旧内容'),
+      staleDocument('prompts', '# 提示词套件\n\n## 一、角色设定\n旧内容'),
+    ])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('上游文档已更新')
+    expect(wrapper.text()).toContain('一键更新')
+
+    // 回 PRD 审阅页：PRD 没有上游，黄条与按钮都不该出现
+    await clickStep(wrapper, 'PRD')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('一键更新')
+    expect(wrapper.text()).not.toContain('上游文档已更新')
+  })
+
+  it('点「一键更新」先弹确认：取消什么都不发生，确认后才切到这一份的生成态', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n\n## 一、概述\n', sectionId: '', index: -1 })
+        await gate
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n新上游内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+    expect(jobCount('api-docs')).toBe(0)
+
+    await clickButton(wrapper, '一键更新', true)
+    await flushPromises()
+
+    // 确认窗（Teleport 到 body）要说清两件事：用哪份上游、旧版本去哪
+    expect(document.body.textContent).toContain('当前 PRD')
+    expect(document.body.textContent).toContain('重新生成接口文档')
+    expect(document.body.textContent).toContain('旧版本保留在版本历史')
+    // 只是弹确认，还没有发起任务——「先问后做」的证据就在这一行
+    expect(jobCount('api-docs')).toBe(0)
+
+    await clickButtonInDialog('取消')
+    await nextTick()
+    expect(document.body.textContent).not.toContain('旧版本保留在版本历史')
+    expect(jobCount('api-docs')).toBe(0)
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+
+    // 再点一次，这回确认
+    await clickButton(wrapper, '一键更新', true)
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 切到这份文档的生成态：审阅页与黄条都不在了，按钮自然也不可点
+    expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
+    expect(wrapper.text()).not.toContain('一键更新')
+    // 走的是既有整篇生成入口：只起一个接口文档任务，不连带更新下游
+    expect(jobCount('api-docs')).toBe(1)
+    expect(jobCount('prompts')).toBe(0)
+    // 「用当前上游」不再是前端递上去的那份副本（票 #54）：请求体里没有 PRD 正文，
+    // 后端按方案取库里当前那一版（改过的需求）——双真源就此消失
+    expect(jobPayload('api-docs')).not.toHaveProperty('prdContent')
+
+    release()
+    await flushPromises()
+  })
+
+  it('更新完成后这一份换成新版本，下游一律不动（它自己亮过期黄条）', async () => {
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n\n## 一、概述\n', sectionId: '', index: -1 })
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n新上游内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+
+    await clickButton(wrapper, '一键更新', true)
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 回到这一份的审阅页，正文换成新的一版（整篇生成的版本语义由后端落地：旧版进历史）
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('新上游内容')
+
+    // 只更新这一份：提示词没有被重写，也没有被前端清掉
+    expect(jobCount('prompts')).toBe(0)
+    expect(documentsOf(wrapper).contentOf('prompts')).toContain('旧内容')
+
+    // 下游自己按过期规则提示
+    await clickStep(wrapper, '提示词')
+    await flushPromises()
+    expect(wrapper.text()).toContain('上游文档已更新')
+  })
+
+  it('提示词过期时更新的是提示词套件（不回头重生成接口文档）', async () => {
+    mockJobStream({
+      prompts: async () => ({
+        conversationId: '',
+        reply: '# 提示词套件\n\n## 一、角色设定\n按新接口重写',
+        asks: [],
+      }),
+    })
+
+    const wrapper = await mountStale('review-prompts')
+    await clickButton(wrapper, '一键更新', true)
+    await flushPromises()
+
+    // 确认窗说的是这一份、以及它的两份上游
+    expect(document.body.textContent).toContain('当前 PRD 与接口文档')
+    expect(document.body.textContent).toContain('提示词套件')
+
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+
+    // 目标由「眼前是哪一份」决定：错发就会静默地多花一次整篇生成
+    expect(jobCount('prompts')).toBe(1)
+    expect(jobCount('api-docs')).toBe(0)
+    // 上游（PRD + 接口文档）由后端按方案取，前端不再递副本（票 #54）
+    expect(jobPayload('prompts')).not.toHaveProperty('prdContent')
+    expect(jobPayload('prompts')).not.toHaveProperty('apiDocsContent')
+    expect(storeOf(wrapper).viewState).toBe('review-prompts')
+    expect(documentsOf(wrapper).contentOf('prompts')).toContain('按新接口重写')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('旧内容')
+  })
+
+  it('生成中「一键更新」不可点：同一份文档只跟一个在途任务', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockJobStream({
+      optimize: async () => {
+        await gate
+        return { conversationId: '', reply: '# 接口文档\n\n优化后的内容', asks: [] }
+      },
+    })
+
+    const wrapper = await mountStale('review-api-docs')
+    // 就地优化不切阶段：审阅页、黄条与按钮都还看得见
+    await clickButton(wrapper, 'AI 优化')
+    await byId(wrapper, 'document-optimize-instruction').setValue('压缩到 500 字')
+    await clickButton(wrapper, '开始优化')
+    await flushPromises()
+
+    const busyButton = wrapper.findAll('button').find((item) => item.text().trim() === '一键更新')
+    expect(busyButton).toBeDefined()
+    expect(busyButton?.attributes('disabled')).toBeDefined()
+
+    release()
+    await flushPromises()
+
+    const idleButton = wrapper.findAll('button').find((item) => item.text().trim() === '一键更新')
+    expect(idleButton?.attributes('disabled')).toBeUndefined()
   })
 })
 

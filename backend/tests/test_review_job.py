@@ -392,7 +392,7 @@ def test_failed_rereview_writes_no_conclusion(client, monkeypatch, reply):
 
 
 # ---------------------------------------------------------------------------
-# 四、入口校验：目标产物与方案都是必填
+# 四、入口校验：目标产物、方案与被审正文都是必填
 # ---------------------------------------------------------------------------
 
 
@@ -414,3 +414,39 @@ def test_review_job_requires_a_solution(client):
     response = client.post("/api/jobs", json={"kind": "review", "doc_kind": "prd"})
 
     assert response.status_code == 400, response.text
+
+
+def test_review_job_requires_the_document_body(client):
+    """这一份还没有正文时 400，而不是建一个注定空跑的任务。
+
+    「没有正文」也没有可写结论的位置（结论写在**当前版本**上），因此这是一次
+    货真价实的请求错误，和「缺上游」同一条口径（C-R3：材料服务端取，缺了就明说）。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+
+    response = client.post("/api/jobs", json=_review_payload(solution_id, "api_docs"))
+
+    assert response.status_code == 400, response.text
+    assert "还没有正文" in response.json()["detail"]
+
+
+def test_rereview_of_prd_tolerates_missing_requirement_input(client, monkeypatch):
+    """**旧方案也能补审**：PRD 有正文、却没有需求输入时，重审照样跑（按降级核对）。
+
+    与生成不同：生成缺需求直接 400（没有事实来源就写不出东西），而重审的产出是
+    「这一版被审成什么样」——上游只是对照材料，缺了只是判定的把握变小。
+    """
+    register(client)
+    solution_id = _create_solution(client)
+    heading = prd_section_writer.PRD_SECTIONS[0].heading
+    body = f"# 演示产品 产品需求文档（PRD）\n\n{heading}\n\n1.1 产品名称：演示产品\n"
+    _seed_document(client, solution_id, "prd", body)
+
+    _fake_service(monkeypatch, SectionReviewLLM(revise_heading="## 不在正文里的一章"))
+    _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
+
+    assert status == "completed"
+    conclusion = _review_events(events)[0]
+    assert conclusion["verdict"] == "pass"
+    assert _documents(client, solution_id)["prd"]["review"] == conclusion
