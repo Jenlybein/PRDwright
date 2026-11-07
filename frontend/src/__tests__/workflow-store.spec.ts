@@ -390,15 +390,14 @@ describe('useWorkflowStore', () => {
   it('派生状态跟随产物正文变化（解锁进度条的是文档，不是会话快照）', async () => {
     const store = useWorkflowStore()
     expect(store.requiredDocsReady).toBe(false)
-    expect(store.canFinish).toBe(false)
 
     setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
     await nextTick()
 
     expect(store.requiredDocsReady).toBe(true)
-    expect(store.canFinish).toBe(true)
-    // 文档齐备后进度条应到达最后一步
-    expect(store.reachedStepIndex).toBe(4)
+    // 齐备之后「交付」那一格就可点：可点范围一直到最后一步（下标 5 = done）。
+    // 交付页不再由「完成」按钮把关，判据就是这一个（见进度条那一格）。
+    expect(store.reachedStepIndex).toBe(5)
   })
 
   it('选择入口后进入该入口的第一个界面，并按模式裁剪进度条', async () => {
@@ -457,28 +456,28 @@ describe('useWorkflowStore', () => {
     expect(store.viewState).toBe('entry')
   })
 
-  it('完成条件按入口模式的交付物判断', async () => {
+  it('交付判据按入口模式的产物判断', async () => {
     const store = useWorkflowStore()
     store.entryMode = 'prd-quick'
     setDocuments({ prd: '# PRD' })
     await nextTick()
-    // 快捷流程与完整流程口径一致：三份齐备才算完成
-    expect(store.canFinish).toBe(false)
+    // 快捷流程与完整流程口径一致：三份齐备才算齐备（它是交付页的判据）
+    expect(store.requiredDocsReady).toBe(false)
 
     store.entryMode = 'structured'
     await nextTick()
-    expect(store.canFinish).toBe(false)
+    expect(store.requiredDocsReady).toBe(false)
 
     store.entryMode = 'prd-quick'
     setDocuments({ prd: '# PRD', 'api-docs': '# API', prompts: '# Prompts' })
     await nextTick()
-    expect(store.canFinish).toBe(true)
+    expect(store.requiredDocsReady).toBe(true)
 
     store.entryMode = 'prompt-debug'
-    // 换成调试入口后，只有 PRD 反而不能完成
+    // 换成调试入口后，只有 PRD 反而不能交付
     setDocuments({ prd: '', prompts: '# Prompts' })
     await nextTick()
-    expect(store.canFinish).toBe(true)
+    expect(store.requiredDocsReady).toBe(true)
   })
 
   it('任务指针是可持久化字段：变化触发保存信号，并随快照原样往返', async () => {

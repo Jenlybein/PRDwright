@@ -1903,14 +1903,17 @@ describe('AppV2 入口模式', () => {
     )
   })
 
-  it('快捷流程：交付条件与完整流程一致，只生成 PRD 时「完成」仍不可用', async () => {
+  it('快捷流程：交付条件与完整流程一致，只生成 PRD 时「交付」格点不动', async () => {
     const wrapper = await mountEntry()
     await submitQuickPrd(wrapper)
 
-    // 两条流程都要求三份齐备才算交付完成，快捷流程不降低门槛
-    const finish = wrapper.findAll('button').find((item) => item.text().trim() === '完成')
-    expect(finish).toBeDefined()
-    expect((finish?.element as HTMLButtonElement).disabled).toBe(true)
+    // 两条流程都要求三份齐备才算可交付，快捷流程不降低门槛。
+    // 交付入口是进度条那一格（「完成」按钮已撤），未齐备时点了不该有反应。
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(wrapper.text()).not.toContain('文档已生成完毕')
   })
 
   it('我有 PRD：贴入 PRD 直接生成提示词套件，且不出现「查看 PRD」', async () => {
@@ -1937,8 +1940,8 @@ describe('AppV2 入口模式', () => {
     expect(wrapper.text()).not.toContain('查看 PRD')
     expect(wrapper.text()).toContain('返回 PRD')
 
-    // 只有提示词也能完成，且完成页只留这一张卡片
-    await clickButton(wrapper, '完成', true)
+    // 只有提示词也算齐备，点进度条「交付」即进交付页；交付页只留这一张卡片
+    await clickStep(wrapper, '交付')
     await flushPromises()
     expect(wrapper.text()).toContain('文档已生成完毕')
     const doneCards = wrapper.findAll('article')
@@ -2062,6 +2065,135 @@ describe('AppV2 入口模式', () => {
 
     await clickButton(wrapper, '返回对话', true)
     expect(wrapper.text()).toContain('需求澄清对话')
+  })
+})
+
+/**
+ * 交付页入口：齐备即可进入。
+ *
+ * 交付页不再由「完成」按钮把关——进度条的「交付」格是**唯一**入口，可点条件是
+ * 「本入口所需文档齐备」（完整流程与快捷流程三份、两个导入入口只要提示词）。
+ * 齐备那一刻给一次全应用提示，但**不把用户从当前页面带走**：他可能正在改稿。
+ */
+describe('AppV2 交付页入口', () => {
+  /** 三份产物各一份正文（完整流程 / 快捷流程的齐备条件） */
+  function allDocuments(): DocumentRecord[] {
+    return [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n内容'),
+      makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n内容'),
+      makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n内容'),
+    ]
+  }
+
+  /** 侧栏方案列表里的一行（列表用得到的字段） */
+  function sidebarItem(id: number, title: string) {
+    return {
+      id,
+      title,
+      mode: 'structured',
+      stage: 'done',
+      created_at: '2026-10-13T00:00:00',
+      updated_at: '2026-10-13T00:00:00',
+      content_updated_at: '2026-10-13T00:00:00',
+    }
+  }
+
+  /** 点侧栏方案列表里的某一项（换方案走这条路，与用户操作一致） */
+  async function clickSolutionInSidebar(wrapper: VueWrapper, title: string): Promise<void> {
+    const sidebar = wrapper.find('aside[aria-label="方案列表"]')
+    const item = sidebar.findAll('button').find((button) => button.text().includes(title))
+    if (!item) throw new Error(`侧栏未找到方案：${title}`)
+    await item.trigger('click')
+    await flushPromises()
+    await flushPromises()
+  }
+
+  it('审阅页没有「完成」按钮：齐备后点进度条「交付」格进入交付页', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, allDocuments())
+
+    // 「完成」已经撤掉：交付页的唯一入口是进度条那一格
+    expect(wrapper.findAll('button').some((item) => item.text().trim() === '完成')).toBe(false)
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    expect(storeOf(wrapper).viewState).toBe('done')
+    expect(wrapper.text()).toContain('3 份文档已全部完成')
+  })
+
+  it('所需文档未齐备时「交付」格点不动，页面留在原地', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n内容'),
+    ])
+
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    // 只有 PRD：齐备条件没满足，点它不该把用户送进一个空交付页
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(wrapper.text()).not.toContain('文档已生成完毕')
+  })
+
+  it('导入入口的齐备判据只有提示词：提示词生成完即可进交付页', async () => {
+    const wrapper = await mountExistingSolution(
+      { ...reviewSnapshot('review-prompts'), entryMode: 'prompt-debug' },
+      1,
+      [makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n内容')],
+    )
+
+    // 这条入口的进度条只有「提示词 → 交付」两格
+    expect(wrapper.findAll('nav[aria-label="生成进度"] li')).toHaveLength(2)
+
+    await clickStep(wrapper, '交付')
+    await flushPromises()
+
+    expect(storeOf(wrapper).viewState).toBe('done')
+    // 交付页只摆这一份：另外两份本来就不是这条入口的产物
+    expect(wrapper.text()).toContain('文档已生成完毕')
+    expect(wrapper.findAll('article')).toHaveLength(1)
+  })
+
+  it('齐备那一刻只提示一次，不把用户从当前页面带走', async () => {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, allDocuments())
+
+    expect(wrapper.text()).toContain('三份文档已齐备，可在进度条进入交付页')
+    // 停在原页：正文还在，交付页没有被自动打开
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(wrapper.text()).toContain('生成接口文档')
+  })
+
+  it('提示按方案各给一次：换方案会再提示，回到原方案不重复提示', async () => {
+    vi.mocked(solutionApi.fetchSolutions).mockResolvedValue([
+      sidebarItem(1, '方案一'),
+      sidebarItem(2, '方案二'),
+    ])
+    vi.mocked(solutionApi.fetchSolution).mockImplementation(async (id: number) =>
+      id === 2
+        ? makeSolutionDetail(
+            2,
+            { ...reviewSnapshot('review-prompts'), entryMode: 'prompt-debug' },
+            { mode: 'prompt-debug' },
+          )
+        : makeSolutionDetail(1, reviewSnapshot('review-prd')),
+    )
+    vi.mocked(documentApi.fetchDocuments).mockImplementation(async (id: number) =>
+      id === 2
+        ? [makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n内容')]
+        : allDocuments(),
+    )
+
+    const wrapper = await mountEntry('/v2/1')
+    expect(wrapper.text()).toContain('三份文档已齐备，可在进度条进入交付页')
+
+    // 换到方案二（导入入口，只有提示词也算齐备）：换方案可以再提示，文案随入口模式变
+    await clickSolutionInSidebar(wrapper, '方案二')
+    expect(wrapper.text()).toContain('提示词套件已生成，可在进度条进入交付页')
+
+    // 回到方案一：同一方案在同一会话里不再提示——提示位仍是方案二那句，
+    // 没有被换回「三份文档已齐备」（否则等于又提示了一次）
+    await clickSolutionInSidebar(wrapper, '方案一')
+    expect(wrapper.text()).not.toContain('三份文档已齐备，可在进度条进入交付页')
   })
 })
 
