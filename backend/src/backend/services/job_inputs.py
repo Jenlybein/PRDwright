@@ -51,6 +51,7 @@ from backend.repositories.solution_repo import SolutionRepository
 from backend.services import document_store
 from backend.services.document_review import conclusion_to_review
 from backend.services.job_product_kind import _ensure_product_kind
+from backend.services.prd_skill import format_requirements_text
 
 logger = logging.getLogger(__name__)
 
@@ -171,17 +172,16 @@ def resolve_runtime_inputs(
 def prd_requirement_text(resolved: dict[str, Any]) -> str:
     """从**已解析**的输入里取用于计算输入指纹的需求文本。
 
-    与真正喂给模型的那份同源：指纹若仍按请求体算，就会出现「内容取自库里、指纹取自
-    前端副本」这种自相矛盾的记录——上游改过一版，指纹却还是旧的。取法沿用既有口径：
-    自由文本优先，否则用结构化摘要的 JSON。
+    与真正喂给模型的那份**同源**（唯一实现 `prd_skill.format_requirements_text`：
+    结构化摘要优先、其次自由文本、两处都先渲染）。指纹若另写一套折叠（比如此前这里是
+    「自由文本优先」），就会出现「内容取自摘要、指纹按自由文本算」这种自相矛盾的记录——
+    上游两份输入都改过一版，指纹却只跟其中一份走。
     """
-    requirements = str(resolved.get("requirements") or "")
-    if requirements.strip():
-        return requirements
-    summary = resolved.get("summary")
-    if isinstance(summary, dict) and summary:
-        return json.dumps(summary, ensure_ascii=False)
-    return ""
+    return format_requirements_text(
+        resolved.get("summary"),
+        str(resolved.get("requirements") or ""),
+        str(resolved.get("product_name") or ""),
+    )
 
 
 # ---------------------------------------------------------------------------

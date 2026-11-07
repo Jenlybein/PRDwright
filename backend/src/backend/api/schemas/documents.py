@@ -54,6 +54,14 @@ class DocumentItem(BaseModel):
             "「未审核 / 审核失败」。刷新与换会话后它是唯一来源。"
         ),
     )
+    review_failed_at: str | None = Field(
+        default=None,
+        description=(
+            "**当前版本**上一次重审没跑成的时间（UTC ISO 8601）；`None` = 没有失败记录。"
+            "它是落库事实：失败不写结论（没有结论 ≠ 通过），但刷新后仍要能显示"
+            "「审核失败（时间）」，否则界面会退化成「未审核」。拿到新结论时清空。"
+        ),
+    )
     version_no: int = Field(
         default=0,
         description=(
@@ -132,6 +140,13 @@ class DocumentVersionDetail(BaseModel):
         description=(
             "该版本的审核结论（一版一条）；历史版本 / 没审成时为 null（「未审核」）。"
             "形状与 `DocumentItem.review` 相同。"
+        ),
+    )
+    review_failed_at: str | None = Field(
+        default=None,
+        description=(
+            "该版本上一次重审没跑成的时间；`None` = 没有失败记录。"
+            "形状与 `DocumentItem.review_failed_at` 相同。"
         ),
     )
     source: str = Field(description="这一版的来源（见 DocumentVersionItem.source）")

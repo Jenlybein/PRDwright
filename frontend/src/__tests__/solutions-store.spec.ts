@@ -664,6 +664,7 @@ describe('openSolution', () => {
         runSummary: null,
         pendingItems: [],
         review: null,
+        reviewFailedAt: null,
         updatedAt: '',
         stale: false,
         versionNo: 0,

@@ -24,7 +24,7 @@ from backend.api.sse import (  # noqa: F401 - SSE_DONE/SSE_HEADERS/make_sse_gene
 from backend.core.errors import AppError, ErrorCode
 from backend.services import conversation_service, document_service, job_inputs
 from backend.services.auth_service import User
-from backend.services.prd_skill import format_summary_as_requirements
+from backend.services.prd_skill import format_requirements_text
 
 router = APIRouter(prefix="/api/conversation", tags=["conversation"])
 
@@ -201,14 +201,17 @@ def _prd_requirements_text(inputs: dict[str, Any]) -> str:
     """把服务端解析出的 PRD 输入折成「整篇生成」那条链路要的一段需求文本。
 
     两条 PRD 入口的差别只在输入怎么来，而**整篇**链路的提示词只认一段 `requirements`
-    文本（分章节链路才有结构化摘要与两条线程的插槽）。因此这里做一次同口径的折叠：
-    有结构化摘要就渲染成需求文本（与分章节链路 `format_summary_as_requirements` 同一份
-    渲染），否则用快捷入口那段自由文本；线程原样交给 `history`。
+    文本（分章节链路才有结构化摘要与两条线程的插槽）。折叠规则只有一处：
+    `prd_skill.format_requirements_text`（结构化摘要优先，其次自由文本，两处都先渲染）。
+    从前这里自己写了一份「摘要优先、否则原文」，与分章链路那份（会渲染自由文本）和
+    输入指纹那份（自由文本优先）三份各不相同——同一次生成，三处读到的「需求」不是一个东西。
+    线程原样交给 `history`。
     """
-    summary = inputs.get("summary")
-    if summary:
-        return format_summary_as_requirements(summary)
-    return str(inputs.get("requirements") or "")
+    return format_requirements_text(
+        inputs.get("summary"),
+        str(inputs.get("requirements") or ""),
+        str(inputs.get("product_name") or ""),
+    )
 
 
 @router.post(

@@ -36,6 +36,7 @@ import json
 import logging
 from typing import Any, Literal
 
+from backend.core.clock import utc_now_text
 from backend.core.digest import content_fingerprint
 from backend.core.engine import session_scope
 from backend.repositories.document_repo import (
@@ -151,6 +152,7 @@ def commit_generated(
     pending_items: list[dict[str, Any]] | None = None,
     run_summary: dict[str, Any] | None = None,
     review: dict[str, Any] | None = None,
+    review_failed_at: str | None = None,
     append_version: bool = True,
     source: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -167,6 +169,9 @@ def commit_generated(
         review: 这一版正文的审核结论（形状与 SSE `review` 事件的数据一致）。
             **只在追加版本时写入**——结论与它描述的那一版正文同批落库；`None`
             表示这次没审成（或本来就不审），写进去的列留空 = 读侧「未审核」。
+        review_failed_at: 这一版「上一次重审没跑成」的时间。只由**修复**链路在
+            「重写成功、重审失败」时给出：正文照落库，但失败要落成事实（US3），
+            刷新后面板才仍旧显示「审核失败（时间）」。
         append_version: `True` 追加一条新版本并让下游失效（整篇生成）；
             `False` 就地改写当前版本、不牵动下游（`optimize` / `clarify`）。
         source: 版本来源标签；缺省取产物类型（`prd` / `api_docs` / `prompts`）。
@@ -195,6 +200,7 @@ def commit_generated(
                 pending_items=pending_json,
                 last_run_summary=summary_json,
                 review=review_json,
+                review_failed_at=review_failed_at,
                 source=source,
                 metadata=metadata_json,
                 # 下游不再删除：上游换版后下游保留，由读取侧的 `stale` 提示用户。
@@ -277,6 +283,21 @@ def commit_review(
         if row is None or row.current_version_id is None:
             return "missing"
         return "content_changed"
+
+
+def mark_review_failed(owner_id: int, solution_id: int, kind: str) -> bool:
+    """把「这次重审没跑成」记到当前版本上（时间戳），返回是否写进去了。
+
+    为什么这条事实要落库：重审的唯一产出就是判定，而「没审成」不是「没审过」——
+    只说在会话内存里的话，刷新之后界面会退化成「未审核」，用户再也看不出这份正文
+    被审过、且没审成（US3）。拿不到当前版本时返回 `False`（没有「哪一版失败」可言）。
+
+    与结论同一行：失败描述的就是这一版；`commit_review` 写入成功时会把它清空。
+    """
+    with session_scope() as session:
+        return DocumentRepository(session).mark_review_failed(
+            owner_id, solution_id, kind, at=utc_now_text()
+        )
 
 
 def list_versions(owner_id: int, solution_id: int, kind: str) -> list[dict[str, Any]]:
@@ -420,6 +441,8 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
         "review": _load_json(row.review, dict, None),
+        # 「这一版上一次重审没跑成」的时间；`None` = 没有失败记录（不是「没审过」）
+        "review_failed_at": row.review_failed_at,
         # 当前版本序号：结论面板据此说清「这条结论是哪一版的」（后端已有这一列，
         # 只是在版本行里、从前没随文档下发）。没有版本时是 0。
         "version_no": int(row.version_no or 0),
@@ -467,6 +490,7 @@ def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
         "review": _load_json(row.review, dict, None),
+        "review_failed_at": row.review_failed_at,
         "source": row.source,
         "note": row.note or "",
         "created_at": row.created_at,

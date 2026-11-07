@@ -58,14 +58,12 @@ def no_real_llm(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def clean_job_state():
-    """每个用例前后清空进程内运行时、任务集合与总线订阅。"""
-    job_runtime._RUNTIMES.clear()  # noqa: SLF001
-    job_runtime._TASKS.clear()  # noqa: SLF001
-    job_bus._subscribers.clear()  # noqa: SLF001
+    """每个用例前后清空进程内运行时、任务集合与总线订阅（走公开的重置口）。"""
+    job_runtime.reset_for_tests()
+    job_bus.reset_for_tests()
     yield
-    job_runtime._RUNTIMES.clear()  # noqa: SLF001
-    job_runtime._TASKS.clear()  # noqa: SLF001
-    job_bus._subscribers.clear()  # noqa: SLF001
+    job_runtime.reset_for_tests()
+    job_bus.reset_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -518,14 +516,20 @@ def test_fix_keeps_the_new_body_when_the_rereview_fails(client, monkeypatch):
     doc = _documents(client, solution_id)["api_docs"]
     assert doc["content"] == _FIXED_API_DOCS, "新正文照落库"
     assert doc["review"] is None, "没有结论 ≠ 通过：重审失败不写占位"
+    # 失败要落成事实（US3）：刷新后仍显示「审核失败（时间）」，而不是退化成「未审核」
+    assert doc["review_failed_at"], "重审失败的时间必须落库"
     versions = _versions(client, solution_id, "api_docs")
     assert [item["version_no"] for item in versions] == [2, 1]
+    detail = _version_detail(client, solution_id, "api_docs", versions[0]["version_id"])
+    assert detail["review_failed_at"] == doc["review_failed_at"], "失败时间挂在被审的那一版上"
 
-    # 「可再点重新审核」：补审一次就能把这一版的结论填回去
+    # 「可再点重新审核」：补审一次就能把这一版的结论填回去，并清掉失败时间
     _fake_service(monkeypatch, FakeLLM(reviewers=[_PASS_JSON]))
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
     assert status == "completed"
-    assert _documents(client, solution_id)["api_docs"]["review"]["verdict"] == "pass"
+    refreshed = _documents(client, solution_id)["api_docs"]
+    assert refreshed["review"]["verdict"] == "pass"
+    assert refreshed["review_failed_at"] is None, "拿到新结论就该清掉失败时间"
 
 
 # ---------------------------------------------------------------------------

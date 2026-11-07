@@ -59,19 +59,35 @@ function emptyDerived(): Record<DocumentKind, DerivedFrom | null> {
   return { prd: null, 'api-docs': null, prompts: null }
 }
 
-/** 三种产物「当前版本的审核结论」的空值（null = 未审核） */
-function emptyReviews(): Record<DocumentKind, ReviewConclusion | null> {
-  return { prd: null, 'api-docs': null, prompts: null }
+/** 三种产物「当前版本的审核记录」的空值 */
+function emptyReviewSnapshots(): Record<DocumentKind, ReviewSnapshot> {
+  return {
+    prd: { review: null, reviewFailedAt: null, versionNo: 0 },
+    'api-docs': { review: null, reviewFailedAt: null, versionNo: 0 },
+    prompts: { review: null, reviewFailedAt: null, versionNo: 0 },
+  }
 }
 
-/** 三种产物「本次会话里最近一次审核没跑成」的空值 */
-function emptyReviewFailures(): Record<DocumentKind, boolean> {
-  return { prd: false, 'api-docs': false, prompts: false }
-}
-
-/** 三种产物「当前版本号」的空值（0 = 后端没给，界面不显示版本号） */
-function emptyVersionNos(): Record<DocumentKind, number> {
-  return { prd: 0, 'api-docs': 0, prompts: 0 }
+/**
+ * 一份文档「当前版本的审核记录」。
+ *
+ * 三格同源：都描述**同一个版本行**，随同一次 `GET .../documents` 回来。从前它们是三张
+ * 平行的 `Record<DocumentKind, …>`，五处接线各写一遍（读、读失败、清空、setReview、
+ * setReviewFailed）——加一格就要记得改五处，漏一处只表现为「刷新后某个状态不对」。
+ * 收成一条记录之后，「加一格」只剩类型上的一处。
+ */
+export interface ReviewSnapshot {
+  /** 当前版本那一条结论；`null` = 这一版没审过或没审成（**不等于通过**） */
+  review: ReviewConclusion | null
+  /**
+   * 「这一版上一次重审没跑成」的时间；`null` = 没有失败记录。
+   *
+   * 它是**落库事实**（后端 `document_versions.review_failed_at`），因此刷新、换设备后
+   * 仍读得到——「审核失败」不再只活在一次会话里。
+   */
+  reviewFailedAt: string | null
+  /** 当前版本号（0 = 后端没给，界面不显示） */
+  versionNo: number
 }
 
 export const useDocumentsStore = defineStore('documents', () => {
@@ -96,33 +112,14 @@ export const useDocumentsStore = defineStore('documents', () => {
   const derivedFrom = ref<Record<DocumentKind, DerivedFrom | null>>(emptyDerived())
 
   /**
-   * 三份文档**当前版本**的审核结论（一版一条）。
+   * 三份文档**当前版本**的审核记录（结论 / 失败时间 / 版本号），一张表。
    *
    * 它是审阅页结论面板的**唯一真源**：随 `GET .../documents` 返回，因此刷新、换设备、
    * 重连之后读到的仍是同一条。订阅期间收到的 `review` 事件只做**即时更新**
-   * （`setReview`）——落库发生在任务收尾，晚一步才出现在下一次 `loadAll` 里。
+   * （`setReview` / `setReviewFailed`）——落库发生在任务收尾，晚一步才出现在下一次
+   * `loadAll` 里。
    */
-  const reviews = ref<Record<DocumentKind, ReviewConclusion | null>>(emptyReviews())
-
-  /**
-   * 三份文档「本次会话里最近一次审核没跑成」。
-   *
-   * 为什么它不是持久化数据：审核失败**不写结论**（C-R1：没有结论 ≠ 通过），所以库里
-   * 没有「失败」这一条记录可读。界面要区分「未审核」与「审核失败」，只能靠这一次会话
-   * 里亲眼看到的失败（任务报错，或 `review` 事件给的是空判定）。
-   *
-   * 因此刷新之后它会退化成「未审核」——那是库里的真话，不是丢信息：
-   * 真的失败过，重审一次就好；而把旧结论冒充成本次结果才是误导。
-   */
-  const reviewFailures = ref<Record<DocumentKind, boolean>>(emptyReviewFailures())
-
-  /**
-   * 三份文档各自的**当前版本号**。
-   *
-   * 结论面板用它回答「这条结论是哪一版的」（US16）。它随 `GET .../documents` 回来，
-   * 不额外发请求：版本详情里那个 `version_no` 与它是同一个数。
-   */
-  const versionNos = ref<Record<DocumentKind, number>>(emptyVersionNos())
+  const reviewSnapshots = ref<Record<DocumentKind, ReviewSnapshot>>(emptyReviewSnapshots())
 
   /** 这批内容属于哪份方案；`null` 表示还没有归属（新建中） */
   const solutionId = ref<number | null>(null)
@@ -216,16 +213,23 @@ export const useDocumentsStore = defineStore('documents', () => {
       const nextPending = emptyPending()
       const nextStale = emptyStale()
       const nextDerived = emptyDerived()
-      const nextReviews = emptyReviews()
-      const nextVersionNos = emptyVersionNos()
+      const nextReviews = emptyReviewSnapshots()
       for (const record of records) {
+        const local = reviewSnapshots.value[record.kind]
         nextContents[record.kind] = record.content
         nextSummaries[record.kind] = record.runSummary
         nextPending[record.kind] = record.pendingItems
         nextStale[record.kind] = record.stale
         nextDerived[record.kind] = record.derivedFrom
-        nextReviews[record.kind] = record.review
-        nextVersionNos[record.kind] = record.versionNo
+        nextReviews[record.kind] = {
+          review: record.review,
+          // 失败是**落库事实**，服务端给了就用服务端的；服务端没给、而这一版又确实没有
+          // 结论时，保留本会话刚看到的那次失败——生成链路的审核降级不落库（它不是
+          // 「重审失败」），本地这条只活到本会话结束。拿到真结论就一并清掉。
+          reviewFailedAt:
+            record.reviewFailedAt ?? (record.review === null ? local.reviewFailedAt : null),
+          versionNo: record.versionNo,
+        }
       }
       // 尚未落库的手改优先：它们在时间上更新于这次响应
       for (const [kind, content] of pending) nextContents[kind] = content
@@ -234,8 +238,7 @@ export const useDocumentsStore = defineStore('documents', () => {
       pendingItems.value = nextPending
       stale.value = nextStale
       derivedFrom.value = nextDerived
-      reviews.value = nextReviews
-      versionNos.value = nextVersionNos
+      reviewSnapshots.value = nextReviews
     } catch (error) {
       if (token !== loadToken) return
       if (error instanceof DocumentsNotFoundError) {
@@ -244,9 +247,7 @@ export const useDocumentsStore = defineStore('documents', () => {
         pendingItems.value = emptyPending()
         stale.value = emptyStale()
         derivedFrom.value = emptyDerived()
-        reviews.value = emptyReviews()
-        versionNos.value = emptyVersionNos()
-        reviewFailures.value = emptyReviewFailures()
+        reviewSnapshots.value = emptyReviewSnapshots()
       }
       saveError.value = error instanceof Error ? error.message : '无法读取文档'
     } finally {
@@ -305,20 +306,25 @@ export const useDocumentsStore = defineStore('documents', () => {
    *
    * 它是 `review` 事件的落点——落库发生在任务收尾，比这条事件晚一步；不即时更新的话，
    * 用户要等一次 `reload` 往返才看得到结论（表现是「审核完了，面板还是空的」）。
+   * 版本号不动：这次审核并不产生新版本。
    */
   function setReview(kind: DocumentKind, review: ReviewConclusion): void {
-    reviews.value[kind] = review
-    reviewFailures.value[kind] = false
+    const current = reviewSnapshots.value[kind]
+    reviewSnapshots.value[kind] = { ...current, review, reviewFailedAt: null }
   }
 
   /**
    * 记一次**没跑成**的审核（`review` 事件判定为空串，或重审任务失败）。
    *
-   * 不写结论：库里没有「失败」这一条（C-R1），这条标记只活在本会话里，
-   * 作用是把界面从「未审核」改成「审核失败」，别让用户把没审过的当成审过了。
+   * **不写结论**：没有结论 ≠ 通过（失败不写占位）。失败时间戳由后端持久化在
+   * `document_versions.review_failed_at` 上，刷新后 `loadAll` 会把它读回来；
+   * 这里传 `at` 只是为了订阅期间立刻见到「审核失败（时间）」。
+   *
+   * `at` 缺省取当前时刻：即时展示不必等一次往返，下一次 `loadAll` 以后端的值为准。
    */
-  function setReviewFailed(kind: DocumentKind): void {
-    reviewFailures.value[kind] = true
+  function setReviewFailed(kind: DocumentKind, at: string = new Date().toISOString()): void {
+    const current = reviewSnapshots.value[kind]
+    reviewSnapshots.value[kind] = { ...current, reviewFailedAt: at }
   }
 
   /**
@@ -421,9 +427,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     pendingItems.value = emptyPending()
     stale.value = emptyStale()
     derivedFrom.value = emptyDerived()
-    reviews.value = emptyReviews()
-    versionNos.value = emptyVersionNos()
-    reviewFailures.value = emptyReviewFailures()
+    reviewSnapshots.value = emptyReviewSnapshots()
     solutionId.value = null
     saveError.value = ''
     // 让在途的加载结果作废：它的响应属于上一份方案，落地会把空内容又填回去
@@ -459,17 +463,17 @@ export const useDocumentsStore = defineStore('documents', () => {
 
   /** 某份文档当前版本的审核结论；`null` 表示这一版没审过（不等于通过） */
   function reviewOf(kind: DocumentKind): ReviewConclusion | null {
-    return reviews.value[kind]
+    return reviewSnapshots.value[kind].review
   }
 
-  /** 本次会话里，这份文档最近一次审核是否**没跑成** */
-  function reviewFailedOf(kind: DocumentKind): boolean {
-    return reviewFailures.value[kind]
+  /** 这份文档当前版本上一次重审没跑成的时间；`null` = 没有失败记录 */
+  function reviewFailedAtOf(kind: DocumentKind): string | null {
+    return reviewSnapshots.value[kind].reviewFailedAt
   }
 
   /** 这份文档的当前版本号（0 = 后端没给，界面不显示） */
   function versionNoOf(kind: DocumentKind): number {
-    return versionNos.value[kind]
+    return reviewSnapshots.value[kind].versionNo
   }
 
   const hasPrd = computed(() => contents.value.prd.trim() !== '')
@@ -486,9 +490,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     pendingItems,
     stale,
     derivedFrom,
-    reviews,
-    reviewFailures,
-    versionNos,
+    reviewSnapshots,
     solutionId,
     loading,
     saveError,
@@ -516,7 +518,7 @@ export const useDocumentsStore = defineStore('documents', () => {
     staleOf,
     derivedFromOf,
     reviewOf,
-    reviewFailedOf,
+    reviewFailedAtOf,
     versionNoOf,
   }
 })

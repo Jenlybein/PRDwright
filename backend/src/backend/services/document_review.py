@@ -174,6 +174,27 @@ class ReviewOutcome:
     rewritten: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ProductContext:
+    """一条审核 / 修复链路需要的**一份产物的上下文**，收成一个小结构。
+
+    为什么不是几个平行参数：`doc_type`（SSE 事件字段）、`doc_kind`（结论归属 / 落库目标）、
+    `label`（阶段文案）三者描述的是**同一份产物**，必须自洽；各收一个字符串时，
+    调用方随手写 `doc_type="api_doc"` + `kind="prompts"` 也能通过类型检查，症状只是
+    「事件里说接口文档、结论记到了提示词上」。收成结构之后，它们只能一起给。
+
+    `writing_rules` 是该产物的产出规范（技能包整段注入，可能为空 = 降级）；
+    `upstream` 是审核 / 修复用的上游材料（审核侧骨架化、修复侧全文，见
+    `document_service._product_context`）。
+    """
+
+    doc_kind: str
+    doc_type: str
+    label: str
+    writing_rules: str = ""
+    upstream: str = ""
+
+
 def review_messages(
     *,
     document: str,
@@ -777,12 +798,8 @@ async def _stream_section_rewrites(
 async def stream_review_and_rewrite(
     llm: StreamingChatModel,
     *,
+    context: ProductContext,
     document: str,
-    writing_rules: str,
-    requirements: str,
-    doc_type: str,
-    kind: str,
-    label: str,
     outcome: ReviewOutcome,
     review_llm: StreamingChatModel | None = None,
     section_titles: str = "",
@@ -804,12 +821,9 @@ async def stream_review_and_rewrite(
 
     Args:
         llm: 流式模型（撰写用的大窗口实例）。
+        context: 这份产物的上下文（产出规范 / 事件身份 / 展示名，见 `ProductContext`）。
+            `context.upstream` 是上游材料（**调用方应先骨架化**）。
         document: 待审的完整正文（已剥离标记块的干净正文）。
-        writing_rules: 该产物的产出规范（技能包整段注入）。
-        requirements: 上游材料，审核时用来核对「有没有漏」。**调用方应先骨架化**。
-        doc_type: 事件 `data.doc_type`，取 `api_doc` / `prompts`。
-        kind: `review` 事件的产物类型，取 `api_docs` / `prompts`。
-        label: 阶段文案里的产物名，如「接口文档」。
         outcome: **输出参数**。生成器没有返回值，最终正文与清单回填到这里；
             调用方在消费完事件流后读取。审核通过且无须改写时它保持调用方给的原值。
         review_llm: 审核专用的**小输出窗口**实例。审核只吐 JSON 批注，用不着生成级
@@ -821,16 +835,18 @@ async def stream_review_and_rewrite(
     """
     settings = get_runtime_config().settings
     auditor = review_llm or llm
+    doc_type = context.doc_type
+    label = context.label
 
     messages = review_messages(
         document=document,
-        writing_rules=writing_rules,
-        requirements=requirements,
+        writing_rules=context.writing_rules,
+        requirements=context.upstream,
         section_titles=section_titles,
     )
     if messages is None:
         # 正文为空：没什么可审的，直接给一个「通过」结论收场
-        yield review_event(kind, None)
+        yield review_event(context.doc_kind, None)
         return
 
     yield StreamEvent(
@@ -849,14 +865,14 @@ async def stream_review_and_rewrite(
             exc_info=True,
             extra={"event": "doc.review_degraded"},
         )
-        yield review_event(kind, None)
+        yield review_event(context.doc_kind, None)
         return
 
     review = parse_review_text("".join(raw_chunks))
     # 门槛：审核结论照给（含 medium），但只有达到门槛才真动笔——
     # medium 里的口径几乎必然命中，按它改写会把「审一次 → 改一次」变成常态
     if not review.triggers_rewrite(settings.review_rewrite_min_severity):
-        yield review_event(kind, review)
+        yield review_event(context.doc_kind, review)
         return
 
     yield StreamEvent(
@@ -876,7 +892,7 @@ async def stream_review_and_rewrite(
             llm,
             document=document,
             review=review,
-            writing_rules=writing_rules,
+            writing_rules=context.writing_rules,
             doc_type=doc_type,
             label=label,
             outcome=outcome,
@@ -888,14 +904,14 @@ async def stream_review_and_rewrite(
             plan=plan,
             review=review,
             document=document,
-            writing_rules=writing_rules,
+            writing_rules=context.writing_rules,
             doc_type=doc_type,
             label=label,
             outcome=outcome,
         ):
             yield event
 
-    yield review_event(kind, review, rewritten=outcome.rewritten)
+    yield review_event(context.doc_kind, review, rewritten=outcome.rewritten)
 
 
 def _build_messages(system_prompt: str, user_content: str) -> list[BaseMessage]:
@@ -905,12 +921,8 @@ def _build_messages(system_prompt: str, user_content: str) -> list[BaseMessage]:
 async def stream_review_only(
     llm: StreamingChatModel,
     *,
+    context: ProductContext,
     document: str,
-    writing_rules: str,
-    requirements: str,
-    doc_type: str,
-    kind: str,
-    label: str,
     section_titles: str = "",
 ) -> AsyncIterator[StreamEvent]:
     """**只审不改**：整篇审核一次，产出结论，不产生任何正文（重新审核专用）。
@@ -928,12 +940,11 @@ async def stream_review_only(
 
     Args:
         llm: 审核用的**小输出窗口**实例（只吐 JSON 批注）。
+        context: 这份产物的上下文。`context.upstream` 是**上游材料**（调用方已骨架化：
+            审核核对的是「有没有编造 / 漏掉」，要的是事实索引而不是整篇散文），
+            `context.writing_rules` 是产出规范，`doc_kind` / `doc_type` / `label`
+            决定结论归属、事件字段与阶段文案。
         document: 待审正文（当前版本全文）。
-        writing_rules: 该产物的产出规范（技能包整段注入）。
-        requirements: 上游材料（**调用方应先骨架化**）。
-        doc_type: 事件 `data.doc_type`，取 `api_doc` / `prompts`。
-        kind: `review` 事件的产物类型，取 `api_docs` / `prompts`。
-        label: 阶段文案里的产物名，如「接口文档」。
         section_titles: 本文档的章节标题清单，作为审核 `where` 的取值域。
 
     Raises:
@@ -942,8 +953,8 @@ async def stream_review_only(
     """
     messages = review_messages(
         document=document,
-        writing_rules=writing_rules,
-        requirements=requirements,
+        writing_rules=context.writing_rules,
+        requirements=context.upstream,
         section_titles=section_titles,
     )
     if messages is None:
@@ -951,20 +962,20 @@ async def stream_review_only(
 
     yield StreamEvent(
         type="stage",
-        content=f"正在审核{label}…",
-        data={"stage": "reviewing", "doc_type": doc_type},
+        content=f"正在审核{context.label}…",
+        data={"stage": "reviewing", "doc_type": context.doc_type},
     )
     raw_chunks: list[str] = []
     try:
         async for delta in astream_text(llm, messages):
             raw_chunks.append(delta)
-            yield stage_chunk_event("reviewing", delta, doc_type)
+            yield stage_chunk_event("reviewing", delta, context.doc_type)
     except Exception as exc:  # noqa: BLE001 - 统一转成任务失败，绝不报成通过
         logger.warning(
-            "%s重新审核失败", label, exc_info=True, extra={"event": "doc.rereview_failed"}
+            "%s重新审核失败", context.label, exc_info=True, extra={"event": "doc.rereview_failed"}
         )
         raise AppError(
-            ErrorCode.LLM_UPSTREAM_ERROR, f"{label}审核没有跑成：{exc}"
+            ErrorCode.LLM_UPSTREAM_ERROR, f"{context.label}审核没有跑成：{exc}"
         ) from exc
 
     raw = "".join(raw_chunks)
@@ -973,10 +984,10 @@ async def stream_review_only(
         # 而这里唯一的产出就是判定，糊掉的判定不能当成没有意见。
         logger.warning(
             "%s重新审核返回的不是合法 JSON，判本次失败",
-            label,
+            context.label,
             extra={"event": "doc.rereview_invalid_json"},
         )
         raise AppError(
-            ErrorCode.LLM_UPSTREAM_ERROR, f"{label}审核返回的判定无法解析，请再试一次"
+            ErrorCode.LLM_UPSTREAM_ERROR, f"{context.label}审核返回的判定无法解析，请再试一次"
         )
-    yield review_event(kind, parse_review_text(raw))
+    yield review_event(context.doc_kind, parse_review_text(raw))

@@ -48,6 +48,7 @@ from backend.services.job_product_kind import _ensure_product_kind
 from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
 from backend.services.llm_utils import extract_json_object
 from backend.services.document_review import (
+    ProductContext,
     ReviewOutcome,
     conclusion_to_review,
     fix_messages,
@@ -65,8 +66,7 @@ from backend.services.prd_section_writer import PrdSectionWriter, is_available a
 from backend.services.prd_skill import (
     build_prd_system_prompt,
     format_conversation,
-    format_freeform_requirements,
-    format_summary_as_requirements,
+    format_requirements_text,
     load_prd_skill_artifacts,
 )
 from backend.services.prompts import (
@@ -86,6 +86,23 @@ from backend.services.skill_registry import load_skill_artifacts
 from backend.services.stream_reply import astream_text, collect_reply, iter_reply_events
 
 logger = logging.getLogger(__name__)
+
+# 产物种类 → （SSE 事件里的 `doc_type`, 阶段文案里的展示名）。
+#
+# 这三个值描述的是**同一份产物**，必须自洽：生成链路的事件字段、审核 / 修复的阶段文案、
+# 结论归属都从这里取，别处不再手写这三元组。写错一处的症状不是报错，而是「事件里说
+# 接口文档、结论记到了提示词上」这种同物异名。
+_PRODUCT_IDENTITIES: dict[str, tuple[str, str]] = {
+    "prd": ("prd", "PRD"),
+    "api_docs": ("api_doc", "接口文档"),
+    "prompts": ("prompts", "提示词套件"),
+}
+
+
+def _product_identity(doc_kind: str) -> tuple[str, str]:
+    """取某份产物的事件 `doc_type` 与展示名（见 `_PRODUCT_IDENTITIES`）。"""
+    return _PRODUCT_IDENTITIES[doc_kind]
+
 
 # ----------------------------------------------------------------------------
 # 结构化摘要回填：候选值 → 与原始摘要合并
@@ -652,10 +669,9 @@ class DocumentService:
 
         # 降级：技能包缺失或模板章节对不上，退回整篇一次性生成
         logger.warning("PRD 分章节生成不可用，本次降级为整篇生成")
-        if summary:
-            requirements_text = format_summary_as_requirements(summary)
-        else:
-            requirements_text = format_freeform_requirements(requirements, product_name)
+        # 折叠规则与分章节链路同一处（`prd_skill.format_requirements_text`）：
+        # 降级不该悄悄换一份需求（摘要优先，其次渲染过的自由文本）
+        requirements_text = format_requirements_text(summary, requirements, product_name)
         async for event in self.generate_prd_stream(
             requirements=requirements_text,
             history=history,
@@ -690,6 +706,8 @@ class DocumentService:
                 extra={"event": "api_docs.skill_missing"},
             )
             api_specs = "（团队接口规范未加载，请依据通用 REST 规范与产品 PRD 自行设计）"
+        # 这份产物的「事件字段 + 展示名」只从身份表取，别处不再手写三元组
+        doc_type, label = _product_identity("api_docs")
         user_content = API_DOCS_GENERATION_PROMPT.format(
             prd_content=prd_content,
             api_specs=api_specs,
@@ -701,7 +719,7 @@ class DocumentService:
         yield StreamEvent(
             type="stage",
             content="正在生成接口文档…",
-            data={"stage": "writing", "doc_type": "api_doc"},
+            data={"stage": "writing", "doc_type": doc_type},
         )
         # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
         # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
@@ -710,7 +728,7 @@ class DocumentService:
             self.llm,
             messages,
             status_text="正在生成接口文档…",
-            extra_data={"doc_type": "api_doc"},
+            extra_data={"doc_type": doc_type},
         ):
             if event.type == "chunk":
                 clean = suppressor.feed(event.content)
@@ -738,13 +756,16 @@ class DocumentService:
                     async for review_event_or_chunk in stream_review_and_rewrite(
                         self.llm,
                         document=clean_reply,
-                        writing_rules=api_specs,
+                        # 产出规范与事件身份来自同一份上下文；
                         # 上游材料骨架化：审核要核对的是「有没有编造 / 漏掉」，
                         # 需要的是事实索引而不是整篇散文
-                        requirements=skeletonize(prd_content),
-                        doc_type="api_doc",
-                        kind="api_docs",
-                        label="接口文档",
+                        context=ProductContext(
+                            doc_kind="api_docs",
+                            doc_type=doc_type,
+                            label=label,
+                            writing_rules=api_specs,
+                            upstream=skeletonize(prd_content),
+                        ),
                         outcome=outcome,
                         review_llm=self.review_llm,
                         section_titles="\n".join(extract_headings(clean_reply)),
@@ -801,12 +822,14 @@ class DocumentService:
             api_docs_content=api_docs_content.strip() or NO_API_DOCS_NOTE,
             pending_spec=render_spec(),
         )
+        # 这份产物的「事件字段 + 展示名」只从身份表取，别处不再手写三元组
+        doc_type, label = _product_identity("prompts")
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
         # 与接口文档同构：阶段条立即亮起，别让用户在最长的一步里盯着空白
         yield StreamEvent(
             type="stage",
             content="正在生成提示词套件…",
-            data={"stage": "writing", "doc_type": "prompts"},
+            data={"stage": "writing", "doc_type": doc_type},
         )
         # 实时 chunk 先过抑制器（块被切在 chunk 边界时只漏安全前缀），`done` 时
         # 对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
@@ -815,7 +838,7 @@ class DocumentService:
             self.llm,
             messages,
             status_text="正在生成提示词套件…",
-            extra_data={"doc_type": "prompts"},
+            extra_data={"doc_type": doc_type},
         ):
             if event.type == "chunk":
                 clean = suppressor.feed(event.content)
@@ -842,11 +865,13 @@ class DocumentService:
                     async for review_event_or_chunk in stream_review_and_rewrite(
                         self.llm,
                         document=clean_reply,
-                        writing_rules=guide,
-                        requirements=requirements_text,
-                        doc_type="prompts",
-                        kind="prompts",
-                        label="提示词套件",
+                        context=ProductContext(
+                            doc_kind="prompts",
+                            doc_type=doc_type,
+                            label=label,
+                            writing_rules=guide,
+                            upstream=requirements_text,
+                        ),
                         outcome=outcome,
                         review_llm=self.review_llm,
                         section_titles="\n".join(extract_headings(clean_reply)),
@@ -917,21 +942,16 @@ class DocumentService:
                 yield event
             return
 
-        writing_rules, upstream, doc_type, label = self._product_context(
+        context = self._product_context(
             doc_kind,
             purpose="review",
-            full_text=False,
             prd_content=prd_content,
             api_docs_content=api_docs_content,
         )
         async for event in stream_review_only(
             self.review_llm,
+            context=context,
             document=document,
-            writing_rules=writing_rules,
-            requirements=upstream,
-            doc_type=doc_type,
-            kind=doc_kind,
-            label=label,
             section_titles="\n".join(extract_headings(document)),
         ):
             yield event
@@ -941,7 +961,6 @@ class DocumentService:
         doc_kind: str,
         *,
         purpose: str,
-        full_text: bool,
         prd_content: str = "",
         api_docs_content: str = "",
         summary: dict[str, Any] | None = None,
@@ -949,19 +968,19 @@ class DocumentService:
         product_name: str = "",
         history: list[dict[str, Any]] | None = None,
         clarify_history: list[dict[str, Any]] | None = None,
-    ) -> tuple[str, str, str, str]:
-        """审核与修复**共用**的四格：产出规范、上游材料、事件 `doc_type`、展示名。
+    ) -> ProductContext:
+        """审核与修复**共用**的一份产物上下文（`ProductContext`）。
 
         为什么要一处：这两条链路（`review` / `review_fix`）的「规范从哪个技能包来、
-        缺件怎么降级、事件报哪个 doc_type、界面上叫什么」必须逐字一致——它们描述的是
-        同一份产物。此前各写一份，改一处忘一处就会出现「重审说接口文档、修复说 api_doc」
-        这种同物异名。
+        缺件怎么降级、事件报哪个 doc_type、界面上叫什么、上游给什么粒度」必须逐字一致——
+        它们描述的是同一份产物。此前各写一份，改一处忘一处就会出现「重审说接口文档、
+        修复说 api_doc」这种同物异名。
 
-        上游材料的**唯一差别**是 `full_text`：
+        上游材料的**唯一差别**是 `purpose`：
 
-        - `False`（审核 / 重审）：**骨架化**。审核核对「有没有编造」，要的是事实索引，
+        - `review`（审核 / 重审）：**骨架化**。审核核对「有没有编造」，要的是事实索引，
           不是整篇散文（与生成时的 `stream_review_and_rewrite` 同口径）；
-        - `True`（修复）：整段全文。修复要照着原文改，骨架会把散文里的事实丢掉。
+        - `fix`（修复）：整段全文。修复要照着原文改，骨架会把散文里的事实丢掉。
 
         规范缺失时**不报错**（降级看得见：日志 + 提示词里一句显式说明）：
         - 审核侧留空，`review_messages` 写成「（未提供产出规范，按通用规范核对）」；
@@ -969,16 +988,17 @@ class DocumentService:
 
         Args:
             doc_kind: 目标产物（三份之一，调用方已用 `_ensure_product_kind` 校验过）。
-            purpose: `review` / `fix`，只用于降级日志的归类与措辞。
-            full_text: 上游材料是否整段注入（见上）。
+            purpose: `review` / `fix`；既是降级日志的归类，也决定上游是否整段注入。
             prd_content / api_docs_content: 上游全文（接口文档 / 提示词用）。
             summary / requirements / product_name / history / clarify_history: PRD 的需求侧
                 上游（摘要或自由文本 + 两条澄清线程）。
 
         Returns:
-            `(产出规范, 上游材料, doc_type, 展示名)`。
+            可直接交给 `stream_review_only` / `fix_messages` 的上下文。
         """
         purpose_label = "重审" if purpose == "review" else "修复"
+        full_text = purpose == "fix"
+        doc_type, label = _product_identity(doc_kind)
 
         if doc_kind == "prd":
             artifacts = load_prd_skill_artifacts()
@@ -989,11 +1009,7 @@ class DocumentService:
                     purpose_label,
                     extra={"event": f"prd.{purpose}_skill_missing"},
                 )
-            requirement_text = (
-                format_summary_as_requirements(summary)
-                if summary
-                else format_freeform_requirements(requirements, product_name)
-            )
+            requirement_text = format_requirements_text(summary, requirements, product_name)
             sections = [
                 "## 需求输入（结构化摘要 / 自由文本）\n\n"
                 + (requirement_text or f"（未提供需求输入，本次{purpose_label}仅依据正文）")
@@ -1002,7 +1018,13 @@ class DocumentService:
                 sections.append(f"## 需求澄清对话\n\n{format_conversation(history)}")
             if clarify_history:
                 sections.append(f"## PRD 澄清对话\n\n{format_conversation(clarify_history)}")
-            return writing_rules, "\n\n".join(sections), "prd", "PRD"
+            return ProductContext(
+                doc_kind=doc_kind,
+                doc_type=doc_type,
+                label=label,
+                writing_rules=writing_rules,
+                upstream="\n\n".join(sections),
+            )
 
         if doc_kind == "prompts":
             artifacts = load_skill_artifacts("prompts")
@@ -1027,7 +1049,13 @@ class DocumentService:
                     else skeletonize(api_docs_content)
                 )
                 upstream = f"{upstream}\n\n## 接口文档\n\n{body}"
-            return guide, upstream, "prompts", "提示词套件"
+            return ProductContext(
+                doc_kind=doc_kind,
+                doc_type=doc_type,
+                label=label,
+                writing_rules=guide,
+                upstream=upstream,
+            )
 
         artifacts = load_skill_artifacts("api_docs")
         api_specs = artifacts.get("api_specs", "") if artifacts else ""
@@ -1044,7 +1072,13 @@ class DocumentService:
             if full_text
             else skeletonize(prd_content)
         )
-        return api_specs, upstream, "api_doc", "接口文档"
+        return ProductContext(
+            doc_kind=doc_kind,
+            doc_type=doc_type,
+            label=label,
+            writing_rules=api_specs,
+            upstream=upstream,
+        )
 
     async def fix_document_stream(
         self,
@@ -1104,10 +1138,9 @@ class DocumentService:
             raise AppError(ErrorCode.INVALID_REQUEST, "这份文档还没有正文，无法按结论修复")
         review = conclusion_to_review(conclusion)
 
-        writing_rules, upstream, doc_type, label = self._product_context(
+        context = self._product_context(
             doc_kind,
             purpose="fix",
-            full_text=True,
             prd_content=prd_content,
             api_docs_content=api_docs_content,
             summary=summary,
@@ -1119,8 +1152,8 @@ class DocumentService:
 
         yield StreamEvent(
             type="stage",
-            content=f"正在按审核结论重写{label}…",
-            data={"stage": "writing", "doc_type": doc_type},
+            content=f"正在按审核结论重写{context.label}…",
+            data={"stage": "writing", "doc_type": context.doc_type},
         )
 
         # 实时增量先过抑制器：待确认块可能被切在 chunk 边界，漏出去就是正文里多一段哨兵
@@ -1132,37 +1165,39 @@ class DocumentService:
                 fix_messages(
                     document=document,
                     review=review,
-                    writing_rules=writing_rules,
-                    upstream=upstream,
+                    writing_rules=context.writing_rules,
+                    upstream=context.upstream,
                 ),
             ):
                 chunks.append(delta)
                 clean = suppressor.feed(delta)
                 if clean:
-                    yield StreamEvent(type="chunk", content=clean, data={"doc_type": doc_type})
+                    yield StreamEvent(type="chunk", content=clean, data={"doc_type": context.doc_type})
             trailing = suppressor.flush()
             if trailing:
-                yield StreamEvent(type="chunk", content=trailing, data={"doc_type": doc_type})
+                yield StreamEvent(
+                    type="chunk", content=trailing, data={"doc_type": context.doc_type}
+                )
         except Exception as exc:  # noqa: BLE001 - 重写失败必须判失败（正文与版本都不动）
             logger.warning(
                 "%s按结论修复失败，正文与版本都不动",
-                label,
+                context.label,
                 exc_info=True,
                 extra={"event": "doc.fix_failed"},
             )
             raise AppError(
-                ErrorCode.LLM_UPSTREAM_ERROR, f"{label}修复没有跑成：{exc}"
+                ErrorCode.LLM_UPSTREAM_ERROR, f"{context.label}修复没有跑成：{exc}"
             ) from exc
 
         rewritten = "".join(chunks).strip()
         if not rewritten:
             raise AppError(
-                ErrorCode.LLM_UPSTREAM_ERROR, f"{label}修复没有产出正文，请再试一次"
+                ErrorCode.LLM_UPSTREAM_ERROR, f"{context.label}修复没有产出正文，请再试一次"
             )
         final_reply, items = extract(rewritten)
         if not final_reply.strip():
             raise AppError(
-                ErrorCode.LLM_UPSTREAM_ERROR, f"{label}修复产出的正文为空，请再试一次"
+                ErrorCode.LLM_UPSTREAM_ERROR, f"{context.label}修复产出的正文为空，请再试一次"
             )
         # 预览改用**干净正文**：初稿是模型原始输出（可能带待确认块），这里是剥离后的定稿。
         # 与生成链路的改写同样的整段覆盖语义，前端不会「初稿 + 修稿」叠字。
@@ -1173,12 +1208,8 @@ class DocumentService:
         )
 
         async for event in self._rereview_after_fix(
-            doc_kind=doc_kind,
+            context=context,
             document=final_reply,
-            writing_rules=writing_rules,
-            upstream=upstream,
-            doc_type=doc_type,
-            label=label,
             summary=summary,
             requirements=requirements,
             product_name=product_name,
@@ -1195,12 +1226,8 @@ class DocumentService:
     async def _rereview_after_fix(
         self,
         *,
-        doc_kind: str,
+        context: ProductContext,
         document: str,
-        writing_rules: str,
-        upstream: str,
-        doc_type: str,
-        label: str,
         summary: dict[str, Any] | None,
         requirements: str,
         product_name: str,
@@ -1221,7 +1248,7 @@ class DocumentService:
         否则同一份正文会因为「走的是修复还是重审」得到两种判定。
         """
         try:
-            if doc_kind == "prd":
+            if context.doc_kind == "prd":
                 writer = self._get_section_writer(None)
                 async for event in writer.review_document(
                     document=document,
@@ -1234,24 +1261,29 @@ class DocumentService:
                 return
             async for event in stream_review_only(
                 self.review_llm,
+                # 修复给的是全文（要照着原文改），重审只看骨架（核对有没有编造）：
+                # 这里把全文再压一次，而不是让 `context` 兼职两份上游
+                context=ProductContext(
+                    doc_kind=context.doc_kind,
+                    doc_type=context.doc_type,
+                    label=context.label,
+                    writing_rules=context.writing_rules,
+                    upstream=skeletonize(context.upstream),
+                ),
                 document=document,
-                writing_rules=writing_rules,
-                requirements=skeletonize(upstream),
-                doc_type=doc_type,
-                kind=doc_kind,
-                label=label,
                 section_titles="\n".join(extract_headings(document)),
             ):
                 yield event
         except Exception:  # noqa: BLE001 - 正文已经写好了，这次重审是加成，不该连坐
             logger.warning(
                 "%s修复后的重审没有跑成：正文照落库，结论留空",
-                label,
+                context.label,
                 exc_info=True,
                 extra={"event": "doc.fix_rereview_failed"},
             )
-            # 判定空串 = 没审成：任务照常成功，但**不写结论**（没有结论 ≠ 通过）
-            yield review_event(doc_kind, None)
+            # 判定空串 = 没审成：任务照常成功，但**不写结论**（没有结论 ≠ 通过）。
+            # 收尾会把它落成 `review_failed_at`（US3），界面据此显示「审核失败（时间）」。
+            yield review_event(context.doc_kind, None)
 
     async def optimize_document_stream(
         self,

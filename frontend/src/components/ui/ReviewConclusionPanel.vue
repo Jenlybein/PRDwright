@@ -17,8 +17,9 @@ import { relativeTime } from '@/utils/time'
  * 面板照旧在，显示的还是同一条。**没有结论也渲染**：一份从未审过的文档同样需要
  * 「未审核」这个状态，否则「没有面板」会被读成「没问题」。
  *
- * `failed` 是「本次会话里最近一次审核没跑成」——审核失败不写结论（没有结论 ≠ 通过），
- * 所以库里没有这条记录，只能由调用方按亲眼所见的那次失败告诉我们。
+ * `failed` 是「这一版上一次重审没跑成」——审核失败不写结论（没有结论 ≠ 通过），
+ * 但**失败本身是落库事实**（后端 `review_failed_at`），因此刷新之后它仍在；面板据此
+ * 显示「审核失败」与失败时间，而不是退化成「未审核」。
  *
  * ## 为什么失败态不展示 `review` 的内容
  *
@@ -49,8 +50,13 @@ import { relativeTime } from '@/utils/time'
 const props = defineProps<{
   /** 当前版本的结论；`null` = 这一版没审过或没审成（**不等于通过**） */
   review: ReviewConclusion | null
-  /** 本次会话里最近一次审核是否没跑成（失败不写结论，只能由调用方告知） */
-  failed?: boolean
+  /**
+   * 这一版上一次重审没跑成的时间（`null` = 没有失败记录）。
+   *
+   * 它是落库事实（后端 `document_versions.review_failed_at`），不是会话内状态：
+   * 刷新、换设备之后仍然读得到，面板据此显示「审核失败（时间）」。
+   */
+  reviewFailedAt?: string | null
   /** 当前版本号（`DocumentRecord.versionNo`）；未知时不显示「第几版」 */
   versionNo?: number
 }>()
@@ -86,7 +92,7 @@ const STATE_CLASSES: Record<ReviewState, string> = {
 }
 
 const state = computed<ReviewState>(() => {
-  if (props.failed) return 'failed'
+  if (props.reviewFailedAt) return 'failed'
   const verdict = props.review?.verdict ?? ''
   if (verdict === 'pass') return 'pass'
   if (verdict === 'revise') return 'revise'
@@ -151,6 +157,16 @@ const reviewedLabel = computed(() => {
   return relativeTime(props.review?.reviewedAt ?? '')
 })
 
+/**
+ * 「什么时候失败的」：失败态专属。
+ *
+ * 失败不写结论，所以没有 `reviewedAt` 可显示；把失败时间摆在徽标旁边，用户才能回答
+ * 「这次是刚试过、还是昨天试过」。时间来自落库的 `reviewFailedAt`，刷新后照旧。
+ */
+const failedLabel = computed(() =>
+  state.value === 'failed' && props.reviewFailedAt ? relativeTime(props.reviewFailedAt) : '',
+)
+
 /** 「有问题」时不可点：先按结论修复，再回来确认 */
 const canRereview = computed(() => state.value !== 'revise')
 
@@ -211,6 +227,8 @@ const fixHint = computed(() =>
         <!-- 追溯：这条结论属于哪一版、什么时候审的（收起时也看得到） -->
         <span v-if="versionLabel" class="text-[11px] text-subtle">{{ versionLabel }}</span>
         <span v-if="reviewedLabel" class="text-[11px] text-subtle">· 审于 {{ reviewedLabel }}</span>
+        <!-- 失败也有时间：它落在版本行上（`review_failed_at`），刷新后照旧 -->
+        <span v-if="failedLabel" class="text-[11px] text-subtle">· 失败于 {{ failedLabel }}</span>
         <svg
           class="h-4 w-4 shrink-0 text-subtle transition-transform"
           :class="expanded ? 'rotate-180' : ''"

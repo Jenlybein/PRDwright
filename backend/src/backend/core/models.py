@@ -343,11 +343,19 @@ class DocumentVersion(SQLModel, table=True):
     # 失败章节 / 审核时间）。**审核没跑成就是 NULL**——没有结论不等于通过，
     # 旧版本与旧数据读出来是「未审核」。
     #
-    # ⚠️ 必须声明在**最后**：迁移 0006 用 `ALTER TABLE ... ADD COLUMN` 追加这一列，
-    # 物理列序就是「老列 + review」。模型这边换个位置，`create_all` 建出来的库列序
-    # 就与迁移建的不同，`test_schema_migration` 的整份快照对比会因此转红。
+    # ⚠️ 声明顺序 = 物理列序：迁移 0006 追加 `review`、0007 追加 `review_failed_at`，
+    # 所以这两列都必须在老列之后、且保持这个先后。模型这边换个位置，`create_all`
+    # 建出来的库列序就与迁移建的不同，`test_schema_migration` 的整份快照对比会转红。
     # ⚠️ 不设 `server_default`：MySQL 的 TEXT 不接受字面量默认值。
     review: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # 「这一版上一次重审没跑成」的时间（UTC ISO 8601 文本）；NULL = 没有失败记录。
+    #
+    # 它是**落库事实**，不是会话内状态：审核失败不写结论（没有结论 ≠ 通过），但
+    # 「这次没审成」本身必须刷新后还看得见，否则界面退化成「未审核」——用户会以为
+    # 从没审过。拿到新结论时清空（见 `DocumentRepository.replace_current_review`）。
+    #
+    # 与 `review` 同一行的理由同上（US3）：失败描述的就是这一版。
+    review_failed_at: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
 
 # ---------------------------------------------------------------------------

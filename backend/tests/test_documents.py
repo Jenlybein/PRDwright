@@ -437,9 +437,10 @@ def test_get_version_returns_full_content(client) -> None:
 def test_document_outward_shape_is_unchanged(client) -> None:
     """回归护栏：`GET documents` 的对外结构只**增**不减。
 
-    `version_no` 是本期唯一新增的字段：结论面板要能说清「这条结论是哪一版的」
-    （US16），而它本来就在版本行里、只是没随文档下发。除此以外一个字段都没动 ——
-    正文、清单、回执、结论、过期标记与上游锚点的名字与含义都还是老样子。
+    本期新增两个字段：`version_no`（结论面板要能说清「这条结论是哪一版的」，US16）
+    与 `review_failed_at`（「审核失败」是落库事实，刷新后仍要看得见，US3）。
+    除此以外一个字段都没动 —— 正文、清单、回执、结论、过期标记与上游锚点的名字与含义
+    都还是老样子。
     """
     register(client, username="alice")
     solution_id = _new_solution(client)
@@ -455,6 +456,7 @@ def test_document_outward_shape_is_unchanged(client) -> None:
         "pending_items",
         "last_run_summary",
         "review",
+        "review_failed_at",
         "version_no",
         "updated_at",
         "stale",

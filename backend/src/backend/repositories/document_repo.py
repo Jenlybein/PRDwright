@@ -63,6 +63,8 @@ class DocumentRow:
     pending_items: str | None
     last_run_summary: str | None
     review: str | None
+    # 这一版上一次重审没跑成的时间；NULL = 没有失败记录（见 US3）
+    review_failed_at: str | None
     source: str | None
     metadata: str | None
 
@@ -94,6 +96,8 @@ class VersionDetail:
     last_run_summary: str | None
     # 该版本的审核结论（JSON 文本）。NULL = 没审成 / 历史数据，读侧翻成「未审核」。
     review: str | None
+    # 这一版上一次重审没跑成的时间（UTC ISO 8601）；与结论同一行、同一版。
+    review_failed_at: str | None
     source: str
     note: str | None
     metadata: str | None
@@ -124,6 +128,7 @@ def _merged_select():
             DocumentVersion.pending_items.label("pending_items"),
             DocumentVersion.last_run_summary.label("last_run_summary"),
             DocumentVersion.review.label("review"),
+            DocumentVersion.review_failed_at.label("review_failed_at"),
             DocumentVersion.source.label("source"),
             DocumentVersion.meta.label("metadata"),
         )
@@ -225,6 +230,7 @@ class DocumentRepository:
                 DocumentVersion.pending_items.label("pending_items"),
                 DocumentVersion.last_run_summary.label("last_run_summary"),
                 DocumentVersion.review.label("review"),
+                DocumentVersion.review_failed_at.label("review_failed_at"),
                 DocumentVersion.source.label("source"),
                 DocumentVersion.note.label("note"),
                 DocumentVersion.meta.label("metadata"),
@@ -252,6 +258,7 @@ class DocumentRepository:
             pending_items=row["pending_items"],
             last_run_summary=row["last_run_summary"],
             review=row["review"],
+            review_failed_at=row["review_failed_at"],
             source=row["source"],
             note=row["note"],
             metadata=row["metadata"],
@@ -316,6 +323,7 @@ class DocumentRepository:
         note: str = "",
         metadata: str = "{}",
         review: str | None = None,
+        review_failed_at: str | None = None,
         invalidate: tuple[str, ...] = (),
     ) -> DocumentVersion | None:
         """追加一条新版本并把它设为当前版本；返回新版本**模型对象**，方案不可见时返回 None。
@@ -379,6 +387,7 @@ class DocumentRepository:
             pending_items=pending_items,
             last_run_summary=last_run_summary,
             review=review,
+            review_failed_at=review_failed_at,
             source=source,
             note=note,
             meta=metadata,
@@ -439,7 +448,43 @@ class DocumentRepository:
             statement = statement.where(
                 DocumentVersion.content_sha == expected_content_sha
             )
-        result = self.session.execute(statement.values(review=review, updated_at=now))
+        # 拿到新结论即清掉「上次没跑成」的时间戳：两者描述同一版，不能并存
+        # （并存会让面板同时说「通过」和「审核失败」）。
+        result = self.session.execute(
+            statement.values(review=review, review_failed_at=None, updated_at=now)
+        )
+        return int(result.rowcount or 0) == 1
+
+    def mark_review_failed(
+        self, owner_id: int, solution_id: int, kind: str, *, at: str
+    ) -> bool:
+        """把「这一版上一次重审没跑成」的时间写到**当前版本**上，成功返回 True。
+
+        与 `replace_current_review` 同一道同步子句（当前版本在 SQL 里判定），
+        因此「查的时候是当前版本、写的时候已经不是」的窗口不存在。
+
+        **不碰 `review`**：没有结论 ≠ 通过，失败不写占位；已有结论原样保留（它描述的
+        仍是这一份正文），只是面板按「失败优先于旧结论」显示失败（见 §3.8）。
+
+        同样不更新 `documents.updated_at`：正文没变，变的只是这一版的审核记录；
+        版本行的 `updated_at` 要更新。
+        """
+        now = utc_now_text()
+        current_of_doc = (
+            select(Document.current_version_id)
+            .join(Solution, Solution.id == Document.solution_id)
+            .where(
+                Solution.user_id == owner_id,
+                Document.solution_id == solution_id,
+                Document.kind == kind,
+            )
+            .scalar_subquery()
+        )
+        result = self.session.execute(
+            update(DocumentVersion)
+            .where(DocumentVersion.id == current_of_doc)
+            .values(review_failed_at=at, updated_at=now)
+        )
         return int(result.rowcount or 0) == 1
 
     def update_current_version(

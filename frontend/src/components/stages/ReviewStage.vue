@@ -190,7 +190,13 @@ const props = defineProps<{
    * 审核失败不写结论，因此它只可能是「刚亲眼看到的那次失败」；面板据此显示
    * 「审核失败」，而不是把没审成的文档当成审过了。
    */
-  reviewFailed?: boolean
+  /**
+   * 这一版上一次重审没跑成的时间（`null` = 没有失败记录）。
+   *
+   * 它是**落库事实**（后端 `document_versions.review_failed_at`）：失败不写结论，
+   * 但「这次没审成」刷新后仍要看得见（US3），否则界面会退化成「未审核」。
+   */
+  reviewFailedAt?: string | null
   /**
    * 这份文档的**当前版本号**（结论面板用它回答「这条结论是哪一版的」）。
    *
@@ -458,7 +464,7 @@ function submitOptimize(): void {
          没有结论也渲染（四态之一「未审核」），否则「没有面板」会被读成「没有问题」。 -->
     <ReviewConclusionPanel
       :review="review ?? null"
-      :failed="reviewFailed"
+      :review-failed-at="reviewFailedAt ?? null"
       :version-no="reviewVersionNo ?? 0"
       @fix="emit('fix')"
       @rereview="emit('rereview')"

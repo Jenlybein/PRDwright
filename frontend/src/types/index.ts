@@ -369,6 +369,14 @@ export interface DocumentRecord {
    */
   review: ReviewConclusion | null
   /**
+   * **当前版本**上一次重审没跑成的时间（UTC ISO 8601）；`null` = 没有失败记录。
+   *
+   * 它是**落库事实**（后端 `document_versions.review_failed_at`）：审核失败不写结论
+   * （没有结论 ≠ 通过），但「这次没审成」本身刷新后仍要看得见——否则界面会退化成
+   * 「未审核」，用户会以为自己从没审过。拿到新结论时后端会清空它。
+   */
+  reviewFailedAt: string | null
+  /**
    * 当前版本号（从 1 开始；后端文档行带上来的）。
    *
    * 审核结论面板用它回答「这条结论是哪一版的」——同一个数字在版本抽屉里也看得到，
@@ -431,6 +439,13 @@ export interface DocumentVersionDetail {
   pendingItems: PendingItem[]
   /** 该版本当时的用量回执；缺失为 null */
   runSummary: RunSummary | null
+  /**
+   * 该版本「上一次重审没跑成」的时间；`null` = 没有失败记录。
+   *
+   * 与 `DocumentRecord.reviewFailedAt` 同一个后端列（`review_failed_at`）：
+   * 版本详情里也能回答「这一版失败过没有」。
+   */
+  reviewFailedAt: string | null
   /** 这一版的来源（见 `DocumentVersionSummary.source`） */
   source: string
   /** 备注 */
