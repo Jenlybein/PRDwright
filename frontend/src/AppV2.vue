@@ -576,6 +576,7 @@ const {
   onAiOptimize,
   handleGenerateApiDocs,
   handleGeneratePrompts,
+  updateStaleDocument,
   autoClarify,
   handleGeneratePromptsFromDebugPrd,
   handleGeneratePromptsFromPair,
@@ -1197,6 +1198,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :run-summary="runSummary"
         :pending-items="pendingItems"
         :stale="documentStale"
+        :update-busy="isGeneratingCurrentDoc"
         :review="reviewConclusion"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
@@ -1209,6 +1211,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @back="backToInput"
         @generate-api-docs="handleGenerateApiDocs"
         @generate-prompts="handleGeneratePrompts"
+        @update-stale="updateStaleDocument"
         @navigate="goTo"
         @return-to-chat="handleReturnToChat"
         @auto-clarify="autoClarify"
