@@ -1295,6 +1295,30 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 过期黄条上的「一键更新」：用**当前上游**重新整篇生成这一份。
+   *
+   * 与「生成接口文档 / 生成提示词套件」是**同一条入口**——同一个任务种类、同一份请求体，
+   * 因为上游正文由服务端取（C-R3），前端没有「更新专用」的载荷要拼。这里只回答一件事：
+   * 眼前这一份是谁。PRD 没有上游、黄条上不出按钮，因此它不在分发范围内。
+   *
+   * 不连带更新下游：只重生成被点的这一份，下游按过期规则自己亮黄条（下游的正文与版本
+   * 都不动，这一点与整篇生成的版本语义一致）。
+   */
+  async function updateStaleDocument(): Promise<void> {
+    switch (docKindOfState(viewState.value)) {
+      case 'api-docs':
+        await handleGenerateApiDocs()
+        return
+      case 'prompts':
+        await handleGeneratePrompts()
+        return
+      default:
+        // PRD（无上游）与已不在审阅页：没有可更新的下游文档，什么都不做
+        return
+    }
+  }
+
+  /**
    * 审阅页「AI 自行澄清」：让 AI 替用户把剩余待确认问题逐条拍板，并直接改写正文。
    *
    * 与「按澄清结果改写」的区别只有**谁作答**：那条要求用户先聊出结论，这条由模型按
@@ -1611,6 +1635,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     onAiOptimize,
     handleGenerateApiDocs,
     handleGeneratePrompts,
+    updateStaleDocument,
     autoClarify,
     handleGeneratePromptsFromDebugPrd,
     handleGeneratePromptsFromPair,
