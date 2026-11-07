@@ -16,8 +16,9 @@ import { formatDuration, formatTokens } from '@/utils/metering'
  * 文档「待确认」阶段视图（PRD / 接口文档 / 提示词共用）。
  *
  * 三份文档的审阅区完全一致，差异只在底栏右端的后续操作：按顺序推进（PRD → 接口文档 →
- * 提示词）、回看已生成的其它文档、三份齐备后进入完成页。这些差异由 `viewState`
- * 与三个布尔量驱动，组件自身不持有流程状态。
+ * 提示词）、回看已生成的其它文档。进交付页的入口不在这里——那是进度条上的「交付」格
+ * （判据在 `stores/workflow` 的 `requiredDocsReady`），审阅页不再有「完成」按钮。
+ * 这些差异由 `viewState` 与三个布尔量驱动，组件自身不持有流程状态。
  *
  * ## 底栏两行，各自职责单一
  *
@@ -26,7 +27,7 @@ import { formatDuration, formatTokens } from '@/utils/metering'
  *   因此并邻、复制在下载左边）。
  *   点「AI 优化」后原地换成指令输入，文档全程可见（改成弹窗就看不到了，而写优化指令时恰恰要
  *   对着文档）。
- * - **流程行**：这份文档之后往哪走——返回、生成下一份、完成。
+ * - **流程行**：这份文档之后往哪走——返回、生成下一份、查看已生成的其它文档。
  *
  * 内容行**没有「保存」按钮**：手改正文由 `DocumentReview` 的草稿变化事件驱动、自动防抖落库
  * （800ms，见 `stores/documents.ts`），不需要用户记得点一下；原来那个位置改成「下载」，
@@ -65,8 +66,6 @@ const emit = defineEmits<{
   generatePrompts: []
   /** 跳到某个文档的审阅阶段 */
   navigate: [state: ViewState]
-  /** 进入完成页 */
-  finish: []
   /**
    * 去对话页澄清这份文档的待确认项（三种审阅页共用）。
    *
@@ -92,8 +91,6 @@ const props = defineProps<{
   error?: string
   /** 当前所处的审阅阶段 */
   viewState: ViewState
-  /** 所需文档齐备且无请求进行中，可进入完成页 */
-  canFinish: boolean
   /** 是否已有 PRD 正文（决定「查看 PRD」入口是否出现） */
   hasPrd: boolean
   /** 是否已有接口文档正文（决定「查看接口文档」入口是否出现） */
@@ -150,7 +147,7 @@ const props = defineProps<{
    * 这份下游文档是否基于旧版上游。
    *
    * PRD 没有上游，恒为 false；接口文档 / 提示词由后端按内容指纹比较得出。
-   * 这里只负责展示黄条，不阻断编辑、下载与进入完成页。
+   * 这里只负责展示黄条，不阻断编辑与下载。
    */
   stale?: boolean
   /**
@@ -509,7 +506,7 @@ function submitOptimize(): void {
         </div>
       </template>
 
-      <!-- 流程行：左「返回 / 澄清组」，右按顺序推进 / 查看其它文档 / 完成。
+      <!-- 流程行：左「返回 / 澄清组」，右按顺序推进 / 查看其它文档。
            三段式顺序与「主操作永远最右且唯一」都不动，新入口进的是次操作组。 -->
       <template #secondary>
         <!-- 「返回」只在**录入页不在进度条上**时出现（`hideBack` 为假）。两个从零创建的入口
@@ -635,11 +632,6 @@ function submitOptimize(): void {
         @click="emit('navigate', 'review-prompts')"
       >
         查看提示词
-      </AppButton>
-
-      <!-- 完成入口：三份文档齐备才可用 -->
-      <AppButton variant="primary" size="md" :disabled="!canFinish" @click="emit('finish')">
-        完成
       </AppButton>
     </AppActionBar>
 
