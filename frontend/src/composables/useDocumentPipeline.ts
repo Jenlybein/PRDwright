@@ -233,14 +233,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   })
 
   /**
-   * 这份文档本次会话里**最近一次审核没跑成**。
+   * 这份文档**当前版本**上一次重审没跑成的时间（`null` = 没有失败记录）。
    *
-   * 它不是一个持久化事实（审核失败不写结论，见 C-R1），而是「我刚亲眼看到它失败了」：
-   * 面板据此把「未审核」改成「审核失败」，免得没审过的文档被当成审过了。
+   * 它是**落库事实**（后端 `document_versions.review_failed_at`），不是会话内状态：
+   * 审核失败不写结论（C-R1：没有结论 ≠ 通过），但「失败」本身要刷新后仍看得见，
+   * 否则界面会退化成「未审核」。面板据此把状态标成「审核失败（时间）」。
    */
-  const reviewFailed = computed<boolean>(() => {
+  const reviewFailedAt = computed<string | null>(() => {
     const kind = docKindOfState(viewState.value)
-    return kind ? documents.reviewFailedOf(kind) : false
+    return kind ? documents.reviewFailedAtOf(kind) : null
   })
 
   /**
@@ -1241,9 +1242,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 后端照跑，重连时凭 `activeJobId` 接上——与三份文档的生成完全同一套机制。
    *
    * **先切到 `generating-<kind>` 再发起任务**：改写要跑十几秒，全程停在对话栏用户看不到
-   * 任何进展（流式正文只有 `GeneratingStage` 会渲染）。切阶段必须放在 `job.start`
-   * **之前**——它内部登记运行态，此后 `goTo` 会被「有任务在跑」拦下。
-   * 失败时留在生成视图，由 `GeneratingStage` 的错误区说明原因（后端失败不覆写正文）。
+   * 任何进展（流式正文只有 `GeneratingStage` 会渲染）。顺序是「先切生成视图、再让这次
+   * 发起成为唯一发起」：重入守卫已在开头用 `isRunInFlight()` 显式挡过，`goTo` 本身
+   * **不因忙拒绝跳转**（见 `stores/workflow.ts`）。失败时留在生成视图，由
+   * `GeneratingStage` 的错误区说明原因（后端失败不覆写正文）。
    *
    * ⚠️ **必须带 `docKind`**：它既是「改写结果写回哪一份」的依据，也是「注入哪一套产出规范」
    * 的依据。少了它后端不会猜，而是拒绝落库——那这次澄清就白做了。
@@ -1359,7 +1361,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    *
    * 为什么先切到 `generating-<kind>` 再发任务：它要跑几十秒且输出整篇正文，留在审阅页
    * 只能干等。复用生成态那条流式预览，用户至少能看到字在往下走。
-   * ⚠️ `goTo` 必须在 `job.start` **之前**——它登记运行态之后，`goTo` 会拦掉跳转。
+   * ⚠️ `goTo` 必须在 `job.start` **之前**：先切到生成视图，再让这次发起成为唯一发起
+   * （重入由 `isRunInFlight()` 挡，`goTo` 不因忙拒绝跳转）。
    */
   async function autoClarify(): Promise<void> {
     if (isRunInFlight()) return
@@ -1393,7 +1396,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 三处与其它动作同形、一处不同：
    *
    * - 先 `isRunInFlight()` 拦重入，再 `goTo(generating-<kind>)`，最后 `job.start`——
-   *   顺序不能换（`goTo` 必须在登记运行态之前，见 `autoClarify`）；
+   *   顺序不能换：先切到生成视图，再让这次发起成为唯一发起（`goTo` 不因忙拒绝跳转，
+   *   重入是上面那道显式守卫挡的）；
    * - 载荷只带 `docKind`：被审的正文与比对用的上游都由服务端从库里取（C-R3），
    *   前端不再递正文——递了就是第二个真源；
    * - 收尾**不看 `reply`**：重审不产出正文，`finishDoc` 那条「把正文写回工作副本」的
@@ -1430,7 +1434,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 三件事按这个顺序：
    *
    * 1. **没跑成就标记失败**（`documents.setReviewFailed`）：重审的唯一产出就是判定，
-   *    没审成不能留成「未审核」，更不能拿上一条结论冒充本次结果；
+   *    没审成不能留成「未审核」，更不能拿上一条结论冒充本次结果；后端同时把失败时间
+   *    落库（`review_failed_at`），刷新后从文档记录读回来，仍是「审核失败（时间）」；
    * 2. **清掉 PRD 看板**：重审不产出正文，看板若还留着，看起来像一份「生成了一半的稿」；
    * 3. **回审阅页**：留在生成页只剩一片空白（这次没有正文可长）。
    *
@@ -1458,8 +1463,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * - **失败留在生成态**：改写失败时后端**不动库**（正文与版本都还是原样），错误由
    *   生成页的错误区说明——与「按澄清改写 / AI 自行澄清」同一条口径。
    *
-   * 重审失败**不是失败**（那是后端的事）：任务照旧成功，只是结论留空，界面显示
-   * 「审核失败」，可以再点一次「重新审核」补上。
+   * 重审失败**不是失败**（那是后端的事）：任务照旧成功，只是结论留空；后端把失败时间
+   * 记在 `review_failed_at` 上，界面显示「审核失败（时间）」，可以再点一次「重新审核」补上。
    */
   async function fixDocument(): Promise<void> {
     if (isRunInFlight()) return
@@ -1473,7 +1478,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
     resetDocTransient()
     prdBoard.value = null
-    // 阶段先于任务切（理由见 `autoClarify` / `rereview`）：登记运行态之后 `goTo` 会被忙拦下
+    // 阶段先于任务切：先切到生成视图，再让这次发起成为唯一发起。
+    // `goTo` 不因「有任务在跑」拒绝跳转——重入是开头那道 `isRunInFlight()` 挡的
     goTo(generating)
     // 整篇重写是最长的一步：先把阶段条点亮，别让用户在等后端 `stage` 事件时盯着空白
     docPhase.value = 'writing'
@@ -1660,7 +1666,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 判据读登记表的 `input.stateField` 列（`requirementIsFreeText`），不再按入口字面量分支。
     if (requirementIsFreeText.value) {
       if (!quickInput.value.requirements.trim()) return
-      // ⚠️ `goTo` 必须在 `generatePrd` 之前：生成态置位后 busy 守卫会拦下重复发起
+      // ⚠️ `goTo` 必须在 `generatePrd` 之前：先切到生成视图，再让这次发起成为唯一发起
+      // （重入由 `isRunInFlight()` 挡，`goTo` 不因忙拒绝跳转）
       goTo('generating-prd')
       await generatePrd()
       return
@@ -1757,7 +1764,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   docPhase,
   docStageText,
   reviewConclusion,
-  reviewFailed,
+  reviewFailedAt,
   reviewVersionNo,
   elapsedMs: job.elapsedMs,
     summaryChanges,

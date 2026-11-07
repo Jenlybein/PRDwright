@@ -230,6 +230,7 @@ function detail(overrides: Partial<DocumentVersionDetail> = {}): DocumentVersion
     content: '# 第二版正文\n\n这是内容。',
     pendingItems: [],
     runSummary: null,
+    reviewFailedAt: null,
     updatedAt: '2026-10-16T02:00:00',
     ...overrides,
   }

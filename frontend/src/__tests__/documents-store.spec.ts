@@ -43,6 +43,7 @@ function makeRecord(
     runSummary,
     pendingItems,
     review: null,
+    reviewFailedAt: null,
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
     versionNo: 0,

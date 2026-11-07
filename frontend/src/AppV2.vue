@@ -569,7 +569,7 @@ const {
   docPhase,
   docStageText,
   reviewConclusion,
-  reviewFailed,
+  reviewFailedAt,
   reviewVersionNo,
   runSummary,
   pendingItems,
@@ -1208,7 +1208,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :stale="documentStale"
         :update-busy="isGeneratingCurrentDoc"
         :review="reviewConclusion"
-        :review-failed="reviewFailed"
+        :review-failed-at="reviewFailedAt"
         :review-version-no="reviewVersionNo"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"

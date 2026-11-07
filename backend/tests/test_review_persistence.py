@@ -58,14 +58,12 @@ def no_real_llm(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def clean_job_state():
-    """每个用例前后清空进程内运行时、任务集合与总线订阅。"""
-    job_runtime._RUNTIMES.clear()  # noqa: SLF001
-    job_runtime._TASKS.clear()  # noqa: SLF001
-    job_bus._subscribers.clear()  # noqa: SLF001
+    """每个用例前后清空进程内运行时、任务集合与总线订阅（走公开的重置口）。"""
+    job_runtime.reset_for_tests()
+    job_bus.reset_for_tests()
     yield
-    job_runtime._RUNTIMES.clear()  # noqa: SLF001
-    job_runtime._TASKS.clear()  # noqa: SLF001
-    job_bus._subscribers.clear()  # noqa: SLF001
+    job_runtime.reset_for_tests()
+    job_bus.reset_for_tests()
 
 
 # ---------------------------------------------------------------------------
