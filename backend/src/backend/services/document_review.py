@@ -46,6 +46,7 @@ from backend.services.pending_items import (
     render_spec,
 )
 from backend.services.prompts import (
+    DOC_FIX_PROMPT,
     DOC_REVIEW_PROMPT,
     DOC_REVIEW_SYSTEM_PROMPT,
     DOC_REWRITE_PROMPT,
@@ -307,6 +308,84 @@ def section_rewrite_messages(
             writing_rules=writing_rules or "（未提供产出规范，按通用规范核对）",
             pending_spec=render_spec(),
         ),
+    )
+
+
+def fix_messages(
+    *,
+    document: str,
+    review: DocumentReviewResult,
+    writing_rules: str,
+    upstream: str,
+) -> list[BaseMessage]:
+    """组装「按审核结论修复全文」的消息（`review_fix` 任务的重写那一步）。
+
+    与 `rewrite_whole_document_messages` 的差别只有一处：这里多喂一节**上游材料全文**。
+    生成链路的改写发生在「刚写完、上游就在手边」的时刻；修复则可能发生在几天后，
+    模型手里只剩这一版正文与一条结论——看不见上游，它就会照着结论凭空补，
+    而那正是审核要抓的「编造」。上游因此整段注入，**不走**审核侧那份骨架
+    （骨架是为了省 prefill，代价是丢掉散文里的事实）。
+
+    Args:
+        document: 上一版全文（被修的那一版，含各级标题）。
+        review: 由**落库的结论**还原出的判定（见 `conclusion_to_review`）。
+        writing_rules: 该产物的产出规范（技能包整段注入）。
+        upstream: 上游材料全文（按目标产物拼，见 `document_service._fix_context`）。
+    """
+    return _build_messages(
+        _REWRITE_SYSTEM_PROMPT,
+        DOC_FIX_PROMPT.format(
+            issues=review.issues_text(),
+            instruction=review.instruction or "按问题清单逐条修正",
+            upstream=upstream or "（未提供上游材料，仅依据当前正文与产出规范修复）",
+            writing_rules=writing_rules or "（未提供产出规范，按通用规范核对）",
+            document=document,
+            pending_spec=render_spec(),
+        ),
+    )
+
+
+def conclusion_to_review(conclusion: dict[str, Any] | None) -> DocumentReviewResult:
+    """把**落库的审核结论**还原成修复用的判定；不是「有问题」就 400。
+
+    为什么必须校验而不是「有多少条问题就改多少」：修复的唯一起点是那条结论
+    （「有问题」才可点，见 ARCHITECTURE §3.8）。没有这条校验，一次迟到的请求
+    也能把一份**审核通过**的正文悄悄换掉——用户只会看到正文变了，却不知道为什么。
+
+    结论里没有 `instruction` 这一列（落库形状见 `review_data`），这里用一句话总结兜底：
+    逐条问题仍然原样喂给提示词，那才是模型真正要改的东西。
+
+    Args:
+        conclusion: `document_versions.review` 解出来的对象；`None` 表示这一版没审过。
+
+    Returns:
+        可直接喂给 `fix_messages` 的判定（`verdict` 恒为 `revise`）。
+
+    Raises:
+        AppError: 结论缺失或不是 `revise`（`INVALID_REQUEST`，400）。
+    """
+    data = conclusion if isinstance(conclusion, dict) else {}
+    verdict = str(data.get("verdict") or "").strip().lower()
+    if verdict != "revise":
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "当前版本的审核结论不是「有问题」，无法按结论修复。请先重新审核，"
+            "确认确实有问题后再修复。",
+        )
+    issues: list[dict[str, Any]] = []
+    for item in data.get("issues") or []:
+        if not isinstance(item, dict):
+            continue
+        issue = dict(item)
+        # PRD 的结论按章定位（`section_title`），整篇结论用 `where`；统一到 `where`
+        # 一处，`issues_text()` 才不必知道「这份文档是哪种产物」。
+        if not str(issue.get("where") or "").strip():
+            issue["where"] = str(issue.get("section_title") or "")
+        issues.append(issue)
+    return DocumentReviewResult(
+        verdict="revise",
+        issues=issues,
+        instruction=str(data.get("summary") or "").strip(),
     )
 
 

@@ -3586,6 +3586,13 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     return button
   }
 
+  /** 折叠头上的「修复」按钮（票 #56）：只在「有问题」时可点 */
+  function fixButton(wrapper: VueWrapper): DOMWrapper<Element> {
+    const button = wrapper.findAll('button').find((item) => item.text().trim() === '修复')
+    if (!button) throw new Error('未找到「修复」按钮')
+    return button
+  }
+
   it('四态各自可见：通过 / 有问题 / 审核失败 / 未审核，且没结论不等于通过', async () => {
     // ① 通过（结论来自文档记录，因此刷新后还在——这条用例本来就是「重新打开」）
     const passed = await mountReviewPage('prd', conclusion())
@@ -3630,12 +3637,25 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
 
     const revised = await mountReviewPage('prd', REVISE())
     expect(rereviewButton(revised).attributes('disabled')).toBeDefined()
-    // 「有问题」时的解释写在面板里（只靠 title 太隐蔽），且**不**渲染修复按钮（那是另一票）
+    // 「有问题」时的解释写在面板里（只靠 title 太隐蔽）
     const toggle = revised.findAll('button').find((item) => item.text().includes('审核结论'))
     if (!toggle) throw new Error('未找到结论面板的展开开关')
     await toggle.trigger('click')
     expect(revised.text()).toContain('把它们修好之后再来重新审核')
-    expect(revised.findAll('button').some((item) => item.text().trim() === '修复')).toBe(false)
+  })
+
+  it('「修复」与「重新审核」互斥：只有「有问题」能修复，其余三态只能重审', async () => {
+    const revised = await mountReviewPage('prd', REVISE())
+    expect(fixButton(revised).attributes('disabled')).toBeUndefined()
+    expect(rereviewButton(revised).attributes('disabled')).toBeDefined()
+
+    const passed = await mountReviewPage('prd', conclusion())
+    expect(fixButton(passed).attributes('disabled')).toBeDefined()
+    expect(rereviewButton(passed).attributes('disabled')).toBeUndefined()
+
+    const unreviewed = await mountReviewPage('api-docs', null)
+    expect(fixButton(unreviewed).attributes('disabled')).toBeDefined()
+    expect(rereviewButton(unreviewed).attributes('disabled')).toBeUndefined()
   })
 
   it('点「重新审核」：只带 docKind，期间在生成态，收尾回审阅页并换上新的结论', async () => {
@@ -3679,6 +3699,104 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     expect(wrapper.text()).toContain('有问题')
     // 正文逐字未变（重审只审不改）
     expect(documentsOf(wrapper).contentOf('api-docs')).toBe(BODY)
+  })
+
+  /**
+   * 修复（票 #56）：按结论重写整篇并**追加版本**。
+   *
+   * 与重审同一条缝、同一套动作形状（起任务 → 生成态 → 回审阅页），差别在产出：
+   * 它是**有正文**的那一种，收尾要像生成一样把新正文写回工作副本，并把结论换掉。
+   */
+  it('点「修复」：只带 docKind，期间在生成态，收尾回审阅页并刷新结论与正文', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    const FIXED = '# 接口文档\n\n## 一、概述\n统一响应结构\n\n## 二、鉴权\n已补齐鉴权'
+    const refreshed = conclusion({ kind: 'api_docs', verdict: 'pass', summary: '0 个待处理问题' })
+    let wrapper: VueWrapper | null = null
+    let stateDuringRun = ''
+
+    mockJobStream({
+      'review-fix': async (handlers) => {
+        stateDuringRun = wrapper ? storeOf(wrapper).viewState : ''
+        handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+        // 修复后的复审结论随流到达：面板据此即时更新（落库那条由收尾的 reload 拉回）
+        handlers.onReview?.(refreshed)
+        // 收尾摘要到达 → 前端重新拉一次文档（后端在此之前已写好新版本与新结论）
+        handlers.onRunSummary?.(makeRunSummary({ kind: 'review-fix' }))
+        return { conversationId: '', reply: FIXED, asks: [] }
+      },
+    })
+
+    wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
+    // 收尾会重新拉一次文档：把「追加了新版本」的后端记录摆进来（正文 + 新结论）
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeDocumentRecord('api-docs', FIXED, null, [], refreshed),
+    ])
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+
+    // 请求体只表达「做什么、对哪一份」：被修的正文、结论与上游全由服务端取（C-R3）
+    const payload = jobPayload('review-fix')
+    expect(payload?.docKind).toBe('api-docs')
+    expect(payload?.document).toBeUndefined()
+
+    expect(stateDuringRun).toBe('generating-api-docs')
+    // 收尾回到审阅页：新正文写回工作副本，结论面板换成复审那条
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(FIXED)
+    expect(wrapper.text()).toContain('通过')
+  })
+
+  it('复审失败：新正文照旧落到审阅页，面板显示「审核失败」且可再点重新审核', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    const FIXED = '# 接口文档\n\n## 一、概述\n统一响应结构\n\n## 二、鉴权\n已补齐鉴权'
+    mockJobStream({
+      'review-fix': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+        // 复审没跑成：后端给一条判定空串的 `review` 事件（不是「通过」）
+        handlers.onReview?.(conclusion({ kind: 'api_docs', verdict: '', summary: '审核未完成' }))
+        handlers.onRunSummary?.(makeRunSummary({ kind: 'review-fix' }))
+        return { conversationId: '', reply: FIXED, asks: [] }
+      },
+    })
+
+    const wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
+    // 复审失败不写结论（C-R1）：后端那份记录里这一版仍然没有 review
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeDocumentRecord('api-docs', FIXED, null, [], null),
+    ])
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+
+    // 正文照落库（改写是成功的那一半），但结论留空——界面照实标「审核失败」
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(FIXED)
+    expect(documentsOf(wrapper).reviewOf('api-docs')).toBeNull()
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(wrapper.text()).toContain('审核失败')
+    expect(wrapper.text()).not.toContain('通过')
+    // 还能补审一次（「重新审核」在失败态可点）
+    expect(rereviewButton(wrapper).attributes('disabled')).toBeUndefined()
+  })
+
+  it('修复失败：正文与结论都不动，错误留在生成页', async () => {
+    const BODY = '# 接口文档\n\n## 一、概述\n统一响应结构'
+    mockJobStream({
+      'review-fix': async () => {
+        throw new Error('重写上游挂了')
+      },
+    })
+
+    const wrapper = await mountReviewPage('api-docs', REVISE(), BODY)
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+
+    // 后端在改写失败时不动库（正文与版本都还是原样），前端也不能自作主张写回
+    expect(documentsOf(wrapper).contentOf('api-docs')).toBe(BODY)
+    expect(documentsOf(wrapper).reviewOf('api-docs')?.verdict).toBe('revise')
+    // 留在生成态说明原因：回审阅页会让人以为「改成功了」
+    expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
+    expect(wrapper.text()).toContain('重写上游挂了')
   })
 })
 

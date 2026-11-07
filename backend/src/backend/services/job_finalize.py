@@ -219,7 +219,7 @@ def _write_chat_turn(runtime: JobRuntime) -> None:
 
 
 def _regenerates_whole_document(kind: str) -> bool:
-    """这次任务是否是「整篇重生成上游产物」——只有它会连带作废下游、且追加新版本。
+    """这次任务是否是「整篇重生成上游产物」——只有它会追加新版本并重算上游锚点。
 
     依据是产物依赖链（`document_store.DOWNSTREAM_KINDS`）：下游由上游正文推导而来，
     上游换了一版，下游就不再成立。反过来，`optimize`（按指令就地优化）与 `clarify`
@@ -227,12 +227,16 @@ def _regenerates_whole_document(kind: str) -> bool:
     不该被顺手删掉。
 
     这个判断现在同时驱动两件事，且二者**恒等**（故合成一个 `append_version` 标志）：
-    整篇生成 → 追加新版本 + 删下游；就地改写 → 改当前版本、不删下游。
+    整篇生成 → 追加新版本 + 重算锚点；就地改写 → 改当前版本、不动锚点。
+
+    **`review_fix` 也算整篇重生成**：它重写的是整篇正文，语义上换了一版产物，
+    因此同样追加版本、重算 `derived_from`——下游据此按既有规则亮出过期黄条
+    （C-R2：修复追加新版本）。
 
     ⚠️ 这条判断以前是隐式的（一律 `invalidate_downstream=True`），后果是「优化接口文档」
     会把基于它生成的提示词悄悄删掉——用户看不到任何提示，只是下次打开方案时东西不见了。
     """
-    return kind in DOCUMENT_KINDS
+    return kind in DOCUMENT_KINDS or kind == "review_fix"
 
 
 def _document_kind(runtime: JobRuntime) -> str | None:

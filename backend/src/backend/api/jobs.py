@@ -91,6 +91,15 @@ def _validate_payload(payload: schemas.JobCreateRequest) -> None:
         if payload.solution_id is None:
             # 没有方案就没有可读的正文，也没有可写结论的位置
             raise AppError(ErrorCode.INVALID_REQUEST, "review 必须关联一份方案")
+    elif payload.kind == "review_fix":
+        # 修复同理：被修的正文、那条结论、上游材料全由服务端取（C-R3）；
+        # `doc_kind` 还决定注入哪份上游全文，缺了既不指导哪一份、也拼不出上下文。
+        if payload.doc_kind is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "review_fix 必须指定 doc_kind")
+        if payload.solution_id is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "review_fix 必须关联一份方案")
+        # 结论是不是「有问题」由 `job_inputs._fix_inputs` 在建任务时查库判定：
+        # 那一步本来就要读当前版本，再读一次结论不会多一次往返。
     elif payload.kind == "chat":
         # 线程标识决定「这轮回复记到谁头上」，猜错等于把 A 线程的对话记到 B 线程；
         # 四条线程的人设与上下文完全不同，因此不给默认值，缺了就 400。

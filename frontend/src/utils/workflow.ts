@@ -107,6 +107,7 @@ export function isDocKind(value: unknown): value is DocKind {
     value === 'clarify' ||
     value === 'auto-clarify' ||
     value === 'review' ||
+    value === 'review-fix' ||
     value === 'chat'
   )
 }
@@ -124,6 +125,9 @@ export function fromBackendJobKind(kind: unknown): DocKind | null {
   if (kind === 'auto_clarify' || kind === 'auto-clarify') return 'auto-clarify'
   // 重新审核是**动作**（不产出文档）：它只在任务种类里出现，产物要看 `doc_kind`
   if (kind === 'review') return 'review'
+  // 按结论修复同样是**动作**（产物是它追加的那一版），产物同样看 `doc_kind`；
+  // 后端用 `review_fix`，前端用连字符 `review-fix`（转换只此一处）
+  if (kind === 'review_fix' || kind === 'review-fix') return 'review-fix'
   // 对话是**动作**（不产出文档），因此只能在这里认，不能放进 `fromBackendKind`
   // ——那个函数只回答「这是哪一份产物」，让它认 chat 会破坏「东西 / 动作」的分界。
   if (kind === 'chat') return 'chat'

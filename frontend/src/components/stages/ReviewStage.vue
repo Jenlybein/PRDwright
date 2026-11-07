@@ -88,6 +88,13 @@ const emit = defineEmits<{
    */
   rereview: []
   /**
+   * 按这条结论**修复**这份文档：重写整篇并追加一个新版本（后端 `review_fix`）。
+   *
+   * 与 `rereview` 同在结论面板的折叠头、且两者互斥：有问题时只能修复，
+   * 其余三态只能重审。前端只说「按这条结论改这一份」——依据与上游都由服务端取。
+   */
+  fix: []
+  /**
    * 过期黄条上的「一键更新」：用当前上游重新整篇生成这一份。
    *
    * 与「生成接口文档 / 生成提示词套件」是**同一条入口**（同一个任务种类、同一份请求体），
@@ -446,6 +453,7 @@ function submitOptimize(): void {
     <ReviewConclusionPanel
       :review="review ?? null"
       :failed="reviewFailed"
+      @fix="emit('fix')"
       @rereview="emit('rereview')"
     />
 

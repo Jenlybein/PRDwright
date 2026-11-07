@@ -23,12 +23,24 @@ from backend.core.contracts import DocumentKind, RunSummary
 # `review` 与生成链路共用同一段审核代码，区别只在收尾：它**不写正文**，
 # 只把结论写进被审的那一版（ADR 0002 第 2 条）。
 #
+# `review_fix` 是「按结论**修复**」：按当前版本的审核结论重写整篇、只再审一次、
+# **追加新版本**（正文与结论同批写入）。它与 `review` 是 ADR 0002 里的两个动作，
+# 版本策略相反，因此分成两个 kind 而不是靠隐藏开关。
+#
 # `chat` 是**对话的一轮**：它不写文档，产出是一条 `chat_turns` 轮次。
 # 把对话塞进同一条任务通道，换来的是「切走不断」「刷新接回」「换设备能看」
 # 三者共用现有机制——它们全建立在 `jobId + JobBus + draft_content` 上，
 # 对话原本一样都没有。
 JobKind = Literal[
-    "prd", "api_docs", "prompts", "optimize", "clarify", "auto_clarify", "review", "chat"
+    "prd",
+    "api_docs",
+    "prompts",
+    "optimize",
+    "clarify",
+    "auto_clarify",
+    "review",
+    "review_fix",
+    "chat",
 ]
 
 
@@ -45,7 +57,10 @@ class JobCreateRequest(BaseModel):
     """
 
     kind: JobKind = Field(
-        description="任务类型：prd / api_docs / prompts / optimize / clarify / auto_clarify / review"
+        description=(
+            "任务类型：prd / api_docs / prompts / optimize / clarify / auto_clarify / "
+            "review / review_fix"
+        )
     )
     solution_id: int | None = Field(
         default=None,
@@ -58,8 +73,9 @@ class JobCreateRequest(BaseModel):
         default=None,
         description=(
             "本次任务**作用在**哪一份产物上。`optimize` / `clarify` / `auto_clarify` /"
-            "`review` 必须给：它们的 `kind` 表达的是「做了一件什么事」，而落库要知道"
-            "「东西写进（或读到）哪一份文档」。缺省时 `review` 直接 400，其余不落库"
+            "`review` / `review_fix` 必须给：它们的 `kind` 表达的是「做了一件什么事」，"
+            "而落库要知道「东西写进（或读到）哪一份文档」。缺省时 `review` /"
+            "`review_fix` 直接 400，其余不落库"
             "（宁可本次改动只留在会话里，也不猜一个默认值写错位置）。"
         ),
     )
