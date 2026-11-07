@@ -82,7 +82,7 @@ describe('ReviewConclusionPanel', () => {
   it('收起时给出分类计数：用户知道「有几条、哪一类等着处理」', () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
-    expect(wrapper.text()).toContain('编造 1 · 结构 1')
+    expect(wrapper.text()).toContain('编造 1 · 结构不符 1')
   })
 
   it('展开按类分组、类内 high 在前；没有类别的归「未分类」并排在最后', async () => {
@@ -98,7 +98,7 @@ describe('ReviewConclusionPanel', () => {
         }),
       },
     })
-    expect(wrapper.text()).toContain('编造 2 · 结构 1 · 未分类 1')
+    expect(wrapper.text()).toContain('编造 2 · 结构不符 1 · 未分类 1')
 
     await wrapper.find('button').trigger('click')
     const text = body(wrapper).text()
