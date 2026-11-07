@@ -11,14 +11,33 @@ function review(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
     verdict: 'revise',
     summary: '2 章完成，2 个待处理问题',
     issues: [
-      { severity: 'high', detail: '出现了输入中没有的性能指标', sectionTitle: '产品概述' },
-      { severity: 'medium', detail: '缺少异常流程' },
+      {
+        severity: 'high',
+        category: 'fabrication',
+        detail: '出现了输入中没有的性能指标',
+        sectionTitle: '产品概述',
+      },
+      { severity: 'medium', category: 'structure', detail: '缺少异常流程' },
     ],
     rewritten: false,
     failedSections: [],
     reviewedAt: '2026-10-13T00:00:00',
     ...overrides,
   }
+}
+
+/**
+ * 旧口径的结论（ADR 0003 之前落库的那些）：条目只有 `where` / `severity` / `detail`，
+ * **没有类别**。面板归「未分类」，不推断、不重分类。
+ */
+function legacyReview(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
+  return review({
+    issues: [
+      { severity: 'high', detail: '出现了输入中没有的性能指标', sectionTitle: '产品概述' },
+      { severity: 'medium', detail: '缺少异常流程' },
+    ],
+    ...overrides,
+  })
 }
 
 /** 折叠体：`aria-controls` 指向的那个元素（收起时**不存在**，用 `v-if`） */
@@ -45,17 +64,61 @@ describe('ReviewConclusionPanel', () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
     // 标题与结论徽标常驻：收起不等于「把问题藏了」
-    expect(wrapper.text()).toContain('审核结论')
+    expect(wrapper.text()).toContain('文档缺陷')
     expect(wrapper.text()).toContain('有问题')
     // 明细压根没渲染（`v-if`）：既不占视觉空间，也不会被 `text()` 读到
     expect(isCollapsed(wrapper)).toBe(true)
     expect(wrapper.text()).not.toContain('出现了输入中没有的性能指标')
   })
 
-  it('收起时给出问题条数：用户知道「有几条等着处理」', () => {
+  it('标题是「文档缺陷」：这块只报缺陷，不报未决', () => {
+    // 「缺什么、该怎么定」归待确认清单；标题照实说，用户才不会把它读成第二份待确认清单
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
-    expect(wrapper.text()).toContain('2 个待处理问题')
+    expect(wrapper.text()).toContain('文档缺陷')
+    expect(wrapper.text()).not.toContain('审核结论')
+  })
+
+  it('收起时给出分类计数：用户知道「有几条、哪一类等着处理」', () => {
+    const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
+
+    expect(wrapper.text()).toContain('编造 1 · 结构 1')
+  })
+
+  it('展开按类分组、类内 high 在前；没有类别的归「未分类」并排在最后', async () => {
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: {
+        review: review({
+          issues: [
+            { severity: 'medium', category: 'structure', detail: '条目编号与模板不一致' },
+            { severity: 'medium', category: 'fabrication', detail: '编造了并发量' },
+            { severity: 'high', category: 'fabrication', detail: '编造了鉴权方式' },
+            { severity: 'high', detail: '旧口径条目：性能指标' },
+          ],
+        }),
+      },
+    })
+    expect(wrapper.text()).toContain('编造 2 · 结构 1 · 未分类 1')
+
+    await wrapper.find('button').trigger('click')
+    const text = body(wrapper).text()
+    // 分组顺序固定（编造 → 结构 → 未分类）：未分类是历史，不该挡在新口径的缺陷前面
+    expect(text.indexOf('编造')).toBeLessThan(text.indexOf('结构'))
+    expect(text.indexOf('结构')).toBeLessThan(text.indexOf('未分类'))
+    // 类内 high 在前：先修编造，再修同类里的 medium
+    expect(text.indexOf('编造了鉴权方式')).toBeLessThan(text.indexOf('编造了并发量'))
+  })
+
+  it('旧结论没有类别：归「未分类」，不推断它属于哪一类', async () => {
+    // 不追溯是 ADR 0003 决策 7：照旧标签等于假装历史是按新口径判的
+    const wrapper = mount(ReviewConclusionPanel, { props: { review: legacyReview() } })
+
+    expect(wrapper.text()).toContain('未分类 2')
+    await wrapper.find('button').trigger('click')
+    const text = body(wrapper).text()
+    expect(text).toContain('未分类')
+    // detail 读起来像「编造」，但旧结论没有类别——不替它猜
+    expect(text).not.toContain('编造')
   })
 
   it('点一下展开，问题逐条可见', async () => {
@@ -104,7 +167,7 @@ describe('ReviewConclusionPanel', () => {
     )
 
     expect(wrapper.text()).toContain('通过')
-    expect(wrapper.text()).not.toContain('待处理问题')
+    expect(wrapper.text()).not.toContain('未分类')
     // 没问题时展开只有一个摘要——不该出现空的列表容器
     expect(wrapper.find('ul').exists()).toBe(false)
   })
@@ -150,8 +213,8 @@ describe('ReviewConclusionPanel', () => {
     expect(wrapper.text()).toContain('审核失败')
     // 失败时间来自落库的 `reviewFailedAt`（US3）：刷新后仍然有
     expect(wrapper.text()).toContain('失败于')
-    // 收起态：连问题条数都不该来自上一次那条结论
-    expect(wrapper.text()).not.toContain('2 个待处理问题')
+    // 收起态：连分类计数都不该来自上一次那条结论
+    expect(wrapper.text()).not.toContain('编造 1')
 
     await wrapper.find('button').trigger('click')
     expect(wrapper.text()).not.toContain('出现了输入中没有的性能指标')
