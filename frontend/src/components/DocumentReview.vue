@@ -36,6 +36,15 @@ const props = withDefaults(
      * 展示的是改写前的草稿，需要明确标出来，否则用户会以为文档出了故障。
      */
     draftOnly?: boolean
+    /**
+     * 正文此刻**不许手改**（票 #69）：有一支修复任务正在整篇重写这一份。
+     *
+     * 修复会追加一个新版本；与此同时把旧版手改落库，两边都不知道该以谁为基。因此这里
+     * 不是「提示一句」，而是**根本进不去编辑视图**——只藏按钮会留下一个仍可切进去的路径。
+     */
+    locked?: boolean
+    /** 标题旁徽标的文案（票 #67）；按动作区分「修复中 / 重审中 / 优化中 / 改写中 / 生成中」 */
+    statusLabel?: string
   }>(),
   {
     title: '',
@@ -43,6 +52,7 @@ const props = withDefaults(
     streamingContent: '',
     generating: false,
     draftOnly: false,
+    locked: false,
   },
 )
 
@@ -93,6 +103,16 @@ watch(draft, (value) => {
 
 /** 是否处于「编辑原文」视图；false 时为 Markdown 预览 */
 const viewMode = ref<'preview' | 'edit'>('preview')
+
+/**
+ * 用户实际看到的视图模式。
+ *
+ * `locked` 期间**只有预览**（正文正被整篇重写，在旧版上改没有落点）。这是唯一判据：
+ * 底栏高亮、正文渲染、对外的 `viewMode` 都读它——三处各写一遍 `|| locked` 迟早漏一处。
+ */
+const effectiveViewMode = computed<'preview' | 'edit'>(() =>
+  props.locked ? 'preview' : viewMode.value,
+)
 
 /** 复制成功 / 失败的提示文案 */
 const copyTip = ref('')
@@ -155,9 +175,10 @@ defineExpose({
   /** 当前可编辑原文 */
   draftContent: computed(() => draft.value),
   /** 当前视图模式，供底栏的分段控件读取高亮态 */
-  viewMode: computed(() => viewMode.value),
-  /** 切换视图模式（由底栏的分段控件调用） */
+  viewMode: effectiveViewMode,
+  /** 切换视图模式（由底栏的分段控件调用）；`locked` 时切不进编辑视图 */
   setViewMode: (mode: 'preview' | 'edit') => {
+    if (props.locked && mode === 'edit') return
     viewMode.value = mode
   },
   /** 一键复制 */
@@ -176,7 +197,7 @@ defineExpose({
           class="inline-flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent ring-1 ring-accent-soft-line"
         >
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
-          生成中
+          {{ statusLabel ?? '生成中' }}
         </span>
       </div>
     </div>
@@ -215,9 +236,9 @@ defineExpose({
 
       <!-- 生成完成：预览 / 编辑 切换 -->
       <template v-else>
-        <!-- 预览视图：渲染缓存后的 HTML -->
+        <!-- 预览视图：渲染缓存后的 HTML；`locked` 期间编辑视图不可达，恒停在这里 -->
         <div
-          v-if="viewMode === 'preview'"
+          v-if="effectiveViewMode === 'preview'"
           class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->

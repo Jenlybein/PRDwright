@@ -67,6 +67,21 @@ const props = withDefaults(
      * ——只藏按钮会留下一条空栏，比不显示更难看。
      */
     hideBack?: boolean
+    /**
+     * 是否给「查看当前版本」这个出口（票 #68）。
+     *
+     * 只在**这张页是被一支修复任务撑着**时给：修复会整篇重写，正文一直在变，用户可能
+     * 只想读没被写的那一版。别的动作（生成 / 优化 / 改写）本就以「看它写」为目的，
+     * 多一个出口只是噪音。点它由上层压住兜底渲染并回到审阅页。
+     */
+    canViewCurrentVersion?: boolean
+    /**
+     * 标题旁的徽标文案（票 #67）：按动作区分「修复中 / 重审中 / 优化中 / 改写中 / 生成中」。
+     *
+     * 由上层给出而不是在这里按 kind 猜：这张页不知道任务种类，也不该知道。
+     * 缺省回落到「生成中」由文档卡片自己兜（只在一处）。
+     */
+    statusLabel?: string
   }>(),
   { withReview: true },
 )
@@ -74,6 +89,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** 返回对话 */
   back: []
+  /** 先不看了，回到审阅页读还没被重写的那一版 */
+  viewCurrentVersion: []
 }>()
 
 /** 已用时的可读文案；为 0（尚未开始计时）时不展示 */
@@ -112,6 +129,17 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
       已用时 {{ elapsedText }}
     </p>
 
+    <!-- 出口：先不读过程，回去读还没被重写的那一版（票 #68）。
+         修复是整篇重写，正文一直在长，有人此刻要的正是旧版而不是进度。 -->
+    <button
+      v-if="canViewCurrentVersion"
+      type="button"
+      class="self-start text-xs text-brand-600 underline-offset-2 hover:underline"
+      @click="emit('viewCurrentVersion')"
+    >
+      查看当前版本
+    </button>
+
     <!-- 生成 / 优化出错提示：非正常结尾（如被截断）时展示原因 -->
     <p
       v-if="error"
@@ -135,6 +163,7 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
       :streaming-content="streamingContent"
       :generating="true"
       :draft-only="draftOnly"
+      :status-label="statusLabel"
     />
     <!-- 页面级操作栏：生成中 / 失败时只有「返回」这一条退路，主操作区留空。
          录入页在进度条上的入口连这条退路都是重复的，此时整条栏不渲染。 -->

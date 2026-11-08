@@ -179,6 +179,14 @@ const props = defineProps<{
    */
   updateBusy?: boolean
   /**
+   * 有一支**修复**任务在途（票 #69），判据按任务种类、与产物无关。
+   *
+   * 三份产物的「修复 / 重新审核 / 编辑」在这段时间里都不可用：后端的顶替判据不分产物，
+   * 同一方案里两份修复会互相掐断；而正文正被整篇重写时手改旧版，落库的两边都不知道
+   * 该以谁为基。**不附加任何说明文字**——灰的原因不在这一份的结论上。
+   */
+  fixInFlight?: boolean
+  /**
    * 这份文档**当前版本**的审核结论（后端随文档列表返回，刷新后仍在）。
    *
    * `null` 表示这一版没审过（**不等于通过**）——面板照样渲染，显示「未审核」。
@@ -466,6 +474,7 @@ function submitOptimize(): void {
       :review="review ?? null"
       :review-failed-at="reviewFailedAt ?? null"
       :version-no="reviewVersionNo ?? 0"
+      :fix-in-flight="fixInFlight ?? false"
       @fix="emit('fix')"
       @rereview="emit('rereview')"
     />
@@ -475,6 +484,7 @@ function submitOptimize(): void {
       ref="doc"
       :title="title"
       :content="content"
+      :locked="fixInFlight ?? false"
       @draft-change="emit('draftChange', $event)"
     />
 
@@ -561,10 +571,11 @@ function submitOptimize(): void {
               </button>
               <button
                 type="button"
-                class="rounded-md px-2.5 py-1 text-xs font-medium transition"
+                class="rounded-md px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
                 :class="
                   viewMode === 'edit' ? 'bg-surface text-fg shadow-sm' : 'text-subtle hover:text-muted'
                 "
+                :disabled="fixInFlight"
                 @click="doc?.setViewMode('edit')"
               >
                 编辑

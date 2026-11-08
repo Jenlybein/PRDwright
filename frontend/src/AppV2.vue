@@ -21,7 +21,7 @@ import VersionDrawer from '@/components/ui/VersionDrawer.vue'
 import type { AnswerPayload } from '@/components/ClarificationAskList.vue'
 import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
-import { fetchActiveJobs, onUnauthorized } from '@/services/api'
+import { fetchActiveJobs, onUnauthorized, type JobStatusSummary } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useDocumentsStore } from '@/stores/documents'
 import { useDocumentVersionsStore } from '@/stores/documentVersions'
@@ -42,6 +42,7 @@ import {
   hasRequirementChat,
   inputPageOnBar,
   normalizeChatStage,
+  reviewStateFor,
 } from '@/utils/workflow'
 import {
   CHAT_STAGES,
@@ -366,47 +367,86 @@ async function resumeAfterRestore(): Promise<void> {
       status: 'running',
     }).catch(() => [])
     const match = running[0]
-    if (!match) return
-    runs.restore({
-      jobId: match.id,
-      solutionId: solutions.currentId,
-      jobKind: 'chat',
-      docKind: null,
-      chatStage: match.chatStage ?? store.chatTab,
-    })
-    await reconnectChat(match.id, match.chatStage)
-    return
+    if (match) {
+      runs.restore({
+        jobId: match.id,
+        solutionId: solutions.currentId,
+        jobKind: 'chat',
+        docKind: null,
+        chatStage: match.chatStage ?? store.chatTab,
+      })
+      await reconnectChat(match.id, match.chatStage)
+      return
+    }
+    // 对话没命中就**继续往下走**：人停在对话页时，在途的可能是一支文档任务
+    // （修复整篇重写要几十秒，用户等的就是它）。早退会让这种刷新彻底接不回。
   }
 
-  if (store.downgrade !== 'generating') return
-  const kind = docKindOfState(store.viewState)
-  if (!kind) return
+  // 3. 文档页：按**方案**查一次本方案此刻在跑的任务（票 #70）。
+  //
+  //    这一步不能按产物种类查：后端 `kind` 过滤是等值匹配**任务种类**（`review_fix` /
+  //    `review` / `optimize` / `clarify`），而这里手上只有产物种类（`prd` / `api-docs` /
+  //    `prompts`）。旧写法把产物当任务传，对动作类任务**永远不命中**——那等于这条兜底
+  //    对修复与重审根本不存在。
+  //
+  //    也别只在「降级成生成中」时才走这一步：用户切走之后刷新，快照停在审阅态，
+  //    那恰好是这次投诉的形状。只要落在某一份文档的页面上就查一次，查不到就老实停着。
+  //    停在对话页也查——上一段没命中对话任务时可能是文档任务在跑。
+  const docKind = docKindOfState(store.viewState) ?? docKindOfGeneratingState(store.viewState)
+  if (!docKind && store.viewState !== 'chatting') return
 
   try {
     const jobs = await fetchActiveJobs({
       solutionId: solutions.currentId,
-      kind,
       status: 'running',
     })
-    const match = jobs[0]
+    const match = pickInFlightDocJob(jobs)
     if (!match) return
+    // 认不出任务种类就不接：宁可少接一次，也不把这份产物记到别的动作上
+    const jobKind = fromBackendJobKind(match.kind)
+    if (jobKind === null) return
+    // 产物种类以服务端为准；后端没给（旧形态）才退回当前页那一份。
+    // 注意：**不按当前页过滤**——用户刷新时可能正停在别的产物上，而那支修复仍然在途；
+    // 把它登记进来才不会漏（#68 的兜底渲染与 #69 的入口禁用都靠这份运行态）。
+    const target = match.docKind ?? docKind
+    if (target === null) return
     // 登记运行态：`reconnectJob` 凭它认领事件，界面凭它判断「哪一份正在写」。
-    // `kind` 是后端原始取值（下划线口径），产物种类优先取后端给的 `doc_kind`——
-    // 它在 `optimize` / `clarify` 上比「按阶段反推」权威。
     runs.restore({
       jobId: match.id,
       solutionId: solutions.currentId,
-      jobKind: fromBackendJobKind(match.kind) ?? kind,
-      docKind: match.docKind ?? kind,
+      jobKind,
+      docKind: target,
     })
-    // 命中活跃任务：撤销降级、切回生成态，再重连
+    // 命中活跃任务：撤销降级提示；原来停在「生成中」（含被降级的）才切回生成态，
+    // 停在审阅态的交给运行视图的兜底判据（#68）——这里不替它决定落点
+    const wasGenerating =
+      store.downgrade === 'generating' || docKindOfGeneratingState(store.viewState) !== null
     store.downgrade = null
-    const target = generatingStateFor(kind)
-    if (target) store.viewState = target
+    const generating = generatingStateFor(target)
+    if (generating && wasGenerating) store.viewState = generating
     await reconnectJob(match.id)
   } catch {
     // 兜底查询失败不改变降级结果：保持既有提示即可
   }
+}
+
+/**
+ * 从「本方案此刻在跑的任务」里挑出该归位的那一条（票 #70）。
+ *
+ * 只排除对话（它有自己的一条重连路径，写的是对话预览，不该塞进文档流水线）。
+ * 其余一律接：**修复**最优先——它正把某一份整篇重写，用户最可能就在等它。
+ *
+ * ⚠️ 判「是不是修复」必须经 `fromBackendJobKind`：后端给的是下划线口径 `review_fix`，
+ * 前端那个连字符名只在这一处转换（`utils/workflow.ts`）。直接比字符串会永远不命中，
+ * 于是优先级悄悄失效、只剩「取第一条」——单任务时看不出，两条并行时就接错。
+ *
+ * 刻意**不按「当前页是哪个产物」过滤**：刷新时人可能正停在 PRD 页，而在途的是接口文档
+ * 的修复；过滤掉就等于既接不回进度、也解不开 #69 的入口禁用。产物对得上这件事，
+ * 由 #68 的渲染判据自己回答（`docKind` 与当前页相等时才换成运行视图）。
+ */
+function pickInFlightDocJob(jobs: JobStatusSummary[]): JobStatusSummary | null {
+  const docJobs = jobs.filter((job) => job.kind !== 'chat')
+  return docJobs.find((job) => fromBackendJobKind(job.kind) === 'review-fix') ?? docJobs[0] ?? null
 }
 
 /**
@@ -620,6 +660,121 @@ const versionDrawerOpen = ref(false)
 const activeDocKind = computed(() => docKindOfState(viewState.value))
 
 /**
+ * 是否有一支**修复**任务在途（票 #68 / #69）。
+ *
+ * 判据看**任务种类**，不看产物：入口禁用（#69）与运行视图兜底（#68）都要这一条，
+ * 前者与产物无关（后端顶替只看任务种类），后者还要再拼上「产物对不对得上」。
+ * 「在不在跑」由 `runs` 回答，这里不自己读 `activeRun.status`。
+ */
+const isFixInFlight = computed(() => runs.isRunningKind('review-fix'))
+
+/**
+ * 在途的修复任务作用在哪一份产物；没有就为 null（票 #68）。
+ *
+ * 只认 `review-fix`：重审不产出正文，没有「正在长出来的那一份」可看，
+ * 把它也塞进运行视图只会让用户盯着一张不动的页。
+ */
+const fixingDocKind = computed<DocumentKind | null>(() => {
+  if (!isFixInFlight.value) return null
+  return runs.activeRun?.docKind ?? null
+})
+
+/**
+ * 用户点了「查看当前版本」时立下的**压制位**（票 #68）。
+ *
+ * 运行视图现在由在途任务兜底渲染，因此「我不要看过程，先读旧版」这个意图必须被记住：
+ * 不记的话，兜底渲染会在下一帧把人弹回运行视图，那个出口等于不存在。
+ *
+ * 存的是「哪个方案的哪一支任务的哪一份产物」而不是一个裸 ID：**是否仍然有效由它自己
+ * 算出来**——任务收尾或换了一支 → `jobId` 对不上；切了方案 → `solutionId` 对不上；
+ * 离开这份产物 → 那条 `watch` 把它清掉。只有最后一条需要副作用，前两条是纯派生。
+ *
+ * 它**不落库**：持久化会把一个临时阅读意图升格成配置，而默认落点必须稳定。
+ */
+const suppressedFor = ref<{
+  solutionId: number | null
+  docKind: DocumentKind
+  jobId: number
+} | null>(null)
+
+/** 压制位此刻是否仍然有效（同一方案、同一支任务、同一份产物） */
+const isRunViewSuppressed = computed(() => {
+  const suppressed = suppressedFor.value
+  if (suppressed === null || suppressed.solutionId !== solutions.currentId) return false
+  return suppressed.jobId === runs.activeRun?.jobId && suppressed.docKind === activeDocKind.value
+})
+
+// 「任务换了」「切了方案」都由上面的派生自动失效；只有「人离开了这份产物」需要记一笔——
+// 默认落点必须稳定，走了再回来该重新落回运行视图。
+watch(activeDocKind, () => {
+  if (suppressedFor.value !== null && !isRunViewSuppressed.value) suppressedFor.value = null
+})
+
+/**
+ * 眼下这张页写的是哪一份产物。
+ *
+ * 生成态与审阅态各有一套反推：优化 / 修复期间可能停在审阅态，而生成 / 改写期间停在
+ * 生成态——两种都要能答出「这是哪一份」。
+ */
+const runViewDocKind = computed(
+  () => activeDocKind.value ?? docKindOfGeneratingState(viewState.value),
+)
+
+/**
+ * 眼下这张页写的这一份，是不是**正在被修复**的那一份（票 #68）。
+ *
+ * 「产物对不对得上」在这三处都要用（兜底渲染、出口、压制位），写一遍就够。
+ */
+const fixingThisDoc = computed(() => {
+  const fixing = fixingDocKind.value
+  return fixing !== null && fixing === runViewDocKind.value
+})
+
+/**
+ * 此刻该不该画**运行视图**（票 #68）。
+ *
+ * 两种情形都算：
+ * 1. 界面本来就停在这份文档的生成态（用户刚发起，或任务失败后留在原地看错误）；
+ * 2. 界面停在审阅态，但**眼前这一份**正有一支修复任务在途——这正是「切走再切回来
+ *    看到的是审阅页、没法知道修到哪」的那个洞。
+ *
+ * 第 2 条带两个约束：产物必须**对得上**（一边在修 PRD、一边在看接口文档，那张页不该
+ * 被打扰），且用户没有点过「查看当前版本」（压制位）。
+ */
+const isRunViewVisible = computed(() => {
+  if (isGeneratingPhase.value) return true
+  return fixingThisDoc.value && !isRunViewSuppressed.value
+})
+
+/** 运行视图上的「查看当前版本」：压住兜底渲染，停在审阅页读还没被写的那一版 */
+function viewCurrentVersion(): void {
+  const kind = fixingDocKind.value
+  const run = runs.activeRun
+  if (kind === null || run === null) return
+  suppressedFor.value = { solutionId: solutions.currentId, docKind: kind, jobId: run.jobId }
+  goTo(reviewStateFor(kind))
+}
+
+/** 这张运行视图上要不要给「查看当前版本」：只有正在修这一份时才给 */
+const canViewCurrentVersion = computed(() => fixingThisDoc.value)
+
+/**
+ * 运行视图的标题徽标（票 #67）：按动作区分，不把四件事都叫「生成中」。
+ *
+ * 修复、重审、优化、按澄清改写都不是「生成一份新文档」，混称会让用户以为自己的稿被整篇重做了。
+ * 一键更新走的是生成任务（与普通生成同一套请求体，无处可分辨），因此它显示「生成中」——
+ * 这是已知的口径缺口，写在 [`ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) §5.11。
+ */
+const runViewStatusLabel = computed(() => {
+  if (!runs.hasRunning) return '生成中'
+  if (runs.isRunningKind('review-fix')) return '修复中'
+  if (runs.isRunningKind('review')) return '重审中'
+  if (runs.isRunningKind('optimize')) return '优化中'
+  if (runs.isRunningKind('clarify') || runs.isRunningKind('auto-clarify')) return '改写中'
+  return '生成中'
+})
+
+/**
  * 眼前这一份产物是否正在被写。
  *
  * 判据是**产物**而不是「有没有任务在跑」：正在生成接口文档时，PRD 的审阅页、
@@ -627,9 +782,7 @@ const activeDocKind = computed(() => docKindOfState(viewState.value))
  * 一刀切带来的误伤（生成期间所有对话标签全灰）。
  */
 const isGeneratingCurrentDoc = computed(() => {
-  // 生成态与审阅态各有一套反推：`optimize` 期间阶段不变（停在 review-*），
-  // 而「生成 / 改写」期间停在 generating-*，两者都要能答出「这是哪一份」
-  const kind = activeDocKind.value ?? docKindOfGeneratingState(viewState.value)
+  const kind = runViewDocKind.value
   return kind !== null && runs.isRunningFor(kind)
 })
 
@@ -1175,9 +1328,9 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @rewrite="applyClarification"
       />
 
-      <!-- 文档生成中 / 生成失败（PRD / 接口文档 / 提示词 / 优化共用） -->
+      <!-- 文档生成中 / 生成失败 / 正在被修复（PRD / 接口文档 / 提示词 / 优化共用） -->
       <GeneratingStage
-        v-else-if="isGeneratingPhase"
+        v-else-if="isRunViewVisible"
         :title="activeDocTitle"
         :streaming-content="docStreamingContent"
         :error="docError"
@@ -1190,7 +1343,10 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :elapsed-ms="elapsedMs"
         :back-label="backLabel"
         :hide-back="inputPageOnBar(store.entryMode)"
+        :can-view-current-version="canViewCurrentVersion"
+        :status-label="runViewStatusLabel"
         @back="backToInput"
+        @view-current-version="viewCurrentVersion"
       />
 
       <!-- 文档待确认（PRD / 接口文档 / 提示词共用） -->
@@ -1210,6 +1366,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :review="reviewConclusion"
         :review-failed-at="reviewFailedAt"
         :review-version-no="reviewVersionNo"
+        :fix-in-flight="isFixInFlight"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
         :hide-back="inputPageOnBar(store.entryMode)"

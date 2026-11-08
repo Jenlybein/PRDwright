@@ -312,3 +312,83 @@ def test_entry_registry_conclusions_are_in_current_docs() -> None:
             missing.append(f"GLOSSARY.md 混进了实现口径「{stale}」")
 
     assert missing == [], "以下收口结论还没写进现状文档：\n" + "\n".join(missing)
+
+
+def test_run_view_conclusions_are_in_current_docs() -> None:
+    """#67：运行视图跟随在途任务这一轮的结论落在指定文档落点。
+
+    期望值来自票面验收标准原文：#67 要求「词表定两个词、架构文档落三处取舍、
+    路线图记本轮票序」。与会话里那句「切走就失联」的投诉同构——断言的是
+    「维护者打开仓库能读到什么结论」，不扫源码、不数落点、不断言任何实测计数
+    （用例基线本来就该现取现算，见 conventions.md §10）。
+    """
+    missing: list[str] = []
+
+    def require(label: str, section: str, *anchors: str) -> None:
+        for anchor in anchors:
+            if anchor not in section:
+                missing.append(f"{label} 缺「{anchor}」")
+
+    # 现状架构文档：三处取舍写在「取舍」节新增的小节里，仍按
+    # 目标 → 范围（含本期不做）→ 设计 → 契约 → 取舍 正向写。
+    architecture = _doc("docs/architecture/ARCHITECTURE.md")
+    tradeoffs = _between(architecture, "## 5. 取舍", "## 6.")
+    run_view = _from(tradeoffs, "### 5.11")
+    require(
+        "ARCHITECTURE.md §5.11",
+        run_view,
+        "**目标**",
+        "**范围**",
+        "**设计**",
+        "**契约**",
+        "**取舍**",
+        # 两个词各指一半，是本轮唯一的概念性改动
+        "在途任务",
+        "运行视图",
+        # 取舍一：不给进度条加运行态
+        "进度条",
+        "运行态",
+        # 取舍二：压制位不落库
+        "压制",
+        "不落库",
+        # 取舍三：修完不抢页面
+        "抢走",
+        # 「本期不做」也在本节写明（进度条运行态 / 侧栏角标 / 跨标签页）
+        "本期不做",
+        "角标",
+        "跨标签页",
+    )
+    positive_order = ["**目标**", "**范围**", "**设计**", "**契约**", "**取舍**"]
+    positions = [run_view.find(marker) for marker in positive_order]
+    if any(pos < 0 for pos in positions) or positions != sorted(positions):
+        missing.append("ARCHITECTURE.md §5.11 未按「目标 → 范围 → 设计 → 契约 → 取舍」正向写")
+    for stale in ("盘点", "缺口", "两眼一抹黑"):
+        if stale in run_view:
+            missing.append(f"ARCHITECTURE.md §5.11 仍在反向写旧口径「{stale}」")
+
+    # 词表：只装产品概念。两个词必须都在「任务与运行态」里，且不写实现。
+    glossary = _doc("GLOSSARY.md")
+    require(
+        "GLOSSARY.md §任务与运行态",
+        _between(glossary, "## 任务与运行态", "## 账号与权限"),
+        "在途任务",
+        "运行视图",
+    )
+    for stale in ("生成中状态", "generating", "doc_kind", "review_fix"):
+        if stale in glossary:
+            missing.append(f"GLOSSARY.md 混进了实现口径「{stale}」")
+
+    # 路线图：本轮五张票的票序与依赖，加上逐票落点与验收方式。
+    roadmap = _doc("docs/architecture/roadmap.md")
+    require(
+        "roadmap.md §1",
+        _between(roadmap, "## 1. 票序与依赖", "## 2."),
+        "#67 → #68 → {#69, #70} → #71",
+        "#69 依赖 #68",
+        "#71 依赖 #68、#69、#70",
+    )
+    landing = _from(roadmap, "## 8.")
+    for ticket in ("**#67**", "**#68**", "**#69**", "**#70**", "**#71**"):
+        require("roadmap.md §8", landing, ticket)
+
+    assert missing == [], "以下收口结论还没写进现状文档：\n" + "\n".join(missing)
