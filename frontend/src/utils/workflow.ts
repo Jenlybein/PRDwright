@@ -833,6 +833,41 @@ export function isGeneratingPhase(state: ViewState): boolean {
 }
 
 /**
+ * 这个**任务种类**发起时，界面会不会切进**运行视图**（`generating-*`）。
+ *
+ * 这是「运行视图跟随在途任务」那条兜底判据的唯一依据（见 `ARCHITECTURE.md` §5.11）：
+ * 用户按下某个动作后界面跳进了运行视图，说明他此刻想看的就是它；被打断之后，落点必须
+ * 能回到同一张页。反过来，**就地动作**不切阶段、正文在审阅页上逐字变，把它们也接管
+ * 会把过期黄条与「一键更新」一起顶掉。
+ *
+ * ⚠️ **新增一个任务种类时必须来这里登记**，否则漏掉的那个动作就会退化成
+ * 「切走再切回来什么也看不见」——`一键更新`（走生成任务）与 `按澄清改写` 都曾这样漏过。
+ * `dead-code.spec.ts` 里有一条守卫盯着这里与 `job.start(...)` 的调用点是否对得上。
+ */
+export const JOB_KIND_NAVIGATES_TO_RUN_VIEW: Record<DocKind, boolean> = {
+  // 三种整篇生成：发起即 `goTo(generating-<产物>)`。`一键更新` 也是它们（同一套请求体）
+  prd: true,
+  'api-docs': true,
+  prompts: true,
+  // 澄清改写 / AI 自行澄清：先切生成态再发任务（见 `applyClarification` / `autoClarify`）
+  clarify: true,
+  'auto-clarify': true,
+  // 只审不改：同样先切生成态再发任务（见 `rereview`）
+  review: true,
+  // 按结论修复：整篇重写，调用方自己切到那份产物的生成态（见 `fixDocument`）
+  'review-fix': true,
+  // 就地流式：审阅页不切走，正文逐字变，界面靠 `docPhase` / 忙碌态回答「在做什么」
+  optimize: false,
+  // 对话就地生成：用户本来就在对话页
+  chat: false,
+}
+
+/** 这个任务种类在途时，运行视图该不该接管（见 {@link JOB_KIND_NAVIGATES_TO_RUN_VIEW}） */
+export function navigatesToRunView(kind: DocKind): boolean {
+  return JOB_KIND_NAVIGATES_TO_RUN_VIEW[kind]
+}
+
+/**
  * 文档种类 → 对应的「生成中」阶段；`optimize` 就地流式、不改变阶段，故返回 `null`。
  *
  * 供「刷新后兜底找回任务」把种类还原成阶段（重连时要切回生成态视图）。

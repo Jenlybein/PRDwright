@@ -41,6 +41,7 @@ import {
   hasDocumentReview,
   hasRequirementChat,
   inputPageOnBar,
+  navigatesToRunView,
   normalizeChatStage,
   reviewStateFor,
 } from '@/utils/workflow'
@@ -671,21 +672,16 @@ const isFixInFlight = computed(() => runs.isRunningKind('review-fix'))
 /**
  * 在途的**文档动作**作用在哪一份产物上；没有就为 null（票 #68）。
  *
- * 只认**本来就会切进运行视图**的那两种动作：修复（整篇重写）与重审（只审不改）。
- * 它们在发起时都调 `goTo(generating-*)`，所以「用户按下去就是想看它做」这条前提成立；
- * 一旦被别的导航打断，落点该回到同一张页。
+ * 范围由 `navigatesToRunView` 回答，不在这里手写清单：判据是「这个动作发起时界面会不会
+ * 切进运行视图」。真实用户按下的**一键更新**、**按澄清改写**、**AI 自行澄清**都算——
+ * 它们和生成、修复一样会跳进那张页，漏掉任何一个都会退化成「切走再切回来什么都没有」。
  *
- * 刻意**不含**优化与按澄清改写：那两个是**就地**动作，审阅页不切走、正文逐字变，
- * 把它们的在途状态也映射成运行视图，会把黄条与「一键更新」一起顶掉——那是退步。
- *
- * 对话任务同样排除：它有自己的重连路径，写的是对话预览。
+ * 就地动作（优化）与对话任务不接管：它们本就不切阶段，正文在原来的页上逐字变。
  */
-const RUN_VIEW_ACTIONS: readonly DocKind[] = ['review-fix', 'review']
-
 const inFlightDocKind = computed<DocumentKind | null>(() => {
   const run = runs.activeRun
   if (run === null || !runs.hasRunning) return null
-  if (!RUN_VIEW_ACTIONS.includes(run.jobKind)) return null
+  if (!navigatesToRunView(run.jobKind)) return null
   return run.docKind
 })
 

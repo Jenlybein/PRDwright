@@ -4168,6 +4168,43 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     expect(editModeButton(wrapper).attributes('disabled')).toBeUndefined()
   })
 
+  it('「一键更新」在途时切走再切回，也回到运行视图（#68：走的是生成任务）', async () => {
+    let releaseJob: () => void = () => {}
+    const done = new Promise<void>((resolve) => {
+      releaseJob = resolve
+    })
+    mockJobStream({
+      'api-docs': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+        await done
+        handlers.onRunSummary?.(makeRunSummary({ kind: 'api-docs' }))
+        return { conversationId: '', reply: '# 接口文档\n\n## 一、概述\n新内容', asks: [] }
+      },
+    })
+
+    // 下游过期（接口文档与提示词都落后于 PRD），停在接口文档的审阅页
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n改过的需求'),
+      { ...makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n旧内容'), stale: true },
+      { ...makeDocumentRecord('prompts', '# 提示词套件\n\n## 一、角色设定\n旧内容'), stale: true },
+    ])
+    await flushPromises()
+
+    await clickButton(wrapper, '一键更新', true)
+    await clickButtonInDialog('重新生成')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('文档缺陷')
+
+    // 切到 PRD 不被打扰，切回被更新的那一份仍然是运行视图
+    await clickStep(wrapper, 'PRD')
+    expect(wrapper.text()).toContain('文档缺陷')
+    await clickStep(wrapper, '接口文档')
+    expect(wrapper.text()).not.toContain('文档缺陷')
+
+    releaseJob()
+    await flushPromises()
+  })
+
   it('重审进行中切走再切回，也回到运行视图（#68：不只修复）', async () => {
     // 起一支**悬着不结束**的重审任务：它不产出正文，但用户同样要看「它在做」
     let releaseJob: () => void = () => {}
