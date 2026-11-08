@@ -114,6 +114,14 @@ from backend.services.prompts import (
     PRD_SECTION_REVIEW_SYSTEM_PROMPT,
     PRD_SECTION_REWRITE_PROMPT,
 )
+from backend.services.review_defects import (
+    defects_count_text,
+    finalize_verdict,
+    issues_text as defects_text,
+    normalize_issues,
+    render_category_rules,
+    render_pending_section,
+)
 from backend.services.stream_reply import astream_text, collect_reply, error_event
 
 logger = logging.getLogger(__name__)
@@ -333,17 +341,12 @@ class SectionReview:
         )
 
     def issues_text(self) -> str:
-        """把问题列表渲染成提示词里的编号清单（带上 `where` 定位）。"""
-        if not self.issues:
-            return "（审核未给出具体问题）"
-        lines: list[str] = []
-        for index, issue in enumerate(self.issues, start=1):
-            severity = str(issue.get("severity", "")).strip() or "medium"
-            detail = str(issue.get("detail", "")).strip() or "未说明"
-            where = str(issue.get("where") or "").strip()
-            prefix = f"[{severity}] {where}" if where else f"[{severity}]"
-            lines.append(f"{index}. {prefix}：{detail}")
-        return "\n".join(lines)
+        """把问题列表渲染成提示词里的编号清单（`[severity] where：detail`）。
+
+        空清单的占位句是这条链路的既有口径；`detail` 不截断（章节链路的正文本来就短），
+        实现在 `review_defects.issues_text` 一处（与整篇链路共用）。
+        """
+        return defects_text(self.issues, empty_text="（审核未给出具体问题）")
 
     def summary(self) -> str:
         """给前端一句话展示的改写原因：优先取第一条 high 问题。"""
@@ -542,6 +545,7 @@ class PrdSectionWriter:
         requirements: str = "",
         product_name: str = "",
         history: list[dict[str, Any]] | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """**重新审核**一份已有的 PRD：逐章审当前正文，汇总成一条结论（只审不改）。
 
@@ -565,6 +569,8 @@ class PrdSectionWriter:
             requirements: 自由文本需求（快捷流程）。
             product_name: 产品名（只有自由文本需求时用得上）。
             history: 需求澄清线程；与生成侧一样是**事实来源的一部分**（见 `_review_requirements_text`）。
+            pending_items: **当前版本**的待确认清单。重审是「六类全开」的那个时点：清单整份
+                注入，既判得出「漏登记」，也分得清「已登记过的不算缺陷」。
 
         Yields:
             `stage(reviewing)`（每章一条）→ 若干 `stage_chunk` → 一条 `review`（汇总结论）。
@@ -612,6 +618,7 @@ class PrdSectionWriter:
                 writing_rules=writing_rules,
                 requirements=requirements_text,
                 prior_sections=_join_prior(written),
+                pending_section=render_pending_section(pending_items),
             )
             raw_chunks: list[str] = []
             try:
@@ -642,7 +649,9 @@ class PrdSectionWriter:
                     f"PRD 审核返回的判定无法解析（{section.heading}），请再试一次",
                 )
 
-            review = self._parse_review(raw, where=target.heading)
+            review = self._parse_review(
+                raw, where=target.heading, allow_missing_pending=True
+            )
             # 汇总口径与两条生成链路逐字一致（`section_issue` 是唯一构造点）
             if review.needs_revision:
                 issues.extend(section_issue(target, issue) for issue in review.issues)
@@ -1098,11 +1107,15 @@ class PrdSectionWriter:
         writing_rules: str,
         requirements: str,
         prior_sections: str,
+        pending_section: str = "",
     ) -> list[BaseMessage]:
         """组装「审核某一章」的消息——生成与重新审核共用同一份提示词。
 
         单独一格是为了让重审能**流式**吐出审核输出（那一步要实时展示进展），
         而不必复制粘贴一遍提示词拼装。
+
+        `pending_section` 是**两个时点的开关**：生成链路过默认值（空串），提示词里既没有
+        第六类，也没有清单；重审传 `render_pending_section(当前版本清单)`。
         """
         # 本章的小节标题清单，作为 `where` 的取值域——让模型从里挑，
         # 而不是自由发挥写一个文档里不存在的章节名
@@ -1116,16 +1129,27 @@ class PrdSectionWriter:
             section_heading=section.heading,
             section_text=section_text,
             section_titles=section_titles,
+            # 五类判据与整篇审核同一份生成点（见 `review_defects.render_category_rules`）
+            category_rules=render_category_rules(),
+            pending_section=pending_section,
         )
         return _build_messages(PRD_SECTION_REVIEW_SYSTEM_PROMPT, user_content)
 
     @staticmethod
-    def _parse_review(raw: str, *, where: str = "") -> SectionReview:
+    def _parse_review(
+        raw: str, *, where: str = "", allow_missing_pending: bool = False
+    ) -> SectionReview:
         """把模型的审核输出解析成判定（**永不抛**：解析不出来按通过处理）。
 
         生成链路里这一步「解析失败 = 通过」是有意的：审核是锦上添花，不能因为它
         把已经生成好的正文丢掉。**重新审核**（唯一产出就是判定）不能用这条口径，
         它自己先判一次 JSON，糊掉的判定按失败处理（见 `review_document`）。
+
+        Args:
+            raw: 模型输出。
+            where: 章节标识（仅用于日志）。
+            allow_missing_pending: 这一时点是否允许「清单漏登记」。生成时 `False`
+                （服务端强制：那时清单还没抽出来）；重审时 `True`。
         """
         parsed = extract_json_object(raw)
         if parsed is None:
@@ -1139,12 +1163,23 @@ class PrdSectionWriter:
 
         verdict = str(parsed.get("verdict", "")).strip().lower()
         raw_issues = parsed.get("issues")
-        issues = [item for item in raw_issues if isinstance(item, dict)] if isinstance(raw_issues, list) else []
+        candidates = (
+            [item for item in raw_issues if isinstance(item, dict)]
+            if isinstance(raw_issues, list)
+            else []
+        )
+        issues = normalize_issues(candidates, allow_missing_pending=allow_missing_pending)
         instruction = str(parsed.get("instruction") or "").strip()
 
         if verdict not in {"pass", "revise"}:
             # 判定词不合法时按「有没有问题」推断，避免因为一个词毁掉整段输出
             verdict = "revise" if issues else "pass"
+        verdict, instruction = finalize_verdict(
+            verdict,
+            issues=issues,
+            instruction=instruction,
+            dropped=len(candidates) - len(issues),
+        )
 
         return SectionReview(verdict=verdict, issues=issues, instruction=instruction)
 
@@ -1271,6 +1306,9 @@ def section_issue(section: PrdSection, issue: dict[str, Any]) -> dict[str, Any]:
     return {
         "section_id": section.id,
         "section_title": section.title,
+        # 类别随汇总结论一起走：面板按类分组、按类计数都靠它；没有类别时是 `None`
+        #（旧结论形状），界面归「未分类」，不推断、不重分类。
+        "category": issue.get("category"),
         "severity": str(issue.get("severity") or "medium"),
         "detail": str(issue.get("detail") or ""),
     }
@@ -1290,6 +1328,10 @@ def build_prd_conclusion(
     结果是同一份 PRD 的结论会随「走的哪条路」变一句措辞，而结论是要落库、要给人看
     的一条记录。
 
+    总结**按类别计数**（`6 章已审，缺陷 3 处（编造 1 · 结构不符 2）`）：它显示在
+    「文档缺陷」面板里，术语表在那一处禁用「问题」——那是待确认清单的词，指「未决」；
+    结论里的每一条都是缺陷，不能被读成「还缺什么」。
+
     Args:
         total: 本次 PRD 的章节总数。
         issues: 汇总后的逐条问题（用 `section_issue` 生成）。
@@ -1302,14 +1344,17 @@ def build_prd_conclusion(
     failed = list(failed_sections or [])
     completed = total - len(failed)
     verdict = "revise" if issues else "pass"
-    conclusion = f"{completed} 章完成，{len(issues)} 个待处理问题"
+    summary = f"{completed} 章已审，缺陷 {len(issues)} 处"
+    counts = defects_count_text(issues)
+    if counts:
+        summary = f"{summary}（{counts}）"
     return StreamEvent(
         type="review",
-        content=conclusion,
+        content=summary,
         data=review_data(
             "prd",
             verdict=verdict,
-            summary=conclusion,
+            summary=summary,
             issues=issues,
             rewritten=rewritten,
             failed_sections=failed,

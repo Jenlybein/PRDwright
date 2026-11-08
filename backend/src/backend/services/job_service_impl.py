@@ -608,6 +608,8 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
             requirements=request.get("requirements", "") or "",
             product_name=request.get("product_name", "") or "",
             history=request.get("history") or None,
+            # 当前版本的待确认清单：重审六类全开，清单整份注入（ADR 0003）
+            pending_items=request.get("pending_items") or [],
         )
     if kind == "review_fix":
         # 按结论修复：被修的正文、那条结论与上游材料同样由服务端解析（`_fix_inputs`）。
@@ -623,6 +625,8 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
             product_name=request.get("product_name", "") or "",
             history=request.get("history") or None,
             clarify_history=request.get("clarify_history") or None,
+            # 当前版本的待确认清单：修复提示词里摆出「已经登记过哪些」（ADR 0003）
+            pending_items=request.get("pending_items") or [],
         )
     if kind == "chat":
         return _chat_event_stream(request)

@@ -52,6 +52,14 @@ from backend.services.prompts import (
     DOC_REWRITE_PROMPT,
     DOC_SECTION_REWRITE_PROMPT,
 )
+from backend.services.review_defects import (
+    finalize_verdict,
+    issues_text as defects_text,
+    normalize_issues,
+    render_category_rules,
+    render_pending_list,
+    render_pending_section,
+)
 from backend.services.stream_reply import astream_text, collect_reply
 
 logger = logging.getLogger(__name__)
@@ -138,24 +146,26 @@ class DocumentReviewResult:
         return False
 
     def issues_text(self) -> str:
-        """把问题清单排成给改写提示词用的编号列表（带上 `where` 定位）。"""
-        lines: list[str] = []
-        for index, issue in enumerate(self.issues, start=1):
-            severity = str(issue.get("severity") or "medium")
-            detail = str(issue.get("detail") or "")
-            where = str(issue.get("where") or "").strip()
-            prefix = f"[{severity}]"
-            if where:
-                prefix += f" {where}"
-            lines.append(f"{index}. {prefix}：{_clip(detail)}")
-        return "\n".join(lines) if lines else "（审核未给出逐条问题）"
+        """把问题清单排成给改写提示词用的编号列表（`[severity] where：detail`）。
+
+        空清单的占位句与 `detail` 的截断（60 字）是这条链路的既有口径，
+        实现在 `review_defects.issues_text` 一处（与 PRD 章节链路共用）。
+        """
+        return defects_text(
+            self.issues, empty_text="（审核未给出逐条问题）", clip=_clip
+        )
 
     def summary(self) -> str:
-        """一句话结论：优先第一条 high，否则第一条问题。"""
+        """一句话结论：优先第一条 high，否则第一条问题；没有问题时给明「未发现缺陷」。
+
+        没有问题的结论不能留空：`review` 事件的 `content` 与落库的 `summary` 都是这一句
+        （界面在通过态下直接显示它）。空串读起来像「没审」，与「审过且没问题」混在一起。
+        生成时被服务端丢光的条目也走这里——那时判定已降成 `pass`，这句就是唯一说明。
+        """
         for issue in self.issues:
             if str(issue.get("severity") or "") == "high":
                 return str(issue.get("detail") or "")
-        return str(self.issues[0].get("detail") or "") if self.issues else ""
+        return str(self.issues[0].get("detail") or "") if self.issues else "未发现缺陷"
 
 
 @dataclass
@@ -201,6 +211,7 @@ def review_messages(
     writing_rules: str,
     requirements: str,
     section_titles: str = "",
+    pending_section: str = "",
 ) -> list[BaseMessage] | None:
     """组装整篇审核的消息；正文为空时返回 `None`（无可审核的内容）。
 
@@ -211,6 +222,10 @@ def review_messages(
         section_titles: 本文档的章节标题清单，作为审核 `where` 的取值域。
             留空时提示词里那一节会写成「（未能识别章节）」，模型仍可判定，
             只是后续无法定位到具体章节、只能退回整篇重写。
+        pending_section: **两个时点的开关**。生成链路填空串（那一态里既没有第六类
+            「清单漏登记」，也没有清单——那时清单还没抽出来）；重审与修复后的重审填
+            `render_pending_section(当前版本清单)`，六类全开。同一套解析，提示词只有一份，
+            见 `review_defects` 的模块说明。
     """
     text = (document or "").strip()
     if not text:
@@ -222,15 +237,24 @@ def review_messages(
             requirements=requirements or "（未提供上游材料）",
             section_titles=section_titles.strip() or "（未能识别章节标题，无法定位的问题请写空串）",
             document=text,
+            # 五类判据与 PRD 单章审核同一份生成点（见 `review_defects.render_category_rules`）
+            category_rules=render_category_rules(),
+            pending_section=pending_section,
         ),
     )
 
 
-def parse_review_text(raw: str) -> DocumentReviewResult:
+def parse_review_text(raw: str, *, allow_missing_pending: bool = False) -> DocumentReviewResult:
     """把模型吐出的审核文本解析成判定。
 
     **永不抛异常**：JSON 解析不出来时按「通过」处理，与 PRD 的 `_safe_review` 同口径
     ——宁可漏审，也不要因为审核这一步把已经生成好的正文丢掉。
+
+    Args:
+        raw: 模型输出的原始文本。
+        allow_missing_pending: 这一时点是否允许「清单漏登记」。生成链路传 `False`
+            （服务端强制：那时清单还没抽出来，该判定不可能成立，报了也不进结论）；
+            重审 / 修复后的重审传 `True`。严重度一律按类别覆写，见 `review_defects`。
     """
     parsed = extract_json_object(raw)
     if parsed is None:
@@ -241,14 +265,22 @@ def parse_review_text(raw: str) -> DocumentReviewResult:
         return DocumentReviewResult(verdict="pass")
 
     issues = parsed.get("issues")
-    normalized_issues = [item for item in issues if isinstance(item, dict)] if isinstance(issues, list) else []
+    raw_issues = [item for item in issues if isinstance(item, dict)] if isinstance(issues, list) else []
+    normalized_issues = normalize_issues(raw_issues, allow_missing_pending=allow_missing_pending)
+    instruction = str(parsed.get("instruction") or "")
     verdict = str(parsed.get("verdict") or "").strip().lower()
     if verdict not in ("pass", "revise"):
         verdict = "revise" if normalized_issues else "pass"
+    verdict, instruction = finalize_verdict(
+        verdict,
+        issues=normalized_issues,
+        instruction=instruction,
+        dropped=len(raw_issues) - len(normalized_issues),
+    )
     return DocumentReviewResult(
         verdict=verdict,
         issues=normalized_issues,
-        instruction=str(parsed.get("instruction") or ""),
+        instruction=instruction,
     )
 
 
@@ -338,6 +370,7 @@ def fix_messages(
     review: DocumentReviewResult,
     writing_rules: str,
     upstream: str,
+    pending_items: list[dict[str, Any]] | None = None,
 ) -> list[BaseMessage]:
     """组装「按审核结论修复全文」的消息（`review_fix` 任务的重写那一步）。
 
@@ -352,6 +385,8 @@ def fix_messages(
         review: 由**落库的结论**还原出的判定（见 `conclusion_to_review`）。
         writing_rules: 该产物的产出规范（技能包整段注入）。
         upstream: 上游材料全文（按目标产物拼，见 `document_service._product_context`）。
+        pending_items: 当前版本的待确认清单。摆出来是为了「已经登记过的不再重复登记」——
+            修复最容易出的错不是漏写，而是顺手再登记一遍，让用户面对两份重叠的清单。
     """
     return _build_messages(
         _REWRITE_SYSTEM_PROMPT,
@@ -362,6 +397,7 @@ def fix_messages(
             writing_rules=writing_rules or "（未提供产出规范，按通用规范核对）",
             document=document,
             pending_spec=render_spec(),
+            pending_list=render_pending_list(pending_items),
         ),
     )
 
@@ -938,6 +974,7 @@ async def stream_review_only(
     context: ProductContext,
     document: str,
     section_titles: str = "",
+    pending_items: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """**只审不改**：整篇审核一次，产出结论，不产生任何正文（重新审核专用）。
 
@@ -960,6 +997,8 @@ async def stream_review_only(
             决定结论归属、事件字段与阶段文案。
         document: 待审正文（当前版本全文）。
         section_titles: 本文档的章节标题清单，作为审核 `where` 的取值域。
+        pending_items: **当前版本**的待确认清单。重审是「六类全开」的那个时点，清单必须
+            整份注入——否则既判不出「漏登记」，也分不清「已登记过的不算缺陷」。
 
     Raises:
         AppError: 正文为空、调用失败或返回的不是合法 JSON。三种都是「没审成」，
@@ -970,6 +1009,7 @@ async def stream_review_only(
         writing_rules=context.writing_rules,
         requirements=context.upstream,
         section_titles=section_titles,
+        pending_section=render_pending_section(pending_items),
     )
     if messages is None:
         raise AppError(ErrorCode.INVALID_REQUEST, "这份文档还没有正文，无法重新审核")
@@ -1004,4 +1044,4 @@ async def stream_review_only(
         raise AppError(
             ErrorCode.LLM_UPSTREAM_ERROR, f"{context.label}审核返回的判定无法解析，请再试一次"
         )
-    yield review_event(context.doc_kind, parse_review_text(raw))
+    yield review_event(context.doc_kind, parse_review_text(raw, allow_missing_pending=True))
