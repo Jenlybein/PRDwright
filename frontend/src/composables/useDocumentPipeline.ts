@@ -1497,6 +1497,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
       docError.value = job.error.value || '按结论修复失败'
+      // 人已经不在这一份的页上了：错误只写在 `docError` 里他看不见（那一页没渲染），
+      // 等于「点了修复、任务炸了、界面什么也没说」。这种情况补一句提示。
+      // 而停在这一份的审阅页 / 运行视图时，错误由那两页自己显示，不必再弹一次。
+      const lookingAtTarget =
+        docKindOfState(viewState.value) === target ||
+        docKindOfGeneratingState(viewState.value) === target
+      if (!lookingAtTarget) hooks.onNotice(`按结论修复失败：${docError.value}`)
       return
     }
     // 成功：落点（回这份文档的审阅页）与「写回新正文」都由 `finishDoc` 负责；

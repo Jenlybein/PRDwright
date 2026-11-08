@@ -4168,6 +4168,52 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     expect(editModeButton(wrapper).attributes('disabled')).toBeUndefined()
   })
 
+  it('重审进行中切走再切回，也回到运行视图（#68：不只修复）', async () => {
+    // 起一支**悬着不结束**的重审任务：它不产出正文，但用户同样要看「它在做」
+    let releaseJob: () => void = () => {}
+    const done = new Promise<void>((resolve) => {
+      releaseJob = resolve
+    })
+    mockJobStream({
+      review: async (handlers) => {
+        await done
+        handlers.onReview?.(conclusion({ kind: 'api_docs', verdict: 'pass', summary: '0 个待处理问题' }))
+        handlers.onRunSummary?.(makeRunSummary({ kind: 'review' }))
+        return { conversationId: '', reply: '', asks: [] }
+      },
+    })
+
+    // 结论是「通过」→ 重审可点；两份文档都在，才能在阶段之间来回切
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      makeDocumentRecord('prd', '# PRD\n\n## 一、背景\n内容', null, [], conclusion({ kind: 'prd' })),
+      makeDocumentRecord(
+        'api-docs',
+        '# 接口文档\n\n## 一、概述\n统一响应结构',
+        null,
+        [],
+        conclusion({ kind: 'api_docs' }),
+      ),
+    ])
+    await flushPromises()
+
+    await clickButton(wrapper, '重新审核')
+    await flushPromises()
+
+    // 点了就落在运行视图：徽标说「重审中」，而不是「生成中」
+    expect(wrapper.text()).not.toContain('文档缺陷')
+    expect(wrapper.text()).toContain('重审中')
+
+    // 切到 PRD 不被打扰，切回来仍然是运行视图
+    await clickStep(wrapper, 'PRD')
+    expect(wrapper.text()).toContain('文档缺陷')
+    await clickStep(wrapper, '接口文档')
+    expect(wrapper.text()).not.toContain('文档缺陷')
+    expect(wrapper.text()).toContain('重审中')
+
+    releaseJob()
+    await flushPromises()
+  })
+
   it('收尾时人就停在这份文档的审阅页（含兜底渲染出来的运行视图）：不指错路（#68）', async () => {
     const held = holdFixJob()
     const wrapper = await mountTwoDocsAtApiDocsReview()

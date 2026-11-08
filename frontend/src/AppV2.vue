@@ -46,6 +46,7 @@ import {
 } from '@/utils/workflow'
 import {
   CHAT_STAGES,
+  type DocKind,
   type DocumentKind,
   type EntryMode,
   type RequirementsSummary,
@@ -660,23 +661,32 @@ const versionDrawerOpen = ref(false)
 const activeDocKind = computed(() => docKindOfState(viewState.value))
 
 /**
- * 是否有一支**修复**任务在途（票 #68 / #69）。
+ * 是否有一支**修复**任务在途（票 #69 的入口禁用判据）。
  *
- * 判据看**任务种类**，不看产物：入口禁用（#69）与运行视图兜底（#68）都要这一条，
- * 前者与产物无关（后端顶替只看任务种类），后者还要再拼上「产物对不对得上」。
+ * 只看任务种类、不看产物：后端顶替判据不含产物，三份产物的入口都得拦。
  * 「在不在跑」由 `runs` 回答，这里不自己读 `activeRun.status`。
  */
 const isFixInFlight = computed(() => runs.isRunningKind('review-fix'))
 
 /**
- * 在途的修复任务作用在哪一份产物；没有就为 null（票 #68）。
+ * 在途的**文档动作**作用在哪一份产物上；没有就为 null（票 #68）。
  *
- * 只认 `review-fix`：重审不产出正文，没有「正在长出来的那一份」可看，
- * 把它也塞进运行视图只会让用户盯着一张不动的页。
+ * 只认**本来就会切进运行视图**的那两种动作：修复（整篇重写）与重审（只审不改）。
+ * 它们在发起时都调 `goTo(generating-*)`，所以「用户按下去就是想看它做」这条前提成立；
+ * 一旦被别的导航打断，落点该回到同一张页。
+ *
+ * 刻意**不含**优化与按澄清改写：那两个是**就地**动作，审阅页不切走、正文逐字变，
+ * 把它们的在途状态也映射成运行视图，会把黄条与「一键更新」一起顶掉——那是退步。
+ *
+ * 对话任务同样排除：它有自己的重连路径，写的是对话预览。
  */
-const fixingDocKind = computed<DocumentKind | null>(() => {
-  if (!isFixInFlight.value) return null
-  return runs.activeRun?.docKind ?? null
+const RUN_VIEW_ACTIONS: readonly DocKind[] = ['review-fix', 'review']
+
+const inFlightDocKind = computed<DocumentKind | null>(() => {
+  const run = runs.activeRun
+  if (run === null || !runs.hasRunning) return null
+  if (!RUN_VIEW_ACTIONS.includes(run.jobKind)) return null
+  return run.docKind
 })
 
 /**
@@ -721,13 +731,13 @@ const runViewDocKind = computed(
 )
 
 /**
- * 眼下这张页写的这一份，是不是**正在被修复**的那一份（票 #68）。
+ * 眼下这张页上的这一份，是不是正有一支**文档动作**在跑（票 #68）。
  *
  * 「产物对不对得上」在这三处都要用（兜底渲染、出口、压制位），写一遍就够。
  */
-const fixingThisDoc = computed(() => {
-  const fixing = fixingDocKind.value
-  return fixing !== null && fixing === runViewDocKind.value
+const runInFlightForThisDoc = computed(() => {
+  const inFlight = inFlightDocKind.value
+  return inFlight !== null && inFlight === runViewDocKind.value
 })
 
 /**
@@ -735,28 +745,28 @@ const fixingThisDoc = computed(() => {
  *
  * 两种情形都算：
  * 1. 界面本来就停在这份文档的生成态（用户刚发起，或任务失败后留在原地看错误）；
- * 2. 界面停在审阅态，但**眼前这一份**正有一支修复任务在途——这正是「切走再切回来
- *    看到的是审阅页、没法知道修到哪」的那个洞。
+ * 2. 界面停在审阅态，但**眼前这一份**正有一支文档动作在跑（修复 / 重审 / 优化 / 改写）
+ *    ——这正是「切走再切回来看到的是审阅页、没法知道它做到哪」的那个洞。
  *
  * 第 2 条带两个约束：产物必须**对得上**（一边在修 PRD、一边在看接口文档，那张页不该
  * 被打扰），且用户没有点过「查看当前版本」（压制位）。
  */
 const isRunViewVisible = computed(() => {
   if (isGeneratingPhase.value) return true
-  return fixingThisDoc.value && !isRunViewSuppressed.value
+  return runInFlightForThisDoc.value && !isRunViewSuppressed.value
 })
 
-/** 运行视图上的「查看当前版本」：压住兜底渲染，停在审阅页读还没被写的那一版 */
+/** 运行视图上的「查看当前版本」：压住兜底渲染，停在审阅页读还没被改写的那一版 */
 function viewCurrentVersion(): void {
-  const kind = fixingDocKind.value
+  const kind = inFlightDocKind.value
   const run = runs.activeRun
   if (kind === null || run === null) return
   suppressedFor.value = { solutionId: solutions.currentId, docKind: kind, jobId: run.jobId }
   goTo(reviewStateFor(kind))
 }
 
-/** 这张运行视图上要不要给「查看当前版本」：只有正在修这一份时才给 */
-const canViewCurrentVersion = computed(() => fixingThisDoc.value)
+/** 这张运行视图上要不要给「查看当前版本」：只有这份文档确实有动作在跑时才给 */
+const canViewCurrentVersion = computed(() => runInFlightForThisDoc.value)
 
 /**
  * 运行视图的标题徽标（票 #67）：按动作区分，不把四件事都叫「生成中」。
