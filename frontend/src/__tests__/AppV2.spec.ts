@@ -1546,8 +1546,10 @@ describe('AppV2 完整流程编排', () => {
       conversationId: '',
     })
 
-    // 兜底查询带上了当前方案与文档种类
-    expect(api.fetchActiveJobs).toHaveBeenCalledWith({ solutionId: 1, kind: 'prd', status: 'running' })
+    // 兜底查询带上了当前方案与「在跑」状态；**不再传 kind**（票 #70）：
+    // 后端 `kind` 是任务种类（`review_fix` / `review` …），这里手上只有产物种类，
+    // 旧写法把产物当任务传，对动作类任务永远不命中
+    expect(api.fetchActiveJobs).toHaveBeenCalledWith({ solutionId: 1, status: 'running' })
     // 命中活跃任务：撤销降级提示，切回生成态并重连
     expect(wrapper.text()).not.toContain('上次的生成未完成')
     expect(api.readJobStream).toHaveBeenCalledWith(7, expect.anything(), expect.anything())
@@ -1568,6 +1570,86 @@ describe('AppV2 完整流程编排', () => {
     expect(api.fetchActiveJobs).toHaveBeenCalledTimes(1)
     expect(api.readJobStream).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('上次的生成未完成')
+  })
+
+  it('恢复路径 4：刷新时指针还在 → 直接回到运行视图并重连那支修复任务（#70）', async () => {
+    // 快照停在审阅页，但指针还在：这正是「修复中切走、然后刷新」的形状
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
+    jobHarness.kinds.set(7, 'review-fix')
+    mockJobStream({
+      'review-fix': () => new Promise<api.StreamResult>(() => {}),
+    })
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'review-api-docs',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      activeJobId: 7,
+      activeJobKind: 'review-fix',
+      activeJobDocKind: 'api-docs',
+    })
+
+    // 视图跟随在途任务（#68 的判据）：没走到审阅页，直接是运行视图
+    expect(wrapper.text()).not.toContain('文档缺陷')
+    expect(api.readJobStream).toHaveBeenCalledWith(7, expect.anything(), expect.anything())
+  })
+
+  it('恢复路径 5：指针丢了但本方案有在跑的修复任务 → 照样归位到运行视图（#70）', async () => {
+    jobHarness.kinds.set(9, 'review-fix')
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([
+      {
+        id: 9,
+        kind: 'review_fix',
+        docKind: 'api-docs',
+        chatStage: null,
+        status: 'running',
+        phase: 'writing',
+        solutionId: 1,
+        errorCode: '',
+        errorMessage: '',
+        createdAt: '2026-11-08T00:00:00',
+        updatedAt: '2026-11-08T00:00:00',
+        usage: null,
+      },
+    ])
+    mockJobStream({
+      'review-fix': () => new Promise<api.StreamResult>(() => {}),
+    })
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'review-api-docs',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+      // 刻意**不给** activeJobId：这就是「指针还没落库的那个窗口」
+    })
+
+    // 兜底按方案 + 在跑状态查，不再把产物种类当任务种类传（旧写法对动作类任务永远不命中）
+    expect(api.fetchActiveJobs).toHaveBeenCalledWith({ solutionId: 1, status: 'running' })
+    // 命中后按后端给的 docKind 归位，屏幕上是运行视图而不是审阅页
+    expect(wrapper.text()).not.toContain('文档缺陷')
+    expect(api.readJobStream).toHaveBeenCalledWith(9, expect.anything(), expect.anything())
+  })
+
+  it('恢复路径 6：这次兜底查询只发生一次，不轮询（#70）', async () => {
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
+
+    const wrapper = await mountExistingSolution({
+      viewState: 'review-api-docs',
+      entryMode: 'structured',
+      summary: SAMPLE_SUMMARY,
+      messages: [],
+      conversationId: '',
+    })
+    await flushPromises()
+
+    expect(api.fetchActiveJobs).toHaveBeenCalledTimes(1)
+    // 查不到就老实停在审阅页，不发起任何订阅
+    expect(api.readJobStream).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('文档缺陷')
   })
 
   it('首屏「路由落位」与「登录态探测」同时触发恢复时只订阅一次', async () => {

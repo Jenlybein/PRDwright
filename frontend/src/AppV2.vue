@@ -21,7 +21,7 @@ import VersionDrawer from '@/components/ui/VersionDrawer.vue'
 import type { AnswerPayload } from '@/components/ClarificationAskList.vue'
 import { useClarificationChat } from '@/composables/useClarificationChat'
 import { useDocumentPipeline } from '@/composables/useDocumentPipeline'
-import { fetchActiveJobs, onUnauthorized } from '@/services/api'
+import { fetchActiveJobs, onUnauthorized, type JobStatusSummary } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useDocumentsStore } from '@/stores/documents'
 import { useDocumentVersionsStore } from '@/stores/documentVersions'
@@ -379,35 +379,64 @@ async function resumeAfterRestore(): Promise<void> {
     return
   }
 
-  if (store.downgrade !== 'generating') return
-  const kind = docKindOfState(store.viewState)
-  if (!kind) return
+  // 3. 文档页：按**方案**查一次本方案此刻在跑的任务（票 #70）。
+  //
+  //    这一步不能按产物种类查：后端 `kind` 过滤是等值匹配**任务种类**（`review_fix` /
+  //    `review` / `optimize` / `clarify`），而这里手上只有产物种类（`prd` / `api-docs` /
+  //    `prompts`）。旧写法把产物当任务传，对动作类任务**永远不命中**——那等于这条兜底
+  //    对修复与重审根本不存在。
+  //
+  //    也别只在「降级成生成中」时才走这一步：用户切走之后刷新，快照停在审阅态，
+  //    那恰好是这次投诉的形状。只要落在某一份文档的页面上就查一次，查不到就老实停着。
+  const docKind = docKindOfState(store.viewState) ?? docKindOfGeneratingState(store.viewState)
+  if (!docKind) return
 
   try {
     const jobs = await fetchActiveJobs({
       solutionId: solutions.currentId,
-      kind,
       status: 'running',
     })
-    const match = jobs[0]
+    const match = pickInFlightDocJob(jobs, docKind)
     if (!match) return
+    const target = match.docKind ?? docKind
     // 登记运行态：`reconnectJob` 凭它认领事件，界面凭它判断「哪一份正在写」。
-    // `kind` 是后端原始取值（下划线口径），产物种类优先取后端给的 `doc_kind`——
-    // 它在 `optimize` / `clarify` 上比「按阶段反推」权威。
+    // 产物种类优先取后端给的 `doc_kind`——它在 `optimize` / `clarify` 上比「按阶段反推」权威。
     runs.restore({
       jobId: match.id,
       solutionId: solutions.currentId,
-      jobKind: fromBackendJobKind(match.kind) ?? kind,
-      docKind: match.docKind ?? kind,
+      jobKind: fromBackendJobKind(match.kind) ?? 'prd',
+      docKind: target,
     })
-    // 命中活跃任务：撤销降级、切回生成态，再重连
+    // 命中活跃任务：撤销降级提示；原来停在「生成中」（含被降级的）才切回生成态，
+    // 停在审阅态的交给运行视图的兜底判据（#68）——这里不替它决定落点
+    const wasGenerating =
+      store.downgrade === 'generating' || docKindOfGeneratingState(store.viewState) !== null
     store.downgrade = null
-    const target = generatingStateFor(kind)
-    if (target) store.viewState = target
+    const generating = generatingStateFor(target)
+    if (generating && wasGenerating) store.viewState = generating
     await reconnectJob(match.id)
   } catch {
     // 兜底查询失败不改变降级结果：保持既有提示即可
   }
+}
+
+/**
+ * 从「本方案此刻在跑的任务」里挑出该归位的那一条（票 #70）。
+ *
+ * 优先级：产物对得上的优先，其中**修复**再优先——它正把这一份整篇重写，最该接回来；
+ * 其次是重审 / 优化这类同产物的动作。对话任务不参与（它有自己的重连路径）。
+ * 产物信息缺失（旧后端）时只认「写正文」的两种任务，宁可少接一次也不接到别的产物上。
+ */
+function pickInFlightDocJob(
+  jobs: JobStatusSummary[],
+  docKind: DocumentKind,
+): JobStatusSummary | null {
+  const docJobs = jobs.filter((job) => job.kind !== 'chat')
+  const sameDoc = docJobs.filter((job) => job.docKind === docKind)
+  if (sameDoc.length > 0) {
+    return sameDoc.find((job) => job.kind === 'review-fix') ?? sameDoc[0] ?? null
+  }
+  return null
 }
 
 /**
