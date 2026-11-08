@@ -74,6 +74,16 @@ const props = defineProps<{
   reviewFailedAt?: string | null
   /** 当前版本号（`DocumentRecord.versionNo`）；未知时不显示「第几版」 */
   versionNo?: number
+  /**
+   * 有一支**修复**任务在途（票 #69）。
+   *
+   * 判据由上层按**任务种类**给出，与产物无关：后端判定顶替只看「同一个人 + 同一方案 +
+   * 同一任务种类」，同一方案里两份修复会互相掐断。因此这里禁用的是「还能不能发起」，
+   * 而不是「这一份的结论允不允许修」——两件事，两种禁用，别混成一条。
+   *
+   * 为 true 时两个动作都不可点，且**不挂说明文字**：灰的原因不在这一份的结论上。
+   */
+  busy?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -249,28 +259,34 @@ const failedLabel = computed(() =>
   state.value === 'failed' && props.reviewFailedAt ? relativeTime(props.reviewFailedAt) : '',
 )
 
-/** 「有问题」时不可点：先按结论修复，再回来确认 */
-const canRereview = computed(() => state.value !== 'revise')
+/** 「有问题」时不可点：先按结论修复，再回来确认（修复在途时同样不可点，见 `canFix`） */
+const canRereview = computed(() => state.value !== 'revise' && !props.busy)
 
-const rereviewHint = computed(() =>
-  canRereview.value
+const rereviewHint = computed(() => {
+  if (props.busy) return undefined
+  return canRereview.value
     ? '按当前正文重新审一遍：只更新结论，不动正文、不新增版本'
-    : '这份文档还有未处理的问题——先按结论修复，再重新审核',
-)
+    : '这份文档还有未处理的问题——先按结论修复，再重新审核'
+})
 
 /**
  * 「修复」只对「有问题」开放：没有问题时它没有依据（也就无从下手）。
  *
  * 与重新审核**互斥**：两者各自守着「有问题」与「其余三态」，同一时刻只有一个可点。
  * 这样用户不会面对「两个都能按、但只能选一个」的猜测。
+ *
+ * **修复在途时两个都关掉**（票 #69）：后端的顶替判据按任务种类、不分产物，同一方案里
+ * 两份修复会互相掐断；只拦被修的那一份，等于留了一条能掐掉自己任务的路径。
  */
-const canFix = computed(() => state.value === 'revise')
+const canFix = computed(() => state.value === 'revise' && !props.busy)
 
-const fixHint = computed(() =>
-  canFix.value
+const fixHint = computed(() => {
+  // 灰的原因是「别处有任务在跑」，不是这条结论不行——挂一句就会说错
+  if (props.busy) return undefined
+  return canFix.value
     ? '按这条结论重写整篇：追加一个新版本，并自动再重审一次（重审不再改写）'
-    : '只有「有问题」的结论才能按结论修复',
-)
+    : '只有「有问题」的结论才能按结论修复'
+})
 </script>
 
 <template>

@@ -3859,11 +3859,20 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
   /** 打开一份「PRD 与接口文档都已在」的方案，停在接口文档的审阅页（两份都可达） */
   async function mountTwoDocsAtApiDocsReview(): Promise<VueWrapper> {
     const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
-      makeDocumentRecord('prd', '# PRD\n\n## 一、背景\n内容'),
+      // PRD 也挂一条「有问题」的结论：这样它在正常情况下**本该可修**，
+      // 禁用与否才测得出是「按任务种类」那一刀切的，而不是结论本身不许修
+      makeDocumentRecord('prd', '# PRD\n\n## 一、背景\n内容', null, [], REVISE()),
       makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n统一响应结构', null, [], REVISE()),
     ])
     await flushPromises()
     return wrapper
+  }
+
+  /** 底栏「预览 / 编辑」分段控件里的「编辑」按钮 */
+  function editModeButton(wrapper: VueWrapper): DOMWrapper<Element> {
+    const button = wrapper.findAll('button').find((item) => item.text().trim() === '编辑')
+    if (!button) throw new Error('未找到「编辑」按钮')
+    return button
   }
 
   /** 屏幕上此刻是不是运行视图（判据：审阅页独有的「文档缺陷」面板在不在） */
@@ -3931,6 +3940,58 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     // 不把用户拽回去：与交付页「不自动跳转」同一条裁决
     expect(storeOf(wrapper).viewState).toBe('review-prd')
     expect(wrapper.text()).toContain('已生成完毕')
+  })
+
+  // -------------------------------------------------------------------------
+  // 修复在途时按任务种类禁用入口（票 #69）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 三份产物的入口在修复在途时都该不可用。
+   *
+   * 判据是**任务种类**而不是产物：后端的顶替判据按「同一个人 + 同一方案 + 同一任务种类」，
+   * 同一方案里两份修复会互相掐断。只灰被修的那一份，等于给用户一条能掐掉自己任务的路径。
+   */
+  it('修复在途时三份产物的修复 / 重审 / 编辑全禁用，且不加说明文案（#69）', async () => {
+    const held = holdFixJob()
+    const wrapper = await mountTwoDocsAtApiDocsReview()
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+    expect(onRunView(wrapper)).toBe(true)
+
+    // ① 被修的那一份：回到它的审阅页看按钮的实际禁用态
+    await clickButton(wrapper, '查看当前版本')
+    expect(fixButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(rereviewButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(editModeButton(wrapper).attributes('disabled')).toBeDefined()
+    // 「不多加提示」：不该在按钮上再挂一句为什么
+    expect(fixButton(wrapper).attributes('title')).toBeUndefined()
+    expect(rereviewButton(wrapper).attributes('title')).toBeUndefined()
+
+    // ② 另一份产物（PRD）：正常情况下它带着「有问题」的结论、本该可修，此刻同样禁用
+    await clickStep(wrapper, 'PRD')
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(fixButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(rereviewButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(editModeButton(wrapper).attributes('disabled')).toBeDefined()
+
+    await held.release()
+  })
+
+  it('修复收尾后入口恢复可点（#69）', async () => {
+    const held = holdFixJob()
+    const wrapper = await mountTwoDocsAtApiDocsReview()
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+    await clickButton(wrapper, '查看当前版本')
+    await held.release()
+    await flushPromises()
+
+    // 任务收尾 → 禁用解除：这一页的结论仍是「有问题」，修复本来就该可点
+    expect(fixButton(wrapper).attributes('disabled')).toBeUndefined()
+    expect(editModeButton(wrapper).attributes('disabled')).toBeUndefined()
   })
 })
 

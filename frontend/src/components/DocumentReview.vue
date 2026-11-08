@@ -36,6 +36,13 @@ const props = withDefaults(
      * 展示的是改写前的草稿，需要明确标出来，否则用户会以为文档出了故障。
      */
     draftOnly?: boolean
+    /**
+     * 正文此刻**不许手改**（票 #69）：有一支修复任务正在整篇重写这一份。
+     *
+     * 修复会追加一个新版本；与此同时把旧版手改落库，两边都不知道该以谁为基。因此这里
+     * 不是「提示一句」，而是**根本进不去编辑视图**——只藏按钮会留下一个仍可切进去的路径。
+     */
+    locked?: boolean
   }>(),
   {
     title: '',
@@ -43,6 +50,7 @@ const props = withDefaults(
     streamingContent: '',
     generating: false,
     draftOnly: false,
+    locked: false,
   },
 )
 
@@ -155,9 +163,10 @@ defineExpose({
   /** 当前可编辑原文 */
   draftContent: computed(() => draft.value),
   /** 当前视图模式，供底栏的分段控件读取高亮态 */
-  viewMode: computed(() => viewMode.value),
-  /** 切换视图模式（由底栏的分段控件调用） */
+  viewMode: computed(() => (props.locked ? 'preview' : viewMode.value)),
+  /** 切换视图模式（由底栏的分段控件调用）；`locked` 时切不进编辑视图 */
   setViewMode: (mode: 'preview' | 'edit') => {
+    if (props.locked && mode === 'edit') return
     viewMode.value = mode
   },
   /** 一键复制 */
@@ -215,9 +224,9 @@ defineExpose({
 
       <!-- 生成完成：预览 / 编辑 切换 -->
       <template v-else>
-        <!-- 预览视图：渲染缓存后的 HTML -->
+        <!-- 预览视图：渲染缓存后的 HTML；`locked` 期间编辑视图不可达，恒停在这里 -->
         <div
-          v-if="viewMode === 'preview'"
+          v-if="viewMode === 'preview' || locked"
           class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
