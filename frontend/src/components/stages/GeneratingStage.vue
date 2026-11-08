@@ -76,13 +76,14 @@ const props = withDefaults(
      */
     canViewCurrentVersion?: boolean
     /**
-     * 标题旁的徽标文案（票 #67）：按动作区分「修复中 / 优化中 / 改写中 / 生成中」。
+     * 标题旁的徽标文案（票 #67）：按动作区分「修复中 / 重审中 / 优化中 / 改写中 / 生成中」。
      *
      * 由上层给出而不是在这里按 kind 猜：这张页不知道任务种类，也不该知道。
+     * 缺省回落到「生成中」由文档卡片自己兜（只在一处）。
      */
     statusLabel?: string
   }>(),
-  { withReview: true, statusLabel: '生成中' },
+  { withReview: true },
 )
 
 const emit = defineEmits<{

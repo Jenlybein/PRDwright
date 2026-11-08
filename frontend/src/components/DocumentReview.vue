@@ -43,7 +43,7 @@ const props = withDefaults(
      * 不是「提示一句」，而是**根本进不去编辑视图**——只藏按钮会留下一个仍可切进去的路径。
      */
     locked?: boolean
-    /** 标题旁徽标的文案（票 #67）；按动作区分「修复中 / 优化中 / 改写中 / 生成中」 */
+    /** 标题旁徽标的文案（票 #67）；按动作区分「修复中 / 重审中 / 优化中 / 改写中 / 生成中」 */
     statusLabel?: string
   }>(),
   {
@@ -53,7 +53,6 @@ const props = withDefaults(
     generating: false,
     draftOnly: false,
     locked: false,
-    statusLabel: '生成中',
   },
 )
 
@@ -198,7 +197,7 @@ defineExpose({
           class="inline-flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent ring-1 ring-accent-soft-line"
         >
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
-          {{ statusLabel }}
+          {{ statusLabel ?? '生成中' }}
         </span>
       </div>
     </div>

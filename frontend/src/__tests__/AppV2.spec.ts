@@ -395,6 +395,25 @@ function makeRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   }
 }
 
+/** 造一条「本方案此刻在跑的任务」摘要（`GET /api/jobs` 的返回项），供恢复路径用例使用 */
+function makeJobStatus(overrides: Partial<api.JobStatusSummary> = {}): api.JobStatusSummary {
+  return {
+    id: 1,
+    kind: 'prd',
+    docKind: 'prd',
+    chatStage: null,
+    status: 'running',
+    phase: 'writing',
+    solutionId: 1,
+    errorCode: '',
+    errorMessage: '',
+    createdAt: '2026-11-08T00:00:00',
+    updatedAt: '2026-11-08T00:00:00',
+    usage: null,
+    ...overrides,
+  }
+}
+
 /** 按 id 查找元素（结构化行级 id 含点号，须用属性选择器） */
 function byId(wrapper: VueWrapper | DOMWrapper<Element>, id: string): DOMWrapper<Element> {
   return wrapper.find(`[id="${id}"]`)
@@ -1599,20 +1618,7 @@ describe('AppV2 完整流程编排', () => {
   it('恢复路径 5：指针丢了但本方案有在跑的修复任务 → 照样归位到运行视图（#70）', async () => {
     jobHarness.kinds.set(9, 'review-fix')
     vi.mocked(api.fetchActiveJobs).mockResolvedValue([
-      {
-        id: 9,
-        kind: 'review_fix',
-        docKind: 'api-docs',
-        chatStage: null,
-        status: 'running',
-        phase: 'writing',
-        solutionId: 1,
-        errorCode: '',
-        errorMessage: '',
-        createdAt: '2026-11-08T00:00:00',
-        updatedAt: '2026-11-08T00:00:00',
-        usage: null,
-      },
+      makeJobStatus({ id: 9, kind: 'review_fix', docKind: 'api-docs' }),
     ])
     mockJobStream({
       'review-fix': () => new Promise<api.StreamResult>(() => {}),
@@ -1634,7 +1640,8 @@ describe('AppV2 完整流程编排', () => {
     expect(api.readJobStream).toHaveBeenCalledWith(9, expect.anything(), expect.anything())
   })
 
-  it('恢复路径 6：这次兜底查询只发生一次，不轮询（#70）', async () => {    vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
+  it('恢复路径 6：这次兜底查询只发生一次，不轮询（#70）', async () => {
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
 
     const wrapper = await mountExistingSolution({
       viewState: 'review-api-docs',
@@ -1655,20 +1662,7 @@ describe('AppV2 完整流程编排', () => {
     jobHarness.kinds.set(11, 'review-fix')
     // 在途的是**接口文档**的修复，而刷新后人停在 PRD 的审阅页
     vi.mocked(api.fetchActiveJobs).mockResolvedValue([
-      {
-        id: 11,
-        kind: 'review_fix',
-        docKind: 'api-docs',
-        chatStage: null,
-        status: 'running',
-        phase: 'writing',
-        solutionId: 1,
-        errorCode: '',
-        errorMessage: '',
-        createdAt: '2026-11-08T00:00:00',
-        updatedAt: '2026-11-08T00:00:00',
-        usage: null,
-      },
+      makeJobStatus({ id: 11, kind: 'review_fix', docKind: 'api-docs' }),
     ])
     mockJobStream({
       'review-fix': () => new Promise<api.StreamResult>(() => {}),
@@ -1707,6 +1701,37 @@ describe('AppV2 完整流程编排', () => {
     // 切到被修的那一份：运行视图照常出现（兜底渲染靠的就是这份运行态）
     await clickStep(wrapper, '接口文档')
     expect(wrapper.text()).not.toContain('文档缺陷')
+  })
+
+  it('恢复路径 8：同时有几支在跑时，优先接修复那一支（kind 是下划线口径，须经转换）（#70）', async () => {
+    jobHarness.kinds.set(20, 'prd')
+    jobHarness.kinds.set(21, 'review-fix')
+    // 两条并行（对话之外的场景：本票之后同一方案可能同时有一支生成与一支修复）
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([
+      makeJobStatus({ id: 20, kind: 'prd', docKind: 'prd' }),
+      makeJobStatus({ id: 21, kind: 'review_fix', docKind: 'api-docs' }),
+    ])
+    mockJobStream({
+      prd: () => new Promise<api.StreamResult>(() => {}),
+      'review-fix': () => new Promise<api.StreamResult>(() => {}),
+    })
+
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n统一响应结构', null, [], {
+        kind: 'api_docs',
+        verdict: 'revise',
+        summary: '2 个待处理问题',
+        issues: [],
+        rewritten: false,
+        failedSections: [],
+        reviewedAt: '2026-11-08T00:00:00',
+      }),
+    ])
+
+    // 接的是修复那一支，不是列表里的第一条
+    expect(api.readJobStream).toHaveBeenCalledWith(21, expect.anything(), expect.anything())
+    expect(wrapper.text()).not.toContain('文档缺陷')
+    expect(wrapper.text()).toContain('修复中')
   })
 
   it('首屏「路由落位」与「登录态探测」同时触发恢复时只订阅一次', async () => {
@@ -3737,19 +3762,24 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     return wrapper
   }
 
-  /** 折叠头上的「重新审核」按钮（与展开开关是同一行上的两枚不同按钮） */
-  function rereviewButton(wrapper: VueWrapper): DOMWrapper<Element> {
-    const button = wrapper.findAll('button').find((item) => item.text().trim() === '重新审核')
-    if (!button) throw new Error('未找到「重新审核」按钮')
+  /**
+   * 按文案找一枚按钮。
+   *
+   * 底栏与折叠头上有几枚**只差文案**的按钮（修复 / 重新审核 / 编辑 / 查看当前版本），
+   * 每处都抄一遍 `findAll + trim` 迟早会有一处忘了 `trim` 而找不到。
+   */
+  function buttonByText(wrapper: VueWrapper, text: string): DOMWrapper<Element> {
+    const button = wrapper.findAll('button').find((item) => item.text().trim() === text)
+    if (!button) throw new Error(`未找到按钮：${text}`)
     return button
   }
 
+  /** 折叠头上的「重新审核」按钮（与展开开关是同一行上的两枚不同按钮） */
+  const rereviewButton = (wrapper: VueWrapper): DOMWrapper<Element> =>
+    buttonByText(wrapper, '重新审核')
+
   /** 折叠头上的「修复」按钮（票 #56）：只在「有问题」时可点 */
-  function fixButton(wrapper: VueWrapper): DOMWrapper<Element> {
-    const button = wrapper.findAll('button').find((item) => item.text().trim() === '修复')
-    if (!button) throw new Error('未找到「修复」按钮')
-    return button
-  }
+  const fixButton = (wrapper: VueWrapper): DOMWrapper<Element> => buttonByText(wrapper, '修复')
 
   it('四态各自可见：通过 / 有问题 / 审核失败 / 未审核，且没结论不等于通过', async () => {
     // ① 通过（结论来自文档记录，因此刷新后还在——这条用例本来就是「重新打开」）
@@ -4008,15 +4038,18 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
   }
 
   /** 底栏「预览 / 编辑」分段控件里的「编辑」按钮 */
-  function editModeButton(wrapper: VueWrapper): DOMWrapper<Element> {
-    const button = wrapper.findAll('button').find((item) => item.text().trim() === '编辑')
-    if (!button) throw new Error('未找到「编辑」按钮')
-    return button
-  }
+  const editModeButton = (wrapper: VueWrapper): DOMWrapper<Element> => buttonByText(wrapper, '编辑')
 
-  /** 屏幕上此刻是不是运行视图（判据：审阅页独有的「文档缺陷」面板在不在） */
+  /**
+   * 屏幕上此刻是不是运行视图。
+   *
+   * 两个条件一起判，缺一不可：审阅页独有的「文档缺陷」面板**不在**，而运行视图独有的
+   * 「查看当前版本」出口**在**。只判前者的话，入口页、表单页这种压根没有该面板的页面
+   * 也会被算成「运行视图」——一条永远为真的断言证明不了任何事。
+   */
   function onRunView(wrapper: VueWrapper): boolean {
-    return !wrapper.text().includes('文档缺陷')
+    const text = wrapper.text()
+    return !text.includes('文档缺陷') && text.includes('查看当前版本')
   }
 
   it('修复进行中切到别的阶段再切回来，屏幕上仍是运行视图（#68）', async () => {
