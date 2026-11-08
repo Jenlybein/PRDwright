@@ -621,6 +621,17 @@ const versionDrawerOpen = ref(false)
 const activeDocKind = computed(() => docKindOfState(viewState.value))
 
 /**
+ * 是否有一支**修复**任务在途（票 #68 / #69）。
+ *
+ * 判据看**任务种类**，不看产物：入口禁用（#69）与运行视图兜底（#68）都要这一条，
+ * 前者与产物无关（后端顶替只看任务种类），后者还要再拼上「产物对不对得上」。
+ */
+const isFixInFlight = computed(() => {
+  const run = runs.activeRun
+  return run !== null && run.status === 'running' && run.jobKind === 'review-fix'
+})
+
+/**
  * 在途的修复任务作用在哪一份产物；没有就为 null（票 #68）。
  *
  * 只认 `review-fix`：重审不产出正文，没有「正在长出来的那一份」可看，
@@ -628,7 +639,7 @@ const activeDocKind = computed(() => docKindOfState(viewState.value))
  */
 const fixingDocKind = computed<DocumentKind | null>(() => {
   const run = runs.activeRun
-  if (!run || run.status !== 'running' || run.jobKind !== 'review-fix') return null
+  if (run === null || !isFixInFlight.value) return null
   return run.docKind
 })
 
@@ -1286,6 +1297,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :review="reviewConclusion"
         :review-failed-at="reviewFailedAt"
         :review-version-no="reviewVersionNo"
+        :fix-in-flight="isFixInFlight"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"
         :hide-back="inputPageOnBar(store.entryMode)"
