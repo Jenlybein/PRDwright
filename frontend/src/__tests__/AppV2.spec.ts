@@ -3822,6 +3822,116 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
     expect(wrapper.text()).toContain('重写上游挂了')
   })
+
+  // -------------------------------------------------------------------------
+  // 运行视图跟随在途任务（票 #68）
+  // -------------------------------------------------------------------------
+
+  const FIXED_API_DOCS = '# 接口文档\n\n## 一、概述\n统一响应结构\n\n## 二、鉴权\n已补齐鉴权'
+
+  /**
+   * 起一支**悬着不结束**的修复任务：用例要在它跑着的时候切页面，再放它收尾。
+   *
+   * 断言只跨外壳：屏幕上是运行视图还是审阅页，由「有没有『文档缺陷』面板」回答
+   * （那张面板只画在审阅页上，运行视图没有）。
+   */
+  function holdFixJob(): { release: () => Promise<void> } {
+    let releaseJob: () => void = () => {}
+    const done = new Promise<void>((resolve) => {
+      releaseJob = resolve
+    })
+    mockJobStream({
+      'review-fix': async (handlers) => {
+        handlers.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+        await done
+        handlers.onRunSummary?.(makeRunSummary({ kind: 'review-fix' }))
+        return { conversationId: '', reply: FIXED_API_DOCS, asks: [] }
+      },
+    })
+    return {
+      release: async () => {
+        releaseJob()
+        await flushPromises()
+      },
+    }
+  }
+
+  /** 打开一份「PRD 与接口文档都已在」的方案，停在接口文档的审阅页（两份都可达） */
+  async function mountTwoDocsAtApiDocsReview(): Promise<VueWrapper> {
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-api-docs'), 1, [
+      makeDocumentRecord('prd', '# PRD\n\n## 一、背景\n内容'),
+      makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n统一响应结构', null, [], REVISE()),
+    ])
+    await flushPromises()
+    return wrapper
+  }
+
+  /** 屏幕上此刻是不是运行视图（判据：审阅页独有的「文档缺陷」面板在不在） */
+  function onRunView(wrapper: VueWrapper): boolean {
+    return !wrapper.text().includes('文档缺陷')
+  }
+
+  it('修复进行中切到别的阶段再切回来，屏幕上仍是运行视图（#68）', async () => {
+    const held = holdFixJob()
+    const wrapper = await mountTwoDocsAtApiDocsReview()
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+    // 点了「修复」就落在运行视图：这是用户按下这个按钮的理由
+    expect(onRunView(wrapper)).toBe(true)
+    expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
+
+    // 切到 PRD 的审阅页：那是**另一份**产物，不该被这支任务打扰
+    await clickStep(wrapper, 'PRD')
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(onRunView(wrapper)).toBe(false)
+
+    // 切回被修的那一份：直接落回运行视图，不是一张「什么都没发生」的审阅页
+    await clickStep(wrapper, '接口文档')
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(onRunView(wrapper)).toBe(true)
+
+    await held.release()
+  })
+
+  it('修复进行中点「查看当前版本」停在审阅页；离开再回来重新落回运行视图（#68）', async () => {
+    const held = holdFixJob()
+    const wrapper = await mountTwoDocsAtApiDocsReview()
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+    expect(onRunView(wrapper)).toBe(true)
+
+    // 出口：读旧版。没有这个压制位，兜底渲染会立刻把人弹回运行视图，出口等于失效
+    await clickButton(wrapper, '查看当前版本')
+    expect(onRunView(wrapper)).toBe(false)
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(documentsOf(wrapper).contentOf('api-docs')).toContain('统一响应结构')
+
+    // 离开这份产物就清掉压制位：默认落点必须稳定，否则用户永远不知道回到哪儿
+    await clickStep(wrapper, 'PRD')
+    expect(onRunView(wrapper)).toBe(false)
+    await clickStep(wrapper, '接口文档')
+    expect(onRunView(wrapper)).toBe(true)
+
+    await held.release()
+  })
+
+  it('修复进行中用户已切走：收尾不抢页面，只给一句提示（#68）', async () => {
+    const held = holdFixJob()
+    const wrapper = await mountTwoDocsAtApiDocsReview()
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+    await clickStep(wrapper, 'PRD')
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+
+    await held.release()
+
+    // 不把用户拽回去：与交付页「不自动跳转」同一条裁决
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+    expect(wrapper.text()).toContain('已生成完毕')
+  })
 })
 
 describe('AppV2 错误边界：外壳接缝上失败也不静默', () => {

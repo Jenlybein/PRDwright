@@ -67,6 +67,14 @@ const props = withDefaults(
      * ——只藏按钮会留下一条空栏，比不显示更难看。
      */
     hideBack?: boolean
+    /**
+     * 是否给「查看当前版本」这个出口（票 #68）。
+     *
+     * 只在**这张页是被一支修复任务撑着**时给：修复会整篇重写，正文一直在变，用户可能
+     * 只想读没被写的那一版。别的动作（生成 / 优化 / 改写）本就以「看它写」为目的，
+     * 多一个出口只是噪音。点它由上层压住兜底渲染并回到审阅页。
+     */
+    viewPastVersion?: boolean
   }>(),
   { withReview: true },
 )
@@ -74,6 +82,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** 返回对话 */
   back: []
+  /** 先不看了，回到审阅页读还没被重写的那一版 */
+  viewCurrentVersion: []
 }>()
 
 /** 已用时的可读文案；为 0（尚未开始计时）时不展示 */
@@ -111,6 +121,17 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
     >
       已用时 {{ elapsedText }}
     </p>
+
+    <!-- 出口：先不读过程，回去读还没被重写的那一版（票 #68）。
+         修复是整篇重写，正文一直在长，有人此刻要的正是旧版而不是进度。 -->
+    <button
+      v-if="viewPastVersion"
+      type="button"
+      class="self-start text-xs text-brand-600 underline-offset-2 hover:underline"
+      @click="emit('viewCurrentVersion')"
+    >
+      查看当前版本
+    </button>
 
     <!-- 生成 / 优化出错提示：非正常结尾（如被截断）时展示原因 -->
     <p
