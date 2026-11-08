@@ -1634,8 +1634,7 @@ describe('AppV2 完整流程编排', () => {
     expect(api.readJobStream).toHaveBeenCalledWith(9, expect.anything(), expect.anything())
   })
 
-  it('恢复路径 6：这次兜底查询只发生一次，不轮询（#70）', async () => {
-    vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
+  it('恢复路径 6：这次兜底查询只发生一次，不轮询（#70）', async () => {    vi.mocked(api.fetchActiveJobs).mockResolvedValue([])
 
     const wrapper = await mountExistingSolution({
       viewState: 'review-api-docs',
@@ -1650,6 +1649,64 @@ describe('AppV2 完整流程编排', () => {
     // 查不到就老实停在审阅页，不发起任何订阅
     expect(api.readJobStream).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('文档缺陷')
+  })
+
+  it('恢复路径 7：刷新时停在别的产物上，在途的修复仍然登记并解开入口禁用（#70）', async () => {
+    jobHarness.kinds.set(11, 'review-fix')
+    // 在途的是**接口文档**的修复，而刷新后人停在 PRD 的审阅页
+    vi.mocked(api.fetchActiveJobs).mockResolvedValue([
+      {
+        id: 11,
+        kind: 'review_fix',
+        docKind: 'api-docs',
+        chatStage: null,
+        status: 'running',
+        phase: 'writing',
+        solutionId: 1,
+        errorCode: '',
+        errorMessage: '',
+        createdAt: '2026-11-08T00:00:00',
+        updatedAt: '2026-11-08T00:00:00',
+        usage: null,
+      },
+    ])
+    mockJobStream({
+      'review-fix': () => new Promise<api.StreamResult>(() => {}),
+    })
+
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# PRD\n\n## 一、背景\n内容', null, [], {
+        kind: 'prd',
+        verdict: 'revise',
+        summary: '2 个待处理问题',
+        issues: [],
+        rewritten: false,
+        failedSections: [],
+        reviewedAt: '2026-11-08T00:00:00',
+      }),
+      makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n统一响应结构', null, [], {
+        kind: 'api_docs',
+        verdict: 'revise',
+        summary: '2 个待处理问题',
+        issues: [],
+        rewritten: false,
+        failedSections: [],
+        reviewedAt: '2026-11-08T00:00:00',
+      }),
+    ])
+    await flushPromises()
+    // 说明「人不在这份产物上」：屏幕停在 PRD 的审阅页
+    await clickStep(wrapper, 'PRD')
+    expect(storeOf(wrapper).viewState).toBe('review-prd')
+
+    // 人在 PRD 页：不被打断，但这支修复**已被登记**——PRD 的入口同样禁用（#69 的粒度是任务种类）
+    expect(wrapper.text()).toContain('文档缺陷')
+    const fix = wrapper.findAll('button').find((item) => item.text().trim() === '修复')
+    expect(fix?.attributes('disabled')).toBeDefined()
+
+    // 切到被修的那一份：运行视图照常出现（兜底渲染靠的就是这份运行态）
+    await clickStep(wrapper, '接口文档')
+    expect(wrapper.text()).not.toContain('文档缺陷')
   })
 
   it('首屏「路由落位」与「登录态探测」同时触发恢复时只订阅一次', async () => {
@@ -3971,6 +4028,8 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     // 点了「修复」就落在运行视图：这是用户按下这个按钮的理由
     expect(onRunView(wrapper)).toBe(true)
     expect(storeOf(wrapper).viewState).toBe('generating-api-docs')
+    // 徽标按动作说「修复中」，不把四件事都叫「生成中」（#67）
+    expect(wrapper.text()).toContain('修复中')
 
     // 切到 PRD 的审阅页：那是**另一份**产物，不该被这支任务打扰
     await clickStep(wrapper, 'PRD')
@@ -4074,6 +4133,22 @@ describe('审阅页的审核结论面板：四态与重新审核', () => {
     // 任务收尾 → 禁用解除：这一页的结论仍是「有问题」，修复本来就该可点
     expect(fixButton(wrapper).attributes('disabled')).toBeUndefined()
     expect(editModeButton(wrapper).attributes('disabled')).toBeUndefined()
+  })
+
+  it('收尾时人就停在这份文档的审阅页（含兜底渲染出来的运行视图）：不指错路（#68）', async () => {
+    const held = holdFixJob()
+    const wrapper = await mountTwoDocsAtApiDocsReview()
+
+    await clickButton(wrapper, '修复')
+    await flushPromises()
+    // 用户选了「先读旧版」，于是停在审阅页；此时收尾，他不该被告诉「可在进度条上查看」
+    await clickButton(wrapper, '查看当前版本')
+    await held.release()
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('可在进度条上查看')
+    expect(storeOf(wrapper).viewState).toBe('review-api-docs')
+    expect(wrapper.text()).toContain('文档缺陷')
   })
 })
 

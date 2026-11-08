@@ -83,7 +83,7 @@ const props = defineProps<{
    *
    * 为 true 时两个动作都不可点，且**不挂说明文字**：灰的原因不在这一份的结论上。
    */
-  busy?: boolean
+  fixInFlight?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -260,10 +260,10 @@ const failedLabel = computed(() =>
 )
 
 /** 「有问题」时不可点：先按结论修复，再回来确认（修复在途时同样不可点，见 `canFix`） */
-const canRereview = computed(() => state.value !== 'revise' && !props.busy)
+const canRereview = computed(() => state.value !== 'revise' && !props.fixInFlight)
 
 const rereviewHint = computed(() => {
-  if (props.busy) return undefined
+  if (props.fixInFlight) return undefined
   return canRereview.value
     ? '按当前正文重新审一遍：只更新结论，不动正文、不新增版本'
     : '这份文档还有未处理的问题——先按结论修复，再重新审核'
@@ -278,11 +278,11 @@ const rereviewHint = computed(() => {
  * **修复在途时两个都关掉**（票 #69）：后端的顶替判据按任务种类、不分产物，同一方案里
  * 两份修复会互相掐断；只拦被修的那一份，等于留了一条能掐掉自己任务的路径。
  */
-const canFix = computed(() => state.value === 'revise' && !props.busy)
+const canFix = computed(() => state.value === 'revise' && !props.fixInFlight)
 
 const fixHint = computed(() => {
   // 灰的原因是「别处有任务在跑」，不是这条结论不行——挂一句就会说错
-  if (props.busy) return undefined
+  if (props.fixInFlight) return undefined
   return canFix.value
     ? '按这条结论重写整篇：追加一个新版本，并自动再重审一次（重审不再改写）'
     : '只有「有问题」的结论才能按结论修复'

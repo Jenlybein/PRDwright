@@ -74,9 +74,15 @@ const props = withDefaults(
      * 只想读没被写的那一版。别的动作（生成 / 优化 / 改写）本就以「看它写」为目的，
      * 多一个出口只是噪音。点它由上层压住兜底渲染并回到审阅页。
      */
-    viewPastVersion?: boolean
+    canViewCurrentVersion?: boolean
+    /**
+     * 标题旁的徽标文案（票 #67）：按动作区分「修复中 / 优化中 / 改写中 / 生成中」。
+     *
+     * 由上层给出而不是在这里按 kind 猜：这张页不知道任务种类，也不该知道。
+     */
+    statusLabel?: string
   }>(),
-  { withReview: true },
+  { withReview: true, statusLabel: '生成中' },
 )
 
 const emit = defineEmits<{
@@ -125,7 +131,7 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
     <!-- 出口：先不读过程，回去读还没被重写的那一版（票 #68）。
          修复是整篇重写，正文一直在长，有人此刻要的正是旧版而不是进度。 -->
     <button
-      v-if="viewPastVersion"
+      v-if="canViewCurrentVersion"
       type="button"
       class="self-start text-xs text-brand-600 underline-offset-2 hover:underline"
       @click="emit('viewCurrentVersion')"
@@ -156,6 +162,7 @@ const elapsedText = computed(() => formatDuration(props.elapsedMs ?? 0))
       :streaming-content="streamingContent"
       :generating="true"
       :draft-only="draftOnly"
+      :status-label="statusLabel"
     />
     <!-- 页面级操作栏：生成中 / 失败时只有「返回」这一条退路，主操作区留空。
          录入页在进度条上的入口连这条退路都是重复的，此时整条栏不渲染。 -->

@@ -474,8 +474,7 @@ function submitOptimize(): void {
       :review="review ?? null"
       :review-failed-at="reviewFailedAt ?? null"
       :version-no="reviewVersionNo ?? 0"
-      :busy="fixInFlight ?? false"
-      @fix="emit('fix')"
+      :fix-in-flight="fixInFlight ?? false"      @fix="emit('fix')"
       @rereview="emit('rereview')"
     />
 
