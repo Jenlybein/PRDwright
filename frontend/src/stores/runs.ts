@@ -143,8 +143,7 @@ export const useRunsStore = defineStore('runs', () => {
     return run?.status === 'running' && run.docKind === kind
   }
 
-  /**
-   * 当前跑的这支是否正在替某条**对话线程**生成回复。
+  /** 当前跑的这支是否正在替某条**对话线程**生成回复。
    *
    * 对话没有产物，判据只能是「线程」：四条线程可以各跑各的，A 在生成不该把 B 的
    * 输入框也灰掉——这正是从前那个全局布尔 `chatStreaming` 造成的毛病。
@@ -152,6 +151,18 @@ export const useRunsStore = defineStore('runs', () => {
   function isRunningForChat(stage: ChatStage): boolean {
     const run = activeRun.value
     return run?.status === 'running' && run.jobKind === 'chat' && run.chatStage === stage
+  }
+
+  /**
+   * 当前跑的这支是不是**某一种动作**（`review-fix` / `review` / `optimize` / …）。
+   *
+   * 「有没有任务在跑」只有这一个 store 说了算（本文件的职责）：调用方不要自己读
+   * `activeRun.status` 再拼一遍，否则「忙」的定义会散到界面里去——那正是本 store 从前
+   * 被拆出来的原因（见文件头）。
+   */
+  function isRunningKind(jobKind: DocKind): boolean {
+    const run = activeRun.value
+    return run?.status === 'running' && run.jobKind === jobKind
   }
 
   /** 某一份产物的运行态（取不到为 null） */
@@ -312,6 +323,7 @@ export const useRunsStore = defineStore('runs', () => {
     isRunning,
     isRunningFor,
     isRunningForChat,
+    isRunningKind,
     runOf,
     // 动作
     begin,
