@@ -396,15 +396,20 @@ async function resumeAfterRestore(): Promise<void> {
       solutionId: solutions.currentId,
       status: 'running',
     })
-    const match = pickInFlightDocJob(jobs, docKind)
+    const match = pickInFlightDocJob(jobs)
     if (!match) return
+    // 认不出任务种类就不接：宁可少接一次，也不把这份产物记到别的动作上
+    const jobKind = fromBackendJobKind(match.kind)
+    if (jobKind === null) return
+    // 产物种类以服务端为准；后端没给（旧形态）才退回当前页那一份。
+    // 注意：**不按当前页过滤**——用户刷新时可能正停在别的产物上，而那支修复仍然在途；
+    // 把它登记进来才不会漏（#68 的兜底渲染与 #69 的入口禁用都靠这份运行态）。
     const target = match.docKind ?? docKind
     // 登记运行态：`reconnectJob` 凭它认领事件，界面凭它判断「哪一份正在写」。
-    // 产物种类优先取后端给的 `doc_kind`——它在 `optimize` / `clarify` 上比「按阶段反推」权威。
     runs.restore({
       jobId: match.id,
       solutionId: solutions.currentId,
-      jobKind: fromBackendJobKind(match.kind) ?? 'prd',
+      jobKind,
       docKind: target,
     })
     // 命中活跃任务：撤销降级提示；原来停在「生成中」（含被降级的）才切回生成态，
@@ -423,20 +428,16 @@ async function resumeAfterRestore(): Promise<void> {
 /**
  * 从「本方案此刻在跑的任务」里挑出该归位的那一条（票 #70）。
  *
- * 优先级：产物对得上的优先，其中**修复**再优先——它正把这一份整篇重写，最该接回来；
- * 其次是重审 / 优化这类同产物的动作。对话任务不参与（它有自己的重连路径）。
- * 产物信息缺失（旧后端）时只认「写正文」的两种任务，宁可少接一次也不接到别的产物上。
+ * 只排除对话（它有自己的一条重连路径，写的是对话预览，不该塞进文档流水线）。
+ * 其余一律接：**修复**最先优先级最高——它正把某一份整篇重写，用户最可能就在等它。
+ *
+ * 刻意**不按「当前页是哪个产物」过滤**：刷新时人可能正停在 PRD 页，而在途的是接口文档
+ * 的修复；过滤掉就等于既接不回进度、也解不开 #69 的入口禁用。产物对得上这件事，
+ * 由 #68 的渲染判据自己回答（`docKind` 与当前页相等时才换成运行视图）。
  */
-function pickInFlightDocJob(
-  jobs: JobStatusSummary[],
-  docKind: DocumentKind,
-): JobStatusSummary | null {
+function pickInFlightDocJob(jobs: JobStatusSummary[]): JobStatusSummary | null {
   const docJobs = jobs.filter((job) => job.kind !== 'chat')
-  const sameDoc = docJobs.filter((job) => job.docKind === docKind)
-  if (sameDoc.length > 0) {
-    return sameDoc.find((job) => job.kind === 'review-fix') ?? sameDoc[0] ?? null
-  }
-  return null
+  return docJobs.find((job) => job.kind === 'review-fix') ?? docJobs[0] ?? null
 }
 
 /**
@@ -673,25 +674,32 @@ const fixingDocKind = computed<DocumentKind | null>(() => {
 })
 
 /**
- * 用户点了「查看当前版本」的那一份产物——**压制位**（票 #68）。
+ * 用户点了「查看当前版本」时立下的**压制位**（票 #68）。
  *
  * 运行视图现在由在途任务兜底渲染，因此「我不要看过程，先读旧版」这个意图必须被记住：
  * 不记的话，兜底渲染会在下一帧把人弹回运行视图，那个出口等于不存在。
  *
- * 它**不落库**，只在「本次停留 + 本次任务」内有效：任务收尾、离开这份产物、开始新任务
- * 都会清掉。持久化会把一个临时阅读意图升格成配置，而默认落点必须稳定——否则用户
- * 永远不知道切回来会落在哪儿。
+ * 存的是「哪一支任务的哪一份产物」而不是一个裸 ID：有效性**由它自己算出来**，
+ * 不需要靠 watcher 在三个时机上去清理。任务收尾或换了一支 → `jobId` 对不上，失效；
+ * 离开这份产物 → `docKind` 对不上，失效。这样「清除时机」不会漏，也不会多写一遍。
+ *
+ * 它**不落库**：持久化会把一个临时阅读意图升格成配置，而默认落点必须稳定。
  */
-const suppressedRunViewFor = ref<DocumentKind | null>(null)
+const suppressedFor = ref<{ docKind: DocumentKind; jobId: number } | null>(null)
 
-// 任务换了一支（起跑或收尾）、或人离开了那一份产物：两种情况下默认落点都该重新算一次
-watch(fixingDocKind, () => {
-  suppressedRunViewFor.value = null
+/** 压制位此刻是否仍然有效（任务没换、人也还在这份产物上） */
+const isRunViewSuppressed = computed(() => {
+  const suppressed = suppressedFor.value
+  const run = runs.activeRun
+  if (suppressed === null || run === null) return false
+  return suppressed.jobId === run.jobId && suppressed.docKind === activeDocKind.value
 })
+
+// 「任务换了」由上面的 `jobId` 比对自动失效；只有「人离开了这份产物」需要记一笔——
+// 默认落点必须稳定，走了再回来该重新落回运行视图。
 watch(activeDocKind, (now) => {
-  if (suppressedRunViewFor.value !== null && suppressedRunViewFor.value !== now) {
-    suppressedRunViewFor.value = null
-  }
+  const suppressed = suppressedFor.value
+  if (suppressed !== null && suppressed.docKind !== now) suppressedFor.value = null
 })
 
 /**
@@ -709,29 +717,54 @@ const isRunViewVisible = computed(() => {
   if (isGeneratingPhase.value) return true
   const fixing = fixingDocKind.value
   if (fixing === null || activeDocKind.value !== fixing) return false
-  return suppressedRunViewFor.value !== fixing
+  return !isRunViewSuppressed.value
 })
+
+/**
+ * 眼下这张页写的是哪一份产物。
+ *
+ * 生成态与审阅态各有一套反推：优化 / 修复期间可能停在审阅态，而生成 / 改写期间停在
+ * 生成态——两种都要能答出「这是哪一份」。「查看当前版本」与「这一份是不是正在被写」
+ * 都靠它，别各写一遍。
+ */
+const runViewDocKind = computed(
+  () => activeDocKind.value ?? docKindOfGeneratingState(viewState.value),
+)
 
 /** 运行视图上的「查看当前版本」：压住兜底渲染，停在审阅页读还没被写的那一版 */
 function viewCurrentVersion(): void {
   const kind = fixingDocKind.value
-  if (kind === null) return
-  suppressedRunViewFor.value = kind
+  const run = runs.activeRun
+  if (kind === null || run === null) return
+  suppressedFor.value = { docKind: kind, jobId: run.jobId }
   goTo(reviewStateFor(kind))
 }
 
-/**
- * 眼下这张运行视图写的是哪一份产物。
- *
- * 生成态与审阅态各有一套反推：优化 / 修复期间可能停在审阅态，而生成 / 改写期间停在
- * 生成态——两种都要能答出「这是哪一份」，否则「查看当前版本」只在某一种落点上出现。
- */
-const runViewDocKind = computed(() => activeDocKind.value ?? docKindOfGeneratingState(viewState.value))
-
 /** 这张运行视图上要不要给「查看当前版本」：只有正在修这一份时才给 */
-const canViewPastVersion = computed(
+const canViewCurrentVersion = computed(
   () => fixingDocKind.value !== null && runViewDocKind.value === fixingDocKind.value,
 )
+
+/**
+ * 运行视图的标题徽标（票 #67）：按动作区分，不把四件事都叫「生成中」。
+ *
+ * 修复、优化、按澄清改写都不是「生成一份新文档」，混称会让用户以为自己的稿被整篇重做了。
+ */
+const runViewStatusLabel = computed(() => {
+  const run = runs.activeRun
+  if (run === null || run.status !== 'running') return '生成中'
+  switch (run.jobKind) {
+    case 'review-fix':
+      return '修复中'
+    case 'optimize':
+      return '优化中'
+    case 'clarify':
+    case 'auto-clarify':
+      return '改写中'
+    default:
+      return '生成中'
+  }
+})
 
 /**
  * 眼前这一份产物是否正在被写。
@@ -741,9 +774,7 @@ const canViewPastVersion = computed(
  * 一刀切带来的误伤（生成期间所有对话标签全灰）。
  */
 const isGeneratingCurrentDoc = computed(() => {
-  // 生成态与审阅态各有一套反推：`optimize` 期间阶段不变（停在 review-*），
-  // 而「生成 / 改写」期间停在 generating-*，两者都要能答出「这是哪一份」
-  const kind = activeDocKind.value ?? docKindOfGeneratingState(viewState.value)
+  const kind = runViewDocKind.value
   return kind !== null && runs.isRunningFor(kind)
 })
 
@@ -1304,7 +1335,8 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :elapsed-ms="elapsedMs"
         :back-label="backLabel"
         :hide-back="inputPageOnBar(store.entryMode)"
-        :view-past-version="canViewPastVersion"
+        :can-view-current-version="canViewCurrentVersion"
+        :status-label="runViewStatusLabel"
         @back="backToInput"
         @view-current-version="viewCurrentVersion"
       />

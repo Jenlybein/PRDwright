@@ -876,7 +876,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       goTo(reviewStateFor(target))
       return
     }
-    // 用户已不在这一份的生成页：只提示，不跳转（见上方「不抢方向盘」）
+    // 人已经在这份文档的页上（审阅态）：收尾后就该看到新版本，不必再说「去进度条上查看」。
+    // 这一条覆盖「运行视图是兜底渲染出来的」那种情形（#68）：界面相位明明是审阅态，
+    // 用户却在看这份文档的运行视图，把它当成「已切走」会多一句指错路的提示。
+    if (docKindOfState(viewState.value) === target) return
+    // 用户已不在这一份：只提示，不跳转（见上方「不抢方向盘」）
     hooks.onNotice(`${titleOf(target)}已生成完毕，可在进度条上查看`)
   }
 
