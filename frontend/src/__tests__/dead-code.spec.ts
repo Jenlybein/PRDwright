@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import * as api from '@/services/api'
+import { JOB_KIND_NAVIGATES_TO_RUN_VIEW } from '@/utils/workflow'
 import apiSource from '../services/api.ts?raw'
+import chatSource from '../composables/useClarificationChat.ts?raw'
+import pipelineSource from '../composables/useDocumentPipeline.ts?raw'
 import typesSource from '../types/index.ts?raw'
 
 /**
@@ -61,5 +64,45 @@ describe('死代码清理', () => {
 
   it('API 客户端不再残留只服务于已删函数的请求体类型', () => {
     expect(apiSource).not.toMatch(/export interface GeneratePrdStreamPayload\s*\{/)
+  })
+
+  /**
+   * 运行视图的接管清单与**真实发起任务的地方**必须对得上（#68）。
+   *
+   * 这条守卫来自一次真实事故：兜底清单只手写了「修复」与「重审」，于是
+   * **一键更新**（走生成任务）与**按澄清改写 / AI 自行澄清**在途时切走再切回来就失联了。
+   * 判据只有一条——「这个动作发起时界面会不会切进运行视图」——所以清单必须覆盖
+   * 每一处真正 `job.start('<kind>')` 的调用，且**每一项的分类都要写在这里**：
+   * 新增一个任务种类却没碰清单，这条用例就会红。
+   */
+  it('运行视图接管清单覆盖每一处 job.start 的任务种类（#68 防再漏）', () => {
+    const kindsStartedInSource = new Set<string>()
+    for (const source of [pipelineSource, chatSource]) {
+      for (const match of source.matchAll(/job\.start\(\s*'([^']+)'/g)) {
+        kindsStartedInSource.add(match[1] ?? '')
+      }
+    }
+    // 源码里确实扫到了东西（防止正则失效后这条用例变成永远为真）
+    expect(kindsStartedInSource.size).toBeGreaterThanOrEqual(8)
+
+    for (const kind of kindsStartedInSource) {
+      expect(
+        Object.prototype.hasOwnProperty.call(JOB_KIND_NAVIGATES_TO_RUN_VIEW, kind),
+        `任务种类「${kind}」没有登记是否接管运行视图：它的发起处会切阶段，漏登记就会「切走再切回来看不见」`,
+      ).toBe(true)
+    }
+
+    // 分类本身也是结论，改动必须是有意的
+    expect(JOB_KIND_NAVIGATES_TO_RUN_VIEW).toEqual({
+      prd: true,
+      'api-docs': true,
+      prompts: true,
+      clarify: true,
+      'auto-clarify': true,
+      review: true,
+      'review-fix': true,
+      optimize: false,
+      chat: false,
+    })
   })
 })
