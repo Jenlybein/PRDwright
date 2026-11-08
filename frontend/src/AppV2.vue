@@ -42,6 +42,7 @@ import {
   hasRequirementChat,
   inputPageOnBar,
   normalizeChatStage,
+  reviewStateFor,
 } from '@/utils/workflow'
 import {
   CHAT_STAGES,
@@ -620,6 +621,79 @@ const versionDrawerOpen = ref(false)
 const activeDocKind = computed(() => docKindOfState(viewState.value))
 
 /**
+ * 在途的修复任务作用在哪一份产物；没有就为 null（票 #68）。
+ *
+ * 只认 `review-fix`：重审不产出正文，没有「正在长出来的那一份」可看，
+ * 把它也塞进运行视图只会让用户盯着一张不动的页。
+ */
+const fixingDocKind = computed<DocumentKind | null>(() => {
+  const run = runs.activeRun
+  if (!run || run.status !== 'running' || run.jobKind !== 'review-fix') return null
+  return run.docKind
+})
+
+/**
+ * 用户点了「查看当前版本」的那一份产物——**压制位**（票 #68）。
+ *
+ * 运行视图现在由在途任务兜底渲染，因此「我不要看过程，先读旧版」这个意图必须被记住：
+ * 不记的话，兜底渲染会在下一帧把人弹回运行视图，那个出口等于不存在。
+ *
+ * 它**不落库**，只在「本次停留 + 本次任务」内有效：任务收尾、离开这份产物、开始新任务
+ * 都会清掉。持久化会把一个临时阅读意图升格成配置，而默认落点必须稳定——否则用户
+ * 永远不知道切回来会落在哪儿。
+ */
+const suppressedRunViewFor = ref<DocumentKind | null>(null)
+
+// 任务换了一支（起跑或收尾）、或人离开了那一份产物：两种情况下默认落点都该重新算一次
+watch(fixingDocKind, () => {
+  suppressedRunViewFor.value = null
+})
+watch(activeDocKind, (now) => {
+  if (suppressedRunViewFor.value !== null && suppressedRunViewFor.value !== now) {
+    suppressedRunViewFor.value = null
+  }
+})
+
+/**
+ * 此刻该不该画**运行视图**（票 #68）。
+ *
+ * 两种情形都算：
+ * 1. 界面本来就停在这份文档的生成态（用户刚发起，或任务失败后留在原地看错误）；
+ * 2. 界面停在审阅态，但**眼前这一份**正有一支修复任务在途——这正是「切走再切回来
+ *    看到的是审阅页、没法知道修到哪」的那个洞。
+ *
+ * 第 2 条带两个约束：产物必须**对得上**（一边在修 PRD、一边在看接口文档，那张页不该
+ * 被打扰），且用户没有点过「查看当前版本」（压制位）。
+ */
+const isRunViewVisible = computed(() => {
+  if (isGeneratingPhase.value) return true
+  const fixing = fixingDocKind.value
+  if (fixing === null || activeDocKind.value !== fixing) return false
+  return suppressedRunViewFor.value !== fixing
+})
+
+/** 运行视图上的「查看当前版本」：压住兜底渲染，停在审阅页读还没被写的那一版 */
+function viewCurrentVersion(): void {
+  const kind = fixingDocKind.value
+  if (kind === null) return
+  suppressedRunViewFor.value = kind
+  goTo(reviewStateFor(kind))
+}
+
+/**
+ * 眼下这张运行视图写的是哪一份产物。
+ *
+ * 生成态与审阅态各有一套反推：优化 / 修复期间可能停在审阅态，而生成 / 改写期间停在
+ * 生成态——两种都要能答出「这是哪一份」，否则「查看当前版本」只在某一种落点上出现。
+ */
+const runViewDocKind = computed(() => activeDocKind.value ?? docKindOfGeneratingState(viewState.value))
+
+/** 这张运行视图上要不要给「查看当前版本」：只有正在修这一份时才给 */
+const canViewPastVersion = computed(
+  () => fixingDocKind.value !== null && runViewDocKind.value === fixingDocKind.value,
+)
+
+/**
  * 眼前这一份产物是否正在被写。
  *
  * 判据是**产物**而不是「有没有任务在跑」：正在生成接口文档时，PRD 的审阅页、
@@ -1175,9 +1249,9 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         @rewrite="applyClarification"
       />
 
-      <!-- 文档生成中 / 生成失败（PRD / 接口文档 / 提示词 / 优化共用） -->
+      <!-- 文档生成中 / 生成失败 / 正在被修复（PRD / 接口文档 / 提示词 / 优化共用） -->
       <GeneratingStage
-        v-else-if="isGeneratingPhase"
+        v-else-if="isRunViewVisible"
         :title="activeDocTitle"
         :streaming-content="docStreamingContent"
         :error="docError"
@@ -1190,7 +1264,9 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :elapsed-ms="elapsedMs"
         :back-label="backLabel"
         :hide-back="inputPageOnBar(store.entryMode)"
+        :view-past-version="canViewPastVersion"
         @back="backToInput"
+        @view-current-version="viewCurrentVersion"
       />
 
       <!-- 文档待确认（PRD / 接口文档 / 提示词共用） -->
