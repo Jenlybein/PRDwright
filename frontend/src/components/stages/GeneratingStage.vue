@@ -3,11 +3,10 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import DocumentReview from '@/components/DocumentReview.vue'
 import DocPhaseProgress from '@/components/ui/DocPhaseProgress.vue'
-import PrdProgress from '@/components/stages/PrdProgress.vue'
 import StageOutputStream from '@/components/ui/StageOutputStream.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
-import type { DocPhase, PrdBoardState } from '@/types'
+import type { DocPhase } from '@/types'
 import { isWaitingRetry, retryNoticeText, retryRemainingMs } from '@/utils/backoff'
 import { formatDuration } from '@/utils/metering'
 
@@ -17,8 +16,8 @@ import { formatDuration } from '@/utils/metering'
  * PRD、接口文档、提示词套件以及 AI 优化共用同一个生成态：生成期间只读展示流式内容，
  * 失败（如被截断）时不再渲染空的审阅区，只把原因贴出来并给出返回入口。
  *
- * PRD 走的是分章节链路（撰写 → 审核 → 改写），额外用 `prd` 传入阶段进度；
- * 其它文档与降级路径不传，行为与拆分前完全一致。
+ * 票 #92 起三份产物共用同一套阶段条（大纲 → 撰写 → 审核 → 改写），不再有 PRD 专用的
+ * 多章看板。
  */
 // ⚠️ 布尔 prop 在**未传**时会被 Vue 自动转成 `false`，因此凡「默认该开」的开关都要
 // 显式给默认值：`withReview` 未传必须是 true，否则完整流程的四车道会被悄悄砍成两条。
@@ -32,8 +31,6 @@ const props = withDefaults(
     error?: string
     /** 是否仍在生成中；为 false 表示已失败，只展示错误与返回入口 */
     generating?: boolean
-    /** PRD 分章节生成的管道看板；非 PRD 时为 null */
-    prd?: PrdBoardState | null
     /** 下游文档（接口 / 提示词）的生成阶段；idle 表示未走该链路 */
     docPhase?: DocPhase | null
     /**
@@ -56,8 +53,6 @@ const props = withDefaults(
      * 而审核 / 改写的输出换阶段就该清。
      */
     docOutlineText?: string
-    /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
-    draftOnly?: boolean
     /**
      * 本次生成已用时（毫秒），由任务运行态统一维护（见 `composables/useJob.ts`）。
      *
@@ -176,15 +171,9 @@ onBeforeUnmount(stopTicker)
 <template>
   <section class="space-y-3">
     <template v-if="!waiting">
-      <!-- 分章节生成时先给出阶段条：让用户知道卡在哪一章、是否在改写 -->
-      <PrdProgress
-        v-if="prd && (prd.total > 0 || prd.sections.length > 0)"
-        :board="prd"
-        :with-review="withReview"
-      />
-      <!-- 下游文档：整篇生成 →（审核 → 改写）→ 完成；不复核时就只有首尾两格 -->
+      <!-- 三份产物共用：整篇生成 →（审核 → 改写）→ 完成；不复核时就只有首尾两格 -->
       <DocPhaseProgress
-        v-else-if="docPhase && docPhase !== 'idle'"
+        v-if="docPhase && docPhase !== 'idle'"
         :phase="docPhase"
         :with-review="withReview"
       />
@@ -276,7 +265,6 @@ onBeforeUnmount(stopTicker)
       :title="title"
       :streaming-content="streamingContent"
       :generating="true"
-      :draft-only="draftOnly"
       :status-label="statusLabel"
     />
     <!-- 页面级操作栏：生成中 / 失败时只有「返回」这一条退路，主操作区留空。

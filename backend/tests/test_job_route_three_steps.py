@@ -30,7 +30,6 @@ from backend.services import (
     job_runtime,
     job_ticket,
     llm_factory,
-    prd_section_writer,
 )
 from backend.services.job_bus import job_bus
 from dbsupport import connect
@@ -70,7 +69,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 def _fake_document_service(monkeypatch, llm: ScriptedLLM) -> None:

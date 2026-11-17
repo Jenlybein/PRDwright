@@ -28,7 +28,6 @@ from backend.services import (
     document_service,
     job_runtime,
     llm_factory,
-    prd_section_writer,
 )
 from backend.services.job_bus import job_bus
 from fakes import ScriptedLLM
@@ -47,7 +46,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
     yield
 
 
@@ -393,9 +391,11 @@ def test_prd_job_takes_summary_and_requirement_history_from_server(client, monke
     assert "手工记账太麻烦" in prompts
     assert "登录方式确定为手机号验证码" in prompts
     assert "请求体里的需求" not in prompts
-    # 产品名也从摘要里取：文档头由代码生成，取错名字一眼能看出来
+    # 产品名也从摘要里取：它进需求文本（提示词），文档头由模型按模板渲染。
+    # 票 #92 起不再由代码拼文档头，因此这里断言「提示词里有产品名」+「正文就是模型产物」。
+    assert "记账助手" in prompts
     prd = _documents(client, solution_id)["prd"]
-    assert prd["content"].startswith("# 记账助手 产品需求文档")
+    assert prd["content"].strip() == "章节正文"
 
 
 def test_quick_flow_prd_takes_free_text_requirements_from_server(client, monkeypatch):
@@ -420,6 +420,8 @@ def test_quick_flow_prd_takes_free_text_requirements_from_server(client, monkeyp
         client, {"kind": "prd", "solution_id": solution_id, "review_enabled": False}
     )
 
-    assert "一句话需求：做一个多人共享的账本" in _all_prompts(llm)
+    prompts = _all_prompts(llm)
+    assert "一句话需求：做一个多人共享的账本" in prompts
+    assert "共享账本" in prompts  # 快捷入口单独填的产品名同样进需求文本
     prd = _documents(client, solution_id)["prd"]
-    assert prd["content"].startswith("# 共享账本 产品需求文档")
+    assert prd["content"].strip() == "章节正文"

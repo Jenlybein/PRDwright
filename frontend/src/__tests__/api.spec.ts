@@ -78,27 +78,19 @@ afterEach(() => {
 })
 
 describe('SSE 事件解析', () => {
-  it('把 stage 事件从 snake_case 映射成前端字段，并把 chunk 交给增量回调', async () => {
+  it('把 stage 事件映射成前端字段，并把 chunk 交给增量回调', async () => {
     const fetchMock = vi.fn(async () =>
       streamResponse([
-        sseFrame('status', { type: 'status', content: '正在分 7 章生成 PRD…', data: { total_sections: 7 } }),
+        sseFrame('status', { type: 'status', content: '正在生成 PRD…' }),
         sseFrame('chunk', { type: 'chunk', content: '# 标题\n\n' }),
         sseFrame('stage', {
           type: 'stage',
-          content: '正在撰写 ## 2. 功能需求（2/7）…',
-          data: {
-            stage: 'writing',
-            section_id: 'features',
-            section_title: '功能需求',
-            section_heading: '## 2. 功能需求',
-            index: 1,
-            total: 7,
-          },
+          content: '正在撰写…',
+          data: { stage: 'writing' },
         }),
         sseFrame('chunk', { type: 'chunk', content: '## 2. 功能需求\n\n正文' }),
         // 半帧 + 半帧：验证跨读取边界的缓冲区拼接
-        'event: stage\ndata: {"type":"stage","data":{"stage":"rewrit',
-        'ing","section_id":"features","section_title":"功能需求","index":1,"total":7,"note":"编造了指标","issues":[{"severity":"high","detail":"出现输入中没有的数据"}]}}\n\n',
+        'event: stage\ndata: {"type":"stage","data":{"stage":"rewriting","note":"编造了指标","issues":[{"severity":"high","detail":"出现输入中没有的数据"}]}}\n\n',
         sseFrame('done', { type: 'done', content: '', data: { doc_type: 'prd', reply: '完整正文' } }),
         'data: [DONE]\n\n',
       ]),
@@ -116,37 +108,21 @@ describe('SSE 事件解析', () => {
     expect(result.reply).toBe('完整正文')
 
     expect(stages).toHaveLength(2)
-    expect(stages[0]).toEqual({
-      stage: 'writing',
-      sectionId: 'features',
-      sectionTitle: '功能需求',
-      sectionHeading: '## 2. 功能需求',
-      index: 1,
-      total: 7,
-      note: '',
-      issues: [],
-    })
+    expect(stages[0]).toEqual({ stage: 'writing', note: '', issues: [] })
     // 跨块拼接后的改写事件：原因与问题清单都要完整解析出来
     expect(stages[1]?.stage).toBe('rewriting')
     expect(stages[1]?.note).toBe('编造了指标')
     expect(stages[1]?.issues).toEqual([{ severity: 'high', detail: '出现输入中没有的数据' }])
   })
 
-  it('把 part 事件映射成前端字段：定稿文本可直接按序拼回最终正文', async () => {
+  it('把 part 事件映射成前端字段：改写稿整段覆盖初稿', async () => {
     const fetchMock = vi.fn(async () =>
       streamResponse([
         sseFrame('part', { type: 'part', content: '', data: { text: '# 标题\n\n' } }),
         sseFrame('part', {
           type: 'part',
           content: '',
-          data: {
-            text: '## 2. 功能需求\n\n正文\n\n',
-            section_id: 'features',
-            section_title: '功能需求',
-            section_heading: '## 2. 功能需求',
-            index: 1,
-            total: 7,
-          },
+          data: { text: '## 2. 功能需求\n\n正文\n\n' },
         }),
         sseFrame('done', {
           type: 'done',
@@ -162,19 +138,8 @@ describe('SSE 事件解析', () => {
     const result = await streamOnce({ onPart: (part) => parts.push(part) })
 
     expect(parts).toHaveLength(2)
-    // 文档头不属于任何章节：章节字段全部退化为默认值
-    expect(parts[0]).toEqual({
-      text: '# 标题\n\n',
-      replace: false,
-      sectionId: '',
-      sectionTitle: '',
-      sectionHeading: '',
-      index: 0,
-      total: 0,
-    })
-    expect(parts[1]?.sectionId).toBe('features')
-    expect(parts[1]?.sectionTitle).toBe('功能需求')
-    expect(parts[1]?.index).toBe(1)
+    expect(parts[0]).toEqual({ text: '# 标题\n\n', replace: false })
+    expect(parts[1]).toEqual({ text: '## 2. 功能需求\n\n正文\n\n', replace: false })
     // 契约：part 文本按序拼接后即最终正文（前端预览与落库正文同源）
     expect(parts.map((part) => part.text).join('').trim()).toBe(result.reply)
   })
@@ -182,7 +147,7 @@ describe('SSE 事件解析', () => {
   it('part 事件缺 text 时退化为空串，不影响后续事件', async () => {
     const fetchMock = vi.fn(async () =>
       streamResponse([
-        sseFrame('part', { type: 'part', content: '', data: { section_id: 'features' } }),
+        sseFrame('part', { type: 'part', content: '', data: {} }),
         sseFrame('done', { type: 'done', content: '', data: { reply: '正文' } }),
       ]),
     )
@@ -199,7 +164,7 @@ describe('SSE 事件解析', () => {
   it('stage 事件字段缺失或类型不对时退化为默认值，不打断整条流', async () => {
     const fetchMock = vi.fn(async () =>
       streamResponse([
-        sseFrame('stage', { type: 'stage', content: '', data: { stage: 'reviewing', index: '2' } }),
+        sseFrame('stage', { type: 'stage', content: '', data: { stage: 'reviewing', note: 3 } }),
         sseFrame('chunk', { type: 'chunk', content: '仍然后续内容' }),
         sseFrame('done', { type: 'done', content: '', data: { reply: '仍然后续内容' } }),
       ]),
@@ -210,16 +175,8 @@ describe('SSE 事件解析', () => {
     const result = await streamOnce({ onStage: (event) => stages.push(event) })
 
     expect(stages).toHaveLength(1)
-    expect(stages[0]).toEqual({
-      stage: 'reviewing',
-      sectionId: '',
-      sectionTitle: '',
-      sectionHeading: '',
-      index: 0, // 字符串型的 index 视为缺失
-      total: 0,
-      note: '',
-      issues: [],
-    })
+    // 类型不对的 note 退化为空串（不是 "3"）
+    expect(stages[0]).toEqual({ stage: 'reviewing', note: '', issues: [] })
     expect(result.reply).toBe('仍然后续内容')
   })
 
@@ -519,9 +476,6 @@ describe('生成任务接口（jobs）', () => {
             doc_kind: 'prd',
             finalized_text: '# 产品需求文档\n\n',
             live_buffer: '半句',
-            completed_sections: [
-              { section_id: 'overview', heading: '## 1. 产品概述', text: '## 1. 产品概述\n\n正文\n\n' },
-            ],
             solution_id: 3,
             error_code: '',
             error_message: '',
@@ -602,13 +556,8 @@ describe('生成任务接口（jobs）', () => {
         phase: 'writing',
         finalizedText: '# 产品需求文档\n\n',
         liveBuffer: '半句',
-        // 按章半成品：这份快照没带该字段（旧后端 / 纯内存外的情况），退化为空数组
-        liveBySection: [],
-        // 阶段输出（审核意见 / 改写稿）：PRD 快照不带，退化为空串
+        // 阶段输出（审核意见 / 改写稿）：这份快照没带，退化为空串
         stageText: '',
-        completedSections: [
-          { sectionId: 'overview', heading: '## 1. 产品概述', text: '## 1. 产品概述\n\n正文\n\n' },
-        ],
         solutionId: 3,
         errorCode: '',
         errorMessage: '',
@@ -723,7 +672,7 @@ describe('生成任务接口（jobs）', () => {
     expect(summary.requestId).toBe('')
   })
 
-  it('snapshot 的 completed_sections 逐项校验，坏项被丢弃而不打断整条流', async () => {
+  it('snapshot 里已退役的章节字段被忽略，不影响其余字段的解析', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -733,8 +682,9 @@ describe('生成任务接口（jobs）', () => {
             content: '',
             data: {
               job_id: 6,
-              // 第一项不是对象：应被丢弃，而不是让整段快照失效
+              // 票 #92 起后端不再下发这两项；旧后端 / 旧客户端缓存里仍可能带着，必须无害
               completed_sections: ['坏项', { section_id: 'overview', heading: '## 1', text: '正文' }],
+              live_by_section: [{ section_id: 'overview', index: 0, text: '半截', phase: 'writing' }],
             },
           }),
           sseFrame('done', { type: 'done', content: '', data: { reply: '正文' } }),
@@ -745,9 +695,8 @@ describe('生成任务接口（jobs）', () => {
     const snapshots: JobSnapshot[] = []
     await readJobStream(6, { onSnapshot: (snap) => snapshots.push(snap) })
 
-    expect(snapshots[0]?.completedSections).toEqual([
-      { sectionId: 'overview', heading: '## 1', text: '正文' },
-    ])
+    expect(snapshots[0]).not.toHaveProperty('completedSections')
+    expect(snapshots[0]).not.toHaveProperty('liveBySection')
     // 缺字段各退化为自己的默认值
     expect(snapshots[0]?.status).toBe('')
     expect(snapshots[0]?.solutionId).toBeNull()
@@ -848,7 +797,7 @@ describe('生成任务接口（jobs）', () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/jobs/9/stream')
   })
 
-  it('chunk 帧带章节归属：并行时前端才知道这一片属于哪一章', async () => {
+  it('chunk 帧只保留文本：即使旧后端带了章节归属也一律忽略', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -865,60 +814,21 @@ describe('生成任务接口（jobs）', () => {
     const chunks: StreamChunk[] = []
     await readJobStream(11, { onChunk: (chunk) => chunks.push(chunk) })
 
-    expect(chunks).toEqual([{ text: '半句', sectionId: 'overview', index: 0 }])
+    expect(chunks).toEqual([{ text: '半句' }])
   })
 
-  it('chunk 帧没有归属时退化成空 sectionId 与 -1（不能被当成第一章）', async () => {
+  it('chunk 帧没有归属也照常解析（整篇正文只有一条缓冲）', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
-        streamResponse([
-          // 整篇文档 / 对话的增量本来就不分章；`index` 若退化成 0 会把字塞进第一章
-          sseFrame('chunk', { type: 'chunk', content: '正文', data: {} }),
-        ]),
+        streamResponse([sseFrame('chunk', { type: 'chunk', content: '正文', data: {} })]),
       ),
     )
 
     const chunks: StreamChunk[] = []
     await readJobStream(12, { onChunk: (chunk) => chunks.push(chunk) })
 
-    expect(chunks).toEqual([{ text: '正文', sectionId: '', index: -1 }])
-  })
-
-  it('snapshot 解析按章半成品，坏项丢弃', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        streamResponse([
-          sseFrame('snapshot', {
-            type: 'snapshot',
-            content: '',
-            data: {
-              job_id: 13,
-              kind: 'prd',
-              status: 'running',
-              phase: 'writing',
-              finalized_text: '',
-              live_buffer: '',
-              live_by_section: [
-                { section_id: 'overview', index: 0, text: '第一章半截', phase: 'writing' },
-                // 没有正文的项：没有可显示的东西，丢弃
-                { section_id: 'features', index: 1, text: '', phase: 'writing' },
-                // 没有 section_id 的项：归属不明，丢弃
-                { index: 2, text: '无主正文', phase: 'writing' },
-              ],
-            },
-          }),
-        ]),
-      ),
-    )
-
-    const snapshots: JobSnapshot[] = []
-    await readJobStream(13, { onSnapshot: (snap) => snapshots.push(snap) })
-
-    expect(snapshots[0]?.liveBySection).toEqual([
-      { sectionId: 'overview', index: 0, text: '第一章半截', phase: 'writing' },
-    ])
+    expect(chunks).toEqual([{ text: '正文' }])
   })
 
   it('fetchActiveJobs 按过滤条件拼查询参数，kind 用下划线口径', async () => {

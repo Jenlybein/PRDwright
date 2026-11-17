@@ -10,7 +10,6 @@ import type {
   ChatMessage,
   ChatStage,
   ClarificationAsk,
-  CompletedSection,
   DocKind,
   DocumentKind,
   JobSnapshot,
@@ -25,7 +24,6 @@ import type {
   StreamDocumentPart,
   StreamChunk,
   StreamStageChunk,
-  SectionDraft,
   StreamStageEvent,
   ToolCallRef,
   ToolResultPayload,
@@ -165,27 +163,24 @@ export interface StreamHandlers {
   /**
    * 收到增量文本时触发。
    *
-   * 参数是**对象**而不是裸字符串：分章节链路里多章同时在吐字，必须带上 `sectionId`
-   * 才知道这一片属于哪一章（否则只能丢弃——那正是「PRD 不流式」的历史成因）。
-   * 不分章的场景（整篇文档、对话）`sectionId` 为空串、`index` 为 -1。
+   * 参数是对象而不是裸字符串：三份产物都整篇生成，正文只有一条缓冲（票 #92 起
+   * `chunk` 不再带章节归属）。
    */
   onChunk?: (chunk: StreamChunk) => void
   /**
-   * 收到 `part` 定稿正文事件时触发。
-   * 目前只有「分章节生成 PRD」会下发：文档头一次、每一章一次。
+   * 收到 `part` 定稿正文事件时触发：审核发现问题后整篇改写一次时，改写稿整段覆盖初稿。
    */
   onPart?: (part: StreamDocumentPart) => void
   /**
-   * 收到 `stage` 阶段事件时触发。
-   * 目前只有「分章节生成 PRD」会下发该事件，用于驱动前端的阶段指示，并在换章 /
-   * 改写时重置本章的实时缓冲。
+   * 收到 `stage` 阶段事件时触发（三份产物共用）：驱动阶段条的「走到哪一步」，
+   * 改写阶段还带审核给的改写原因。
    */
   onStage?: (event: StreamStageEvent) => void
   /**
    * 收到 `stage_chunk` 阶段内输出增量时触发。
    *
-   * 目前由「接口文档 / 提示词」的审核与改写两步下发：它们都是整篇量级的调用，
-   * 静默期很长，把模型的原始输出流出来，用户才看得出「确实在推进」。
+   * 由大纲 / 审核 / 改写三步下发：它们都是整篇量级的调用，静默期很长，
+   * 把模型的原始输出流出来，用户才看得出「确实在推进」。
    * 这些文本**不属于正文**，只用于阶段条下方的输出面板。
    */
   onStageChunk?: (chunk: StreamStageChunk) => void
@@ -205,7 +200,7 @@ export interface StreamHandlers {
    * 收到 `review` 审核结论时触发。
    *
    * **不持久化**：只在本次订阅内展示；刷新后不会补发，结论随之消失。
-   * PRD 是「聚合各章审核」，接口文档 / 提示词是「整篇审一次」。
+   * 三份产物都是整篇审一次（票 #92）。
    */
   onReview?: (review: ReviewConclusion) => void
   /**
@@ -389,21 +384,16 @@ function parseStageEvent(data: Record<string, unknown>): StreamStageEvent {
   const rawIssues = data.issues
   const issues = Array.isArray(rawIssues)
     ? rawIssues
-        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
         .map((item) => ({
-          severity: readString(item, 'severity'),
-          detail: readString(item, 'detail'),
+          severity: readString(item, "severity"),
+          detail: readString(item, "detail"),
         }))
     : []
 
   return {
-    stage: readString(data, 'stage'),
-    sectionId: readString(data, 'section_id'),
-    sectionTitle: readString(data, 'section_title'),
-    sectionHeading: readString(data, 'section_heading'),
-    index: readNumber(data, 'index'),
-    total: readNumber(data, 'total'),
-    note: readString(data, 'note'),
+    stage: readString(data, "stage"),
+    note: readString(data, "note"),
     issues,
   }
 }
@@ -424,19 +414,10 @@ function parseStageChunkEvent(event: StreamEventPayload): StreamStageChunk {
 /**
  * 把 `chunk` 事件归一成 `StreamChunk`。
  *
- * 增量文本走事件自带的 `content`，`data` 只负责说明「这属于哪一章」。
- * 与 `parseStageChunkEvent` 完全同构（那一路就是这么拿到 `stage` 的）：
- * 分章节链路靠 `section_id` 把字送进对的卡片，缺了就退化空串由调用方丢弃。
+ * 票 #92 起 `chunk` 不带章节归属：正文只有一条缓冲，「这一片归哪一章」不再存在。
  */
 function parseChunkEvent(event: StreamEventPayload): StreamChunk {
-  const rawIndex = event.data.index
-  return {
-    text: event.content,
-    sectionId: readString(event.data, 'section_id'),
-    // 缺失退化成 -1 而不是 0：0 是**合法的第一章**，用它兜底会把无归属的增量
-    // 悄悄塞进第一章。
-    index: typeof rawIndex === 'number' && Number.isFinite(rawIndex) ? rawIndex : -1,
-  }
+  return { text: event.content }
 }
 
 /**
@@ -448,13 +429,8 @@ function parseChunkEvent(event: StreamEventPayload): StreamChunk {
  */
 function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
   return {
-    text: readString(data, 'text'),
+    text: readString(data, "text"),
     replace: data.replace === true,
-    sectionId: readString(data, 'section_id'),
-    sectionTitle: readString(data, 'section_title'),
-    sectionHeading: readString(data, 'section_heading'),
-    index: readNumber(data, 'index'),
-    total: readNumber(data, 'total'),
   }
 }
 
@@ -470,37 +446,10 @@ export { parseReview }
  * 把任务流 `snapshot` 事件的 `data` 归一成 `JobSnapshot`。
  *
  * 与其它解析函数同一口径：字段缺失或类型不对只退化那一个字段，不打断整条流。
- * `completedSections` 会逐项校验，坏项被丢弃而不是让整段快照失效。
+ * 票 #92 起章节级字段（`completed_sections` / `live_by_section`）随分章链路退役。
  */
 function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
-  const completedSections: CompletedSection[] = readObjectArray(data, 'completed_sections').map(
-    (item) => {
-      const section: CompletedSection = {
-        sectionId: readString(item, 'section_id'),
-        heading: readString(item, 'heading'),
-        text: readString(item, 'text'),
-      }
-      // 旧快照没有这两个字段：缺省就不写，保持既有形状（并行链路才带 index/failed）
-      if (typeof item.index === 'number') section.index = item.index
-      if (item.failed === true) section.failed = true
-      return section
-    },
-  )
-
   const rawSolutionId = data.solution_id
-  // 按章半成品：只认带 sectionId 且有字的项。缺 index 时用数组序兜底
-  // （与 `completedSections` 同口径：旧后端 / 坏数据不该让整段快照失效）。
-  const liveBySection: SectionDraft[] = readObjectArray(data, 'live_by_section')
-    .map((item, position): SectionDraft => {
-      const rawIndex = item.index
-      return {
-        sectionId: readString(item, 'section_id'),
-        index: typeof rawIndex === 'number' ? rawIndex : position,
-        text: readString(item, 'text'),
-        phase: readString(item, 'phase') || 'writing',
-      }
-    })
-    .filter((item) => item.sectionId !== '' && item.text !== '')
   return {
     jobId: readNumber(data, 'job_id'),
     kind: readString(data, 'kind'),
@@ -511,9 +460,7 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     phase: readString(data, 'phase'),
     finalizedText: readString(data, 'finalized_text'),
     liveBuffer: readString(data, 'live_buffer'),
-    liveBySection,
     stageText: readString(data, 'stage_text'),
-    completedSections,
     solutionId: typeof rawSolutionId === 'number' ? rawSolutionId : null,
     errorCode: readString(data, 'error_code'),
     errorMessage: readString(data, 'error_message'),

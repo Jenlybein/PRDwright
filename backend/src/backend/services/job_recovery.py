@@ -291,7 +291,6 @@ def _progress_payload(session, owner_id: int, job_id: int) -> job_state.FinishPa
         return job_state.FinishPayload()
     return job_state.FinishPayload(
         draft_content=job.draft_content or "",
-        completed_sections=_load(job.completed_sections, []) or [],
         usage=job.usage,
         pending_items=_load(job.pending_items, None),
         prompt_tokens=int(job.prompt_tokens or 0),

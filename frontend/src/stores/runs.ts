@@ -40,17 +40,14 @@ import type {
   DocPhase,
   DocumentKind,
   JobSnapshot,
-  PrdBoardState,
   ReviewConclusion,
   RunSummary,
 } from '@/types'
 
-/** 一次任务的预览态（正文 / 看板 / 阶段 / 审核结论 / 错误），整体随运行态清理 */
+/** 一次任务的预览态（正文 / 阶段 / 审核结论 / 错误），整体随运行态清理 */
 export interface RunPreview {
   /** 流式正文（生成中逐字追加，收尾后即最终正文） */
   content: string
-  /** PRD 分章节看板；其它产物为 null */
-  prdBoard: PrdBoardState | null
   /** 当前阶段（loading 条） */
   docPhase: DocPhase
   /** 当前阶段模型的原始输出（审核意见 / 改写稿），只给阶段面板看 */
@@ -107,8 +104,7 @@ export interface ActiveRun extends RunPointer {
 function emptyPreview(): RunPreview {
   return {
     content: '',
-    prdBoard: null,
-    docPhase: 'idle',
+      docPhase: 'idle',
     stageText: '',
     outlineText: '',
     review: null,

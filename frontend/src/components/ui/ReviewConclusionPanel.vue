@@ -414,7 +414,7 @@ const fixHint = computed(() => {
                 {{ severityLabel(issue.severity) }}
               </span>
               <span>
-                <template v-if="issue.sectionTitle">{{ issue.sectionTitle }}：</template>
+                <template v-if="issue.where">{{ issue.where }}：</template>
                 {{ issue.detail }}
               </span>
             </li>

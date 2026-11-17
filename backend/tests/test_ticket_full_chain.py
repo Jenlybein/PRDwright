@@ -32,7 +32,6 @@ from backend.services import (
     job_service,
     job_runtime,
     llm_factory,
-    prd_section_writer,
 )
 from backend.services.job_bus import job_bus
 from backend.services.job_ticket import (
@@ -78,7 +77,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 @pytest.fixture
@@ -209,37 +207,39 @@ def test_fake_stream_app_error_keeps_budget_exceeded_code(alice):
     assert events[-1].data["status"] == "failed"
 
 
-def test_fake_stream_out_of_order_parts_reassemble_by_index(alice):
-    """分章乱序：part 按 index 装配成权威正文，终态与落库正文同源。"""
+def test_fake_stream_replace_part_wins_over_the_initial_chunks(alice):
+    """整篇改写：`part{replace}` 整段覆盖初稿，终态与落库正文同源。
 
-    async def out_of_order(kind, request):
-        # 故意乱序：第 2 章先到、文档头其次、第 1 章最后。
+    分章时代的「按 index 装配」已随票 #92 退役；三份产物都只有「初稿 chunk →
+    （必要时）整篇改写稿 part{replace}」这一种形态。落库正文必须是**覆盖后**的全文，
+    否则初稿与改稿会在同一份档里叠字。
+    """
+
+    async def rewritten(kind, request):
+        yield StreamEvent(type="chunk", content="# 初稿\n\n旧正文\n", data={})
         yield StreamEvent(
-            type="part", content="", data={"text": "第2章\n", "index": 1, "section_id": "features"}
+            type="part", content="", data={"text": "# 改后全文\n\n新正文\n", "replace": True}
         )
-        yield StreamEvent(type="part", content="", data={"text": "# 文档头\n"})
         yield StreamEvent(
-            type="part", content="", data={"text": "第1章\n", "index": 0, "section_id": "overview"}
-        )
-        yield StreamEvent(
-            type="done", content="", data={"reply": "# 文档头\n第1章\n第2章\n", "partial": False}
+            type="done", content="", data={"reply": "# 改后全文\n\n新正文\n", "partial": False}
         )
 
     registered, events = run_ticket(
         owner_id=alice,
         solution_id=None,
         kind="prd",
-        request={"requirements": "乱序", "product_name": "装配"},
-        event_stream_source=out_of_order,
+        request={"requirements": "覆盖", "product_name": "装配"},
+        event_stream_source=rewritten,
     )
 
     done = next(event for event in events if event.type == "done")
-    assert done.data["reply"] == "# 文档头\n第1章\n第2章\n"
+    assert done.data["reply"] == "# 改后全文\n\n新正文\n"
     assert events[-1].data["status"] == "succeeded"
     row = _row(registered.job_id)
     assert row["status"] == "succeeded"
-    # 最终落库正文按 index 交错归并，不按到达顺序。
-    assert row["draft_content"] == "# 文档头\n第1章\n第2章\n"
+    # 覆盖语义：初稿不留在落库正文里
+    assert row["draft_content"] == "# 改后全文\n\n新正文\n"
+    assert "旧正文" not in row["draft_content"]
 
 
 def test_fake_stream_partial_done_marks_receipt_and_keeps_text(alice):

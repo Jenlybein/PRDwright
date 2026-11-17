@@ -638,38 +638,6 @@ export interface SummaryChange {
   after: unknown
 }
 
-/**
- * PRD 分章节生成的阶段。
- *
- * 与后端 `prd_section_writer` 的 `stage` 事件一一对应：
- * 逐章撰写（writing）→ 章节审核（reviewing）→ 有问题则改写（rewriting）→ 全部完成（done）。
- * 其它文档（接口文档 / 提示词 / 优化）走整篇生成，恒为 `idle`。
- */
-export type PrdGenerationStage = 'idle' | 'writing' | 'reviewing' | 'rewriting' | 'done'
-
-/**
- * 一次分章节生成的进度快照，由 `stage` 事件累积得出。
- *
- * `sectionId` 标识当前正在处理的章节：换章（`writing`）时前端要丢弃本章的实时缓冲，
- * 改写（`rewriting`）时则把缓冲留作「上一版草稿」提示。
- */
-export interface PrdStageProgress {
-  /** 当前阶段 */
-  stage: PrdGenerationStage
-  /** 当前章节 id；未开始时为空串 */
-  sectionId: string
-  /** 当前章节名称，如「功能需求」 */
-  sectionTitle: string
-  /** 当前章节标题行，如 `## 2. 功能需求` */
-  sectionHeading: string
-  /** 当前章节下标（从 0 开始）；未知为 0 */
-  index: number
-  /** 章节总数；未知为 0（例如后端降级为整篇生成时） */
-  total: number
-  /** 触发改写时的原因摘要；无则为空串 */
-  note: string
-}
-
 /** 一条审核问题（PRD 单章审核与下游整篇审核共用展示结构） */
 export interface ReviewIssue {
   severity: string
@@ -681,10 +649,8 @@ export interface ReviewIssue {
    * 归一化只在 `utils/review.ts::parseReview` 一处做，两处数据源不会分叉。
    */
   category?: string | null
-  /** 问题所在章节 id（PRD 用；下游整篇审核可能为空） */
-  sectionId?: string
-  /** 问题所在章节名（展示用） */
-  sectionTitle?: string
+  /** 问题所在的小节标题（模型给的 `where`，如 `## 2. 接口列表`）；整篇性问题为空串 */
+  where?: string
   detail: string
 }
 
@@ -736,47 +702,26 @@ export type DocPhase = 'idle' | 'outlining' | 'writing' | 'reviewing' | 'rewriti
 /**
  * 一段**已定稿正文**，由 `part` 事件下发。
  *
- * 后端每完成一段就把加工好的正文整段发下来：文档头一次、每一章一次。
- * `text` 已含必要的分隔空行，**可直接追加到文档末尾**——前端据此累积出与最终
- * `done.reply` 逐字一致的预览。之所以不按 `chunk` 自己拼：`chunk` 是模型原始输出，
- * 还差「补标题行」「补章间空行」两道加工，那是前端看不到的。
+ * 票 #92 起只剩一种语义：整段覆盖（`replace: true`）。生成路径不按章节追加——
+ * PRD 与另两份产物都整篇生成，改写稿用 `replace` 覆盖初稿。
  */
 export interface StreamDocumentPart {
-  /** 可直接追加到文档末尾的定稿文本（含分隔空行） */
+  /** 可直接替换当前预览的定稿全文 */
   text: string
-  /**
-   * 是否整段替换当前预览。
-   *
-   * 下游文档「审核发现问题 → 改写一次」时，改写稿用 `replace: true` 覆盖初稿；
-   * PRD 的定稿段不带这个标记（按章节归位，见 `index`）。
-   */
+  /** 是否整段替换当前预览（审核发现问题 → 整篇改写一次时为 true） */
   replace?: boolean
-  /** 是否为失败占位（并行链路）；前端据此停在失败车道并标红 */
-  failed?: boolean
-  /** 所属章节 id；文档头等不属于任何章节的部分为空串 */
-  sectionId: string
-  /** 所属章节名称，如「功能需求」；非章节部分为空串 */
-  sectionTitle: string
-  /** 所属章节标题行，如 `## 2. 功能需求`；非章节部分为空串 */
-  sectionHeading: string
-  /** 章节下标（从 0 开始）；非章节部分为 0 */
-  index: number
-  /** 章节总数；非章节部分为 0 */
-  total: number
 }
 
 /**
  * 一条 `stage` 事件解析出的结果。
- * 字段与后端 `prd_section_writer._section_stage_event` 的 `data` 一致。
+ *
+ * 三份产物共用同一条整篇路径：阶段只说明「走到哪一步」（outlining / writing /
+ * reviewing / rewriting / done），不再带章节归属。
  */
 export interface StreamStageEvent {
   /** 原始阶段名，可能是后端新增的取值；未知值由消费方归一为 `writing` */
   stage: string
-  sectionId: string
-  sectionTitle: string
-  sectionHeading: string
-  index: number
-  total: number
+  /** 改写原因（审核给出的一句话结论）；其余阶段为空串 */
   note: string
   /** 改写原因（审核给出的问题清单） */
   issues: { severity: string; detail: string }[]
@@ -799,19 +744,14 @@ export interface StreamStageChunk {
 /**
  * 一片正文增量（`chunk` 事件）。
  *
- * 分章节链路里**必须**带归属：多章同时吐字，`sectionId` 决定这一片进哪张卡片。
- * 不分章的场景（整篇文档、对话）`sectionId` 为空串、`index` 为 -1。
+ * 票 #92 起 `chunk` **不带章节归属**：PRD 与另两份产物都整篇生成，正文只有一条缓冲。
  *
  * ⚠️ 它是模型的**原始输出**（可能缺标题、章间没空行），只用于「过程中的显示」；
- * 权威正文以 `part` 为准，到了就整段覆盖。
+ * 权威正文以 `part`（整段覆盖）与 `done.reply` 为准。
  */
 export interface StreamChunk {
   /** 本次增量文本 */
   text: string
-  /** 所属章节 id；不分章时为空串 */
-  sectionId: string
-  /** 章节下标；不分章时为 -1（**不能**用 0 兜底，那是合法的第一章） */
-  index: number
 }
 
 // ============================================================================
@@ -833,85 +773,6 @@ export type JobState =
   | 'failed'
   | 'superseded'
   | 'cancelled'
-
-/** 一章在并行流水线里的阶段（4 列看板只按它分组） */
-export type PrdSectionPhase =
-  | 'pending'
-  | 'writing'
-  | 'reviewing'
-  | 'rewriting'
-  | 'done'
-  | 'failed'
-
-/** 管道看板里的一张章节卡片（按 index 排序渲染） */
-export interface PrdSectionCard {
-  sectionId: string
-  sectionTitle: string
-  sectionHeading: string
-  /** 章节下标；文档头为 -1 */
-  index: number
-  phase: PrdSectionPhase
-  /** 是否为失败占位（仍停在失败时的车道） */
-  failed: boolean
-  /** 定稿正文；未定稿为空串 */
-  text: string
-  /**
-   * 本章**还没定稿**的逐字缓冲。
-   *
-   * 与 `text` 分开存：`text` 是权威定稿（后端 `part` 下发后的文本），`draft` 是
-   * 模型正在吐的原始字。渲染取 `text || draft`，`part` 一到就清 `draft`——
-   * 于是「逐字看着它在长」与「最终正文与 done.reply 逐字一致」同时成立。
-   *
-   * `rewriting` / 重试会把它清零（信号是 `stage`，不是字符数回退）。
-   */
-  draft: string
-  /** 改写原因 / 失败原因 */
-  note: string
-  issues: { severity: string; detail: string }[]
-}
-
-/** PRD 生成的管道看板状态（并行与串行共用） */
-export interface PrdBoardState {
-  /** 章节总数；未知为 0 */
-  total: number
-  /** 文档头是否已下发 */
-  headerReady: boolean
-  /** 文档头正文（不属于任何章节） */
-  headerText: string
-  /** 章节卡片，恒按 index 升序 */
-  sections: PrdSectionCard[]
-  /** 本次审核结论（生成过程中的看板用；落库的那条见 `DocumentRecord.review`） */
-  review: ReviewConclusion | null
-  /** 是否有章节失败后被占位 */
-  partial: boolean
-  failedSections: FailedSection[]
-}
-
-/** 已定稿章节的结构化记录（后端 `snapshot` 的 `completed_sections` 项） */
-export interface CompletedSection {
-  /** 章节 id，如 `overview` */
-  sectionId: string
-  /** 章节标题行，如 `## 1. 产品概述` */
-  heading: string
-  /** 该章的定稿正文（可直接追加） */
-  text: string
-  /** 章节下标；旧快照可能缺失，前端按数组序兜底 */
-  index?: number
-  /** 该章是否为失败占位 */
-  failed?: boolean
-}
-
-/** 某一章「正在写」的半成品（后端 `snapshot` 的 `live_by_section` 项） */
-export interface SectionDraft {
-  /** 章节 id，如 `overview` */
-  sectionId: string
-  /** 章节下标（内容里有它就一定要用：并行时章节不按到达顺序） */
-  index: number
-  /** 这一章已经吐出的原始字（未过定稿加工） */
-  text: string
-  /** 该章当前所处阶段：writing / reviewing / rewriting */
-  phase: string
-}
 
 /**
  * 一次生成任务在订阅开始时的**快照**（后端 `snapshot` 事件的 `data`）。
@@ -936,29 +797,17 @@ export interface JobSnapshot {
   status: JobState
   /** 当前阶段（如 writing / reviewing / rewriting） */
   phase: string
-  /** 已定稿正文（文档头 + 各章，可直接作为预览前缀） */
+  /** 已定稿正文（整篇形态：改写稿覆盖后的全文；可直接作为预览前缀） */
   finalizedText: string
   /** 当前段落实时缓冲（尚未定稿的 chunk 增量） */
   liveBuffer: string
   /**
-   * **按章**的未定稿半成品（分章节链路专有）。
-   *
-   * 并行时好几章同时在写，`liveBuffer` 一格装不下（混在一起就分不开）。刷新重连时
-   * 靠它把「正在写的几章」摆回各自卡片并接着往下长；只含**还没定稿**的章——
-   * 定稿的在 `completedSections` 里，两处都发会让同一段正文出现两次。
-   *
-   * 与 `stageText` 同口径：不落库，进程重启后的兜底快照里恒为空数组。
-   */
-  liveBySection: SectionDraft[]
-  /**
-   * 当前阶段模型的原始输出（审核意见 / 改写稿）。
+   * 当前阶段模型的原始输出（大纲 / 审核意见 / 改写稿）。
    *
    * 断线重连时由任务运行时补回，面板因此不会在刷新后空着。它**不落库**：
    * 进程重启后的兜底快照里恒为空串。
    */
   stageText: string
-  /** 已定稿章节列表 */
-  completedSections: CompletedSection[]
   /** 关联方案 id；可空 */
   solutionId: number | null
   /** 失败时的错误码；正常为空串 */
@@ -971,9 +820,9 @@ export interface JobSnapshot {
    * 刷新重连时从任务记录（`generation_jobs.pending_items`）一并恢复，前端无需另发一次请求。
    */
   pendingItems: PendingItem[]
-  /** 是否有章节失败后被占位（仅 PRD 并行链路） */
+  /** 是否有落下一版「可用但不完整」的正文（部分完成） */
   partial: boolean
-  /** 失败章节清单 */
+  /** 失败章节清单（分章链路已退役，当前恒为空；保留形状给 #94 收口） */
   failedSections: FailedSection[]
   /**
    * 服务端算的任务已用时（毫秒）。
@@ -1069,9 +918,9 @@ export interface RunSummary {
    * 真正的拦截发生在超顶时，那时请求根本没发出，会直接转成 `error` 事件。
    */
   warnings: string[]
-  /** 是否有章节失败后被占位（仅 PRD 并行链路） */
+  /** 是否有落下一版「可用但不完整」的正文（部分完成） */
   partial: boolean
-  /** 失败章节清单 */
+  /** 失败章节清单（分章链路已退役，当前恒为空；保留形状给 #94 收口） */
   failedSections: FailedSection[]
   /** 实际使用的**协议**（openai_compatible / anthropic / ark / google_genai …） */
   protocol: string

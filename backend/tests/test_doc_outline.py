@@ -92,7 +92,7 @@ SUMMARY = {
     "scope": {"in_scope": ["结构化录入", "流式生成"], "out_of_scope": ["多用户协作"]},
 }
 
-PRD_SECTIONS = ("1. 产品概述", "2. 功能需求", "3. 页面设计", "4. 技术规格", "5. 非功能需求", "6. 项目范围")
+PRD_OUTLINE_SECTIONS = ("1. 产品概述", "2. 功能需求", "3. 页面设计", "4. 技术规格", "5. 非功能需求", "6. 项目范围")
 
 
 def _drain(events: AsyncIterator) -> list:
@@ -250,11 +250,11 @@ def test_prd_outline_follows_the_template_sections() -> None:
     outline = build_outline(
         "prd",
         upstream=json.dumps(SUMMARY, ensure_ascii=False, indent=2),
-        structure=PRD_SECTIONS,
+        structure=PRD_OUTLINE_SECTIONS,
     )
     assert outline is not None
     # 骨架顺序与模板逐字一致：大纲说的就是接下来要写的章节
-    assert [entry.heading for entry in outline.entries] == list(PRD_SECTIONS)
+    assert [entry.heading for entry in outline.entries] == list(PRD_OUTLINE_SECTIONS)
 
     rendered = render_outline(outline)
     assert "结构化录入" in rendered
@@ -388,43 +388,21 @@ def test_prompts_stream_degrades_too() -> None:
     assert done.data["reply"].strip() == "# 提示词套件"
 
 
-def test_prd_stream_shows_outline_before_the_first_section() -> None:
-    """PRD 也是三份之一：大纲在第一章之前出现，骨架就是模板章节。"""
-    from backend.services.prd_section_writer import PrdSectionWriter
-
-    class _WriterLLM:
-        """按照角色分流的假模型：撰写与审核共用，这里只回答问题、记录调用。"""
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def astream(self, messages: list[Any]) -> AsyncIterator[Any]:  # noqa: ANN401
-            from langchain_core.messages import AIMessageChunk
-
-            self.calls += 1
-            yield AIMessageChunk(content="## 章节正文\n\n内容")
-
-    writer = PrdSectionWriter(llm=_WriterLLM(), review_enabled=False)
-    events = _drain(
-        writer.stream(
-            summary=SUMMARY,
-            requirements="",
-            product_name="演示产品",
-        )
-    )
+def test_prd_stream_shows_outline_before_the_first_chunk() -> None:
+    """PRD 也是三份之一（票 #92 起整篇生成）：大纲在撰写之前出现，骨架即模板章节。"""
+    llm = ScriptedLLM(["# 演示产品 产品需求文档（PRD）\n\n## 1. 产品概述\n\n正文"])
+    service = DocumentService(llm=llm)
+    events = _drain(service.generate_prd_from_summary_stream(summary=SUMMARY))
 
     stages = _stages(events)
     assert stages[0] == "outlining", f"PRD 的第一格必须是大纲：{stages}"
     outline_text = _stage_chunks(events, "outlining")
-    assert "1. 产品概述" in outline_text
-    assert "2. 功能需求" in outline_text
-    # 预报的章节集合与真正会写出的章节集合一致
-    written_headings = [
-        str(event.data.get("section_heading", "")) for event in events if event.type == "part"
-    ]
-    assert any("产品概述" in heading for heading in written_headings)
-    # 大纲里报的六章与真正写出的六章是同一批（不预报、也不漏报）
-    assert len(written_headings) == len(PRD_SECTIONS) + 1  # 文档头 + 六章
+    assert "PRD大纲" in outline_text
+    assert "产品概述" in outline_text
+    assert "功能需求" in outline_text
+    # 大纲只走过程通道：它一个字都不进正文
+    done = next(event for event in events if event.type == "done")
+    assert "大纲" not in done.data["reply"]
 
 
 # ---------------------------------------------------------------------------

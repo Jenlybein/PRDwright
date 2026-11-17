@@ -6,7 +6,7 @@
 - 目标产物由 `doc_kind` 决定，缺了就是 400（与 `clarify` 同口径）；
 - 审核侧真的没审成（调用失败 / 回的不是 JSON）时**任务判失败**，绝不写一条
   「通过」占位（C-R1：审核失败不写结论，没有结论 ≠ 通过）；
-- PRD 按章重审当前正文，汇总成一条与生成时同形的结论。
+- PRD 与另两份同为整篇重审（票 #92），结论形状与生成时同形。
 
 所有用例只跨 HTTP 主接缝：
 
@@ -31,7 +31,7 @@ from langchain_core.messages import AIMessageChunk, BaseMessage
 from backend.core.engine import session_scope
 from backend.core.errors import ErrorCode
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.services import document_service, document_store, job_runtime, llm_factory, prd_section_writer
+from backend.services import document_service, document_store, job_runtime, llm_factory
 from backend.services.job_bus import job_bus
 
 # 审核的假模型只按「这次有没有拿到某个事实」作答，不认提示词里的任何原文：
@@ -53,7 +53,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 @pytest.fixture(autouse=True)
@@ -98,10 +97,10 @@ class WholeDocReviewLLM:
                 yield AIMessageChunk(content=piece)
 
 
-class SectionReviewLLM:
-    """PRD 单章审核的假模型：**按「手里有没有那个事实」作答**，不认提示词原文。
+class FactAwareReviewLLM:
+    """按「手里有没有那个事实」作答的审核假模型，不认提示词原文。
 
-    - `fact is None`：每一章都判「有问题」（用来验证汇总口径）；
+    - `fact is None`：判「有问题」（用来验证结论形状）；
     - 给了 `fact`：提示词里找得到这个事实就判「通过」，找不到就判「有问题」。
 
     于是「事实有没有真的进提示词」这件事，从**提示词原文断言**变成**结论断言**：
@@ -329,49 +328,43 @@ def test_rereview_updates_the_conclusion_in_place(client, monkeypatch, doc_kind,
 
 
 # ---------------------------------------------------------------------------
-# 二、PRD 按章重审当前正文，汇总成一条与生成时同形的结论
+# 二、PRD 也整篇重审：一次调用，结论与生成时同形
 # ---------------------------------------------------------------------------
 
 
-def test_rereview_of_prd_reviews_the_current_body_section_by_section(client, monkeypatch):
-    """PRD 的结论由逐章重审汇总而来：一章一条问题，章节定位取自**当前正文**。
+def test_rereview_of_prd_reviews_the_whole_body_once(client, monkeypatch):
+    """PRD 的重审是**整篇一次**：不再逐章调用，也不再按章定位。
 
-    用例刻意准备一份**手写**的正文（不是生成出来的）：重审读的是库里当前版本，
-    与「这一版是谁产出的」无关。正文里两章（模板第一章 + 一个模板外的自定义章），
-    因此应当有两次审核调用、两条按章定位的问题。
+    用例准备一份**手写**的正文（不是生成出来的）：重审读的是库里当前版本，
+    与「这一版是谁产出的」无关。章节标题清单只作为审核 `where` 的取值域。
     """
     register(client)
     solution_id = _create_solution(client)
     _seed_requirements(client, solution_id)
-    revise_heading = prd_section_writer.PRD_SECTIONS[0].heading
     body = (
         "# 演示产品 产品需求文档（PRD）\n\n"
-        f"{revise_heading}\n\n1.1 产品名称：演示产品\n\n"
+        "## 1. 产品概述\n\n1.1 产品名称：演示产品\n\n"
         "## 自定义章节\n\n这一章不在模板里\n"
     )
     _seed_document(client, solution_id, "prd", body)
 
-    llm = SectionReviewLLM()
+    llm = FactAwareReviewLLM()
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
     assert status == "succeeded"
-    assert llm.calls == 2, "两章各审一次"
+    assert llm.calls == 1, "整篇重审只该发一次调用（分章时代是每章一次）"
 
     conclusion = _review_events(events)[0]
     assert conclusion["kind"] == "prd"
     assert conclusion["verdict"] == "revise"
     assert conclusion["rewritten"] is False
+    # 分章链路已退役：结论里不再有 section_id / section_title 这类按章字段
     assert conclusion["failed_sections"] == []
-    # 两章各一条：定位来自当前正文（自定义章也在内），不是模板
-    assert len(conclusion["issues"]) == 2
-    first, second = conclusion["issues"]
-    assert first["section_id"] == prd_section_writer.PRD_SECTIONS[0].id
-    assert first["section_title"] == prd_section_writer.PRD_SECTIONS[0].title
-    assert first["severity"] == "high"
-    assert second["section_title"] == "自定义章节"
+    assert len(conclusion["issues"]) == 1
+    assert "section_id" not in conclusion["issues"][0]
 
     doc = _documents(client, solution_id)["prd"]
-    assert doc["content"] == body, "按章重审不改正文"
+    assert doc["content"] == body, "重审只更新结论，不动正文"
     assert doc["review"] == conclusion
     assert len(_versions(client, solution_id, "prd")) == 1
 
@@ -393,18 +386,17 @@ def test_rereview_of_prd_feeds_the_requirement_thread_into_the_prompt(client, mo
     """
     register(client)
     solution_id = _create_solution(client)
-    heading = prd_section_writer.PRD_SECTIONS[0].heading
-    body = f"# 演示产品 产品需求文档（PRD）\n\n{heading}\n\n1.1 产品名称：演示产品\n"
+    body = "# 演示产品 产品需求文档（PRD）\n\n## 1. 产品概述\n\n1.1 产品名称：演示产品\n"
     _seed_requirements(client, solution_id)
     _seed_requirement_turn(solution_id, "支付方式确定为只做微信支付，不做支付宝")
     _seed_document(client, solution_id, "prd", body)
 
-    llm = SectionReviewLLM(fact="只做微信支付")
+    llm = FactAwareReviewLLM(fact="只做微信支付")
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
 
     assert status == "succeeded"
-    assert llm.calls == 1, "这一版只有一章"
+    assert llm.calls == 1, "整篇重审只该发一次调用"
     conclusion = _review_events(events)[0]
     assert conclusion["verdict"] == "pass", "重审没有看到需求澄清线程里的拍板细节"
 
@@ -630,14 +622,13 @@ def test_rereview_of_prd_tolerates_missing_requirement_input(client, monkeypatch
     """
     register(client)
     solution_id = _create_solution(client)
-    heading = prd_section_writer.PRD_SECTIONS[0].heading
-    body = f"# 演示产品 产品需求文档（PRD）\n\n{heading}\n\n1.1 产品名称：演示产品\n"
+    body = "# 演示产品 产品需求文档（PRD）\n\n## 1. 产品概述\n\n1.1 产品名称：演示产品\n"
     _seed_document(client, solution_id, "prd", body)
 
-    _fake_service(monkeypatch, SectionReviewLLM())
+    _fake_service(monkeypatch, FactAwareReviewLLM())
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
 
     assert status == "succeeded"
     conclusion = _review_events(events)[0]
-    assert conclusion["verdict"] == "revise", "假模型每章都判有问题，汇总也应是「有问题」"
+    assert conclusion["verdict"] == "revise", "假模型判有问题时结论照给"
     assert _documents(client, solution_id)["prd"]["review"] == conclusion

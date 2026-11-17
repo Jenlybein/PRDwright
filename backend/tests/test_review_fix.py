@@ -30,7 +30,7 @@ from langchain_core.messages import AIMessageChunk, BaseMessage
 
 from backend.core.engine import session_scope
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.services import document_service, job_runtime, llm_factory, prd_section_writer
+from backend.services import document_service, job_runtime, llm_factory
 from backend.services.job_bus import job_bus
 
 # 两类调用靠系统提示词区分：审核人设提示词里的特征词、与撰写人设（重写）的。
@@ -53,7 +53,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 @pytest.fixture(autouse=True)

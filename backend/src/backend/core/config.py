@@ -158,40 +158,7 @@ class Settings(BaseSettings):
         "用不上指数退避；留一点间隔是为了避开上游刚抖动完的那几个瞬间。",
     )
 
-    # --- PRD 分章节生成 ------------------------------------------------------
-    # 模板本身就是「6 章 + 待确认附录」，逐章撰写可以让每章都带上已定稿的前序章节，
-    # 从而保证 6.1 引用的功能编号、附录汇总的「待确认」与前文一致；
-    # 代价是 LLM 调用次数从 1 次变成「章节数 × (1 + 审核 + 改写)」次。
-    prd_section_review_enabled: bool = Field(
-        default=True,
-        description="生成 PRD 时是否启用「写作 → 审核 → 改写」中的审核环节。"
-        "关闭后只逐章撰写，不再调用审核 Agent，可显著降低时延与费用。",
-    )
-    prd_section_max_rewrites: int = Field(
-        default=1,
-        ge=0,
-        le=3,
-        description="单个章节最多改写的轮数。0 表示只审核不改写；"
-        "达到上限即保留当前版本，避免审核与改写互相拉扯导致无限循环。",
-    )
-    prd_pipeline_concurrency: int = Field(
-        default=3,
-        ge=1,
-        le=8,
-        description="PRD 分章节生成时同时在飞的模型调用上限（撰写 / 审核 / 改写共用）。"
-        "1 表示退回串行：每章都能带上已定稿的前序章节；大于 1 时后章基于前章草稿，"
-        "跨章一致性由最终的审核结论兜底。并发越高越容易撞单供应商限流。",
-    )
-    prd_section_max_retries: int = Field(
-        default=3,
-        ge=0,
-        le=5,
-        description="单个章节在某一阶段失败后的最多重试次数（总尝试 = 1 + 该值）。"
-        "只重试该阶段本身：撰写用尽后写占位，审核用尽后保留正文，改写用尽后保留改写前版本。"
-        "与 llm_max_retries（单次调用重试）是两层，实际调用次数是两者之积。",
-    )
-
-    # --- 文档审核（整篇 / 分章节共用） ----------------------------------------
+    # --- 文档审核（三份产物共用，票 #92 起 PRD 也整篇审） ----------------------
     # 审核只是「判定 + 批注」，输出量与正文不在一个量级。给它一个远小于生成的上限，
     # 既省时间也省 token；万一被截断，按「审核失败 → 通过」处理（审核是锦上添花，
     # 不能反向拖垮已经生成好的正文）。
@@ -201,19 +168,11 @@ class Settings(BaseSettings):
     doc_review_max_tokens: int = Field(
         default=2048,
         ge=256,
-        description="整篇文档（接口文档 / 提示词套件）审核这次调用的 max_tokens。",
-    )
-    prd_section_review_max_tokens: int = Field(
-        default=2048,
-        ge=256,
-        description="PRD 单章节审核这次调用的 max_tokens。"
-        "默认值与整篇审核（2048）对齐：此前这里是 1024，但章节审核实际复用了整篇的"
-        " `review_llm`（2048），于是这个配置一直是**死配置**——改了没有任何效果。"
-        "把默认值对齐到 2048 并让章节审核真正用自己的实例，才不会一改就改变现有行为。",
+        description="整篇文档（PRD / 接口文档 / 提示词套件）审核这次调用的 max_tokens。",
     )
     review_rewrite_min_severity: Literal["high", "medium", "low"] = Field(
         default="high",
-        description="触发改写的最低严重度，两条链路共用。"
+        description="触发改写的最低严重度，三份产物共用。"
         "默认 `high`：medium 里有「空泛表述」「结构不符」这类几乎必然命中的口径，"
         "按它改写会把「审一次 → 改一次」变成常态，时延翻倍而收益极小。"
         "审核结论里的 issues 不受此影响——medium 照样报给用户，只是不自动改。",

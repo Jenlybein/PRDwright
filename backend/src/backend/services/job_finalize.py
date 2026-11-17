@@ -101,7 +101,6 @@ def _finish_payload(
 ) -> job_state.FinishPayload:
     return job_state.FinishPayload(
         draft_content=draft,
-        completed_sections=runtime.completed_sections,
         usage=json.dumps(summary, ensure_ascii=False),
         pending_items=runtime.pending_items,
         prompt_tokens=int(summary.get("prompt_tokens") or 0),

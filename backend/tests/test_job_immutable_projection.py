@@ -100,7 +100,7 @@ def test_create_writes_all_immutable_data_at_creation(alice):
         "provider_name": "定格用配置",
         "provider_model": "doubao-frozen-01",
     }
-    config = {"active_provider": provider, "prd_pipeline_concurrency": 1}
+    config = {"active_provider": provider, "doc_review_max_tokens": 1}
     skills = [{"name": "prd-generator", "version": "0.1.0", "fingerprint": "abc123"}]
 
     with session_scope() as session:
@@ -170,7 +170,7 @@ def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypa
     走「造单 → 登记 → 派发 → 订阅」真实链路（离线假 LLM），只断言两个公开
     出口一致：DB 行的不可变投影，以及订阅者收到的回执；收尾也不覆写四列。
     """
-    from backend.services import document_service, prd_section_writer
+    from backend.services import document_service
     from backend.services.job_bus import job_bus
     from fakes import ScriptedLLM
     from ticket_support import run_ticket
@@ -187,7 +187,6 @@ def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypa
         raise AssertionError("测试不应触网调用真实 LLM")
 
     monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
     job_runtime._RUNTIMES.clear()  # noqa: SLF001 - 清掉别的用例留下的运行时
     job_bus._subscribers.clear()  # noqa: SLF001
 
@@ -265,7 +264,7 @@ def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice, monkeypat
     """
     import backend.core.runtime_config as rc
     from backend.core.providers import ProviderSpec
-    from backend.services import document_service, prd_section_writer
+    from backend.services import document_service
     from backend.services.job_bus import job_bus
     from fakes import ScriptedLLM
     from ticket_support import run_ticket_in_flight
@@ -296,7 +295,6 @@ def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice, monkeypat
         raise AssertionError("测试不应触网调用真实 LLM")
 
     monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
     job_bus._subscribers.clear()  # noqa: SLF001
 
     def switch_provider_while_running() -> None:

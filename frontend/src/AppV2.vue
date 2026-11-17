@@ -608,8 +608,6 @@ const {
   formBackLabel,
   docStreamingContent,
   docError,
-  prdStatus,
-  prdShowingDraft,
   docPhase,
   docStageText,
   docOutlineText,
@@ -1377,12 +1375,10 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :streaming-content="docStreamingContent"
         :error="docError"
         :generating="isGeneratingCurrentDoc"
-        :prd="prdStatus"
         :doc-phase="docPhase"
         :doc-stage-text="docStageText"
         :doc-outline-text="docOutlineText"
         :with-review="hasDocumentReview(store.entryMode)"
-        :draft-only="prdShowingDraft"
         :elapsed-ms="elapsedMs"
         :retry-at="retryAt"
         :back-label="backLabel"

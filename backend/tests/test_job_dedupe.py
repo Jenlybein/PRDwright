@@ -342,10 +342,8 @@ def _no_real_llm(monkeypatch) -> None:
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("测试不应触网调用真实 LLM")
 
-    from backend.services import prd_section_writer
 
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 def test_two_identical_http_submissions_share_one_running_job(client, monkeypatch):
