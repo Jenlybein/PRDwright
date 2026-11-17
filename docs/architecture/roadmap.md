@@ -316,7 +316,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 ### 9.8 范围、验收与复测（#88 失败延迟退避）
 
-**范围**：可重试失败**回排队之前先等一段时间**，按错误类型区分，避免连续限流在几十秒内把重试次数耗光。本票只把「到期」这个判据落库并用例化——**调度循环仍然不存在**（原计划挂在 #89；#89 实际只做了管理端指标，调度仍未立票）。
+**范围**：可重试失败**回排队之前先等一段时间**，按错误类型区分，避免连续限流在几十秒内把重试次数耗光。本票只把「到期」这个判据落库并用例化——**调度循环当时仍然不存在**（原计划挂在 #89；#89 实际只做了管理端指标）。→ 后续已接上，见 §13。
 
 - **迁移 `0006`**：`generation_jobs.next_run_at`，`VARCHAR(32) NOT NULL DEFAULT ''`，`down_revision = "0005"`。空串 = **立即到期**（不是「没有值」），于是到期判据只有一种形状。
 - **错误码 → 退避秒数的唯一映射表**：`backend/src/backend/services/job_backoff.py` 的 `BACKOFF_SECONDS`——限流（`INVALID_REQUEST`，仓库里 HTTP 429 的稳定码）**30 秒**、上游 5xx（`LLM_UPSTREAM_ERROR`）**10 秒**、超时（`LEASE_EXPIRED`）**5 秒**、其余兜底 5 秒。按 **code 值**分类，不看中文文案 / `detail`；调用方一个数字都不写。
@@ -351,7 +351,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 **已知遗留（给后续票）**：
 
-- **调度循环**（原计划挂在 #89，实际未做）：到期之后由谁来扫、多久扫一次、扫到怎么派发——本票不起后台定时器，退避只把判据落库。因此在有调度循环之前，真正被回排队的行会停在「等待重试」而没人领。
+- **调度循环**（原计划挂在 #89，当时未做）：到期之后由谁来扫、多久扫一次、扫到怎么派发——本票不起后台定时器，退避只把判据落库。→ 后续已接上（§13），回排队的行会被领取周期领走。
 - **「可重试失败」转换**（#84）：本票能真实产生的是超时那一路（恢复器回排队带 `LEASE_EXPIRED`）；限流 / 上游 5xx 两档要等 #84 把「执行中 → 排队中」这条转换接上，映射与写入路径已全部定死，接线时不需要动退避代码。
 - **等待中的订阅**：等待态任务没有运行时，DB 兜底快照发完就结束（不是本票改的语义）。等调度循环接上之后，「等服务端事件」这一步才有意义；在那之前靠快照里的 `next_run_at` 显示倒计时。
 
@@ -429,12 +429,12 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 **给后续票的遗留**：
 
-- **调度循环**（原计划挂在 #89，实际未做）：`pending` 现在有唯一的表示，但「谁来领、多久扫一次」仍不存在；
+- **调度循环**（原计划挂在 #89，当时未做）：`pending` 现在有唯一的表示，但「谁来领、多久扫一次」当时仍不存在（→ 已在 §13 接上）；
   启动档只能把上次残留的 `pending` 判死（`EXPIRE_PENDING`），不能重新派发。
 - **真实在途任务的管理端取消**：管理员的 `_force_cancel` 直接确认取消（最终裁决）；
   若同一进程里确实有协程在跑，它会在下一个动作点发现自己失去写权而停止（协作式，不是强杀）。
 - **回排队与账本**：`REQUEUE` 现在落 `pending`；首次真实「执行中 → 排队中」的可重试生产者
-  仍要等调度循环（尚未立票）接上之后才有（#88 的映射已就绪）。
+  仍要等调度循环接上之后才有（#88 的映射已就绪；循环已在 §13 接上）。
 - **旧行映射只做一次**：`0007` 只在升级时执行；如果存量库里有 `running` + 空租约的行，
   升级后立刻变成 `pending`，不会被启动回收误判成「重启中断」。
 
@@ -485,7 +485,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 **给后续票的遗留**：
 
-- **调度循环**：原计划挂在 #89，但本票只做指标——「谁来领、多久扫一次」仍未立票；卡死数
+- **调度循环**：原计划挂在 #89，但本票只做指标——「谁来领、多久扫一次」当时仍未立票（→ 已在 §13 接上）；卡死数
   正是用来观察那段没有调度时的积压。
 - **看板趋势图**：四数字只给当前 / 累计快照，没有逐日曲线；趋势仍靠既有「按日趋势」的
   失败率 / 生成数 / Token 三条柱。
@@ -697,3 +697,44 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 - **`continuation` 不落库**（#93）：重连后看不到「写到了第几批」，要显示得给快照加一格——契约变更，另开票。
 - **审核 / 改写的续写**：若将来确实需要（例如极长的接口文档），要先决定「续写出来的 JSON 怎么合并」，不能照搬正文续写。
 - **PRD 的旧结论里可能只有 `section_title`**：前端 `parseReview` 已做读回退（`where` 优先、退回 `section_title`），后端 `conclusion_to_review` 同样回退；等历史数据自然淘汰后可以只留 `where`。
+
+## 13. 本轮：spec #75 双轴评审修复（P0-1 ~ P3）
+
+### 13.1 范围
+
+`integration/spec-75` 的双轴评审（standards / spec）提出 11 项，本轮逐项收口。**没有新增迁移**：`head` 仍是 `0008`。
+
+| 项 | 改了什么 |
+| --- | --- |
+| **P0-1** | 调度循环接上：`services/job_scheduler.py` 在 `lifespan` 末尾起三个 `asyncio` 周期任务（领取约 1 秒 / 收口约 30 秒 / 清理约 1 小时），关闭阶段第一步 cancel + await。`claim_once` / `recover_once` / `purge_expired_events` 第一次有了生产调用者——#83 AC1、#84 AC3、#88 AC1、#86 AC5 因此在运行期可达。派发前按库里的行重建任务单（重新解析上游输入、配置取当前生效值）；`chat` 无法重建上下文，如实判失败。开关 `job_scheduler_enabled`（生产默认开，测试默认关） |
+| **P0-2** | 取消不再写 `review_failed_at`：用户按停止 ≠ 审核失败（`job_finalize._closeout_once` 的 `cancelled` 分支只落部分完成正文） |
+| **P0-3** | `cancelling` 不再被顶替：顶替的前态收窄为 `pending` / `running`（`SUPERSEDABLE_STATUSES`），内存侧的顶替标记同样跳过取消中的运行时 |
+| **P0-4** | 删方案 / 删账号**单步收口**：任意非终态 → `cancelled` + 清租约（`UPDATE … RETURNING` 带回逐条 id，账本照记）。收口前先把在途运行时的半截正文落一次盘（#85 的口径不回退） |
+| **P1-1** | 三份产物的整篇生成循环收成**一份**（`document_service._stream_whole_document`），error 分支也 `flush()` 抑制器——失败落的那版「部分完成」不再丢尾字；同时消掉约 110 行重复 |
+| **P1-2** | `admin_repo._count_one_day` 返回 frozen dataclass（`_DayCounts`）并按列名取值，不再按位置下标读聚合行 |
+| **P1-3** | 失效注释 / 口径改正：`core/limits.py`、`generation_job_repo.py`、`services/job_events.py` 不再把 `completed_sections` 当现存列；前端 `ReviewStage.vue` / `types/index.ts` / `stores/runs.ts` 不再讲「失败占位的章节」 |
+| **P2** | US10 落字：**取消只保证结果不再写入，不保证停止上游计费** → `GLOSSARY.md`「取消 / 已取消」词条 + `ARCHITECTURE.md` §4.5（契约 C-C1）；`state-flow-design.md` §11 补「调度循环已接」「四列用账本行数 / `max(id)` 等价替代」「方案删除单步收口」 |
+| **P3** | 范围蔓延交代：`0007` 的旧值映射**保留**并写明理由（幂等、对空库零影响，见 `ARCHITECTURE.md` §5.7）；「分节改写」判定为「按缺陷精确定位到小节」而非分章遗留，**保留**（区别写在 `ARCHITECTURE.md` §5.12 与 `state-flow-design.md` §11）；`#77` 的「每用例独立 schema」在 `docs/agents/conventions.md` §10 与 `tests/conftest.py` 里改正为「每用例独立库（`CREATE DATABASE … TEMPLATE`）」 |
+
+### 13.2 本期不做
+
+- **不新增迁移**（无新列）：`attempt_count` / `max_attempts` / `snapshot_cursor` / `progress_snapshot` 四列仍用「账本行数 / `max(id)` / 既有快照列」等价替代。
+- **不改启动档判据**：启动回收仍把上一次进程留下的非终态行判终态（它跑在调度循环之前，且那些行是残骸）。
+- **不动 `deploy/`**（#78 / #90 的成果）与 `#77` 的建库机制。
+
+### 13.3 验收与证据
+
+- 调度循环（P0-1）：`backend/tests/test_job_scheduler.py` —— `test_scheduler_claims_a_due_pending_job_and_runs_it`（到期行被领走跑完 + 未到期行不动）、`test_scheduler_recovery_requeues_an_expired_running_job`（过期租约收口回排队并记账）、`test_lifespan_starts_and_stops_the_scheduler_cleanly`（三支周期任务，关闭后全部 `done()`、观测句柄清空）、`test_scheduler_is_off_by_default_in_tests`（开关）。
+- 取消语义（P0-2 / P0-3 / P0-4）：`backend/tests/test_cancel_semantics.py` —— `test_cancelled_review_does_not_mark_review_failed`、`test_new_registration_keeps_a_cancelling_job_out_of_superseded`、`test_delete_solution_settles_a_running_job_in_one_step`；口径修正同步在 `test_job_state_machine.py`（批量取消 / 顶替前态）与 `test_job_attempt_ledger.py`（批量取消当场记账、单条取消确认时记账）。
+- 失败分支 flush（P1-1）：`backend/tests/test_pending_items.py` 四条（PRD / 接口文档 / 提示词 / 短正文各一条）+ 三份产物共用一个循环函数。
+- 单日计数投影（P1-2）：`backend/tests/test_admin_stats.py::test_daily_counts_projection_is_a_frozen_dataclass`。
+- 文档与口径（P2 / P3）：`backend/tests/test_closeout_docs.py`（文档路径可见、无悬空引用）与 `test_architecture_guards.py` / `test_cleanup_dead_code.py` 全绿。
+
+### 13.4 复测与收口
+
+- 后端：`cd backend && PRDWRIGHT_TEST_POSTGRES_URL=…:5433 uv run pytest -n auto -q` → **1491 passed，0 skipped，0 failed**（spec #75 收口基线 **1478 passed**；本轮净增 13：调度循环 4、取消语义 3、失败分支 flush 4、单日计数投影 1、单条取消账本 1）。`--collect-only -q` 现取 **1491** 收集 / **1281** 文本计数 / **210** 参数化展开差额。
+- 前端：`cd frontend && npm run test:unit -- --run` → **760 passed / 43 文件**（与 #94 收口基线一致：本轮只改注释）；`npm run build`（含 `type-check`）通过。
+- 管理端：`cd frontend_admin && npm run test:unit` → **125 passed / 13 文件**；`npm run build`（含 `type-check`）通过。
+- 迁移：**没有新增**。`head` 仍是 `0008`，`test_schema_migration` 的「基线库 == 模型库」仍成立。
+- 文档：本文件 §13、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §3.3（调度循环那条 + 取消 / 顶替口径）、§4.5（C-C1）、§5.7（取舍）、[`state-flow-design.md`](./state-flow-design.md) §11、[`GLOSSARY.md`](../../GLOSSARY.md)（「取消 / 已取消」）、[`../agents/conventions.md`](../agents/conventions.md) §10（#77 口径 + 循环在测试里默认关）。
+- **未执行**：push 与合并（由用户确认）。

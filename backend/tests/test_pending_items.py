@@ -464,6 +464,64 @@ def test_line_without_block_yields_empty_list() -> None:
     assert done.data["pending_items"] == []
 
 # ---------------------------------------------------------------------------
+# 失败分支也要 flush：被抑制器扣住的尾字不能丢（P1-1）
+# ---------------------------------------------------------------------------
+
+
+class _TailThenFailLLM:
+    """吐一段正文之后**失败**：覆盖「抑制器里还扣着尾字时流就断了」。
+
+    抑制器在块外态只扣住末尾「可能被切断的哨兵前缀」（至多 `len(哨兵)-1` 个字符），
+    因此流一经失败，这段扣住的字必须由 `flush()` 交出去——否则它既没进实时 `chunk`，
+    也没进失败收尾落的那一版「部分完成」（#85）。
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    async def astream(self, messages) -> AsyncIterator[Any]:  # noqa: ANN001, ARG002
+        from langchain_core.messages import AIMessageChunk
+
+        yield AIMessageChunk(content=self._text)
+        raise ValueError("上游断开")
+
+
+def _chunks_of(events: list[StreamEvent]) -> str:
+    return "".join(event.content for event in events if event.type == "chunk")
+
+
+def test_failure_flushes_the_suppressor_tail_on_the_prd_line() -> None:
+    service = DocumentService(llm=_TailThenFailLLM("# 演示 PRD\n\n正文结尾。"))
+    events = asyncio.run(
+        _drain(service.generate_prd_from_summary_stream(requirements="做一个演示产品"))
+    )
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "# 演示 PRD\n\n正文结尾。"
+
+
+def test_failure_flushes_the_suppressor_tail_on_the_api_docs_line() -> None:
+    service = DocumentService(llm=_TailThenFailLLM("# 接口文档\n\n接口正文结尾。"))
+    events = asyncio.run(_drain(service.generate_api_docs_stream(prd_content="# PRD")))
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "# 接口文档\n\n接口正文结尾。"
+
+
+def test_failure_flushes_the_suppressor_tail_on_the_prompts_line() -> None:
+    service = DocumentService(llm=_TailThenFailLLM("# 提示词套件\n\n正文结尾。"))
+    events = asyncio.run(_drain(service.generate_prompts_stream(prd_content="# PRD")))
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "# 提示词套件\n\n正文结尾。"
+
+
+def test_failure_flush_also_covers_a_short_body_held_entirely() -> None:
+    """短正文整段都被扣住的情形：不 flush 就一个字都留不下（失败落版会是空稿）。"""
+    service = DocumentService(llm=_TailThenFailLLM("正文很短"))
+    events = asyncio.run(_drain(service.generate_api_docs_stream(prd_content="# PRD")))
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "正文很短"
+
+
+# ---------------------------------------------------------------------------
 # format_pending_items：把**已有**清单渲染进提示词
 #
 # 与 `render_spec` 是一对：那个教模型「怎么产出」清单，这个把「已有的」念给它听。

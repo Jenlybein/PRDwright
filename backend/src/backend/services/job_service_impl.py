@@ -181,6 +181,40 @@ def cancel_job(owner_id: int, job_id: int, *, message: str = "用户停止了生
     return result.applied
 
 
+def _persist_in_flight_progress(owner_id: int, *, solution_id: int | None = None) -> None:
+    """单步收口取消**之前**，把在途运行时已经产出的正文落一次盘。
+
+    删方案 / 删账号是**一步落终态 + 清租约**（P0-4）：不会有「执行者确认退出」这一步，
+    执行者醒来时的补写会因为凭证已清而改到 0 行。它内存里的那半截正文若不先落盘，
+    这条任务记录就会写着「已取消」而正文是空的——而 #85 的口径是「已生成的内容不丢」
+    （它不是一份文档版本，但它是这次执行在任务行上留下的唯一痕迹）。
+
+    只写**进度列**（`draft_content` / `phase` / `pending_items`）与过程日志，不改状态：
+    状态由紧随其后的那一次转换负责。失败只记日志——落盘半截正文失败不该挡住取消
+    （取消的本意是「别再跑了」，不是「等写完」）。
+    """
+    for runtime in list(_RUNTIMES.values()):  # noqa: SLF001 - 包内互引
+        if runtime.owner_id != owner_id:
+            continue
+        if solution_id is not None and runtime.solution_id != solution_id:
+            continue
+        if runtime.status not in (STATUS_RUNNING, STATUS_CANCELLING):
+            continue
+        try:
+            _flush_now(runtime)
+        except Exception:  # noqa: BLE001 - 落盘失败不该挡住取消
+            logger.warning(
+                "取消前落盘半截正文失败，取消照常进行",
+                exc_info=True,
+                extra={
+                    "event": "job.cancel_flush_failed",
+                    "job_id": runtime.job_id,
+                    "user_id": runtime.owner_id,
+                    "kind": runtime.kind,
+                },
+            )
+
+
 def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
     """删除方案，并在**同一个事务**里把挂在它上面的在飞任务收成终态。
 
@@ -194,6 +228,12 @@ def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
     事务内先删再取消——顺序不影响原子性，但先判「方案在不在」能顺带挡掉
     「方案不存在却把它的任务改成 failed」这种越界写。
 
+    **单步收口**（P0-4）：方案已经不存在了，不会再有「执行者来确认退出」这件事。
+    因此这里不用两阶段的「执行中 → 取消中 → 等确认」，而是一步把任意非终态改成
+    `cancelled` 并清空租约（转换表里 `REQUEST_CANCEL` 的批量作用域那一行）。留着
+    `cancelling` 只是把一行永远不会被确认的任务交给恢复器兜底，而恢复器的收口发生在
+    租约到期之后——这段时间里用户看到的是一条「正在取消」却没人管的行。
+
     为什么放在 `job_service` 而不是 `solution_service`
     -------------------------------------------------
     在途任务的协作式取消标记（`_RUNTIMES`）住在同目录的 `job_runtime.py`：#5 拆模块时
@@ -204,6 +244,8 @@ def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
     Returns:
         方案是否存在并被删除。`False` 表示不存在或不属于该用户（路由翻 404）。
     """
+    # 先落一次半截正文（在删方案的事务**之外**）：单步收口之后执行者再也写不进去。
+    _persist_in_flight_progress(owner_id, solution_id=solution_id)
     with session_scope() as session:
         # 同一条事务里**先删再取消**：事务内的顺序不影响原子性，但先判「方案在不在」
         # 可以避免「方案不存在却把它的任务改成 failed」这种越界写。
@@ -240,8 +282,10 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
     并不省钱。真正让它停下的只有内存运行时上的 `cancelled` 标记。
 
     与 `cancel_job`（单条）和 `delete_solution_and_cancel_jobs`（单方案）同一套机制，区别只有
-    过滤维度是 `owner_id`。
+    过滤维度是 `owner_id`。与删方案一样是**单步收口**（P0-4）：账号都要没了，不会有人
+    来确认退出，一步把任意非终态改成 `cancelled` 并清租约。
     """
+    _persist_in_flight_progress(owner_id)
     with session_scope() as session:
         cancelled = job_state.transition(
             job_state.JobEvent.REQUEST_CANCEL,
@@ -776,8 +820,10 @@ def reap_orphans() -> None:
     启动档去向见 `job_recovery` 模块 docstring：取消中的行按**已取消**收口（用户的
     意图优先于「超时」），有租约的执行中行按**租约超时**判失败（`LEASE_EXPIRED`），
     从没被领过的残留行（含排队中）按**服务重启中断**判失败（`INTERNAL_ERROR`）。
-    不回排队：本票不引入调度循环（#89），排队的行没人会来领，
-    AC4「重启后不存在永远进行中」就当场红。
+    不回排队：这些行是上一次进程留下的残骸，如实报一次「中断」比静默重跑诚实——
+    重跑是用户的决定（再点一次生成），不该由服务替他把上一次的失败抹掉。
+    （调度循环已在 `services/job_scheduler.py` 接上，但它只领**本轮进程**登记 /
+    回排队的行；启动档的判据与它不重叠，两者不冲突。）
     """
     job_recovery.recover_once(startup=True)
 

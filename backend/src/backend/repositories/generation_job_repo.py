@@ -9,7 +9,9 @@
 `draft_content` 走**合并写**：`job_service` 在内存里维护权威正文，按「≤300ms 或增量
 >4KB」的节奏调用 `persist_progress` 落一份最新快照。因此本层不实现
 `add_completed_section` 那种「读-改-写单段」的方法——那种写法要在单连接内 read-modify-write
-才不会并发丢段，而合并写由调用方一次传入完整的 `completed_sections`，天然避免该问题。
+才不会并发丢段，而合并写由调用方一次传入**完整正文快照**，天然避免该问题。
+（`completed_sections` 那一列与「按章累加」的写法一起在 #94 退役：迁移 `0008` 删列，
+分章生成已不存在，进度只剩 `draft_content` / `phase` / `pending_items` 三个快照列。）
 
 ## 形态（v6 / T16.8）
 
@@ -71,6 +73,13 @@ TERMINAL_STATUSES: tuple[str, ...] = (
 )
 # 「会被重复提交复用」的目标：排队中 / 执行中（取消中的任务正在退出，不该被复用）。
 REUSABLE_STATUSES: tuple[str, ...] = (STATUS_PENDING, STATUS_RUNNING)
+# 「会被新任务顶替」的目标：排队中 / 执行中。
+#
+# ⚠️ **不含 `cancelling`**（P0-3）：用户已经表达了「停」的意图，这一行正在往外走，
+# 再被改写成 `superseded` 就把「用户不要了」和「被新任务挤掉」混成了一句——而这两件事
+# 在统计与排查上必须分开（GLOSSARY「任务状态」）。新的任务照常建行、照常派发；
+# 旧的那一行由执行者（或恢复器兜底）自己收成 `cancelled`。
+SUPERSEDABLE_STATUSES: tuple[str, ...] = (STATUS_PENDING, STATUS_RUNNING)
 
 # 卡死判定的「停更」阈值（票 #89 从管理端服务层移到仓储层，成为唯一一处定义）。
 #
@@ -472,21 +481,39 @@ class GenerationJobRepository:
     # 取消 / 顶替（票 #84：请求与确认分开，条件更新返回 rowcount）
     # ------------------------------------------------------------------
     #
-    # 所有者/方案/账号三种批量作用域共用「请求取消」的两个动作，而不是三套：
-    # - `_request_cancel`：按交给它的 WHERE 条件，把 `pending` 直接改成 `cancelled`
-    #   （没人在跑，不需要等谁确认），把 `running` / `cancelling` 改成 `cancelling`
-    #   （执行者要自己收口）。**两条 UPDATE 相加**才是这次请求影响的条数。
-    # 一次请求命中两种去向，所以不能写成一条带 CASE 的 UPDATE 再去判「哪些算」——
-    # 那样调用方还得回头猜每行去了哪儿；这里只回行数，去向由随后的读回答。
+    # 两种取消作用域，两套语义（**不可混用**）：
+    #
+    # - **单条任务**（`request_cancel_one`，用户按「停止生成」）：两阶段。排队中的直接
+    #   落 `cancelled`（没人在跑，不需要等谁确认），执行中的转 `cancelling` 并**保留
+    #   租约**——执行者还要用它把半截正文与已经烧掉的用量写下来，终态由它在下一个
+    #   动作点确认（`confirm_cancel`）。
+    # - **批量作用域**（`request_cancel_solution` / `request_cancel_owner`，删方案 /
+    #   删账号）：**单步收口**。方案或账号已经不在了，不会再有「执行者来确认退出」
+    #   这件事；留着 `cancelling` 只是让这一行卡在那儿等恢复器。因此任意非终态一步落
+    #   `cancelled` + 清租约（P0-4）。
+    #
+    # 单条取消的「请求」也要回**去向**（排队中 → 已取消 / 执行中 → 取消中），所以它是
+    # 两条 UPDATE 相加再回行数，而不是一条带 CASE 的 UPDATE：调用方还得回头猜每行去了哪儿。
 
-    def _request_cancel(
-        self, conditions: list[Any], *, error_message: str
-    ) -> int:
-        """对一个作用域发起取消请求：排队中的直接落已取消，执行中的转取消中。"""
+    def request_cancel_one(
+        self, owner_id: int, job_id: int, *, error_message: str
+    ) -> bool:
+        """对某一条任务发起取消**请求**（两阶段），返回是否确实改到了。
+
+        用户按「停止生成」针对的是**这一次**任务；同一方案下别的线程可能也在跑，
+        所以不能顺手批量取消。
+
+        任务已经自然结束（0 行）时返回 False：调用方据此回答「没取消到东西」，
+        而不是报错——「你点的时候它刚好说完了」不是失败。
+        """
         now = utc_now_text()
         immediate = self.session.execute(
             update(GenerationJob)
-            .where(*conditions, GenerationJob.status == STATUS_PENDING)
+            .where(
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
+                GenerationJob.status == STATUS_PENDING,
+            )
             .values(
                 status=STATUS_CANCELLED,
                 error_code="",
@@ -497,7 +524,8 @@ class GenerationJobRepository:
         requesting = self.session.execute(
             update(GenerationJob)
             .where(
-                *conditions,
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
                 GenerationJob.status.in_((STATUS_RUNNING, STATUS_CANCELLING)),
             )
             .values(
@@ -507,35 +535,50 @@ class GenerationJobRepository:
                 updated_at=now,
             )
         )
-        return int(immediate.rowcount or 0) + int(requesting.rowcount or 0)
+        return bool((immediate.rowcount or 0) + (requesting.rowcount or 0))
 
-    def request_cancel_one(
-        self, owner_id: int, job_id: int, *, error_message: str
-    ) -> bool:
-        """对某一条任务发起取消请求，返回是否确实改到了。
+    def _settle_cancel_scope(self, conditions: list[Any], *, error_message: str) -> list[int]:
+        """**单步收口**一个作用域的取消，返回真正改到的任务 id。
 
-        用户按「停止生成」针对的是**这一次**任务；同一方案下别的线程可能也在跑，
-        所以不能顺手批量取消。
+        任意非终态（`pending` / `running` / `cancelling`）一步落 `cancelled` 并清空
+        租约三列：没有「等谁确认」这件事（方案 / 账号已经不存在），而留着租约等于
+        把一行永远不会再被确认的 `cancelling` 留给恢复器。
 
-        任务已经自然结束（0 行）时返回 False：调用方据此回答「没取消到东西」，
-        而不是报错——「你点的时候它刚好说完了」不是失败。
+        为什么用 `RETURNING` 而不是「回行数 + 再用另一个查询找 id」：批量取消**要记账**
+        （每一次取消都是一次真的结束），而账本要的是逐条 id。两条语句在并发下会错开
+        （扫描之后、回查之前有行被领走），一条 `UPDATE … RETURNING` 既原子又只有一次往返。
+        本项目只有一个数据库后端（Postgres，票 #78），`RETURNING` 不需要方言分支。
+
+        `error_message` 说明**是谁**取消的（「方案已删除」/「账号已删除」）：取消不是错误，
+        所以 `error_code` 留空，原因只写在这一列。
         """
-        rows = self._request_cancel(
-            [GenerationJob.owner_id == owner_id, GenerationJob.id == job_id],
-            error_message=error_message,
+        result = self.session.execute(
+            update(GenerationJob)
+            .where(*conditions, GenerationJob.status.in_(ACTIVE_STATUSES))
+            .values(
+                status=STATUS_CANCELLED,
+                error_code="",
+                error_message=error_message,
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
+                updated_at=utc_now_text(),
+            )
+            .returning(GenerationJob.id)
         )
-        return rows > 0
+        return [int(value) for value in result.scalars().all()]
 
     def request_cancel_solution(
         self, owner_id: int, *, solution_id: int, error_message: str
-    ) -> int:
-        """对某方案下所有在途任务发起取消请求（删方案），返回受影响条数。
+    ) -> list[int]:
+        """**删方案**时单步收口该方案下的全部在途任务，返回改到的 id（P0-4）。
 
-        方案没了，挂在它上面的生成任务再跑完也没地方落正文，继续跑只是白烧 token。
+        方案没了，挂在它上面的生成任务再跑完也没地方落正文，继续跑只是白烧 token；
+        而且没有人会来确认退出（收口条件只有「还没收尾」这一条）。
         `solution_id` 用 `= ?`：本方法只服务于「删掉一份具体方案」，没有方案的
         逃生口任务不会被这个动作波及。
         """
-        return self._request_cancel(
+        return self._settle_cancel_scope(
             [
                 GenerationJob.owner_id == owner_id,
                 GenerationJob.solution_id == solution_id,
@@ -543,13 +586,13 @@ class GenerationJobRepository:
             error_message=error_message,
         )
 
-    def request_cancel_owner(self, owner_id: int, *, error_message: str) -> int:
-        """对某用户名下**所有**在途任务发起取消请求（删账号），返回条数。
+    def request_cancel_owner(self, owner_id: int, *, error_message: str) -> list[int]:
+        """**删账号**时单步收口该用户名下所有在途任务，返回改到的 id（P0-4）。
 
         与按方案的区别只有过滤维度：删账号要覆盖名下所有方案，包括还没方案的
         逃生口任务（`solution_id IS NULL`）。
         """
-        return self._request_cancel(
+        return self._settle_cancel_scope(
             [GenerationJob.owner_id == owner_id], error_message=error_message
         )
 
@@ -659,9 +702,10 @@ class GenerationJobRepository:
         「同一 owner + solution + kind 至多一个在途任务」是一条业务不变量，在新建任务前
         先把旧的判为被取代，避免两个任务同时往同一处写正文。
 
-        覆盖三种前态（`pending` / `running` / `cancelling`）：排队中的让位、执行中的让开、
-        正在取消的任务同样已经有更新的任务接手——统一落 `superseded`，不是「取消」：
-        它们一个是被新任务挤掉（系统行为），一个是被用户叫停（用户意图），统计上必须分开。
+        覆盖两种前态（`pending` / `running`，见 `SUPERSEDABLE_STATUSES`）：排队中的让位、
+        执行中的让开。**`cancelling` 不在其中**（P0-3）：用户已经表达了停止的意图，把它
+        改写成 `superseded` 会把「用户不要了」说成「被新任务挤掉」——两个含义相反的状态
+        混成一个，统计与排查都再也分不开。它由执行者确认、或恢复器兜底，收成 `cancelled`。
 
         `error_code` 留空：`SUPERSEDED` 曾经是错误码，现在由状态表达（AC4）。
         `solution_id` 可能为 `None`，SQL 用 `IS NULL` 而不是 `= NULL`。
@@ -669,7 +713,7 @@ class GenerationJobRepository:
         conditions = [
             GenerationJob.owner_id == owner_id,
             GenerationJob.kind == kind,
-            GenerationJob.status.in_(ACTIVE_STATUSES),
+            GenerationJob.status.in_(SUPERSEDABLE_STATUSES),
         ]
         conditions.append(
             GenerationJob.solution_id.is_(None)
@@ -766,7 +810,7 @@ class GenerationJobRepository:
         执行者（单 worker 硬约束，`_RUNTIMES` 在进程内），库里任何 `running` / `cancelling`
         行都是上次进程留下的——**包括还没到期的租约**（不看的话「崩溃前 1 秒领走」的
         行要再等满一个租约时长才被动），**也包括从没被领过的残留 `pending` 行**
-        （登记完还没派发就崩了；本票没有调度循环，留着就是永远排队中）。
+        （登记完还没派发就崩了：启动档跑在调度循环之前，且这些行是上一次进程的残骸，如实判「中断」而不是替用户静默重跑）。
 
         排序 `lease_expire_at, id`：过期最久的最先收，同一秒的按自增 id 稳定排序
         （启动档里没有租约的行 `lease_expire_at` 是空串，字典序最小，同样稳定地排在
@@ -801,7 +845,7 @@ class GenerationJobRepository:
             # `_RUNTIMES` 在进程内），所以**所有非终态行**都要收口：
             # - `running`（含还没到期的租约）：按超时 / 中断判失败；
             # - `cancelling`：按已取消收口（取消是用户的明确意图，不能记成失败）；
-            # - `pending`：登记完还没派发就崩了——本票没有调度循环，留着就是永远排队中。
+            # - `pending`：登记完还没派发就崩了——启动档跑在调度循环之前，这里如实判「中断」。
             conditions.append(GenerationJob.status.in_(ACTIVE_STATUSES))
         return list(
             self.session.execute(

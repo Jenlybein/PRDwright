@@ -326,7 +326,7 @@ def test_startup_recovery_cancels_a_cancelling_row_instead_of_failing_it(alice):
 
 
 def test_startup_recovery_settles_a_queued_row_as_interrupted(alice):
-    """启动档：排队中但从未被领走的行没有执行者会来领（本票不做调度循环），
+    """启动档：排队中但从未被领走的行没有执行者会来领（启动档跑在调度循环之前），
     按「服务重启中断」判失败——不许留在永远排队中。"""
     job_id = job_create(alice, "prd", None)
     job_service.reap_orphans()

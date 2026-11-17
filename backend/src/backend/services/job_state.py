@@ -25,12 +25,13 @@
 | `CLAIM` | `pending` | `running` | 单条任务；到期闸门 `next_run_at <= now`；写租约三列 |
 | `SUCCEED` | `running` | `succeeded` | 单条任务；给出凭证时叠「凭证仍是本轮 + 未过期」 |
 | `FAIL` | `running` | `failed` | 单条任务；给出凭证时叠「凭证仍是本轮 + 未过期」 |
-| `REQUEST_CANCEL` | `pending` | `cancelled` | 单条 / 方案 / owner；**没人在跑，立刻终态** |
-| `REQUEST_CANCEL` | `running` / `cancelling` | `cancelling` | 同上；**保留租约**（执行者还要用它确认） |
+| `REQUEST_CANCEL` | `pending` | `cancelled` | 单条任务；**没人在跑，立刻终态** |
+| `REQUEST_CANCEL` | `running` / `cancelling` | `cancelling` | 单条任务；**保留租约**（执行者还要用它确认） |
+| `REQUEST_CANCEL` | 任意非终态 | `cancelled` | **批量作用域**（删方案 / 删账号）：方案或账号已经不存在，没人会来确认退出，因此**单步收口**并清租约（P0-4） |
 | `CONFIRM_CANCEL` | `running` / `cancelling` | `cancelled` | 单条任务（给出凭证时叠「本轮凭证 + 未过期」）；清租约、补一次载荷 |
 | `EXPIRE_CANCELLING` | `cancelling` | `cancelled` | 单条任务 + 旧租约 fence（恢复器兜底，无载荷） |
 | `EXPIRE_PENDING` | `pending` | `failed` | 单条任务；启动档专用（没人会来领的排队行） |
-| `SUPERSEDE` | `pending` / `running` / `cancelling` | `superseded` | 同 owner + 方案 + 产物；清租约 |
+| `SUPERSEDE` | `pending` / `running` | `superseded` | 同 owner + 方案 + 产物；清租约。**不碰 `cancelling`**（用户已表达停止意图，见 P0-3） |
 | `CONFIRM_SUPERSEDED` | `superseded` 且 `usage IS NULL` | `superseded` | 单条任务；只补一次载荷（不改状态） |
 | `REQUEUE` | `running` | `pending` | 单条任务 + 旧租约 fence；清租约 + 写 `next_run_at` |
 | `EXPIRE` | `running` | `failed` | 单条任务 + 旧租约 fence；清租约 |
@@ -54,6 +55,17 @@
 - **执行者卡住不退出**：租约到期，恢复器扫到 `cancelling + 过期租约`，用扫描时读到的
   旧凭证把它收成 `cancelled`（`EXPIRE_CANCELLING`，AC3）。
 
+**唯一的例外是批量作用域**（删方案 / 删账号，P0-4）：方案或账号已经不在了，不会再有
+「执行者来确认退出」这件事，所以任意非终态**一步**落 `cancelled` 并清租约。执行者
+醒来照常收尾，但凭证已经不作数 → 改到 0 行 → 丢弃（它这一轮烧掉的用量不再补记，
+因为已经没有一行属于它了；取消记账在请求那一刻完成）。
+
+## 谁在调这些转换
+
+单条转换的调用方是交互路径与执行者；批量转换的调用方是删方案 / 删账号；`REQUEUE` /
+`EXPIRE` / `EXPIRE_CANCELLING` / `EXPIRE_PENDING` 的调用方是恢复器——它由
+`services/job_scheduler.py` 的周期任务在生产里驱动（此前这三个维护单元没有调用者）。
+
 ## 对外 API 的 `status` 就是这七个值
 
 `error_code` **不再承担状态语义**（AC4）：已取消 / 被取代的行的 `error_code` 是空串，
@@ -72,7 +84,8 @@
 | `FAIL` | 记（`failed`） | 执行有结论 |
 | `CONFIRM_CANCEL` / `EXPIRE_CANCELLING` | 记（`cancelled`） | 这一轮没跑成，但原因是用户取消——结论仍是确定的 |
 | `REQUEUE` / `EXPIRE` / `EXPIRE_PENDING` | 记（`failed`） | 这一轮超时没跑成也是结论 |
-| `REQUEST_CANCEL` | **不记** | 它只是「请求停止」：真正的结论由确认那一方给 |
+| `REQUEST_CANCEL`（单条） | **不记** | 它只是「请求停止」：真正的结论由确认那一方给 |
+| `REQUEST_CANCEL`（批量） | 记（`cancelled`） | 单步收口：这一批行此刻就进了终态，不会再有确认方 |
 | `SUPERSEDE` / `CONFIRM_SUPERSEDED` | **不记** | 被取代不是这次执行的结局（票面口径） |
 
 **账本写失败的口径**：审计数据写不进去要**可见**（`job.attempt_record_failed`
@@ -94,6 +107,7 @@ from backend.core.clock import utc_now_text
 from backend.core.engine import session_scope
 from backend.repositories.generation_job_repo import (
     STATUS_CANCELLED,
+    STATUS_CANCELLING,
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_RUNNING,
@@ -126,8 +140,9 @@ class JobEvent(StrEnum):
 
     取消相关的三条是票 #84 新增的：
 
-    - `REQUEST_CANCEL`：**请求停止**。排队中的行一步落已取消；执行中的行只转成
-      「取消中」并保留租约——执行者还要用它收口。
+    - `REQUEST_CANCEL`：**请求停止**。单条任务里，排队中的行一步落已取消、执行中的行
+      只转成「取消中」并保留租约——执行者还要用它收口；**批量作用域**（删方案 /
+      删账号）没有任何人会来确认，因此任意非终态一步落已取消并清租约（P0-4）。
     - `CONFIRM_CANCEL`：**执行者确认退出**。把取消中 / 执行中落成已取消，清租约，
       并补一次载荷（半截正文与已经烧掉的用量）。
     - `EXPIRE_CANCELLING`：**恢复器兜底**。执行者卡住不退出、租约过期之后，由它把
@@ -137,7 +152,7 @@ class JobEvent(StrEnum):
     「补一次载荷」：顶替是登记路径先落终态，被顶替那一支烧掉的 token 只能由它自己补。
 
     `EXPIRE_PENDING` 是启动档专用（票 #84）：进程刚起来时，库里那条**排队中**的行
-    没有任何执行者会来领（本票没有调度循环），必须收成「服务重启中断」的失败——
+    没有任何执行者会来领（启动档跑在调度循环之前），必须收成「服务重启中断」的失败——
     不然它就永远停在排队中。它不能复用 `FAIL`：`FAIL` 的前态是执行中，放宽到
     `pending` 会让「旧执行者的晚到失败」写进一条已经被恢复器交还队列的行。
     """
@@ -342,12 +357,17 @@ def _validate(
 
 @dataclass(frozen=True, slots=True)
 class _WriteResult:
-    """一次条件写的**原始结果**：行数 + 读回的事实。"""
+    """一次条件写的**原始结果**：行数 + 读回的事实。
+
+    `affected_ids` 只有**批量作用域**会给（删方案 / 删账号的单步收口）：那时账本要逐条
+    记，而「改到了几行」回答不了「是哪几行」。单条任务本来就知道 id，不必从库里读回来。
+    """
 
     rows: int
     observed_status: str = ""
     observed_code: str = ""
     observed_message: str = ""
+    affected_ids: tuple[int, ...] = ()
 
 
 def _write(
@@ -367,6 +387,8 @@ def _write(
     repo = GenerationJobRepository(session)
     owner_id = scope.owner_id
     payload = payload or FinishPayload()
+    # 批量作用域才需要「改到了哪几条」（账本逐条记）；单条任务本来就知道 id。
+    affected: tuple[int, ...] = ()
     if event is JobEvent.CLAIM:
         grant = lease_grant or LeaseGrant(owner="", token="", expire_at="", now_text="")
         rows = repo.claim(
@@ -411,13 +433,15 @@ def _write(
                 owner_id, int(scope.job_id or 0), error_message=error_message
             ) else 0
         elif scope.solution_filter:
-            rows = repo.request_cancel_solution(
+            ids = repo.request_cancel_solution(
                 owner_id,
                 solution_id=int(scope.solution_id),
                 error_message=error_message,
             )
+            rows, affected = len(ids), tuple(ids)
         else:
-            rows = repo.request_cancel_owner(owner_id, error_message=error_message)
+            ids = repo.request_cancel_owner(owner_id, error_message=error_message)
+            rows, affected = len(ids), tuple(ids)
     elif event is JobEvent.CONFIRM_CANCEL:
         rows = repo.confirm_cancel(
             owner_id,
@@ -506,15 +530,16 @@ def _write(
     # 单条任务的「改到了哪儿」总是从库里读回来：取消请求可能落在「排队中 → 已取消」
     # 或「执行中 → 取消中」两种去向，结果必须如实带出去（调用方据此决定内存怎么结算）。
     if not _scope_has_job(scope) or (rows and event not in _STATUS_REPORTING_EVENTS):
-        return _WriteResult(rows=rows)
+        return _WriteResult(rows=rows, affected_ids=affected)
     job = repo.get(owner_id, int(scope.job_id or 0))
     if job is None:
-        return _WriteResult(rows=rows)
+        return _WriteResult(rows=rows, affected_ids=affected)
     return _WriteResult(
         rows=rows,
         observed_status=job.status,
         observed_code=job.error_code or "",
         observed_message=job.error_message or "",
+        affected_ids=affected,
     )
 
 
@@ -559,11 +584,17 @@ def _sanitize_summary(message: str) -> str:
     return text
 
 
-def _attempt_outcome(event: JobEvent, error_code: str) -> str | None:
-    """这次转换该记成哪种结论；`None` = **不是执行结论，不记账本**。"""
+def _attempt_outcome(event: JobEvent, error_code: str, scope: JobScope) -> str | None:
+    """这次转换该记成哪种结论；`None` = **不是执行结论，不记账本**。
+
+    批量作用域的 `REQUEST_CANCEL`（删方案 / 删账号）是**一步落终态**，此刻就有结论，
+    所以它要记；单条任务的 `REQUEST_CANCEL` 只是「请求停止」，结论由确认那一方给。
+    """
     if event is JobEvent.SUCCEED:
         return OUTCOME_COMPLETED
     if event is JobEvent.CONFIRM_CANCEL or event is JobEvent.EXPIRE_CANCELLING:
+        return OUTCOME_CANCELLED
+    if event is JobEvent.REQUEST_CANCEL and scope.job_id is None:
         return OUTCOME_CANCELLED
     if (
         event is JobEvent.REQUEUE
@@ -576,10 +607,16 @@ def _attempt_outcome(event: JobEvent, error_code: str) -> str | None:
 
 
 def _attempt_targets(scope: JobScope, write: _WriteResult) -> tuple[int, ...]:
-    """这次转换要给哪几条任务记账（只有单条任务的转换记账）。"""
-    if write.rows <= 0 or scope.job_id is None:
+    """这次转换要给哪几条任务记账。
+
+    单条任务就是它自己；批量作用域用条件写带回来的 `affected_ids`（`UPDATE … RETURNING`
+    给的就是「真的改到了哪几行」，不必再猜）。
+    """
+    if write.rows <= 0:
         return ()
-    return (int(scope.job_id),)
+    if scope.job_id is not None:
+        return (int(scope.job_id),)
+    return write.affected_ids
 
 
 def _record_attempt(
@@ -600,7 +637,7 @@ def _record_attempt(
     但**不许因此把一个真实成功的生成判死**。所以账本这一笔套在 `begin_nested()`
     （Postgres 的 SAVEPOINT）里：写坏只回滚到保存点，终态照常提交。
     """
-    outcome = _attempt_outcome(event, error_code)
+    outcome = _attempt_outcome(event, error_code, scope)
     if outcome is None or write.rows <= 0:
         return
     targets = _attempt_targets(scope, write)
@@ -712,7 +749,10 @@ def _settle(
             request_cancel(target, result.error_message)
             continue
         if result.event is JobEvent.SUPERSEDE:
-            request_supersede(target)
+            # 「取消中」的那一支不带被顶替标记（P0-3）：库里那一行也没被改写
+            # （`SUPERSEDABLE_STATUSES` 不含 `cancelling`），内存与库必须同一个口径。
+            if target.status != STATUS_CANCELLING:
+                request_supersede(target)
             continue
         if result.event is JobEvent.CONFIRM_SUPERSEDED:
             target.status = STATUS_SUPERSEDED

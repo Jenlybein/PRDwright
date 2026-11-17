@@ -206,7 +206,7 @@ def claim_and_dispatch(ticket: RegisteredJobTicket) -> bool:
     另一个改到 0 行之后安静退场（日志里能看到 `job.dispatch_skipped`）。
 
     为什么单进程里仍然**当场**抢占 + 派发（而不是注册后等轮询）：现有的用户体验是
-    「提交完立刻开始生成」。纯队列的调度循环（谁、多久扫一次、崩溃后怎么接手）是 #83
+    「提交完立刻开始生成」。补漏用的调度循环（谁、多久扫一次、扫到怎么派发）在 `services/job_scheduler.py`；崩溃后怎么接手是 #83
     的恢复器，本票不把它引入默认路径——否则本票会顺带把交互延迟从毫秒级拖成轮询周期。
     """
     lease = job_claimer.claim(ticket.owner_id, ticket.job_id)

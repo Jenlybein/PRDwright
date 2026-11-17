@@ -136,8 +136,9 @@ def _closeout_once(
     ## 七态（票 #84）下的四个结局
 
     - `succeeded`：`SUCCEED`（正文 / 结论照常写）；
-    - `failed`：`FAIL`（失败收尾可能落一版「部分完成」正文）；
-    - `cancelled`：`CONFIRM_CANCEL`（取消确认，清租约，半截正文与用量同样落下来）；
+    - `failed`：`FAIL`（失败收尾可能落一版「部分完成」正文；重审失败写 `review_failed_at`）；
+    - `cancelled`：`CONFIRM_CANCEL`（取消确认，清租约，半截正文与用量同样落下来；
+      **不写 `review_failed_at`**——用户主动停止不是审核失败）；
     - `superseded`：`CONFIRM_SUPERSEDED`（登记路径已经落了终态，这里只补一次载荷，
       **不写正文**——同一份文档已经有更新的任务接手）。
     """
@@ -186,10 +187,14 @@ def _closeout_once(
                 _write_document(runtime, summary, session=session)
         elif status == STATUS_CANCELLED:
             # 取消 / 用户停止：文档任务把已经写出来的正文落成一版部分完成（#85），
-            # 一个字都没写出来时不落版本；重审被取消同样把「没跑成」记成事实。
-            if runtime.kind == "review":
-                _mark_review_failed(runtime, session=session)
-            elif partial_content:
+            # 一个字都没写出来时不落版本。
+            #
+            # ⚠️ **取消不写 `review_failed_at`**（P0-2）：用户按停止 ≠ 审核失败。
+            # 从前这里对 `review` 任务也走 `_mark_review_failed`，于是「我自己停掉的」
+            # 会在审阅页显示成「审核失败」——把用户的主动意图说成一次失败。
+            # 取消的结局由 `status=cancelled` 表达（AC4），重审没有产出结论这一点
+            # 也已经写在任务的终态里，不需要另记一次「失败时间」。
+            if runtime.kind != "review" and partial_content:
                 _write_partial_document(runtime, summary, partial_content, session=session)
         elif status == STATUS_FAILED:
             if runtime.kind == "review":

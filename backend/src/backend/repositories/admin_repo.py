@@ -69,6 +69,26 @@ _AUDIT_MAX_ROWS = 500
 
 
 @dataclass(frozen=True, slots=True)
+class _DayCounts:
+    """一天之内各项计数的**不可变投影**（`_count_one_day` 的返回值）。
+
+    为什么不是裸 `dict[str, int]`：聚合结果没有对应的模型类，但裸 dict 会把「有哪些
+    字段」变成运行期才知道的事——调用方写错一个键要到用户点开后台才报 500。同文件里
+    对外的聚合行（`UserUsage` / `DailyUsage` / `JobMetrics`）都是这个写法，这里不该破例。
+    私有（下划线）是因为它只在「聚合 → `DailyUsage`」这一跳里存在，不是对外契约。
+    """
+
+    task_count: int
+    succeeded_count: int
+    failed_count: int
+    cancelled_count: int
+    superseded_count: int
+    active_count: int
+    prompt_tokens: int
+    completion_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class UserUsage:
     """用户列表的一行：账号基本信息 + 累计用量 + 额度覆盖值。"""
 
@@ -443,53 +463,74 @@ class AdminStatsRepository:
         for back in range(safe_days - 1, -1, -1):
             day = today - timedelta(days=back)
             counts = self._count_one_day(*_utc_day_bounds(day, shift))
-            finished = counts["succeeded_count"] + counts["failed_count"]
+            finished = counts.succeeded_count + counts.failed_count
             # 失败率由后端算好：前端各算一遍就会与这里漂移
             result.append(
                 DailyUsage(
                     day=day.isoformat(),
                     failure_rate=(
-                        round(counts["failed_count"] / finished, 4) if finished else None
+                        round(counts.failed_count / finished, 4) if finished else None
                     ),
-                    **counts,
+                    task_count=counts.task_count,
+                    succeeded_count=counts.succeeded_count,
+                    failed_count=counts.failed_count,
+                    cancelled_count=counts.cancelled_count,
+                    superseded_count=counts.superseded_count,
+                    active_count=counts.active_count,
+                    prompt_tokens=counts.prompt_tokens,
+                    completion_tokens=counts.completion_tokens,
                 )
             )
         return result
 
-    def _count_one_day(self, start: str, end: str) -> dict[str, int]:
+    def _count_one_day(self, start: str, end: str) -> _DayCounts:
         """统计 `[start, end)` 内的各项指标（七态，按状态列，不看错误码）。
 
         区间**左闭右开**：`end` 那一刻的任务属于下一天，两边都算会把边界值数两遍。
         无行时 `func.sum` 返回 NULL，统一折成 0——`None` 会让调用方的加法直接炸。
+
+        返回**不可变投影**而不是裸 dict（P1-2）：裸 dict 会把「有哪些字段」变成运行期
+        才知道的事，`counts["failed_count"]` 打错一个字母要到用户点开后台才炸；而且
+        按位置下标从聚合行取值（`row[2]`）意味着**改一下 SELECT 的列顺序就静默错位**——
+        两列都是整数，错位之后连类型检查都救不了。`frozen dataclass` 把形状钉死：
+        少一个字段是导入期就能发现的 `TypeError`。同一文件里的 `JobMetrics` 是同样的写法。
         """
         status_is = lambda value: GenerationJob.status == value  # noqa: E731
         row = self.session.execute(
             select(
-                func.count(),
-                func.sum(case((status_is(STATUS_SUCCEEDED), 1), else_=0)),
-                func.sum(case((status_is(STATUS_FAILED), 1), else_=0)),
-                func.sum(case((status_is(STATUS_CANCELLED), 1), else_=0)),
-                func.sum(case((status_is(STATUS_SUPERSEDED), 1), else_=0)),
+                func.count().label("task_count"),
+                func.sum(case((status_is(STATUS_SUCCEEDED), 1), else_=0)).label(
+                    "succeeded_count"
+                ),
+                func.sum(case((status_is(STATUS_FAILED), 1), else_=0)).label("failed_count"),
+                func.sum(case((status_is(STATUS_CANCELLED), 1), else_=0)).label(
+                    "cancelled_count"
+                ),
+                func.sum(case((status_is(STATUS_SUPERSEDED), 1), else_=0)).label(
+                    "superseded_count"
+                ),
                 func.sum(
                     case((GenerationJob.status.in_(ACTIVE_STATUSES), 1), else_=0)
-                ),
-                func.sum(GenerationJob.prompt_tokens),
-                func.sum(GenerationJob.completion_tokens),
+                ).label("active_count"),
+                func.sum(GenerationJob.prompt_tokens).label("prompt_tokens"),
+                func.sum(GenerationJob.completion_tokens).label("completion_tokens"),
             ).where(
                 GenerationJob.created_at >= start,
                 GenerationJob.created_at < end,
             )
         ).one()
-        return {
-            "task_count": int(row[0] or 0),
-            "succeeded_count": int(row[1] or 0),
-            "failed_count": int(row[2] or 0),
-            "cancelled_count": int(row[3] or 0),
-            "superseded_count": int(row[4] or 0),
-            "active_count": int(row[5] or 0),
-            "prompt_tokens": int(row[6] or 0),
-            "completion_tokens": int(row[7] or 0),
-        }
+        # 按**列名**取值：与上面的 `.label(...)` 一一对应，列顺序再变也不会错位。
+        mapping = row._mapping
+        return _DayCounts(
+            task_count=int(mapping["task_count"] or 0),
+            succeeded_count=int(mapping["succeeded_count"] or 0),
+            failed_count=int(mapping["failed_count"] or 0),
+            cancelled_count=int(mapping["cancelled_count"] or 0),
+            superseded_count=int(mapping["superseded_count"] or 0),
+            active_count=int(mapping["active_count"] or 0),
+            prompt_tokens=int(mapping["prompt_tokens"] or 0),
+            completion_tokens=int(mapping["completion_tokens"] or 0),
+        )
 
     def top_users(self, limit: int = 10) -> list[TopUser]:
         """用量最高的用户。

@@ -605,8 +605,8 @@ class JobEvent(SQLModel, table=True):
     ## 保留策略
 
     终态任务的过程日志**保留 7 天**（`services/job_events.purge_expired_events`，由
-    #89 的调度接线调它，本票只交付这个动作）。清理只删本表，权威正文在任务行与
-    `document_versions` 上，一行都不受影响。
+    `services/job_scheduler.py` 的清理周期约 1 小时一轮调度它）。清理只删本表，权威正文
+    在任务行与 `document_versions` 上，一行都不受影响。
 
     ## 归属与级联
 

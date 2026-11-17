@@ -12,8 +12,8 @@
 （用户的明确意图），而不是一次失败（AC3）。
 
 恢复器是**可直接调用的单元**：`recover_once(limit)` 扫一批、逐条收口、返回报告。
-不启动线程、不起定时器、不 sleep——接入调度循环（多久扫一次、扫到之后怎么派发）
-是 #89 的事。
+它自己不起线程、不起定时器、不 sleep——生产里由 `services/job_scheduler.py` 的收口周期
+（约 30 秒一轮）驱动，启动档由 `job_service.reap_orphans` 调一次。
 
 ## 档位与去向
 
@@ -23,9 +23,10 @@
 | 启动（`startup=True`，`reap_orphans` 用） | 库里所有**非终态**行（`pending` / `running` / `cancelling`） | 一律**落终态**：`cancelling` → `cancelled`；`running` 有租约 → `failed + LEASE_EXPIRED`；`running` 没租约 / `pending` → `failed + INTERNAL_ERROR`（服务重启中断） |
 
 为什么启动档不看「剩余次数」：**启动那一刻没有任何执行者会来领这一行**。单 worker
-是部署硬约束（`_RUNTIMES` 在进程内），进程刚起来时库里不可能有真正在跑的任务；
-而本票不引入调度循环（那是 #89），把行清成「排队中」等于让它永远排队——AC4
-「重启后不存在永远进行中」当场就红。
+是部署硬约束（`_RUNTIMES` 在进程内），进程刚起来时库里不可能有真正在跑的任务。
+调度循环虽然已经接上（`services/job_scheduler.py`），但它起在启动回收**之后**；
+即便回排队，这些行也是上一次进程留下的残骸——如实报一次「中断」比替用户静默重跑诚实
+（要重跑是用户再点一次生成）。
 
 ## 判权：fencing 用扫描时读到的旧凭证
 
@@ -57,7 +58,6 @@
 
 ## 本票不做什么
 
-- 调度循环 / 定时器 / 派发（#89）：本模块只提供 `recover_once` 这个入口。
 - 审批 / 人工介入：超时收口是机械规则，不在这里排队等人。
 """
 
@@ -242,7 +242,7 @@ def _decide(
             MESSAGE_CANCEL_CONFIRMED,
         )
     if target.status == STATUS_PENDING:
-        # 启动档才扫得到排队中：登记完还没派发就崩了，本票没有调度循环，留着就是永远排队中。
+        # 启动档才扫得到排队中：登记完还没派发就崩了，而启动档跑在调度循环之前，没人会来领。
         return (
             job_state.JobEvent.EXPIRE_PENDING,
             CODE_RESTART_INTERRUPTED,
@@ -377,7 +377,7 @@ def recover_once(
     """**本票的入口**：扫一批、逐条收口、返回报告（不起线程 / 不起定时器）。
 
     每条候选各自一个事务（`recover_one` 里的状态转换），所以一条写失败不会连带
-    别的候选：#89 的调度循环直接调用它即可。
+    别的候选——调度循环（`job_scheduler.recover_expired`）直接调用它即可。
     """
     moment = now or utc_now()
     targets = scan(limit, now=moment, startup=startup)

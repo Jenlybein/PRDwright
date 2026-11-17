@@ -18,8 +18,9 @@ live 之间那段只能靠运气。本模块把过程日志落成 `job_events` �
 
 ## 与「权威正文」的分工（重要）
 
-- `generation_jobs.draft_content` / `completed_sections` / `phase` 是**快照**：
+- `generation_jobs.draft_content` / `phase` / `pending_items` 是**快照**：
   冷读者一次拿走，回答「现在长什么样」；
+  （`completed_sections` 已在 #94 随分章链路退役，迁移 `0008` 删列；过程日志不依赖它。）
 - 本模块写的事件是**过程日志**：回答「一路走来发生了什么」，且**只增不改**；
 - 两者在**同一个事务**里写（见 `job_runtime_events._maybe_flush` 与
   `job_finalize._closeout_once`），所以「快照游标 = 快照内容覆盖到的最后一条事件」
@@ -211,8 +212,8 @@ def purge_expired_events(
     **权威正文不受影响**：正文在 `generation_jobs.draft_content` 与
     `document_versions.content` 上，本动作只 `DELETE FROM job_events`。
 
-    这里刻意**不**起后台定时器、不接调度循环：调度是 #89 / 清理票的事，本票只交付
-    「按保留期删过程日志」这一个可以直接被调用的动作。
+    生产里由 `services/job_scheduler.py` 的清理周期驱动（约 1 小时一轮）；本函数自己
+    不起线程、不起定时器，也可以被运维或用例直接调用。
     """
     moment = now or utc_now()
     if moment.tzinfo is not None:

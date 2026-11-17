@@ -18,6 +18,12 @@
 `CREATE DATABASE … TEMPLATE` 是它自己的「拷一份」——派生库拿到的是同一个结构、
 零数据，用例结束整库删掉。**模板库只有结构、没有数据**，这是「用例之间数据互不可见」的根。
 
+**是「库」不是「schema」**：#77 的票面写的是「每用例独立 schema」，实现里**从来不是**
+schema。Postgres 的 schema 是**一个库内部的命名空间**：同一个库、同一套连接池、同一个
+`alembic_version` 与 `system_config`——用例之间照样互相看得见，隔离不了任何东西。
+真正落地的隔离是**每个用例一个数据库**（`CREATE DATABASE … TEMPLATE`，见上段）。
+后人按票面去找「每用例 schema」会一无所获，口径以本段为准。
+
 ## 集成库从哪来（⚠️ 地址不带库名）
 
 `PRDWRIGHT_TEST_POSTGRES_URL` 给的是**维护库地址、不带库名**：
@@ -72,6 +78,12 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("INVITE_CODE", "test-invite")
     monkeypatch.setenv("INIT_ADMIN_USER", "")
     monkeypatch.setenv("INIT_ADMIN_PASSWORD", "")
+    # 后台调度循环（`services/job_scheduler.py`）在用例里**默认关掉**：一千多条用例
+    # 各自起三个周期任务，会互相抢同一批行，并在用例收尾时还在跑——那会把
+    # `in_use == 0` 的泄漏守卫和「用例之间数据互不可见」一起弄坏。
+    # 循环本身由 `test_job_scheduler.py` 显式打开它来验证（那几条用例自己
+    # `monkeypatch.setenv("JOB_SCHEDULER_ENABLED", "true")`）。
+    monkeypatch.setenv("JOB_SCHEDULER_ENABLED", "false")
     # 日志目录也要隔离：v4 起 lifespan 会把日志写进轮转文件，若不指到临时目录，
     # 每跑一次用例就会往仓库的 backend/logs/ 里塞一份，且用例之间互相覆盖。
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
@@ -317,16 +329,16 @@ def job_persist_progress(*args, **kwargs):
 
 
 def job_cancel_running(*args, **kwargs):
-    """按方案发起取消（测试薄封装）：排队中的立刻落已取消，执行中的转取消中。
+    """按方案取消（测试薄封装）：**任意非终态一步落已取消**并清租约（P0-4）。
 
-    七态之后「取消」是**请求**：执行中的行会停在 `cancelling` 等执行者确认，
-    排队中的行没有执行者，直接落 `cancelled`。返回值是改到的行数。
+    这是「删方案」那条路：方案已经不在了，不会有人来确认退出，所以不经过
+    「执行中 → 取消中 → 等确认」两阶段。返回值是改到的条数。
     """
     session_scope, repo = _job_repo()
     kwargs.pop("error_code", None)
     kwargs.setdefault("error_message", "方案已删除，任务已取消")
     with session_scope() as session:
-        return repo(session).request_cancel_solution(*args, **kwargs)
+        return len(repo(session).request_cancel_solution(*args, **kwargs))
 
 
 # ---------------------------------------------------------------------------
