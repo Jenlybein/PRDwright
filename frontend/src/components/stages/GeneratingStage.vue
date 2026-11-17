@@ -49,6 +49,13 @@ const props = withDefaults(
      * 不能混进正文预览（正文由 `streamingContent` 单独负责）。
      */
     docStageText?: string
+    /**
+     * 大纲文本（票 #91）：`stage_chunk(outlining)` 的累计。
+     *
+     * 与 `docStageText` 分开传：它在正文撰写期间仍然要显示（「先定了哪些结构」），
+     * 而审核 / 改写的输出换阶段就该清。
+     */
+    docOutlineText?: string
     /** 当前流式展示的是否为「上一版草稿」（章节改写期间），用于降透明度并加提示 */
     draftOnly?: boolean
     /**
@@ -182,12 +189,13 @@ onBeforeUnmount(stopTicker)
         :with-review="withReview"
       />
 
-      <!-- 阶段输出：紧贴进度条下方。审核 / 改写都是整篇量级的静默调用，
-           把模型正在写的字实时滚出来，用户才知道「它还在动」 -->
+      <!-- 阶段输出：紧贴进度条下方。大纲 / 审核 / 改写都是「先定结构」或整篇量级的
+           静默步骤，把过程文本实时滚出来，用户才知道「它还在动、它凭什么这么定」 -->
       <StageOutputStream
         v-if="docPhase && docPhase !== 'idle'"
         :phase="docPhase"
         :text="docStageText ?? ''"
+        :outline-text="docOutlineText ?? ''"
       />
     </template>
 

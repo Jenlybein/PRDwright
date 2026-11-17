@@ -612,6 +612,7 @@ const {
   prdShowingDraft,
   docPhase,
   docStageText,
+  docOutlineText,
   reviewConclusion,
   reviewFailedAt,
   reviewVersionNo,
@@ -1379,6 +1380,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :prd="prdStatus"
         :doc-phase="docPhase"
         :doc-stage-text="docStageText"
+        :doc-outline-text="docOutlineText"
         :with-review="hasDocumentReview(store.entryMode)"
         :draft-only="prdShowingDraft"
         :elapsed-ms="elapsedMs"

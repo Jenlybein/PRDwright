@@ -596,18 +596,24 @@ def test_closing_the_stream_mid_flight_cancels_the_lane() -> None:
     """消费者提前断开（生成器被 `aclose()`）时，车道与派生任务必须被取消、不报错。
 
     这是「客户端滑走」的路径：不清理就会留下后台还在烧 token 的任务。
+
+    ⚠️ 票 #91 之后流的最前面多了大纲（`stage` / `stage_chunk`）：断言因此从
+    「第一个事件是 `status`」改成「车道真的开跑了（`status` 在其中）」，性质不变。
     """
 
     async def scenario():
         writer = PrdSectionWriter(llm=RoutingLLM(), review_enabled=False)
         stream = writer.stream(requirements="做一个演示产品")
-        first = await stream.__anext__()
+        head = [await stream.__anext__() for _ in range(5)]
         # 继续取到「车道已经开跑、且已有章节在流」之后再看断开：此时 `finally` 里有活要收
         for _ in range(3):
             await stream.__anext__()
         await stream.aclose()
-        return first
+        return head
 
-    first = asyncio.run(scenario())
-    assert first.type == "status"
+    head = asyncio.run(scenario())
+    assert any(event.type == "status" for event in head), "车道必须已经开跑"
+    assert not any(event.type == "error" for event in head), "提前断开不该报错"
+    # 大纲在最前面，且早于车道状态
+    assert head[0].type == "stage" and head[0].data["stage"] == "outlining"
 

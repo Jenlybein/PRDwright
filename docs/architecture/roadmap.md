@@ -488,3 +488,65 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
   失败率 / 生成数 / Token 三条柱。
 - **成功率的敏感度**：累计口径在数据量大之后变化很慢；要看出「今天开始的恶化」得看按日
   趋势，或以后给四个数字加时间窗（那会改接口参数，属于新票）。
+
+### 9.11 范围、验收与复测（#91 大纲扩到三份）
+
+**范围**：三份产物（PRD / 接口文档 / 提示词）在写正文之前都先出一份**大纲**，三份走同一条
+阶段顺序「大纲 → 撰写 → 审核 → 改写」。大纲**只从上游材料抽取**、不发明；抽不出的结构标
+「待确认」；抽不出可追溯结构时**自动降级为直接写正文**，链路不卡死。**不新增迁移**（大纲
+是运行时过程信息，沿用 `stage_text` / `stage_chunk` 口径、不落库）。
+
+- **三份来源各不相同、但都只读上游**（`backend/src/backend/services/doc_outline.py`，
+  纯字符串、零 LLM 调用）：PRD ← 需求输入（结构化摘要按字段路径归类）+ 技能包模板章节骨架；
+  接口文档 ← PRD 的接口清单（功能编号 / HTTP 方法 + 路径 / `/api/…` 条目优先入「接口列表」）；
+  提示词 ← PRD 的功能与场景 + 接口文档的接口条目。**下游不从自己的产物取**。
+- **「只抽取不发明」两道机制，不靠一句提示词**：① 结构上根本没有创作这一步——大纲的每条
+  条目都是上游原文里的**整行**（锚点逐字保留，显示才截断）；② 抽出后 `verify_outline`
+  后校验，锚点在上游里查不到出处就作废、该节降级为「待确认」，因此即便将来别的路径塞条目
+  进来也过不了闸。骨架也不另立一套：接口文档的五节与提示词的四节分别必须在
+  `API_DOCS_GENERATION_PROMPT` 与 `prompts-guide.md` 里能找到（用例守着）。
+- **降级路径**：上游空白 / 骨架缺失 / 一条锚点都抽不到 / 抽取异常 → `build_outline` 返回
+  `None`，`outline_events` 只发一条说明性的 `stage(outlining)`（文案写明「直接开始撰写正文」），
+  随后照常 `stage(writing)`；**不发 `error`**，任务照常成功，前端阶段条不报错。
+- **事件形状不变**：`stage` 多一个取值 `outlining`、大纲正文走既有 `stage_chunk`（只进阶段
+  输出面板）；大纲不进 `done.reply`、不进 `chunk`、不参与交付齐备判据（仍按入口模式）。
+- **前端**：`DocPhase` 加 `outlining`；`DocPhaseProgress.vue` 加「大纲」一格（不复核的快捷
+  流程为「大纲 → 生成 → 完成」）；`StageOutputStream.vue` 把大纲单独一块（`outlineText`，
+  正文撰写期间仍显示）；`useDocumentPipeline.ts` 把 `stage_chunk(outlining)` 累计到大纲槽、
+  并给 PRD 路径补上 `onStageChunk`；`stores/runs.ts` 预览态加 `outlineText`；`AppV2.vue` /
+  `GeneratingStage.vue` 接线。
+
+**验收（逐条都有对应用例）**：
+
+1. 三份产物都能看到大纲阶段 —— 后端 `test_api_docs_stream_announces_outline_then_writing`、
+   `test_prompts_stream_announces_outline_then_writing`、
+   `test_prd_stream_shows_outline_before_the_first_section`；前端 `DocPhaseProgress.spec.ts`
+   「默认五格…」、`AppV2.spec.ts` 的四条大纲用例。
+2. 抽不出的结构标「待确认」、不编造 —— `test_outline_marks_unextractable_sections_as_pending`、
+   `test_verify_outline_drops_fabricated_anchors`、`test_prd_outline_follows_the_template_sections`、
+   `test_api_docs_outline_takes_structures_from_the_prd`、
+   `test_api_docs_outline_structure_matches_the_generation_prompt`、
+   `test_prompts_outline_structure_matches_the_skill_guide`。
+3. 大纲失败仍能继续写正文 —— `test_blank_upstream_degrades_to_plain_writing`、
+   `test_degrade_is_reported_honestly_in_the_stage_note`、`test_prompts_stream_degrades_too`；
+   前端 `AppV2.spec.ts`「大纲降级：直接进入撰写，阶段条不报错」、
+   `DocPhaseProgress.spec.ts`「大纲降级后直接进撰写…」。
+4. 大纲内容可在阶段输出里看到 —— `test_outline_stage_carries_doc_type`；前端
+   `StageOutputStream.spec.ts` 的三条大纲用例与 `AppV2.spec.ts`「大纲出现在阶段条上…」。
+5. 大纲不影响交付判据 —— `test_outline_never_leaks_into_the_deliverable_body`（大纲不进
+   `done.reply` / `pending_items`）；齐备判据本身未改，仍由登记表 `requiredDocs` 决定。
+
+**复测**（`ticket/91-outline`，基于 `integration/spec-75` tip `f74e1bf`）：后端
+`uv run pytest -n auto`（单独跑、不与其它全量并发）**1500 passed / 0 skipped / 0 failed**
+（= 合并前基线 1483 + 本票 17 条）；前端 `npm run test:unit -- --run` **822 passed / 43 文件**
+（基线 813 / 43 + 9 条）、`npm run build`（含 `type-check`）通过。**未执行**：push、合并与发布
+（由用户确认）。
+
+**给后续票的遗留**：
+
+- **大纲不落库**：它是过程信息（同 `stage_text`），刷新后看不到；要「回看某次生成定了哪些
+  结构」得给它一列或一张表——那会改 schema，留给 #92~#94 决定。
+- **本地化预测偏差**：结构骨架与关键词表是**保守**的启发式（宁可标「待确认」也不猜），
+  上游措辞与关键词表对不上时会多出几个待确认节；等三份产物真正收敛成同一套模板后再收窄。
+- **只会「抽取」不会「补全」**：源材料缺的章节永远标待确认；「要不要补写、什么时候补」
+  属于后续澄清链路，不在本票。

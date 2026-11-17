@@ -4,26 +4,30 @@ import { computed } from 'vue'
 import type { DocPhase } from '@/types'
 
 /**
- * 下游文档（接口文档 / 提示词）生成中的阶段条。
+ * 文档生成中的阶段条（三份产物共用）。
  *
- * 与 `PrdProgress` 的管道看板不同：这两份产物是整篇生成、只审一次，没有章节维度，
- * 因此只展示四个阶段胶囊：生成 → 审核 → 改写 → 完成。
+ * 票 #91 起阶段顺序三份一致：**大纲 → 生成 →（审核 → 改写）→ 完成**。
+ * 「大纲」是从上游材料里抽取结构的那一步（接口文档来自 PRD 的接口清单、提示词来自
+ * PRD + 接口文档、PRD 来自需求输入 + 模板章节）；它抽不出结构时后端直接降级进入
+ * 「生成」，阶段条不会停在「大纲」不动、也不会报错。
  *
- * `withReview` 为 false（快捷流程）时**只剩「生成 → 完成」两格**：那两格永远走不到，
- * 画在地图上的路走不通，比不画更糟——用户会以为「它还没审到」而不是「这次不审」。
+ * `withReview` 为 false（快捷流程）时**只剩「大纲 → 生成 → 完成」**：审核 / 改写那两格
+ * 永远走不到，画在地图上的路走不通，比不画更糟——用户会以为「它还没审到」而不是
+ * 「这次不审」。
  */
 // ⚠️ 必须显式给默认值：布尔 prop 在**未传**时会被 Vue 自动转成 `false`，
 // 于是「没传」等于「关掉复核」，完整流程会被悄悄降级。
 const props = withDefaults(
   defineProps<{
     phase: DocPhase
-    /** 本次生成是否带「审核 / 改写」；为 false 时只画「生成 → 完成」 */
+    /** 本次生成是否带「审核 / 改写」；为 false 时只画「大纲 → 生成 → 完成」 */
     withReview?: boolean
   }>(),
   { withReview: true },
 )
 
 const STEPS: { id: DocPhase; label: string }[] = [
+  { id: 'outlining', label: '大纲' },
   { id: 'writing', label: '生成' },
   { id: 'reviewing', label: '审核' },
   { id: 'rewriting', label: '改写' },
@@ -33,10 +37,11 @@ const STEPS: { id: DocPhase; label: string }[] = [
 /** 带复核时的下标 */
 const ORDER: Record<DocPhase, number> = {
   idle: -1,
-  writing: 0,
-  reviewing: 1,
-  rewriting: 2,
-  done: 3,
+  outlining: 0,
+  writing: 1,
+  reviewing: 2,
+  rewriting: 3,
+  done: 4,
 }
 
 /**
@@ -48,15 +53,17 @@ const ORDER: Record<DocPhase, number> = {
  */
 const ORDER_NO_REVIEW: Record<DocPhase, number> = {
   idle: -1,
-  writing: 0,
-  reviewing: 0,
-  rewriting: 0,
-  done: 1,
+  outlining: 0,
+  writing: 1,
+  reviewing: 1,
+  rewriting: 1,
+  done: 2,
 }
 
 const steps = computed(() =>
   props.withReview === false
     ? [
+        { id: 'outlining' as DocPhase, label: '大纲' },
         { id: 'writing' as DocPhase, label: '生成' },
         { id: 'done' as DocPhase, label: '完成' },
       ]

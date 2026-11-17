@@ -43,6 +43,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
+from backend.services.doc_outline import outline_events
 from backend.services.doc_skeleton import extract_headings, skeletonize
 from backend.services.job_product_kind import _ensure_product_kind
 from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
@@ -714,6 +715,12 @@ class DocumentService:
             pending_spec=render_spec(),
         )
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        # 大纲先于撰写：只从上游 PRD 的接口清单**抽取**结构（零 LLM 调用、不发明），
+        # 抽不到就降级直接撰写——阶段事件形状不变，前端只是多一格「大纲」。
+        for outline_event in outline_events(
+            "api_docs", upstream=prd_content, doc_type=doc_type
+        ):
+            yield outline_event
         # 阶段条要**立刻**出现：整篇生成是最长的一步，若等第一次模型调用之后再报阶段，
         # 用户在最长的那段时间里看到的是一片空白（前端因此不知道在干什么）。
         yield StreamEvent(
@@ -825,6 +832,14 @@ class DocumentService:
         # 这份产物的「事件字段 + 展示名」只从身份表取，别处不再手写三元组
         doc_type, label = _product_identity("prompts")
         messages = self._build_messages(SYSTEM_PROMPT, user_content)
+        # 大纲同构：提示词套件的大纲从 **PRD + 接口文档** 抽取（接口文档缺席时不编）。
+        for outline_event in outline_events(
+            "prompts",
+            upstream=prd_content,
+            secondary=api_docs_content,
+            doc_type=doc_type,
+        ):
+            yield outline_event
         # 与接口文档同构：阶段条立即亮起，别让用户在最长的一步里盯着空白
         yield StreamEvent(
             type="stage",

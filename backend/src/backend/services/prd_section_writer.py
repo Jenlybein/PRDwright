@@ -75,13 +75,14 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
+from backend.services.doc_outline import outline_events
 from backend.services.llm_factory import StreamingChatModel, config_fingerprint, get_llm
 from backend.services.llm_utils import extract_json_object
 from backend.services.pending_items import (
@@ -500,6 +501,26 @@ class PrdSectionWriter:
     # 主流程
     # ------------------------------------------------------------------
 
+    def _outline_events(self, requirements_text: str) -> Iterator[StreamEvent]:
+        """PRD 的大纲阶段：骨架 = 即将写入的模板章节，内容从需求输入**抽取**。
+
+        三份产物的阶段顺序因此一致（大纲 → 撰写 → 审核 → 改写 → 完成），事件形状不变
+        （仍是 `stage` / `stage_chunk`，只多一个 `stage` 取值 `outlining`）；抽不出结构
+        时降级为直接撰写、**不发 `error`**（与接口文档 / 提示词同口径）。
+
+        Args:
+            requirements_text: 与撰写链路**同一份**需求文本（摘要优先、其次自由文本）。
+
+        Yields:
+            `stage(outlining)`、可选的一条 `stage_chunk(outlining)`。
+        """
+        return outline_events(
+            "prd",
+            upstream=requirements_text,
+            doc_type="prd",
+            structure=tuple(section.heading for section in PRD_SECTIONS),
+        )
+
     async def stream(
         self,
         *,
@@ -512,7 +533,16 @@ class PrdSectionWriter:
 
         并发度为 1 时走原来的串行链路（回滚开关）；大于 1 时走三车道并行。
         两条链路产出同一套 `StreamEvent` 契约，`document_service` 无需分支。
+
+        大纲在这**两条车道之前**统一下发：它是「先定结构」这一步，与后面串行还是并行
+        无关。骨架就是马上要写的模板章节，内容从需求输入抽取——两者都只是**读**上游
+        与模板，不改任何后续行为，因此并行的观感与从前一致（只多一格「大纲」）。
         """
+        # 需求文本与撰写链路同一处口径（摘要优先、其次自由文本），大纲不另拼一份
+        requirements_text = format_requirements_text(summary, requirements, product_name)
+        for outline_event in self._outline_events(requirements_text):
+            yield outline_event
+
         lane = (
             self._stream_linear(
                 summary=summary,
