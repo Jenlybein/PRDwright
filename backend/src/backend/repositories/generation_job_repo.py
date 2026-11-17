@@ -319,7 +319,7 @@ class GenerationJobRepository:
         job_id: int,
         *,
         draft_content: str,
-        completed_sections: list[dict[str, Any]],
+        completed_sections: list[dict[str, Any]] | None = None,
         phase: str,
         pending_items: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -328,7 +328,7 @@ class GenerationJobRepository:
         高频写（≤300ms / 增量 4KB）：**每次调用仍应是一个短事务**（调用方每次一个
         `session_scope()`），不要与其它写合并——        长事务会持锁，把生成链路卡住。
         """
-        sections_text = _dump_sections(completed_sections)
+        sections_text = _dump_sections(completed_sections or [])
         _ensure_progress_texts(draft_content, sections_text)
         self.session.execute(
             update(GenerationJob)
@@ -348,7 +348,7 @@ class GenerationJobRepository:
         job_id: int,
         *,
         draft_content: str,
-        completed_sections: list[dict[str, Any]],
+        completed_sections: list[dict[str, Any]] | None = None,
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
@@ -379,7 +379,7 @@ class GenerationJobRepository:
         `partial` 是「有内容可用、但不完整」（票 #85）：章节重试用尽后照常收尾的
         「部分完成」也走本方法，标记与终态同一条语句落下。
         """
-        sections_text = _dump_sections(completed_sections)
+        sections_text = _dump_sections(completed_sections or [])
         _ensure_progress_texts(draft_content, sections_text)
         conditions: list[Any] = [
             GenerationJob.id == job_id,
@@ -421,7 +421,7 @@ class GenerationJobRepository:
         error_code: str,
         error_message: str,
         draft_content: str,
-        completed_sections: list[dict[str, Any]],
+        completed_sections: list[dict[str, Any]] | None = None,
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
@@ -450,7 +450,7 @@ class GenerationJobRepository:
         `partial` 是「失败但有内容可用」（票 #85）：失败收尾把已生成的正文落成
         `document_versions.partial=true` 时，任务行同一次事务里留这一份投影。
         """
-        sections_text = _dump_sections(completed_sections)
+        sections_text = _dump_sections(completed_sections or [])
         _ensure_progress_texts(draft_content, sections_text)
         conditions: list[Any] = [
             GenerationJob.id == job_id,

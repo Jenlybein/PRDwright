@@ -67,9 +67,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: 'writing',
     finalizedText: '',
     liveBuffer: '',
-    liveBySection: [],
     stageText: '',
-    completedSections: [],
     solutionId: 1,
     errorCode: '',
     errorMessage: '',
@@ -177,7 +175,7 @@ describe('useJob.start', () => {
     const snap = snapshot({ phase: 'reviewing', finalizedText: '# 正文\n' })
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       handlers?.onSnapshot?.(snap)
-      handlers?.onChunk?.({ text: '增量', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '增量' })
       handlers?.onRunSummary?.(runSummary())
       return { conversationId: '', reply: '# 正文\n增量', asks: [] }
     })
@@ -348,13 +346,13 @@ describe('useJob 按游标续读（#86）', () => {
       handlers?.onCursor?.(0)
       handlers?.onSnapshot?.(snapshot({ status: 'running' }))
       handlers?.onCursor?.(7)
-      handlers?.onChunk?.({ text: '甲', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '甲' })
       throw new Error('连接被断开')
     })
     // 续读：服务端只发游标 7 之后的事件（增量 + 结束）
     vi.mocked(api.readJobStream).mockImplementationOnce(async (_jobId, handlers) => {
       handlers?.onCursor?.(8)
-      handlers?.onChunk?.({ text: '乙', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '乙' })
       return completed('甲乙')
     })
 

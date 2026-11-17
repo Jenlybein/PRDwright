@@ -189,7 +189,7 @@
 
 ### 7.5 落地与复测（`ticket/63-review-defects-impl`，基于 `integration/spec-63` 的 `6c6e4bc`）
 
-- **代码落点**：唯一口径模块 `backend/src/backend/services/review_defects.py`（类别→固定严重度、别名归一、两时点开关、清单注入文本、旧形状归一、`issues_text` 与 `defects_count_text`、条目被丢光后的 `finalize_verdict`）；`document_review`（接口文档 / 提示词整篇）与 `prd_section_writer`（PRD 逐章 + 重审）共用同一套提示词与解析，提示词只有一份、靠 `{pending_section}` 占位符区分生成与重审两态；`job_inputs` 在建任务那一刻取当前版本的待确认清单（重审 / 修复各一处），生成链路不带。前端：`ReviewConclusionPanel` 标题改「文档缺陷」、折叠头分类计数、展开按类分组（类内 high 在前、未分类垫底），`types/index.ts::ReviewIssue.category` 与 `utils/review.ts::parseReview` 归一，标签与后端 `CATEGORY_LABELS` 逐项逐序一致（有跨端对拍用例）。
+- **代码落点**：唯一口径模块 `backend/src/backend/services/review_defects.py`（类别→固定严重度、别名归一、两时点开关、清单注入文本、旧形状归一、`issues_text` 与 `defects_count_text`、条目被丢光后的 `finalize_verdict`）；`document_review`（接口文档 / 提示词整篇）与 `prd_section_writer`（PRD 逐章 + 重审；票 #92 起 PRD 也走 `document_review` 整篇链路，`prd_section_writer` 已退役）共用同一套提示词与解析，提示词只有一份、靠 `{pending_section}` 占位符区分生成与重审两态；`job_inputs` 在建任务那一刻取当前版本的待确认清单（重审 / 修复各一处），生成链路不带。前端：`ReviewConclusionPanel` 标题改「文档缺陷」、折叠头分类计数、展开按类分组（类内 high 在前、未分类垫底），`types/index.ts::ReviewIssue.category` 与 `utils/review.ts::parseReview` 归一，标签与后端 `CATEGORY_LABELS` 逐项逐序一致（有跨端对拍用例）。
 - **七条验收各有用例**（`backend/tests/test_review_defects.py` **23 个用例函数 / 25 条收集项**，覆盖七条验收 + PRD 空清单仍开第六类 + 别名与旧形状分路；B1 / B2 / B3 与 C1 / C2 的收口各有守卫；前端 `ReviewConclusionPanel.spec.ts` / `review.spec.ts` 守标题、计数、分组、未分类与解析归一）。
 - **复测**（前后端分开跑，全流程离线、零 LLM Key）：后端 `uv run pytest` **1260 passed**；`frontend` 的 `test:unit -- --run` **752 passed / 41 文件**、`type-check` 通过；`frontend_admin` 的 `test:unit -- --run` **117 passed / 13 文件**（管理端零改动，只做回归）。用例基线按 `--collect-only -q` 现取：**1260 收集 / 1080 文本计数 / 180 差额**（口径见 [`../agents/conventions.md`](../agents/conventions.md) §10）。
 - **未执行**：push 与合并（由用户确认）；发布与线上三点验证不在本轮。
@@ -550,3 +550,39 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
   上游措辞与关键词表对不上时会多出几个待确认节；等三份产物真正收敛成同一套模板后再收窄。
 - **只会「抽取」不会「补全」**：源材料缺的章节永远标待确认；「要不要补写、什么时候补」
   属于后续澄清链路，不在本票。
+
+---
+
+## 10. 本轮：PRD 整篇化 + 分章退役（#92）
+
+### 10.1 范围
+
+- **一个生成路径**：PRD 与接口文档 / 提示词共用同一条整篇生成路径——一次模型调用写完整篇（`generate_prd_stream` → 一条 `stage(writing)` → 连续 `chunk` → `done.reply`），一次整篇审核（`document_review.stream_review_only`，上游注入**原始需求 / 需求澄清对话**），有问题再整篇改写一次（`fix_document_stream` + `part{replace}` 整段覆盖，改写后不重审）。PRD 的 `chunk` 不再带 `section_id` / `index`，前述事件形状与另两份产物**逐字段一致**。
+- **退役分章实现**：删除 `services/prd_section_writer.py`（1503 行）与 `services/prd_section_parallel.py`（464 行）及四个 PRD 专用分章提示词；删除五个 PRD 专用配置键（`prd_pipeline_concurrency` / `prd_section_max_retries` / `prd_section_review_enabled` / `prd_section_max_rewrites` / `prd_section_review_max_tokens`）与后台「分章节生成」配置组；`job_runtime` / `job_runtime_events` / `job_snapshot` / `job_finalize` / `job_recovery` / `job_state` 里的 `_SectionLive` / `live_by_index` / `parts_by_index` / `completed_sections` 相关分支一并删除（`completed_sections` 列保留、不再写，留给 #94 收口）。
+- **前端退役多章看板**：删除 `components/stages/PrdProgress.vue`；`GeneratingStage` 不再有 `prd` 分支与 `draftOnly`（三份产物共用同一套 `DocPhaseProgress`）；`useDocumentPipeline` 删除看板装配 / 快照还原 / 三段预览，PRD 与另两份走同一套 handlers（`onChunk` 只带 `{text}`，`part{replace}` 整段覆盖）；`types` / `api` / `stores/runs` 的章节级字段（`PrdBoardState` / `PrdSectionCard` / `CompletedSection` / `SectionDraft` / `liveBySection` / `completedSections`）删除。
+- **审核与修复同口径**：PRD 审核从「逐章审 + 汇总」改为「整篇审一次」；`review_document_stream` 不再有 PRD 分支，`_rereview_after_fix` 不再走章节写入；失败章节清单字段保留在契约里、当前恒为空（给 #94）。
+
+### 10.2 本期不做
+
+- 三份产物的**产物语义**统一（章节模板、审核口径细节、上游注入字段）归 #93；`failed_sections` / `partial` 等兼容字段的最终去留归 #94。本票只统一**生成路径与事件形状**，不顺手改另两份产物的内容语义。
+- 分章的历史版本不做数据迁移：`generation_jobs.completed_sections` 列继续存在（旧值只读、不再写）。
+
+### 10.3 验收与证据
+
+1. **PRD 不再分章并行**：`backend/tests/test_prd_whole_stream.py`（8 条）守「撰写一次调用、无章节归属、整篇审一次、高严重度整篇改写一次且不重审、审核看到完整需求、两条整篇入口（重审 / 修复）、SSE 端到端」；`test_review_defects.py` / `test_review_job.py` / `test_review_persistence.py` 的 PRD 用例全部改成整篇口径。
+2. **前端一套进度**：`PrdProgress.vue` 与 `PrdProgress.spec.ts` 删除；`AppV2.spec.ts` 新增「PRD 生成显示共用阶段条与大纲内容」一条，旧的「分章节阶段展示」整块（多章车道 / 按章装配 / 改写叠字等）随看板退役删除。
+3. **分章代码与用例退役**：后端收集数从 **1500** 降到 **1443**（删掉三个分章测试文件（52 条收集项）与散布在各文件的分章断言（13 条收集项），新增 `test_prd_whole_stream.py` 8 条）；前端 `test:unit -- --run` 从 **822 passed / 43 文件** 降到 **751 passed / 42 文件**（删 71 条：`AppV2.spec` 的「分章节阶段展示」整块 66 条 + `PrdProgress.spec` 5 条，`api.spec` 的章节字段用例 2 条改为 1 条，另新增 1 条共用阶段展示用例）。
+4. **PRD 仍然写出并落一版**（最高优先级回归）：`test_sse_end_to_end_prd_generation_lands_a_version` 走「提交 → 大纲 → 撰写 → 审核 → 定稿 → 落版本」，断言 `document_store.list_versions` 得到 `version_no 1` 且正文等于 `done.reply`。
+5. **进度信息不空转**：阶段条（大纲 → 撰写 → 审核 → 改写 → 完成）+ 阶段输出在 PRD 生成期间照常显示，前端用例守着「大纲内容真的出现」；不再有「看板空着 = 生成中什么都看不到」。
+
+### 10.4 复测与收口
+
+- 后端：`cd backend && PRDWRIGHT_TEST_POSTGRES_URL=…:5434 uv run pytest -n auto -q` → **1443 passed，0 skipped，0 failed**（#91 收口基线为 **1500 passed**；本票净减 57：删 65 条收集项、新增 8）。`--collect-only -q` 现取 **1443** 收集 / **1246** 文本计数 / **197** 参数化展开差额。
+- 前端：`cd frontend && npm run test:unit -- --run` → **751 passed / 42 文件**；`npm run build`（含 `type-check`）通过。
+- 文档：`GLOSSARY.md`（「分章」降级为文档内部结构的**章节**叙述）、本文件 §10、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §3.3（新增「PRD 整篇化」条）、[`../agents/conventions.md`](../agents/conventions.md) §5（分章约定整段替换为退役说明 + 统一口径）、`README.md` 管线描述同步。
+- **未执行**：push 与合并（由用户确认）。
+
+### 10.5 给后续票的遗留
+
+- **#93**：三份产物的产物级统一（含上游注入字段、审核提示词细节、待确认清单的章节字段）。
+- **#94**：清理兼容字段 / 死列（`completed_sections`、`live_by_section`、`failed_sections`、`partial` 的最终去留）与契约收口；`job_state.FinishPayload.completed_sections` 目前仍作为通用存储在（用例也还在用它），那是 #94 的范围。

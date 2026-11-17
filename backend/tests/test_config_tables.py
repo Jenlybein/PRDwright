@@ -93,11 +93,11 @@ def test_fresh_db_has_no_factory_providers():
 
 def test_config_upsert_overwrites_and_delete_restores_default():
     """写入覆盖同一键；删除即「恢复默认」。"""
-    SystemConfigRepository.upsert_many({"prd_pipeline_concurrency": "5"}, updated_by=1)
-    SystemConfigRepository.upsert_many({"prd_pipeline_concurrency": "3"}, updated_by=2)
-    assert SystemConfigRepository.get_all() == {"prd_pipeline_concurrency": "3"}
+    SystemConfigRepository.upsert_many({"doc_review_max_tokens": "5"}, updated_by=1)
+    SystemConfigRepository.upsert_many({"doc_review_max_tokens": "3"}, updated_by=2)
+    assert SystemConfigRepository.get_all() == {"doc_review_max_tokens": "3"}
 
-    assert SystemConfigRepository.delete_many(["prd_pipeline_concurrency"]) == 1
+    assert SystemConfigRepository.delete_many(["doc_review_max_tokens"]) == 1
     assert SystemConfigRepository.get_all() == {}
     # 删不存在的键不该报错，也不该返回负数
     assert SystemConfigRepository.delete_many(["nope"]) == 0
@@ -106,11 +106,11 @@ def test_config_upsert_overwrites_and_delete_restores_default():
 def test_config_upsert_is_all_or_nothing():
     """整批写入在一个事务里：配置是一组语义，写一半会撕裂。"""
     SystemConfigRepository.upsert_many(
-        {"prd_pipeline_concurrency": "2", "review_rewrite_min_severity": '"high"'},
+        {"doc_review_max_tokens": "2", "review_rewrite_min_severity": '"high"'},
         updated_by=1,
     )
     stored = SystemConfigRepository.get_all()
-    assert stored["prd_pipeline_concurrency"] == "2"
+    assert stored["doc_review_max_tokens"] == "2"
     assert json.loads(stored["review_rewrite_min_severity"]) == "high"
 
 

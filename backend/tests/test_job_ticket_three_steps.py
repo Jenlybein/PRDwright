@@ -78,9 +78,7 @@ def _use_prd_llm(monkeypatch, pieces: list[str]) -> None:
         raise AssertionError("测试不应触网调用真实 LLM")
 
     monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
-    from backend.services import prd_section_writer
 
-    monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
 
 
 def _use_chat_llm(monkeypatch, pieces: list[str]) -> None:

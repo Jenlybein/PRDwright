@@ -15,7 +15,7 @@ function review(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
         severity: 'high',
         category: 'fabrication',
         detail: '出现了输入中没有的性能指标',
-        sectionTitle: '产品概述',
+        where: '产品概述',
       },
       { severity: 'medium', category: 'structure', detail: '缺少异常流程' },
     ],
@@ -33,7 +33,7 @@ function review(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
 function legacyReview(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
   return review({
     issues: [
-      { severity: 'high', detail: '出现了输入中没有的性能指标', sectionTitle: '产品概述' },
+      { severity: 'high', detail: '出现了输入中没有的性能指标', where: '产品概述' },
       { severity: 'medium', detail: '缺少异常流程' },
     ],
     ...overrides,

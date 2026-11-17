@@ -1,8 +1,8 @@
 """统一的流式回复编排。
 
 「把模型的一次流式输出包装成 SSE 事件序列」这件事，历史上在 `conversation_service`、
-`document_service`、`prd_section_writer` 里各有一份实现：两个 `_stream_reply` 几乎
-逐行相同，`prd_section_writer._error_event` 还是第三份「异常 → error 事件」的转换
+`document_service` 里曾有两份实现：两个 `_stream_reply` 几乎
+逐行相同，另一份 `_error_event` 还是第三份「异常 → error 事件」的转换
 （它的注释当时写着「与 `document_service._stream_reply` 的口径一致」——靠注释保证
 一致，改一处漏一处只是时间问题）。
 

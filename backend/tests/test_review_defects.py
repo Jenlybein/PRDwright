@@ -37,7 +37,6 @@ from backend.services import (
     document_store,
     job_runtime,
     llm_factory,
-    prd_section_writer,
     prompts,
     review_defects,
 )
@@ -102,7 +101,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 @pytest.fixture(autouse=True)
@@ -525,7 +523,7 @@ def test_legacy_conclusion_without_a_category_reads_back_as_uncategorized(
 def test_prd_rereview_also_opens_the_sixth_category_with_an_empty_list(
     client, monkeypatch
 ):
-    """PRD 的逐章重审与整篇重审同一套类别：清单为空时照样允许报「清单漏登记」。
+    """PRD 的整篇重审与接口文档 / 提示词同一套类别：清单为空时照样允许报「清单漏登记」。
 
     三份产物必须用同一个类别集，否则「同一份判断在 PRD 侧判 medium、在接口文档侧
     判 high」这种分叉会立刻出现（ADR 0003）。
@@ -533,7 +531,7 @@ def test_prd_rereview_also_opens_the_sixth_category_with_an_empty_list(
     register(client)
     solution_id = _create_solution(client)
     _seed_requirements(client, solution_id)
-    heading = prd_section_writer.PRD_SECTIONS[0].heading
+    heading = "## 1. 产品概述"
     _seed_document(
         client, solution_id, "prd", f"# 演示产品 产品需求文档（PRD）\n\n{heading}\n\n正文内容\n"
     )
@@ -551,8 +549,8 @@ def test_prd_rereview_also_opens_the_sixth_category_with_an_empty_list(
     issue = conclusion["issues"][0]
     assert issue["category"] == "missing_pending"
     assert issue["severity"] == "medium"
-    # 汇总结论按章定位，`section_title` 是章节名（与生成链路的汇总形状同一份）
-    assert issue["section_title"] == prd_section_writer.PRD_SECTIONS[0].title
+    # 整篇结论用 `where` 定位（`where` 取自提示词里的章节标题清单）
+    assert issue["where"] == heading
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +583,7 @@ def test_category_table_is_locked_to_six_keys_and_fixed_severity():
 
 def _prd_header(body: str = "正文内容") -> str:
     """一份最小可审的 PRD 正文（H1 + 第一章），供「需要上游 PRD」的产物准备材料。"""
-    heading = prd_section_writer.PRD_SECTIONS[0].heading
+    heading = "## 1. 产品概述"
     return f"# 演示产品 产品需求文档（PRD）\n\n{heading}\n\n{body}\n"
 
 
@@ -799,43 +797,6 @@ def test_prompts_rereview_opens_all_six_categories_and_injects_the_list(
 
 
 # ---------------------------------------------------------------------------
-# 六、PRD 的汇总结论按类别计数（不再出现「待处理问题」）
-# ---------------------------------------------------------------------------
-
-
-def test_prd_summary_counts_defects_by_category(client, monkeypatch):
-    """PRD 的 summary 是「N 章已审，缺陷 M 处（类别计数）」——术语表禁用「问题」于此。"""
-    register(client)
-    solution_id = _create_solution(client)
-    _seed_requirements(client, solution_id)
-    first = prd_section_writer.PRD_SECTIONS[0].heading
-    second = prd_section_writer.PRD_SECTIONS[1].heading
-    _seed_document(
-        client,
-        solution_id,
-        "prd",
-        f"# 演示产品 产品需求文档（PRD）\n\n{first}\n\n正文内容\n\n{second}\n\n正文内容\n",
-    )
-
-    reply = _review_json(
-        {
-            "where": "",
-            "category": "fabrication",
-            "severity": "high",
-            "detail": "凭空补了鉴权方式",
-        }
-    )
-    llm = FakeLLM(reviewer=lambda prompt: reply)
-    _fake_service(monkeypatch, llm)
-    _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
-
-    assert status == "succeeded"
-    summary = _review_events(events)[0]["summary"]
-    assert summary == "2 章已审，缺陷 2 处（编造 2）"
-    assert "待处理问题" not in summary
-
-
-# ---------------------------------------------------------------------------
 # 七、五类表只有一个生成点（两条产物链都从 `review_defects` 取）
 # ---------------------------------------------------------------------------
 
@@ -853,15 +814,13 @@ def test_both_review_prompts_share_one_generated_category_table():
     assert table.strip(), "共用的类别表不能是空串"
     assert "fabrication" in table and "unlabeled_inference" in table
 
-    assert table in _rendered(prompts.PRD_SECTION_REVIEW_PROMPT, category_rules=table)
     assert table in _rendered(prompts.DOC_REVIEW_PROMPT, category_rules=table)
 
     # 模板里再手写一份类别表就会与生成点漂移：这里直接把它排除
-    for template in (prompts.PRD_SECTION_REVIEW_PROMPT, prompts.DOC_REVIEW_PROMPT):
-        for identifier in review_defects.CATEGORY_SEVERITY:
-            assert identifier not in template, (
-                f"提示词模板里还写着类别标识 `{identifier}`——类别表必须只有一个生成点"
-            )
+    for identifier in review_defects.CATEGORY_SEVERITY:
+        assert identifier not in prompts.DOC_REVIEW_PROMPT, (
+            f"提示词模板里还写着类别标识 `{identifier}`——类别表必须只有一个生成点"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +882,7 @@ def test_frontend_defect_labels_match_the_backend_one_to_one():
 def test_prd_rewrite_prompt_has_no_fix_only_constraint_but_fix_prompt_keeps_it():
     """「不得为缺失编造」只留修复提示词（ADR 0003 决策 6），不蔓延到生成期改写。"""
     assert "不得为缺失编造" in prompts.DOC_FIX_PROMPT
-    assert "不得为缺失编造" not in prompts.PRD_SECTION_REWRITE_PROMPT
+    assert "不得为缺失编造" not in prompts.DOC_REWRITE_PROMPT
 
 
 def test_rewrite_prompt_gets_plain_severity_not_the_chinese_category_label(
@@ -979,7 +938,7 @@ def test_verdict_falls_back_to_pass_only_when_filtering_emptied_the_list():
 
 
 def test_issues_text_keeps_placeholder_and_clipping_at_both_call_sites():
-    """两处薄壳各自只有「占位句」与「是否截断」不同，实现只有一份。"""
+    """三份产物共用的整篇结论：占位句与 60 字截断都在同一份实现里。"""
     long_detail = "很长" * 40
 
     whole = DocumentReviewResult(
@@ -991,15 +950,7 @@ def test_issues_text_keeps_placeholder_and_clipping_at_both_call_sites():
     assert text.endswith("…"), "整篇链路的 detail 仍按 60 字截断（口径不变）"
     assert long_detail not in text
 
-    section = prd_section_writer.SectionReview(
-        verdict="revise",
-        issues=[{"severity": "low", "detail": long_detail}],
-    )
-    text = section.issues_text()
-    assert long_detail in text, "PRD 章节链路的 detail 不做截断（口径不变）"
-
     assert DocumentReviewResult(verdict="pass").issues_text() == "（审核未给出逐条问题）"
-    assert prd_section_writer.SectionReview(verdict="pass").issues_text() == "（审核未给出具体问题）"
 
 
 # ---------------------------------------------------------------------------

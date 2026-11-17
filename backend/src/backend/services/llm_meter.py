@@ -4,7 +4,7 @@
 
 用量是在流水线最深处产生的（`stream_reply.astream_text` 消费模型分块），而「这是哪一次
 生成、第几步」只有最外层（`job_service`）知道。若靠参数一路传下去，`document_service`、
-`prd_section_writer`、`conversation_service` 的每个流式入口签名都要改——而现行设计约定是
+`conversation_service` 的每个流式入口签名都要改——而现行设计约定是
 **业务层调用方式不变**（见 `docs/architecture/ARCHITECTURE.md` §3.3「生成任务与 SSE 契约」：
 观测层挂在模型调用之外，业务层无感）。
 

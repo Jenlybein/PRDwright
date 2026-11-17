@@ -32,7 +32,6 @@ from backend.services import (
     job_service,
     job_runtime,
     llm_factory,
-    prd_section_writer,
 )
 from backend.services.job_bus import job_bus
 from fakes import ScriptedLLM
@@ -78,7 +77,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 def _seed_solution(client, title: str = "深还原方案") -> int:

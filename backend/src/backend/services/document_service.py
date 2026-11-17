@@ -22,13 +22,14 @@ PRD / 接口文档 / 提示词套件三类生成均走技能包驱动：各自�
 内置提示词。这一改动废弃了原先的 RAG 检索：团队规范不再「按 PRD 关键词
 挑几条」下发，而是整段注入，避免「检索没命中就悄悄丢规范」的静默降级。
 
-按摘要生成 PRD 时优先走**分章节生成 + 写作/审核双 Agent**（`services/prd_section_writer.py`），
-只有技能包缺失时才降级为整篇一次性生成。
+按摘要生成 PRD 与接口文档 / 提示词套件走**同一条整篇生成路径**（票 #92：分章退役）：
+大纲 → 整篇撰写 → 整篇审核 → 必要时整篇改写一次。三份产物的事件形状因此一致
+（`chunk` 不带章节归属、`part` 只有整段覆盖语义、进度按阶段推进）。
 
 模块划分（避免循环依赖）：
 - `llm_utils`：模型输出 → 纯文本 / JSON 的通用处理；
 - `prd_skill`：技能包资源定位与输入材料格式化；
-- `prd_section_writer`：分章节生成器（依赖上面两个）。
+- `document_review`：整篇审核 / 改写 / 修复（三份产物共用）。
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -63,8 +65,8 @@ from backend.services.pending_items import (
     format_pending_items,
     render_spec,
 )
-from backend.services.prd_section_writer import PrdSectionWriter, is_available as prd_sections_available
 from backend.services.prd_skill import (
+    NO_CONVERSATION_PLACEHOLDER,
     build_prd_system_prompt,
     format_conversation,
     format_requirements_text,
@@ -103,6 +105,24 @@ _PRODUCT_IDENTITIES: dict[str, tuple[str, str]] = {
 def _product_identity(doc_kind: str) -> tuple[str, str]:
     """取某份产物的事件 `doc_type` 与展示名（见 `_PRODUCT_IDENTITIES`）。"""
     return _PRODUCT_IDENTITIES[doc_kind]
+
+
+@dataclass(frozen=True, slots=True)
+class _PrdPrompt:
+    """一份 PRD 整篇生成所需的提示词与配套信息。
+
+    与接口文档 / 提示词套件只在「提示词来自哪个技能包」上不同：三份产物的事件形状、
+    审核口径与改写路径完全共用，因此这里只装「这一份产物自己的材料」。
+    """
+
+    # 组装好的 `[SystemMessage, HumanMessage]`
+    messages: list[BaseMessage]
+    # 写作规范（审核 / 修复要按它核对；技能包缺失时为空串 = 降级）
+    writing_rules: str
+    # 大纲骨架：模板的一级章节。抽不出时为空元组（大纲随之降级，不发明结构）
+    structure: tuple[str, ...]
+
+
 
 
 # ----------------------------------------------------------------------------
@@ -274,7 +294,7 @@ _SKILL_KEY_LABELS: dict[str, str] = {
 
 
 def review_enabled_for_whole_document(value: bool | None) -> bool:
-    """整篇类产物（接口文档 / 提示词套件）本次是否跑「审一次 → 必要时改写一次」。
+    """三份整篇类产物本次是否跑「审一次 → 必要时改写一次」（PRD 也是整篇了）。
 
     与 PRD 的逐章审核共用一个请求字段 `review_enabled`，但**默认口径不同**：
     `None` 在这里视为**开启**——这两份产物没有独立的配置开关，历史行为就是审，
@@ -284,6 +304,23 @@ def review_enabled_for_whole_document(value: bool | None) -> bool:
     原有行为，别因为一个前端漏传字段就悄悄改变产出的质量口径。
     """
     return value is not False
+
+
+def _prd_review_upstream(requirements_text: str, conversation: str) -> str:
+    """PRD 审核侧的上游材料：**完整需求**（摘要 / 自由文本）+ 需求澄清线程。
+
+    为什么不骨架化：骨架器是为 Markdown 正文设计的，遇到代码块只留围栏首行、块体
+    整块丢；而结构化摘要整篇就是一个 ```json 块，压完只剩「```json」——审核的
+    「唯一事实来源」会变成空壳，正文里任何具体内容都会被判成编造。
+    对话线程同理：有一半拍板细节只在对话里，生成时带着它，审核也必须看得见。
+    """
+    parts: list[str] = []
+    if requirements_text.strip():
+        parts.append(f"## 需求输入\n\n{requirements_text}")
+    text = (conversation or "").strip()
+    if text and text != NO_CONVERSATION_PLACEHOLDER:
+        parts.append(f"## 需求澄清对话\n\n{text}")
+    return "\n\n".join(parts) or "（未提供需求输入，仅依据正文与写作规范核对）"
 
 
 def format_rewrite_reference(kind: str) -> str:
@@ -339,14 +376,10 @@ class DocumentService:
         # 页面显示已保存，看不出任何异常。
         self._llm_key: tuple[str, str, str, int] | None = None
         self._review_llm_key: tuple[str, str, str, int] | None = None
-        self._section_review_llm_key: tuple[str, str, str, int] | None = None
-        # 分章节生成器。惰性创建：它自己也会惰性获取 LLM，且只有在技能包可用时才会用到。
-        self._section_writer: PrdSectionWriter | None = None
-        # 审核专用的小输出窗口实例（惰性，见 `review_llm` / `section_review_llm`）
+        # 审核专用的小输出窗口实例（惰性）
         self._review_llm: StreamingChatModel | None = None
         # 构造时是否显式注入了 review_llm（测试用）。注入的一律原样复用。
         self._review_llm_injected = False
-        self._section_review_llm: StreamingChatModel | None = None
 
     # ------------------------------------------------------------------
     # LLM 惰性获取
@@ -386,56 +419,6 @@ class DocumentService:
             self._review_llm = get_llm(max_tokens=max_tokens)
             self._review_llm_key = key
         return self._review_llm
-
-    @property
-    def section_review_llm(self) -> StreamingChatModel:
-        """**分章节**审核专用实例（`prd_section_review_max_tokens`）。
-
-        为什么要跟 `review_llm` 分开
-        ----------------------------
-        这两个配置项一直是分开定义的（整篇审核 2048、单章审核 1024），但章节链路此前
-        直接把 `review_llm` 传给了 `PrdSectionWriter`——于是 `prd_section_review_max_tokens`
-        成了**死配置**：改它没有任何效果，因为它从未被读取过。
-
-        这里给它一个真正独立的实例：两个配置各管一处，改哪一处都是真生效。
-        默认值已对齐（都是 2048），所以**默认行为完全不变**。
-        """
-        if self._llm_injected:
-            return self.llm
-        max_tokens = int(get_runtime_config().settings.prd_section_review_max_tokens)
-        key = config_fingerprint(max_tokens)
-        if self._section_review_llm is None or self._section_review_llm_key != key:
-            self._section_review_llm = get_llm(max_tokens=max_tokens)
-            self._section_review_llm_key = key
-        return self._section_review_llm
-
-    def _get_section_writer(self, review_enabled: bool | None = None) -> PrdSectionWriter:
-        """获取 PRD 分章节生成器（惰性创建，与本源共用同一个 LLM 实例）。
-
-        Args:
-            review_enabled: 本次是否启用逐章审核/改写。**不传（`None`）返回共享实例**，
-                行为完全等于从前；显式传入时**每次新建一个**——生成器把该开关存成
-                属性，复用一个共享实例就等于「后一个请求悄悄改掉前一个请求的配置」。
-                新建时仍复用同一个 LLM 实例（`self.llm`），不会多开客户端。
-
-        Returns:
-            `PrdSectionWriter` 实例。
-
-        ⚠️ 传给 writer 的 `review_llm` 是 **`section_review_llm`**，不是 `review_llm`。
-        用错这个就是前面说的死配置：`prd_section_review_max_tokens` 被
-        `doc_review_max_tokens` 顶掉，改它完全没反应。
-        """
-        if review_enabled is None:
-            if self._section_writer is None:
-                self._section_writer = PrdSectionWriter(
-                    llm=self.llm, review_llm=self.section_review_llm
-                )
-            return self._section_writer
-        return PrdSectionWriter(
-            llm=self.llm,
-            review_llm=self.section_review_llm,
-            review_enabled=review_enabled,
-        )
 
     # ------------------------------------------------------------------
     # 模板加载与 Prompt 拼接
@@ -489,131 +472,32 @@ class DocumentService:
         ]
 
     # ------------------------------------------------------------------
-    # PRD 提示词组装（技能包驱动）
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_prd_prompt(requirements: str, conversation: str) -> tuple[str, str]:
-        """组装 PRD 生成的系统提示词与用户消息。
-
-        优先使用 `skills/prd-generator` 技能包的三份资源：
-        - `field-schema.json`：作为字段契约放进用户消息，供模型校验输入与归一化；
-        - `prd-template.md`：作为章节骨架放进用户消息，约束输出结构；
-        - `writing-rules.md`：作为写作规范追加进系统提示词，约束表达与禁编造。
-
-        资源缺失（如部署时未打包 skills 目录）时降级为 `prompts.py` 的内置提示词，
-        保证服务不中断。
-
-        Args:
-            requirements: 需求澄清结果（问卷答案整理成的文本）。
-            conversation: 已格式化好的补充对话记录文本。
-
-        Returns:
-            `(系统提示词, 用户消息正文)` 二元组。
-        """
-        artifacts = load_prd_skill_artifacts()
-        if artifacts is None:
-            # 降级：沿用内置提示词
-            user_content = DocumentService._load_template("prd").format(
-                requirements=requirements,
-                conversation=conversation,
-            )
-            return SYSTEM_PROMPT, user_content
-
-        system_prompt = build_prd_system_prompt(artifacts["writing_rules"])
-        user_content = PRD_SKILL_GENERATION_PROMPT.format(
-            requirements=requirements,
-            conversation=conversation,
-            field_schema=artifacts["field_schema"],
-            prd_template=artifacts["prd_template"],
-        )
-        return system_prompt, user_content
-
-    # ------------------------------------------------------------------
-    # 结构化摘要回填（对话 → 摘要）
-    # ------------------------------------------------------------------
-
-    async def sync_summary_from_conversation(
-        self,
-        summary: dict[str, Any],
-        history: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """读一遍对话历史，把用户**明确补充或修正**的字段回填进结构化摘要。
-
-        规则（提示词与本地合并双重保证，见 `_merge_summary`）：
-        仅当用户明确补充/修正时才更新；不确定的内容保持原值；不凭空新增字段；
-        返回**完整**摘要，便于前端做 Diff。
-
-        模型输出非法 JSON 或调用失败时，一律返回原摘要的深拷贝——回填是「锦上添花」
-        的一步，不能因为它把用户已填好的需求弄丢。
-
-        Args:
-            summary: 当前结构化需求摘要。
-            history: 对话历史（`{role, content}` 列表）。
-
-        Returns:
-            更新后的完整结构化摘要；无法回填时等价于原摘要。
-
-        Raises:
-            Exception: 模型调用失败时向上抛出，由路由层转成 HTTP 错误。
-        """
-        if not summary:
-            return {}
-
-        user_content = SUMMARY_SYNC_PROMPT_TEMPLATE.format(
-            summary=json.dumps(summary, ensure_ascii=False, indent=2),
-            conversation=format_conversation(history or []),
-        )
-        messages = self._build_messages(SUMMARY_SYNC_SYSTEM_PROMPT, user_content)
-        raw = await self._collect_reply(messages)
-
-        candidate = extract_json_object(raw)
-        if candidate is None:
-            logger.warning("摘要回填未返回合法 JSON，保持原摘要不变。原始输出：%s", raw[:500])
-            return copy.deepcopy(summary)
-
-        return _merge_summary(summary, candidate)
-
-    # ------------------------------------------------------------------
-    # 通用流式生成
-    # ------------------------------------------------------------------
-
-    async def _collect_reply(self, messages: list[BaseMessage]) -> str:
-        """把流式回复收拢成完整文本（用于需要整体结果的非流式场景）。
-
-        供应商抽象只提供 `astream`，需要完整结果时（如摘要回填要解析 JSON）就在
-        内部把增量拼起来。同样做截断检查，避免拿到一段被切断的 JSON 后误判。
-        """
-        return await collect_reply(self.llm, messages)
-
-    # ------------------------------------------------------------------
-    # PRD 生成（整篇 / 分章节）
+    # PRD 生成（整篇，与接口文档 / 提示词套件同一条路径）
     # ------------------------------------------------------------------
 
     async def generate_prd_stream(
         self,
         requirements: str,
         history: list[dict[str, Any]] | None = None,
+        review_enabled: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """根据需求澄清结果与对话记录生成 PRD。
+
+        与 `generate_prd_from_summary_stream` 是同一条整篇路径的两个入口形态：
+        这里吃「已经格式化好的需求文本」，那边吃结构化摘要或自由文本。
 
         Args:
             requirements: 需求澄清结果（问卷答案整理成的文本）。
             history: 补充对话记录（`{role, content}` 列表），可为空。
+            review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」；`None` 视为开启。
 
         Yields:
             `StreamEvent`，`done` 事件的 `data` 带完整 `reply`（PRD 正文）。
         """
-        system_prompt, user_content = self._build_prd_prompt(
-            requirements=requirements,
+        async for event in self._generate_prd_events(
+            requirements_text=requirements,
             conversation=format_conversation(history or []),
-        )
-        messages = self._build_messages(system_prompt, user_content)
-        async for event in iter_reply_events(
-            self.llm,
-            messages,
-            status_text="正在生成 PRD…",
-            extra_data={"doc_type": "prd"},
+            review_enabled=review_enabled,
         ):
             yield event
 
@@ -625,14 +509,12 @@ class DocumentService:
         history: list[dict[str, Any]] | None = None,
         review_enabled: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """根据**结构化需求摘要**或**自由文本需求**生成 PRD。
+        """根据**结构化需求摘要**或**自由文本需求**生成整篇 PRD。
 
-        与 `generate_prd_stream` 的区别是入口形态：这里吃的是「与 `field-schema.json`
-        对齐的摘要字典」或「用户随手写下的一段话」，需求文本由 `prd_skill` 统一格式化。
-
-        实现上优先走**分章节生成**（`PrdSectionWriter`：逐章撰写 → 审核 → 必要时改写，
-        并通过 `stage` 事件把阶段回报给前端）；技能包资源缺失时降级为整篇一次性生成
-        （`generate_prd_stream`），保证服务不中断。
+        票 #92 起 PRD 与接口文档 / 提示词套件**共用同一条生成路径**：大纲 → 整篇撰写
+        → 整篇审核 → 必要时整篇改写一次。分章节链路（逐章撰写 / 逐章审核 / 逐章改写）
+        已退役——它的事件形状（`chunk` 带 `section_id`、`part` 按章追加）与另两份不一致，
+        前端因此要维护第二套看板。
 
         因为入参是「需求本身」而不是「某次会话」，这条链路可被任意入口复用：
         完整流程（传 `summary`）、PRD 快捷入口（传 `requirements` + `product_name`）
@@ -643,13 +525,13 @@ class DocumentService:
             requirements: 自由文本需求；仅在 `summary` 为空时使用。
             product_name: 产品名称，仅用于 PRD 文档头；摘要里已有名称时以摘要为准。
             history: 补充对话记录（`{role, content}` 列表），可为空。
-            review_enabled: 本次是否启用**逐章审核 + 改写**。`None`（默认）取配置口径；
-                快捷流程显式传 `False`——它的输入只有一段话，逐章复核的边际收益很低，
-                而「只撰写、不审不改」能省下约一半调用。
+            review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」。`None`（默认）
+                视为开启；快捷流程显式传 `False`，一遍过（与另两份同口径）。
 
         Yields:
-            `StreamEvent`：分章节路径下为 `status` / `chunk` / 若干 `stage` / `done`；
-            降级路径下为 `status` / `chunk` / `done`。`done` 的 `data` 带完整 `reply`。
+            `StreamEvent`：大纲 `stage(outlining)` → `stage(writing)` → 若干 `chunk`
+            → 审核 / 改写的 `stage` / `stage_chunk` → `review` → `done`。
+            `done` 的 `data` 带完整 `reply` 与剥离标记块后的 `pending_items`。
 
         Raises:
             ValueError: 两种需求输入都为空（路由层已拦一次，这里再兜一层）。
@@ -657,27 +539,152 @@ class DocumentService:
         if not summary and not requirements.strip():
             raise ValueError("summary 与 requirements 至少需要提供一个")
 
-        if prd_sections_available():
-            writer = self._get_section_writer(review_enabled)
-            async for event in writer.stream(
-                summary=summary,
-                requirements=requirements,
-                product_name=product_name,
-                history=history,
-            ):
-                yield event
-            return
-
-        # 降级：技能包缺失或模板章节对不上，退回整篇一次性生成
-        logger.warning("PRD 分章节生成不可用，本次降级为整篇生成")
-        # 折叠规则与分章节链路同一处（`prd_skill.format_requirements_text`）：
-        # 降级不该悄悄换一份需求（摘要优先，其次渲染过的自由文本）
+        # 折叠规则只有一处（`prd_skill.format_requirements_text`）：摘要优先，
+        # 其次渲染过的自由文本——生成与重审拿到的是**同一份需求**。
         requirements_text = format_requirements_text(summary, requirements, product_name)
-        async for event in self.generate_prd_stream(
-            requirements=requirements_text,
-            history=history,
+        async for event in self._generate_prd_events(
+            requirements_text=requirements_text,
+            conversation=format_conversation(history or []),
+            review_enabled=review_enabled,
         ):
             yield event
+
+    def _prd_prompt(self, requirements_text: str, conversation: str) -> _PrdPrompt:
+        """组装 PRD 整篇生成的提示词与大纲骨架。
+
+        技能包在位时三份资源全量注入：`field-schema.json`（输入字段契约）、
+        `prd-template.md`（六章节骨架与渲染说明）、`writing-rules.md`（写作规范）。
+        资源缺失时退回 `prompts.py` 的内置提示词——这条降级路径必须能在回执上看见
+        （债务 D8），因此这里不补占位内容，回执上体现为 `injected_skills` 为空。
+
+        大纲骨架取模板的 `## ` 一级章节：它是**马上就要写的结构**，不是另起一套口径。
+        """
+        artifacts = load_prd_skill_artifacts()
+        if artifacts is None:
+            user_content = self._load_template("prd").format(
+                requirements=requirements_text,
+                conversation=conversation,
+                pending_spec=render_spec(),
+            )
+            return _PrdPrompt(
+                messages=self._build_messages(SYSTEM_PROMPT, user_content),
+                writing_rules="",
+                structure=(),
+            )
+
+        template = artifacts["prd_template"]
+        return _PrdPrompt(
+            messages=self._build_messages(
+                build_prd_system_prompt(artifacts["writing_rules"]),
+                PRD_SKILL_GENERATION_PROMPT.format(
+                    requirements=requirements_text,
+                    conversation=conversation,
+                    field_schema=artifacts["field_schema"],
+                    prd_template=template,
+                    pending_spec=render_spec(),
+                ),
+            ),
+            writing_rules=artifacts["writing_rules"],
+            structure=tuple(extract_headings(template)),
+        )
+
+    async def _generate_prd_events(
+        self,
+        *,
+        requirements_text: str,
+        conversation: str,
+        review_enabled: bool | None,
+    ) -> AsyncIterator[StreamEvent]:
+        """PRD 的整篇生成事件流（三个入口共用这一份实现）。
+
+        事件顺序与接口文档 / 提示词套件**逐项对齐**：
+
+        1. 大纲：`stage(outlining)` + 可选一条 `stage_chunk`（从需求输入抽取结构）；
+        2. 撰写：`stage(writing)` 立刻亮起（整篇生成是最长的一步，不能等第一次模型
+           调用之后再报），随后逐字 `chunk`（不带章节归属）；
+        3. 审核 / 改写：`stream_review_and_rewrite`（整篇审一次，仅 high 触发一次改写，
+           改完不重审），改写稿用 `part{replace}` 整段覆盖初稿；
+        4. `done`：干净正文 + 待确认清单。
+
+        快捷流程（`review_enabled=False`）整段跳过审核：连 `review` 结论事件一起不发。
+        只跳调用、照样发一条「通过」，会被读成「审过了、没问题」——那是假信号。
+        """
+        prompt = self._prd_prompt(requirements_text, conversation)
+        doc_type, label = _product_identity("prd")
+        for outline_event in outline_events(
+            "prd",
+            upstream=requirements_text,
+            doc_type=doc_type,
+            structure=prompt.structure,
+        ):
+            yield outline_event
+
+        yield StreamEvent(
+            type="stage",
+            content="正在生成 PRD…",
+            data={"stage": "writing", "doc_type": doc_type},
+        )
+
+        # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
+        # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
+        suppressor = PendingBlockSuppressor()
+        async for event in iter_reply_events(
+            self.llm,
+            prompt.messages,
+            status_text="正在生成 PRD…",
+            extra_data={"doc_type": doc_type},
+        ):
+            if event.type == "chunk":
+                clean = suppressor.feed(event.content)
+                if clean:
+                    yield StreamEvent(type="chunk", content=clean, data=event.data)
+            elif event.type == "done":
+                trailing = suppressor.flush()
+                if trailing:
+                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                reply = str(event.data.get("reply", ""))
+                clean_reply, items = extract(reply)
+                outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
+
+                if review_enabled_for_whole_document(review_enabled):
+                    async for review_event_or_chunk in stream_review_and_rewrite(
+                        self.llm,
+                        document=clean_reply,
+                        # 审核要核对的是「有没有编造 / 漏掉」，而 PRD 的上游是**结构化需求**
+                        # （整篇 JSON）。骨架器会丢掉代码块块体，把需求压成空壳——因此这里
+                        # 原样注入，不骨架化。
+                        context=ProductContext(
+                            doc_kind="prd",
+                            doc_type=doc_type,
+                            label=label,
+                            writing_rules=prompt.writing_rules,
+                            upstream=_prd_review_upstream(requirements_text, conversation),
+                        ),
+                        outcome=outcome,
+                        review_llm=self.review_llm,
+                        section_titles="\n".join(extract_headings(clean_reply)),
+                    ):
+                        yield review_event_or_chunk
+
+                yield StreamEvent(
+                    type="done",
+                    content="",
+                    data={
+                        **(event.data or {}),
+                        "reply": outcome.final_reply,
+                        "pending_items": outcome.pending_items,
+                    },
+                )
+            elif event.type == "error":
+                # 失败也要把抑制器里扣住的尾巴吐出去：它只是「可能被切断的哨兵前缀」，
+                # 不吐会让短正文整段滞留在缓冲里——失败收尾按「已产出内容」落的那一版
+                # 部分完成（#85）会因此丢掉最后十几字，甚至一个字都留不下。
+                trailing = suppressor.flush()
+                if trailing:
+                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                yield event
+            else:
+                yield event
 
     async def generate_api_docs_stream(
         self,
@@ -919,11 +926,9 @@ class DocumentService:
     ) -> AsyncIterator[StreamEvent]:
         """**重新审核**一份已有文档：只产结论，不产正文（重新审核任务的唯一入口）。
 
-        为什么按产物分两条路
-        --------------------
-        PRD 是按章审的（每章有自己的写作要点，结论也按章汇总），接口文档与提示词是整篇
-        生成、整篇审的。两条路复用各自的**生成时**那套提示词与解析，因此「重审得到的结论」
-        与「生成当下得到的结论」形状一致——界面上同一份文档不会有两套结论长相。
+        三份产物（PRD / 接口文档 / 提示词套件）自票 #92 起都是**整篇生成、整篇审**，
+        因此这里只有一条路径：同一套审核提示词与解析，结论形状与生成时那一条完全一致
+        ——界面上同一份文档不会有两套结论长相。
 
         `doc_kind` 必须是三份产物之一：缺了它既不知道审哪一份，也不知道注入哪一套规范，
         因此直接 400（不猜默认值，与 `clarify` 同口径）。
@@ -949,24 +954,15 @@ class DocumentService:
         """
         # 产物种类的校验只有一处（`_ensure_product_kind`）：与建任务那一刻同一句文案
         doc_kind = _ensure_product_kind(doc_kind, action="重新审核")
-        if doc_kind == "prd":
-            writer = self._get_section_writer(None)
-            async for event in writer.review_document(
-                document=document,
-                summary=summary,
-                requirements=requirements,
-                product_name=product_name,
-                history=history,
-                pending_items=pending_items,
-            ):
-                yield event
-            return
-
         context = self._product_context(
             doc_kind,
             purpose="review",
             prd_content=prd_content,
             api_docs_content=api_docs_content,
+            summary=summary,
+            requirements=requirements,
+            product_name=product_name,
+            history=history,
         )
         async for event in stream_review_only(
             self.review_llm,
@@ -1271,8 +1267,12 @@ class DocumentService:
         审核侧仍然只看骨架（与生成 / 重审同口径）——它是核对「有没有编造」，
         需要的是事实索引；重写那一步看的才是全文。
 
+        **PRD 例外**：它的上游是**结构化需求**（整篇 JSON）。骨架器会丢弃代码块块体，
+        把需求压成一个空壳——审核因此拿不到「唯一事实来源」，正文里任何具体内容都会
+        被判成编造。所以 PRD 的上游原样注入，只有 Markdown 类上游才骨架化。
+
         `history` 是需求澄清线程：与「重新审核」同口径进提示词（见
-        `PrdSectionWriter.review_document`）。修复看得见的事实，重审也必须看得见，
+        `_product_context` 的 PRD 分支）。修复看得见的事实，重审也必须看得见，
         否则同一份正文会因为「走的是修复还是重审」得到两种判定。
 
         `pending_items` 是**刚重写出来的那一版**的待确认清单（`extract` 的产物）：
@@ -1280,28 +1280,20 @@ class DocumentService:
         「刚补登记进来的项」会被当成漏登记。
         """
         try:
-            if context.doc_kind == "prd":
-                writer = self._get_section_writer(None)
-                async for event in writer.review_document(
-                    document=document,
-                    summary=summary,
-                    requirements=requirements,
-                    product_name=product_name,
-                    history=history,
-                    pending_items=pending_items,
-                ):
-                    yield event
-                return
+            # 上游粒度与生成 / 重审同口径：Markdown 类上游骨架化，PRD 的需求原样注入
+            upstream = (
+                context.upstream
+                if context.doc_kind == "prd"
+                else skeletonize(context.upstream)
+            )
             async for event in stream_review_only(
                 self.review_llm,
-                # 修复给的是全文（要照着原文改），重审只看骨架（核对有没有编造）：
-                # 这里把全文再压一次，而不是让 `context` 兼职两份上游
                 context=ProductContext(
                     doc_kind=context.doc_kind,
                     doc_type=context.doc_type,
                     label=context.label,
                     writing_rules=context.writing_rules,
-                    upstream=skeletonize(context.upstream),
+                    upstream=upstream,
                 ),
                 document=document,
                 section_titles="\n".join(extract_headings(document)),

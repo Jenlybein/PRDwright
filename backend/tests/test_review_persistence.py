@@ -23,20 +23,16 @@ import pytest
 from conftest import login, register
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
-from backend.core import runtime_config
-from backend.core.config import get_settings
 from backend.services import (
     document_service,
     job_runtime,
     llm_factory,
-    prd_section_writer,
 )
 from backend.services.job_bus import job_bus
 
 # 审核 / 改写人设提示词里的特征词：用它区分三类模型调用（与 `test_document_review.py` 同口径）
 _REVIEW_MARKER = "技术文档评审员"
 _REWRITE_MARKER = "技术文档撰写者"
-_PRD_REVIEW_MARKER = "产品文档评审员"
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +49,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
 
 
 @pytest.fixture(autouse=True)
@@ -120,59 +115,6 @@ class RoutingDocLLM:
             if piece:
                 await asyncio.sleep(0)
                 yield AIMessageChunk(content=piece)
-
-
-class RoutingPrdLLM:
-    """PRD 三类调用：撰写 / 审核 / 改写，按人设与「审核发现的问题」分流。
-
-    并行链路里章节完成顺序不确定，因此**不能按「第 N 次调用」编排**——
-    一律按提示词里的章节标题路由（与 `test_prd_section_parallel.py` 同口径）。
-    """
-
-    def __init__(self, *, revise_heading: str | None = None) -> None:
-        self._revise_heading = revise_heading
-        self.calls = 0
-
-    @staticmethod
-    def _heading(text: str) -> str:
-        """取**最后一次**出现的章节标题（生成提示词里带着整份模板）。"""
-        candidates = [
-            (text.rfind(section.heading), section.heading)
-            for section in prd_section_writer.PRD_SECTIONS
-        ]
-        position, heading = max(candidates)
-        return heading if position >= 0 else ""
-
-    async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
-        self.calls += 1
-        await asyncio.sleep(0.005)
-        system = str(messages[0].content)
-        user = str(messages[-1].content)
-        heading = self._heading(user)
-
-        if _PRD_REVIEW_MARKER in system:
-            if heading == self._revise_heading:
-                yield AIMessageChunk(
-                    content=json.dumps(
-                        {
-                            "verdict": "revise",
-                            "issues": [
-                                {"where": heading, "severity": "high", "detail": "缺少关键内容"}
-                            ],
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-            else:
-                yield AIMessageChunk(content='{"verdict": "pass"}')
-            return
-
-        # 改写与撰写同一套人设，只能靠用户消息区分
-        if "审核发现的问题" in user:
-            yield AIMessageChunk(content=f"\n\n改后稿：{heading}\n\n")
-            return
-
-        yield AIMessageChunk(content=f"\n\n{heading}\n\n初稿：{heading}\n\n")
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +255,6 @@ def _api_docs_payload(solution_id: int, *, review_enabled: bool | None = None) -
     if review_enabled is not None:
         payload["review_enabled"] = review_enabled
     return payload
-
-
-def _use_prd_pipeline(monkeypatch, concurrency: str) -> None:  # noqa: ANN001
-    """把 PRD 链路的并发度定死（并让运行时配置快照立刻反映新环境变量）。"""
-    monkeypatch.setenv("PRD_PIPELINE_CONCURRENCY", concurrency)
-    monkeypatch.setenv("PRD_SECTION_MAX_RETRIES", "0")
-    get_settings.cache_clear()
-    runtime_config.invalidate()
 
 
 # ---------------------------------------------------------------------------
@@ -512,48 +446,41 @@ def test_old_versions_without_a_review_read_as_unreviewed(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 二、PRD 的汇总结论：串行与并行两条链路同形，`rewritten` 如实汇总
+# 二、PRD 的结论同样落在当前版本上（票 #92：与另两份同一条整篇路径）
 # ---------------------------------------------------------------------------
 
+_PASS_JSON = json.dumps({"verdict": "pass", "issues": []}, ensure_ascii=False)
 
-@pytest.mark.parametrize("concurrency", ["1", "3"])
-@pytest.mark.parametrize("revise", [True, False])
-def test_prd_conclusion_is_aggregated_in_both_links(
-    client, monkeypatch, concurrency, revise
-):  # noqa: ANN001
-    """并发度 1（串行回滚路径）与 >1（并行）都得到**一条**汇总结论。
 
-    `rewritten` 必须如实反映「这次到底改没改」，不能是恒假——否则「PRD 能不能修复」
-    会随并发度配置漂。结论与当前版本一起落库，读文档列表即可拿到。
+@pytest.mark.parametrize("rewrite", [True, False])
+def test_prd_conclusion_lands_on_the_current_version(client, monkeypatch, rewrite):
+    """PRD 整篇生成：结论随当前版本落库，`rewritten` 如实反映「这次改没改」。
+
+    分章链路退役后不再有「并发度 1 / >1 两条链路」这回事：一次撰写 → 整篇审一次 →
+    （仅 high 时）整篇改写一次。结论与正文一起落库，读文档列表 / 版本详情即可拿到。
     """
-    _use_prd_pipeline(monkeypatch, concurrency)
     register(client)
     solution_id = _create_solution(client)
-
-    target = prd_section_writer.PRD_SECTIONS[0]
     _seed_requirements(client, solution_id)
     _fake_service(
         monkeypatch,
-        RoutingPrdLLM(revise_heading=target.heading if revise else None),
+        RoutingDocLLM(
+            document=[_DRAFT_DOC],
+            review=[_REVISE_JSON if rewrite else _PASS_JSON],
+            rewrite=[_REVISED_DOC],
+        ),
     )
 
-    _job_id, events = _run_job(
-        client,
-        {
-            "kind": "prd",
-            "solution_id": solution_id,
-        },
-    )
+    _job_id, events = _run_job(client, {"kind": "prd", "solution_id": solution_id})
 
     conclusion = _review_event(events)
     assert conclusion["kind"] == "prd"
-    assert conclusion["verdict"] == ("revise" if revise else "pass")
-    assert conclusion["rewritten"] is revise
-    assert bool(conclusion["issues"]) is revise
+    assert conclusion["verdict"] == ("revise" if rewrite else "pass")
+    assert conclusion["rewritten"] is rewrite
+    assert bool(conclusion["issues"]) is rewrite
     assert conclusion["failed_sections"] == []
-    if revise:
+    if rewrite:
         assert conclusion["issues"][0]["severity"] == "high"
-        assert conclusion["issues"][0]["section_id"] == target.id
 
     doc = _documents(client, solution_id)["prd"]
     assert doc["review"] == conclusion

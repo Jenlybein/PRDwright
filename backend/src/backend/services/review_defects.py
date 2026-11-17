@@ -8,7 +8,7 @@
    `high` 下次 `medium`，改写门槛就会随模型心情漂移。
 2. **类别表只有一个生成点**：提示词里的五类判据由 `render_category_rules()` 渲染，
    第六类与清单由 `render_pending_section()` 在同一份提示词的 `{pending_section}` 里给出。
-   PRD 的单章审核（`prd_section_writer`）与整篇审核（`document_review`）都从这里取；
+   三份产物的整篇审核（`document_review`，票 #92 起 PRD 也走这条）都从这里取；
    各写一份的下场是「同一份正文在 PRD 侧判 medium、在接口文档侧判 high」。
 3. **两个时点两套口径**：生成过程只看前五类（那时清单还没抽出来）；重审与修复后的重审
    才看第六类「清单漏登记」，并且必须把当前版本的清单整份注入提示词。

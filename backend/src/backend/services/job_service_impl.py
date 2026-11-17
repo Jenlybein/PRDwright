@@ -797,7 +797,7 @@ def _build_event_stream(kind: str, request: dict[str, Any]) -> AsyncIterator[Str
     """按任务类型复用 `document_service` 的模块级流式入口，返回 `StreamEvent` 流。
 
     这里只做「任务类型 → 现有生成入口」的映射，生成逻辑（提示词、分章节、审核、
-    截断检测）全部在 `document_service` / `prd_section_writer` / `stream_reply` 里，
+    截断检测）全部在 `document_service` / `stream_reply` 里，
     本模块一行不改。
     """
     if kind == "prd":

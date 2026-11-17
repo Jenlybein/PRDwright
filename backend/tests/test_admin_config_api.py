@@ -121,16 +121,17 @@ def test_get_config_groups_and_metadata(client):
     _as_admin(client)
     data = client.get("/api/admin/config").json()
 
-    assert [g["key"] for g in data["groups"]] == ["prd", "review", "llm", "quota", "auth"]
+    # 票 #92：分章退役后不再有 PRD 专用分组（控制「逐章撰写节奏」的配置一并退役）
+    assert [g["key"] for g in data["groups"]] == ["review", "llm", "quota", "auth"]
     items = {item["key"]: item for g in data["groups"] for item in g["items"]}
     assert len(items) == len(rc.WHITELIST)
 
     # 约束由 `Settings` 反射而来，不是接口层另写一份
-    concurrency = items["prd_pipeline_concurrency"]
-    assert concurrency["min"] == 1 and concurrency["max"] == 8
-    assert concurrency["type"] == "number"
+    window = items["doc_review_max_tokens"]
+    assert window["min"] == 256
+    assert window["type"] == "number"
     # 危险项要能被前端识别，用于二次确认
-    assert items["prd_section_review_enabled"]["danger"] is True
+    assert items["review_rewrite_min_severity"]["danger"] is True
     # 枚举项带选项
     assert items["review_rewrite_min_severity"]["options"] == ["high", "medium", "low"]
     # 额度项的边界也要从 `Settings` 反射出来（时区偏移有上下界）
@@ -152,20 +153,20 @@ def test_patch_applies_and_changes_revision(client):
     before = client.get("/api/admin/config").json()
 
     response = client.patch(
-        "/api/admin/config", json={"updates": {"prd_pipeline_concurrency": 5}}
+        "/api/admin/config", json={"updates": {"doc_review_max_tokens": 3000}}
     )
     assert response.status_code == 200, response.text
 
     data = response.json()
     items = {item["key"]: item for g in data["groups"] for item in g["items"]}
-    assert items["prd_pipeline_concurrency"]["value"] == 5
-    assert items["prd_pipeline_concurrency"]["source"] == "db"
+    assert items["doc_review_max_tokens"]["value"] == 3000
+    assert items["doc_review_max_tokens"]["source"] == "db"
     assert data["revision"] != before["revision"]
 
     # 独立复核：再拉一次，值必须仍是新的（排除「响应体是回声」）
     again = client.get("/api/admin/config/effective").json()
     items2 = {item["key"]: item for g in again["groups"] for item in g["items"]}
-    assert items2["prd_pipeline_concurrency"]["value"] == 5
+    assert items2["doc_review_max_tokens"]["value"] == 3000
 
 
 def test_patch_rejects_out_of_range_and_writes_nothing(client):
@@ -178,7 +179,7 @@ def test_patch_rejects_out_of_range_and_writes_nothing(client):
 
     response = client.patch(
         "/api/admin/config",
-        json={"updates": {"llm_max_retries": 3, "prd_pipeline_concurrency": 99}},
+        json={"updates": {"llm_max_retries": 3, "doc_review_max_tokens": 100}},
     )
     assert response.status_code == 400
     # 合法的那一项也不能写进去

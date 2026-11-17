@@ -3,7 +3,7 @@
 `ScriptedLLM` 覆盖三条边角：① 一进流就抛（连接失败）；② 末块带 `usage_metadata`
 （为后续 token 计量预留）；③ 先吐若干块再抛（生成中途断流）。
 
-**不改动**既有 `test_prd_section_stream.py::FakeLLM` 与 `test_stream_reply.py` 的假 LLM——
+**不改动**既有 `test_stream_reply.py` 的假 LLM——
 那些测试守的是各自的契约，本文件只服务 generation_jobs 的测试。
 """
 

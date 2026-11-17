@@ -35,7 +35,6 @@ from backend.services import (
     job_service,
     job_runtime,
     llm_factory,
-    prd_section_writer,
 )
 from backend.services.job_ticket import start_registered_job
 from fakes import ScriptedLLM
@@ -68,7 +67,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
     yield
 
 
@@ -142,7 +140,6 @@ def test_main_chain_logs_carry_job_and_request_ids(client, log_env, monkeypatch)
     # 主链路的关键节点都该出现
     assert "job.started" in events, f"缺任务起点日志，实际事件：{events}"
     assert "job.stage" in events, f"缺阶段推进日志，实际事件：{events}"
-    assert "job.section_done" in events, f"缺章节定稿日志，实际事件：{events}"
     assert "job.succeeded" in events, f"缺收尾日志，实际事件：{events}"
 
     # 归属字段：日志页「按任务串」「按请求反查」两条主路径的前提

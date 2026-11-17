@@ -80,20 +80,18 @@ class StreamEvent(BaseModel):
         description=(
             "事件类型：状态提示 status / 增量文本 chunk / 定稿正文 part / 阶段进度 stage / "
             "结束 done / 错误 error，tool_call 与 document 为后续扩展预留。"
-            "`stage` 用于分章节生成：`data.stage` 取 outlining / writing / reviewing / rewriting / done，"
-            "`data.section_id` 标识当前章节（前端据此重置本章的实时缓冲）。"
+            "`stage` 用于三份产物的生成（票 #92 起 PRD 也整篇生成）：`data.stage` 取 "
+            "outlining / writing / reviewing / rewriting / done。"
             "三份产物都先发 `outlining`（票 #91，从上游抽取大纲）；抽不出大纲时只发一条说明性的"
             "`outlining` 后直接进入 `writing`，**不发 `error`**。"
-            "`chunk` 在分章节链路里**必须带 `data.section_id` + `data.index`**：多章同时"
-            "吐字，没有归属前端只能整批丢弃（那正是「PRD 不流式」的成因）；它是模型的"
-            "原始输出，只负责「让用户现在就看见它在长」，权威正文仍以 `part` 为准。"
-            "`part` 也用于分章节生成：每段正文（文档头、每一章）一被定稿就整段下发，"
-            "`data.text` 可直接追加到文档末尾，前端据此拼出与最终 `done.reply` 逐字一致的预览。"
+            "`chunk` 只表示「正文在长」，**不带章节归属**（`section_id` / `index` 已随分章链路"
+            "退役）。它是模型的原始输出，权威正文仍以 `part` 为准。"
+            "`part` 用于整篇改写：`data.text` + `data.replace=true` 表示整段覆盖初稿"
+            "（审核发现问题后的那一次改写）；生成路径不按章节追加。"
             "`snapshot` 与 `run_summary` 用于生成任务（generation_jobs）：前者在每次订阅开始时 "
             "**首发给**，`data` 含 job_id/kind/status/phase/finalized_text/live_buffer/"
-            "live_by_section/stage_text/completed_sections/solution_id/error_code/"
-            "error_message/elapsed_ms，供前端补全已产出正文与当前阶段输出"
-            "（`live_by_section` 是按章的半成品，只有分章节链路非空，不落库）；"
+            "stage_text/solution_id/error_code/"
+            "error_message/elapsed_ms，供前端补全已产出正文与当前阶段输出；"
             "后者在任务收尾时下发本次生成的用量汇总（结构见 `RunSummary`）。"
             "`review` 是审核结论：`data` 含 kind/verdict/summary/issues/rewritten/"
             "failed_sections/reviewed_at/attempted。它随**被审的那一版正文**一起落库"
@@ -231,12 +229,12 @@ class RunSummary(BaseModel):
     request_id: str = Field(default="", description="该次生成所属请求的追踪 id")
     partial: bool = Field(
         default=False,
-        description="本次生成是否有章节失败后被占位（仅 PRD 分章节；其余任务恒为 false）。"
+        description="本次生成是否有落下一版**可用但不完整**的正文（部分完成）。"
         "true 表示正文可用但不完整，前端据此在审阅页给出提示。",
     )
     failed_sections: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="失败章节清单（section_id / title / index / reason）。"
-        "与 partial 配套：前者是结论，这里是可定位的细节。",
+        description="失败章节清单。分章链路已随票 #92 退役，三份产物都整篇生成，"
+        "因此该字段当前恒为空——保留形状是为了 #94 统一收口时不破坏既有结论结构。",
     )
 
