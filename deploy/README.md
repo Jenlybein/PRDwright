@@ -155,6 +155,7 @@ api 的 8000 端口**不发布到宿主**，只能被 web 通过内部网络访�
 | 构建两个镜像 | `make build` |
 | 生成主密钥（仅首次） | `make keygen` |
 | 备份（见 §6） | `make backup` |
+| 回滚预演练（见 §6.7） | `make drill` |
 
 `deploy/Makefile` 的每条目标**只有一条 `docker compose …` / `uv run …`**，没有额外逻辑，
 所以 `make` 与 docker 命令是同一套口径的简写与展开式。没有 `make` 的环境（Windows 原生
@@ -172,6 +173,7 @@ make config  = docker compose config
 make build   = docker compose build
 make keygen  = 上面 §1.2 那条 docker run
 make backup  = uv run --project ../backend python backup.py
+make drill   = uv run --project ../backend python drill.py
 ```
 
 ---
@@ -292,6 +294,9 @@ Get-Content .\prdwright-20261117-1400.dump.sha256
 
 ### 6.4 恢复（也是「回滚」）
 
+下面是恢复的**机械命令**。先选场景、再照做、每步怎么判断成功——见 §6.7 的入口与
+[`ROLLBACK.md`](./ROLLBACK.md)（场景 A / B / C 的逐步命令与判据都在那里）。
+
 ```bash
 make down                 # 停栈，保留卷（= docker compose down）
 
@@ -304,6 +309,10 @@ docker run --rm --network prdwright_net \
   sh -c "pg_restore --clean --if-exists --no-owner --no-privileges \
          -h db -U prdwright -d prdwright -v /backup/prdwright-<日期>.dump"
 
+# 2) 起服务
+#    · 只是「同一版本内恢复数据」：make up
+#    · 回滚到**旧版本代码**：先按 §6.7 场景 B 把旧镜像 tag 指回，再 `docker compose up -d --no-build`
+#      （用 make up 会按当前代码重建镜像，等于没回退）
 make up
 ```
 
@@ -314,6 +323,10 @@ make up
   空库，去掉这两个参数。
 - 备份来自另一台机器时，**同时**把那份备份对应时期的 `master.key` 放回 `prdwright_secrets`
   卷（否则库里的模型密钥解不开）。
+- 恢复成功后还有一步「**校验**」：`alembic_version` 与表数必须和备份自检输出里记录的一致
+  （命令与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §7 的 B4）。跳过校验等于没验证恢复是否正确。
+- 回滚到旧版本时，**数据库恢复与镜像回退必须成对**：用新代码启动一个旧备份库，会在启动期把库
+  再迁移一次。完整顺序见 [`ROLLBACK.md`](./ROLLBACK.md) §7。
 - 恢复后先打开 `/readyz` 与 `/admin/` 确认，再继续操作。
 
 ### 6.5 `docker compose down -v` 会删数据
@@ -339,6 +352,61 @@ v9 之前 `backup.py` 产出的是 `prdwright-<日期>.db`（SQLite 在线快照
   起一次、导出需要的业务数据，再按业务需要逐条导入——而不是把它塞回数据卷。
 
 同理，`prdwright_data` 这个旧卷（装 SQLite 库文件）不再挂载，也没有任何代码读它。
+
+### 6.7 回滚预案（切换当天照这个做）
+
+**完整的手册在 [`ROLLBACK.md`](./ROLLBACK.md)**：场景 A / B / C 的逐步命令、预期输出、
+「这一步怎么判断成功」、演练记录（含实测耗时）与红线清单都在那里。本节只给入口与最关键的约束。
+
+#### 三个场景，先选一个
+
+| 场景 | 何时用 | 动什么 |
+| --- | --- | --- |
+| **A** 只回退应用镜像 | 新版本代码有问题，本次发布**没跑过迁移**（`alembic_version` 没变） | 停栈 → 旧镜像 tag 指回 → `docker compose up -d --no-build` |
+| **B** 应用 + 数据库一起回退 | 本次发布**跑过迁移**，或数据被新代码写坏 | 停栈 → 起 db → `pg_restore`（§6.4）→ 校验版本/表数 → 起旧镜像 |
+| **C** 只回退某一张表 | 只有一张表的数据被误操作，结构没变，其余表正常 | 停 api → `TRUNCATE` 该表 → `pg_restore --data-only --table=<表名>` → 同步序列 |
+
+**A 与 B 的分界线只有一条：`alembic_version` / 表结构变了没有。** 拿不准就按 B 走（更重，但不会留下「新代码 + 旧库」的错配）。
+每条命令的预期输出与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §6/§7/§8。
+
+#### 切换当天要备份什么、留多久
+
+| 对象 | 怎么备 | 保留期限 |
+| --- | --- | --- |
+| **数据库** | `make backup`（`pg_dump -Fc` + 自检 + sha256，§6.2） | 至少 **90 天**，且至少留最近 **3 次切换**各一份；异地再存一份 |
+| **镜像 tag** | 切换前 `docker tag prdwright-api:local prdwright-api:rollback-<日期>`（web 同样）+ `docker save` | 到下一次发布验收通过，最短 **30 天** |
+| **`deploy/.env`** | 复制进密码管理器/离线加密介质 | 与该版本同寿命 |
+| **`master.key`** | 从 `prdwright_secrets` 卷单独导出 | **永久**（每一把都留） |
+| 代码 / 迁移版本 | `git tag release-<日期>` + 记录 `alembic_version` | 永久 |
+
+**口令与主密钥不进备份包**：`.env` 与 `master.key` 单独保管，不跟 `.dump` 放同一个包、同一个介质
+（`README.md` §1.2 第 4 点）。命令与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §3。
+
+#### 两条边界（别混）
+
+- **回滚 ≠ 并行**：回滚是「停新、起旧」的串行动作，数据单向。本项目的任务运行时、`JobBus`、连接池全在单个 api 进程内，
+  且启动即跑迁移——两个版本同时连一个库会互相把结构改回去或启动失败。设计取舍见
+  [`../docs/architecture/state-flow-design.md`](../docs/architecture/state-flow-design.md)（「一次性切换，不能靠并行运行退回」）。
+- **回滚 ≠ 文档版本历史**：`document_versions` 只增不改，`restore` 是**追加**一版、指针不回拨（业务功能，不停服务）。
+  数据库回滚是**整库退回某个时间点**，会连同回滚点之后新追加的版本行一起丢掉。两者是两层，不能互相替代——
+  详见 [`ROLLBACK.md`](./ROLLBACK.md) §2。
+
+#### 演练过一次（不是生产演练）
+
+```bash
+make drill   # = uv run --project ../backend python drill.py
+```
+
+在本机开发库上真跑「迁移 → 造数据 → `pg_dump` → 砸库 → `pg_restore` → 核对」，逐见证耗时（本机实测总耗时 7.3 秒，
+每步耗时与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §9）。它幂等、只动演练库 `prdwright_drill`、
+不写 `deploy/backups/`、不碰三个命名卷（生产卷）。**这不是生产演练**：生产数据量与磁盘/网络不可比，
+切换窗口必须另做一次并把真实耗时补记进去。
+
+#### 红线（每一条都别做）
+
+`docker compose down -v`；用 `docker compose up -d --build` 当回滚；数据库已迁移后还只回退镜像；
+用新代码启动旧备份库；`alembic downgrade` 当回滚；把 `.db` 旧备份喂回新栈；把 `.env` / `master.key` 打进备份包；
+api 还跑着就 `pg_restore --clean` 或 TRUNCATE；验收前删旧镜像/旧备份。
 
 ---
 ## 7. 重启与升级
@@ -376,9 +444,14 @@ make up
 
 ### 7.3 回滚
 
-- **代码**：切回上一个提交后 `make up` 重建镜像。
-- **数据**：如果这次发布动过表结构，按 §6.4 恢复备份。`git revert` 只回退代码，回退不了
-  已经被迁移过的库。
+回滚有独立的一节：[`§6.7`](#67-回滚预案切换当天照这个做) 与完整手册 [`ROLLBACK.md`](./ROLLBACK.md)。
+这里只重复三条最容易被违反的：
+
+- **代码**：切回上一个提交后**必须** `make up` 重建；但「用 `make up` 重建当前代码」不是回滚——
+  回滚要用 §6.7 场景 A 的 `--no-build` + 旧镜像 tag，判据是容器镜像 ID 等于回滚 tag 的 ID。
+- **数据**：动过表结构（`alembic_version` 变了）就必须按 §6.4 / 场景 B 恢复备份。`git revert` 只回退代码，
+  回退不了已经被迁移过的库；恢复旧备份后**也必须**起旧镜像，否则新代码会把库再迁移一次。
+- **顺序**：停新 → （需要时）恢复数据 → 起旧。任何时刻不要让两个版本的 api 同时连同一个库。
 
 ---
 
@@ -415,7 +488,9 @@ make up
 | `deploy/docker/api.Dockerfile` 与 `deploy/docker/api-entrypoint.sh` | 应用镜像（单 worker、非 root、主密钥缺失即拒启动） |
 | `deploy/docker/web.Dockerfile` 与 `deploy/docker/nginx.conf` | 静态站点镜像与三路反代、SSE 不缓冲 |
 | `deploy/backup.py` | 备份脚本：`pg_dump -Fc` + `pg_restore --list` 自检 + sha256（§6） |
-| `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份） |
+| `deploy/drill.py` | 回滚预演练：本机库上「备份 → 破坏 → 恢复」，记每步耗时（§6.7、`make drill`） |
+| `deploy/ROLLBACK.md` | 回滚预案：备份清单与保留期限、三个场景的逐步命令与判据、演练记录 |
+| `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份/演练） |
 | `deploy/backups/` | 备份产物目录（**内容**被版本控制忽略，目录本身靠 `.gitkeep` 入库；产物由 `backup.py` 写入，可整目录删除） |
 
 设计依据与取舍：[`../docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md)（§3.6 部署形态、§5 取舍）。
