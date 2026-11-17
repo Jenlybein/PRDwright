@@ -235,12 +235,21 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        lease_token: str = "",
+        now_text: str = "",
     ) -> int:
         """标记任务完成，落最终正文与章节。清空错误字段。返回**改到的行数**。
 
         **条件写**：`WHERE status='running'`（#79）。只有仍在执行的任务才允许收尾成功；
         已经终态的行改到 0 行——调用方据此丢弃本次结果（而不是把第二次收尾又写一遍，
         例如把 `failed` 覆回 `completed`）。
+
+        **执行权三条件（#82）**：调用方给出本轮凭证时，再叠两条数据库层的判据——
+        `lease_token` 仍是本轮那个、`lease_expire_at` 还没过。三条合起来只回答一个问题：
+        「我现在还有没有资格写这一行」。改到 0 行 = 结果丢弃（丢弃日志与「不重试」的口径
+        在 `job_state`，本层只回行数）。
+
+        收尾成功同时**交还执行权**（三列清空）：这一轮结束了，没有谁还在持有它。
 
         `prompt_tokens` / `completion_tokens` 是 `usage` 那份 JSON 的派生副本：
         管理员后台统计消耗时用 SQL 直接求和，不必把每行 JSON 取回解析。
@@ -250,13 +259,19 @@ class GenerationJobRepository:
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
+        conditions: list[Any] = [
+            GenerationJob.id == job_id,
+            GenerationJob.owner_id == owner_id,
+            GenerationJob.status == STATUS_RUNNING,
+        ]
+        if lease_token:
+            # 判权：凭证是本轮那个、到期时间还没过。两列一起进 WHERE 而不是先查后判，
+            # 数据库在改之前会重新判一次条件（并发的接管因此不可能被这次收尾覆盖）。
+            conditions.append(GenerationJob.lease_token == lease_token)
+            conditions.append(GenerationJob.lease_expire_at >= (now_text or utc_now_text()))
         result = self.session.execute(
             update(GenerationJob)
-            .where(
-                GenerationJob.id == job_id,
-                GenerationJob.owner_id == owner_id,
-                GenerationJob.status == STATUS_RUNNING,
-            )
+            .where(*conditions)
             .values(
                 status=STATUS_COMPLETED,
                 draft_content=draft_content,
@@ -267,6 +282,9 @@ class GenerationJobRepository:
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
                 updated_at=utc_now_text(),
             )
         )
@@ -286,6 +304,8 @@ class GenerationJobRepository:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         abort_code: str = "",
+        lease_token: str = "",
+        now_text: str = "",
     ) -> int:
         """标记任务失败，保留已产出的半截正文、章节与已发生的用量。返回**改到的行数**。
 
@@ -301,6 +321,14 @@ class GenerationJobRepository:
         别把条件放宽成「`status='failed'` 一律可写」：那正是「晚到的失败把启动回收写的
         `INTERNAL_ERROR` 覆写成别的东西」的入口。
 
+        **执行权三条件（#82）**：调用方给出本轮凭证时，普通失败再叠「凭证是本轮 + 没到期」，
+        改到 0 行即丢弃。`abort_code`（取消 / 被顶替之后补一次载荷）那条路只叠**凭证**、
+        不叠到期：那两列回答的是「还能不能被别人领走」，而终态行不会再被任何人领走
+        （抢占要求 `status='running'`），所以对它写权的唯一判据是「这一轮是不是你的」
+        ＋「载荷只补一次」（`usage IS NULL`）。这不是放宽：#79 的「补一次载荷」契约
+        必须保留（用户按停止之后，已经烧掉的 token 与半截正文仍要记账），而旧凭证
+        在凭证判据上照样一行都改不到。
+
         `usage` 在失败路径同样要落：失败的生成**照样消耗了 token**，
         只记成功那次等于把最贵的失败藏起来。两个 token 列同理一并写：
         成本统计若跳过失败任务，「这次为什么这么贵」永远查不出来。
@@ -311,7 +339,7 @@ class GenerationJobRepository:
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
         if abort_code:
-            expected = or_(
+            expected: Any = or_(
                 GenerationJob.status == STATUS_RUNNING,
                 and_(
                     GenerationJob.status == STATUS_FAILED,
@@ -321,13 +349,20 @@ class GenerationJobRepository:
             )
         else:
             expected = GenerationJob.status == STATUS_RUNNING
+        conditions: list[Any] = [
+            GenerationJob.id == job_id,
+            GenerationJob.owner_id == owner_id,
+            expected,
+        ]
+        if lease_token:
+            conditions.append(GenerationJob.lease_token == lease_token)
+            if not abort_code:
+                conditions.append(
+                    GenerationJob.lease_expire_at >= (now_text or utc_now_text())
+                )
         result = self.session.execute(
             update(GenerationJob)
-            .where(
-                GenerationJob.id == job_id,
-                GenerationJob.owner_id == owner_id,
-                expected,
-            )
+            .where(*conditions)
             .values(
                 status=STATUS_FAILED,
                 error_code=error_code,
@@ -338,6 +373,9 @@ class GenerationJobRepository:
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
                 updated_at=utc_now_text(),
             )
         )
@@ -508,6 +546,115 @@ class GenerationJobRepository:
             select(GenerationJob.id).where(GenerationJob.status == STATUS_RUNNING)
         ).scalars().all()
         return [int(row) for row in rows if row is not None]
+
+    # ------------------------------------------------------------------
+    # 执行权（租约，票 #82）：抢占 / 续租 / 扫待领
+    # ------------------------------------------------------------------
+
+    def claim(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        lease_owner: str,
+        lease_token: str,
+        expire_at: str,
+        now_text: str,
+    ) -> int:
+        """抢占一条任务，返回**改到的行数**（1 = 领到了，0 = 没领到）。
+
+        ## 判断与修改压在同一条 UPDATE 里
+
+        `WHERE` 里的「没有有效租约」是这条语句的核心：`lease_token = ''`（从没人领过）
+        **或** `lease_expire_at < 现在`（领它的人已经到期）。数据库在改之前会重新判一次
+        条件，所以两个进程同时执行同一条语句时，第一个改到的那些行对第二个已经不满足
+        条件——它一行都改不到。**谁改到了行，谁才算领到**；这不是靠错开时间去避让。
+
+        反过来说，写成「先查有没有人领、再写」就一定会漏：查与写之间那段窗口里，
+        两边都会读到「还没人领」，然后都以为自己领到了（后写的那个把先写的凭证覆盖掉，
+        于是两个执行者同时在跑同一行）。
+
+        ## 允许领「已过期」的行
+
+        这是崩溃接手的入口（#83 的恢复器走的就是它）：原执行者的进程没了，租约到期，
+        另一处用新的凭证接手。凭什么接手者更有权？因为它也守同一条规则——凭证对不上，
+        它一样一行都改不到。
+
+        `lease_owner` 只写进库供排查，**不参与任何条件**：判权的是凭证。
+        """
+        result = self.session.execute(
+            update(GenerationJob)
+            .where(
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
+                GenerationJob.status == STATUS_RUNNING,
+                or_(
+                    GenerationJob.lease_token == "",
+                    GenerationJob.lease_expire_at < now_text,
+                ),
+            )
+            .values(
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+                lease_expire_at=expire_at,
+                updated_at=utc_now_text(),
+            )
+        )
+        return int(result.rowcount or 0)
+
+    def renew_lease(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        lease_token: str,
+        expire_at: str,
+    ) -> int:
+        """续租：把到期时间往后推，返回**改到的行数**（0 = 已失去执行权）。
+
+        条件只有两条：状态仍是 `running`、凭证仍是本轮那个。**刻意不叠加「还没到期」**——
+        续租本来就是为了把到期时间推后；如果要求未到期，一次比租约时长更久的模型调用
+        就会让执行者把自己判死（长任务在动作点之间停多久不由它自己决定）。
+        到期这条判据约束的是**写结果**（见 `finish` / `fail`），不是「还能不能继续干」。
+
+        反过来，续租失败**本身就是信号**：凭证对不上说明这一轮已经被取消或被接手，
+        调用方该立刻停下来（`job_claimer.renew` 会把它翻成一个明确的错误）。
+        """
+        result = self.session.execute(
+            update(GenerationJob)
+            .where(
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
+                GenerationJob.status == STATUS_RUNNING,
+                GenerationJob.lease_token == lease_token,
+            )
+            .values(lease_expire_at=expire_at, updated_at=utc_now_text())
+        )
+        return int(result.rowcount or 0)
+
+    def claimable(self, *, now_text: str, limit: int) -> list[tuple[int, int]]:
+        """系统级维护：扫一批「还没有有效租约」的待领任务，返回 `(owner_id, id)`。
+
+        本仓库第三个（也是最后一个）没有 `owner_id` 入参的方法：队列扫描天然跨用户。
+        它**只挑候选**，判权仍由 `claim` 那条条件写完成——扫描结果过期（被别的进程
+        先领走）不会造成两个执行者，`claim` 会如实回 0 行。
+
+        排序 `created_at, id`：`created_at` 是秒级文本，同一秒建的行只靠它排不出稳定
+        顺序；`id` 是自增的，补上之后「先来先领」在秒内也成立（同优先级排队语义）。
+        """
+        rows = self.session.execute(
+            select(GenerationJob.owner_id, GenerationJob.id)
+            .where(
+                GenerationJob.status == STATUS_RUNNING,
+                or_(
+                    GenerationJob.lease_token == "",
+                    GenerationJob.lease_expire_at < now_text,
+                ),
+            )
+            .order_by(GenerationJob.created_at, GenerationJob.id)
+            .limit(max(1, int(limit)))
+        ).all()
+        return [(int(row[0]), int(row[1])) for row in rows]
 
     # ------------------------------------------------------------------
     # 读

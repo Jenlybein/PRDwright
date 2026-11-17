@@ -30,6 +30,7 @@
 
 | 事件 | 期望条件 | 落库 | 内存 |
 |---|---|---|---|
+| `CLAIM` | 单条任务 | 抢占：写租约三列（谁领的 / 本轮凭证 / 到期时间） | 不结算（抢占时还没有运行时） |
 | `SUCCEED` | 单条任务 | `finish`（completed） | status=completed、清错误码 |
 | `FAIL` | 单条任务 / 维护面 | `fail`（failed + 错误码） | status=failed + 错误码 |
 | `CANCEL` | 单条 / 方案 / owner | `failed + CANCELLED` | 只置「取消意图」标志 |
@@ -114,12 +115,34 @@ ABORT_CODES = frozenset({CODE_CANCELLED, CODE_SUPERSEDED})
 
 
 class JobEvent(StrEnum):
-    """四种转换意图（三态下只有这四个出口）。"""
+    """转换意图（三态下只有这五个出口）。
 
+    `CLAIM` 是 #82 加的：**抢占**是「排队中 → 执行中」的转换，和四个终止事件一样经
+    `transition` 走，不另写一套改状态的路径。三态里「排队中」与「执行中」共用
+    `status='running'`，区别只在**有没有有效租约**——所以这条事件改的是租约三列，
+    不是 status（七态是 #84 的事）。
+    """
+
+    CLAIM = "claim"
     SUCCEED = "succeed"
     FAIL = "fail"
     CANCEL = "cancel"
     SUPERSEDE = "supersede"
+
+
+@dataclass(frozen=True, slots=True)
+class LeaseGrant:
+    """一次抢占要写进库的执行权：谁领的 / 本轮凭证 / 到几点失效 / 判据用的「现在」。
+
+    `now_text` 一起传是为了让「判断」与「修改」看到同一个时刻：抢占条件是
+    「没有有效租约」，而「有效」是相对某个时刻说的；两处各取一次 `now()` 会让
+    边界上的行为取决于毫秒级抖动。
+    """
+
+    owner: str
+    token: str
+    expire_at: str
+    now_text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +235,9 @@ class TransitionResult:
 
 
 def _expected_status(event: JobEvent) -> str:
-    """事件成功后任务应处于的状态（三态只有这两个终态）。"""
+    """事件成功后任务应处于的状态（三态只有两个终态；抢占之后仍是 `running`）。"""
+    if event is JobEvent.CLAIM:
+        return STATUS_RUNNING
     return STATUS_COMPLETED if event is JobEvent.SUCCEED else STATUS_FAILED
 
 
@@ -220,11 +245,21 @@ def _scope_has_job(scope: JobScope) -> bool:
     return scope.job_id is not None
 
 
-def _validate(event: JobEvent, scope: JobScope, payload: FinishPayload | None) -> None:
+def _validate(
+    event: JobEvent,
+    scope: JobScope,
+    payload: FinishPayload | None,
+    lease_grant: LeaseGrant | None = None,
+) -> None:
     """校验「事件 + 期望条件」的组合是否合法（拼错是程序错误，直接抛）。"""
     if scope.maintenance:
         if event is not JobEvent.FAIL:
             raise ValueError("维护面只允许「失败收尾」：启动回收把残留 running 判死")
+        return
+    if event is JobEvent.CLAIM:
+        # 抢占只针对**一条**具体任务：批量抢占没有意义（每个执行者只该拿走它要跑的那一条）。
+        if not _scope_has_job(scope) or lease_grant is None:
+            raise ValueError("抢占必须给单条任务与本轮执行权（谁领的 / 凭证 / 到期时间）")
         return
     if event is JobEvent.SUCCEED:
         if not _scope_has_job(scope) or payload is None:
@@ -266,6 +301,9 @@ def _write(
     error_code: str,
     error_message: str,
     session: Session,
+    lease_grant: LeaseGrant | None = None,
+    lease_token: str = "",
+    now_text: str = "",
 ) -> _WriteResult:
     """执行条件写，返回行数与观察到的状态（0 行时在**同一事务**里读回那一行）。
 
@@ -275,7 +313,17 @@ def _write(
     repo = GenerationJobRepository(session)
     owner_id = scope.owner_id
     reaped: tuple[int, ...] = ()
-    if event is JobEvent.SUCCEED:
+    if event is JobEvent.CLAIM:
+        grant = lease_grant or LeaseGrant(owner="", token="", expire_at="", now_text="")
+        rows = repo.claim(
+            owner_id,
+            int(scope.job_id or 0),
+            lease_owner=grant.owner,
+            lease_token=grant.token,
+            expire_at=grant.expire_at,
+            now_text=grant.now_text,
+        )
+    elif event is JobEvent.SUCCEED:
         rows = repo.finish(
             owner_id,
             int(scope.job_id or 0),
@@ -285,6 +333,8 @@ def _write(
             pending_items=payload.pending_items if payload else None,
             prompt_tokens=payload.prompt_tokens if payload else 0,
             completion_tokens=payload.completion_tokens if payload else 0,
+            lease_token=lease_token,
+            now_text=now_text,
         )
     elif event is JobEvent.FAIL:
         if scope.maintenance:
@@ -310,6 +360,8 @@ def _write(
                 # 中止类失败允许「补一次载荷」：状态早已被取消/顶替路径落成终态，
                 # 但用量与半截正文还没记下来。条件在仓储里写死（见 `fail` 的注释）。
                 abort_code=error_code if error_code in ABORT_CODES else "",
+                lease_token=lease_token,
+                now_text=now_text,
             )
     elif event is JobEvent.CANCEL:
         code = error_code or CODE_CANCELLED
@@ -531,7 +583,12 @@ def _settle(
 
     只写该写的：收尾写 `status` / 错误码；取消与顶替只置意图标志（终态由被请求的
     那条协程自己收尾时结算）。容器是本模块的 `_RUNTIMES`，调用方不必伸手。
+
+    **抢占不结算内存**：领到执行权的那一刻还没有运行时（派发才建运行时），
+    这一轮的凭证由调用方（`job_claimer`）直接递给派发侧，不在这里中转一份。
     """
+    if result.event is JobEvent.CLAIM:
+        return
     targets = [runtime] if runtime is not None else _match_runtimes(scope)
     for target in targets:
         if result.event is JobEvent.CANCEL:
@@ -582,11 +639,14 @@ def transition(
     error_code: str = "",
     error_message: str = "",
     session: Session | None = None,
+    lease_grant: LeaseGrant | None = None,
+    lease_token: str = "",
+    now_text: str = "",
 ) -> TransitionResult:
     """**唯一的状态转换动作**：事件 + 期望条件 → 结果（以影响行数为唯一判据）。
 
     Args:
-        event: 想做什么（成功收尾 / 失败收尾 / 取消 / 顶替）。
+        event: 想做什么（抢占 / 成功收尾 / 失败收尾 / 取消 / 顶替）。
         scope: 期望条件（哪一条 / 哪一批，前置状态恒为 `running`）。
         runtime: 单条任务的内存运行时。给了它，成功时同步结算 `status` / 错误码。
         payload: 收尾载荷（`SUCCEED` / `FAIL` 必填）。
@@ -595,11 +655,16 @@ def transition(
         session: 调用方自己持有事务时传入（删方案 / 删账号 / 登记顶替要和别的写同生共死）。
             **传入时本函数不结算内存**：调用方必须在事务提交之后调
             `settle_after_commit(result, scope)`，否则会留下「协程停了、库里还在跑」的错位。
+        lease_grant: `CLAIM` 必填：这一轮的执行权（谁领的 / 凭证 / 到期时间 / 判据时刻）。
+        lease_token: 收尾（`SUCCEED` / `FAIL`）时带上**本轮凭证**：仓储据此叠「凭证仍是
+            本轮 + 没到期」两条判据，改到 0 行就是「我已经没资格写了」。
+        now_text: 判据用的「现在」（留空取 `utc_now_text()`）。注入它是为了让用例能在
+            毫秒内演示「租约 120 秒、任务跑十几分钟」这类时间跨度；生产不传。
 
     Returns:
         `TransitionResult`：`rows == 0` 表示本次结果被丢弃（已留丢弃日志）。
     """
-    _validate(event, scope, payload)
+    _validate(event, scope, payload, lease_grant)
 
     if session is not None:
         write = _write(
@@ -609,6 +674,9 @@ def transition(
             error_code=error_code,
             error_message=error_message,
             session=session,
+            lease_grant=lease_grant,
+            lease_token=lease_token,
+            now_text=now_text,
         )
         # 账本与状态更新同事务：调用方持事务时账本也留在它的事务里，要么一起成、
         # 要么账本那一笔（且只有那一笔）被保存点回滚。
@@ -642,6 +710,9 @@ def transition(
             error_code=error_code,
             error_message=error_message,
             session=own_session,
+            lease_grant=lease_grant,
+            lease_token=lease_token,
+            now_text=now_text,
         )
         _record_attempt(
             event,
@@ -679,6 +750,9 @@ def _result(
 ) -> TransitionResult:
     """把写入结果折成 `TransitionResult`（改到了取事件的目标值，没改到取观察到的事实）。"""
     if rows:
+        if event is JobEvent.CLAIM:
+            # 抢占成功之后任务仍在执行中：这条事件改的是租约三列，不是 status。
+            return TransitionResult(event=event, rows=rows, status=STATUS_RUNNING)
         if event is JobEvent.SUCCEED:
             return TransitionResult(event=event, rows=rows, status=STATUS_COMPLETED)
         return TransitionResult(

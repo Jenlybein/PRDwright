@@ -119,6 +119,10 @@ def _closeout_once(
     执行者会覆盖别人已经写好的终态；#79 的口径）。
 
     返回值是 `TransitionResult`；调用方在提交之后才结算内存、写日志、广播回执。
+
+    **执行权（#82）**：收尾的条件写带上本轮的 `lease_token`——状态仍是执行中、凭证仍是
+    这一轮、到期时间还没过，三条同时成立才改到那一行。旧执行者的晚到收尾因此是 0 行：
+    它随后既不写正文、也不记账本、不留结论，只走调用方那条「结果已丢弃」的分支。
     """
     event = job_state.JobEvent.SUCCEED if status == "completed" else job_state.JobEvent.FAIL
     payload = _finish_payload(runtime, summary, draft)
@@ -130,6 +134,7 @@ def _closeout_once(
             error_code=error_code,
             error_message=error_message,
             session=session,
+            lease_token=runtime.lease_token,
         )
         if not result.applied:
             return result
