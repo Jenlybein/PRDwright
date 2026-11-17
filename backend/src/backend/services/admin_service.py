@@ -39,7 +39,11 @@ from backend.repositories.auth_repo import (
     InviteCodeRepository,
     UserRepository,
 )
-from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
+from backend.repositories.generation_job_repo import (
+    STATUS_RUNNING,
+    STUCK_MINUTES,
+    GenerationJobRepository,
+)
 from backend.repositories.log_repo import LogRepository
 from backend.repositories.quota_repo import QuotaRepository
 from backend.services import auth_service, export_service, job_service, job_state, quota_service
@@ -266,9 +270,18 @@ def set_user_quota(
 
 
 def platform_stats() -> dict[str, Any]:
-    """平台总量：用户数、管理员数、任务数、成功数、Token 合计。"""
+    """平台总量 + 管理端「四个数字」（票 #89）。
+
+    四个数字（排队数 / 成功率 / 平均耗时 / 卡死数）由仓储层各算一条查询后合并进同一个
+    响应：它们回答的是「此刻系统里还有多少活、上一次收尾成功了没有」，与按日趋势的
+    「在变好还是变坏」互补。**不在前端推算**——前端只能看到一页列表，由它加总会漏掉
+    翻页之外的行。
+    """
     with session_scope() as session:
-        return AdminStatsRepository(session).platform_usage().as_dict()
+        repository = AdminStatsRepository(session)
+        usage = repository.platform_usage()
+        metrics = repository.job_metrics()
+    return {**usage.as_dict(), **metrics.as_dict()}
 
 
 def daily_stats(days: int = 7, tz_offset_minutes: int = 0) -> dict[str, Any]:
@@ -685,12 +698,10 @@ def list_logs(
 # 任务监控（v4.5 T5-1）
 # ----------------------------------------------------------------------
 
-# 卡死判定阈值：running 任务超过这么久没有更新，就认为它「卡住了」。
-#
-# 为什么看 `updated_at` 而不是 `created_at`：正文在流式写入时 `updated_at`
-# 会持续刷新，它停住不动恰恰说明「不再产出」。半小时足以覆盖长文档里最慢的
-# 单章生成；再短会把正常的长任务误报成卡死，管理员就会对红色标记脱敏。
-STUCK_MINUTES = 30
+# 卡死判定阈值（`STUCK_MINUTES`）住在仓储层的 `generation_job_repo`：那里的
+# `stuck_condition` 是「什么算卡死」的**唯一一处定义**——概览页的卡死数与任务列表的
+# `stuck_only` 筛选共用同一个 SQL 表达式，两处各写一遍就会出现「卡片说 1 个、列表里 0 个」。
+# 本层只负责把「卡死了几分钟」换算成给人看的数字。
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -704,24 +715,25 @@ def _parse_ts(value: Any) -> datetime | None:
 
 
 def _job_view(row: dict[str, Any]) -> dict[str, Any]:
-    """把一行任务补上「耗时 / 是否卡死」，供前端直接展示。
+    """把一行任务补上「耗时 / 卡死分钟数」，供前端直接展示。
 
     耗时与卡死**在这里算一次**。前端再算一遍就会出现两套口径：浏览器与服务器
     的时钟差几分钟，卡死边界就会对不上，而管理员只会看到「列表说卡死、点了
     却说还在跑」这种互相矛盾的状态。
+
+    ⚠️ 票 #89 起 `is_stuck` **不是**在这里判的：它由仓储的 `stuck_condition` 在查询时
+    算好（租约过期 或 停更超阈值），随行一起带进来。同一口径要服务概览页的卡死数与
+    列表的卡死筛选，判据只能有一处。这里只把「卡了多久」换算成分钟——租约刚刚过期
+    的行 `updated_at` 可能还很新，`max(1, …)` 保证文案不会出现「已卡死 0 分钟」。
     """
     created = _parse_ts(row.get("created_at"))
     updated = _parse_ts(row.get("updated_at"))
     now = utc_now()
 
     duration = int((now - created).total_seconds()) if created else 0
-    is_stuck = False
-    stuck_minutes = 0
-    if row.get("status") == STATUS_RUNNING and updated is not None:
-        idle = int((now - updated).total_seconds())
-        if idle >= STUCK_MINUTES * 60:
-            is_stuck = True
-            stuck_minutes = idle // 60
+    is_stuck = bool(row.get("is_stuck"))
+    idle_minutes = int((now - updated).total_seconds()) // 60 if updated else 0
+    stuck_minutes = max(1, idle_minutes) if is_stuck else 0
 
     return {
         "id": int(row["id"]),
@@ -747,10 +759,11 @@ def list_jobs(
     status: str = "",
     username: str = "",
     kind: str = "",
+    stuck: bool = False,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """任务监控列表：在飞 / 最近失败 / 全部（可按用户名、类型过滤）。
+    """任务监控列表：在飞 / 最近失败 / 卡死 / 全部（可按用户名、类型过滤）。
 
     Returns:
         `{"items": [...], "total": int}`。`total` 是同口径命中总数，
@@ -758,6 +771,10 @@ def list_jobs(
     `status` 接受逗号分隔的多个取值（七态，票 #84）：管理端的「在飞」标签传
     `pending,running,cancelling`，「最近失败」传 `failed`。按状态列过滤而不是按
     错误码猜——「被取代」与「已取消」各自是一个状态。
+
+    `stuck`（票 #89）：只回**卡死**的行，判据是仓储的 `stuck_condition`——与概览页的
+    卡死数是同一处定义。管理员点概览上的卡死数就落到这里；若两处各算一遍，
+    「卡片说 3 个、列表里 2 个」会让人不信任何一个数。
     """
     safe_limit = max(1, min(int(limit), 500))
     safe_offset = max(0, int(offset))
@@ -768,6 +785,7 @@ def list_jobs(
             statuses=statuses or None,
             username=clean_username,
             kind=kind or None,
+            stuck_only=bool(stuck),
             limit=safe_limit,
             offset=safe_offset,
         )
@@ -775,6 +793,7 @@ def list_jobs(
             statuses=statuses or None,
             username=clean_username,
             kind=kind or None,
+            stuck_only=bool(stuck),
         )
         items = [_job_view(row.as_dict()) for row in rows]
     return {"items": items, "total": total}
@@ -834,16 +853,18 @@ def cancel_job_as_admin(actor: User, job_id: int) -> bool:
 
 
 def cancel_stuck_jobs(actor: User) -> int:
-    """取消所有「running 且已停更超过阈值」的任务，返回实际取消条数。
+    """取消所有「running 且判定为卡死」的任务，返回实际取消条数。
 
     只动**判定为卡死**的那些：正常在跑的任务一个都不碰——批量取消一旦误伤，
     用户的正文会直接断在半截，比卡死更难解释。
+
+    判据与概览页的卡死数**同一处**（仓储 `stuck_condition`：租约过期 或 停更超阈值）。
+    直接按 `stuck_only` 取候选，而不是先把全部 running 行捞回来再逐条判——单机在飞
+    任务上限 500 条，卡死的通常只有个位数，少捞的那部分本来就要被丢掉。
     """
-    # running 按 created_at 升序，卡死（最久）的必然排在最前；500 条足够覆盖
-    # 单机在飞任务的实际量级。
     with session_scope() as session:
         rows = GenerationJobRepository(session).admin_list(
-            statuses=(STATUS_RUNNING,), limit=500
+            statuses=(STATUS_RUNNING,), stuck_only=True, limit=500
         )
         views = [_job_view(row.as_dict()) for row in rows]
     stuck = [view for view in views if view["is_stuck"]]

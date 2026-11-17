@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
@@ -70,6 +71,46 @@ TERMINAL_STATUSES: tuple[str, ...] = (
 )
 # 「会被重复提交复用」的目标：排队中 / 执行中（取消中的任务正在退出，不该被复用）。
 REUSABLE_STATUSES: tuple[str, ...] = (STATUS_PENDING, STATUS_RUNNING)
+
+# 卡死判定的「停更」阈值（票 #89 从管理端服务层移到仓储层，成为唯一一处定义）。
+#
+# 为什么是 30 分钟：`updated_at` 在流式写入与动作点续租时都会刷新，它停住不动
+# 恰恰说明「不再产出」。半小时足以覆盖长文档里最慢的单步生成；再短会把正常的长任务
+# 误报成卡死，管理员对红色标记就会脱敏。
+STUCK_MINUTES = 30
+
+
+def stuck_condition(*, now_text: str) -> Any:
+    """**卡死判据的唯一一处定义**（票 #89）：执行中，且出现下面任一情形。
+
+    - **租约已过期**（`lease_expire_at` 非空且早于 `now_text`）：执行者本该续租却没续。
+      七态之后这是「仍 `running` 但已经没人有权写它」的窗口——#83 的恢复器会把它
+      收口（回排队 / 判失败），但在恢复器跑到之前，它必须算卡死，否则卡死数永远是 0。
+    - **停更超过 `STUCK_MINUTES`**：没有租约或租约还活着、但进度不再刷新。租约与
+      进度都由同一个动作点刷新，两者通常同向；保留这条是为了覆盖「没有租约的
+      `running` 残留行」与「续租了但不再产出」两种历史形态。
+
+    ⚠️ 只认 `running`：`pending` 本来就在排队，`cancelling` 是用户已经叫停、
+    由执行者或恢复器收口——都不是「卡住没人管」。
+
+    ⚠️ 时间比较全部是**ISO 文本的字典序**（`core/clock.py` 的口径），不把时间取回
+    Python 再比：聚合查询（`admin_repo.job_metrics`）与列表筛选（`admin_list`）
+    共用这一个表达式，两处各写一遍就会出现「卡片说 1 个、列表里 0 个」。
+
+    Args:
+        now_text: 判据时刻（`utc_now_text()` 的形态，不带时区标记）。
+    """
+    stale_before = (datetime.fromisoformat(now_text) - timedelta(minutes=STUCK_MINUTES)).isoformat()
+    return and_(
+        GenerationJob.status == STATUS_RUNNING,
+        or_(
+            and_(
+                GenerationJob.lease_expire_at != "",
+                GenerationJob.lease_expire_at < now_text,
+            ),
+            GenerationJob.updated_at < stale_before,
+        ),
+    )
 
 
 def _due_now(now_text: str):
@@ -179,17 +220,21 @@ def _provider_columns(provider: dict[str, str] | None) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class AdminJob:
-    """管理面投影：任务模型 + JOIN 出来的用户名。
+    """管理面投影：任务模型 + JOIN 出来的用户名 + 服务端算好的卡死标记。
 
-    `owner_name` 来自 `users.username`；`as_dict()` 把模型全列与用户名合并成
-    管理员视图需要的扁平 dict（`_job_view` 消费的就是它）。
+    `owner_name` 来自 `users.username`；`is_stuck` 是**查询时由 SQL 判据算出来的**
+    （`stuck_condition`），不是服务层再猜一遍：管理端卡片与列表必须同一处定义，
+    否则会出现「卡片说 1 个卡死、列表里 0 个」。`as_dict()` 把模型全列、用户名与
+    这个标记合并成管理员视图需要的扁平 dict（`_job_view` 消费的就是它）。
     """
 
     job: GenerationJob
     owner_name: str
+    # 是否卡死（由 `stuck_condition` 在查询时算好；票 #89 起前端只展示不判断）。
+    is_stuck: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        return {**self.job.model_dump(), "owner_name": self.owner_name}
+        return {**self.job.model_dump(), "owner_name": self.owner_name, "is_stuck": self.is_stuck}
 
 
 class GenerationJobRepository:
@@ -1196,6 +1241,7 @@ class GenerationJobRepository:
         statuses: tuple[str, ...] | None = None,
         username: str | None = None,
         kind: str | None = None,
+        stuck_only: bool = False,
         limit: int = 100,
         offset: int = 0,
     ) -> list[AdminJob]:
@@ -1205,36 +1251,49 @@ class GenerationJobRepository:
         「在飞」标签传 `pending,running,cancelling`——一列状态值已经能回答「哪些还没收尾」，
         不必再按「有没有租约」猜。
 
+        `stuck_only`（票 #89）：只留**卡死**的行，判据是仓储层的 `stuck_condition`
+        ——与概览页「卡死数」用的是同一个表达式。管理员点概览上的卡死数就落到这里，
+        两边数字对不上会让人不信任何一个。
+
         排序按状态分开：
         - 在途（`pending` / `running` / `cancelling`）用 `created_at ASC`——卡死任务的特征
           就是「跑得最久」，把它顶到最前面才看得见；
+        - 卡死列表用 `updated_at ASC`——停得最久的最先出现（它们都已经卡住了，
+          这时候该看的是「谁卡得最久」而不是「谁跑得久」）；
         - 其余用 `updated_at DESC`——最近有动静的在前。
 
         `username` 是**模糊匹配**（`LIKE`）：管理员通常只记得半个用户名，
         要求精确输入等于让他先去用户页复制一遍。
         """
-        conditions = []
+        conditions: list[Any] = []
         if statuses:
             conditions.append(GenerationJob.status.in_(statuses))
         if kind:
             conditions.append(GenerationJob.kind == kind)
         if username:
             conditions.append(User.username.like(f"%{username}%"))
+        stuck = stuck_condition(now_text=utc_now_text())
+        if stuck_only:
+            conditions.append(stuck)
 
-        order = (
-            (GenerationJob.created_at.asc(), GenerationJob.id.asc())
-            if statuses and all(value in ACTIVE_STATUSES for value in statuses)
-            else (GenerationJob.updated_at.desc(), GenerationJob.id.desc())
-        )
+        if stuck_only:
+            order = (GenerationJob.updated_at.asc(), GenerationJob.id.asc())
+        elif statuses and all(value in ACTIVE_STATUSES for value in statuses):
+            order = (GenerationJob.created_at.asc(), GenerationJob.id.asc())
+        else:
+            order = (GenerationJob.updated_at.desc(), GenerationJob.id.desc())
         rows = self.session.execute(
-            select(GenerationJob, User.username)
+            select(GenerationJob, User.username, stuck.label("is_stuck"))
             .join(User, User.id == GenerationJob.owner_id)
             .where(*conditions)
             .order_by(*order)
             .limit(limit)
             .offset(offset)
         ).all()
-        return [AdminJob(job=row[0], owner_name=row[1] or "") for row in rows]
+        return [
+            AdminJob(job=row[0], owner_name=row[1] or "", is_stuck=bool(row[2]))
+            for row in rows
+        ]
 
     def admin_count(
         self,
@@ -1242,15 +1301,18 @@ class GenerationJobRepository:
         statuses: tuple[str, ...] | None = None,
         username: str | None = None,
         kind: str | None = None,
+        stuck_only: bool = False,
     ) -> int:
         """与 `admin_list` 同口径的命中总数（分页 / 「还有多少」用）。"""
-        conditions = []
+        conditions: list[Any] = []
         if statuses:
             conditions.append(GenerationJob.status.in_(statuses))
         if kind:
             conditions.append(GenerationJob.kind == kind)
         if username:
             conditions.append(User.username.like(f"%{username}%"))
+        if stuck_only:
+            conditions.append(stuck_condition(now_text=utc_now_text()))
         total = self.session.execute(
             select(func.count())
             .select_from(GenerationJob)
@@ -1267,10 +1329,14 @@ class GenerationJobRepository:
         会让事后追责时要再查一次库。
         """
         row = self.session.execute(
-            select(GenerationJob, User.username)
+            select(
+                GenerationJob,
+                User.username,
+                stuck_condition(now_text=utc_now_text()).label("is_stuck"),
+            )
             .join(User, User.id == GenerationJob.owner_id)
             .where(GenerationJob.id == job_id)
         ).first()
         if row is None:
             return None
-        return AdminJob(job=row[0], owner_name=row[1] or "")
+        return AdminJob(job=row[0], owner_name=row[1] or "", is_stuck=bool(row[2]))

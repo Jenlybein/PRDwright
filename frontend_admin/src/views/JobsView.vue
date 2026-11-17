@@ -4,15 +4,22 @@
  *
  * 三条交互纪律：
  * 1. **「卡死」由后端判定**。前端只负责把它画红——浏览器与服务器时钟有偏差，
- *    自己算会让「列表说卡死」与「点取消时说还在跑」互相矛盾。
+ *    自己算会让「列表说卡死」与「点取消时说还在跑」互相矛盾。判据与概览页的
+ *    卡死数同源（执行中且：租约已过期 或 停更超过阈值）。
  * 2. **取消要二次确认**。它是不可逆的：文档任务不会保留半截正文。
  * 3. **`cancelled=false` 不是错误**。它表示任务在点击前刚好结束，
  *    页面要说清「不用取消了」，而不是弹一个红色失败。
+ *
+ * 「卡死」标签（票 #89）：概览页的卡死数点进来就落在这里。筛选由**后端**做
+ * （`?stuck=true`，与卡死数同一个 SQL 判据），前端不拿一页列表再自己过滤——
+ * 那样会漏掉翻页之外的卡死任务，点进来的列表也就不是「只含卡死任务」。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import AdminModal from '@/components/AdminModal.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { formatDuration } from '@/format'
 
 import {
   cancelJob,
@@ -23,11 +30,13 @@ import {
   type AdminJob,
 } from '@/services/adminService'
 
-type TabKey = 'active' | 'failed' | 'all'
+type TabKey = 'active' | 'failed' | 'stuck' | 'all'
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'active', label: '在飞任务' },
   { key: 'failed', label: '最近失败' },
+  // 从概览页的「卡死数」点进来时落在这一页：只含卡死任务，筛选在服务端做
+  { key: 'stuck', label: '卡死' },
   { key: 'all', label: '全部' },
 ]
 
@@ -48,7 +57,21 @@ const KIND_OPTIONS = [
   { value: 'chat', label: '对话' },
 ]
 
-const tab = ref<TabKey>('active')
+/**
+ * 标签页的初始落点：概览页点「卡死数」时会带 `?stuck=1` 进来。
+ *
+ * 用真 router 的 query，而不是另开一个页面：概览与任务监控是同一份数据的两屏，
+ * 「点进去看列表」只是换一个筛选条件。页面内切标签**不改 URL**（沿用既有行为），
+ * 但若外部再次导航到 `?stuck=1`，下面的 watch 会把标签切回「卡死」。
+ */
+const route = useRoute()
+
+/** 落点判定只写一处：query 带 `stuck=1` 就是「卡死」标签，否则默认「在飞」 */
+function tabFromQuery(query: Record<string, unknown> | undefined): TabKey {
+  return query?.stuck === '1' ? 'stuck' : 'active'
+}
+
+const tab = ref<TabKey>(tabFromQuery(route?.query))
 const username = ref('')
 const kind = ref('')
 
@@ -77,6 +100,7 @@ const emptyText = computed(() => {
   if (filtered.value) return '没有符合筛选条件的任务'
   if (tab.value === 'active') return '当前没有在途任务（排队中 / 执行中 / 取消中）'
   if (tab.value === 'failed') return '最近没有失败任务'
+  if (tab.value === 'stuck') return '当前没有卡死任务（执行中且租约过期 / 停更超阈值的任务）'
   return '还没有任何任务'
 })
 
@@ -94,6 +118,8 @@ async function load(silent = false) {
             : tab.value,
       username: username.value.trim(),
       kind: kind.value,
+      // 卡死标签只向后端要卡死任务（服务端判据），与其他标签共用同一个列表接口
+      stuck: tab.value === 'stuck',
       limit: 100,
     })
     jobs.value = page.items
@@ -107,6 +133,14 @@ async function load(silent = false) {
 
 onMounted(load)
 onUnmounted(stopTimer)
+
+/** 外部再次导航到 `?stuck=1` 时切回「卡死」标签（页面内切标签不改 URL） */
+watch(
+  () => route?.query?.stuck,
+  (value) => {
+    if (value === '1') selectTab('stuck')
+  },
+)
 
 function selectTab(next: TabKey) {
   if (tab.value === next) return
@@ -209,13 +243,8 @@ function formatTime(value: string): string {
   )
 }
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ${minutes % 60}m`
-}
+// 耗时读数与概览页的「平均耗时」共用同一个格式化（见 `@/format`）——
+// 同一个后台里同一份秒数不该出现两种读法。
 
 /**
  * 任务七态的文案（票 #84，与后端 `status` 一一对应）。
@@ -282,10 +311,11 @@ function totalTokens(job: AdminJob): string {
           />
           自动刷新（10 秒）
         </label>
-        <!-- 只在「在飞」页显示：失败页没有 running 数据，按钮会一直是（0），
-             反而让人以为「没有卡死任务」，而真正该清理的可能在别处 -->
+        <!-- 「在飞」与「卡死」两页都显示：前者是预防性清理，后者是概览页点进来的
+             现场。失败页不显示——那里没有 running 数据，按钮会一直是（0），
+             反而让人以为「没有卡死任务」，而真正该清理的可能在别处。 -->
         <button
-          v-if="tab === 'active'"
+          v-if="tab === 'active' || tab === 'stuck'"
           type="button"
           class="brut-btn brut-btn-xs"
           :class="stuckCount > 0 ? 'brut-btn-danger' : ''"
@@ -298,8 +328,8 @@ function totalTokens(job: AdminJob): string {
 
       <template #desc>
         <p>
-          在飞任务超过 30 分钟没有更新会被标记为卡死（判据「执行中」且 updated_at 超 30 分钟）。
-          取消是协作式的：任务在下一个可中断点停下。
+          卡死 = <b>执行中</b>且（<b>租约已过期</b> 或 <b>进度长时间未更新</b>）——
+          判据只在服务端，与概览页的卡死数同源。取消是协作式的：任务在下一个可中断点停下。
         </p>
       </template>
     </PageHeader>

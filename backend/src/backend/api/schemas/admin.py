@@ -27,7 +27,16 @@ class AdminMeResponse(BaseModel):
 
 
 class AdminStatsResponse(BaseModel):
-    """平台总量。一次请求拿全，避免前端为了凑一个总数连打好几个接口。"""
+    """平台总量 + 管理端「四个数字」（票 #89）。一次请求拿全，避免前端为了凑一个总数连打好几个接口。
+
+    「四个数字」只在后端算：前端能看到的是一页列表，由它加总会漏掉翻页之外的行，
+    而且成功率这类口径一旦两处各写一遍必然漂移。
+
+    ⚠️ 两组数字的时间口径不同，界面上的说明文字要把这个区别讲出来：
+    - `queue_count` / `stuck_count` 是**当前快照**（此刻有多少压在系统里）；
+    - `task_count` / `succeeded_count` / `success_rate` / `avg_duration_seconds`
+      是**累计**（从有数据那天起）。
+    """
 
     user_count: int = Field(description="注册用户数")
     admin_count: int = Field(description="管理员人数")
@@ -35,6 +44,27 @@ class AdminStatsResponse(BaseModel):
     succeeded_count: int = Field(description="已定稿（`succeeded`）任务数")
     prompt_tokens: int = Field(description="输入 Token 合计")
     completion_tokens: int = Field(description="输出 Token 合计")
+    # --- 四个数字（票 #89）---
+    queue_count: int = Field(
+        description="当前排队中的任务数（`pending`，含在退避等待里、尚未到期的行）"
+    )
+    success_rate: float | None = Field(
+        default=None,
+        description="成功率 = 已定稿 /（已定稿 + 真失败）。被取代与已取消**不进分母**；"
+        "分母为 0 时为 null——「还没有收尾任务」与「0% 成功」是两回事。",
+    )
+    avg_duration_seconds: int | None = Field(
+        default=None,
+        description="已收尾（已定稿 + 真失败）任务从创建到最后一次状态更新的平均秒数；"
+        "取消 / 被取代不进。分母为 0 时为 null。",
+    )
+    stuck_count: int = Field(
+        description="当前判定为卡死的任务数：执行中且（租约已过期 或 停更超过阈值）。"
+        "由服务端判据得出，前端不猜。",
+    )
+    stuck_threshold_minutes: int = Field(
+        description="卡死判据里的「停更阈值」分钟数。回传给前端写口径说明，避免前端硬编码第二份规则。"
+    )
 
 
 class AdminUserItem(BaseModel):
@@ -335,8 +365,13 @@ class AdminJobItem(BaseModel):
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     updated_at: str = Field(description="最后更新时间（UTC ISO 8601）")
     duration_seconds: int = Field(description="已运行秒数；running 为「至今」，其余为收尾耗时")
-    is_stuck: bool = Field(description="是否判定为卡死（running 且超过阈值未更新）")
-    stuck_minutes: int = Field(description="已停更分钟数；仅 is_stuck 为 true 时有意义")
+    is_stuck: bool = Field(
+        description="是否判定为卡死（执行中且：租约已过期 或 停更超过阈值）。服务端判据，"
+        "与概览页卡死数同源。"
+    )
+    stuck_minutes: int = Field(
+        description="已卡死的分钟数（停更分钟数，至少 1）；仅 is_stuck 为 true 时有意义"
+    )
     prompt_tokens: int = Field(description="输入 Token")
     completion_tokens: int = Field(description="输出 Token")
     error_code: str = Field(description="失败原因码（如 LEASE_EXPIRED / LLM_UPSTREAM_ERROR）；取消 / 被取代为空串")

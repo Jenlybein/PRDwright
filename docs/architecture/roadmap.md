@@ -252,6 +252,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 | **#86** | 事件表与游标订阅 | `job_events` 表（迁移 `0005`）+ `services/job_events.py`；`GET /api/jobs/{id}/stream` 按游标读表、断线重连不重不漏；快照防冷读回放；清理是可调用单元 | 已合入（`8727973`） |
 | **#88** | 失败延迟退避 | `0006` 一列（`generation_jobs.next_run_at`）、`services/job_backoff.py` 唯一映射表（限流 / 5xx / 超时）、`job_state.transition(REQUEUE)` 同批写退避、仓储到期闸门 `_due_now` 与排队顺序 `_queue_order`、前端等待倒计时与退避期取消 | 本轮（`ticket/88-backoff`，基于 `b3a7940`） |
 | **#84** | 七态与「取消中」 | `job_state` 七态转换表（`REQUEST_CANCEL` / `CONFIRM_CANCEL` / `EXPIRE_CANCELLING` / `EXPIRE_PENDING` / `SUPERSEDE` / `CONFIRM_SUPERSEDED`）；仓储条件写按七态重写（`pending` 是唯一「排队中」）；`cancelling` 经动作点续租 → `CancelRequestedError` → 确认取消；恢复器兜底 `cancelling` + 启动档收 `pending`；`0007` 旧行一次性映射；前端 / 管理端七态文案与「正在取消」按钮 | 本轮（`ticket/84-seven-states`，基于 `integration/spec-75` tip） |
+| **#89** | 管理端四个数字 | `repositories/generation_job_repo.py::stuck_condition`（卡死判据唯一一处）+ `admin_repo.py::job_metrics`（排队 / 成功率 / 平均耗时 / 卡死）；`GET /api/admin/stats` 扩字段、`GET /api/admin/jobs?stuck=true`；管理端概览加一块四数字（卡死数可点）、任务页加「卡死」标签 | 本轮（`ticket/89-metrics`，基于 `be5be18`） |
 
 ### 9.4 验收（#81）
 
@@ -312,7 +313,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 ### 9.8 范围、验收与复测（#88 失败延迟退避）
 
-**范围**：可重试失败**回排队之前先等一段时间**，按错误类型区分，避免连续限流在几十秒内把重试次数耗光。本票只把「到期」这个判据落库并用例化——**调度循环仍然不存在**（谁领、多久扫一次是 #89）。
+**范围**：可重试失败**回排队之前先等一段时间**，按错误类型区分，避免连续限流在几十秒内把重试次数耗光。本票只把「到期」这个判据落库并用例化——**调度循环仍然不存在**（原计划挂在 #89；#89 实际只做了管理端指标，调度仍未立票）。
 
 - **迁移 `0006`**：`generation_jobs.next_run_at`，`VARCHAR(32) NOT NULL DEFAULT ''`，`down_revision = "0005"`。空串 = **立即到期**（不是「没有值」），于是到期判据只有一种形状。
 - **错误码 → 退避秒数的唯一映射表**：`backend/src/backend/services/job_backoff.py` 的 `BACKOFF_SECONDS`——限流（`INVALID_REQUEST`，仓库里 HTTP 429 的稳定码）**30 秒**、上游 5xx（`LLM_UPSTREAM_ERROR`）**10 秒**、超时（`LEASE_EXPIRED`）**5 秒**、其余兜底 5 秒。按 **code 值**分类，不看中文文案 / `detail`；调用方一个数字都不写。
@@ -347,7 +348,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 **已知遗留（给后续票）**：
 
-- **调度循环**（#89）：到期之后由谁来扫、多久扫一次、扫到怎么派发——本票不起后台定时器，退避只把判据落库。因此在有调度循环之前，真正被回排队的行会停在「等待重试」而没人领。
+- **调度循环**（原计划挂在 #89，实际未做）：到期之后由谁来扫、多久扫一次、扫到怎么派发——本票不起后台定时器，退避只把判据落库。因此在有调度循环之前，真正被回排队的行会停在「等待重试」而没人领。
 - **「可重试失败」转换**（#84）：本票能真实产生的是超时那一路（恢复器回排队带 `LEASE_EXPIRED`）；限流 / 上游 5xx 两档要等 #84 把「执行中 → 排队中」这条转换接上，映射与写入路径已全部定死，接线时不需要动退避代码。
 - **等待中的订阅**：等待态任务没有运行时，DB 兜底快照发完就结束（不是本票改的语义）。等调度循环接上之后，「等服务端事件」这一步才有意义；在那之前靠快照里的 `next_run_at` 显示倒计时。
 
@@ -425,11 +426,65 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 **给后续票的遗留**：
 
-- **调度循环**（#89）：`pending` 现在有唯一的表示，但「谁来领、多久扫一次」仍不存在；
+- **调度循环**（原计划挂在 #89，实际未做）：`pending` 现在有唯一的表示，但「谁来领、多久扫一次」仍不存在；
   启动档只能把上次残留的 `pending` 判死（`EXPIRE_PENDING`），不能重新派发。
 - **真实在途任务的管理端取消**：管理员的 `_force_cancel` 直接确认取消（最终裁决）；
   若同一进程里确实有协程在跑，它会在下一个动作点发现自己失去写权而停止（协作式，不是强杀）。
 - **回排队与账本**：`REQUEUE` 现在落 `pending`；首次真实「执行中 → 排队中」的可重试生产者
-  仍是 #89 接上调度后的事（#88 的映射已就绪）。
+  仍要等调度循环（尚未立票）接上之后才有（#88 的映射已就绪）。
 - **旧行映射只做一次**：`0007` 只在升级时执行；如果存量库里有 `running` + 空租约的行，
   升级后立刻变成 `pending`，不会被启动回收误判成「重启中断」。
+
+### 9.10 范围、验收与复测（#89 管理端四个数字）
+
+**范围**：管理端统计里能看到**四个数字**——排队数、成功率、平均耗时、卡死数——用来提前发现
+「重试把任务打成失败」这类恶化。**不新建独立看板**（在既有 `DashboardView` 上加一块）；
+**不新增迁移**（纯查询与展示）。
+
+- **四个数字由后端一次查全**：`repositories/admin_repo.py::AdminStatsRepository.job_metrics()`
+  返回 frozen dataclass `JobMetrics`（不返回裸 dict），挂在既有 `GET /api/admin/stats` 上
+  （新增字段 `queue_count` / `success_rate` / `avg_duration_seconds` / `stuck_count` /
+  `stuck_threshold_minutes`）。前端只做格式换算。
+- **口径**（无时间窗：`queue_count` / `stuck_count` 是当前快照，
+  `success_rate` / `avg_duration_seconds` 是累计）：
+  - 排队数 = `count(status='pending')`，**含退避等待中（`next_run_at` 未到期）的行**；
+  - 成功率 = `succeeded / (succeeded + failed)`，**分母不含 `superseded` / `cancelled`**，
+    分母为 0 时 `null`（不是 0%）；
+  - 平均耗时 = 已收尾（成功 + 真失败）`avg(epoch(updated_at) - epoch(created_at))`；取消 / 被取代不进；
+  - 卡死数 = `stuck_condition` 的行数：`status='running'` 且（`lease_expire_at` 非空且早于现在
+    **或** `updated_at` 早于 `now - STUCK_MINUTES`）。「仍 running 但租约已过期」是 #83 恢复器
+    收口之前的真实窗口，必须计入；判据只有一处（`generation_job_repo.stuck_condition`），
+    `GET /api/admin/jobs?stuck=true` 与 `is_stuck` 列都用它，卡片数字与点进去的列表因此一致。
+- **管理端**：`DashboardView.vue` 加「四个数字」一块（各带一句口径说明；成功率旁写明
+  「排除被取代与已取消」；卡死数可点，落 `/jobs?stuck=1`）；`JobsView.vue` 加「卡死」标签
+  （`stuck=true` 服务端筛选）；`adminService.ts` 扩类型与 `stuck` 查询参数；耗时格式化抽到
+  `src/format.ts` 供概览与列表共用。
+
+**验收（逐条都有对应用例）**：
+
+1. 四个数字由数据库查询得出 —— `test_four_numbers_are_computed_by_the_server_from_the_database`、
+   `test_empty_platform_reports_null_rate_and_duration`；管理端 `dashboard.spec.ts`
+   「四个数字都在界面上…」。
+2. 成功率排除被取代与已取消 —— `test_success_rate_excludes_superseded_and_cancelled`、
+   `test_success_rate_is_null_when_only_cancelled_and_superseded`；界面口径文案
+   「排除被取代与已取消」。
+3. 卡死只由服务端判定 —— `test_stuck_count_includes_a_running_row_whose_lease_has_expired`
+   （租约过期窗口 + 卡片与列表同源）、`test_stuck_count_ignores_finished_rows_with_old_timestamps`；
+   管理端 `jobs.spec.ts`「从概览的卡死数点进来…」「切到卡死标签…」。
+4. 界面显示四个数字 —— `dashboard.spec.ts` 的四数字 / 成功率 `null` 显示「—」两条。
+5. 不新建独立看板 —— 未新增路由或视图，四数字落在既有 `DashboardView` 的一块里。
+
+**复测**（`ticket/89-metrics`，基于 `integration/spec-75` tip `be5be18`）：后端
+`uv run pytest -n auto`（单独跑、不与其它全量并发）**1483 passed / 0 skipped / 0 failed**
+（= 合并前基线 1474 + 本票 9 条）；管理端 `npm run test:unit -- --run` **125 passed / 13 文件**
+（基线 120 + 5 条）、`npm run build`（含 `type-check`）通过。**未执行**：push、合并与发布
+（由用户确认）。
+
+**给后续票的遗留**：
+
+- **调度循环**：原计划挂在 #89，但本票只做指标——「谁来领、多久扫一次」仍未立票；卡死数
+  正是用来观察那段没有调度时的积压。
+- **看板趋势图**：四数字只给当前 / 累计快照，没有逐日曲线；趋势仍靠既有「按日趋势」的
+  失败率 / 生成数 / Token 三条柱。
+- **成功率的敏感度**：累计口径在数据量大之后变化很慢；要看出「今天开始的恶化」得看按日
+  趋势，或以后给四个数字加时间窗（那会改接口参数，属于新票）。
