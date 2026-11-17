@@ -48,7 +48,13 @@ from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import conversation_service, document_service, job_claimer, job_state
+from backend.services import (
+    conversation_service,
+    document_service,
+    job_claimer,
+    job_recovery,
+    job_state,
+)
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import use_meter
 from backend.services.skill_registry import describe_kind
@@ -568,16 +574,20 @@ def list_jobs(
 
 
 def reap_orphans() -> None:
-    """启动时回收上次残留的 running 任务（进程重启后运行时已丢失）。
+    """启动回收：把上次进程留下的 `running` 行收成确定终态（票 #83）。
 
-    改道经状态机（#79）：终态写的规则只写一份，这里只是「维护面」那一次失败收尾。
+    收编进恢复器（#83）：这里不再是一次「维护面」的批量判死，而是
+    `job_recovery.recover_once(..., startup=True)` 的启动档——同一套判权（扫描时
+    读到的旧租约凭证 fencing）、同一套账本（每行一条，原因写明）、同一个状态机入口。
+    区别只在候选集：启动档不看到期时间、也不区分「有没有租约」，因为进程刚起来时
+    库里不可能有真正的执行者（单 worker 硬约束，`_RUNTIMES` 在进程内）。
+
+    启动档去向见 `job_recovery` 模块 docstring：有租约的行按**租约超时**判失败
+    （`LEASE_EXPIRED`），从没被领过的残留行按**服务重启中断**判失败
+    （`INTERNAL_ERROR` +「服务重启，任务已中断」）。不回排队：本票不引入调度循环
+    （#88），排队的行没人会来领，AC4「重启后不存在永远进行中」就当场红。
     """
-    job_state.transition(
-        job_state.JobEvent.FAIL,
-        job_state.maintenance_scope(),
-        error_code="INTERNAL_ERROR",
-        error_message="服务重启，任务已中断",
-    )
+    job_recovery.recover_once(startup=True)
 
 
 # ----------------------------------------------------------------------------

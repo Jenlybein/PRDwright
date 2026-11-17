@@ -237,7 +237,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 ### 9.2 本期不做
 
-七态与「取消中」（#84）、租约与周期恢复器（#82）、事件表与快照（#83）、部分完成落成新版本（#85）、排队 / 抢占 / 退避。前端不新增界面，只加冲突提示与失败不显示成功。
+#81 的「本期不做」：七态与「取消中」（#84）、租约与周期恢复器（#82 / #83）、事件表与快照（#86）、部分完成落成新版本（#85）、排队 / 抢占 / 退避（#88）。前端不新增界面，只加冲突提示与失败不显示成功。其中 #82 / #83 / #85 已在后续票落地（见 §9.3）。
 
 ### 9.3 票序与状态
 
@@ -248,7 +248,8 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 | **#81** | 原子收尾 + 统一版本锁 | `services/job_finalize.py` 单事务收尾；`services/document_store.py::write_document` 唯一写入入口 + `expected_version_no`；`repositories/document_repo.py::write_current_version` 条件写；`PUT .../documents/{kind}` 409 + `CONTENT_CHANGED`；就地动作的 `expected_version_no` 随任务单定格；前端冲突提示与「保存失败不显示成功」 | 本轮（`ticket/81-atomic-closeout`，基于 `cf25ec1`） |
 | **#82** | 抢占 + 租约 + 动作点续租 | `0003` 三列（`lease_owner` / `lease_token` / `lease_expire_at`）、`services/job_claimer.py` 抢占 / 续租、状态机 `CLAIM` 事件、收尾三条件回写 | 已合入（`d7b89bc`） |
 | **#85** | 部分完成落成新版本 | `0004` 两列（`document_versions.partial` / `generation_jobs.partial`）、失败收尾追加部分完成版本（审核两列留空、与任务标记同事务）、前端三处提示 | 本轮（`ticket/85-partial`，基于 `7b9c2ad`） |
-| #83 / #84 | 事件表与快照 / 七态与「取消中」 | 见 spec 第六~八节 | 待做 |
+| **#83** | 恢复器（过期租约收口） | `services/job_recovery.py`：`recover_once(limit)` 可直接调用（不起线程 / 定时器）；扫描时旧凭证 fencing（凭证 + 到期时间两列进 WHERE）；周期档按账本剩余次数回排队 / 判失败（`LEASE_EXPIRED`），启动档一律落终态；`reap_orphans` 收编为 `recover_once(startup=True)` | 本轮（`ticket/83-recovery`，基于 `7b9c2ad`） |
+| #84 / #86 / #88 | 七态与「取消中」 / 事件表与快照 / 失败退避 | 见 spec 第六~八节 | 待做 |
 
 ### 9.4 验收（#81）
 
@@ -284,3 +285,25 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 6. 用户取消也落部分完成版本 —— `test_user_cancel_also_lands_a_partial_version`；负例（没有内容 / 被取代 / 重审）各有断言。
 
 **复测**（`ticket/85-partial`，基于 `7b9c2ad`）：后端 `uv run pytest -n auto`（单独跑）**1401 passed / 0 skipped / 0 failed**（收集 1401）；`frontend npm run test:unit -- --run` **789 passed / 41 文件**；`npm run build`（含 `type-check`）通过。**未执行**：push、合并与发布（由用户确认）。
+
+### 9.7 范围、验收与复测（#83 恢复器）
+
+**范围**：过期租约的收口。执行者的进程没了之后，那一行不再永远停在「执行中」。
+
+- **入口**：`services/job_recovery.py::recover_once(limit) -> RecoveryReport` 是**可直接调用的单元**——不起线程、不起定时器、不 sleep（接入调度循环是 #88）。`scan` / `recover_one` 也在公开面：AC3 靠它们把「扫描之后、收口之前」的窗口固定在两步之间。
+- **判权**：扫描只挑候选，改不改得到由状态机的条件写回答；`WHERE` 里是**扫描时读到的旧凭证**（`lease_token` + `lease_expire_at` 两列一起）。凭证被换掉、或到期时间被续租推后都改到 0 行——跳过、不报错、不记账（丢弃日志与其它转换同一口径）。
+- **去向**：账本行数 = 已结束的执行次数（本票不加迁移，库里没有 `attempt_count` 列）；`attempts + 1 >= DEFAULT_MAX_ATTEMPTS` 判失败（`failed + LEASE_EXPIRED`），否则回排队（清租约、状态仍 `running`）。**启动档一律落终态**（有租约按 `LEASE_EXPIRED`、从没被领过按旧口径 `INTERNAL_ERROR` +「服务重启，任务已中断」）：那一刻没有执行者会来领，而本票还没有调度循环，回排队等于永远进行中。
+- **账本**：每次交接记一条超时账（`error_code=LEASE_EXPIRED`、摘要写明「执行者进程已消失、租约到期未续」），与状态更新同事务（#80 口径）；执行者不在场，用量与耗时记 0（那是未知，不是没花）。
+- **收编**：`reap_orphans` 改为 `recover_once(startup=True)`，候选集不看到期时间、也含「登记后没派发」的残留行；不再是一次性批量判死。
+- **前端零改动**：原因文案随 `error_message` 由 DB 快照展示；运行视图收到终态后回审阅页并说明「任务已中断」是 #84 的活。
+
+**验收（逐条都有对应用例，`backend/tests/test_job_recovery.py`）**：
+
+1. 杀掉执行中的进程后任务离开执行中 —— `test_a_dead_executors_job_leaves_executing_and_is_claimable_again`、`test_used_up_attempts_turn_the_job_failed_with_lease_expired`、`test_recovery_is_a_noop_when_nothing_has_expired`。
+2. 恢复时记一条超时账本、写明超时原因 —— `test_recovery_records_the_timeout_with_a_stable_reason`、`test_each_recovery_round_appends_exactly_one_ledger_row`。
+3. 凭证被换掉的行不被误改（改到 0 行即跳过、不报错） —— `test_a_replaced_token_is_skipped_instead_of_updated`（扫描之后另一执行者抢占换了 token）、`test_a_renewed_lease_is_not_stolen`（凭证不变、只把到期时间续到后面）。
+4. 重启后不存在「永远进行中」的任务 —— `test_startup_recovery_settles_every_job_that_was_executing`、`test_startup_recovery_reports_the_restart_for_a_row_never_claimed`。
+5. 恢复器自身守状态机规则 —— `test_recovery_does_not_touch_a_row_that_is_no_longer_running`、`test_a_row_cancelled_mid_window_is_not_overwritten`、`test_recovery_module_only_writes_state_through_the_state_machine`（AST：必须调 `transition`，不许调 `finish` / `fail` / 取消系列 / 旧的 `reap_running`）。
+
+**复测**（`ticket/83-recovery`，基于 `7b9c2ad`；已并入 `integration/spec-75` 的 #85 之后）：后端 `uv run pytest -n auto`（单独跑、不与其它全量并发）**1413 passed / 0 skipped / 0 failed**（收集 1413 = 合并前基线 1401 + 本票 12 条）。第一次全量有 1 条 DB 连接类假红（`test_second_login_revokes_the_first_session` 撞 psycopg `OperationalError`），单跑绿、第二次全量全绿，按「先单跑、再看错误类型、再重跑全量」的口径记为环境串扰，不记回归。**未执行**：push、合并与发布（由用户确认）。
+

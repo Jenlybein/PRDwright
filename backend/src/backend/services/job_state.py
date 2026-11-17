@@ -25,20 +25,33 @@
 
 ## 对外只有一个转换动作
 
-`transition(事件, 期望条件) -> TransitionResult`。事件是四种意图，期望条件由
-`JobScope` 给出（哪条任务 / 哪个方案 / 哪个 owner / 哪个产物 / 维护面）：
+`transition(事件, 期望条件) -> TransitionResult`。事件是几种意图，期望条件由
+`JobScope` 给出（哪条任务 / 哪个方案 / 哪个 owner / 哪个产物）：
 
 | 事件 | 期望条件 | 落库 | 内存 |
 |---|---|---|---|
 | `CLAIM` | 单条任务 | 抢占：写租约三列（谁领的 / 本轮凭证 / 到期时间） | 不结算（抢占时还没有运行时） |
 | `SUCCEED` | 单条任务 | `finish`（completed） | status=completed、清错误码 |
-| `FAIL` | 单条任务 / 维护面 | `fail`（failed + 错误码） | status=failed + 错误码 |
+| `FAIL` | 单条任务 | `fail`（failed + 错误码） | status=failed + 错误码 |
 | `CANCEL` | 单条 / 方案 / owner | `failed + CANCELLED` | 只置「取消意图」标志 |
 | `SUPERSEDE` | 同 owner+方案+产物 | `failed + SUPERSEDED` | 只置「被顶替意图」标志 |
+| `REQUEUE` | 单条任务 + 旧租约凭证 | 清租约三列（仍是 running） | 不结算（执行者在别的进程里，已不在场） |
+| `EXPIRE` | 单条任务 + 旧租约凭证 | `failed + LEASE_EXPIRED` + 清租约 | 同上 |
 
 四条终止路径全部改道经它：成功收尾与失败收尾在 `job_finalize._finalize`，
 取消在 `job_service_impl.cancel_job` / `delete_solution_and_cancel_jobs` /
 `cancel_for_user`，顶替在 `job_registration.register_in_transaction`。
+
+### 恢复器（#83）的两条转换
+
+`REQUEUE` / `EXPIRE` 是 #83 加的：执行者的进程没了、租约过期，由**恢复器**接手。
+它们与别的转换**不同的只有期望条件**——带的不是「我要写什么」，而是**扫描时读到的
+旧租约凭证**（`LeaseFence`：凭证 + 到期时间）。仓储据此做条件更新：凭证被换掉、
+或到期时间被续租推后，都一行改不到（与 #82 的写权判据同一条规则）。改到 0 行就是
+「这一行已经不是我看到的那一份死租约了」，跳过、不报错、不记账（丢弃日志同其它转换）。
+
+一条过期租约的去向（回排队 / 判失败）由恢复器按账本决定；状态机只负责「这条转换
+能不能成立」，它从不替调用方挑去向，也不碰调度（怎么扫、扫多久是 `job_recovery` 的事）。
 
 ### 取消、顶替只置「意图」，不置终态
 
@@ -57,7 +70,8 @@
 
 ## 执行账本（#80）：跟着收尾一起记一行
 
-每次**执行有结论**（成功 / 失败 / 取消 / 启动回收判死）都在 `job_attempts` 记一行：
+每次**执行有结论**（成功 / 失败 / 取消 / 租约过期被恢复器接手 / 启动回收判死）都在
+`job_attempts` 记一行：
 第几次、成还是败、为什么（错误分类 + 脱敏摘要）、花了多少、跑了多久。写入点在
 `transition` 里、与状态更新**同一个事务**——账本不是另一份独立的写，而是这次转换的
 一部分。三条口径：
@@ -66,6 +80,8 @@
 |---|---|---|
 | `SUCCEED` | 记（`completed`） | 执行有结论 |
 | `FAIL` | 记（`failed` / `cancelled`） | 执行有结论（含上游报错、预算超顶、回收判死） |
+| `REQUEUE` | 记（`failed` + `LEASE_EXPIRED`） | 这一轮超时没跑成也是结论；不记的话「为什么重试」在账本里是空白 |
+| `EXPIRE` | 记（`failed` + `LEASE_EXPIRED`） | 同上，且是最后一次 |
 | `CANCEL` | **不记** | 它只是「请求停止」：行先落 `failed + CANCELLED` 让人马上看见，真正的结论由被请求的那条协程收尾时给出——那一刻才记（`FAIL` 分支）。不这么分就会出现「按停止记一笔、收尾再记一笔」，一次执行两行账 |
 | `SUPERSEDE` | **不记** | 被取代**不是执行结论**（票面明确）：它是「同一份文档有更晚的任务接手」，`SUPERSEDED` 留在任务行上供排查。若在这里记账，账本会把一次正常让位记成一次失败 |
 
@@ -106,21 +122,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 取消 / 被顶替的 `error_code` 取值：**不是** `ErrorCode` 成员（它们不是错误，
-# 只是「没跑成」的两种正常原因），由本模块统一给出，仓储与收尾都不再各写一份字面量。
+# 取消 / 被顶替 / 租约过期的 `error_code` 取值：**不是** `ErrorCode` 成员（它们不是
+# 错误，只是「没跑成」的几种正常原因），由本模块统一给出，仓储与收尾都不再各写一份
+# 字面量。`LEASE_EXPIRED` 是恢复器（#83）给「执行者的进程没了、租约到期」的稳定标识符
+# ——前端按 `error_code` 分支展示终态文案，换一个字符串就等于换一处契约。
 CODE_CANCELLED = "CANCELLED"
 CODE_SUPERSEDED = "SUPERSEDED"
+CODE_LEASE_EXPIRED = "LEASE_EXPIRED"
 # 「不是红色错误」的两个中止码：订阅侧据此决定补不补 `error` 事件。
 ABORT_CODES = frozenset({CODE_CANCELLED, CODE_SUPERSEDED})
 
 
 class JobEvent(StrEnum):
-    """转换意图（三态下只有这五个出口）。
+    """转换意图（三态下只有这几个出口）。
 
-    `CLAIM` 是 #82 加的：**抢占**是「排队中 → 执行中」的转换，和四个终止事件一样经
+    `CLAIM` 是 #82 加的：**抢占**是「排队中 → 执行中」的转换，和终止事件一样经
     `transition` 走，不另写一套改状态的路径。三态里「排队中」与「执行中」共用
     `status='running'`，区别只在**有没有有效租约**——所以这条事件改的是租约三列，
     不是 status（七态是 #84 的事）。
+
+    `REQUEUE` / `EXPIRE` 是 #83 加的：**恢复器**接手一条过期租约的两种去向。
+    前者把租约交还队列（状态不变，下一次抢占会重新写凭证），后者判失败。两者都必须
+    带扫描时读到的旧凭证（`LeaseFence`）——恢复器的判权与 #82 的写权是同一条规则。
     """
 
     CLAIM = "claim"
@@ -128,6 +151,8 @@ class JobEvent(StrEnum):
     FAIL = "fail"
     CANCEL = "cancel"
     SUPERSEDE = "supersede"
+    REQUEUE = "requeue"
+    EXPIRE = "expire"
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,13 +171,34 @@ class LeaseGrant:
 
 
 @dataclass(frozen=True, slots=True)
+class LeaseFence:
+    """恢复器（#83）扫描时读到的**旧租约凭证**：本轮凭证 + 到期时间。
+
+    两列一起进条件写，回答的是「这一行还是不是我扫描时看到的那一份死租约」：
+    - 凭证被换掉（别人已经接手）→ 条件不成立；
+    - 到期时间被推后（执行者其实还在跑，刚续了租）→ 条件同样不成立。
+
+    为什么不是只比凭证：续租不改凭证（`job_claimer.renew` 保持 token），只比凭证的
+    话恢复器会把一条刚续过租、正在正常跑的任务抢回队列。到期时间同样是「这一轮」
+    的身份。
+    """
+
+    token: str
+    expire_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class JobScope:
     """转换的**期望条件**：作用对象 + 前置状态（三态下前置恒为 `running`）。
 
     由下面的具名构造器生成，不直接拼字段：拼错一个字段就是「改到了别人的任务」。
-    `solution_filter` 单独一位，因为「按方案过滤」与「方案为空」是两件事：
-    `solution_id=None` 是**合法的过滤值**（快捷入口逃生口那些没有方案的任务），
-    不能拿 `None` 当「不过滤」用。
+    批次维度用四个互斥的开关表达：`job_id`（单条）、`solution_filter`（按方案）、
+    `owner_wide`（按 owner）、`kind`（同产物）。`solution_filter` 单独一位，因为
+    「按方案过滤」与「方案为空」是两件事：`solution_id=None` 是**合法的过滤值**
+    （快捷入口逃生口那些没有方案的任务），不能拿 `None` 当「不过滤」用。
+
+    「启动回收」不再是一档作用域（#83）：它改成逐条按租约收口（见 `job_recovery`），
+    所以「没有 owner 的批量维护面」这个逃生口随旧实现一起删掉了。
     """
 
     owner_id: int
@@ -161,11 +207,10 @@ class JobScope:
     solution_filter: bool = False
     kind: str | None = None
     owner_wide: bool = False
-    maintenance: bool = False
 
 
 def job_scope(owner_id: int, job_id: int) -> JobScope:
-    """单条任务（成功收尾 / 失败收尾 / 用户按停止）。"""
+    """单条任务（成功收尾 / 失败收尾 / 用户按停止 / 恢复器接手）。"""
     return JobScope(owner_id=owner_id, job_id=job_id)
 
 
@@ -184,11 +229,6 @@ def supersede_scope(owner_id: int, solution_id: int | None, kind: str) -> JobSco
     return JobScope(
         owner_id=owner_id, solution_id=solution_id, solution_filter=True, kind=kind
     )
-
-
-def maintenance_scope() -> JobScope:
-    """维护面：启动回收残留的 running（无归属过滤，唯一没有 owner 的用户面外动作）。"""
-    return JobScope(owner_id=0, maintenance=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,8 +278,8 @@ class TransitionResult:
 
 
 def _expected_status(event: JobEvent) -> str:
-    """事件成功后任务应处于的状态（三态只有两个终态；抢占之后仍是 `running`）。"""
-    if event is JobEvent.CLAIM:
+    """事件成功后任务应处于的状态（三态只有两个终态；抢占与回排队之后仍是 `running`）。"""
+    if event is JobEvent.CLAIM or event is JobEvent.REQUEUE:
         return STATUS_RUNNING
     return STATUS_COMPLETED if event is JobEvent.SUCCEED else STATUS_FAILED
 
@@ -253,12 +293,9 @@ def _validate(
     scope: JobScope,
     payload: FinishPayload | None,
     lease_grant: LeaseGrant | None = None,
+    lease_fence: LeaseFence | None = None,
 ) -> None:
     """校验「事件 + 期望条件」的组合是否合法（拼错是程序错误，直接抛）。"""
-    if scope.maintenance:
-        if event is not JobEvent.FAIL:
-            raise ValueError("维护面只允许「失败收尾」：启动回收把残留 running 判死")
-        return
     if event is JobEvent.CLAIM:
         # 抢占只针对**一条**具体任务：批量抢占没有意义（每个执行者只该拿走它要跑的那一条）。
         if not _scope_has_job(scope) or lease_grant is None:
@@ -276,24 +313,29 @@ def _validate(
     elif event is JobEvent.SUPERSEDE:
         if scope.kind is None:
             raise ValueError("顶替的期望条件必须带产物类型")
+    elif event is JobEvent.REQUEUE or event is JobEvent.EXPIRE:
+        # 恢复器只接一条过期租约：没有「批量接手」这回事，且**必须**带旧凭证——
+        # 不带凭证的恢复等于按 id 盲写，那正是 #82 挡掉的那条路径。
+        if not _scope_has_job(scope) or lease_fence is None or not lease_fence.token:
+            raise ValueError(
+                "恢复事件必须给单条任务与扫描时读到的旧租约凭证（凭证 / 到期时间）"
+            )
     else:  # pragma: no cover - StrEnum 已穷尽
         raise ValueError(f"未知的转换事件：{event}")
 
 
 @dataclass(frozen=True, slots=True)
 class _WriteResult:
-    """一次条件写的**原始结果**：行数 + 读回的事实 + 回收判死涉及的 id。
+    """一次条件写的**原始结果**：行数 + 读回的事实。
 
-    `reaped_job_ids` 只在「启动回收」那条转换里非空：`reap_running` 只回一个条数，
-    而账本要**逐任务一行**，所以回收前先取一份清单（同一个事务，见
-    `GenerationJobRepository.running_ids`）。
+    0 行时在**同一事务**里回读那一行（单条任务），调用方据此知道「别人已经把这一行
+    收成了什么」，而不是猜。
     """
 
     rows: int
     observed_status: str = ""
     observed_code: str = ""
     observed_message: str = ""
-    reaped_job_ids: tuple[int, ...] = ()
 
 
 def _write(
@@ -306,16 +348,12 @@ def _write(
     session: Session,
     lease_grant: LeaseGrant | None = None,
     lease_token: str = "",
+    lease_fence: LeaseFence | None = None,
     now_text: str = "",
 ) -> _WriteResult:
-    """执行条件写，返回行数与观察到的状态（0 行时在**同一事务**里读回那一行）。
-
-    0 行时（单条任务）读回那一行：调用方据此知道「别人已经把这一行收成了什么」，
-    而不是猜。
-    """
+    """执行条件写，返回行数与观察到的状态（0 行时在**同一事务**里读回那一行）。"""
     repo = GenerationJobRepository(session)
     owner_id = scope.owner_id
-    reaped: tuple[int, ...] = ()
     if event is JobEvent.CLAIM:
         grant = lease_grant or LeaseGrant(owner="", token="", expire_at="", now_text="")
         rows = repo.claim(
@@ -341,33 +379,24 @@ def _write(
             now_text=now_text,
         )
     elif event is JobEvent.FAIL:
-        if scope.maintenance:
-            # 先取清单再改：回收之后库里就没有 running 了，账本却要逐任务记一行。
-            # 两句话在同一个事务里，中间没有别的写者能插进来（单 worker 硬约束）。
-            reaped = tuple(repo.running_ids())
-            rows = repo.reap_running(
-                error_code=error_code or "INTERNAL_ERROR",
-                error_message=error_message or "服务重启，任务已中断",
-            )
-        else:
-            rows = repo.fail(
-                owner_id,
-                int(scope.job_id or 0),
-                error_code=error_code or "INTERNAL_ERROR",
-                error_message=error_message or "生成失败",
-                draft_content=payload.draft_content if payload else "",
-                completed_sections=list(payload.completed_sections or []) if payload else [],
-                usage=payload.usage if payload else None,
-                pending_items=payload.pending_items if payload else None,
-                prompt_tokens=payload.prompt_tokens if payload else 0,
-                completion_tokens=payload.completion_tokens if payload else 0,
-                partial=bool(payload.partial) if payload else False,
-                # 中止类失败允许「补一次载荷」：状态早已被取消/顶替路径落成终态，
-                # 但用量与半截正文还没记下来。条件在仓储里写死（见 `fail` 的注释）。
-                abort_code=error_code if error_code in ABORT_CODES else "",
-                lease_token=lease_token,
-                now_text=now_text,
-            )
+        rows = repo.fail(
+            owner_id,
+            int(scope.job_id or 0),
+            error_code=error_code or "INTERNAL_ERROR",
+            error_message=error_message or "生成失败",
+            draft_content=payload.draft_content if payload else "",
+            completed_sections=list(payload.completed_sections or []) if payload else [],
+            usage=payload.usage if payload else None,
+            pending_items=payload.pending_items if payload else None,
+            prompt_tokens=payload.prompt_tokens if payload else 0,
+            completion_tokens=payload.completion_tokens if payload else 0,
+            partial=bool(payload.partial) if payload else False,
+            # 中止类失败允许「补一次载荷」：状态早已被取消/顶替路径落成终态，
+            # 但用量与半截正文还没记下来。条件在仓储里写死（见 `fail` 的注释）。
+            abort_code=error_code if error_code in ABORT_CODES else "",
+            lease_token=lease_token,
+            now_text=now_text,
+        )
     elif event is JobEvent.CANCEL:
         code = error_code or CODE_CANCELLED
         if _scope_has_job(scope):
@@ -388,6 +417,26 @@ def _write(
             rows = repo.cancel_running_for_owner(
                 owner_id, error_code=code, error_message=error_message
             )
+    elif event is JobEvent.REQUEUE:
+        fence = lease_fence or LeaseFence(token="", expire_at="")
+        rows = repo.requeue_lease(
+            owner_id,
+            int(scope.job_id or 0),
+            lease_token=fence.token,
+            lease_expire_at=fence.expire_at,
+            now_text=now_text,
+        )
+    elif event is JobEvent.EXPIRE:
+        fence = lease_fence or LeaseFence(token="", expire_at="")
+        rows = repo.fail_expired(
+            owner_id,
+            int(scope.job_id or 0),
+            lease_token=fence.token,
+            lease_expire_at=fence.expire_at,
+            error_code=error_code or CODE_LEASE_EXPIRED,
+            error_message=error_message or "执行者进程已消失，租约已过期",
+            now_text=now_text,
+        )
     else:
         rows = repo.supersede_active(
             owner_id,
@@ -398,16 +447,15 @@ def _write(
         )
 
     if rows or not _scope_has_job(scope):
-        return _WriteResult(rows=rows, reaped_job_ids=reaped)
+        return _WriteResult(rows=rows)
     job = repo.get(owner_id, int(scope.job_id or 0))
     if job is None:
-        return _WriteResult(rows=rows, reaped_job_ids=reaped)
+        return _WriteResult(rows=rows)
     return _WriteResult(
         rows=rows,
         observed_status=job.status,
         observed_code=job.error_code or "",
         observed_message=job.error_message or "",
-        reaped_job_ids=reaped,
     )
 
 
@@ -451,12 +499,15 @@ def _sanitize_summary(message: str) -> str:
 def _attempt_outcome(event: JobEvent, error_code: str) -> str | None:
     """这次转换该记成哪种结论；`None` = **不是执行结论，不记账本**。
 
-    只有成功收尾与失败收尾是结论。取消 / 顶替两条事件都只是「请求停止」：前者由被
-    请求的那条协程收尾时经 `FAIL` 记成 `cancelled`（一次执行只留一行），后者按票面
-    口径**根本不记账**（被取代不是这次执行的结局）。
+    只有成功收尾、失败收尾、以及恢复器接手的两种超时去向是结论（超时是「这一轮没
+    跑成」的结论，码是 `LEASE_EXPIRED`，见 #83）。取消 / 顶替两条事件都只是「请求
+    停止」：前者由被请求的那条协程收尾时经 `FAIL` 记成 `cancelled`（一次执行只留
+    一行），后者按票面口径**根本不记账**（被取代不是这次执行的结局）。
     """
     if event is JobEvent.SUCCEED:
         return OUTCOME_COMPLETED
+    if event is JobEvent.REQUEUE or event is JobEvent.EXPIRE:
+        return OUTCOME_FAILED
     if event is JobEvent.FAIL:
         if error_code == CODE_SUPERSEDED:
             return None
@@ -467,10 +518,8 @@ def _attempt_outcome(event: JobEvent, error_code: str) -> str | None:
 
 
 def _attempt_targets(scope: JobScope, write: _WriteResult) -> tuple[int, ...]:
-    """这次转换要给哪几条任务记账（回收判死是批量，其余是单条）。"""
-    if scope.maintenance:
-        return write.reaped_job_ids
-    if scope.job_id is None:
+    """这次转换要给哪几条任务记账（只有单条任务的转换记账）。"""
+    if write.rows <= 0 or scope.job_id is None:
         return ()
     return (int(scope.job_id),)
 
@@ -512,8 +561,9 @@ def _record_attempt(
         ledger_code = ""
         summary = ""
     else:
-        # 与 `_write` 的兜底口径一致：没有明确原因时记成内部错误，而不是留空。
-        ledger_code = error_code or "INTERNAL_ERROR"
+        # 与 `_write` 的兜底口径一致：恢复类的两种事件没有明确原因时记成
+        # `LEASE_EXPIRED`（它们的语义就是这个），其余仍兜底成内部错误。
+        ledger_code = error_code or _default_code(event) or "INTERNAL_ERROR"
         summary = _sanitize_summary(error_message)
     prompt_tokens = payload.prompt_tokens if payload else 0
     completion_tokens = payload.completion_tokens if payload else 0
@@ -589,10 +639,16 @@ def _settle(
     只写该写的：收尾写 `status` / 错误码；取消与顶替只置意图标志（终态由被请求的
     那条协程自己收尾时结算）。容器是本模块的 `_RUNTIMES`，调用方不必伸手。
 
-    **抢占不结算内存**：领到执行权的那一刻还没有运行时（派发才建运行时），
-    这一轮的凭证由调用方（`job_claimer`）直接递给派发侧，不在这里中转一份。
+    **抢占 / 回排队 / 判超时不结算内存**：前两者改的是租约（抢占时还没有运行时），
+    第三种面对的是**别的进程**（或者已经消失）里的执行者——本进程的 `_RUNTIMES`
+    里不该为它留一份状态，更不该顺手把某个运行时的 `status` 改掉（那会掩盖它其实
+    还没停的事实；它能不能写结果由 `lease_token` 判，不由内存状态判）。
     """
-    if result.event is JobEvent.CLAIM:
+    if (
+        result.event is JobEvent.CLAIM
+        or result.event is JobEvent.REQUEUE
+        or result.event is JobEvent.EXPIRE
+    ):
         return
     targets = [runtime] if runtime is not None else _match_runtimes(scope)
     for target in targets:
@@ -646,30 +702,35 @@ def transition(
     session: Session | None = None,
     lease_grant: LeaseGrant | None = None,
     lease_token: str = "",
+    lease_fence: LeaseFence | None = None,
     now_text: str = "",
 ) -> TransitionResult:
     """**唯一的状态转换动作**：事件 + 期望条件 → 结果（以影响行数为唯一判据）。
 
     Args:
-        event: 想做什么（抢占 / 成功收尾 / 失败收尾 / 取消 / 顶替）。
+        event: 想做什么（抢占 / 成功收尾 / 失败收尾 / 取消 / 顶替 / 回排队 / 判超时）。
         scope: 期望条件（哪一条 / 哪一批，前置状态恒为 `running`）。
         runtime: 单条任务的内存运行时。给了它，成功时同步结算 `status` / 错误码。
         payload: 收尾载荷（`SUCCEED` / `FAIL` 必填）。
-        error_code: `FAIL` / `CANCEL` / `SUPERSEDE` 的错误码（后两者留空时取默认值）。
-        error_message: 落进 `error_message` 的文案。
+        error_code: `FAIL` / `CANCEL` / `SUPERSEDE` / `REQUEUE` / `EXPIRE` 的错误码
+            （后三者留空时取默认值）。
+        error_message: 落进 `error_message`（以及账本摘要）的文案。
         session: 调用方自己持有事务时传入（删方案 / 删账号 / 登记顶替要和别的写同生共死）。
             **传入时本函数不结算内存**：调用方必须在事务提交之后调
             `settle_after_commit(result, scope)`，否则会留下「协程停了、库里还在跑」的错位。
         lease_grant: `CLAIM` 必填：这一轮的执行权（谁领的 / 凭证 / 到期时间 / 判据时刻）。
         lease_token: 收尾（`SUCCEED` / `FAIL`）时带上**本轮凭证**：仓储据此叠「凭证仍是
             本轮 + 没到期」两条判据，改到 0 行就是「我已经没资格写了」。
+        lease_fence: `REQUEUE` / `EXPIRE` 必填：**恢复器扫描时读到的旧租约凭证**
+            （凭证 + 到期时间）。两列一起进 WHERE：凭证被换掉、或到期时间被续租推后，
+            都改到 0 行（#82 判权规则，不由本模块另立一套）。
         now_text: 判据用的「现在」（留空取 `utc_now_text()`）。注入它是为了让用例能在
             毫秒内演示「租约 120 秒、任务跑十几分钟」这类时间跨度；生产不传。
 
     Returns:
         `TransitionResult`：`rows == 0` 表示本次结果被丢弃（已留丢弃日志）。
     """
-    _validate(event, scope, payload, lease_grant)
+    _validate(event, scope, payload, lease_grant, lease_fence)
 
     if session is not None:
         write = _write(
@@ -681,6 +742,7 @@ def transition(
             session=session,
             lease_grant=lease_grant,
             lease_token=lease_token,
+            lease_fence=lease_fence,
             now_text=now_text,
         )
         # 账本与状态更新同事务：调用方持事务时账本也留在它的事务里，要么一起成、
@@ -717,6 +779,7 @@ def transition(
             session=own_session,
             lease_grant=lease_grant,
             lease_token=lease_token,
+            lease_fence=lease_fence,
             now_text=now_text,
         )
         _record_attempt(
@@ -755,8 +818,9 @@ def _result(
 ) -> TransitionResult:
     """把写入结果折成 `TransitionResult`（改到了取事件的目标值，没改到取观察到的事实）。"""
     if rows:
-        if event is JobEvent.CLAIM:
-            # 抢占成功之后任务仍在执行中：这条事件改的是租约三列，不是 status。
+        if event is JobEvent.CLAIM or event is JobEvent.REQUEUE:
+            # 抢占与回排队之后任务仍在执行中（三态下「排队中」也读作 running）：
+            # 这两条事件改的是租约三列，不是 status。
             return TransitionResult(event=event, rows=rows, status=STATUS_RUNNING)
         if event is JobEvent.SUCCEED:
             return TransitionResult(event=event, rows=rows, status=STATUS_COMPLETED)
@@ -781,6 +845,8 @@ def _default_code(event: JobEvent) -> str:
         return CODE_CANCELLED
     if event is JobEvent.SUPERSEDE:
         return CODE_SUPERSEDED
+    if event is JobEvent.REQUEUE or event is JobEvent.EXPIRE:
+        return CODE_LEASE_EXPIRED
     return ""
 
 
