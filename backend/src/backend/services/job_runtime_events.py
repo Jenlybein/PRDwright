@@ -134,7 +134,7 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
             slot.section_id = section_id
             slot.text = ""
             slot.phase = stage
-        if stage in ("writing", "reviewing", "rewriting", "done"):
+        if stage in ("outlining", "writing", "reviewing", "rewriting", "done"):
             logger.info(
                 "生成阶段推进：%s",
                 stage,

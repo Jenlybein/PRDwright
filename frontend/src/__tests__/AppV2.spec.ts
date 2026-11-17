@@ -4457,3 +4457,172 @@ describe('AppV2 刷新后的审核失败', () => {
   })
 })
 
+
+/**
+ * 大纲阶段（票 #91）：三份产物都先「大纲」，再接正文撰写。
+ *
+ * 用「手动放行」的接口文档流，才观察得到中间态：大纲进了阶段条与阶段输出面板、
+ * 撰写换了阶段之后大纲**还在**（用户能回看「先定了哪些结构」），而抽不出大纲时
+ * 阶段条只是继续往前走到「生成」，绝不显示成错误。
+ */
+describe('AppV2 大纲阶段（三份产物共用）', () => {
+  interface ControlledDocStream {
+    handlers: api.StreamHandlers | undefined
+    finish: (reply: string) => Promise<void>
+  }
+
+  /** 把接口文档生成换成可手动推进的流，并停在「生成中」 */
+  async function startControlledApiDocsGeneration(
+    wrapper: VueWrapper,
+  ): Promise<ControlledDocStream> {
+    const state: ControlledDocStream = { handlers: undefined, finish: async () => {} }
+    mockJobStream({
+      'api-docs': (handlers) => {
+        state.handlers = handlers
+        return new Promise<api.StreamResult>((resolve) => {
+          state.finish = async (reply: string) => {
+            resolve({ conversationId: '', reply, asks: [] })
+            await flushPromises()
+          }
+        })
+      },
+    })
+
+    await reachPrdReview(wrapper)
+    await clickButton(wrapper, '生成接口文档')
+    await flushPromises()
+    return state
+  }
+
+  /** 推送一条阶段事件（接口文档不带章节归属） */
+  async function pushDocStage(stream: ControlledDocStream, stage: string): Promise<void> {
+    stream.handlers?.onStage?.({
+      stage,
+      sectionId: '',
+      sectionTitle: '',
+      sectionHeading: '',
+      index: 0,
+      total: 0,
+      note: '',
+      issues: [],
+    })
+    await nextTick()
+  }
+
+  /** 推送一片阶段输出增量 */
+  async function pushStageChunk(
+    stream: ControlledDocStream,
+    stage: string,
+    text: string,
+  ): Promise<void> {
+    stream.handlers?.onStageChunk?.({ stage, text })
+    await nextTick()
+  }
+
+  /** 当前处于生成中的阶段条上的胶囊文字 */
+  function stageChips(wrapper: VueWrapper): string[] {
+    const bar = wrapper.find('ol[aria-label="文档生成阶段"]')
+    if (!bar.exists()) return []
+    return bar.findAll('li').map((li) => li.find('span').text().trim())
+  }
+
+  it('大纲出现在阶段条上，内容进阶段输出面板', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledApiDocsGeneration(wrapper)
+
+    await pushDocStage(stream, 'outlining')
+    await pushStageChunk(
+      stream,
+      'outlining',
+      '# 接口文档大纲\n- 接口列表\n    · - F-01 用户登录：支持邮箱密码登录',
+    )
+
+    // ① 阶段条上有一格「大纲」，且当前点亮的就是它
+    expect(stageChips(wrapper)).toEqual(['大纲', '生成', '审核', '改写', '完成'])
+    const outliningChip = wrapper
+      .find('ol[aria-label="文档生成阶段"]')
+      .findAll('li')[0]
+      ?.find('span')
+    expect(outliningChip?.classes()).toContain('ring-primary-100')
+
+    // ② 阶段输出面板里真的看得到大纲内容
+    expect(wrapper.find('[aria-label="大纲输出"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('F-01 用户登录')
+  })
+
+  it('大纲不卡链路：进撰写后大纲仍可回看，且没有错误提示', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledApiDocsGeneration(wrapper)
+
+    await pushDocStage(stream, 'outlining')
+    await pushStageChunk(stream, 'outlining', '- 接口列表\n    · F-01 用户登录')
+    await pushDocStage(stream, 'writing')
+    await nextTick()
+
+    expect(wrapper.text()).toContain('F-01 用户登录')
+    expect(wrapper.find('[aria-label="大纲输出"]').exists()).toBe(true)
+    // 撰写阶段不再显示审核块（那是另一格，换阶段就该清）
+    expect(wrapper.find('[aria-label="阶段输出"]').exists()).toBe(false)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  })
+
+  it('大纲降级：直接进入撰写，阶段条不报错', async () => {
+    const wrapper = await mountApp()
+    const stream = await startControlledApiDocsGeneration(wrapper)
+
+    // 后端抽不出大纲时只发一条说明性的 stage(outlining)，随后就是 writing
+    await pushDocStage(stream, 'outlining')
+    await pushDocStage(stream, 'writing')
+    await nextTick()
+
+    expect(stageChips(wrapper)).toEqual(['大纲', '生成', '审核', '改写', '完成'])
+    // 没有大纲内容：面板不出现空的大纲块
+    expect(wrapper.find('[aria-label="大纲输出"]').exists()).toBe(false)
+    // 阶段条不报错、也没有任何错误横幅
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    // 正文照常流：预览区仍在生成中
+    expect(wrapper.text()).toContain('生成中')
+  })
+
+  it('PRD 也先出大纲：章节卡片出现之前显示的是共用阶段条', async () => {
+    const wrapper = await mountApp()
+    const state: ControlledDocStream = { handlers: undefined, finish: async () => {} }
+    mockJobStream({
+      prd: (handlers) => {
+        state.handlers = handlers
+        return new Promise<api.StreamResult>((resolve) => {
+          state.finish = async (reply: string) => {
+            resolve({ conversationId: '', reply, asks: [] })
+            await flushPromises()
+          }
+        })
+      },
+    })
+    await submitSampleForm(wrapper)
+    await clickButton(wrapper, '生成 PRD', true)
+    await flushPromises()
+    await confirmSummaryPanel(wrapper)
+    await nextTick()
+
+    // 大纲阶段（不带章节归属）：看板还空着，显示共用阶段条
+    state.handlers?.onStage?.({
+      stage: 'outlining',
+      sectionId: '',
+      sectionTitle: '',
+      sectionHeading: '',
+      index: 0,
+      total: 0,
+      note: '',
+      issues: [],
+    })
+    await nextTick()
+    state.handlers?.onStageChunk?.({
+      stage: 'outlining',
+      text: '- 1. 产品概述\n    · "product_name": "演示产品",',
+    })
+    await nextTick()
+
+    expect(stageChips(wrapper)).toEqual(['大纲', '生成', '审核', '改写', '完成'])
+    expect(wrapper.text()).toContain('演示产品')
+  })
+})

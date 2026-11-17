@@ -723,8 +723,15 @@ export interface ReviewConclusion {
   reviewedAt: string
 }
 
-/** 下游文档（接口文档 / 提示词）生成中的阶段 */
-export type DocPhase = 'idle' | 'writing' | 'reviewing' | 'rewriting' | 'done'
+/**
+ * 文档生成中的阶段（三份产物共用：阶段顺序一致）。
+ *
+ * 票 #91 起三份产物都先出大纲：`outlining → writing → reviewing → rewriting → done`。
+ * `outlining` 是**纯抽取**的一步（从上游材料里摘结构，不调模型、不发明），因此它很快；
+ * 抽不出结构时后端直接降级进入 `writing`，不发 `error`——阶段条只是没看到大纲内容，
+ * 不该显示成出错。
+ */
+export type DocPhase = 'idle' | 'outlining' | 'writing' | 'reviewing' | 'rewriting' | 'done'
 
 /**
  * 一段**已定稿正文**，由 `part` 事件下发。
@@ -783,7 +790,7 @@ export interface StreamStageEvent {
  * 前端只在阶段条下方的一个附属面板里滚动展示，让「正在审核」有可感知的进展。
  */
 export interface StreamStageChunk {
-  /** 属于哪个阶段：`reviewing` / `rewriting` */
+  /** 属于哪个阶段：`outlining`（大纲）/ `reviewing`（审核意见）/ `rewriting`（改写稿） */
   stage: string
   /** 本次增量文本 */
   text: string

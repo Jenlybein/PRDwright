@@ -55,6 +55,14 @@ export interface RunPreview {
   docPhase: DocPhase
   /** 当前阶段模型的原始输出（审核意见 / 改写稿），只给阶段面板看 */
   stageText: string
+  /**
+   * 大纲文本（`stage_chunk(outlining)` 的累计，票 #91）。
+   *
+   * 与 `stageText` 分开：那个「换阶段即清空」，而大纲是「这份产物定了哪些结构」，
+   * 正文写到一半时用户还要能回头看——它只在开新任务时清。
+   * 不落库：进程信息，刷新后由快照的 `stageText` 补（看不到就看不到，不影响产物）。
+   */
+  outlineText: string
   /** 审核结论；不持久化，刷新即失 */
   review: ReviewConclusion | null
   /** 生成失败原因（成功时为空串） */
@@ -97,7 +105,15 @@ export interface ActiveRun extends RunPointer {
 }
 
 function emptyPreview(): RunPreview {
-  return { content: '', prdBoard: null, docPhase: 'idle', stageText: '', review: null, error: '' }
+  return {
+    content: '',
+    prdBoard: null,
+    docPhase: 'idle',
+    stageText: '',
+    outlineText: '',
+    review: null,
+    error: '',
+  }
 }
 
 export const useRunsStore = defineStore('runs', () => {

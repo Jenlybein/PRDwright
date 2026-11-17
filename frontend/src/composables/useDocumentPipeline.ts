@@ -218,6 +218,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   const docStageText = previewField('stageText')
 
   /**
+   * 大纲文本（票 #91）：`stage_chunk(outlining)` 的累计，只用于阶段条下方的大纲块。
+   *
+   * 与 `stageText` 分开存：后者「换阶段即清空」，而大纲是「这份产物定了哪些结构」，
+   * 正文写到一半时用户还要能回头看一眼。开新任务（`resetPreview`）时才清。
+   */
+  const docOutlineText = previewField('outlineText')
+
+  /**
    * 当前审阅阶段那份文档的**审核结论**（当前版本那一条）。
    *
    * 来源是**文档记录**（`documents.review`），不是某一次订阅：刷新、换设备、重连之后
@@ -397,6 +405,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 后者是初稿换改写稿，不清就会两轮的字叠着长。`reviewing` 不清——正文已经写完了。
    */
   function handlePrdStage(event: StreamStageEvent): void {
+    // 大纲阶段先说一句：它发生在章节卡片出现之前，此刻看板还是空的，
+    // 生成页显示的是共用阶段条（`DocPhaseProgress`）——把它点亮，别让用户在这个
+    // 「已经定完结构」的时刻看到一片空白。
+    if (event.stage === 'outlining') {
+      docPhase.value = 'outlining'
+      return
+    }
     const board = prdBoard.value
     if (!board) return
     if (event.total) board.total = event.total
@@ -547,7 +562,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 猜错了会让进度条停在某个看起来合理、其实没发生的阶段上。
    */
   function normalizeDocPhase(raw: string): DocPhase | null {
-    if (raw === 'writing' || raw === 'reviewing' || raw === 'rewriting' || raw === 'done') {
+    if (
+      raw === 'outlining' ||
+      raw === 'writing' ||
+      raw === 'reviewing' ||
+      raw === 'rewriting' ||
+      raw === 'done'
+    ) {
       return raw
     }
     return null
@@ -569,8 +590,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 增量可能来自审核也可能来自改写，归属以事件自带的 `stage` 为准；万一它跳过了
    * 对应的 `stage` 事件（订阅晚了一步），这里顺手把阶段纠正过来，避免面板标题与
    * 内容对不上。
+   *
+   * 大纲（`outlining`）走**另一个格子**：它不随阶段切换清空，正文写到一半也要能回看。
    */
   function handleDocStageChunk(chunk: StreamStageChunk): void {
+    if (chunk.stage === 'outlining') {
+      if (docPhase.value !== 'outlining') docPhase.value = 'outlining'
+      docOutlineText.value += chunk.text
+      return
+    }
     if (chunk.stage === 'reviewing' || chunk.stage === 'rewriting') {
       if (docPhase.value !== chunk.stage) {
         docStageText.value = ''
@@ -707,6 +735,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
           onChunk: appendPrdChunk,
           onPart: handlePrdPart,
           onStage: handlePrdStage,
+          // PRD 也有大纲阶段（票 #91）：它的增量只进大纲块，不进正文预览
+          onStageChunk: handleDocStageChunk,
           onSnapshot: applyJobSnapshot,
           onReview: handleReview,
           onRunSummary,
@@ -824,6 +854,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (phase) docPhase.value = phase
     else if (snap.status === 'running') docPhase.value = 'writing'
     if (!docStageText.value && snap.stageText) docStageText.value = snap.stageText
+    // 大纲只有「快照正停在大纲阶段」时补得回来：换成撰写之后阶段输出就换了一格，
+    // 那时快照里也不再有大纲文本——它是过程信息，不落库，看不到不影响产物。
+    if (!docOutlineText.value && snap.stageText && phase === 'outlining') {
+      docOutlineText.value = snap.stageText
+    }
   }
 
   /**
@@ -1957,6 +1992,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   pendingItems,
   docPhase,
   docStageText,
+  docOutlineText,
   reviewConclusion,
   reviewFailedAt,
   reviewVersionNo,

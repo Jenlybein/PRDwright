@@ -55,7 +55,7 @@
 - 只经 `llm_factory.get_llm()`；默认 ark + `doubao-seed-2-1-turbo-260628`（该模型不收 `thinking.type:"auto"`，只认 `disabled`）。
 - 流式唯一入口 `stream_reply.py`；出错只发 `error` 不发 `done`；`on_finish` 仅成功时调、且在 `done` 之前。
 - 区分 `stage_chunk` 与 `chunk`：前者是当前阶段的原始输出（审核意见 / 改写稿），只进阶段输出面板；混用会把审核 JSON 写进正文。
-- 下游文档开流首条必须 `stage(writing)`；阶段输出归 `JobRuntime`、换阶段即清空、不落库；重连恢复正文必须 `finalized_text + live_buffer`。
+- 下游文档开流首条必须是 `stage`：先 `stage(outlining)`（三份产物都有大纲，票 #91），随后 `stage(writing)`；阶段输出归 `JobRuntime`、换阶段即清空、不落库；重连恢复正文必须 `finalized_text + live_buffer`。大纲文本走既有的 `stage_chunk(outlining)`，不进正文 `chunk`。
 - 流式工具调用必须逐片相加（`AIMessageChunk.__add__`）：整批塞进一个 chunk 会拆成「空调用 + 废调用」，症状是「模型调了工具、选项卡一张不弹」；假模型必须复现真实分片形态。
 - token 计量唯一落点 `astream_text`；方舟 `include_usage` 的用量帧 `choices` 为空 → 先读 `usage`，别 `continue`。
 - 预算检查在 `astream_text` 开头、记账在末尾；超顶复用 `INVALID_REQUEST`（别标 `LLM_UPSTREAM_ERROR`，否则前端白重试）；`max_retries` 设 0；`text_emitted` 守卫：yield 过增量就绝不重来。
@@ -80,6 +80,7 @@
 - 整篇链路分节改写：只重写 `where` 命中的节、按标题拼回；`part{replace}` 必须发拼好的完整正文（前端无条件整段覆盖）；两条兜底退回整篇重写——`where` 一条都定位不到、拼回后短于 `_MIN_KEPT_RATIO`；`DOC_SECTION_REWRITE_ENABLED` 一键回退。
 - 只改 N 节时，未被改写章节的待确认项必须合并保留（`pending_items.finalize_items`）。
 - 骨架化 `doc_skeleton.py`（纯字符串、零 LLM 调用）只用在审核侧：标题整行 / 表格整行（只留首列会丢接口路径）/ 条目整行 / 含数字行 / 代码块只留围栏首行；撰写侧的需求输入不动（唯一事实来源），撰写侧要带 `format_field_contract`（枚举递归扫）；`skeletonize` 喂 fenced JSON 会静默吐空。
+- 大纲 `doc_outline.py`（票 #91，纯字符串、零 LLM 调用）：三份产物的阶段顺序统一为「大纲 → 撰写 → 审核 → 改写」；大纲只**抽取**上游已有结构，锚点是上游原文的整行（显示才截断），`verify_outline` 后校验查不到出处即降级「待确认」；骨架不许另立一套（接口文档五节、提示词四节必须能在对应生成提示词 / 技能包里找到，用例守着）；抽不出结构时返回 `None` → 只发一条说明性的 `stage(outlining)` 后直接 `stage(writing)`，**不发 `error`**。不要改成「让模型写大纲」——那会把「不编造」重新压在一句提示词上。
 - PRD 改写不复用 `PRD_SECTION_GENERATION_PROMPT`（6000 字符字段契约 + `{{占位符}}` 会诱导重新渲染），改用 `PRD_SECTION_REWRITE_PROMPT`。
 - 待确认清单唯一实现 `services/pending_items.py`：`extract()` 剥离全部块并按 `{prefix}-{n}` 重分配 id、坏 JSON 与未闭合块跳过；`id` 由后端分配、不信任模型的 id；抑制器流结束仍在块内则什么都不输出。
 - 清单三路可达前端：`done.data.pending_items` → `snapshot`（`generation_jobs.pending_items` 列，`_snapshot_event` 与 `_db_snapshot_event` 两条路都要带）→ `GET .../documents`。
