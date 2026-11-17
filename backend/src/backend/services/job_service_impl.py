@@ -47,11 +47,13 @@ from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
+from backend.repositories.job_event_repo import JobEventRepository
 from backend.repositories.solution_repo import SolutionRepository
 from backend.services import (
     conversation_service,
     document_service,
     job_claimer,
+    job_events,
     job_recovery,
     job_state,
 )
@@ -68,6 +70,7 @@ from backend.services.job_product_kind import _target_product_kind
 from backend.services.job_runtime import _RUNTIMES, _TASKS
 from backend.services.job_runtime_events import (
     _apply_event,
+    _flush_now,
     _maybe_flush,
     _run_summary_event,
     _summary_data,
@@ -312,9 +315,10 @@ def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -
         )
         # 错误事件走 `_failure_event`（与异常兜底同一个构造）：订阅者只看有没有
         # `error` 事件判断失败，自造一个形状不同的错误事件等于让前端多一条解析分支。
-        job_bus.publish(
-            runtime.job_id, _failure_event(job_state.CODE_CANCELLED, reason)
-        )
+        failure = _failure_event(job_state.CODE_CANCELLED, reason)
+        # 同样进过程日志：排空/超时取消时，在途任务的那条订阅需要读到「为什么停」。
+        job_events.record(runtime, failure)
+        job_bus.publish(runtime.job_id, failure)
         _finalize(
             runtime,
             "failed",
@@ -399,8 +403,12 @@ async def run_job(
                 if runtime.cancelled or runtime.superseded or (guard is not None and guard.lost):
                     break
                 _apply_event(runtime, event)
-                job_bus.publish(runtime.job_id, event)
+                # 过程日志：先记进待写缓冲，随后与进度列同一笔落盘（见 `job_events`）。
+                # 顺序是「应用 → 记日志 → 合并写 → 唤醒」：唤醒只作**叫醒**用，数据由
+                # 订阅者自己去表里按游标读，因此「醒来时那一笔已经提交」能省一次空读。
+                job_events.record(runtime, event)
                 _maybe_flush(runtime)
+                job_bus.publish(runtime.job_id, event)
         if guard is not None and guard.lost:
             _log_lease_lost(runtime, "续租失败之后的下一个事件点")
             return
@@ -425,10 +433,11 @@ async def run_job(
         # 而不发事件，界面上就是「流结束、正文为空」——被当成生成成功（空内容）。
         # 无模型配置时 `get_llm()` 就在这一层抛出，正是这条路径。
         if not already_reported:
-            job_bus.publish(
-                runtime.job_id,
-                _failure_event(runtime.error_code, runtime.error_message),
-            )
+            failure = _failure_event(runtime.error_code, runtime.error_message)
+            # 兜底异常的这一条同样要进过程日志：它可能是这条订阅看到的最后一条事件，
+            # 只广播不落盘的话，按游标续读的读者永远拿不到它。
+            job_events.record(runtime, failure)
+            job_bus.publish(runtime.job_id, failure)
         # 兜底异常单独留一条 ERROR（带 traceback）：`_finalize` 的终态日志是「收尾了」，
         # 这一条才是「为什么收尾」——它俩缺一，排障时都得猜另一半。
         logger.error(
@@ -492,31 +501,96 @@ def _failure_event(code: str, message: str) -> StreamEvent:
     )
 
 
-async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
-    """订阅一个任务的事件流：先 `snapshot`，再 live。
+def _terminal_tail(
+    runtime: JobRuntime,
+    *,
+    snapshot_delivered: bool,
+    saw_summary: bool,
+    saw_error: bool,
+) -> list[StreamEvent]:
+    """订阅收尾时给「带快照的读者」补发结束事件（错误原因 + 回执）。
 
-    - 内存运行时命中且 owner 相符：在**无 await 的临界区**内取快照并订阅队列，
-      先 `yield` 快照；若任务已非 running 则补发一份 `run_summary` 后立即返回，
-      否则循环消费队列直到哨兵 `None`。
-    - 未命中或 owner 不符：读 DB 发一份快照后返回（进程重启 / 已完成过久 / 越权）；
-      终态任务若已落用量，同样补发 `run_summary`。
+    为什么需要它：**订阅时任务已经是终态**的那条路上，结束事件早已落盘、且游标已经
+    覆盖它（快照内容就包含它），所以续读不会再收到——于是「失败原因」与「用量回执」
+    要单独补一份，否则前端只能看到一份没有结论的空白稿。
 
-    「无 await 临界区」是正确性的关键：取快照与订阅之间一旦让出事件循环，
-    任务就可能在这段窗口里产事件并被丢弃，导致「快照与 live 之间缺一段」。
+    **已经通过续读收到的就不要补**：续读路径上 `run_summary` 是真实那一笔（与落库的
+    `usage` 同源）；再补一份「现算」的回执，`duration_ms` 会与落库值差几毫秒，前端
+    就会看到「流里说的耗时」与「刷新后读到的耗时」不一致。`saw_summary` / `saw_error`
+    就是为这个判据。
 
-    **为什么要补发 `run_summary`**：收尾事件是在任务结束那一刻广播的，只在当刻连着的人
-    收得到。刷新页面、或任务结束得早于订阅，都会漏掉它——那样「花了多少 token」就只在
-    没人看的时候存在。终态任务的用量已经落库，重连时补一份即可，前端因此无需再单独
-    发一次 `GET /api/jobs/{id}` 就能显示用量。
+    带游标的读者**不补**：它读的是回放，游标之后有什么就给什么，不在这条链上加料。
     """
-    runtime = _RUNTIMES.get(job_id)
-    if runtime is None or runtime.owner_id != owner_id:
-        with session_scope() as session:
-            job = GenerationJobRepository(session).get(owner_id, job_id)
-            row = job.model_dump() if job else None
-        if row is None:
-            return
-        yield _db_snapshot_event(row)
+    if not snapshot_delivered or runtime.status == STATUS_RUNNING:
+        return []
+    events: list[StreamEvent] = []
+    if (
+        runtime.status == "failed"
+        and runtime.error_code not in _ABORT_CODES
+        and not saw_error
+    ):
+        events.append(_failure_event(runtime.error_code, runtime.error_message))
+    if not saw_summary:
+        events.append(_run_summary_event(_summary_data(runtime, runtime.status)))
+    return events
+
+
+async def _wait_for_wake(wake: asyncio.Queue) -> bool:
+    """等一次唤醒（或轮询超时），返回「是否收到结束哨兵」。
+
+    唤醒队列只是**叫醒通道**：里面的内容（事件）在这里被丢弃，真正的数据永远从
+    `job_events` 按游标读。没有唤醒就靠 `POLL_SECONDS` 超时轮询兜底——通知是加速器，
+    不是数据通道（Postgres 的 NOTIFY 同样有上限、无监听者即丢、不保证送达）。
+    """
+    try:
+        item = await asyncio.wait_for(wake.get(), timeout=job_events.POLL_SECONDS)
+    except asyncio.TimeoutError:
+        return False
+    closed = item is None
+    # 队列里可能已经堆了一串唤醒：一次排空，哨兵也可能排在事件后面。
+    while not wake.empty():
+        queued = wake.get_nowait()
+        if queued is None:
+            closed = True
+    return closed
+
+
+def _flush_before_snapshot(runtime: JobRuntime) -> int:
+    """取快照之前把在途事件补写进表，返回快照游标。
+
+    **为什么必须先补写**：内存快照是「全部已应用事件」的视图，而游标是「最后一条已落盘
+    事件」的 id。若还有事件在内存缓冲里没落盘，快照就领先游标——拿着这个游标续读的
+    读者会把那一段再收一遍（重复正文）。补写与快照在同一个无 await 临界区里完成，
+    所以补写之后「快照内容 == 游标之前的事件之和」严格成立。
+
+    没有在途事件时不做任何写：游标就是已有的 `last_event_id`，快照与它天然一致。
+    """
+    if not runtime.pending_events:
+        return runtime.last_event_id
+    return _flush_now(runtime)
+
+
+async def _db_stream(
+    owner_id: int, job_id: int, cursor: int | None
+) -> AsyncIterator[StreamEvent]:
+    """运行时未命中时的订阅：DB 快照兜底（或按游标回放已落盘事件）。
+
+    - 不带游标（刷新 / 新读者）：先 `snapshot`（正文取 `draft_content`，游标取
+      `MAX(job_events.id)`——两者在同一笔事务里写过，所以快照内容覆盖到该游标为止），
+      再补发失败原因与回执，然后结束。**不回放过程日志**（否则每次刷新都重演一遍）。
+    - 带游标：不重发快照，只把游标之后的已落盘事件发完（一个短循环，读空即止）。
+      进程重启后运行时已不在，这里就是「把断线期间落盘的那一段补给你」的唯一通道。
+    """
+    with session_scope() as session:
+        job = GenerationJobRepository(session).get(owner_id, job_id)
+        row = job.model_dump() if job else None
+        snapshot_cursor = JobEventRepository(session).max_id(job_id) if job else 0
+    if row is None:
+        return
+    if cursor is None:
+        snapshot = _db_snapshot_event(row)
+        snapshot.event_id = snapshot_cursor
+        yield snapshot
         status = str(row.get("status") or "")
         code = str(row.get("error_code") or "")
         # 已经失败且不是「取消 / 被顶替」：补一条 error，迟到的订阅者才知道为什么空。
@@ -526,26 +600,126 @@ async def open_stream(owner_id: int, job_id: int) -> AsyncIterator[StreamEvent]:
         if usage is not None and status != STATUS_RUNNING:
             yield _run_summary_event(usage)
         return
+    current = cursor
+    while True:
+        events, current = job_events.read_after(job_id, current)
+        if not events:
+            return
+        for event in events:
+            yield event
+
+
+async def open_stream(
+    owner_id: int, job_id: int, cursor: int | None = None
+) -> AsyncIterator[StreamEvent]:
+    """订阅一个任务的事件流：**按游标读表**，先快照（不带游标时）再追新事件。
+
+    ## 游标
+
+    `cursor` 是客户端手里**已经收到的最后一条事件**的 id（事件 `data.cursor` 给出）。
+    带上它就只读 `id > cursor` 的那些行——断线重连因此不重不漏；多个读者各持各的游标，
+    互不影响。不带游标（刷新 / 新读者）则先发一份快照 + 快照游标，**不回放历史**。
+
+    ## 数据通道与唤醒
+
+    数据只从 `job_events` 读；进程内的 `job_bus` 只负责**叫醒**（与 Postgres NOTIFY
+    同角色：有上限、无监听者即丢、不保证送达）。没有唤醒时靠 `POLL_SECONDS` 轮询兜底，
+    所以「通知丢了」只影响延迟，不影响正确性。
+
+    ## 无 await 临界区
+
+    带快照的那条路上，「补写在途事件 → 取快照 → 订阅唤醒队列」之间**一次都不让出
+    事件循环**：一旦让出，任务就可能在这段窗口里产事件（既没进快照、也没被唤醒队列
+    记下），表现为「快照与续流之间缺一段」。
+    """
+    runtime = _RUNTIMES.get(job_id)
+    if runtime is not None and runtime.owner_id != owner_id:
+        runtime = None
+    if runtime is None:
+        async for event in _db_stream(owner_id, job_id, cursor):
+            yield event
+        return
 
     # —— 无 await 临界区 ——
-    snapshot = _snapshot_event(runtime)
-    queue = job_bus.subscribe(job_id)
+    if cursor is None:
+        snapshot_cursor = _flush_before_snapshot(runtime)
+        snapshot: StreamEvent | None = _snapshot_event(runtime)
+        snapshot.event_id = snapshot_cursor
+        start = snapshot_cursor
+    else:
+        snapshot = None
+        start = cursor
+    wake = job_bus.subscribe(job_id)
     # ————————————————————————
     try:
-        yield snapshot
-        if runtime.status != "running":
-            # 同上：快照里已是 failed 时补一条 error，让「失败发生在订阅之前」也能被看见。
-            if runtime.status == "failed" and runtime.error_code not in _ABORT_CODES:
-                yield _failure_event(runtime.error_code, runtime.error_message)
-            yield _run_summary_event(_summary_data(runtime, runtime.status))
-            return
+        if snapshot is not None:
+            yield snapshot
+        current = start
+        closed = False
+        saw_summary = False
+        saw_error = False
+
+        def _observe(event: StreamEvent) -> None:
+            """记住「这两类结束事件是否已经从续读里收到」（用于避免重复补发）。"""
+            nonlocal saw_summary, saw_error
+            if event.type == "run_summary":
+                saw_summary = True
+            elif event.type == "error":
+                saw_error = True
+
         while True:
-            event = await queue.get()
-            if event is None:
+            events, current = job_events.read_after(job_id, current)
+            if not events and not closed and not _is_terminal(runtime):
+                # 表里还没有新行，但运行时里躺着还没落盘的增量：替写者把它们合并写下去。
+                #
+                # 为什么是**读者**来写：写者只在「来下一个事件时」检查合并写窗口，
+                # 一旦它挂在模型调用上（一次调用可能几十秒），最后一段增量就会一直
+                # 留在内存里——表现为进度条卡住、而任务其实还在跑。轮询兜底必须能
+                # 推进**数据**，而不只是「醒过来再读一次空表」。
+                if runtime.pending_events:
+                    try:
+                        _flush_now(runtime, progress=False)
+                    except Exception:  # noqa: BLE001 - 写不进去不该打断订阅，下一轮再试
+                        logger.warning(
+                            "订阅侧合并写失败，下一轮重试",
+                            extra={
+                                "event": "job.flush_on_poll_failed",
+                                "job_id": job_id,
+                                "request_id": current_request_id(),
+                            },
+                        )
+                    continue  # 刚落盘的事件可能就有人要读，立刻再读一遍
+                closed = await _wait_for_wake(wake)
+                continue
+            for event in events:
+                _observe(event)
+                yield event
+            if _is_terminal(runtime):
+                # 终态与收尾事件同一笔提交：醒来先读空剩余行（含 run_summary），再收尾。
+                while True:
+                    more, current = job_events.read_after(job_id, current)
+                    if not more:
+                        break
+                    for event in more:
+                        _observe(event)
+                        yield event
+                for event in _terminal_tail(
+                    runtime,
+                    snapshot_delivered=snapshot is not None,
+                    saw_summary=saw_summary,
+                    saw_error=saw_error,
+                ):
+                    yield event
                 return
-            yield event
+            if closed:
+                return
     finally:
-        job_bus.unsubscribe(job_id, queue)
+        job_bus.unsubscribe(job_id, wake)
+
+
+def _is_terminal(runtime: JobRuntime) -> bool:
+    """运行时是否已到终态（内存状态由状态机在**提交之后**结算，见 #79）。"""
+    return runtime.status != STATUS_RUNNING
 
 
 def get_job(owner_id: int, job_id: int) -> dict[str, Any] | None:

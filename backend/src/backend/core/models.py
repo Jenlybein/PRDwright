@@ -1,4 +1,4 @@
-"""数据层模型（v9）：15 张表的**唯一结构真源**。
+"""数据层模型（v9）：16 张表的**唯一结构真源**。
 
 ## 这个文件是什么
 
@@ -55,6 +55,7 @@ ISO 8601 的字典序等于时间序，这是承重设计。换 `DateTime` 会�
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     ForeignKey,
@@ -563,6 +564,76 @@ class JobAttempt(SQLModel, table=True):
     created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
 
 
+class JobEvent(SQLModel, table=True):
+    """生成过程的一条事件日志（票 #86）：**只增不改、只按游标读**。
+
+    ## 它回答什么
+
+    「这次生成到第几步、已经吐出了哪些字」。任务行的 `phase` / `draft_content` /
+    `completed_sections` 只留**最近一次的合并写**（每 ≤300ms 或 4KB 一次），中间那几次
+    推进没有任何痕迹；浏览器断线重连时，「上次读到哪里」也没有落点。
+
+    这张表把**过程日志**独立出来：
+
+    - 订阅按 `id > cursor` 逐条读（`cursor` 是客户端手里那一条的 id），断线重连因此
+      **不重不漏**；
+    - 多个订阅者各持各的游标，各读各的（游标是读者的状态，不是任务的）；
+    - 时间上的**唯一真相**在这里：`id` 单调自增，同一任务内的事件顺序即 id 顺序。
+
+    ## 为什么不和「权威正文」混
+
+    任务行上的 `draft_content` / `completed_sections` 是**快照**（冷读者一次拿走即可），
+    本表是**过程**。两者分工：快照回答「现在长什么样」，事件表回答「一路走来发生了什么」。
+    冷读者只取快照 + 快照游标，**不回放**本表历史（否则刷新一次就把整段生成重演一遍）；
+    表里的行只是给「已经手持游标的读者」续读用。
+
+    ## `id` 为什么是 BIGSERIAL
+
+    它是**全局**自增游标（不是每任务一个序号）：一次查询只按 `(job_id, id)` 走一个索引
+    区间，`id > cursor` 的比较对全表也成立。`Integer` 只有 21 亿，长期部署里事件表是
+    增长最快的一张表，留一档尺寸不占任何实际空间。
+
+    ## 保留策略
+
+    终态任务的过程日志**保留 7 天**（`services/job_events.purge_expired_events`，由
+    #89 的调度接线调它，本票只交付这个动作）。清理只删本表，权威正文在任务行与
+    `document_versions` 上，一行都不受影响。
+
+    ## 归属与级联
+
+    `job_id` 外键指向 `generation_jobs.id` 且 `ON DELETE CASCADE`：任务行随账号删除一起
+    消失时，它的过程日志跟着消失（否则库里会留下指向不存在任务的孤儿行）。**不存
+    `owner_id`**：归属一律经任务行确认，避免两份归属真源。
+    """
+
+    __tablename__ = "job_events"
+    __table_args__ = (
+        # 订阅的唯一查询形态：按任务取「比游标新」的一段。`id` 放第二列，因为它是
+        # INCLUDE 之外的自然序：同一个 job_id 下的 id 本来就有序，索引扫一遍即可。
+        Index("idx_job_events_job_cursor", "job_id", "id"),
+    )
+
+    # 全局自增游标（BIGSERIAL）：读侧只做 `id > cursor`，写侧从不显式赋值。
+    id: int | None = Field(
+        default=None,
+        sa_column=Column(BigInteger, primary_key=True, autoincrement=True),
+    )
+    job_id: int = Field(
+        sa_column=Column(
+            Integer, ForeignKey("generation_jobs.id", ondelete="CASCADE"), nullable=False
+        )
+    )
+    # 事件种类：与 SSE 的 `event:` 同名（status / chunk / part / stage / stage_chunk /
+    # review / error / done / run_summary），见 `services/job_events.EVENT_KINDS`。
+    # 短文本（列宽与 `short_text` 纪律对齐）——它不进索引，但索引列以外的文本也一律给宽度，
+    # 免得「同名列在不同表里类型不一致」。
+    kind: str = Field(sa_column=Column(short_text(32), nullable=False))
+    # 事件体（JSON）：`{content, data, code}`，与 `StreamEvent` 三字段一一对应。
+    # 大文本，**不给 server_default**（省略该列应当当场失败，而不是静默写空串）。
+    payload: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+
+
 # ---------------------------------------------------------------------------
 # 对话
 # ---------------------------------------------------------------------------
@@ -823,6 +894,7 @@ __all__ = [
     "GenerationJob",
     "InviteCode",
     "JobAttempt",
+    "JobEvent",
     "LoginFailure",
     "ModelProvider",
     "Solution",

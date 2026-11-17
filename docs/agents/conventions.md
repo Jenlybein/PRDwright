@@ -61,6 +61,7 @@
 - 预算检查在 `astream_text` 开头、记账在末尾；超顶复用 `INVALID_REQUEST`（别标 `LLM_UPSTREAM_ERROR`，否则前端白重试）；`max_retries` 设 0；`text_emitted` 守卫：yield 过增量就绝不重来。
 - 需整段结果（JSON 回填等）用 `document_service._collect_reply()`（拼增量 + 截断检查）。
 - SSE 分帧唯一实现 `api/sse.py::make_sse_generator`（已带 `X-Accel-Buffering: no`）；事件 `status/chunk/part/stage/review/done/error` + 末尾 `data: [DONE]`；服务层与路由层两层异常兜底；前端用原生 `fetch` + `ReadableStream`（axios 不支持流式读）。
+- 任务订阅的事件**带 SSE `id:` 行**（票 #86）：它是 `job_events.id`（全局游标），只作「断线重连从哪接」用，**不进 JSON 体**（`StreamEvent.event_id`，`exclude=True`）。客户端带 `GET /api/jobs/{id}/stream?cursor=N`（或 `Last-Event-ID` 头）续读 → 服务端只发 `id > N` 的事件；不带游标 → 先快照 + 快照游标，不回放历史。数据永远来自 `job_events` 表（按游标读），`JobBus` / 数据库通知**只作唤醒**；通知丢了只是延迟变大，轮询兜底。清理只删 `job_events`（终态后保留 7 天），权威正文不动。
 - 心跳 `: ping` 是 v7 必做，只能走 `api/sse.py` 这个出口。
 - 三家 LLM 抽象、路由 / service 分离、SSE 两层兜底、技能包驱动 + 资源缺失降级：别动。
 

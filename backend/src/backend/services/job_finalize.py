@@ -42,7 +42,7 @@ from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.services import document_store, job_state, solution_service
+from backend.services import document_store, job_events, job_state, solution_service
 from backend.services.job_bus import job_bus
 from backend.services.job_product_kind import _target_product_kind
 from backend.services.job_runtime_events import _draft, _run_summary_event, _summary_data
@@ -155,6 +155,14 @@ def _closeout_once(
         if not result.applied:
             return result
 
+        # 过程日志（#86）：待写事件 + 本次回执，与终态写**同一笔事务**提交。
+        # 顺序在这里是承重的：订阅者「看到任务已终态」与「看到 run_summary 那一行」
+        # 必须是同一时刻——分成两笔提交就会出现「流结束、回执还没来」的窗口，
+        # 靠 wake 猜时序的客户端会漏掉最后一条。
+        cursor = job_events.flush_pending(
+            runtime, session, extra=(_run_summary_event(summary),)
+        )
+
         if status == "completed":
             if runtime.kind == "review":
                 # 重审的产出只有结论：先写结论，写不成整批回滚并改判失败（见下方 catch）。
@@ -171,26 +179,28 @@ def _closeout_once(
             # 失败（含用户取消）但已经写出了正文：升格成一版「部分完成」（#85）。
             # 与任务终态 / 账本同一个事务——写不进去就整批回滚，不谎报「有内容可用」。
             _write_partial_document(runtime, summary, partial_content, session=session)
-        return result
+    # 事务提交之后才清空待写缓冲：整批回滚时那一批事件必须还在（下一次收尾重写）。
+    job_events.mark_flushed(runtime, cursor)
+    return result
 
 
-def _publish_gate_failure(
-    runtime: JobRuntime, code: str, message: str
-) -> None:
-    """重审结论写不进去时，给仍连着的订阅者补一条 `error` 事件与结束回执。
+def _gate_failure_event(code: str, message: str) -> StreamEvent:
+    """收尾里才发现的那条失败（重审结论写不进去 / 版本锁拒绝）对应的 `error` 事件。
 
-    这次失败是收尾里才发现（正文 / 版本是在写入那一刻比的），不像普通失败那样有异常可抛；
-    不补这一条，前端只会看到「流读完、任务却失败」。
+    它必须**先记进过程日志、再随第二笔收尾事务一起提交**，最后才广播：按游标续读的
+    读者只从表里取事件，只广播不落盘的话，这条「为什么失败」永远读不到。
     """
-    job_bus.publish(
-        runtime.job_id,
-        StreamEvent(
-            type="error",
-            content=message,
-            data={"error_type": "JobFailed"},
-            code=code,
-        ),
+    return StreamEvent(
+        type="error",
+        content=message,
+        data={"error_type": "JobFailed"},
+        code=code,
     )
+
+
+def _publish_gate_failure(runtime: JobRuntime, event: StreamEvent) -> None:
+    """把上面那条事件广播给仍连着的订阅者（唤醒用；数据已在表里）。"""
+    job_bus.publish(runtime.job_id, event)
 
 
 def _finalize(
@@ -383,6 +393,9 @@ def _finalize_review_gate_failure(
     """
     status = "failed"
     summary = _summary_data(runtime, status)
+    failure_event = _gate_failure_event(failure.error_code, failure.error_message)
+    # 与「改判失败」同一笔事务进过程日志（见 `_gate_failure_event` 的说明）
+    job_events.record(runtime, failure_event)
     try:
         result = _closeout_once(
             runtime,
@@ -414,7 +427,7 @@ def _finalize_review_gate_failure(
                     "request_id": current_request_id(),
                 },
             )
-            _publish_gate_failure(runtime, failure.error_code, failure.error_message)
+            _publish_gate_failure(runtime, failure_event)
             job_bus.publish(runtime.job_id, _run_summary_event(summary))
         else:
             job_state.settle_after_commit(
@@ -446,6 +459,9 @@ def _finalize_version_conflict(runtime: JobRuntime, draft: str) -> None:
     summary = _summary_data(runtime, status)
     code = ErrorCode.CONTENT_CHANGED.value
     message = document_store.VERSION_CONFLICT_MESSAGE
+    failure_event = _gate_failure_event(code, message)
+    # 与「改判失败」同一笔事务进过程日志：按游标续读的读者也要看到这条原因
+    job_events.record(runtime, failure_event)
     try:
         result = _closeout_once(
             runtime,
@@ -476,7 +492,7 @@ def _finalize_version_conflict(runtime: JobRuntime, draft: str) -> None:
                     "request_id": current_request_id(),
                 },
             )
-            _publish_gate_failure(runtime, code, message)
+            _publish_gate_failure(runtime, failure_event)
             job_bus.publish(runtime.job_id, _run_summary_event(summary))
         else:
             job_state.settle_after_commit(

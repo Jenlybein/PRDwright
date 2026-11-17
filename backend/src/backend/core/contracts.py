@@ -103,6 +103,11 @@ class StreamEvent(BaseModel):
             "`data` 含 stage（reviewing / rewriting）与 doc_type；"
             "它与 `chunk` 是两条独立通道——`chunk` 进文档预览，它只进阶段输出面板，"
             "混用会把审核意见写进正文。"
+            "**任务订阅的每个事件（含 snapshot）都带 SSE 的 `id:` 行**（票 #86）：它是这条"
+            "事件在 `job_events` 里的全局游标（模型字段 `event_id`，不进 JSON 体）。"
+            "客户端记住最后一条，断线重连时带回来即只收它之后的事件（不重复、不缺段）。"
+            "快照的游标是「快照内容覆盖到的最后一条事件」，因此新读者从它往后追即可，"
+            "服务端不回放历史。"
         )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
@@ -115,6 +120,18 @@ class StreamEvent(BaseModel):
             "刻意放在**顶层**而不是塞进 `data`：SSE 流是 HTTP 200，前端拿不到状态码，"
             "判断「该不该降级重试」只能靠这个字段，放在顶层才不会被 `data` 的"
             "其它附加字段淹没。缺失或取值未知时前端一律按 `INTERNAL_ERROR` 处理。"
+        ),
+    )
+    event_id: int | None = Field(
+        default=None,
+        exclude=True,
+        description=(
+            "事件游标（票 #86）：`job_events.id`，只对任务订阅有意义。"
+            "它**不进 JSON 体**（`exclude=True`），只出现在 SSE 的 `id:` 行——"
+            "那是 SSE 规范留给「断线重连从哪里接」的标准位置。客户端在 `id:` 行里读到它、"
+            "原样作为 `Last-Event-ID` 头或 `?cursor=` 带回来，服务端就只发它之后的事件。"
+            "快照事件的 `event_id` 是「快照内容覆盖到的最后一条事件」，所以新读者从它"
+            "往后追即可，服务端不回放历史。"
         ),
     )
 
