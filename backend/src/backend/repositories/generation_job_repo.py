@@ -545,6 +545,52 @@ class GenerationJobRepository:
             .first()
         )
 
+    def find_dedupe_target(
+        self,
+        owner_id: int,
+        *,
+        solution_id: int | None,
+        kind: str,
+        doc_kind: str,
+        input_fingerprint: str,
+        created_since: str,
+    ) -> GenerationJob | None:
+        """查「这次提交可以复用哪一条既有任务」（创建去重，票 #87）。
+
+        判据是**同键 + 仍在 running + 在时间窗内**：键为 owner / 方案 / `kind` /
+        `doc_kind` / 输入指纹；`created_since` 是窗口下界的时间文本。
+
+        `created_at` 是 `timestamp_text()`（ISO 文本），字典序即时间序，因此
+        `>=` 可以直接在 SQL 里比（见 `core/clock.py` 的口径）——不必把时间取回
+        Python 再判断。`solution_id` 可能为 `None`（没有方案的任务），用 `IS NULL`。
+
+        只返回 `running`：终态任务不复用（生成已结束，再点一次是「重新生成」）。
+        排序取最近一条：同一键在窗内理论上至多一条（登记互斥保证），`id` 兜底。
+        """
+        conditions = [
+            GenerationJob.owner_id == owner_id,
+            GenerationJob.kind == kind,
+            GenerationJob.doc_kind == doc_kind,
+            GenerationJob.input_fingerprint == input_fingerprint,
+            GenerationJob.status == STATUS_RUNNING,
+            GenerationJob.created_at >= created_since,
+        ]
+        conditions.append(
+            GenerationJob.solution_id.is_(None)
+            if solution_id is None
+            else GenerationJob.solution_id == solution_id
+        )
+        return (
+            self.session.execute(
+                select(GenerationJob)
+                .where(*conditions)
+                .order_by(GenerationJob.id.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+
     def list_by_owner(
         self,
         owner_id: int,
