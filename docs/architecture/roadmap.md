@@ -738,3 +738,36 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 - 迁移：**没有新增**。`head` 仍是 `0008`，`test_schema_migration` 的「基线库 == 模型库」仍成立。
 - 文档：本文件 §13、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §3.3（调度循环那条 + 取消 / 顶替口径）、§4.5（C-C1）、§5.7（取舍）、[`state-flow-design.md`](./state-flow-design.md) §11、[`GLOSSARY.md`](../../GLOSSARY.md)（「取消 / 已取消」）、[`../agents/conventions.md`](../agents/conventions.md) §10（#77 口径 + 循环在测试里默认关）。
 - **未执行**：push 与合并（由用户确认）。
+
+## 14. 本轮：交互手感收口（spec #96，#97~#102 逐票交付）
+
+### 14.1 范围
+
+用户端弹层手感、按压反馈、reduced-motion 与无障碍、触屏与安全区、低频增补动效。**没有新增迁移、没有后端改动**。
+
+| 票 | 主题 | 阻塞于 | 状态 |
+| --- | --- | --- | --- |
+| #97 | 动效令牌与用户端弹层（弹窗 · 菜单 · 保存提示） | 无 | 已实现 |
+| #98 | 抽屉与侧栏（版本抽屉 · 方案侧栏 · 管理端弹窗） | #97 | 已实现 |
+| #99 | 按压反馈与排版细节 | 无 | 已实现 |
+| #100 | reduced-motion 策略与弹层无障碍 | #97 | 已实现 |
+| #101 | 触屏与安全区 | #98 | 已实现 |
+| #102 | 低频增补动效（入口 · 进度 · 主题 · 流式首字） | #97, #100 | 已实现 |
+
+### 14.2 本期不做
+
+- 不引入动效库；不做视觉重设计；不覆盖完整 WCAG 审计。
+- 不做 iPad / Android 全量适配，只做 hover 门控、overscroll、安全区。
+- 不改管理端 Sky Brutalism 体系（除弹窗面板 120ms 与 hover 门控）。
+
+### 14.3 验收与证据
+
+- 前端：`cd frontend && npx vitest run` → **768 passed / 44 文件**；`npm run type-check` 通过。
+- 管理端：`cd frontend_admin && npm run test:unit` → **125 passed / 13 文件**；`npm run type-check` 通过。
+- 新增用例：`AppDialog.spec.ts`（7 条，Esc / 遮罩 / `aria-labelledby` / 焦点进出 / `overscroll`）、`SolutionSidebar.spec.ts` 补窄屏抽屉遮罩、`AppV2.spec.ts` 保存提示 `role="status"`。
+- 人工验收（未执行，需真机）：慢放 2–5 倍看弹层曲线；iPhone Safari 看安全区与滚动穿透；系统开启「减少动态效果」「降低透明度」各复验一次。
+
+### 14.4 复测与收口
+
+- 文档：本节、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §5.13、[`../agents/conventions.md`](../agents/conventions.md) §6（动效令牌与 reduced-motion 策略）。
+- **未执行**：提交与推送（由用户确认）。

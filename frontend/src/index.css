@@ -47,6 +47,7 @@
   --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 4px 12px -2px rgb(15 23 42 / 0.06);
   --shadow-pop: 0 10px 30px -6px rgb(15 23 42 / 0.18);
   --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 /* L2：语义令牌对外暴露为工具类（bg-surface / text-muted / border-line …）
@@ -158,21 +159,67 @@
   }
   body {
     @apply bg-bg text-body;
+    /* 明暗主题切换的低频过渡：只让底色与文字自身过渡，不给每个元素加 transition */
+    transition:
+      background-color 150ms ease,
+      color 150ms ease;
   }
   /* 统一键盘焦点环：所有可聚焦元素都有清晰的可见焦点（无障碍） */
   :focus-visible {
     @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-bg;
   }
 
-  /* 尊重「减少动态效果」偏好：关闭非必要的过渡与动画，避免眩晕 */
+  /* 标题排版：大字号需要略收紧字距，并用 balance 让换行两行长度接近，避免吊尾 */
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  h1 {
+    letter-spacing: -0.02em;
+  }
+
+  /* 减少动态效果：去掉位移与弹跳，保留透明度 / 颜色的淡化——
+     「减少」不是「全关」，加载指示器仍要能表达「在转」。 */
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
     *::after {
       animation-duration: 0.001ms !important;
       animation-iteration-count: 1 !important;
-      transition-duration: 0.001ms !important;
+      /* 只留淡化与颜色；位移类过渡因此瞬间到位 */
+      transition-property:
+        opacity,
+        color,
+        background-color,
+        border-color,
+        box-shadow !important;
+      transition-duration: 120ms !important;
       scroll-behavior: auto !important;
+    }
+    /* 例外：环形加载是状态指示，不是会致晕的位移，保留旋转 */
+    .app-spinner {
+      animation: spin 1s linear infinite !important;
+    }
+  }
+
+  /* 降低透明度：把半透明材质换成实色，文字才不会糊在背景上 */
+  @media (prefers-reduced-transparency: reduce) {
+    .shell-action-bar,
+    .sidebar-surface {
+      background-color: var(--ui-surface) !important;
+      backdrop-filter: none !important;
+    }
+  }
+
+  /* 「思考中」三点：只做透明度呼吸，不做上下弹跳 */
+  @keyframes thinking-dot {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
     }
   }
 }
@@ -187,4 +234,35 @@
   html:has(.shell-action-bar) .shell-fab {
     bottom: calc(var(--shell-action-bar-h) + 1rem);
   }
+}
+
+/*
+ * 入口卡片入场：40ms 递增错峰，一次性。
+ * 用 backwards 而不是 both：动画结束后释放 transform，卡片自己的按压反馈才能生效。
+ */
+@keyframes entry-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.entry-card {
+  animation: entry-card-in 300ms var(--ease-smooth) backwards;
+}
+.entry-card:nth-child(1) {
+  animation-delay: 0ms;
+}
+.entry-card:nth-child(2) {
+  animation-delay: 40ms;
+}
+
+/* 流式首字：80ms 轻浮现，只在第一条正文挂载时发生一次 */
+@keyframes doc-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+.doc-reveal {
+  animation: doc-reveal 80ms var(--ease-smooth) backwards;
 }

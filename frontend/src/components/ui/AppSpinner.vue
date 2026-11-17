@@ -20,7 +20,7 @@ const sizeMap = { sm: 'h-3.5 w-3.5', md: 'h-4 w-4', lg: 'h-6 w-6' } as const
   <span
     role="status"
     aria-label="加载中"
-    class="inline-block animate-spin rounded-full border-2 border-line-strong border-t-accent"
+    class="app-spinner inline-block animate-spin rounded-full border-2 border-line-strong border-t-accent"
     :class="sizeMap[size]"
   />
 </template>

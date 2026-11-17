@@ -1241,12 +1241,12 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
 
         <!-- 保存 / 操作提示：失败红、动作确认绿，2.5s 自动淡出（`flashSavedTip`） -->
         <Transition
-          enter-active-class="transition duration-200"
+          enter-active-class="transition-[opacity,transform] duration-200 ease-[var(--ease-smooth)]"
           enter-from-class="opacity-0 translate-y-1"
-          leave-active-class="transition duration-500"
-          leave-to-class="opacity-0"
+          leave-active-class="transition-[opacity,transform] duration-150 ease-[var(--ease-smooth)]"
+          leave-to-class="opacity-0 translate-y-1"
         >
-          <AppBadge v-if="savedTip" :variant="savedTipVariant" class="shadow-card">
+          <AppBadge v-if="savedTip" :variant="savedTipVariant" class="shadow-card" role="status" aria-live="polite">
             <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
               <!-- 失败用叹号、成功用对勾：红色药丸顶着一个对勾，用户会以为「保存成功了」 -->
               <path

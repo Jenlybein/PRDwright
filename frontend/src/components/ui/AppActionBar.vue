@@ -115,7 +115,7 @@ onBeforeUnmount(() => {
     ref="root"
     :class="
       sticky
-        ? 'shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 backdrop-blur lg:left-[var(--shell-sidebar-w)]'
+        ? 'shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]'
         : 'border-t border-line bg-surface'
     "
   >

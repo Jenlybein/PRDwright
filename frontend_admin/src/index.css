@@ -358,10 +358,6 @@
       box-shadow 0.11s var(--ease-snap),
       background-color 0.11s linear;
   }
-  .brut-btn:hover:not(:disabled) {
-    transform: translate(-1px, -1px);
-    box-shadow: 4px 4px 0 0 var(--brut-shadow);
-  }
   /* 按下时「压进纸面」：位移与投影同时收掉，比变色更像实体按键 */
   .brut-btn:active:not(:disabled) {
     transform: translate(2px, 2px);
@@ -401,17 +397,10 @@
     text-decoration-thickness: 2px;
     text-decoration-color: var(--ui-line);
   }
-  .brut-btn-bare:hover {
-    color: var(--ui-sky-deep);
-    text-decoration-color: var(--ui-sky-deep);
-  }
   .brut-btn-xs {
     padding: 0.25rem 0.45rem;
     font-size: 0.6875rem;
     box-shadow: 2px 2px 0 0 var(--brut-shadow);
-  }
-  .brut-btn-xs:hover:not(:disabled) {
-    box-shadow: 3px 3px 0 0 var(--brut-shadow);
   }
 
   /* 分段控件：联排、共用边框，选中项整块变墨色 */
@@ -433,10 +422,6 @@
   }
   .brut-seg button:last-child {
     border-right: 0;
-  }
-  .brut-seg button:hover {
-    background: var(--ui-sky-soft);
-    color: var(--ui-sky-deep);
   }
   .brut-seg button[aria-pressed="true"] {
     background: var(--ui-ink);
@@ -562,9 +547,6 @@
   .brut-table tbody tr:last-child td {
     border-bottom: 0;
   }
-  .brut-table tbody tr:hover td {
-    background: color-mix(in srgb, var(--ui-sky-soft) 55%, transparent);
-  }
 
   /* ------------------------------------------------------------------ 提示 */
 
@@ -605,8 +587,15 @@
 
   /* ------------------------------------------------------------------ 弹窗 */
 
-  /* 遮罩层：半透明墨色。卡片本身没有模糊/投影过渡，遮罩也就不做动画——
-     粗野风的层级靠色块与描边，不靠淡入淡出。 */
+  /* 遮罩层：半透明墨色，刻意不做动画——粗野风的层级靠色块与描边，不靠淡入淡出。
+     面板例外：120ms 的微浮现让「弹窗出现」与全站 0.11s 的按钮手感对齐；
+     只动 opacity 与 2px 位移，不破坏硬边。 */
+  @keyframes admin-modal-in {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+  }
   .admin-modal {
     position: fixed;
     inset: 0;
@@ -634,6 +623,7 @@
     background: var(--ui-card);
     box-shadow: 8px 8px 0 0 var(--brut-shadow);
     outline: none;
+    animation: admin-modal-in 120ms var(--ease-snap) both;
   }
   .admin-modal-sm {
     max-width: 28rem;
@@ -700,9 +690,6 @@
   .action-list-item:last-child {
     border-bottom: 0;
   }
-  .action-list-item:hover:not(:disabled) {
-    background: var(--ui-sky-soft);
-  }
   .action-list-item:disabled {
     opacity: 0.45;
     cursor: not-allowed;
@@ -747,10 +734,6 @@
     transition:
       background-color 0.1s linear,
       border-color 0.1s linear;
-  }
-  .brut-nav-row:hover {
-    border-color: var(--ui-brut);
-    background: var(--ui-sky-soft);
   }
   /* 选中：整块翻墨。投影用卡片色而不是墨色——侧栏底是天蓝，墨色投影看不见 */
   .brut-nav-row.is-active {
@@ -810,10 +793,6 @@
       background-color 0.1s linear,
       border-color 0.1s linear;
   }
-  .brut-nav-caret:hover {
-    border-color: var(--ui-brut);
-    background: var(--ui-card);
-  }
   .brut-nav-caret.is-closed {
     transform: rotate(-90deg);
   }
@@ -847,6 +826,42 @@
     .theme-switch svg {
       width: 15px;
       height: 15px;
+    }
+  }
+
+  /* ------------------------------------------------------------------ 悬停 */
+
+  /* 只在「真有指针、能悬停」的设备上启用：触屏按下会误触发 hover，
+     高亮会粘在按钮上，看起来像卡在选中态。 */
+  @media (hover: hover) and (pointer: fine) {
+    .brut-btn:hover:not(:disabled) {
+      transform: translate(-1px, -1px);
+      box-shadow: 4px 4px 0 0 var(--brut-shadow);
+    }
+    .brut-btn-xs:hover:not(:disabled) {
+      box-shadow: 3px 3px 0 0 var(--brut-shadow);
+    }
+    .brut-btn-bare:hover {
+      color: var(--ui-sky-deep);
+      text-decoration-color: var(--ui-sky-deep);
+    }
+    .brut-seg button:hover {
+      background: var(--ui-sky-soft);
+      color: var(--ui-sky-deep);
+    }
+    .brut-table tbody tr:hover td {
+      background: color-mix(in srgb, var(--ui-sky-soft) 55%, transparent);
+    }
+    .action-list-item:hover:not(:disabled) {
+      background: var(--ui-sky-soft);
+    }
+    .brut-nav-row:hover {
+      border-color: var(--ui-brut);
+      background: var(--ui-sky-soft);
+    }
+    .brut-nav-caret:hover {
+      border-color: var(--ui-brut);
+      background: var(--ui-card);
     }
   }
 }

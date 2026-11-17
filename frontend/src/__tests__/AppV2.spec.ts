@@ -1270,6 +1270,8 @@ describe('AppV2 完整流程编排', () => {
       .findAllComponents(AppBadge)
       .find((item) => item.props('variant') === 'danger')
     expect(tip?.text()).toContain('后端不可用')
+    // 读屏用户也要知道保存失败了：提示位必须带 status 语义
+    expect(tip?.attributes('role')).toBe('status')
   })
 
   it('恢复时若快照停在确认闸门，回到发起该步骤的阶段并给出说明', async () => {

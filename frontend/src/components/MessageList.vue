@@ -259,14 +259,14 @@ defineExpose({ scrollToBottom })
             >
               <span class="flex items-end gap-1" aria-hidden="true">
                 <span
-                  class="h-2 w-2 animate-bounce rounded-full bg-subtle"
+                  class="h-2 w-2 animate-[thinking-dot_1.4s_ease-in-out_infinite] rounded-full bg-subtle"
                   style="animation-delay: -0.32s"
                 ></span>
                 <span
-                  class="h-2 w-2 animate-bounce rounded-full bg-subtle"
+                  class="h-2 w-2 animate-[thinking-dot_1.4s_ease-in-out_infinite] rounded-full bg-subtle"
                   style="animation-delay: -0.16s"
                 ></span>
-                <span class="h-2 w-2 animate-bounce rounded-full bg-subtle"></span>
+                <span class="h-2 w-2 animate-[thinking-dot_1.4s_ease-in-out_infinite] rounded-full bg-subtle"></span>
               </span>
               <span class="text-sm text-subtle">{{ thinkingPhrase }}</span>
             </div>
@@ -274,7 +274,7 @@ defineExpose({ scrollToBottom })
             <!-- 已有内容：Markdown 渲染 + 流式光标 -->
             <div
               v-else
-              class="prose prose-sm prose-slate max-w-none rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm ring-1 ring-line dark:prose-invert  "
+              class="prose prose-sm prose-slate doc-reveal max-w-none rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm ring-1 ring-line dark:prose-invert"
             >
               <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
               <div v-html="renderMarkdown(message.content)" />

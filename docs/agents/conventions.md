@@ -129,6 +129,7 @@
 - 底栏读子组件句柄要兜 null（模板 ref 首帧后才赋值），断言状态前必须 `await nextTick()`。
 - 待确认清单面板在正文之上（`PendingItemsPanel.vue`，只 `ReviewStage` 用），默认铺开 2 条、其余可展开；折叠只改铺开数量、不动排序、不进快照；序号用位置下标，后端 `id` 只作渲染 key。
 - 主题三层令牌（`@theme` → `@theme inline` → `:root` 亮 / `.dark` 暗）：`inline` 必须保留、`:root` 必须写在 `.dark` 之前；只用语义令牌、禁用未定义令牌类（Tailwind 不生成 → 回落 currentColor）；`dark:` 只留给结构性判断、状态色 tint、模态遮罩。
+- **动效令牌与 reduced-motion 策略**：用户端只用 `--ease-smooth`（进场 / 按压）与 `--ease-drawer`（抽屉 / 侧栏），时长表为按压 120ms / 菜单 160ms / 遮罩 180ms / 弹窗面板 220ms / 抽屉 260ms / 提示进 200ms 出 150ms；只过渡具体属性，禁用裸 `transition` 与 `transition: all`；reduced-motion 是「关位移、留淡化」，`.app-spinner` 是唯一保留旋转的例外；管理端手写 `:hover` 一律包在 `(hover: hover) and (pointer: fine)` 内。结论见 [`ARCHITECTURE.md`](../architecture/ARCHITECTURE.md) §5.13。
 - 改主题只动 `index.css` + `useTheme.ts` + `ui/ThemeMenu.vue` + `index.html` 首帧脚本；前端不存界面状态，唯一 localStorage 键是主题的 `theme`（两处共用键与解析规则）。
 - 表单 `RequirementsForm.vue`：不让用户填格式、行输入用 `:value` + `@input`（数组下标 v-model 报类型错）、元素 id = 错误键、折叠用 `v-show` 保留 DOM、默认只展开「产品与用户」；MVP 功能选填（整行留空的行过滤 + 跳过校验）。
 - 「默认该开」的布尔 prop 必须 `withDefaults(..., { x: true })`（Vue 会把未传的布尔 prop 转成 `false`，完整流程被悄悄降级）。

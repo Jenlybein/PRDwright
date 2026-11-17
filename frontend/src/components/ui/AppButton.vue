@@ -28,10 +28,10 @@ withDefaults(
     :type="type"
     :disabled="disabled || loading"
     :aria-busy="loading || undefined"
-    class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50"
+    class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50"
     :class="[
       variant === 'primary'
-        ? 'bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 active:scale-[0.99] disabled:bg-surface-2 disabled:text-subtle disabled:shadow-none'
+        ? 'bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 disabled:bg-surface-2 disabled:text-subtle disabled:shadow-none'
         : '',
       variant === 'secondary'
         ? 'border border-line-strong bg-surface text-body hover:border-accent hover:text-accent disabled:opacity-50'

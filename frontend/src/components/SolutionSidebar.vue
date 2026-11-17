@@ -96,19 +96,21 @@ function open(item: SolutionSummary): void {
     </svg>
   </button>
 
-  <!-- 窄屏抽屉遮罩 -->
-  <div
-    v-if="drawerOpen"
-    class="fixed inset-0 z-30 bg-slate-950/40 lg:hidden"
-    @click="drawerOpen = false"
-  />
+  <!-- 窄屏抽屉遮罩：淡入淡出，避免硬开硬关时背后页面「闪」一下 -->
+  <Transition name="sidebar-backdrop">
+    <div
+      v-if="drawerOpen"
+      class="sidebar-backdrop fixed inset-0 z-30 overscroll-contain bg-slate-950/40 lg:hidden"
+      @click="drawerOpen = false"
+    />
+  </Transition>
 
   <aside
     :class="[
-      'flex flex-col border-line bg-surface/80 backdrop-blur',
+      'sidebar-surface flex flex-col border-line bg-surface/80 backdrop-blur',
       // 窄屏：抽屉；lg 以上：常驻左侧且 sticky，不随右侧内容滚动。
       // 宽度走 --shell-sidebar-w（index.css）：底部操作栏吸底时的左偏移引用同一个值。
-      'fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0',
+      'fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform duration-[260ms] ease-[var(--ease-drawer)] overscroll-contain lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0',
       drawerOpen ? 'translate-x-0' : '-translate-x-full',
     ]"
     aria-label="方案列表"
@@ -265,3 +267,15 @@ function open(item: SolutionSummary): void {
     </div>
   </aside>
 </template>
+
+<style scoped>
+/* 遮罩 180ms 淡入淡出；抽屉本体 260ms 走 --ease-drawer，两者同时收束 */
+.sidebar-backdrop-enter-active,
+.sidebar-backdrop-leave-active {
+  transition: opacity 180ms var(--ease-smooth);
+}
+.sidebar-backdrop-enter-from,
+.sidebar-backdrop-leave-to {
+  opacity: 0;
+}
+</style>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 
 import { useAuthStore } from '@/stores/auth'
 import AppButton from '@/components/ui/AppButton.vue'
@@ -18,6 +18,18 @@ const auth = useAuthStore()
 
 /** 用户名输入框，弹窗打开时自动聚焦 */
 const usernameInput = ref<HTMLInputElement | null>(null)
+
+/** 标题 id：让 dialog 通过 aria-labelledby 读到「登录」/「注册账号」 */
+const titleId = useId()
+
+/** 面板元素：焦点陷阱的边界，也是无输入可聚焦时的兜底落点 */
+const panelEl = ref<HTMLElement | null>(null)
+
+/** 打开前的焦点落点：关闭弹窗后原路还回去 */
+let lastFocused: HTMLElement | null = null
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 const username = ref('')
 const password = ref('')
@@ -96,45 +108,75 @@ function handleSubmit(): void {
   void auth.login({ username: name, password: password.value })
 }
 
-/** ESC 关闭 */
+/** ESC 关闭；Tab 在面板内循环，不跑到背景页面上 */
 function handleKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && auth.dialogOpen) close()
+  if (!auth.dialogOpen) return
+  if (event.key === 'Escape') {
+    close()
+    return
+  }
+  if (event.key !== 'Tab' || !panelEl.value) return
+
+  const items = Array.from(panelEl.value.querySelectorAll<HTMLElement>(FOCUSABLE))
+  if (items.length === 0) {
+    event.preventDefault()
+    return
+  }
+  const first = items[0] as HTMLElement
+  const last = items[items.length - 1] as HTMLElement
+  const active = document.activeElement
+
+  if (event.shiftKey && active === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 onMounted(() => window.addEventListener('keydown', handleKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleKeydown)
+  lastFocused?.focus()
+})
 
-// 打开时聚焦用户名输入框，用户可以直接开打
+// 打开时记录焦点落点并聚焦用户名输入框；关闭时把焦点还回去，用户可以直接开打
 watch(
   () => auth.dialogOpen,
   (open) => {
-    if (!open) return
-    void nextTick(() => usernameInput.value?.focus())
+    if (open) {
+      lastFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      void nextTick(() => usernameInput.value?.focus())
+      return
+    }
+    lastFocused?.focus()
+    lastFocused = null
   },
 )
 </script>
 
 <template>
   <Teleport to="body">
-    <Transition
-      enter-active-class="transition duration-150"
-      enter-from-class="opacity-0"
-      leave-active-class="transition duration-150"
-      leave-to-class="opacity-0"
-    >
+    <Transition name="auth-dialog">
       <div
         v-if="auth.dialogOpen"
-        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-4 pt-24 backdrop-blur-sm"
+        class="auth-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overscroll-contain bg-slate-950/50 p-4 pt-24 backdrop-blur-sm"
         role="dialog"
         aria-modal="true"
-        aria-label="登录或注册"
+        :aria-labelledby="titleId"
+        tabindex="-1"
         @click.self="close"
       >
-        <div class="w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-pop">
+        <div
+          ref="panelEl"
+          class="auth-panel w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-pop outline-none"
+          tabindex="-1"
+        >
           <!-- 顶部：标题 + 关闭 -->
           <div class="flex items-start justify-between">
             <div>
-              <h2 class="text-base font-bold text-fg">
+              <h2 :id="titleId" class="text-base font-bold text-fg">
                 {{ isRegister ? '注册账号' : '登录' }}
               </h2>
               <p class="mt-1 text-xs text-subtle">
@@ -256,3 +298,23 @@ watch(
     </Transition>
   </Teleport>
 </template>
+
+<style scoped>
+/* 遮罩只动透明度，面板做 0.96→1 的缩放，两者同时开始、一起收束 */
+.auth-dialog-enter-active,
+.auth-dialog-leave-active {
+  transition: opacity 180ms var(--ease-smooth);
+}
+.auth-dialog-enter-active .auth-panel,
+.auth-dialog-leave-active .auth-panel {
+  transition: transform 220ms var(--ease-smooth);
+}
+.auth-dialog-enter-from,
+.auth-dialog-leave-to {
+  opacity: 0;
+}
+.auth-dialog-enter-from .auth-panel,
+.auth-dialog-leave-to .auth-panel {
+  transform: scale(0.96);
+}
+</style>

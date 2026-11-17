@@ -130,7 +130,7 @@ const CHAT_ICON =
         >
           <!-- 已完成显示对勾；当前步骤在生成中时呼吸高亮，否则实心高亮 -->
           <span
-            class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold transition"
+            class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition"
             :class="[
               item.index === currentIndex
                 ? generating
@@ -177,12 +177,19 @@ const CHAT_ICON =
             {{ item.step.label }}
           </span>
         </div>
-        <!-- 步骤之间的连接线；对话那一段后面不画——它与里程碑之间由上面那根竖线分隔 -->
+        <!-- 步骤之间的连接线；对话那一段后面不画——它与里程碑之间由上面那根竖线分隔。
+             推进由「填充条从左向右长出来」表达，不再靠圆点呼吸。 -->
         <div
           v-if="item.kind === 'milestone' && item.ordinal !== null && item.ordinal < milestoneCount"
-          class="mx-1 mb-5 h-0.5 flex-1 rounded-full transition"
-          :class="item.index < reachedIndex ? 'bg-primary-500' : 'bg-line-strong'"
-        ></div>
+          class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong"
+        >
+          <div
+            class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]"
+            :style="{
+              clipPath: item.index < reachedIndex ? 'inset(0 0 0 0)' : 'inset(0 100% 0 0)',
+            }"
+          ></div>
+        </div>
       </li>
     </ol>
   </nav>

@@ -187,7 +187,7 @@ const ARROW_ICON =
             :key="option.mode"
             interactive
             :padded="false"
-            class="group p-4"
+            class="group entry-card p-4"
             @click="emit('select', option.mode)"
           >
             <!--

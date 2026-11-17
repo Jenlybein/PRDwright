@@ -165,7 +165,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     预览态临时加宽到 640px——窄栏读长文档要频繁滚动，而这一段恰好是要读的正文。
   -->
   <aside
-    class="shell-version-drawer fixed right-0 top-0 z-30 flex flex-col border-l border-line bg-surface shadow-xl transition-[width,transform] duration-300 ease-out"
+    class="shell-version-drawer fixed right-0 top-0 z-30 flex flex-col overscroll-contain border-l border-line bg-surface shadow-xl transition-transform duration-[260ms] ease-[var(--ease-drawer)]"
     :class="[
       open ? 'translate-x-0' : 'translate-x-full',
       previewing ? 'w-[640px] max-w-[92vw]' : 'w-[360px] max-w-[85vw]',

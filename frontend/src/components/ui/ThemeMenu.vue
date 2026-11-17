@@ -83,15 +83,15 @@ onBeforeUnmount(() => document.removeEventListener('click', handleOutsideClick))
     </AppButton>
 
     <Transition
-      enter-active-class="transition duration-100"
-      enter-from-class="opacity-0 -translate-y-1"
-      leave-active-class="transition duration-100"
-      leave-to-class="opacity-0"
+      enter-active-class="transition-[opacity,transform] duration-[160ms] ease-[var(--ease-smooth)]"
+      enter-from-class="origin-top-right scale-95 opacity-0"
+      leave-active-class="transition-[opacity,transform] duration-[120ms] ease-[var(--ease-smooth)]"
+      leave-to-class="origin-top-right scale-95 opacity-0"
     >
       <div
         v-if="menuOpen"
         role="menu"
-        class="absolute right-0 top-full z-50 mt-2 w-36 overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-pop"
+        class="absolute right-0 top-full z-50 mt-2 w-36 origin-top-right overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-pop"
       >
         <button
           v-for="option in OPTIONS"

@@ -83,14 +83,14 @@ onBeforeUnmount(() => document.removeEventListener('click', handleOutsideClick))
     </button>
 
     <Transition
-      enter-active-class="transition duration-100"
-      enter-from-class="opacity-0 translate-y-1"
-      leave-active-class="transition duration-100"
-      leave-to-class="opacity-0"
+      enter-active-class="transition-[opacity,transform] duration-[160ms] ease-[var(--ease-smooth)]"
+      enter-from-class="origin-bottom-left scale-95 opacity-0"
+      leave-active-class="transition-[opacity,transform] duration-[120ms] ease-[var(--ease-smooth)]"
+      leave-to-class="origin-bottom-left scale-95 opacity-0"
     >
       <div
         v-if="menuOpen"
-        class="absolute bottom-full left-0 mb-2 w-full overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-pop"
+        class="absolute bottom-full left-0 mb-2 w-full origin-bottom-left overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-pop"
       >
         <div class="border-b border-line px-3 py-2">
           <div class="truncate text-xs font-semibold text-fg">{{ auth.displayName }}</div>

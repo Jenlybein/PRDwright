@@ -20,11 +20,11 @@ withDefaults(
   <component
     :is="interactive ? 'button' : 'div'"
     :type="interactive ? 'button' : undefined"
-    class="block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition dark:shadow-none"
+    class="block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none"
     :class="[
       padded ? 'p-5' : '',
       interactive
-        ? 'cursor-pointer hover:border-accent hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
+        ? 'cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
         : '',
     ]"
   >

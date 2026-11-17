@@ -1,5 +1,6 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -288,5 +289,22 @@ describe('切换与新建', () => {
     expect(router.currentRoute.value.path).toBe('/v2')
     // 旧方案仍在列表里
     expect(solutions.items.map((item) => item.id)).toContain(7)
+  })
+})
+
+describe('窄屏抽屉', () => {
+  it('唤出按钮打开抽屉，遮罩随之出现；点遮罩收起抽屉', async () => {
+    const wrapper = await mountSidebar()
+
+    await wrapper.find('button[aria-label="打开方案列表"]').trigger('click')
+    await nextTick()
+
+    expect(wrapper.find('.sidebar-backdrop').exists()).toBe(true)
+    expect(wrapper.find('aside').classes()).toContain('translate-x-0')
+
+    await wrapper.find('.sidebar-backdrop').trigger('click')
+    await nextTick()
+
+    expect(wrapper.find('aside').classes()).toContain('-translate-x-full')
   })
 })
