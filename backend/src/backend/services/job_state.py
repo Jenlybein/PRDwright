@@ -53,11 +53,32 @@
 并且**第二次补载荷同样是 0 行**（用量已经不是空，条件不再成立）。
 别用「状态等于 failed 就允许写」这种更宽的条件：那正是「晚到的失败把
 `INTERNAL_ERROR` 覆写成别的东西」的入口（§1.5 的覆盖窗口）。
+
+## 执行账本（#80）：跟着收尾一起记一行
+
+每次**执行有结论**（成功 / 失败 / 取消 / 启动回收判死）都在 `job_attempts` 记一行：
+第几次、成还是败、为什么（错误分类 + 脱敏摘要）、花了多少、跑了多久。写入点在
+`transition` 里、与状态更新**同一个事务**——账本不是另一份独立的写，而是这次转换的
+一部分。三条口径：
+
+| 事件 | 记不记账本 | 理由 |
+|---|---|---|
+| `SUCCEED` | 记（`completed`） | 执行有结论 |
+| `FAIL` | 记（`failed` / `cancelled`） | 执行有结论（含上游报错、预算超顶、回收判死） |
+| `CANCEL` | **不记** | 它只是「请求停止」：行先落 `failed + CANCELLED` 让人马上看见，真正的结论由被请求的那条协程收尾时给出——那一刻才记（`FAIL` 分支）。不这么分就会出现「按停止记一笔、收尾再记一笔」，一次执行两行账 |
+| `SUPERSEDE` | **不记** | 被取代**不是执行结论**（票面明确）：它是「同一份文档有更晚的任务接手」，`SUPERSEDED` 留在任务行上供排查。若在这里记账，账本会把一次正常让位记成一次失败 |
+
+**账本写失败的口径**：审计数据写不进去要**可见**（留一条 `job.attempt_record_failed`
+warning，带 job_id 与结论），但**不许把一次真实成功的生成判死**——账本用**保存点**
+写完，写坏只回滚这一笔，任务终态照常提交。这与 `_write_document` 吞异常的口径同源：
+「副作用失败不改变结论，但必须留痕」。反过来若让整笔事务回滚，任务会卡在 `running`
+等回收，代价远大于少一行账。
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -70,6 +91,12 @@ from backend.repositories.generation_job_repo import (
     STATUS_FAILED,
     STATUS_RUNNING,
     GenerationJobRepository,
+)
+from backend.repositories.job_attempt_repo import (
+    OUTCOME_CANCELLED,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+    JobAttemptRepository,
 )
 from backend.services.job_runtime import _RUNTIMES
 
@@ -143,7 +170,12 @@ def maintenance_scope() -> JobScope:
 
 @dataclass(frozen=True, slots=True)
 class FinishPayload:
-    """收尾要一起落库的载荷（正文 / 章节 / 用量 / 待确认清单 / token 两列）。"""
+    """收尾要一起落库的载荷（正文 / 章节 / 用量 / 待确认清单 / token 两列 / 耗时）。
+
+    `duration_ms` 与 `usage` 里的 `duration_ms` 是同一个值（都由
+    `job_runtime_events._summary_data` 算出来）：账本要回答「跑了多久」，而它属于收尾
+    载荷、不该在状态机里再从 usage JSON 里解析一遍。
+    """
 
     draft_content: str = ""
     completed_sections: list[dict[str, Any]] | None = None
@@ -151,6 +183,7 @@ class FinishPayload:
     pending_items: list[dict[str, Any]] | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    duration_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +242,22 @@ def _validate(event: JobEvent, scope: JobScope, payload: FinishPayload | None) -
         raise ValueError(f"未知的转换事件：{event}")
 
 
+@dataclass(frozen=True, slots=True)
+class _WriteResult:
+    """一次条件写的**原始结果**：行数 + 读回的事实 + 回收判死涉及的 id。
+
+    `reaped_job_ids` 只在「启动回收」那条转换里非空：`reap_running` 只回一个条数，
+    而账本要**逐任务一行**，所以回收前先取一份清单（同一个事务，见
+    `GenerationJobRepository.running_ids`）。
+    """
+
+    rows: int
+    observed_status: str = ""
+    observed_code: str = ""
+    observed_message: str = ""
+    reaped_job_ids: tuple[int, ...] = ()
+
+
 def _write(
     event: JobEvent,
     scope: JobScope,
@@ -217,14 +266,15 @@ def _write(
     error_code: str,
     error_message: str,
     session: Session,
-) -> tuple[int, str, str, str]:
-    """执行条件写，返回 `(行数, 观察到的状态, 观察到的错误码, 观察到的错误文案)`。
+) -> _WriteResult:
+    """执行条件写，返回行数与观察到的状态（0 行时在**同一事务**里读回那一行）。
 
-    0 行时（单条任务）在同一事务里读回那一行：调用方据此知道「别人已经把这一行
-    收成了什么」，而不是猜。
+    0 行时（单条任务）读回那一行：调用方据此知道「别人已经把这一行收成了什么」，
+    而不是猜。
     """
     repo = GenerationJobRepository(session)
     owner_id = scope.owner_id
+    reaped: tuple[int, ...] = ()
     if event is JobEvent.SUCCEED:
         rows = repo.finish(
             owner_id,
@@ -238,6 +288,9 @@ def _write(
         )
     elif event is JobEvent.FAIL:
         if scope.maintenance:
+            # 先取清单再改：回收之后库里就没有 running 了，账本却要逐任务记一行。
+            # 两句话在同一个事务里，中间没有别的写者能插进来（单 worker 硬约束）。
+            reaped = tuple(repo.running_ids())
             rows = repo.reap_running(
                 error_code=error_code or "INTERNAL_ERROR",
                 error_message=error_message or "服务重启，任务已中断",
@@ -288,11 +341,151 @@ def _write(
         )
 
     if rows or not _scope_has_job(scope):
-        return rows, "", "", ""
+        return _WriteResult(rows=rows, reaped_job_ids=reaped)
     job = repo.get(owner_id, int(scope.job_id or 0))
     if job is None:
-        return rows, "", "", ""
-    return rows, job.status, job.error_code or "", job.error_message or ""
+        return _WriteResult(rows=rows, reaped_job_ids=reaped)
+    return _WriteResult(
+        rows=rows,
+        observed_status=job.status,
+        observed_code=job.error_code or "",
+        observed_message=job.error_message or "",
+        reaped_job_ids=reaped,
+    )
+
+
+# ----------------------------------------------------------------------------
+# 执行账本（#80）：跟着这次转换记一行
+# ----------------------------------------------------------------------------
+
+# 脱敏摘要的长度上限：账本是长期留存的审计数据，一行足够定位问题，不必抄全文。
+_MAX_SUMMARY_CHARS = 240
+
+# 疑似凭据的片段：上游回显 `sk-...`、`Bearer ...`、`api_key=...` 这类串时，账本里
+# 不能原样留下。规则刻意保守——只抹「明显是密钥形态」的片段，不动普通文案。
+_SUMMARY_SECRETS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}"), "<已脱敏>"),
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._-]{8,}"), r"\1 <已脱敏>"),
+    (
+        re.compile(
+            r"(?i)\b(api[_-]?key|access[_-]?key|token|password|secret)\s*[=:]\s*"
+            r"[\"']?[^\s,;\"']{6,}"
+        ),
+        r"\1=<已脱敏>",
+    ),
+)
+
+
+def _sanitize_summary(message: str) -> str:
+    """把错误文案压成账本能长期存的样子：单行、截断、抹掉疑似凭据。
+
+    三步都要：换行压成空格（否则一行账本在日志页/导出里会撑成好几行）、超长截断
+    （上游报错可能带整段响应体）、凭据片段替换（`sk-...` 之类原样落库等于把密钥
+    抄进一张不会被清理的表里）。它是**纯函数**，所以可以直接对着一串构造输入验证。
+    """
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    for pattern, replacement in _SUMMARY_SECRETS:
+        text = pattern.sub(replacement, text)
+    if len(text) > _MAX_SUMMARY_CHARS:
+        text = text[: _MAX_SUMMARY_CHARS - 1] + "…"
+    return text
+
+
+def _attempt_outcome(event: JobEvent, error_code: str) -> str | None:
+    """这次转换该记成哪种结论；`None` = **不是执行结论，不记账本**。
+
+    只有成功收尾与失败收尾是结论。取消 / 顶替两条事件都只是「请求停止」：前者由被
+    请求的那条协程收尾时经 `FAIL` 记成 `cancelled`（一次执行只留一行），后者按票面
+    口径**根本不记账**（被取代不是这次执行的结局）。
+    """
+    if event is JobEvent.SUCCEED:
+        return OUTCOME_COMPLETED
+    if event is JobEvent.FAIL:
+        if error_code == CODE_SUPERSEDED:
+            return None
+        if error_code == CODE_CANCELLED:
+            return OUTCOME_CANCELLED
+        return OUTCOME_FAILED
+    return None
+
+
+def _attempt_targets(scope: JobScope, write: _WriteResult) -> tuple[int, ...]:
+    """这次转换要给哪几条任务记账（回收判死是批量，其余是单条）。"""
+    if scope.maintenance:
+        return write.reaped_job_ids
+    if scope.job_id is None:
+        return ()
+    return (int(scope.job_id),)
+
+
+def _record_attempt(
+    event: JobEvent,
+    scope: JobScope,
+    write: _WriteResult,
+    *,
+    payload: FinishPayload | None,
+    error_code: str,
+    error_message: str,
+    session: Session,
+) -> None:
+    """把这一次转换记进执行账本（**与状态更新同一个事务**）。
+
+    ## 为什么用保存点
+
+    账本是审计用途：写不进去必须**可见**（一条 `job.attempt_record_failed` warning），
+    但**不许因此把一个真实成功的生成判死**。同一个事务里如果让异常直接飞出去，
+    整笔事务（含那条刚写好的终态）会一起回滚——任务卡回 `running` 等回收，代价比
+    少一行账大得多。所以账本这一笔套在 `begin_nested()`（Postgres 的 SAVEPOINT）里：
+    写坏只回滚到保存点，终态照常提交。这与 `_write_document` 吞异常的口径同源。
+
+    ## 记什么
+
+    结论（`completed` / `failed` / `cancelled`）、错误分类、脱敏摘要、两列 token 与耗时
+    全部来自本次收尾的载荷——**不在事后从任务行回读**：任务行只保留最近一次错误，
+    账本要的是「这一次」的事实。
+    """
+    outcome = _attempt_outcome(event, error_code)
+    if outcome is None or write.rows <= 0:
+        return
+    targets = _attempt_targets(scope, write)
+    if not targets:
+        return
+
+    if outcome == OUTCOME_COMPLETED:
+        ledger_code = ""
+        summary = ""
+    else:
+        # 与 `_write` 的兜底口径一致：没有明确原因时记成内部错误，而不是留空。
+        ledger_code = error_code or "INTERNAL_ERROR"
+        summary = _sanitize_summary(error_message)
+    prompt_tokens = payload.prompt_tokens if payload else 0
+    completion_tokens = payload.completion_tokens if payload else 0
+    duration_ms = payload.duration_ms if payload else 0
+
+    repo = JobAttemptRepository(session)
+    for job_id in targets:
+        try:
+            with session.begin_nested():
+                repo.append(
+                    job_id,
+                    outcome=outcome,
+                    error_code=ledger_code,
+                    error_summary=summary,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    duration_ms=duration_ms,
+                )
+        except Exception:  # noqa: BLE001 - 审计写失败不许把已成功的生成判死
+            logger.warning(
+                "执行账本写入失败，本次结论不受影响",
+                extra={
+                    "event": "job.attempt_record_failed",
+                    "job_id": job_id,
+                    "outcome": outcome,
+                    "error_code": ledger_code,
+                },
+                exc_info=True,
+            )
 
 
 def _match_runtimes(scope: JobScope) -> list[JobRuntime]:
@@ -409,7 +602,7 @@ def transition(
     _validate(event, scope, payload)
 
     if session is not None:
-        rows, observed_status, observed_code, observed_message = _write(
+        write = _write(
             event,
             scope,
             payload,
@@ -417,21 +610,32 @@ def transition(
             error_message=error_message,
             session=session,
         )
+        # 账本与状态更新同事务：调用方持事务时账本也留在它的事务里，要么一起成、
+        # 要么账本那一笔（且只有那一笔）被保存点回滚。
+        _record_attempt(
+            event,
+            scope,
+            write,
+            payload=payload,
+            error_code=error_code,
+            error_message=error_message,
+            session=session,
+        )
         result = _result(
             event,
-            rows,
+            write.rows,
             requested_code=error_code,
             requested_message=error_message,
-            observed_status=observed_status,
-            observed_code=observed_code,
-            observed_message=observed_message,
+            observed_status=write.observed_status,
+            observed_code=write.observed_code,
+            observed_message=write.observed_message,
         )
         if result.discarded:
-            _log_discard(event, scope, rows, observed_status)
+            _log_discard(event, scope, write.rows, write.observed_status)
         return result
 
     with session_scope() as own_session:
-        rows, observed_status, observed_code, observed_message = _write(
+        write = _write(
             event,
             scope,
             payload,
@@ -439,17 +643,26 @@ def transition(
             error_message=error_message,
             session=own_session,
         )
+        _record_attempt(
+            event,
+            scope,
+            write,
+            payload=payload,
+            error_code=error_code,
+            error_message=error_message,
+            session=own_session,
+        )
     result = _result(
         event,
-        rows,
+        write.rows,
         requested_code=error_code,
         requested_message=error_message,
-        observed_status=observed_status,
-        observed_code=observed_code,
-        observed_message=observed_message,
+        observed_status=write.observed_status,
+        observed_code=write.observed_code,
+        observed_message=write.observed_message,
     )
     if result.discarded:
-        _log_discard(event, scope, rows, observed_status)
+        _log_discard(event, scope, write.rows, write.observed_status)
     _settle(result, scope, runtime=runtime)
     return result
 

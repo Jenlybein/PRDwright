@@ -175,6 +175,8 @@ def _finalize(
             pending_items=runtime.pending_items,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            # 账本要回答「跑了多久」：与 `usage.duration_ms` 同源，一次算好两处用。
+            duration_ms=int(summary.get("duration_ms") or 0),
         ),
         # 与旧 `fail()` 的兜底口径一致：没有明确原因时记成内部错误，而不是留空。
         error_code=error_code or runtime.error_code or ErrorCode.INTERNAL_ERROR.value,
