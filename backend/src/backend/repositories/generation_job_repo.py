@@ -1,9 +1,9 @@
 """生成任务（generation_jobs）的数据仓储。
 
 **数据隔离落在这一层，而不是路由层。** 与 `solution_repo` 的口径一致：除系统级维护
-方法 `reap_running` 与管理员查询外，每个方法的第一个参数都是 `owner_id` 且**不接受
-`None`**——没有「不过滤归属」的逃生口。所有查询、更新都把它写进 SQL 的 WHERE 条件，
-越权访问在数据库层面就查不到这一行。
+方法 `reap_running` / `running_ids` 与管理员查询外，每个方法的第一个参数都是 `owner_id`
+且**不接受 `None`**——没有「不过滤归属」的逃生口。所有查询、更新都把它写进 SQL 的
+WHERE 条件，越权访问在数据库层面就查不到这一行。
 
 `draft_content` 走**合并写**：`job_service` 在内存里维护权威正文，按「≤300ms 或增量
 >4KB」的节奏调用 `persist_progress` 落一份最新快照。因此本层不实现
@@ -479,10 +479,10 @@ class GenerationJobRepository:
     def reap_running(self, *, error_code: str, error_message: str) -> int:
         """系统级维护：把所有残留的 running 任务置为 failed，返回条数。
 
-        **这是本仓库唯一没有 `owner_id` 的用户面外方法**，属于启动运维（进程重启后，
-        内存里的运行时已丢失，DB 里不可能还有真正在跑的任务），**不是用户面接口**。
-        调用点只有 `job_service.reap_orphans()`，即在应用 `lifespan` 启动时回收上次
-        崩溃 / 重启留下的悬挂任务。
+        **本仓库仅有的两个没有 `owner_id` 的方法之一**（另一个是与它配对的
+        `running_ids`），属于启动运维（进程重启后，内存里的运行时已丢失，DB 里不可能
+        还有真正在跑的任务），**不是用户面接口**。调用点只有 `job_service.reap_orphans()`，
+        即在应用 `lifespan` 启动时回收上次崩溃 / 重启留下的悬挂任务。
         """
         result = self.session.execute(
             update(GenerationJob)
@@ -495,6 +495,19 @@ class GenerationJobRepository:
             )
         )
         return int(result.rowcount or 0)
+
+    def running_ids(self) -> list[int]:
+        """系统级维护：当前所有残留 running 任务的 id（供回收前记一笔账）。
+
+        与 `reap_running` 同属启动运维、同样**没有 `owner_id`**：`reap_running` 只回一个
+        条数，而账本要**逐任务一行**，所以回收之前先取一份 id 清单（同一个事务里）。
+        读完就改意味着中间没有窗口：这个函数不做任何过滤假设，返回的就是
+        `status='running'` 的全体。
+        """
+        rows = self.session.execute(
+            select(GenerationJob.id).where(GenerationJob.status == STATUS_RUNNING)
+        ).scalars().all()
+        return [int(row) for row in rows if row is not None]
 
     # ------------------------------------------------------------------
     # 读

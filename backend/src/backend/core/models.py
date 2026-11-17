@@ -1,4 +1,4 @@
-"""数据层模型（v9）：14 张表的**唯一结构真源**。
+"""数据层模型（v9）：15 张表的**唯一结构真源**。
 
 ## 这个文件是什么
 
@@ -446,6 +446,82 @@ class GenerationJob(SQLModel, table=True):
     )
 
 
+class JobAttempt(SQLModel, table=True):
+    """一次「已结束的执行」的账本行（票 #80）：**只增不改**。
+
+    ## 它回答什么
+
+    「这次任务是第几次、成还是败、为什么、花了多少、跑了多久」。任务行只留**最近一次**
+    的错误（`generation_jobs.error_code` / `error_message` 是同值的单份投影），完整的执行
+    历史只在这里——两者分工明确：任务行说「现在是什么状态」，账本说「一路过来都发生过
+    什么」。任务行因此不必再长出一排历史列。
+
+    ## 什么时候写
+
+    **只有执行有结论时才写一行**（成功 / 失败 / 取消 / 回收判死）。抢占、登记、进度合并写
+    都不产生账本行：那只是「开始」与「过程」，不是结论。被取代**不写**——它不是这次执行
+    的结局，而是被更晚的任务接手（`SUPERSEDED` 留在任务行上供排查）。
+
+    ## 序号
+
+    `attempt_no` 在**同一任务内**从 1 起递增，与 `job_id` 组成唯一约束
+    （`ux_job_attempts_job_attempt`）——它是「不重复」的数据库级保证；分配由
+    `JobAttemptRepository.append` 在同一事务里算 `MAX+1`。今天每次执行都会走到终态
+    且不重跑，所以实际取值恒为 1；#82 的重试（一次失败之后再来一次）才会让它变成 2、3。
+
+    ## 「脱敏摘要」
+
+    `error_summary` 是**单行、截断、抹掉疑似凭据**之后的错误文案（实现见
+    `services/job_state._sanitize_summary`）：账本是长期留存的审计数据，不能把上游回显
+    的 key / token 原样抄进来。
+
+    ## 归属与级联
+
+    `job_id` 外键指向 `generation_jobs.id` 且 `ON DELETE CASCADE`：账号被删、任务行被删
+    时账本跟着消失（它是任务行的附属审计，不是独立事实）。刻意不存 `owner_id`——归属
+    一律经任务行 join，避免两份归属真源。
+
+    ## 用量与耗时
+
+    用量取任务收尾时那一份汇总（与 `generation_jobs.usage` / 两个 token 列同源），耗时取
+    同一个 `duration_ms`。回收判死（启动时把残留 `running` 收成失败）没有执行者在场，
+    这两项记 0——那是**未知**，不是「没花」；#82 的租约恢复会把用量带进账本。
+    """
+
+    __tablename__ = "job_attempts"
+    __table_args__ = (
+        # 序号唯一性：同一任务的账本序号从 1 起、不重复。名字写死便于迁移里同形声明。
+        UniqueConstraint("job_id", "attempt_no", name="ux_job_attempts_job_attempt"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    job_id: int = Field(
+        sa_column=Column(
+            Integer, ForeignKey("generation_jobs.id", ondelete="CASCADE"), nullable=False
+        )
+    )
+    # 同一任务内的执行序号（1 起）。唯一约束见 `__table_args__`。
+    attempt_no: int = Field(sa_column=Column(Integer, nullable=False))
+    # 结论：completed / failed / cancelled。取值住在 `repositories/job_attempt_repo.py`。
+    outcome: str = Field(sa_column=Column(short_text(32), nullable=False))
+    # 错误分类（`ErrorCode` 的取值或 CANCELLED 这类中止码）；成功时为空串。
+    error_code: str = Field(default="", sa_column=Column(Text, nullable=False))
+    # 脱敏后的单行摘要（见类 docstring「脱敏摘要」）；成功时为空串。
+    error_summary: str = Field(default="", sa_column=Column(Text, nullable=False))
+    # 这一轮花了多少：与 `generation_jobs` 的两个 token 列同源。
+    prompt_tokens: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
+    )
+    completion_tokens: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
+    )
+    # 这一轮跑了多久（毫秒）：与 `usage.duration_ms` 同源。
+    duration_ms: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
+    )
+    created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
+
+
 # ---------------------------------------------------------------------------
 # 对话
 # ---------------------------------------------------------------------------
@@ -702,6 +778,7 @@ __all__ = [
     "DocumentVersion",
     "GenerationJob",
     "InviteCode",
+    "JobAttempt",
     "LoginFailure",
     "ModelProvider",
     "Solution",

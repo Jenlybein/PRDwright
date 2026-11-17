@@ -159,7 +159,7 @@ def pg_client(pg_database, isolated_db, temp_skills_root, monkeypatch):  # noqa:
 
 
 def test_empty_postgres_database_migrates_to_head(pg_database):
-    """空库 → `upgrade head`：版本到最新、14 张业务表 + 迁移账本都在。
+    """空库 → `upgrade head`：版本到最新、15 张业务表 + 迁移账本都在。
 
     这是「迁移能在全新库上一次跑通」那条 AC 的**空库一半**。它同时钉住 #76 的
     第一号阻塞点：`0001` 的布尔列默认值（`DEFAULT 0`/`1`）在 PG 的 `BOOLEAN` 上非法，
@@ -174,7 +174,7 @@ def test_empty_postgres_database_migrates_to_head(pg_database):
         tables = set(inspect(engine).get_table_names())
         assert "alembic_version" in tables
         business = {name for name in tables if not name.startswith("pg_")}
-        assert len(business) == 15, f"应当是 14 张业务表 + alembic_version，实际 {sorted(business)}"
+        assert len(business) == 16, f"应当是 15 张业务表 + alembic_version，实际 {sorted(business)}"
 
         # 布尔列的**库级默认值**必须真的可插入：以前这里会撞上
         # 「column is of type boolean but default expression is of type integer」

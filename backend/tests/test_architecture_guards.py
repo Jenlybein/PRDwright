@@ -391,28 +391,36 @@ _BACKEND_SPECIFIC_IMPORTS = {"sqlite3", "pymysql", "mysql", "mariadb", "psycopg2
 
 
 def test_c10_migration_chain_is_single_postgres_baseline() -> None:
-    """迁移链只允许一条 Postgres 基线，且不再出现 SQLite / MySQL 专属写法（#78）。
+    """迁移链是**一条线性 Postgres 链**（基线 + 其后增量），且不出现 SQLite / MySQL 专属写法（#78 / #80）。
 
     判据分三层：
 
-    1. `migrations/versions/` 下只有一个 `.py`（`0001_baseline.py`）——0001~0007 已合并；
-    2. `env.py` 与这份基线里没有 `batch_alter_table` / `sqlite_autoincrement` /
-       `sqlite_where` / `PRAGMA` / `mysql` 之类的写法（docstring 除外）；
-    3. `migrations/env.py` 不再按方言给 Alembic 开关（那是双后端时代的残留）。
+    1. `0001_baseline.py` 仍在（它是「空库到 v9 结构」的唯一基线，不许被增量迁移替代）；
+    2. 版本号与 `down_revision` 拼出一条**线性链**：一个起点、一个终点、每个版本最多一个
+       子版本——出现分叉就意味着「同一个库可能按两条不同路径升级」，而 Alembic 只会
+       选一条；
+    3. `env.py` 与**每一份**迁移里没有 `batch_alter_table` / `sqlite_autoincrement` /
+       `sqlite_where` / `PRAGMA` / `mysql` 之类的写法（docstring 除外）。
 
     为什么值得一条守卫：这些写法在 Postgres 上要么是语法错误、要么被静默忽略，
     没人会在「测试全绿」时注意到它们又长回来了。
     """
-    versions = sorted(
-        path.name for path in _VERSIONS.glob("*.py") if not path.name.startswith("_")
-    )
-    assert versions == ["0001_baseline.py"], (
-        "迁移链应当只有一条 Postgres 基线（0001~0007 已合并）；"
-        f"现在 versions/ 下是 {versions}"
+    versions = {
+        path.stem: path
+        for path in _VERSIONS.glob("*.py")
+        if not path.name.startswith("_")
+    }
+    assert "0001_baseline" in versions, (
+        "迁移链应当以 0001_baseline.py 为基线（0001~0007 已合并）；"
+        f"现在 versions/ 下是 {sorted(path.name for path in versions.values())}"
     )
 
+    chain = {stem: _migration_revisions(path) for stem, path in versions.items()}
+    problems = _chain_problems(chain)
+    assert problems == [], "迁移链不成立：\n  " + "\n  ".join(problems)
+
     offenders: list[str] = []
-    for path in [_MIGRATIONS / "env.py", _VERSIONS / "0001_baseline.py"]:
+    for path in [_MIGRATIONS / "env.py", *versions.values()]:
         tree = _parse(path)
         docstrings = _docstring_values(tree)
         for node in ast.walk(tree):
@@ -427,6 +435,53 @@ def test_c10_migration_chain_is_single_postgres_baseline() -> None:
         "迁移里又出现了只为 SQLite / MySQL 存在的写法（这些在 Postgres 上无效）：\n  "
         + "\n  ".join(offenders)
     )
+
+
+def _migration_revisions(path: pathlib.Path) -> tuple[str, str | None]:
+    """从一份迁移文件里读出 `(revision, down_revision)`。
+
+    刻意用正则读文件而不是 `importlib` 导入：迁移模块在 import 时会 `from alembic import op`，
+    而这里只想要两个字符串常量。正则只匹配文件顶部的赋值行（迁移文件的固定写法），
+    读不到就是「写法偏离约定」，单独报出来而不是静默当成「无依赖」。
+    """
+    source = path.read_text(encoding="utf-8")
+    revision = re.search(r'^revision:\s*str\s*=\s*"([^"]+)"', source, re.MULTILINE)
+    down = re.search(
+        r"^down_revision:\s*[^=\n]+=\s*(?:\"([^\"]+)\"|(None))",
+        source,
+        re.MULTILINE,
+    )
+    assert revision is not None, f"{path.name} 没有 `revision: str = \"...\"` 这一行"
+    assert down is not None, f"{path.name} 没有 `down_revision` 赋值行"
+    parent = None if down.group(2) == "None" else down.group(1)
+    return revision.group(1), parent
+
+
+def _chain_problems(chain: dict[str, tuple[str, str | None]]) -> list[str]:
+    """校验版本号拼成的是一条线性链（单起点、单终点、无分叉、无自引用）。"""
+    problems: list[str] = []
+    stems = sorted(chain)
+    revisions = {revision for revision, _ in chain.values()}
+    if len(revisions) != len(stems):
+        problems.append(f"有重复的 revision 号：{[chain[stem][0] for stem in stems]}")
+    bases = [stem for stem in stems if chain[stem][1] is None]
+    if len(bases) != 1:
+        problems.append(f"迁移链应当恰有一个起点（down_revision 为空），实际 {bases}")
+    children: dict[str, list[str]] = {}
+    for stem in stems:
+        under = chain[stem][1]
+        if under is not None and under not in revisions:
+            # 版本号与文件名不要求同名，但 down_revision 必须指向链上真实存在的版本
+            problems.append(f"{stem} 的 down_revision={under} 不在链上")
+        if under is not None:
+            children.setdefault(under, []).append(stem)
+    for parent, child in children.items():
+        if len(child) > 1:
+            problems.append(f"{parent} 有多个子版本 {child}：迁移链分叉了")
+    heads = revisions - set(children)
+    if len(heads) != 1:
+        problems.append(f"迁移链应当恰有一个 head，实际 {sorted(heads)}")
+    return problems
 
 
 def test_c10_production_code_has_no_other_backend() -> None:
