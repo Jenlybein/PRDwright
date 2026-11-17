@@ -129,6 +129,8 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
         "instruction": payload.instruction,
         # 落库用：`optimize` 靠它知道把结果写进哪一份产物
         "doc_kind": payload.doc_kind,
+        # 就地改写的版本锁（票 #81）：随任务单定格，收尾按它做条件写。
+        "expected_version_no": payload.expected_version_no,
         # 仅 auto_clarify：交给后端拼提示词的**结构化数据**，不是前端拼好的文本
         "pending_items": payload.pending_items,
         # 仅 prd：`None` 时由服务层取配置，显式 `false` 才关掉逐章审核

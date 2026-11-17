@@ -95,11 +95,25 @@ class DocumentListResponse(BaseModel):
 class DocumentSaveRequest(BaseModel):
     """用户手改正文的提交体。
 
-    只有 `content`：归属由路径上的方案 id 决定、产物类型由路径上的 kind 决定。
-    刻意**不接收**待确认清单——它是模型产出的元数据，不该由用户或客户端改写。
+    只有 `content` + 可选的 `expected_version_no`：归属由路径上的方案 id 决定、产物类型由
+    路径上的 kind 决定。刻意**不接收**待确认清单——它是模型产出的元数据，不该由用户或
+    客户端改写。
+
+    `expected_version_no` 是**版本锁**（票 #81）：客户端提交时「我以为当前是第几版」
+    （来自它读到的那份文档的 `version_no`）。不给时不比对（兼容旧客户端 / 内部调用）；
+    给了且与库里当前版本号不一致时后端**拒绝写入**（HTTP 409 + `CONTENT_CHANGED`），
+    不按「当前版本」盲改——那一版很可能已经是刚生成好的新正文，覆盖回去就是静默丢稿。
     """
 
     content: str = Field(description="用户编辑后的完整文档正文")
+    expected_version_no: int | None = Field(
+        default=None,
+        description=(
+            "客户端以为的当前版本序号（`documents.version_no`）。对不上时拒绝保存："
+            "409 + `CONTENT_CHANGED`，界面提示「正文已被更新，请刷新后重试」。"
+            "0 表示「我认为这份文档还没有任何版本」（首次手改时允许建版本 1）。"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

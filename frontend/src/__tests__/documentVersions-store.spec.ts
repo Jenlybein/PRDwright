@@ -30,6 +30,12 @@ vi.mock('../services/documentService', () => ({
       this.name = 'DocumentsNotFoundError'
     }
   },
+  DocumentVersionConflictError: class DocumentVersionConflictError extends Error {
+    constructor(message = '正文已被更新，请刷新后重试') {
+      super(message)
+      this.name = 'DocumentVersionConflictError'
+    }
+  },
   fetchDocuments: vi.fn(),
   saveDocument: vi.fn(),
   fetchVersions: vi.fn(),
@@ -206,6 +212,21 @@ describe('useDocumentVersionsStore 的写入', () => {
     expect(ok).toBe(false)
     expect(versions.error).toBe('恢复版本失败')
     expect(documentApi.fetchDocuments).not.toHaveBeenCalled()
+  })
+
+  it('手改没保存成功时不继续写版本，也不报成功（#81：保存失败不能显示成功）', async () => {
+    const { documents, versions } = setup()
+    vi.mocked(documentApi.saveDocument).mockRejectedValue(new Error('网络断了'))
+    vi.mocked(documentApi.checkpointDocument).mockResolvedValue(makeRecord('prd', '# 手改'))
+
+    // 防抖窗口里还有一笔没落库的手改
+    documents.save('prd', '# 手改')
+
+    const ok = await versions.checkpoint('prd', '# 手改')
+
+    expect(ok).toBe(false)
+    expect(documentApi.checkpointDocument).not.toHaveBeenCalled()
+    expect(versions.error).toBe('网络断了')
   })
 
   it('方案还没登记时直接返回 false，不发请求', async () => {

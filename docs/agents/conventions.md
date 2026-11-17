@@ -34,7 +34,7 @@
 - `max_overflow=0` 是承重设计：运行期一条连接都不许新建（池满就报错，连接数问题不推迟到服务端 `max_connections`）；启动路径必须在 `prepare_schema` 之后调 `warmup(engine)`。
 - 数据层是 SQLModel：时间工具在 `core/clock.py`，引擎 / 事务在 `core/engine.py`，连哪个库在 `core/database.py`。
 - 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8）。
-- 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8）。
+- 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在**统一正文写入入口**（`document_store.write_document`，三种 mode 都过闸）与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8；#81 之前就地改写能绕过这道闸）。
 - upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；必须显式给 `conflict_cols`（不带目标的 `DO NOTHING` 语义更宽），只准用在「该表只有一个唯一约束」的表上（契约 C-D1）。
 - **唯一部署后端是 Postgres**（v9 起，票 #75~#78）：SQLite / MySQL 的方言分支、迁移链、测试基座与备份链都已删除；`SUPPORTED_BACKENDS` 只含 `postgresql`，非 Postgres 地址在 `core/database.py` 就被拒绝并给出迁移指引，旧 SQLite 库拒绝启动。四模块边界仍在 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），意义是「方言知识只出现一处」；可移植性台账与 C-D1~C-D6 见 `docs/architecture/ARCHITECTURE.md 附录 A`（v8 原文，结论已被 #78 取代）。两条列类型纪律继续守：索引列必须 `short_text(n)`（n≤768）、大文本（`long_text()`）不得带 `server_default`。
 - `get_settings()` 走 lru_cache：改环境变量后必须 `cache_clear()`；`prompts.py` 走 `str.format()`，字面量花括号写 `{{ }}`，给 LLM 的指令用 `<!-- -->` 注释。
@@ -139,8 +139,9 @@
 - 版本来源取值（`document_versions.source`）必须**全部**在 `frontend/src/utils/versions.ts` 有中文说法：它直接取 `runtime.kind`（`prd` / `api_docs` / `prompts` / `optimize` / `clarify` / `auto_clarify` / `review_fix`）或写入口（`manual` / `checkpoint` / `restore` / `migrated`），漏一个版本历史里就出现裸标识符。`review` 不追加版本，因此不会出现在版本行上。
 - 「是否追加版本」与「是否删下游」恒等（都由「是不是整篇重生成」决定），`job_service` 收成一个 `append_version` 标志。
 - 环形外键：先空指针插 `documents` 行 → 插版本 → 回填指针（`_ensure_document()`）。
-- 写正文唯一入口 = job 成功收尾（`_write_document` → `commit_generated`）：正文 + 清单 + 回执同批写入、失败不覆写；新增产出正文的路径不要自己写库，接进 `_build_event_stream` 的 `done`。
-- `save_content`（手改）与 `commit_generated`（整批写入）别互相顶替；`optimize` / `clarify` / `auto_clarify` / `review_fix` 落地靠请求体 `doc_kind`，取不到 → 不落库也不猜默认值；`review` 只更新当前版本的结论列。
+- 写正文**只有一个入口**（#81）：`document_store.write_document(mode=append / replace / manual, expected_version_no=…)`——手改、整篇生成、修复、恢复、就地改写都走它；`save_document` / `commit_generated` / `checkpoint` / `restore` 是薄封装。新增产出正文的路径不要自己写库，接进 `_build_event_stream` 的 `done`（收尾经 `_finalize` → `write_document`）。**所有会覆盖当前正文的写入带版本锁**：对不上返回 `version_conflict`（不是「0 行 / 成功」），HTTP 保存回 409 + `CONTENT_CHANGED`，就地改写让任务判失败——旧内容不许覆盖已更新的正文。正文 + 清单 + 回执（就地改写时）同批写入、失败不覆写。
+- **收尾是一个事务**（#81）：`_finalize` 用一个 `session_scope()` 收进「状态机条件写 + 账本（保存点）+ 正文版本 + 审核结论」，提交后才结算内存与广播；写正文失败整批回滚、任务保持 `running`（留 `job.closeout_rolled_back`，由恢复接手），**不许把异常吞成 warning 后照报 completed**。重审结论写不进去仍判失败（第二笔事务只落失败 + 账本）；就地改写撞版本锁以 `CONTENT_CHANGED` 判失败。
+- `save_document`（手改，就地改当前版本、只动正文）与 `commit_generated`（整批写入：`append_version=True` 追加版本 / `False` 就地替换正文 + 清单 + 回执）都只是 `write_document` 的门面；`optimize` / `clarify` / `auto_clarify` / `review_fix` 落地靠请求体 `doc_kind`，取不到 → 不落库也不猜默认值；`review` 只更新当前版本的结论列（`commit_review`，可入收尾事务）。
 - 版本路由挂 solution 作用域（`.../{kind}/versions`、`.../versions/{vid}`、`POST .../{kind}/checkpoint`、`POST .../{kind}/restore`）；版本不存在复用 `SOLUTION_NOT_FOUND`(404) 不新增错误码：「方案不可见」404、「还没有任何版本」200 + 空列表。
 - 删除只删历史版本，当前版本回 400 `INVALID_REQUEST`；守卫写在仓储 SQL 的 `WHERE`（`v.id != COALESCE(d.current_version_id, -1)`），不是「先查后删」。
 - 删除只重拉列表、不重拉当前文档；checkpoint / restore 相反（要 `documents.reload()` + 重拉列表）。

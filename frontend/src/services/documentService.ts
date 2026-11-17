@@ -57,6 +57,21 @@ export class DocumentsNotFoundError extends Error {
 }
 
 /**
+ * 版本锁拒绝写入（后端 409 + `CONTENT_CHANGED`）时抛出。
+ *
+ * 含义：客户端保存时带的「我以为当前是第几版」已经不是库里的当前版本——这段时间里
+ * 生成任务追加了新版本（或者别的会话换了版）。此时**绝不能**把本地旧内容重试回去，
+ * 否则会把新正文悄悄覆盖掉。界面提示「正文已被更新，请刷新后重试」，本地改动保留在
+ * 工作副本里（不静默丢）。
+ */
+export class DocumentVersionConflictError extends Error {
+  constructor(message = '正文已被更新，请刷新后重试') {
+    super(message)
+    this.name = 'DocumentVersionConflictError'
+  }
+}
+
+/**
  * 把后端返回的待确认清单收敛成前端结构。
  *
  * 后端返回的 `pending_items` 是对象数组；逐条校验「有 id 且有 question」才收，
@@ -189,22 +204,34 @@ export async function fetchDeliveryZip(solutionId: number): Promise<Blob> {
  * 对应 `PUT /api/solutions/{id}/documents/{kind}`。
  *
  * 只覆盖正文——待确认清单与用量回执是「上一次生成」的事实，不因用户改几个字而改变。
+ *
+ * `expectedVersionNo` 是**版本锁**（票 #81）：调用方读到的那份文档的 `version_no`。
+ * 后端对不上时回 409 + `CONTENT_CHANGED`，这里翻成 `DocumentVersionConflictError`——
+ * 调用方（`stores/documents.ts`）据此**停止重试**并提示刷新，而不是把旧内容覆盖回去。
+ * 不传时不做比对（兼容旧调用方 / 还没有版本的文档）。
  */
 export async function saveDocument(
   solutionId: number,
   kind: DocumentKind,
   content: string,
+  expectedVersionNo?: number,
 ): Promise<DocumentRecord> {
   try {
-    const { data } = await http.put(`/api/solutions/${solutionId}/documents/${toBackendKind(kind)}`, {
-      content,
-    })
+    const payload: { content: string; expected_version_no?: number } = { content }
+    if (expectedVersionNo !== undefined) payload.expected_version_no = expectedVersionNo
+    const { data } = await http.put(
+      `/api/solutions/${solutionId}/documents/${toBackendKind(kind)}`,
+      payload,
+    )
     const record = toRecord(data)
     if (record === null) throw new Error('保存文档失败')
     return record
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) {
       throw new DocumentsNotFoundError()
+    }
+    if (axios.isAxiosError(error) && error.response?.status === 409) {
+      throw new DocumentVersionConflictError(backendMessage(error, '正文已被更新，请刷新后重试'))
     }
     // 兜底文案与上面 `toRecord` 失配时抛的错同源：非 axios 错误一律收敛成它，
     // 因此这里不必再分辨「是不是自己抛的」——那会变成拿中文文案做判断。

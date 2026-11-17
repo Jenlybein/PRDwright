@@ -24,11 +24,13 @@ from backend.core import runtime_config as rc
 from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
 from dbsupport import connect
-from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
+from conftest import (
+    model_providers as ModelProviderRepository,
+    register,
+    system_config as SystemConfigRepository,
+)
 from backend.services import document_service, llm_factory
-from backend.services.job_bus import job_bus
-from backend.services.job_ticket import start_registered_job
-from ticket_support import fake_registered_ticket
+from ticket_support import run_ticket_events
 
 
 class _FakeLLM:
@@ -259,12 +261,15 @@ def test_task_snapshot_does_not_drift():
     assert rc.get_runtime_config().settings.prd_pipeline_concurrency != before
 
 
-def test_job_meter_uses_active_provider():
+def test_job_meter_uses_active_provider(client):
     """任务回执里记的是**使用中的那条配置**，而不是 `DEFAULT_LLM_PROVIDER`。
 
     切过配置之后，后者可能与实际发出的请求不符——回执与账单就对不上了。
-    只派发不登记的用例归到「造单 + 派发」：造单是公开正门，可直接造假单；
-    假事件流在造单时传入，断言外部可观察的 `run_summary` 回执，不探内部摆位。
+
+    ⚠️ #81 起「收尾」是一次条件写（`WHERE status='running'`）+ 同事务副作用；不登记的假任务
+    改不到任何行，收尾按「本次结果被丢弃」处理、不再广播回执（旧实现会照发一份）。因此
+    这条用例改成走真实的「登记 → 派发 → 订阅」接缝（主接缝 `ticket_support` 本来就是
+    这类用例的标准写法），断言的仍是同一件事：`run_summary` 里的四格供应商身份。
     """
     ModelProviderRepository.create(
         provider_id="cfg_claude01",
@@ -274,35 +279,17 @@ def test_job_meter_uses_active_provider():
     )
     _set(active_provider_id="cfg_claude01")
     rc.invalidate()
+    register(client)
 
-    async def fake_stream(kind, request):  # noqa: ANN001, ARG001
-        yield StreamEvent(type="chunk", content="假流", data={})
-        yield StreamEvent(type="done", content="", data={"reply": "假流", "partial": False})
+    registered, events = run_ticket_events(
+        1,
+        None,
+        "prd",
+        {"requirements": "x", "product_name": "y"},
+        StreamEvent(type="chunk", content="假流", data={}),
+        reply="假流",
+    )
 
-    import asyncio
-
-    async def _run() -> list:
-        # 造单时定格配置快照（生产真值），随即用公开正门补登记身份造假单②。
-        ticket = fake_registered_ticket(
-            owner_id=1,
-            solution_id=None,
-            kind="prd",
-            request={"requirements": "x", "product_name": "y"},
-            job_id=999,
-            event_stream_source=fake_stream,
-        )
-        # 只派发不登记：订阅这个假 id，读回执里的四格供应商身份。
-        queue = job_bus.subscribe(ticket.job_id)
-        start_registered_job(ticket)
-        events = []
-        while True:
-            event = await asyncio.wait_for(queue.get(), timeout=5)
-            if event is None:
-                break
-            events.append(event)
-        return events
-
-    events = asyncio.run(_run())
     summary = next(event for event in reversed(events) if event.type == "run_summary").data
     # 协议与条目 id 必须同时记下：前者用于查限值与聚合账单，后者用于定位到具体一条
     assert summary["protocol"] == "anthropic", f"应按协议记录，实际 {summary['protocol']}"
@@ -310,6 +297,7 @@ def test_job_meter_uses_active_provider():
     assert summary["provider_name"] == "Claude-测试"
     assert summary["model"] == "claude-test"
     assert summary["status"] == "completed"
+    assert registered.job_id > 0
 
 
 # ---------------------------------------------------------------------------
