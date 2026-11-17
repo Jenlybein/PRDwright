@@ -50,7 +50,7 @@ from conftest import job_create, job_get, register, users
 from backend.core.clock import utc_now
 from backend.core.engine import session_scope
 from backend.repositories.job_attempt_repo import OUTCOME_FAILED, JobAttemptRepository
-from backend.services import job_claimer, job_recovery, job_service, job_state
+from backend.services import job_backoff, job_claimer, job_recovery, job_service, job_state
 
 # 租约时长与 `job_claimer.DEFAULT_LEASE_SECONDS` 一致：用例只借它算「过期时刻」。
 LEASE_SECONDS = job_claimer.DEFAULT_LEASE_SECONDS
@@ -127,8 +127,10 @@ def test_a_dead_executors_job_leaves_executing_and_is_claimable_again(alice):
     assert row["lease_owner"] == ""
     assert row["lease_token"] == ""
     assert row["lease_expire_at"] == ""
-    # 不是「永远进行中」：下一个执行者当场能把它领走。
-    assert job_claimer.claim(alice, job_id, lease_owner="proc-b", now=died_later) is not None
+    # 不是「永远进行中」：等过失败退避（#88，超时那一路 5 秒）之后，下一个执行者
+    # 就能把它领走。退避到期之前领不走——那是 #88 的到期闸门，本文件只借它算时刻。
+    due = died_later + timedelta(seconds=job_backoff.BACKOFF_TIMEOUT_SECONDS)
+    assert job_claimer.claim(alice, job_id, lease_owner="proc-b", now=due) is not None
 
 
 def test_used_up_attempts_turn_the_job_failed_with_lease_expired(alice):
@@ -144,6 +146,9 @@ def test_used_up_attempts_turn_the_job_failed_with_lease_expired(alice):
         assert job_claimer.claim(alice, job_id, lease_owner="proc-a", now=moment) is not None
         moment = moment + timedelta(minutes=5)
         last = job_recovery.recover_once(10, now=moment)
+        # #88：回排队之后要先等过失败退避才允许被领走（超时那一路 5 秒），
+        # 所以下一轮的「现在」推到到期时刻，而不是接着上一轮的失败时刻。
+        moment = moment + timedelta(seconds=job_backoff.BACKOFF_TIMEOUT_SECONDS)
 
     assert last is not None
     assert last.failed == 1, "次数用完之后不该再回排队"

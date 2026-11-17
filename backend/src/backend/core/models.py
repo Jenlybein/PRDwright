@@ -476,6 +476,19 @@ class GenerationJob(SQLModel, table=True):
         default="",
         sa_column=Column(timestamp_text(), nullable=False, server_default=text("''")),
     )
+    # --- 失败退避（票 #88）---
+    #
+    # 「这条任务最早什么时候可以被下一个执行者领走」。可重试失败回排队时写
+    # 「失败时刻 + 按错误类型算出的退避时长」（映射表在 `services/job_backoff.py`，
+    # 全仓只一份）；到期之前抢占条件一行都改不到。
+    #
+    # 空串 = **立即到期**（不是「没有值」）：于是到期判据只有一种形状——
+    # `next_run_at = '' OR next_run_at <= now`。允许 NULL 的话每处判据都要多一条
+    # `IS NULL` 分支，漏写一处不会报错、只会让那一行永远领不走。
+    next_run_at: str = Field(
+        default="",
+        sa_column=Column(timestamp_text(), nullable=False, server_default=text("''")),
+    )
     # 「这次生成有内容可用、但不完整」（票 #85）：失败收尾（含用户取消）把已生成的正文
     # 落成一版 `document_versions.partial=true` 时，任务行同一次事务里留这一份投影。
     #

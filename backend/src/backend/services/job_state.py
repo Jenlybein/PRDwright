@@ -35,7 +35,7 @@
 | `FAIL` | 单条任务 | `fail`（failed + 错误码） | status=failed + 错误码 |
 | `CANCEL` | 单条 / 方案 / owner | `failed + CANCELLED` | 只置「取消意图」标志 |
 | `SUPERSEDE` | 同 owner+方案+产物 | `failed + SUPERSEDED` | 只置「被顶替意图」标志 |
-| `REQUEUE` | 单条任务 + 旧租约凭证 | 清租约三列（仍是 running） | 不结算（执行者在别的进程里，已不在场） |
+| `REQUEUE` | 单条任务 + 旧租约凭证 | 清租约三列（仍是 running）+ 写 `next_run_at`（按错误码的退避） | 不结算（执行者在别的进程里，已不在场） |
 | `EXPIRE` | 单条任务 + 旧租约凭证 | `failed + LEASE_EXPIRED` + 清租约 | 同上 |
 
 四条终止路径全部改道经它：成功收尾与失败收尾在 `job_finalize._finalize`，
@@ -52,6 +52,21 @@
 
 一条过期租约的去向（回排队 / 判失败）由恢复器按账本决定；状态机只负责「这条转换
 能不能成立」，它从不替调用方挑去向，也不碰调度（怎么扫、扫多久是 `job_recovery` 的事）。
+
+### 失败退避（#88）：回排队**不等于立刻能领**
+
+`REQUEUE` 除了清租约，还要写下「最早什么时候可以被下一个执行者领走」——`next_run_at`。
+这一列不靠调用方另发一条 UPDATE，而是与清租约、`updated_at` 在**同一条条件 UPDATE**里
+写完：否则「已经把行交给队列」与「退避时间还没写上」之间就有一个能被立刻领走的窗口，
+连续限流恰好会从这个窗口里把三次机会烧光。
+
+该等多久唯一由 `services/job_backoff` 的映射表决定（**按错误码值查，不看中文文案**）：
+限流 30 秒、上游 5xx 10 秒、超时 5 秒、其余 5 秒。状态机只做一件事：把
+`transition(now_text=...)` 的那个「现在」与错误码一起交给它，保证「判断」与「写入」
+看到同一秒（AC5 里「时间入口可注入」的落点也在这里）。
+
+到期闸门与排队顺序只有仓储一处定义（`_due_now` / `_queue_order`）：未到期的行
+`claim` / `claimable` 都够不着，到期之后才按 `updated_at` 排队。
 
 ### 取消、顶替只置「意图」，不置终态
 
@@ -102,6 +117,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session
 
+from backend.core.clock import utc_now_text
 from backend.core.engine import session_scope
 from backend.repositories.generation_job_repo import (
     STATUS_COMPLETED,
@@ -115,6 +131,7 @@ from backend.repositories.job_attempt_repo import (
     OUTCOME_FAILED,
     JobAttemptRepository,
 )
+from backend.services import job_backoff
 from backend.services.job_runtime import _RUNTIMES
 
 if TYPE_CHECKING:
@@ -144,6 +161,9 @@ class JobEvent(StrEnum):
     `REQUEUE` / `EXPIRE` 是 #83 加的：**恢复器**接手一条过期租约的两种去向。
     前者把租约交还队列（状态不变，下一次抢占会重新写凭证），后者判失败。两者都必须
     带扫描时读到的旧凭证（`LeaseFence`）——恢复器的判权与 #82 的写权是同一条规则。
+
+    `REQUEUE` 在 #88 之后还多写一列 `next_run_at`（按 `error_code` 的退避时长）：回排队
+    之后要等一段时间才允许被领走，避免连续限流把重试机会在几十秒内耗光。
     """
 
     CLAIM = "claim"
@@ -419,12 +439,19 @@ def _write(
             )
     elif event is JobEvent.REQUEUE:
         fence = lease_fence or LeaseFence(token="", expire_at="")
+        # 失败退避（#88）：回排队**不等于立刻能领**。该等多久由唯一映射表算
+        # （`services/job_backoff`，按错误码值查），写进 `next_run_at` 与清租约、
+        # 更新 `updated_at` 放在**同一条 UPDATE**里——不存在「先回排队、再补退避时间」
+        # 那种能被抢跑的中间态，也不存在收尾之外的第二条写路径。
+        requeue_now = now_text or utc_now_text()
+        backoff = job_backoff.of(error_code or _default_code(event), now_text=requeue_now)
         rows = repo.requeue_lease(
             owner_id,
             int(scope.job_id or 0),
             lease_token=fence.token,
             lease_expire_at=fence.expire_at,
-            now_text=now_text,
+            now_text=requeue_now,
+            next_run_at=backoff.next_run_at,
         )
     elif event is JobEvent.EXPIRE:
         fence = lease_fence or LeaseFence(token="", expire_at="")
@@ -713,7 +740,8 @@ def transition(
         runtime: 单条任务的内存运行时。给了它，成功时同步结算 `status` / 错误码。
         payload: 收尾载荷（`SUCCEED` / `FAIL` 必填）。
         error_code: `FAIL` / `CANCEL` / `SUPERSEDE` / `REQUEUE` / `EXPIRE` 的错误码
-            （后三者留空时取默认值）。
+            （后三者留空时取默认值）。`REQUEUE` 还用它查**退避时长**（`job_backoff`
+            的唯一映射表）——所以回排队这类转换的码值不是装饰，它决定「等多久」。
         error_message: 落进 `error_message`（以及账本摘要）的文案。
         session: 调用方自己持有事务时传入（删方案 / 删账号 / 登记顶替要和别的写同生共死）。
             **传入时本函数不结算内存**：调用方必须在事务提交之后调

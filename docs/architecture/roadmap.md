@@ -247,9 +247,11 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 | **#80** | 执行账本 | `job_attempts` + `repositories/job_attempt_repo.py`；与状态更新同一事务、保存点隔离（审计写坏不杀结论） | 已合入（`cf25ec1`） |
 | **#81** | 原子收尾 + 统一版本锁 | `services/job_finalize.py` 单事务收尾；`services/document_store.py::write_document` 唯一写入入口 + `expected_version_no`；`repositories/document_repo.py::write_current_version` 条件写；`PUT .../documents/{kind}` 409 + `CONTENT_CHANGED`；就地动作的 `expected_version_no` 随任务单定格；前端冲突提示与「保存失败不显示成功」 | 本轮（`ticket/81-atomic-closeout`，基于 `cf25ec1`） |
 | **#82** | 抢占 + 租约 + 动作点续租 | `0003` 三列（`lease_owner` / `lease_token` / `lease_expire_at`）、`services/job_claimer.py` 抢占 / 续租、状态机 `CLAIM` 事件、收尾三条件回写 | 已合入（`d7b89bc`） |
-| **#85** | 部分完成落成新版本 | `0004` 两列（`document_versions.partial` / `generation_jobs.partial`）、失败收尾追加部分完成版本（审核两列留空、与任务标记同事务）、前端三处提示 | 本轮（`ticket/85-partial`，基于 `7b9c2ad`） |
-| **#83** | 恢复器（过期租约收口） | `services/job_recovery.py`：`recover_once(limit)` 可直接调用（不起线程 / 定时器）；扫描时旧凭证 fencing（凭证 + 到期时间两列进 WHERE）；周期档按账本剩余次数回排队 / 判失败（`LEASE_EXPIRED`），启动档一律落终态；`reap_orphans` 收编为 `recover_once(startup=True)` | 本轮（`ticket/83-recovery`，基于 `7b9c2ad`） |
-| #84 / #86 / #88 | 七态与「取消中」 / 事件表与快照 / 失败退避 | 见 spec 第六~八节 | 待做 |
+| **#85** | 部分完成落成新版本 | `0004` 两列（`document_versions.partial` / `generation_jobs.partial`）、失败收尾追加部分完成版本（审核两列留空、与任务标记同事务）、前端三处提示 | 已合入（`cf2b2a0`） |
+| **#83** | 恢复器（过期租约收口） | `services/job_recovery.py`：`recover_once(limit)` 可直接调用（不起线程 / 定时器）；扫描时旧凭证 fencing（凭证 + 到期时间两列进 WHERE）；周期档按账本剩余次数回排队 / 判失败（`LEASE_EXPIRED`），启动档一律落终态；`reap_orphans` 收编为 `recover_once(startup=True)` | 已合入（`4f668ff`） |
+| **#86** | 事件表与游标订阅 | `job_events` 表（迁移 `0005`）+ `services/job_events.py`；`GET /api/jobs/{id}/stream` 按游标读表、断线重连不重不漏；快照防冷读回放；清理是可调用单元 | 已合入（`8727973`） |
+| **#88** | 失败延迟退避 | `0006` 一列（`generation_jobs.next_run_at`）、`services/job_backoff.py` 唯一映射表（限流 / 5xx / 超时）、`job_state.transition(REQUEUE)` 同批写退避、仓储到期闸门 `_due_now` 与排队顺序 `_queue_order`、前端等待倒计时与退避期取消 | 本轮（`ticket/88-backoff`，基于 `b3a7940`） |
+| #84 | 七态与「取消中」 | 见 spec 第六节 | 待做 |
 
 ### 9.4 验收（#81）
 
@@ -307,3 +309,44 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 **复测**（`ticket/83-recovery`，基于 `7b9c2ad`；已并入 `integration/spec-75` 的 #85 之后）：后端 `uv run pytest -n auto`（单独跑、不与其它全量并发）**1413 passed / 0 skipped / 0 failed**（收集 1413 = 合并前基线 1401 + 本票 12 条）。第一次全量有 1 条 DB 连接类假红（`test_second_login_revokes_the_first_session` 撞 psycopg `OperationalError`），单跑绿、第二次全量全绿，按「先单跑、再看错误类型、再重跑全量」的口径记为环境串扰，不记回归。**未执行**：push、合并与发布（由用户确认）。
 
+
+### 9.8 范围、验收与复测（#88 失败延迟退避）
+
+**范围**：可重试失败**回排队之前先等一段时间**，按错误类型区分，避免连续限流在几十秒内把重试次数耗光。本票只把「到期」这个判据落库并用例化——**调度循环仍然不存在**（谁领、多久扫一次是 #89）。
+
+- **迁移 `0006`**：`generation_jobs.next_run_at`，`VARCHAR(32) NOT NULL DEFAULT ''`，`down_revision = "0005"`。空串 = **立即到期**（不是「没有值」），于是到期判据只有一种形状。
+- **错误码 → 退避秒数的唯一映射表**：`backend/src/backend/services/job_backoff.py` 的 `BACKOFF_SECONDS`——限流（`INVALID_REQUEST`，仓库里 HTTP 429 的稳定码）**30 秒**、上游 5xx（`LLM_UPSTREAM_ERROR`）**10 秒**、超时（`LEASE_EXPIRED`）**5 秒**、其余兜底 5 秒。按 **code 值**分类，不看中文文案 / `detail`；调用方一个数字都不写。
+- **写入点只有一处**：`job_state.transition(REQUEUE, …)` 把「退避 + 清租约 + `updated_at` + 账本」压进同一条条件 UPDATE、同一个事务（不存在「已回排队但还能被立刻领走」的窗口，也不存在收尾之外的第二条写路径）。
+- **到期闸门与排队顺序各只有一处定义**（`repositories/generation_job_repo.py` 的 `_due_now` / `_queue_order`）：
+
+  ```sql
+  -- 抢占 / 候选扫描共同的条件（字面即 SQL，两条入口同一处定义）
+  WHERE status = 'running'
+    AND (lease_token = '' OR lease_expire_at < now)
+    AND (next_run_at = '' OR next_run_at <= now)     -- 到期闸门（#88）
+
+  -- 闸门之后的排队顺序（唯一一处 `_queue_order`）
+  ORDER BY updated_at, id
+  ```
+
+  规则固定为：**先看是否到期（闸门在 WHERE 里），到期之后才按 `updated_at` 排队**。回排队把 `updated_at` 推到现在 = 排到同优先级队尾；`created_at` 不再参与排序。两套语义各管一段，不叠加成第三种顺序。
+- **时间入口可注入**：`transition(now_text=…)` / `claim(now=…)` / `recover_once(now=…)` 都接受注入的时刻（唯一时钟入口仍是 `core/clock.py`），用例毫秒级演示 30 / 10 / 5 秒。
+- **前端**（`frontend/src`）：等待态**不显示成失败、也不无限转圈**——运行视图换成「等待重试，约 xx 秒后」（到点转「即将重试」，向上取整 + clamp 到 0，不跳负数、不闪烁），进度条与转圈动画在等待态不渲染；**退避期间取消仍然可用**（等待面板上的「停止生成」调 `POST /api/jobs/{id}/cancel`，等待态任务没有运行时，所以取消后前端自己收尾本地运行态并回到审阅页）。数据来源是 DB 兜底快照新增的 `next_run_at` 字段。
+
+**验收（逐条都有对应用例，`backend/tests/test_job_backoff.py`；前端在 `frontend/src/__tests__/jobBackoff.spec.ts`）**：
+
+1. 限流退 30 秒 / 上游 5xx 退 10 秒 / 超时退 5 秒，映射集中一处 —— `test_backoff_table_is_the_single_mapping`、`test_backoff_keys_are_all_stable_codes`、`test_unknown_code_falls_back_to_the_shortest_wait`、`test_requeue_presses_the_backoff_of_its_failure_code`（三个参数化用例）、`test_backoff_time_is_a_pure_function_of_the_injected_clock`。
+2. 未到期的任务不被抢占 —— `test_a_backoff_row_stays_unclaimed_until_its_time_comes`（真实链路：抢占 → 租约过期 → 恢复器回排队 → 到期前领不到、到期后领得到）、`test_the_queue_scan_also_skips_rows_that_are_not_due_yet`（扫描侧同口径）。
+3. 排序规则「先看到期，到期后按更新时间」 —— `test_queue_order_is_due_gate_then_updated_at`（未到期不是候选、到期后按 `updated_at`、`created_at`/id 不参与）、`test_a_requeued_row_goes_to_the_tail_of_the_due_queue`。
+4. 同一任务连续失败的时间间隔符合退避设置 —— `test_two_consecutive_failures_each_wait_the_full_backoff`（两次失败各等满 5 秒、两次失败之间隔着一整轮租约）、`test_a_rate_limited_task_waits_thirty_seconds_between_retries`（限流那一路等满 30 秒）。
+5. 时间入口可注入、用例不靠 sleep —— `test_the_due_judgement_follows_the_injected_moment_not_the_wall_clock`（判据只看注入时刻与库里的列，与真实流逝无关）+ 全文件无 `sleep`。
+6. 周边：退避期间取消仍即时生效 —— `test_cancelling_a_waiting_job_still_works_immediately`；快照带等待信息 —— `test_the_db_snapshot_tells_the_frontend_when_the_retry_comes`、`test_a_job_that_never_failed_carries_an_empty_next_run_at`。
+7. 前端：等待原因 / 不显示成失败 / 倒计时不跳负数 / 退避期取消仍可用 —— `jobBackoff.spec.ts` 的 9 条（工具 4 条 + `GeneratingStage` 等待态 5 条）。
+
+**复测**（`ticket/88-backoff`，基于 `integration/spec-75` tip `b3a7940`）：后端 `uv run pytest -n auto`（单独跑、不与其它全量并发）**1445 passed / 0 skipped / 0 failed**（= 合并前基线 1428 + 本票 17 条）。前端 `npm run test:unit -- --run` **805 passed / 42 文件**；`npm run build`（含 `type-check`）通过。**未执行**：push、合并与发布（由用户确认）。
+
+**已知遗留（给后续票）**：
+
+- **调度循环**（#89）：到期之后由谁来扫、多久扫一次、扫到怎么派发——本票不起后台定时器，退避只把判据落库。因此在有调度循环之前，真正被回排队的行会停在「等待重试」而没人领。
+- **「可重试失败」转换**（#84）：本票能真实产生的是超时那一路（恢复器回排队带 `LEASE_EXPIRED`）；限流 / 上游 5xx 两档要等 #84 把「执行中 → 排队中」这条转换接上，映射与写入路径已全部定死，接线时不需要动退避代码。
+- **等待中的订阅**：等待态任务没有运行时，DB 兜底快照发完就结束（不是本票改的语义）。等调度循环接上之后，「等服务端事件」这一步才有意义；在那之前靠快照里的 `next_run_at` 显示倒计时。

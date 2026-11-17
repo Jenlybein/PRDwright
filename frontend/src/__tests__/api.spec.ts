@@ -618,6 +618,8 @@ describe('生成任务接口（jobs）', () => {
         failedSections: [],
         // 服务端算的已用时：刷新重连后用它给本地计时器打底，显示的仍是任务真实耗时
         elapsedMs: 4500,
+        // 失败退避（#88）：后端快照里 `next_run_at` 为空串 = 没在等
+        retryAt: null,
       },
     ])
     // run_summary 的完整契约：任务状态 + 用量汇总（含按步骤拆分）

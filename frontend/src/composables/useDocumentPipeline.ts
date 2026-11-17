@@ -962,6 +962,41 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 等待重试期间按「停止生成」（票 #88）。
+   *
+   * ## 为什么不能只退订
+   *
+   * 等待态的任务**没有运行时**（执行者已经不在场，恢复器刚把它回排队）。`detach` 只
+   * 中止本地读取、服务端任务照跑——对一条要再等 30 秒的任务来说，等于「按了停止，
+   * 它下一轮照样跑」。所以这里调真正的取消端点，服务端立刻落 `failed + CANCELLED`。
+   *
+   * ## 为什么取消之后还要自己收尾
+   *
+   * 那一条任务没有协程可推事件，取消落库之后订阅端**不会**收到任何后续事件（流挂在
+   * 空的唤醒队列上）。于是：先退订（那一支不再有事件、也不该继续占着运行视图），
+   * 再把用户带回这份文档的审阅页，并留下「任务已取消」的说明。
+   *
+   * 取消没成功（`cancelled === false`）不是错误：那一刻任务刚好已经结束，同样不该
+   * 继续挂在等待态上，所以走同一条落点，只是文案不同。
+   */
+  async function cancelRun(): Promise<void> {
+    const run = runs.activeRun
+    if (run === null) return
+    const epoch = solutions.sessionEpoch
+    const jobId = run.jobId
+    const target = run.docKind ?? docKeyForJob(run.jobKind)
+    const cancelled = await job.cancel(jobId)
+    // 等待期间用户可能已经切了方案 / 换了任务：那份结果不属于现在这一屏。
+    if (isExpired(epoch) || runs.activeRun?.jobId !== jobId) return
+    job.detach()
+    goTo(reviewStateFor(target))
+    // `goTo` 会清掉错误回显（那是「开始新一轮」的语义）：取消结果必须留在页面上，
+    // 否则用户只看到一份旧正文、不知道自己按的那一下生效了没有。
+    docError.value = cancelled ? '任务已取消' : '这次任务已经结束，无需取消'
+    if (cancelled) hooks.onNotice('任务已取消')
+  }
+
+  /**
    * 任务种类 → 这次要落进哪一份产物。
    *
    * 三种生成任务的种类就是产物；`optimize` / `clarify` 是动作，目标另行反推：
@@ -1829,6 +1864,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   reviewFailedAt,
   reviewVersionNo,
   elapsedMs: job.elapsedMs,
+  // 失败退避（#88）：等待重试时的「最早可再领走时刻」；null = 没在等
+  retryAt: job.retryAt,
     summaryChanges,
     summarySyncing,
     summarySyncError,
@@ -1837,6 +1874,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 生成与优化
     generatePrd,
     reconnectJob,
+    // 等待重试期间取消（票 #88）
+    cancelRun,
     onSaveDocument,
     onAiOptimize,
     handleGenerateApiDocs,

@@ -40,6 +40,40 @@ STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 
 
+def _due_now(now_text: str):
+    """**到期闸门**：这一行现在能不能被领走（票 #88）。
+
+    `next_run_at` 是失败退避写下的「最早可再被领走的时刻」，空串表示「立即」。
+    判据是 ISO 文本的字符串比较——字典序 = 时间序（`core/clock.py` 的口径），
+    不需要把时间取回 Python 再判。
+
+    ## 为什么只写成一处
+
+    「先看是否到期、到期之后才按更新时间排队」（AC3）这条规则里，「是否到期」是**闸门**
+    而不是排序键：闸门在 `WHERE` 里（未到期的行一行都改不到 / 选不出来），闸门之后的
+    `ORDER BY` 才是排队顺序（`_queue_order`）。两处各写一遍必然有一天不一致，
+    而那种不一致不会报错，只会表现成「某条任务被提前领走」或者「永远领不走」。
+
+    `now_text` 为空串时判据退化成「只认空串 = 立即」：调用方总是会传判据时刻，
+    这里不替它兜底成「现在」——判据与修改必须看到同一秒。
+    """
+    return or_(
+        GenerationJob.next_run_at == "",
+        GenerationJob.next_run_at <= now_text,
+    )
+
+
+def _queue_order() -> tuple:
+    """**排队顺序**（AC3 的唯一一处定义）：到期之后按 `updated_at` 排，同一秒按 id。
+
+    「回排队就更新 `updated_at`」是既有语义：回排队（`requeue_lease`）把这一列写成
+    当前时刻，于是它排到同优先级队尾。加了 `next_run_at` 之后两套语义叠加，规则固定为
+    ——**先过到期闸门（`_due_now`），到期之后才按这一列排队**。`created_at` 不再参与：
+    建得早不等于该先跑，回排队过的任务应当让位给刚建的同优先级任务。
+    """
+    return (GenerationJob.updated_at, GenerationJob.id)
+
+
 def _dump_sections(sections: list[dict[str, Any]]) -> str:
     """把章节列表序列化成 JSON 文本（中文不转义，便于人工排查）。"""
     return json.dumps(sections or [], ensure_ascii=False)
@@ -580,6 +614,7 @@ class GenerationJobRepository:
         lease_token: str,
         lease_expire_at: str,
         now_text: str = "",
+        next_run_at: str = "",
     ) -> int:
         """恢复器：把过期租约交还队列（**状态不变**，只清租约三列），返回改到的行数。
 
@@ -596,7 +631,16 @@ class GenerationJobRepository:
         `lease_owner / lease_token / lease_expire_at` 全清空之后，这一行在
         `claimable` 眼里就是「还没人领」，下一个执行者能直接领走（#82 的抢占条件
         正是 `lease_token='' or lease_expire_at < now`）。`updated_at` 一起更新：
-        「回排队就排到同优先级队尾」是既有排序语义（退避 `next_run_at` 是 #88 的事）。
+        「回排队就排到同优先级队尾」是既有排序语义。
+
+        ## `next_run_at`：回排队**不等于立刻能领**（#88）
+
+        失败退避把「最早可再被领走的时刻」一起写进这一行（取值来自
+        `services/job_backoff` 的唯一映射表，由状态机按错误码算好后传入）：
+        到期之前 `claim` / `claimable` 的到期闸门（`_due_now`）都过不去。
+        它与清租约、`updated_at`、账本那一笔在**同一条 UPDATE、同一个事务**里完成
+        ——「先回排队、再单独补一条退避时间」会留下一个能被立刻领走的窗口，
+        连续限流就会在那几十毫秒里把重试次数烧光。
 
         ## 为什么不在这里改状态
 
@@ -617,6 +661,7 @@ class GenerationJobRepository:
                 lease_owner="",
                 lease_token="",
                 lease_expire_at="",
+                next_run_at=next_run_at,
                 updated_at=now_text or utc_now_text(),
             )
         )
@@ -701,6 +746,12 @@ class GenerationJobRepository:
         它一样一行都改不到。
 
         `lease_owner` 只写进库供排查，**不参与任何条件**：判权的是凭证。
+
+        ## 再加一条「到期闸门」（#88）
+
+        `next_run_at` 是失败退避写下的「最早可再被领走的时刻」：未到期时这条 UPDATE
+        一行都改不到，于是「回排队了但还要等一会儿」不是靠调用方自律，而是数据库层的
+        机械强制（AC2）。判据本身只有一处定义（`_due_now`）。
         """
         result = self.session.execute(
             update(GenerationJob)
@@ -712,12 +763,17 @@ class GenerationJobRepository:
                     GenerationJob.lease_token == "",
                     GenerationJob.lease_expire_at < now_text,
                 ),
+                # 失败退避：还没到期的一行领不走（`next_run_at=''` = 立即）。
+                _due_now(now_text),
             )
             .values(
                 lease_owner=lease_owner,
                 lease_token=lease_token,
                 lease_expire_at=expire_at,
-                updated_at=utc_now_text(),
+                # 与判据同一个时刻：`now_text` 是可注入的「现在」（`LeaseGrant` 带着它），
+                # 写成墙钟会让「在注入时刻领走」的行在队列里排到别的秒次上（#88 的
+                # 排序规则要看得懂这一步的 `updated_at`）。
+                updated_at=now_text or utc_now_text(),
             )
         )
         return int(result.rowcount or 0)
@@ -760,8 +816,10 @@ class GenerationJobRepository:
         它**只挑候选**，判权仍由 `claim` 那条条件写完成——扫描结果过期（被别的进程
         先领走）不会造成两个执行者，`claim` 会如实回 0 行。
 
-        排序 `created_at, id`：`created_at` 是秒级文本，同一秒建的行只靠它排不出稳定
-        顺序；`id` 是自增的，补上之后「先来先领」在秒内也成立（同优先级排队语义）。
+        排序规则（AC3，唯一一处定义在 `_queue_order`）：**先过到期闸门**（没到
+        `next_run_at` 的行直接不是候选，见 `_due_now`），**到期之后按 `updated_at`
+        排队**，同一秒用自增 `id` 稳定。`updated_at` 是「回排队就排到队尾」那条既有
+        语义；`created_at` 不再参与——建得早不等于该先跑。
         """
         rows = self.session.execute(
             select(GenerationJob.owner_id, GenerationJob.id)
@@ -771,8 +829,10 @@ class GenerationJobRepository:
                     GenerationJob.lease_token == "",
                     GenerationJob.lease_expire_at < now_text,
                 ),
+                # 到期闸门（#88）：没到 `next_run_at` 的行不是候选，与 `claim` 同一处定义。
+                _due_now(now_text),
             )
-            .order_by(GenerationJob.created_at, GenerationJob.id)
+            .order_by(*_queue_order())
             .limit(max(1, int(limit)))
         ).all()
         return [(int(row[0]), int(row[1])) for row in rows]

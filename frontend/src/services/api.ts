@@ -524,6 +524,9 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
       reason: readString(item, 'reason'),
     })),
     elapsedMs: readNumber(data, 'elapsed_ms'),
+    // 失败退避（#88）：空串 = 立即可领，读成 null 让调用方走「没在等」的常规路径。
+    // 时间换算（含时区）统一在 `@/utils/backoff`，这里只负责把原文搬过来。
+    retryAt: readString(data, 'next_run_at') || null,
   }
 }
 
