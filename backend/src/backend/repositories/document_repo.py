@@ -77,6 +77,8 @@ class DocumentRow:
     review_failed_at: str | None
     source: str | None
     metadata: str | None
+    # 这一版是不是「部分完成」（票 #85）：可用但不完整。NULL/False = 没有不完整记录。
+    partial: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +94,8 @@ class VersionSummary:
     created_at: str
     updated_at: str
     is_current: bool
+    # 这一版是不是「部分完成」（票 #85）：版本列表据此与完整版本区分开。
+    partial: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +115,8 @@ class VersionDetail:
     source: str
     note: str | None
     metadata: str | None
+    # 这一版是不是「部分完成」（票 #85）。读侧据此显示「这份正文不完整」。
+    partial: bool | None
     created_at: str
     updated_at: str
     is_current: bool
@@ -139,6 +145,7 @@ def _merged_select():
             DocumentVersion.last_run_summary.label("last_run_summary"),
             DocumentVersion.review.label("review"),
             DocumentVersion.review_failed_at.label("review_failed_at"),
+            DocumentVersion.partial.label("partial"),
             DocumentVersion.source.label("source"),
             DocumentVersion.meta.label("metadata"),
         )
@@ -200,6 +207,7 @@ class DocumentRepository:
                 func.length(DocumentVersion.content).label("content_length"),
                 DocumentVersion.created_at.label("created_at"),
                 DocumentVersion.updated_at.label("updated_at"),
+                DocumentVersion.partial.label("partial"),
                 (DocumentVersion.id == Document.current_version_id).label("is_current"),
             )
             .select_from(DocumentVersion)
@@ -223,6 +231,7 @@ class DocumentRepository:
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 is_current=bool(row["is_current"]),
+                partial=bool(row["partial"]),
             )
             for row in rows
         ]
@@ -244,6 +253,7 @@ class DocumentRepository:
                 DocumentVersion.source.label("source"),
                 DocumentVersion.note.label("note"),
                 DocumentVersion.meta.label("metadata"),
+                DocumentVersion.partial.label("partial"),
                 DocumentVersion.created_at.label("created_at"),
                 DocumentVersion.updated_at.label("updated_at"),
                 (DocumentVersion.id == Document.current_version_id).label("is_current"),
@@ -272,6 +282,7 @@ class DocumentRepository:
             source=row["source"],
             note=row["note"],
             metadata=row["metadata"],
+            partial=row["partial"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             is_current=bool(row["is_current"]),
@@ -334,6 +345,7 @@ class DocumentRepository:
         metadata: str = "{}",
         review: str | None = None,
         review_failed_at: str | None = None,
+        partial: bool = False,
         invalidate: tuple[str, ...] = (),
     ) -> DocumentVersion | None:
         """追加一条新版本并把它设为当前版本；返回新版本**模型对象**，方案不可见时返回 None。
@@ -355,6 +367,10 @@ class DocumentRepository:
         它与正文**同批写入**：结论描述的就是这一版正文，分两次写就会出现「正文换了、
         结论还是旧的」这种无主记录。没有审核结论（没审成 / 该任务本来就不审）时为
         `None`——**不写占位**，读侧据此显示「未审核」。
+
+        `partial` 是「这一版正文可用但不完整」（票 #85）。它与正文同批写入同一个理由：
+        标记描述的就是这一版。**它不改变审核两列**——部分完成的那一版没有结论，
+        调用方照样传 `review=None` / `review_failed_at=None`，不许把上一版的结论顺手带过来。
         """
         now = utc_now_text()
 
@@ -398,6 +414,7 @@ class DocumentRepository:
             last_run_summary=last_run_summary,
             review=review,
             review_failed_at=review_failed_at,
+            partial=partial,
             source=source,
             note=note,
             meta=metadata,

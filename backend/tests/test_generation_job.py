@@ -885,7 +885,12 @@ def test_completed_api_docs_job_writes_its_own_kind(client, monkeypatch):
 
 
 def test_failed_job_keeps_previous_document(client, monkeypatch):
-    """失败的任务**不覆写**已有文档：半截输出不该顶掉上一版可用正文。"""
+    """失败的任务**不覆写**已有文档：半截输出另起一版「部分完成」，旧版原样留着。
+
+    #85 之前这里断言「当前正文仍是上一版」——失败一律不写文档。那套口径的代价是
+    「写到一半的正文直接丢掉」。现在失败也落一版，但**只追加、不就地改**：旧版正文
+    一个字不动、仍在版本链里可恢复，当前指针前移到那版部分完成稿。
+    """
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
@@ -902,9 +907,16 @@ def test_failed_job_keeps_previous_document(client, monkeypatch):
     )
 
     assert events[-1].data["status"] == "failed"
+    versions = document_store.list_versions(uid, solution_id, "prd")
+    assert [item["version_no"] for item in versions] == [2, 1]
+    assert versions[0]["partial"] is True, "失败写出的那一版标成部分完成"
+    old = document_store.get_version(uid, solution_id, "prd", int(versions[1]["version_id"]))
+    assert old is not None
+    assert old["content"] == "# 上一版 PRD", "上一版的正文一个字都没被改"
     doc = document_store.get_document(uid, solution_id, "prd")
     assert doc is not None
-    assert doc["content"] == "# 上一版 PRD"
+    assert doc["content"].strip() != "", "半截正文没丢，而是成了当前版本的那一版"
+    assert doc["partial"] is True
 
 
 def test_document_job_without_solution_is_not_created(client, monkeypatch):

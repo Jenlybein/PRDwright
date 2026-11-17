@@ -72,6 +72,14 @@ class DocumentItem(BaseModel):
         ),
     )
     updated_at: str = Field(default="", description="最近更新时间（UTC ISO 8601）")
+    partial: bool = Field(
+        default=False,
+        description=(
+            "当前版本是否**可用但不完整**（票 #85）：失败收尾把已生成的正文落成新版本、"
+            "或有章节落成失败占位时为 true。它只说明「这份正文完整不完整」，"
+            "**不**影响下载 / 修复 / 重生成是否可用。旧数据恒为 false。"
+        ),
+    )
     stale: bool = Field(
         default=False,
         description="这份下游文档是否基于旧版上游（按 `derived_from` 记录的指纹比较）。"
@@ -137,6 +145,13 @@ class DocumentVersionItem(BaseModel):
     content_length: int = Field(default=0, description="正文字符数（概览用，不下发正文）")
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     is_current: bool = Field(default=False, description="是否为当前版本")
+    partial: bool = Field(
+        default=False,
+        description=(
+            "这一版是否**部分完成**（票 #85）：正文可用但不完整。版本列表据此把它与"
+            "完整版本区分开，并说明它带着「已生成的部分可以先用」的性质。"
+        ),
+    )
 
 
 class DocumentVersionDetail(BaseModel):
@@ -167,6 +182,13 @@ class DocumentVersionDetail(BaseModel):
     )
     source: str = Field(description="这一版的来源（见 DocumentVersionItem.source）")
     note: str = Field(default="", description="备注")
+    partial: bool = Field(
+        default=False,
+        description=(
+            "这一版是否**部分完成**（票 #85）：正文可用但不完整。"
+            "与 `DocumentVersionItem.partial` 同一个后端列（`document_versions.partial`）。"
+        ),
+    )
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
     is_current: bool = Field(default=False, description="是否为当前版本")

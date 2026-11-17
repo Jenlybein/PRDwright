@@ -60,6 +60,8 @@ function summary(
     contentLength: 10,
     createdAt: '2026-10-16T00:00:00',
     isCurrent,
+    // 部分完成标记（票 #85）：默认是完整版本
+    partial: false,
   }
 }
 
@@ -87,6 +89,8 @@ function makeRecord(kind: DocumentKind, content: string): DocumentRecord {
     updatedAt: '2026-10-16T00:00:00',
     stale: false,
     versionNo: 0,
+    // 「这份正文可用但不完整」（票 #85）：默认完整
+    partial: false,
     derivedFrom: null,
   }
 }

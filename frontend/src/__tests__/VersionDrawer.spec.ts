@@ -26,6 +26,8 @@ function version(overrides: Partial<DocumentVersionSummary> = {}): DocumentVersi
     contentLength: 128,
     createdAt: '2026-10-16T02:00:00',
     isCurrent: false,
+    // 部分完成标记（票 #85）：默认是完整版本
+    partial: false,
     ...overrides,
   }
 }
@@ -232,6 +234,8 @@ function detail(overrides: Partial<DocumentVersionDetail> = {}): DocumentVersion
     runSummary: null,
     reviewFailedAt: null,
     updatedAt: '2026-10-16T02:00:00',
+    // 部分完成标记（票 #85）：默认是完整版本
+    partial: false,
     ...overrides,
   }
 }
@@ -448,5 +452,48 @@ describe('VersionDrawer 的 Esc 逐层退出', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     await listWrapper.vm.$nextTick()
     expect(listWrapper.emitted('close')).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 部分完成标记（票 #85）：与完整版本区分开，但动作不禁用
+// ---------------------------------------------------------------------------
+
+describe('VersionDrawer 的部分完成标记', () => {
+  it('列表里部分完成的版本带「部分完成」徽标，完整版本没有', () => {
+    const wrapper = mountDrawer({
+      versions: [
+        version({ versionId: 12, versionNo: 2, isCurrent: true, partial: true }),
+        version({ versionId: 11, versionNo: 1, isCurrent: false }),
+      ],
+    })
+
+    expect(wrapper.text()).toContain('部分完成')
+    // 只有部分完成那一版带徽标：完整版本不该被顺手标上
+    const badges = wrapper.findAll('.inline-flex').filter((item) => item.text() === '部分完成')
+    expect(badges).toHaveLength(1)
+  })
+
+  it('部分完成的历史版本照旧能预览 / 修复 / 恢复——标记不是禁用理由', async () => {
+    const wrapper = mountDrawer({
+      versions: [version({ versionId: 11, versionNo: 2, partial: true })],
+    })
+
+    // 预览热区在（点得进去，正文可读 = 可下载的前置）
+    expect(wrapper.find('button[aria-label="预览 v2"]').exists()).toBe(true)
+    // 恢复 / 删除按钮在，且未禁用
+    expect(buttonByText(wrapper, '恢复此版本').attributes('disabled')).toBeUndefined()
+    expect(buttonByText(wrapper, '删除').attributes('disabled')).toBeUndefined()
+  })
+
+  it('预览态里同样标出「部分完成」', () => {
+    const wrapper = mountDrawer({
+      versions: [version()],
+      preview: detail({ partial: true }),
+    })
+
+    expect(wrapper.text()).toContain('部分完成')
+    // 预览是 Markdown 渲染后的正文（`#` 不进纯文本），内容本身要读得到
+    expect(wrapper.text()).toContain('第二版正文')
   })
 })

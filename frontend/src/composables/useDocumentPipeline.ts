@@ -906,6 +906,44 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 失败收尾的落点：先与后端对齐，再决定「有没有内容可用」（票 #85）。
+   *
+   * 失败不再等于「什么都没留下」：后端在失败 / 取消收尾时会把已生成的正文落成一版
+   * **部分完成**（`document_versions.partial`）。因此这里做三件事：
+   *
+   * 1. 记下错误（运行视图与审阅页都会展示它——**失败仍然是失败**，不粉饰）；
+   * 2. **先拉一次文档**：不拉的话本地看到的还是上一份正文，判断「有没有内容可用」会看错
+   *    （而且恰恰是在「这次留下了一版」的时候看错）；
+   * 3. 若这一份确实有了部分完成版本，把用户带到**审阅页**——那里有正文、有下载、
+   *    有修复 / 重生成入口，还有「这份正文不完整」的提示。留在运行视图只会给他一片
+   *    写着「失败」的空白。
+   *
+   * 与 `finishDoc` 同一条不抢方向盘的规矩：用户已经走开（不在这份文档的生成页）时
+   * **不拽回去**，只把正文照常落库（它已经在库里，他回来就能看到）。
+   */
+  async function settleFailedDocument(
+    target: DocumentKind,
+    message: string,
+    epoch: number,
+  ): Promise<void> {
+    docError.value = message
+    prdBoard.value = null
+    // 会话已被换掉（删方案 / 切到别的方案）时不必再拉，也不该把落点改到别人的页面上
+    if (isExpired(epoch)) return
+    await documents.reload()
+    if (isExpired(epoch)) return
+    // 没有「部分完成版本」= 这次真的没留下可用内容：留在运行视图看错误，行为与从前一致。
+    if (!documents.partialOf(target) || !documents.contentOf(target).trim()) return
+    const generatingState = generatingStateFor(target)
+    if (generatingState !== null && viewState.value === generatingState) {
+      goTo(reviewStateFor(target))
+      // `goTo` 会清掉错误回显（那是「开始新一轮」的语义），但这次是**失败收尾**：
+      // 原因必须留在审阅页上，否则用户只看到一份半截正文、不知道为什么会停在这里。
+      docError.value = message
+    }
+  }
+
+  /**
    * 刷新后静默重连一个进行中的任务：先收快照补全正文，再接 live。
    *
    * 由 AppV2 在恢复快照后调用——**无需用户点击**。按快照 status 分流：
@@ -1018,11 +1056,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       return
     }
     if (!ok) {
-      docError.value = job.error.value || '生成失败'
-      prdBoard.value = null
+      await settleFailedDocument(target, job.error.value || '生成失败', epochAtStart)
     } else if (snap?.status === 'failed') {
-      docError.value = snap.errorMessage || '生成失败'
-      prdBoard.value = null
+      await settleFailedDocument(target, snap.errorMessage || '生成失败', epochAtStart)
     } else {
       // 落点由 `finishDoc` 自己决定：优化留在原审阅页，生成 / 澄清都回到那份文档的审阅页
       finishDoc(kind, reply, target, epochAtStart)
@@ -1086,9 +1122,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // `aborted` 见 `reconnectAndSettle` 的同名判断：主动退订不是失败，不该弹红字。
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
-      docError.value = job.error.value || 'PRD 生成失败'
-      // 失败时收掉阶段条：原因由错误提示说明，留着一个「进行中」的指示反而误导
-      prdBoard.value = null
+      // 失败：后端可能已经把已生成的内容落成一版部分完成（#85），落点由它决定
+      await settleFailedDocument('prd', job.error.value || 'PRD 生成失败', epochAtStart)
       return
     }
     finishDoc('prd', reply, 'prd', epochAtStart)
@@ -1118,7 +1153,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
-      docError.value = job.error.value || '接口文档生成失败'
+      await settleFailedDocument('api-docs', job.error.value || '接口文档生成失败', epochAtStart)
       return
     }
     finishDoc('api-docs', reply, 'api-docs', epochAtStart)
@@ -1147,7 +1182,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
-      docError.value = job.error.value || '提示词生成失败'
+      await settleFailedDocument('prompts', job.error.value || '提示词生成失败', epochAtStart)
       return
     }
     finishDoc('prompts', reply, 'prompts', epochAtStart)
@@ -1510,7 +1545,9 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
     if (!ok) {
-      docError.value = job.error.value || '按结论修复失败'
+      // 修复是**整篇重写**（后端按 `review_fix` 追加版本），因此失败时也可能留下一版
+      // 部分完成：由 `settleFailedDocument` 决定是否带用户去看那份可用正文（#85）。
+      await settleFailedDocument(target, job.error.value || '按结论修复失败', epochAtStart)
       // 人已经不在这一份的页上了：错误只写在 `docError` 里他看不见（那一页没渲染），
       // 等于「点了修复、任务炸了、界面什么也没说」。这种情况补一句提示。
       // 而停在这一份的审阅页 / 运行视图时，错误由那两页自己显示，不必再弹一次。

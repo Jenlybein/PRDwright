@@ -713,6 +713,8 @@ function makeDocumentRecord(
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
     versionNo: 0,
+    // 「这份正文可用但不完整」（票 #85）：默认完整；要测部分完成时显式覆盖
+    partial: false,
     derivedFrom: null,
   }
 }
@@ -3332,6 +3334,7 @@ describe('AppV2 的版本历史抽屉', () => {
         contentLength: 10,
         createdAt: '2026-10-16T00:00:00',
         isCurrent: false,
+        partial: false,
       },
     ])
     vi.mocked(documentApi.restoreVersion).mockResolvedValue(
@@ -3380,6 +3383,8 @@ describe('AppV2 的版本预览与删除', () => {
       contentLength: 10,
       createdAt: '2026-10-16T00:00:00',
       isCurrent: false,
+      // 部分完成标记（票 #85）：默认是完整版本
+      partial: false,
       ...overrides,
     }
   }

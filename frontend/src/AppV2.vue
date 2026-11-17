@@ -804,6 +804,17 @@ const documentStale = computed(() => {
   return kind ? documents.staleOf(kind) : false
 })
 
+/**
+ * 当前审阅的这份正文是不是**可用但不完整**（票 #85）。
+ *
+ * 判据是后端的落库标记（`document_versions.partial`），不是「本次任务成没成功」：
+ * 任务失败也可能留下这一版，那正是「已生成的部分可以先用」的场景。
+ */
+const documentPartial = computed(() => {
+  const kind = activeDocKind.value
+  return kind ? documents.partialOf(kind) : false
+})
+
 /** 当前文档线程对应的待确认清单；需求澄清线程没有文档，返回空 */
 const chatPendingItems = computed(() => {
   const kind = documentKindOfChatStage(activeChatTab.value)
@@ -1372,6 +1383,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :review="reviewConclusion"
         :review-failed-at="reviewFailedAt"
         :review-version-no="reviewVersionNo"
+        :partial="documentPartial"
         :fix-in-flight="isFixInFlight"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"

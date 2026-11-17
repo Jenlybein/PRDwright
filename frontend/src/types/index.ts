@@ -383,6 +383,14 @@ export interface DocumentRecord {
    * 两处显示的是同一件事。0 表示后端没给（旧数据），界面不显示版本号。
    */
   versionNo: number
+  /**
+   * 这份正文是不是**可用但不完整**（后端 `document_versions.partial`，票 #85）。
+   *
+   * 生成写到一半失败、或有章节落成失败占位时为 true：界面据此提示「已生成的部分可以
+   * 先用」，而不是把半截稿当完整交付。它**不**禁用下载 / 修复 / 重生成——那三件事由
+   * 正文与结论决定。
+   */
+  partial: boolean
   /** 最近更新时间（UTC ISO 8601） */
   updatedAt: string
   /** 这份下游文档是否基于旧版上游（后端按 `derivedFrom` 的指纹比较得出） */
@@ -425,6 +433,12 @@ export interface DocumentVersionSummary {
   createdAt: string
   /** 是否为当前版本 */
   isCurrent: boolean
+  /**
+   * 这一版是否**部分完成**（后端 `document_versions.partial`，票 #85）。
+   *
+   * 版本列表据此把它与完整版本区分开：正文可用，但不完整。
+   */
+  partial: boolean
 }
 
 /** 一条文档版本的**完整内容**（`GET .../versions/{version_id}`）。 */
@@ -450,6 +464,13 @@ export interface DocumentVersionDetail {
   source: string
   /** 备注 */
   note: string
+  /**
+   * 这一版是否**部分完成**（票 #85）：正文可用但不完整。
+   *
+   * 与 `DocumentVersionSummary.partial` 同一个后端列（`document_versions.partial`）：
+   * 预览一条历史版本时也要看得出它不完整。
+   */
+  partial: boolean
   /** 创建时间（UTC ISO 8601） */
   createdAt: string
   /** 最近更新时间（UTC ISO 8601） */

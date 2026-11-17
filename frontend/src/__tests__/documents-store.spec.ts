@@ -42,6 +42,7 @@ function makeRecord(
   content: string,
   runSummary: RunSummary | null = null,
   pendingItems: PendingItem[] = [],
+  extra: Partial<DocumentRecord> = {},
 ): DocumentRecord {
   return {
     kind,
@@ -53,7 +54,10 @@ function makeRecord(
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
     versionNo: 0,
+    // 「这份正文可用但不完整」（票 #85）：默认完整
+    partial: false,
     derivedFrom: null,
+    ...extra,
   }
 }
 
@@ -435,6 +439,58 @@ describe('派生状态', () => {
 
     expect(documents.hasPrd).toBe(false)
     expect(documents.hasAny).toBe(false)
+  })
+})
+
+describe('部分完成（票 #85）', () => {
+  it('读回的那一版标了 partial 时，store 暴露 partialOf', async () => {
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 半截正文', null, [], { partial: true, versionNo: 1 }),
+    ])
+    await documents.loadAll(1)
+
+    expect(documents.partialOf('prd')).toBe(true)
+    // 另外两份没生成，也就谈不上「不完整」
+    expect(documents.partialOf('api-docs')).toBe(false)
+    expect(documents.contentOf('prd')).toBe('# 半截正文')
+  })
+
+  it('部分完成版本不带本会话里上一版的「审核失败时间」', async () => {
+    // 先读到一份审核失败的版本：本会话记下了那次失败的时间
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 旧稿', null, [], {
+        reviewFailedAt: '2026-01-02T00:00:00',
+        versionNo: 1,
+      }),
+    ])
+    await documents.loadAll(1)
+    expect(documents.reviewFailedAtOf('prd')).toBe('2026-01-02T00:00:00')
+
+    // 失败收尾把半截正文落成一版部分完成：服务端这一版既没有结论、也没有失败记录
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 半截正文', null, [], { partial: true, versionNo: 2 }),
+    ])
+    await documents.loadAll(1)
+
+    expect(documents.reviewOf('prd')).toBeNull()
+    // 审核面板据此显示「未审核」：旧的失败时间属于**别的正文**，不许跟过来
+    expect(documents.reviewFailedAtOf('prd')).toBeNull()
+    expect(documents.partialOf('prd')).toBe(true)
+  })
+
+  it('手改部分完成的正文之后，标记仍在（它描述的仍是同一份不完整正文）', async () => {
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 半截正文', null, [], { partial: true, versionNo: 1 }),
+    ])
+    await documents.loadAll(1)
+
+    vi.mocked(documentApi.saveDocument).mockResolvedValue(
+      makeRecord('prd', '# 半截正文（改过）', null, [], { partial: true, versionNo: 1 }),
+    )
+    documents.save('prd', '# 半截正文（改过）')
+    await documents.flushPendingSave()
+
+    expect(documents.partialOf('prd')).toBe(true)
   })
 })
 
