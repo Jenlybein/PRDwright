@@ -167,7 +167,7 @@ def test_failures_outside_window_are_ignored(client, isolated_db):  # noqa: ARG0
     old = (utc_now() - timedelta(minutes=get_settings().login_failure_window_minutes + 5)).isoformat()
     with connect() as conn:
         conn.execute(
-            "INSERT INTO login_failures (username, ip, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO login_failures (username, ip, created_at) VALUES (%s, %s, %s)",
             ("alice", "", old),
         )
         conn.commit()

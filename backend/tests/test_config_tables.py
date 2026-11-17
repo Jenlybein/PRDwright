@@ -29,16 +29,29 @@ from backend.repositories.runtime_config_repo import decode_extra
 
 
 def _tables() -> set[str]:
+    """库里现有的业务表（问元数据，不问模型——「模型怎么想」正是要独立校验的）。
+
+    Postgres 没有 `sqlite_master`：表的清单在 `information_schema.tables`。
+    """
     with connect() as conn:
         return {
-            str(row[0])
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            str(row["table_name"])
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+            )
         }
 
 
 def _job_columns() -> set[str]:
     with connect() as conn:
-        return {str(row[1]) for row in conn.execute("PRAGMA table_info(generation_jobs)")}
+        return {
+            str(row["column_name"])
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'generation_jobs'"
+            )
+        }
 
 
 # ---------------------------------------------------------------------------

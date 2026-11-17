@@ -24,10 +24,17 @@ def test_schema_has_is_admin_column():
     """基线里 `users` 必须有 `is_admin` 列。
 
     列名写错（例如 `is_admin_user`）不会报错，只会让整条权限链读到 `None`，
-    表现是「管理员登进去也看不见后台」。这条用 PRAGMA 直接问库，不问模型。
+    表现是「管理员登进去也看不见后台」。这条直接问库的元数据（`information_schema`），
+    不问模型——「模型怎么想」正是要独立校验的东西。
     """
     with connect() as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'users'"
+            )
+        }
     assert "is_admin" in columns
 
 

@@ -180,7 +180,7 @@ def _mysql_on_connect(dbapi_connection: Any, _record: Any) -> None:
 
 
 def _postgresql_on_connect(dbapi_connection: Any, _record: Any) -> None:
-    """Postgres 的连接级配置：**只**固定会话时区。
+    """Postgres 的连接级配置：**只**固定会话时区，并且必须**显式提交**。
 
     为什么只有一句：
 
@@ -191,12 +191,24 @@ def _postgresql_on_connect(dbapi_connection: Any, _record: Any) -> None:
       假设——非 SQLite 分支无条件挂 MySQL 的钩子，Postgres 接上之后第一条连接就会
       在那句 `SET SESSION sql_mode` 上报语法错误，而报错长在驱动里、看不出真因。
       所以连接级配置只能按方言取（见 `_CONNECT_HOOKS`）。
+
+    ⚠️ **`SET` 在 Postgres 里是事务性的**（#77 实测）：连接是 `autocommit=False`
+    的，钩子里那句 `SET` 会开一个隐式事务，而连接归还给池时 SQLAlchemy 会
+    `rollback()` —— 于是设置被悄悄撤掉：**池里的第一条连接是 UTC，之后全是服务端
+    时区**。这不是报错，是「第一条之后悄悄换口径」，比一眼红难查得多。
+    所以这里显式 `commit()`：钩子跑到时，SQLAlchemy 还没开始任何业务事务，
+    提交这一下只落住这条会话配置本身。
+
+    也有人会把这条配置放进 `connect_args` 的 libpq `options`（`-c timezone=UTC`），
+    同样有效；留在钩子里是因为本文件的纪律是「连接级配置只有这一处」。
     """
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("SET TIME ZONE 'UTC'")
     finally:
         cursor.close()
+    # 见上面 ⚠️：不提交就等于没设（池归还连接时的 rollback 会把它撤掉）。
+    dbapi_connection.commit()
 
 
 # 方言 → 连接级配置钩子。**新增后端就在这张表上加一行**：

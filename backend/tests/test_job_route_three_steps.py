@@ -121,7 +121,7 @@ def _row(job_id: int) -> dict[str, Any]:
     """按 id 直读整行（绕开 ORM，验证真的落盘了）。"""
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM generation_jobs WHERE id = %s", (job_id,)
         ).fetchone()
     assert row is not None
     return dict(row)

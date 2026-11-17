@@ -230,16 +230,19 @@ def test_health_reports_skill_identity(make_client, tmp_path):
     assert len(entry["fingerprint"]) == 12
 
 
-def test_health_flags_unavailable_database(isolated_db, monkeypatch, tmp_path):  # noqa: ARG001
+def test_health_flags_unavailable_database(isolated_db, monkeypatch):  # noqa: ARG001
     """数据库连不上要报出来。
 
-    这里直接调探测函数而不是走 HTTP：把 `DB_PATH` 指到非法路径后，
+    这里直接调探测函数而不是走 HTTP：把 `DATABASE_URL` 指到一个**没人监听的端口**后，
     连应用启动（`prepare_schema`）都会失败，根本到不了能发请求的状态——
     而「体检自己要能在这种时候给出结论」正是它的用途。
+
+    #77 之前这里指的是一个非法的 SQLite 文件路径；换库之后「连不上」的等价造法是
+    「地址可达但没人应答」，所以换成 PG URL 上的空端口。
     """
-    blocker = tmp_path / "not-a-directory"
-    blocker.write_text("占位文件，让同名的目录建不出来", encoding="utf-8")
-    monkeypatch.setenv("DB_PATH", str(blocker / "test.db"))
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://postgres:postgres@127.0.0.1:1/prdwright"
+    )
     get_settings.cache_clear()
 
     from backend.api.health import _check_database

@@ -73,11 +73,13 @@ def _job(owner_id: int, *, status: str = "completed", prompt_tokens: int = 10) -
             " provider_protocol, provider_config_id, provider_name, provider_model, "
             " prompt_tokens, completion_tokens, created_at, updated_at, "
             " request_params, config_snapshot, skill_refs, skill_manifest) "
-            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', ?, 7, ?, ?, '{}', '{}', '[]', '')",
+            "VALUES (%s, NULL, 'prd', '', '', %s, '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', %s, 7, %s, %s, '{}', '{}', '[]', '') "
+            "RETURNING id",
             (owner_id, status, prompt_tokens, moment, moment),
         )
+        job_id = int(cur.fetchone()["id"])
         conn.commit()
-        return int(cur.lastrowid or 0)
+        return job_id
 
 
 def _seed_alice(client) -> int:
@@ -229,7 +231,7 @@ def test_delete_keeps_audit_records(client) -> None:
         # ⚠️ 不同动作的 `target` 口径并不统一：额度记的是**用户 id**，删号记的是**用户名**。
         # 只按用户名查会漏掉额度那条，看起来像「删号把审计弄丢了」——其实是查错了。
         rows = conn.execute(
-            "SELECT action FROM admin_audit_log WHERE target IN (?, ?) ORDER BY id",
+            "SELECT action FROM admin_audit_log WHERE target IN (%s, %s) ORDER BY id",
             ("alice", str(owner_id)),
         ).fetchall()
     actions = [str(row["action"]) for row in rows]
@@ -303,7 +305,7 @@ def test_cancel_for_user_marks_db_rows_and_memory_runtime(client) -> None:
     ), "在途任务被取消后收尾必须落成失败"
     with connect() as conn:
         row = conn.execute(
-            "SELECT status, error_code, draft_content FROM generation_jobs WHERE id = ?",
+            "SELECT status, error_code, draft_content FROM generation_jobs WHERE id = %s",
             (registered.job_id,),
         ).fetchone()
     assert row["status"] == "failed"
@@ -323,7 +325,7 @@ def test_cancel_for_user_leaves_finished_jobs_alone(client) -> None:
 
     with connect() as conn:
         row = conn.execute(
-            "SELECT status, error_code FROM generation_jobs WHERE id = ?", (done_id,)
+            "SELECT status, error_code FROM generation_jobs WHERE id = %s", (done_id,)
         ).fetchone()
     assert row["status"] == "completed"
     assert row["error_code"] == ""

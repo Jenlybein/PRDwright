@@ -6,51 +6,37 @@
 配置是 `lru_cache` 单例，所以这里不是「改环境变量」就完事——
 必须同时 `cache_clear()`，让下一次 `get_settings()` 重新读取。
 
-## 建库：一次建模板，每用例拷一份
+## 建库：每 worker 一个模板库，每用例 `CREATE DATABASE … TEMPLATE`（#77）
 
-每个用例都跑一次完整的 `alembic upgrade head` 会白花十几秒（975 个用例 × 约 12ms）。
-所以这里改成**每个进程建一次模板库**（还是走 `prepare_schema`，与真实启动同一条路），
-之后每个用例只做一次文件拷贝——拷贝的是「已经接管好的库」，`client` 夹具的 lifespan
-再调 `prepare_schema` 时走的是 `upgrade head` 空转，正好也是真实部署里最常见的那条分支。
+每个用例都跑一次完整的 `alembic upgrade head` 会白花十几秒（全量 1000+ 用例 × 几百毫秒）。
+所以这里改成**每个进程（= 每个 xdist worker）建一次模板库**（还是走 `prepare_schema`，
+与真实启动同一条路），之后每个用例只做一次 `CREATE DATABASE … TEMPLATE`——派生出来的
+是「已经接管好的库」，`client` 夹具的 lifespan 再调 `prepare_schema` 时走的是
+`upgrade head` 空转，正好也是真实部署里最常见的那条分支。
+
+**为什么不是「换一份库文件」**：SQLite 靠拷贝库文件隔离数据，Postgres 没有等价物。
+`CREATE DATABASE … TEMPLATE` 是它自己的「拷一份」——派生库拿到的是同一个结构、
+零数据，用例结束整库删掉。**模板库只有结构、没有数据**，这是「用例之间数据互不可见」的根。
+
+## 集成库从哪来（⚠️ 地址不带库名）
+
+`PRDWRIGHT_TEST_POSTGRES_URL` 给的是**维护库地址、不带库名**：
+
+```
+postgresql+psycopg://postgres:postgres@127.0.0.1:5433
+```
+
+用例自己往后面拼 `/<库名>` 建库。缺省值就是这个本地集成库；**没有 Postgres 时
+本夹具直接让用例失败**（带「设哪个变量 / 本地该起在哪」的提示），绝不静默跳过——
+静默绿比红更难发现。
 """
 
 from __future__ import annotations
 
-import pathlib
-import shutil
-import tempfile
-
 import pytest
 
+import dbsupport
 from backend.core.config import get_settings
-
-# 进程级模板库（每个 xdist worker 建一次）。
-_TEMPLATE_DB: pathlib.Path | None = None
-
-
-def _schema_template() -> pathlib.Path:
-    """建一次「最新结构 + 已登记 alembic 版本」的模板库，之后一直复用。"""
-    global _TEMPLATE_DB
-    if _TEMPLATE_DB is not None and _TEMPLATE_DB.exists():
-        return _TEMPLATE_DB
-
-    directory = pathlib.Path(tempfile.mkdtemp(prefix="prdwright-schema-"))
-    path = directory / "template.db"
-
-    # ⚠️ 用独立的 Engine，不碰 `get_engine()`：后者绑的是当前 `DB_PATH`，
-    # 而模板要在任何用例的库路径都还不存在时就建好。
-    from backend.core.engine import build_engine
-    from backend.core.schema import prepare_schema
-
-    engine = build_engine(path)
-    try:
-        prepare_schema(engine)
-    finally:
-        # dispose 会把 WAL 落盘并关掉句柄，否则拷贝出来的可能缺最近几页
-        engine.dispose()
-
-    _TEMPLATE_DB = path
-    return path
 
 
 def _reset_runtime_state() -> None:
@@ -81,9 +67,7 @@ def _reset_runtime_state() -> None:
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
-    """把数据库指向用例专属的临时文件，并在结束后还原运行时状态。"""
-    db_path = tmp_path / "test.db"
-    monkeypatch.setenv("DB_PATH", str(db_path))
+    """把数据库指向用例专属的库（每用例从模板库派生一个，结束删掉）。"""
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("INVITE_CODE", "test-invite")
     monkeypatch.setenv("INIT_ADMIN_USER", "")
@@ -102,32 +86,73 @@ def isolated_db(tmp_path, monkeypatch):
 
     _reset_runtime_state()
 
-    # 建库：从模板拷一份（模板是 `prepare_schema` 建的，与真实启动同一条路）。
+    # 建库：每用例一个**新建的库**，从本 worker 的模板库派生（模板只有结构、没有数据）。
     #
-    # 为什么不每个用例都跑一次 `alembic upgrade head`：975 个用例 × 约 12ms
-    # 就是十几秒，而每个用例拿到的库本来就一模一样。拷贝之后 `client` 夹具的
+    # 为什么不每个用例都跑一次 `alembic upgrade head`：全量 1000+ 用例 × 几百毫秒
+    # 就是几分钟，而每个用例拿到的库本来就一模一样。派生之后 `client` 夹具的
     # lifespan 仍会调 `prepare_schema`，走的是「已接管 → upgrade head 空转」这条
     # 分支——正好是真实部署里最常见的那条。
-    shutil.copyfile(_schema_template(), db_path)
-
-    yield
-
-    # 收尾守卫（比任何单条用例的覆盖面都大）：**每个用例都在守「没有连接被泄漏」**。
-    # 池子被占住不会立刻报错，只会让它慢慢变小，最后表现为「接口全部超时」。
-    # 用 `engine_stats()` 而不是 `get_engine()`：后者会顺手建一个 Engine，
-    # 让从未碰过数据库的用例也开一池连接，并把这条断言变成恒真。
     #
-    # ⚠️ 只断 `in_use == 0`。v7 之前这里还有一条 `idle == size`，那是个**假守卫**：
-    # 当时 `idle` 是用 `size - in_use` 算的，而 `size` 是 `maxsize`（配置容量），
-    # 于是 `in_use == 0` 时 `idle == size` 恒成立——它什么都没守。现在 `idle` 取的是
-    # `checkedin()`（真的空闲条数），懒建的池本来就不满，`idle == size` 反而会误报。
-    from backend.core.engine import engine_stats
+    # 没有 Postgres 时 `template_database()` 抛 `PostgresUnavailable`（带操作指引）：
+    # 用例**失败**而不是跳过——静默绿比红更难发现。
+    #
+    # ⚠️ 维护库地址在这里**先抄一份**：用例可以把 `PRDWRIGHT_TEST_POSTGRES_URL` 改成
+    # 一个错的地址（「连不上库时该报什么」本身就是被测行为），而收尾删库必须沿用
+    # 建立时那个地址，否则会连删库都删不掉、还留下一个垃圾库。
+    maintenance_url = dbsupport.maintenance_url()
+    case_database = dbsupport.database_name()
+    created = {"done": False}
 
-    stats = engine_stats()
-    if stats["opened"]:
-        assert stats["in_use"] == 0, f"有用例借了连接没归还：{stats}"
+    def _ensure_case_database() -> None:
+        """**按需**建库：从本 worker 的模板库派生一份。
 
-    _reset_runtime_state()
+        为什么要懒建：`CREATE DATABASE` 在 Postgres 上是几十毫秒级的真实开销
+        （Windows 上约 45~65ms，服务端还要为模板库刷一次检查点），而全量一千多
+        个用例里有一批根本不碰数据库（纯函数、提示词、技能包、前端守卫）。
+        对它们来说「每用例建一个库」是纯浪费——懒建让它们一分钱不付。
+        """
+        if created["done"]:
+            return
+        dbsupport.create_database(case_database, template=dbsupport.template_database())
+        created["done"] = True
+
+    # 懒建的挂点：应用只通过 `get_engine()` 建引擎（=> `core.engine.build_engine`），
+    # 所以在这一层拦一刀就等于「第一次真的要连库时才建库」。
+    from backend.core import engine as engine_module
+
+    original_build_engine = engine_module.build_engine
+
+    def _build_engine(*args, **kwargs):  # noqa: ANN002, ANN003 - 原样透传
+        _ensure_case_database()
+        return original_build_engine(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "build_engine", _build_engine)
+
+    monkeypatch.setenv("DATABASE_URL", dbsupport.database_url(case_database))
+    get_settings.cache_clear()
+
+    try:
+        yield
+    finally:
+        # 收尾守卫（比任何单条用例的覆盖面都大）：**每个用例都在守「没有连接被泄漏」**。
+        # 池子被占住不会立刻报错，只会让它慢慢变小，最后表现为「接口全部超时」。
+        # 用 `engine_stats()` 而不是 `get_engine()`：后者会顺手建一个 Engine，
+        # 让从未碰过数据库的用例也开一池连接，并把这条断言变成恒真。
+        #
+        # ⚠️ 只断 `in_use == 0`。v7 之前这里还有一条 `idle == size`，那是个**假守卫**：
+        # 当时 `idle` 是用 `size - in_use` 算的，而 `size` 是 `maxsize`（配置容量），
+        # 于是 `in_use == 0` 时 `idle == size` 恒成立——它什么都没守。现在 `idle` 取的是
+        # `checkedin()`（真的空闲条数），懒建的池本来就不满，`idle == size` 反而会误报。
+        from backend.core.engine import engine_stats
+
+        stats = engine_stats()
+        if stats["opened"]:
+            assert stats["in_use"] == 0, f"有用例借了连接没归还：{stats}"
+
+        # 先收掉全部连接再删库（池里还连着的话 `DROP DATABASE` 会被挡住）。
+        _reset_runtime_state()
+        if created["done"]:
+            dbsupport.drop_database(case_database, url=maintenance_url)
 
 
 @pytest.fixture

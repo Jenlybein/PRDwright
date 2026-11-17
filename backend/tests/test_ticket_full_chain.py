@@ -121,7 +121,7 @@ def _row(job_id: int) -> dict:
     """按 id 直读任务行，断言外部可观察的终态与正文。"""
     with connect() as conn:
         result = conn.execute(
-            "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM generation_jobs WHERE id = %s", (job_id,)
         ).fetchone()
     assert result is not None
     return dict(result)

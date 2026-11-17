@@ -2079,7 +2079,7 @@ def test_db_snapshot_tolerates_corrupt_columns(alice):
         conn.execute(
             "UPDATE generation_jobs SET status = 'failed', error_code = 'LLM_UPSTREAM_ERROR', "
             "draft_content = '半截正文', completed_sections = '{坏掉的 JSON', "
-            "usage = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' WHERE id = ?",
+            "usage = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' WHERE id = %s",
             (registered.job_id,),
         )
         conn.commit()

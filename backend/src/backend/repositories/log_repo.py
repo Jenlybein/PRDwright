@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import case, delete, func, insert, select
+from sqlalchemy import case, delete, func, insert, or_, select
 from sqlmodel import Session
 
 from backend.core.clock import utc_ms_text, utc_now
@@ -201,10 +201,16 @@ class LogRepository:
         if user_id is not None:
             conditions.append(AppLog.user_id == user_id)
         if exclude_event:
-            # 用 `IS NOT` 而不是 `!=`：`event` 可为 NULL，而 `NULL != 'x'`
-            # 在 SQL 里求值为 NULL（不成立），会把所有「没有事件名」的日志一起丢掉。
-            # `IS NOT` 对 NULL 成立，语义正是「不是这个事件（含没有事件名的）」。
-            conditions.append(AppLog.event.is_not(exclude_event))
+            # 语义是「不是这个事件（含没有事件名的）」：`event` 可为 NULL，而
+            # `NULL != 'x'` 在 SQL 里求值为 NULL（不成立），会把所有「没有事件名」
+            # 的日志一起丢掉，所以要把 `IS NULL` 显式带上。
+            #
+            # ⚠️ 不能写 `AppLog.event.is_not(exclude_event)`（#77 在 Postgres 上撞出真因）：
+            # `IS NOT <值>` 只在 SQLite 上合法，Postgres 的 `IS NOT` 只接受
+            # NULL / TRUE / FALSE / DISTINCT FROM 这几种右值，直接传字符串是**语法错误**
+            # （`syntax error at or near "$1"`）。而 `IS NULL OR event != 值` 两边都合法、
+            # 语义与原来那句完全一致。
+            conditions.append(or_(AppLog.event.is_(None), AppLog.event != exclude_event))
         if keyword:
             # 转义 `%` / `_`：用户搜「50%」时不该被当成通配符，否则会搜出无关的行
             escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

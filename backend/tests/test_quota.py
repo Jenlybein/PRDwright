@@ -43,14 +43,15 @@ def _user(user_id: int = 1, username: str = "u1") -> User:
 def _ensure_user(user_id: int) -> None:
     """`generation_jobs.owner_id` 有外键指向 `users`，造任务前必须先有这个人。
 
-    用 `INSERT OR IGNORE` 而不是查一下再插：用例里同一个 id 会被反复用到
+    用「撞主键就跳过」而不是查一下再插：用例里同一个 id 会被反复用到
     （多数用例只关心「谁的任务」），重复插入静默跳过最省事。
+    （SQLite 的 `INSERT OR IGNORE` 在 Postgres 上写作 `ON CONFLICT DO NOTHING`。）
     """
     with connect() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO users (id, username, password_hash, salt, created_at)"
-            " VALUES (?, ?, 'hash', X'', ?)",
-            (user_id, f"user{user_id}", utc_now_text()),
+            "INSERT INTO users (id, username, password_hash, salt, created_at) "
+            "VALUES (%s, %s, 'hash', %s, %s) ON CONFLICT (id) DO NOTHING",
+            (user_id, f"user{user_id}", b"", utc_now_text()),
         )
         conn.commit()
 

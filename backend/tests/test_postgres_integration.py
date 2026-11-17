@@ -4,11 +4,9 @@
 
 1. **应用能用 Postgres 启动并跑通主链路**：空库 → 迁移到 head → 连接池预热 →
    `/readyz` 可写探针 200 → 提交任务 → 跑到终态 → 正文落到 `document_versions`；
-2. **SQLite 仍是默认后端**：本文件的用例只在 `PRDWRIGHT_TEST_POSTGRES_URL` 指向的
-   真库上跑；库不可用时**整模块跳过**（不是失败），所以本地没起 PG 的环境照旧全绿；
-3. **结构校验没有被放宽**：PG 上的 `stamp` 路径（已有结构、没有 `alembic_version`）
+2. **结构校验没有被放宽**：PG 上的 `stamp` 路径（已有结构、没有 `alembic_version`）
    必须逐列逐索引对拍通过；真的漂移时仍然拒绝启动；
-4. **按方言的写法**：就绪探针在 PG 上不许发 `BEGIN IMMEDIATE` / `PRAGMA`，
+3. **按方言的写法**：就绪探针在 PG 上不许发 `BEGIN IMMEDIATE` / `PRAGMA`，
    只读事务里必须如实说「不可写」。
 
 ## 为什么单独一个文件
@@ -17,66 +15,32 @@
 DATABASE`）。本文件只挑**主链路**这一条纵向切片，在真库上走一遍；它用的是既有的
 公开接缝（HTTP + 迁移编排 + 就绪探针），不构造任何内部运行态。
 
-## 库从哪来
+## 库从哪来（#77 之后没有「跳过」这条路）
 
-连 `PRDWRIGHT_TEST_POSTGRES_URL`（默认本机 `postgresql+psycopg://postgres:postgres@
-127.0.0.1:5433`）的维护库，**每个用例新建一个唯一命名的库**，用例结束删掉。
-不碰共享库里的既有数据，也不依赖上一个用例留下的结构。
+连 `PRDWRIGHT_TEST_POSTGRES_URL`（维护库地址、**不带库名**，缺省
+`postgresql+psycopg://postgres:postgres@127.0.0.1:5433`）的维护库，**每个用例新建
+一个唯一命名的库**，用例结束删掉。不碰共享库里的既有数据，也不依赖上一个用例留下的结构。
+
+⚠️ 以前这里是「没 PG 就整模块跳过」。票 #77 之后全量用例都要在 PG 上跑，
+**跳过就是静默绿**——所以跳过策略已删除：基座连不上库时由 `conftest` 的
+`isolated_db` 直接失败并给出操作指引（见 `dbsupport.PostgresUnavailable`）。
 """
 
 from __future__ import annotations
 
 import json
-import os
-import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
 
+import dbsupport
 from backend.core import database as database_module
 from backend.core.schema import (
     SchemaMismatchError,
     current_revision,
     head_revision,
     prepare_schema,
-)
-
-# 维护库地址（不带库名）：用例自己 CREATE DATABASE。
-POSTGRES_ADMIN_URL = os.environ.get(
-    "PRDWRIGHT_TEST_POSTGRES_URL",
-    "postgresql+psycopg://postgres:postgres@127.0.0.1:5433",
-).rstrip("/")
-
-
-def _maintenance_engine():
-    """连维护库（`postgres`）用：AUTOCOMMIT 才能 CREATE / DROP DATABASE。"""
-    return create_engine(
-        f"{POSTGRES_ADMIN_URL}/postgres",
-        connect_args={"connect_timeout": 3},
-        isolation_level="AUTOCOMMIT",
-    )
-
-
-def _postgres_reachable() -> bool:
-    """Postgres 现在连得上吗（连不上就整模块跳过，不是失败）。"""
-    engine = _maintenance_engine()
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except Exception:  # noqa: BLE001 - 任何连不上的原因都只意味着「本机没有 PG」
-        return False
-    finally:
-        engine.dispose()
-    return True
-
-
-pytestmark = pytest.mark.skipif(
-    not _postgres_reachable(),
-    reason=(
-        "本机没有可用的 Postgres（默认 postgresql+psycopg://postgres:postgres@127.0.0.1:5433，"
-        "可用 PRDWRIGHT_TEST_POSTGRES_URL 覆盖）；PG 集成用例只在真库上跑。"
-    ),
 )
 
 
@@ -87,26 +51,59 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def pg_database():
-    """建一个唯一命名的空库，用例结束删掉；返回完整 URL。"""
-    name = f"prdwright_t76_{uuid.uuid4().hex[:12]}"
-    admin = _maintenance_engine()
-    with admin.connect() as conn:
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
-    url = f"{POSTGRES_ADMIN_URL}/{name}"
-    try:
+    """建一个唯一命名的**空**库，用例结束删掉；返回完整 URL。
+
+    空库（而不是从模板派生）：本文件要验的正是「全新库上一次跑通迁移链」。
+    """
+    with dbsupport.empty_database() as url:
         yield url
+
+
+@pytest.fixture
+def pg_engine(pg_database):
+    """按应用同一条路（`build_engine` → `prepare_schema`）把空库带到 head。"""
+    engine = database_module.build_engine(pg_database)
+    try:
+        prepare_schema(engine)
+        yield engine
     finally:
-        with admin.connect() as conn:
-            # 先把池里可能残留的连接踢掉，否则 DROP DATABASE 会被挡
-            conn.execute(
-                text(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = :name AND pid <> pg_backend_pid()"
-                ),
-                {"name": name},
-            )
-            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
-        admin.dispose()
+        engine.dispose()
+
+
+@pytest.fixture
+def pg_client(pg_database, isolated_db, temp_skills_root, monkeypatch):  # noqa: ARG001
+    """把整个应用绑到这个 PG 库上的 TestClient（lifespan 会迁移 + 预热）。
+
+    ⚠️ 排序依赖：`DATABASE_URL` 必须在 `get_settings()` 被读之前设进环境。
+    `isolated_db` 先跑完（它会 `cache_clear()` 一次，并把 `DATABASE_URL` 指到本用例
+    那个派生库），所以我们这里再覆盖成「空库」并清一次。
+    """
+    from fastapi.testclient import TestClient
+
+    from backend.core import runtime_config
+    from backend.core.config import get_settings
+    from backend.core.engine import reset_engine
+
+    monkeypatch.setenv("DATABASE_URL", pg_database)
+    get_settings.cache_clear()
+    runtime_config.invalidate()
+    reset_engine()
+
+    from conftest import write_skill_package
+
+    write_skill_package(temp_skills_root, "prd-generator")
+
+    from backend.main import app
+
+    engine = reset_engine()  # noqa: F841 - 真的把上一份引擎收掉；返回值为 None
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        # 必须在 `pg_database` 删库之前把池关干净（夹具销毁顺序：本夹具先于它）
+        reset_engine()
+        get_settings.cache_clear()
+        runtime_config.invalidate()
 
 
 @pytest.fixture

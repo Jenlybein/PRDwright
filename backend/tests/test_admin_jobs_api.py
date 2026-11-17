@@ -59,7 +59,8 @@ def _job(
             " provider_protocol, provider_config_id, provider_name, provider_model, "
             " prompt_tokens, completion_tokens, created_at, updated_at, "
             " request_params, config_snapshot, skill_refs, skill_manifest) "
-            "VALUES (?, NULL, ?, '', '', ?, 'writing', '', '[]', '[]', NULL, NULL, 2, ?, '', '', '', '', '', ?, ?, ?, ?, '{}', '{}', '[]', '')",
+            "VALUES (%s, NULL, %s, '', '', %s, 'writing', '', '[]', '[]', NULL, NULL, 2, %s, '', '', '', '', '', %s, %s, %s, %s, '{}', '{}', '[]', '') "
+            "RETURNING id",
             (
                 owner_id,
                 kind,
@@ -71,7 +72,7 @@ def _job(
                 updated.isoformat(),
             ),
         )
-        job_id = int(cur.lastrowid or 0)
+        job_id = int(cur.fetchone()["id"])
         conn.commit()
     return job_id
 
@@ -79,7 +80,7 @@ def _job(
 def _row(job_id: int) -> dict:
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM generation_jobs WHERE id = %s", (job_id,)
         ).fetchone()
         assert row is not None
         return dict(row)

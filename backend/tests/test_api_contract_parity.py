@@ -187,7 +187,7 @@ def test_created_at_comes_from_the_same_clock_as_the_db(client):
 
     with __import__("dbsupport").connect() as conn:
         stored = conn.execute(
-            "SELECT created_at FROM solutions WHERE id = ?", (solution_id,)
+            "SELECT created_at FROM solutions WHERE id = %s", (solution_id,)
         ).fetchone()
 
     detail = client.get(f"/api/solutions/{solution_id}").json()

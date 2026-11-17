@@ -417,11 +417,11 @@ def test_list_orders_by_content_time(client):
 
     with connect() as conn:
         conn.execute(
-            "UPDATE solutions SET content_updated_at = ?, updated_at = ? WHERE id = ?",
+            "UPDATE solutions SET content_updated_at = %s, updated_at = %s WHERE id = %s",
             ("2026-01-01T00:00:00+00:00", "2026-09-09T00:00:00+00:00", viewed["id"]),
         )
         conn.execute(
-            "UPDATE solutions SET content_updated_at = ?, updated_at = ? WHERE id = ?",
+            "UPDATE solutions SET content_updated_at = %s, updated_at = %s WHERE id = %s",
             ("2026-05-05T00:00:00+00:00", "2026-05-05T00:00:00+00:00", edited["id"]),
         )
         conn.commit()

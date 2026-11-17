@@ -56,8 +56,20 @@ def test_migration_adds_token_columns_and_audit_table():
     """
 
     with connect() as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'generation_jobs'"
+            )
+        }
+        tables = {
+            row["table_name"]
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+            )
+        }
 
     assert {"prompt_tokens", "completion_tokens"} <= columns
     assert "admin_audit_log" in tables

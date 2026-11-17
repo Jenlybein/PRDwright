@@ -1,4 +1,4 @@
-"""结构对拍（v6 / T16.3）：证明「模型」忠实描述「现有库」。
+"""结构对拍（v6 / T16.3；#77 起跑在 Postgres 上）：证明「模型」忠实描述「现有库」。
 
 这是整次数据层迁移的**关键门**。模型少一列的后果是「写不进去、读出来是默认值」，
 运行时不报错——只能靠这里挡住。
@@ -6,23 +6,27 @@
 三条判据：
 
 1. `create_all()` 建出来的库，与 **Alembic 基线**建出来的库，**语义快照完全一致**；
-2. 每张有自增主键的表真的带 `AUTOINCREMENT`（id 不复用，翻页游标才不会看见已删除的行）；
+2. 每张有自增主键的表在声明里仍带 `sqlite_autoincrement`，且**行为上** id 不复用
+   （Postgres 一侧由 `SERIAL` 序列保证：序列只增不回退，删掉最大行也不会复用它的 id）；
 3. 没有裸 `str` 字段（SQLModel 会把它映射成 `VARCHAR`，与现有库的 `TEXT` 全表漂移）。
+
+#77 换库改了**手段**：库从「临时 SQLite 文件」换成「两个临时 Postgres 库」，
+结构快照从 `schema_snapshot(文件路径)`（PRAGMA 专用）换成 `inspector_snapshot(engine)`
+（SQLAlchemy 反射，任何方言通用）。被验的性质一条没变。
 """
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 import sqlalchemy
-from sqlalchemy import create_engine
 from sqlmodel import SQLModel
 
+import dbsupport
+from backend.core.database import build_engine
 from backend.core.schema_snapshot import (
     BOOLEAN_COLUMNS,
     diff_snapshots,
-    schema_snapshot,
+    inspector_snapshot,
 )
 
 # 允许出现在库里的列类型。
@@ -48,42 +52,62 @@ _AUTOINCREMENT_TABLES = {
 }
 
 
-def _build_models_db(path) -> None:
-    """用模型建一个全新的库（模拟「空库升级到最新」）。"""
+def _build_models_db(url: str):
+    """用模型在一个**空库**上 `create_all`，返回它的 Engine（模拟「空库升级到最新」）。"""
     from backend.core import models  # noqa: F401  导入即注册模型
 
-    engine = create_engine(f"sqlite+pysqlite:///{path}")
+    engine = build_engine(url)
     try:
         SQLModel.metadata.create_all(engine)
     finally:
-        engine.dispose()
+        pass
+    return engine
 
 
-def test_create_all_matches_alembic_baseline(isolated_db, tmp_path):  # noqa: ARG001
+def test_create_all_matches_alembic_baseline():
     """`create_all()` 的库 == Alembic 基线建出来的库。
 
     比较的是语义快照（列/索引/外键），不是建表语句文本——两者的缩进、列序、
     约束渲染位置都不同，文本 diff 会把无关差异报成漂移。
 
-    conftest 的那个库就是 `prepare_schema`（`upgrade head`）建的，所以直接取它：
-    这条同时证明「基线迁移没有漏掉模型里的任何东西」。
+    两个库都是**当场新建的空库**：一个跑基线迁移，一个直接 `create_all`，
+    所以这条同时证明「基线迁移没有漏掉模型里的任何东西」。
     """
-    alembic_built = schema_snapshot(tmp_path / "test.db")
+    from backend.core.schema import prepare_schema
 
-    # 对照路径：用模型直接建库
-    models_db = tmp_path / "models.db"
-    _build_models_db(models_db)
-    fresh = schema_snapshot(models_db)
+    engine_alembic = None
+    engine_models = None
+    try:
+        with dbsupport.empty_database() as alembic_url:
+            engine_alembic = build_engine(alembic_url)
+            prepare_schema(engine_alembic)
+            alembic_built = inspector_snapshot(engine_alembic)
 
-    problems = diff_snapshots(alembic_built, fresh)
-    assert problems == [], "模型与基线库结构不一致：\n  " + "\n  ".join(problems)
+            with dbsupport.empty_database() as models_url:
+                engine_models = _build_models_db(models_url)
+                fresh = inspector_snapshot(engine_models)
+
+        problems = diff_snapshots(alembic_built, fresh)
+        assert problems == [], "模型与基线库结构不一致：\n  " + "\n  ".join(problems)
+    finally:
+        for engine in (engine_alembic, engine_models):
+            if engine is not None:
+                engine.dispose()
 
 
-def test_every_table_is_modelled(isolated_db, tmp_path):
+def test_every_table_is_modelled():
     """库里的表集合 == 模型声明的表集合（防「模型少一张表」）。"""
     from backend.core import models  # noqa: F401
+    from backend.core.schema import prepare_schema
 
-    legacy_tables = set(schema_snapshot(tmp_path / "test.db"))
+    with dbsupport.empty_database() as url:
+        engine = build_engine(url)
+        try:
+            prepare_schema(engine)
+            legacy_tables = set(inspector_snapshot(engine))
+        finally:
+            engine.dispose()
+
     model_tables = set(SQLModel.metadata.tables)
     assert model_tables == legacy_tables
 
@@ -201,10 +225,14 @@ def test_boolean_default_normalization_accepts_legacy_zero_one():
 @pytest.mark.parametrize("table", sorted(_AUTOINCREMENT_TABLES))
 
 def test_autoincrement_is_declared(table):
-    """每张自增主键表都带 `sqlite_autoincrement`。
+    """每张自增主键表在**声明**里仍带 `sqlite_autoincrement`。
 
-    少了它的后果是 SQLite 复用已删除的最大 rowid。`app_logs` / `admin_audit_log`
-    的 id 被当作翻页游标用，复用会让「下一页」看见上一次已删除的行。
+    这是 SQLite 专属表选项（非 SQLite 方言上会被静默忽略）。留着它有两个意义：
+
+    - 本仓库的模型是「一份声明，多方言」的，SQLite 那个后端在 #78 收缩之前仍要能建库；
+    - PG 一侧的自增来自 `SERIAL`（SQLAlchemy 对整数主键自动生成），**不需要**这个声明。
+
+    真正有价值的是下一条**行为**验证：删掉最大 id 之后新 id 不复用。声明只是它的一半证据。
     """
     from backend.core import models  # noqa: F401
 
@@ -212,34 +240,36 @@ def test_autoincrement_is_declared(table):
     assert table_obj.dialect_options["sqlite"]["autoincrement"] is True
 
 
-def test_deleted_max_id_is_not_reused(isolated_db, tmp_path):
+def test_deleted_max_id_is_not_reused(isolated_db):  # noqa: ARG001
     """行为验证：删掉最大 id 的行之后，新插入的 id **不复用**。
 
-    这条比「声明里有没有 AUTOINCREMENT」更硬：它验证的是 SQLite 的**实际行为**，
-    而不是我们对 DDL 的阅读。
+    这条比「声明里有没有 AUTOINCREMENT」更硬：它验证的是库的**实际行为**。
+    Postgres 一侧由 `SERIAL` 序列保证——序列只增不回退，删行不会让下一个 id 落回来。
     """
     from backend.core import models
     from dbsupport import connect
 
-    models.User  # 确保模型已注册（表由 conftest 的 prepare_schema 建好，这里只写入）
+    models.User  # 确保模型已注册（表由 conftest 的模板库建好，这里只写入）
     with connect() as conn:
         now = "2026-01-01T00:00:00"
         for name in ("u1", "u2", "u3"):
             conn.execute(
-                "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?,?,?,?)",
+                "INSERT INTO users (username, password_hash, salt, created_at) "
+                "VALUES (%s,%s,%s,%s)",
                 (name, "h", b"s", now),
             )
         conn.commit()
         assert conn.execute("SELECT MAX(id) FROM users").fetchone()[0] == 3
         conn.execute("DELETE FROM users WHERE id = 3")
         conn.execute(
-            "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?,?,?,?)",
+            "INSERT INTO users (username, password_hash, salt, created_at) "
+            "VALUES (%s,%s,%s,%s)",
             ("u4", "h", b"s", now),
         )
         conn.commit()
         new_id = conn.execute("SELECT id FROM users WHERE username = 'u4'").fetchone()[0]
 
-    assert new_id == 4, "id 被复用了：表上没有 AUTOINCREMENT"
+    assert new_id == 4, "id 被复用了：自增序列退回了（Postgres 上是 SERIAL 出问题）"
 
 
 def test_metadata_column_is_bound_to_reserved_name():
