@@ -811,6 +811,22 @@ export interface StreamChunk {
 // 生成任务（generation_jobs）：刷新重连的状态载体
 // ============================================================================
 
+/**
+ * 任务状态（七值，票 #84）。
+ *
+ * 后端 `generation_jobs.status` 的取值：排队中 / 执行中 / 取消中 / 已定稿 / 失败 /
+ * 被取代 / 已取消。`error_code` 只表达失败原因，**不承担状态语义**——「被取代」与
+ * 「已取消」靠这个字段区分（文案与配色见 `@/utils/jobState`，那是唯一一份表）。
+ */
+export type JobState =
+  | 'pending'
+  | 'running'
+  | 'cancelling'
+  | 'succeeded'
+  | 'failed'
+  | 'superseded'
+  | 'cancelled'
+
 /** 一章在并行流水线里的阶段（4 列看板只按它分组） */
 export type PrdSectionPhase =
   | 'pending'
@@ -909,8 +925,8 @@ export interface JobSnapshot {
    * （猜错等于拿 A 的结果覆盖 B）。
    */
   docKind: DocumentKind | null
-  /** 任务状态：running / completed / failed */
-  status: string
+  /** 任务状态（七值）：pending / running / cancelling / succeeded / failed / superseded / cancelled */
+  status: JobState
   /** 当前阶段（如 writing / reviewing / rewriting） */
   phase: string
   /** 已定稿正文（文档头 + 各章，可直接作为预览前缀） */
@@ -1018,8 +1034,8 @@ export interface SkillRef {
 export interface RunSummary {
   /** 文档种类（后端原始取值：prd / api_docs / prompts / optimize） */
   kind: string
-  /** 终态：completed / failed */
-  status: string
+  /** 终态（七值）：succeeded / failed / superseded / cancelled */
+  status: JobState
   /** 本次生成总耗时（毫秒） */
   durationMs: number
   /** 模型调用总次数（只统计拿到结果的调用） */
@@ -1255,4 +1271,5 @@ export interface SessionDataV2 {
    */
   activeChatStage?: ChatStage | null
 }
+
 

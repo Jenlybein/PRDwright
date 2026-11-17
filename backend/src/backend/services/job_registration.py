@@ -23,7 +23,11 @@ from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
+from backend.repositories.generation_job_repo import (
+    STATUS_CANCELLING,
+    STATUS_RUNNING,
+    GenerationJobRepository,
+)
 from backend.repositories.solution_repo import SolutionRepository
 from backend.services import job_claimer, job_dedupe, job_state
 from backend.services.job_service_impl import run_job
@@ -177,7 +181,7 @@ def _check_chat_single_writer(session: Any, ticket: JobTicket) -> None:
             and runtime.solution_id == ticket.solution_id
             and runtime.kind == "chat"
             and runtime.chat_stage == ticket.chat_stage
-            and runtime.status == STATUS_RUNNING
+            and runtime.status in (STATUS_RUNNING, STATUS_CANCELLING)
         ):
             raise AppError(
                 ErrorCode.INVALID_REQUEST,

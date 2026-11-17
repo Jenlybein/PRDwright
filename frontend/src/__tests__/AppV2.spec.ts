@@ -382,7 +382,7 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
 function makeRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     durationMs: 1000,
     totalCalls: 1,
     failedCalls: 0,
@@ -1577,7 +1577,10 @@ describe('AppV2 完整流程编排', () => {
     // 兜底查询带上了当前方案与「在跑」状态；**不再传 kind**（票 #70）：
     // 后端 `kind` 是任务种类（`review_fix` / `review` …），这里手上只有产物种类，
     // 旧写法把产物当任务传，对动作类任务永远不命中
-    expect(api.fetchActiveJobs).toHaveBeenCalledWith({ solutionId: 1, status: 'running' })
+    expect(api.fetchActiveJobs).toHaveBeenCalledWith({
+      solutionId: 1,
+      status: 'pending,running,cancelling',
+    })
     // 命中活跃任务：撤销降级提示，切回生成态并重连
     expect(wrapper.text()).not.toContain('上次的生成未完成')
     expect(api.readJobStream).toHaveBeenCalledWith(7, expect.anything(), expect.anything())
@@ -1643,7 +1646,10 @@ describe('AppV2 完整流程编排', () => {
     })
 
     // 兜底按方案 + 在跑状态查，不再把产物种类当任务种类传（旧写法对动作类任务永远不命中）
-    expect(api.fetchActiveJobs).toHaveBeenCalledWith({ solutionId: 1, status: 'running' })
+    expect(api.fetchActiveJobs).toHaveBeenCalledWith({
+      solutionId: 1,
+      status: 'pending,running,cancelling',
+    })
     // 命中后按后端给的 docKind 归位，屏幕上是运行视图而不是审阅页
     expect(wrapper.text()).not.toContain('文档缺陷')
     expect(api.readJobStream).toHaveBeenCalledWith(9, expect.anything(), expect.anything())

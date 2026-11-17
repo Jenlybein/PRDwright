@@ -235,9 +235,9 @@ def test_fake_stream_out_of_order_parts_reassemble_by_index(alice):
 
     done = next(event for event in events if event.type == "done")
     assert done.data["reply"] == "# 文档头\n第1章\n第2章\n"
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = _row(registered.job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     # 最终落库正文按 index 交错归并，不按到达顺序。
     assert row["draft_content"] == "# 文档头\n第1章\n第2章\n"
 
@@ -262,14 +262,14 @@ def test_fake_stream_partial_done_marks_receipt_and_keeps_text(alice):
     assert any(event.type == "chunk" for event in events)
     assert events[-1].type == "run_summary"
     assert events[-1].data["partial"] is True
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = _row(registered.job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert "只写了一半" in row["draft_content"]
 
 
 def test_cancel_through_public_action_keeps_aborted_semantics(alice):
-    """按停止走公开动作 `cancel_job`：落 `failed + CANCELLED`，不是「生成失败」。
+    """按停止走公开动作 `cancel_job`：落 `cancelled`，不是「生成失败」。
 
     已取消与真出错要分开：订阅不该收到红色 `error` 事件，回执仍是 failed。
     假流在造单时传入并停在一个可放行的位置，用公开动作而不是内部标志位来取消。
@@ -307,10 +307,10 @@ def test_cancel_through_public_action_keeps_aborted_semantics(alice):
 
     assert not any(event.type == "error" for event in events)
     assert events[-1].type == "run_summary"
-    assert events[-1].data["status"] == "failed"
+    assert events[-1].data["status"] == "cancelled"
     row = _row(registered.job_id)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     assert "已经说出口的话" in row["draft_content"]
 
 
@@ -339,9 +339,9 @@ def test_unreadable_skill_package_degrades_visibility_not_the_job(
     )
 
     assert events[-1].type == "run_summary"
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     assert events[-1].data["injected_skills"] == []
-    assert _row(job_id)["status"] == "completed"
+    assert _row(job_id)["status"] == "succeeded"
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +398,7 @@ def test_fake_config_is_frozen_at_build_time_and_does_not_drift(alice):
 
     frozen, registered, events = asyncio.run(scenario())
     summary = events[-1].data
-    assert summary["status"] == "completed"
+    assert summary["status"] == "succeeded"
     assert summary["provider_config_id"] == "cfg_seam_a"
     assert summary["model"] == "model-A"
     row = _row(registered.job_id)
@@ -445,7 +445,7 @@ def test_chat_derived_fields_and_unique_input_turn(client, alice, monkeypatch):
         "form_data": {},
     }
     assert any(event.type == "done" for event in events)
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
 
     with session_scope() as session:
         repo = ChatTurnRepository(session)

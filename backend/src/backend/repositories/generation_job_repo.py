@@ -34,10 +34,42 @@ from backend.core.clock import utc_now_text
 from backend.core.limits import ensure_text_within_limit
 from backend.core.models import GenerationJob, User
 
-# 任务状态：running / completed / failed（本层不做枚举约束，取值由服务层保证）
+# 任务状态：七值（票 #84）。**这是全仓唯一的取值定义**——服务层、管理端统计、
+# 对外 API 都从这一处取，不在别处再拼一份字面量。
+#
+# 七个状态一句话：
+# - `pending`（排队中）：已接单、没有执行者；可被领走，也可被直接取消；
+# - `running`（执行中）：某个执行者正拿着这条任务的租约在跑；
+# - `cancelling`（取消中）：用户已经说要停，等执行者确认退出；
+# - `succeeded`（已定稿）：正文已经可靠存进库；
+# - `failed`（失败）：真失败（含部分完成），**不是**「没跑成」的统称；
+# - `superseded`（被取代）：同一份文档有更新的任务接手，这一支让位（系统行为）；
+# - `cancelled`（已取消）：用户取消 / 方案被删（用户意图）。
+#
+# 「被取代」与「已取消」必须分开：两者都没有结果，含义却相反。合并之后排查时
+# 永远分不清「是用户不要了，还是被新任务挤掉了」——这也正是统计口径要分开的原因。
+#
+# ⚠️ 不再有 `completed` 这个取值：它的语义由 `succeeded` 承担。也不再有
+# 「`running` + 没有租约 = 排队中」这种同形表达——「排队中」只有 `pending` 一个表示。
+STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
-STATUS_COMPLETED = "completed"
+STATUS_CANCELLING = "cancelling"
+STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
+STATUS_SUPERSEDED = "superseded"
+STATUS_CANCELLED = "cancelled"
+
+# 在途（还没收尾）与终态（不会再变）两套集合。它们互斥且覆盖全部七个值：
+# 任何「是不是在飞 / 是不是已收尾」的判断都从这两处取，不各自列举。
+ACTIVE_STATUSES: tuple[str, ...] = (STATUS_PENDING, STATUS_RUNNING, STATUS_CANCELLING)
+TERMINAL_STATUSES: tuple[str, ...] = (
+    STATUS_SUCCEEDED,
+    STATUS_FAILED,
+    STATUS_SUPERSEDED,
+    STATUS_CANCELLED,
+)
+# 「会被重复提交复用」的目标：排队中 / 执行中（取消中的任务正在退出，不该被复用）。
+REUSABLE_STATUSES: tuple[str, ...] = (STATUS_PENDING, STATUS_RUNNING)
 
 
 def _due_now(now_text: str):
@@ -183,7 +215,12 @@ class GenerationJobRepository:
         config_snapshot: Any = None,
         skill_refs: Any = None,
     ) -> GenerationJob:
-        """新建一条 running 任务，返回**模型对象**（已 `flush`，`id` 可用）。
+        """新建一条**排队中**任务，返回**模型对象**（已 `flush`，`id` 可用）。
+
+        票 #84 起建行即 `pending`：登记只代表「接单了」，谁去跑由抢占那条转换回答
+        （`claim` 才把它改成 `running` 并写租约）。这样「排队中」有唯一的表示，
+        不再靠「`running` + 没有有效租约」同形表达——后者永远分不清「刚建好」与
+        「被恢复器交还队列」。
 
         `doc_kind` 与 `kind` 分开：`kind` 是「做了什么」，`doc_kind` 是「写到哪」。
         `optimize` / `clarify` 这类动作凭 `kind` 定不了产物，只有请求体知道；
@@ -209,7 +246,7 @@ class GenerationJobRepository:
             kind=kind,
             doc_kind=doc_kind,
             chat_stage=chat_stage,
-            status=STATUS_RUNNING,
+            status=STATUS_PENDING,
             phase="",
             draft_content="",
             completed_sections="[]",
@@ -275,11 +312,11 @@ class GenerationJobRepository:
         lease_token: str = "",
         now_text: str = "",
     ) -> int:
-        """标记任务完成，落最终正文与章节。清空错误字段。返回**改到的行数**。
+        """标记任务**已定稿**（`succeeded`），落最终正文与章节。清空错误字段。返回改到的行数。
 
         **条件写**：`WHERE status='running'`（#79）。只有仍在执行的任务才允许收尾成功；
         已经终态的行改到 0 行——调用方据此丢弃本次结果（而不是把第二次收尾又写一遍，
-        例如把 `failed` 覆回 `completed`）。
+        例如把 `failed` 覆回 `succeeded`）。
 
         **执行权三条件（#82）**：调用方给出本轮凭证时，再叠两条数据库层的判据——
         `lease_token` 仍是本轮那个、`lease_expire_at` 还没过。三条合起来只回答一个问题：
@@ -313,7 +350,7 @@ class GenerationJobRepository:
             update(GenerationJob)
             .where(*conditions)
             .values(
-                status=STATUS_COMPLETED,
+                status=STATUS_SUCCEEDED,
                 draft_content=draft_content,
                 completed_sections=sections_text,
                 usage=usage,
@@ -345,31 +382,18 @@ class GenerationJobRepository:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         partial: bool = False,
-        abort_code: str = "",
         lease_token: str = "",
         now_text: str = "",
     ) -> int:
-        """标记任务失败，保留已产出的半截正文、章节与已发生的用量。返回**改到的行数**。
+        """标记任务**失败**（`failed`），保留已产出的半截正文、章节与已发生的用量。
 
-        **条件写（#79）**，期望条件分两种：
-
-        - 普通失败 / 成功：`WHERE status='running'`——只允许从执行中收尾。
-        - `abort_code` 非空（`CANCELLED` / `SUPERSEDED`）：`status='running'` **或者**
-          「已经被同一个 abort 码落库、且 `usage` 还是空」。取消 / 顶替先把行落成终态
-          （用户按下停止要马上看得见），那一刻还没有用量；被取消的那条协程醒来收尾时
-          要补的正是半截正文与用量。这条「补一次」的条件**只能命中一次**（补完之后
-          `usage` 不再是空），所以重复收尾依然是 0 行——而不是「状态是 failed 就随便写」。
-
-        别把条件放宽成「`status='failed'` 一律可写」：那正是「晚到的失败把启动回收写的
+        **条件写（#79）**：`WHERE status='running'`——只允许从执行中失败收尾。
+        已经终态的行改到 0 行，调用方据此丢弃本次结果。**别把条件放宽成**
+        「`status='failed'` 一律可写」：那正是「晚到的失败把启动回收写的
         `INTERNAL_ERROR` 覆写成别的东西」的入口。
 
-        **执行权三条件（#82）**：调用方给出本轮凭证时，普通失败再叠「凭证是本轮 + 没到期」，
-        改到 0 行即丢弃。`abort_code`（取消 / 被顶替之后补一次载荷）那条路只叠**凭证**、
-        不叠到期：那两列回答的是「还能不能被别人领走」，而终态行不会再被任何人领走
-        （抢占要求 `status='running'`），所以对它写权的唯一判据是「这一轮是不是你的」
-        ＋「载荷只补一次」（`usage IS NULL`）。这不是放宽：#79 的「补一次载荷」契约
-        必须保留（用户按停止之后，已经烧掉的 token 与半截正文仍要记账），而旧凭证
-        在凭证判据上照样一行都改不到。
+        「取消 / 被取代」不在这里：它们有各自的状态（`cancelled` / `superseded`），
+        走 `confirm_cancel` / `confirm_superseded` 两条转换（票 #84）。
 
         `usage` 在失败路径同样要落：失败的生成**照样消耗了 token**，
         只记成功那次等于把最贵的失败藏起来。两个 token 列同理一并写：
@@ -383,28 +407,16 @@ class GenerationJobRepository:
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
-        if abort_code:
-            expected: Any = or_(
-                GenerationJob.status == STATUS_RUNNING,
-                and_(
-                    GenerationJob.status == STATUS_FAILED,
-                    GenerationJob.error_code == abort_code,
-                    GenerationJob.usage.is_(None),
-                ),
-            )
-        else:
-            expected = GenerationJob.status == STATUS_RUNNING
         conditions: list[Any] = [
             GenerationJob.id == job_id,
             GenerationJob.owner_id == owner_id,
-            expected,
+            GenerationJob.status == STATUS_RUNNING,
         ]
         if lease_token:
             conditions.append(GenerationJob.lease_token == lease_token)
-            if not abort_code:
-                conditions.append(
-                    GenerationJob.lease_expire_at >= (now_text or utc_now_text())
-                )
+            conditions.append(
+                GenerationJob.lease_expire_at >= (now_text or utc_now_text())
+            )
         result = self.session.execute(
             update(GenerationJob)
             .where(*conditions)
@@ -428,8 +440,186 @@ class GenerationJobRepository:
         return int(result.rowcount or 0)
 
     # ------------------------------------------------------------------
-    # 取消 / 顶替（条件更新，返回 rowcount）
+    # 取消 / 顶替（票 #84：请求与确认分开，条件更新返回 rowcount）
     # ------------------------------------------------------------------
+    #
+    # 所有者/方案/账号三种批量作用域共用「请求取消」的两个动作，而不是三套：
+    # - `_request_cancel`：按交给它的 WHERE 条件，把 `pending` 直接改成 `cancelled`
+    #   （没人在跑，不需要等谁确认），把 `running` / `cancelling` 改成 `cancelling`
+    #   （执行者要自己收口）。**两条 UPDATE 相加**才是这次请求影响的条数。
+    # 一次请求命中两种去向，所以不能写成一条带 CASE 的 UPDATE 再去判「哪些算」——
+    # 那样调用方还得回头猜每行去了哪儿；这里只回行数，去向由随后的读回答。
+
+    def _request_cancel(
+        self, conditions: list[Any], *, error_message: str
+    ) -> int:
+        """对一个作用域发起取消请求：排队中的直接落已取消，执行中的转取消中。"""
+        now = utc_now_text()
+        immediate = self.session.execute(
+            update(GenerationJob)
+            .where(*conditions, GenerationJob.status == STATUS_PENDING)
+            .values(
+                status=STATUS_CANCELLED,
+                error_code="",
+                error_message=error_message,
+                updated_at=now,
+            )
+        )
+        requesting = self.session.execute(
+            update(GenerationJob)
+            .where(
+                *conditions,
+                GenerationJob.status.in_((STATUS_RUNNING, STATUS_CANCELLING)),
+            )
+            .values(
+                status=STATUS_CANCELLING,
+                error_code="",
+                error_message=error_message,
+                updated_at=now,
+            )
+        )
+        return int(immediate.rowcount or 0) + int(requesting.rowcount or 0)
+
+    def request_cancel_one(
+        self, owner_id: int, job_id: int, *, error_message: str
+    ) -> bool:
+        """对某一条任务发起取消请求，返回是否确实改到了。
+
+        用户按「停止生成」针对的是**这一次**任务；同一方案下别的线程可能也在跑，
+        所以不能顺手批量取消。
+
+        任务已经自然结束（0 行）时返回 False：调用方据此回答「没取消到东西」，
+        而不是报错——「你点的时候它刚好说完了」不是失败。
+        """
+        rows = self._request_cancel(
+            [GenerationJob.owner_id == owner_id, GenerationJob.id == job_id],
+            error_message=error_message,
+        )
+        return rows > 0
+
+    def request_cancel_solution(
+        self, owner_id: int, *, solution_id: int, error_message: str
+    ) -> int:
+        """对某方案下所有在途任务发起取消请求（删方案），返回受影响条数。
+
+        方案没了，挂在它上面的生成任务再跑完也没地方落正文，继续跑只是白烧 token。
+        `solution_id` 用 `= ?`：本方法只服务于「删掉一份具体方案」，没有方案的
+        逃生口任务不会被这个动作波及。
+        """
+        return self._request_cancel(
+            [
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.solution_id == solution_id,
+            ],
+            error_message=error_message,
+        )
+
+    def request_cancel_owner(self, owner_id: int, *, error_message: str) -> int:
+        """对某用户名下**所有**在途任务发起取消请求（删账号），返回条数。
+
+        与按方案的区别只有过滤维度：删账号要覆盖名下所有方案，包括还没方案的
+        逃生口任务（`solution_id IS NULL`）。
+        """
+        return self._request_cancel(
+            [GenerationJob.owner_id == owner_id], error_message=error_message
+        )
+
+    def confirm_cancel(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        error_message: str,
+        draft_content: str = "",
+        completed_sections: list[dict[str, Any]] | None = None,
+        usage: str | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        partial: bool = False,
+        lease_token: str = "",
+        now_text: str = "",
+    ) -> int:
+        """**确认取消**：把执行中 / 取消中的任务落成已取消，清租约，返回改到的行数。
+
+        这是「取消」的第二阶段：用户按下停止只把行变成 `cancelling`，真正的终态由
+        还有资格写这一行的人落——执行者在下一个动作点看到标记，或恢复器在租约过期
+        后兜底（后者走 `cancel_expired`，因为那时执行权凭证已经不作数了）。
+
+        载荷（半截正文 / 用量）与终态**同一条语句**写下来：取消不是「什么都没发生」，
+        已经烧掉的 token 照记。条件只有两条——状态仍是参与执行的两个值、凭证仍是
+        本轮那个（`lease_token` 给出时）；第二次确认改到 0 行。
+        """
+        conditions: list[Any] = [
+            GenerationJob.owner_id == owner_id,
+            GenerationJob.id == job_id,
+            GenerationJob.status.in_((STATUS_RUNNING, STATUS_CANCELLING)),
+        ]
+        if lease_token:
+            conditions.append(GenerationJob.lease_token == lease_token)
+        result = self.session.execute(
+            update(GenerationJob)
+            .where(*conditions)
+            .values(
+                status=STATUS_CANCELLED,
+                # 已取消不是错误：`error_code` 只表达失败原因，状态由 `status` 表达。
+                error_code="",
+                error_message=error_message,
+                draft_content=draft_content,
+                completed_sections=_dump_sections(completed_sections or []),
+                usage=usage,
+                pending_items=_dump_pending_items(pending_items),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                partial=partial,
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
+                updated_at=utc_now_text(),
+            )
+        )
+        return int(result.rowcount or 0)
+
+    def settle_superseded_payload(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        draft_content: str = "",
+        completed_sections: list[dict[str, Any]] | None = None,
+        usage: str | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        partial: bool = False,
+    ) -> int:
+        """被顶替之后**补一次载荷**（半截正文 / 用量），返回改到的行数。
+
+        顶替是登记路径先落终态（`supersede_active`，此刻还不知道被顶替那一支烧了多少
+        token）；被顶替的执行者醒来收尾时，把这一次执行已经产生的正文与用量补上。
+        「补一次」由条件收口：`status='superseded'` **且 `usage IS NULL`**——补完之后
+        `usage` 不再是空，第二次照样 0 行。终态行不会再被任何人领走，所以不需要凭证。
+        """
+        result = self.session.execute(
+            update(GenerationJob)
+            .where(
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
+                GenerationJob.status == STATUS_SUPERSEDED,
+                GenerationJob.usage.is_(None),
+            )
+            .values(
+                draft_content=draft_content,
+                completed_sections=_dump_sections(completed_sections or []),
+                usage=usage,
+                pending_items=_dump_pending_items(pending_items),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                partial=partial,
+                updated_at=utc_now_text(),
+            )
+        )
+        return int(result.rowcount or 0)
 
     def supersede_active(
         self,
@@ -437,23 +627,24 @@ class GenerationJobRepository:
         *,
         solution_id: int | None,
         kind: str,
-        error_code: str,
         error_message: str,
     ) -> int:
-        """把同 owner + solution + kind 下旧的 running 置为 failed，返回被取代的条数。
+        """把同 owner + solution + kind 下旧的**在途**任务置为被取代，返回条数。
 
-        「同一 owner + solution + kind 至多一个 running」是一条业务不变量，在新建任务前
+        「同一 owner + solution + kind 至多一个在途任务」是一条业务不变量，在新建任务前
         先把旧的判为被取代，避免两个任务同时往同一处写正文。
-        `solution_id` 可能为 `None`，SQL 需用 `IS NULL` 而不是 `= NULL`。
 
-        `error_code` 用 `SUPERSEDED` 而不是笼统的 `INTERNAL_ERROR`：这次失败有明确原因
-        （被别人接手了，不是出错），运维看这一行时不该去翻日志找异常。取值由
-        `job_state` 统一给出，本层不再各写一份字面量（#79）。
+        覆盖三种前态（`pending` / `running` / `cancelling`）：排队中的让位、执行中的让开、
+        正在取消的任务同样已经有更新的任务接手——统一落 `superseded`，不是「取消」：
+        它们一个是被新任务挤掉（系统行为），一个是被用户叫停（用户意图），统计上必须分开。
+
+        `error_code` 留空：`SUPERSEDED` 曾经是错误码，现在由状态表达（AC4）。
+        `solution_id` 可能为 `None`，SQL 用 `IS NULL` 而不是 `= NULL`。
         """
         conditions = [
             GenerationJob.owner_id == owner_id,
             GenerationJob.kind == kind,
-            GenerationJob.status == STATUS_RUNNING,
+            GenerationJob.status.in_(ACTIVE_STATUSES),
         ]
         conditions.append(
             GenerationJob.solution_id.is_(None)
@@ -464,98 +655,65 @@ class GenerationJobRepository:
             update(GenerationJob)
             .where(*conditions)
             .values(
-                status=STATUS_FAILED,
-                error_code=error_code,
+                status=STATUS_SUPERSEDED,
+                error_code="",
                 error_message=error_message,
+                # 终态一律清空租约三列：这一行没有执行者了（被顶替的那一支即使还醒着，
+                # 也只能补一次载荷，不能借租约继续写）。
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
                 updated_at=utc_now_text(),
             )
         )
         return int(result.rowcount or 0)
 
-    def cancel_one(
-        self, owner_id: int, job_id: int, *, error_code: str, error_message: str
-    ) -> bool:
-        """把某一条 running 任务置为 failed + 入参错误码，返回是否确实改到了。
+    def fail_queued(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        error_code: str,
+        error_message: str,
+        draft_content: str = "",
+        completed_sections: list[dict[str, Any]] | None = None,
+        usage: str | None = None,
+        pending_items: list[dict[str, Any]] | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        partial: bool = False,
+        now_text: str = "",
+    ) -> int:
+        """启动档专用：把一条**排队中**的行落成失败（服务重启中断）。
 
-        与 `cancel_running`（按方案批量）分开：用户按「停止生成」针对的是**这一次**
-        任务，而同一方案下别的线程可能也在跑，批量取消会连带掐掉它们。
-
-        任务已经自然结束（`rowcount = 0`）时返回 False：调用方据此回答
-        「没取消到东西」，而不是报错——「你点的时候它刚好说完了」不是失败。
+        为什么单独一个方法而不是复用 `fail`：`fail` 的前态是 `running`——只有执行者
+        才有资格写「这一轮失败了」。把条件放宽到 `pending` 会让「旧执行者的晚到失败」
+        写进一条已经被恢复器交还队列的行（那是二阶事故：队列里的活被别人的结论判死）。
+        本方法只由启动回收调用（那时代码刚起来，不可能有执行者），前态固定为
+        `pending`，改到 0 行即跳过。
         """
         result = self.session.execute(
             update(GenerationJob)
             .where(
                 GenerationJob.owner_id == owner_id,
                 GenerationJob.id == job_id,
-                GenerationJob.status == STATUS_RUNNING,
+                GenerationJob.status == STATUS_PENDING,
             )
             .values(
                 status=STATUS_FAILED,
                 error_code=error_code,
                 error_message=error_message,
-                updated_at=utc_now_text(),
-            )
-        )
-        return int(result.rowcount or 0) == 1
-
-    def cancel_running(
-        self, owner_id: int, *, solution_id: int, error_code: str, error_message: str
-    ) -> int:
-        """把该 owner + 方案下所有 running 任务置为 failed，返回受影响条数。
-
-        用在「方案被删除」：方案没了，挂在它上面的生成任务再跑完也没地方落正文，
-        继续跑只会白烧 token。
-
-        ⚠️ **刻意复用 `failed` 而不是新造一个 `cancelled` 状态**：任务状态是前后端共享
-        的契约（前端所有 status 分支都按 running / completed / failed 三态判），
-        多一个取值意味着每一处分支都要多一条分支，而漏掉任何一处都会让界面停在
-        「生成中」。语义上被取消确实「没有成功」，复用 `failed` 是代价最小的选择；
-        具体原因放在 `error_code` / `error_message` 里（取值由 `job_state` 统一给出，
-        本层不再各写一份字面量，#79）。
-
-        `solution_id` 用 `= ?` 而不是 `IS NULL`：本方法只服务于「删掉一份具体方案」，
-        没有方案的任务（快捷入口逃生口）不会被这个动作波及。
-        """
-        result = self.session.execute(
-            update(GenerationJob)
-            .where(
-                GenerationJob.owner_id == owner_id,
-                GenerationJob.solution_id == solution_id,
-                GenerationJob.status == STATUS_RUNNING,
-            )
-            .values(
-                status=STATUS_FAILED,
-                error_code=error_code,
-                error_message=error_message,
-                updated_at=utc_now_text(),
-            )
-        )
-        return int(result.rowcount or 0)
-
-    def cancel_running_for_owner(
-        self, owner_id: int, *, error_code: str, error_message: str
-    ) -> int:
-        """把该 owner 名下**所有** running 任务置为 failed + 入参错误码，返回条数。
-
-        用在「删除账号」：账号一旦消失，任务再跑完也没有地方落正文，继续跑只是白烧
-        token——而且收尾那一刻还会去写一个已经不存在的归属。
-
-        与 `cancel_running`（按方案）的区别只有过滤维度：删账号要覆盖他名下**所有**
-        方案，包括还没有方案的逃生口任务（`solution_id IS NULL`），所以这里只按
-        `owner_id` 过滤，不加 `solution_id` 条件。
-        """
-        result = self.session.execute(
-            update(GenerationJob)
-            .where(
-                GenerationJob.owner_id == owner_id,
-                GenerationJob.status == STATUS_RUNNING,
-            )
-            .values(
-                status=STATUS_FAILED,
-                error_code=error_code,
-                error_message=error_message,
-                updated_at=utc_now_text(),
+                draft_content=draft_content,
+                completed_sections=_dump_sections(completed_sections or []),
+                usage=usage,
+                pending_items=_dump_pending_items(pending_items),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                partial=partial,
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
+                updated_at=now_text or utc_now_text(),
             )
         )
         return int(result.rowcount or 0)
@@ -567,34 +725,61 @@ class GenerationJobRepository:
     def scan_recoverable(
         self, *, now_text: str, limit: int, startup: bool = False
     ) -> list[GenerationJob]:
-        """系统级维护读：扫一批该接手的 running 行（返回模型对象）。
+        """系统级维护读：扫一批该接手的**非终态**行（返回模型对象）。
 
         本仓库两个系统级维护读之一（另一个是抢占侧的 `claimable`）：恢复天然跨用户。
         条件分两档（语义与去向见 `services/job_recovery` 的模块 docstring）：
 
-        周期档（`startup=False`，默认）三句，各有各的必要性：
+        周期档（`startup=False`，默认）只看两种「该有人收口却没人收」的行：
 
-        - `status='running'`：只有执行中才谈得上「接手」（#79 的合法前态）。
-        - `lease_expire_at != ''`：**没有租约的行是「排队中」，不是孤儿**——它本来就
-          该等调度循环来领，恢复器去动它等于把排队中的活判死。
-        - `lease_expire_at < now_text`：到期才轮得到别人接手。时间用 ISO 文本直接比，
-          字典序即时间序（`core/clock.py` 的口径），不把时间取回 Python 再判。
+        - `status='running'` 且租约已过期：执行者的进程没了（#83 的交接）；
+        - `status='cancelling'` 且租约已过期（或租约本来就是空的）：用户要停，但执行者
+          卡住没来确认（票 #84 的 AC3）。**取消中先由执行者确认**，恢复器只在租约过期
+          之后接手，否则会把一条正在正常收口的任务抢走。
+        - `pending` **不是**候选：排队中本来就该等下一次抢占，恢复器去动它等于把排队
+          中的活判死。时间用 ISO 文本直接比，字典序即时间序（`core/clock.py` 的口径）。
 
-        启动档（`startup=True`）只留 `status='running'` 一句：进程刚起来时它上面
-        不可能有真正的执行者（单 worker 硬约束，`_RUNTIMES` 在进程内），库里任何
-        `running` 行都是上次进程留下的——**包括还没到期的租约**（不看的话「崩溃前
-        1 秒领走」的行要再等满一个租约时长才被动），**也包括从没被领过的残留行**
-        （登记完还没派发就崩了；本票没有调度循环，留着就是永远进行中）。
+        启动档（`startup=True`）扫所有非终态行：进程刚起来时它上面不可能有真正的
+        执行者（单 worker 硬约束，`_RUNTIMES` 在进程内），库里任何 `running` / `cancelling`
+        行都是上次进程留下的——**包括还没到期的租约**（不看的话「崩溃前 1 秒领走」的
+        行要再等满一个租约时长才被动），**也包括从没被领过的残留 `pending` 行**
+        （登记完还没派发就崩了；本票没有调度循环，留着就是永远排队中）。
 
         排序 `lease_expire_at, id`：过期最久的最先收，同一秒的按自增 id 稳定排序
-        （启动档里没租约的行 `lease_expire_at` 是空串，字典序最小，同样稳定地排在
+        （启动档里没有租约的行 `lease_expire_at` 是空串，字典序最小，同样稳定地排在
         前面）。只挑候选，不判权——真正的「改不改得到」由 `requeue_lease` /
-        `fail_expired` 的条件写回答。
+        `fail_expired` / `cancel_expired` 的条件写回答。
         """
-        conditions: list[Any] = [GenerationJob.status == STATUS_RUNNING]
+        conditions: list[Any] = []
         if not startup:
-            conditions.append(GenerationJob.lease_expire_at != "")
-            conditions.append(GenerationJob.lease_expire_at < now_text)
+            # 周期档两条候选：
+            # - 执行中且租约已过期（执行者进程没了）；
+            # - 取消中且租约已过期（或者租约本来就是空的：没有执行者还拿得住它）——
+            #   AC3 的兜底对象。取消中的行**先由执行者自己确认**，恢复器只在租约过期
+            #   之后接手，否则会把一条正在正常收口的任务抢走。
+            conditions.append(
+                or_(
+                    and_(
+                        GenerationJob.status == STATUS_RUNNING,
+                        GenerationJob.lease_expire_at != "",
+                        GenerationJob.lease_expire_at < now_text,
+                    ),
+                    and_(
+                        GenerationJob.status == STATUS_CANCELLING,
+                        or_(
+                            GenerationJob.lease_expire_at == "",
+                            GenerationJob.lease_expire_at < now_text,
+                        ),
+                    ),
+                )
+            )
+        else:
+            # 启动档：进程刚起来时它上面不可能有真正的执行者（单 worker 硬约束，
+            # `_RUNTIMES` 在进程内），所以**所有非终态行**都要收口：
+            # - `running`（含还没到期的租约）：按超时 / 中断判失败；
+            # - `cancelling`：按已取消收口（取消是用户的明确意图，不能记成失败）；
+            # - `pending`：登记完还没派发就崩了——本票没有调度循环，留着就是永远排队中。
+            conditions.append(GenerationJob.status.in_(ACTIVE_STATUSES))
         return list(
             self.session.execute(
                 select(GenerationJob)
@@ -616,7 +801,7 @@ class GenerationJobRepository:
         now_text: str = "",
         next_run_at: str = "",
     ) -> int:
-        """恢复器：把过期租约交还队列（**状态不变**，只清租约三列），返回改到的行数。
+        """恢复器：把过期租约交还队列（**回到 `pending`** 并清租约），返回改到的行数。
 
         ## 为什么是条件写
 
@@ -626,12 +811,13 @@ class GenerationJobRepository:
         跑，刚续了租）。恢复器凭的就是「这一行还是我扫描时看到的那一份死租约」——
         跟一个晚到的执行者拿旧凭证写结果时遵守的是同一条规则。
 
-        ## 清三列 = 回排队
+        ## 清三列 + 回到 `pending` = 回排队
 
-        `lease_owner / lease_token / lease_expire_at` 全清空之后，这一行在
-        `claimable` 眼里就是「还没人领」，下一个执行者能直接领走（#82 的抢占条件
-        正是 `lease_token='' or lease_expire_at < now`）。`updated_at` 一起更新：
-        「回排队就排到同优先级队尾」是既有排序语义。
+        七态之后「排队中」只有 `pending` 一个表示，所以这里**同时改状态**：
+        `lease_owner / lease_token / lease_expire_at` 全清空、`status` 回到 `pending`，
+        下一个执行者靠 `claim`（`WHERE status='pending'`）领走。若只清租约不改状态，
+        就会出现第二种「排队中」（`running` + 空租约），那是两个真源。
+        `updated_at` 一起更新：「回排队就排到同优先级队尾」是既有排序语义。
 
         ## `next_run_at`：回排队**不等于立刻能领**（#88）
 
@@ -644,9 +830,9 @@ class GenerationJobRepository:
 
         ## 为什么不在这里改状态
 
-        回排队**不是**一次状态转换（`running` 还是 `running`），改状态只能经状态机；
-        本方法只回答「这一次交接成没成」。账本那一笔由调用方（`job_state.transition`
-        的 `REQUEUE` 分支）与它同事务写入，所以这里不写任何结论。
+        回排队**是**一次状态转换（`running` → `pending`），但本层只做「这一次交接成没成」
+        的条件写；改状态的规则只在状态机一处（`job_state` 的 `REQUEUE` 分支），
+        账本那一笔由它与本次写同事务完成，所以这里不写任何结论。
         """
         result = self.session.execute(
             update(GenerationJob)
@@ -658,6 +844,7 @@ class GenerationJobRepository:
                 GenerationJob.lease_expire_at == lease_expire_at,
             )
             .values(
+                status=STATUS_PENDING,
                 lease_owner="",
                 lease_token="",
                 lease_expire_at="",
@@ -685,8 +872,7 @@ class GenerationJobRepository:
 
         **不复用 `fail`**：那个方法叠的是「这一轮凭证还是我的、且**还没到期**」这条
         判据（#82 的写权口径）。恢复器面对的恰恰是**已经过期**的租约，拿那条条件写
-        永远 0 行；而 `fail` 的 `abort_code` 那条放宽分支只服务于「取消之后补一次
-        载荷」，也不该被超时复用来绕开判权。两个场景的期望条件不同，所以是两个方法。
+        永远 0 行。两个场景的期望条件不同，所以是两个方法。
 
         不写 `draft_content` / `usage`：恢复器手里没有本轮产物（执行者已经不在场），
         行上已有的半截进度原样保留，用量保持「未知」而不是伪造成 0。
@@ -712,6 +898,48 @@ class GenerationJobRepository:
         )
         return int(result.rowcount or 0)
 
+    def cancel_expired(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        lease_token: str,
+        lease_expire_at: str,
+        error_message: str,
+        now_text: str = "",
+    ) -> int:
+        """恢复器：把**卡住的「取消中」**落成已取消（终态 + 清租约），返回改到的行数。
+
+        票 #84 AC3 的落点：用户已经说要停，执行者却卡在模型调用里没来确认；租约过期
+        之后由恢复器替它收口。结局是 `cancelled`（用户的明确意图），**不是 `failed`**——
+        把「用户不要了」记成一次失败，统计与排查都会读错。
+
+        与 `requeue_lease` / `fail_expired` 同一套 fencing（扫描时读到的旧凭证 + 旧到期
+        时间两列进 `WHERE`）：凭证被换掉 / 刚续过租，都一行改不到。
+        取消确认没有载荷：执行者已经不在场，它这一次产生的正文与用量无从得知
+        （与 `fail_expired` 同一口径——宁可少算，不伪造 0）。
+        """
+        result = self.session.execute(
+            update(GenerationJob)
+            .where(
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
+                GenerationJob.status == STATUS_CANCELLING,
+                GenerationJob.lease_token == lease_token,
+                GenerationJob.lease_expire_at == lease_expire_at,
+            )
+            .values(
+                status=STATUS_CANCELLED,
+                error_code="",
+                error_message=error_message,
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
+                updated_at=now_text or utc_now_text(),
+            )
+        )
+        return int(result.rowcount or 0)
+
     # ------------------------------------------------------------------
     # 执行权（租约，票 #82）：抢占 / 续租 / 扫待领
     # ------------------------------------------------------------------
@@ -726,24 +954,25 @@ class GenerationJobRepository:
         expire_at: str,
         now_text: str,
     ) -> int:
-        """抢占一条任务，返回**改到的行数**（1 = 领到了，0 = 没领到）。
+        """抢占一条**排队中**任务，返回**改到的行数**（1 = 领到了，0 = 没领到）。
 
         ## 判断与修改压在同一条 UPDATE 里
 
-        `WHERE` 里的「没有有效租约」是这条语句的核心：`lease_token = ''`（从没人领过）
-        **或** `lease_expire_at < 现在`（领它的人已经到期）。数据库在改之前会重新判一次
-        条件，所以两个进程同时执行同一条语句时，第一个改到的那些行对第二个已经不满足
-        条件——它一行都改不到。**谁改到了行，谁才算领到**；这不是靠错开时间去避让。
+        `WHERE status='pending'` 是这条语句的核心（七态之后「排队中」只有这一个表示）。
+        数据库在改之前会重新判一次条件，所以两个进程同时执行同一条语句时，第一个改到的
+        那些行对第二个已经不满足条件——它一行都改不到。**谁改到了行，谁才算领到**；
+        这不是靠错开时间去避让。
 
         反过来说，写成「先查有没有人领、再写」就一定会漏：查与写之间那段窗口里，
         两边都会读到「还没人领」，然后都以为自己领到了（后写的那个把先写的凭证覆盖掉，
         于是两个执行者同时在跑同一行）。
 
-        ## 允许领「已过期」的行
+        ## 过期租约的「执行中」行不在这里接手
 
-        这是崩溃接手的入口（#83 的恢复器走的就是它）：原执行者的进程没了，租约到期，
-        另一处用新的凭证接手。凭什么接手者更有权？因为它也守同一条规则——凭证对不上，
-        它一样一行都改不到。
+        #82 当时允许直接领「租约已过期」的 `running` 行；七态之后这条路收口到恢复器
+        （#83）：过期租约先由 `requeue_lease` 变成 `pending`（并按剩余次数决定去向，
+        账本记一笔），再由本方法领走。直接抢一条过期 `running` 行等于绕过恢复器的去向
+        判定与账本，等于给「执行中 → 执行中」开了第二个入口。
 
         `lease_owner` 只写进库供排查，**不参与任何条件**：判权的是凭证。
 
@@ -758,15 +987,12 @@ class GenerationJobRepository:
             .where(
                 GenerationJob.owner_id == owner_id,
                 GenerationJob.id == job_id,
-                GenerationJob.status == STATUS_RUNNING,
-                or_(
-                    GenerationJob.lease_token == "",
-                    GenerationJob.lease_expire_at < now_text,
-                ),
+                GenerationJob.status == STATUS_PENDING,
                 # 失败退避：还没到期的一行领不走（`next_run_at=''` = 立即）。
                 _due_now(now_text),
             )
             .values(
+                status=STATUS_RUNNING,
                 lease_owner=lease_owner,
                 lease_token=lease_token,
                 lease_expire_at=expire_at,
@@ -809,7 +1035,7 @@ class GenerationJobRepository:
         return int(result.rowcount or 0)
 
     def claimable(self, *, now_text: str, limit: int) -> list[tuple[int, int]]:
-        """系统级维护：扫一批「还没有有效租约」的待领任务，返回 `(owner_id, id)`。
+        """系统级维护：扫一批**排队中**的待领任务，返回 `(owner_id, id)`。
 
         本仓库两个系统级维护读之一（另一个是恢复器的 `scan_recoverable`）：队列扫描
         天然跨用户。
@@ -824,11 +1050,7 @@ class GenerationJobRepository:
         rows = self.session.execute(
             select(GenerationJob.owner_id, GenerationJob.id)
             .where(
-                GenerationJob.status == STATUS_RUNNING,
-                or_(
-                    GenerationJob.lease_token == "",
-                    GenerationJob.lease_expire_at < now_text,
-                ),
+                GenerationJob.status == STATUS_PENDING,
                 # 到期闸门（#88）：没到 `next_run_at` 的行不是候选，与 `claim` 同一处定义。
                 _due_now(now_text),
             )
@@ -861,13 +1083,13 @@ class GenerationJobRepository:
         kind: str | None = None,
         chat_stage: str | None = None,
     ) -> GenerationJob | None:
-        """查该 owner 下最近的 running 任务（`updated_at DESC`）。
+        """查该 owner 下最近的**在途**任务（`updated_at DESC`，七态下 = 排队中/执行中/取消中）。
 
         `solution_id` / `kind` / `chat_stage` 为 `None` 时不参与过滤。
         """
         conditions = [
             GenerationJob.owner_id == owner_id,
-            GenerationJob.status == STATUS_RUNNING,
+            GenerationJob.status.in_(ACTIVE_STATUSES),
         ]
         if solution_id is not None:
             conditions.append(GenerationJob.solution_id == solution_id)
@@ -898,14 +1120,15 @@ class GenerationJobRepository:
     ) -> GenerationJob | None:
         """查「这次提交可以复用哪一条既有任务」（创建去重，票 #87）。
 
-        判据是**同键 + 仍在 running + 在时间窗内**：键为 owner / 方案 / `kind` /
+        判据是**同键 + 仍在排队/执行中 + 在时间窗内**：键为 owner / 方案 / `kind` /
         `doc_kind` / 输入指纹；`created_since` 是窗口下界的时间文本。
 
         `created_at` 是 `timestamp_text()`（ISO 文本），字典序即时间序，因此
         `>=` 可以直接在 SQL 里比（见 `core/clock.py` 的口径）——不必把时间取回
         Python 再判断。`solution_id` 可能为 `None`（没有方案的任务），用 `IS NULL`。
 
-        只返回 `running`：终态任务不复用（生成已结束，再点一次是「重新生成」）。
+        只返回 `pending` / `running`：终态任务不复用（生成已结束，再点一次是「重新生成」）；
+        `cancelling` 也不复用——那一支正在退出，复用它等于把用户刚叫停的任务当成新活。
         排序取最近一条：同一键在窗内理论上至多一条（登记互斥保证），`id` 兜底。
         """
         conditions = [
@@ -913,7 +1136,7 @@ class GenerationJobRepository:
             GenerationJob.kind == kind,
             GenerationJob.doc_kind == doc_kind,
             GenerationJob.input_fingerprint == input_fingerprint,
-            GenerationJob.status == STATUS_RUNNING,
+            GenerationJob.status.in_(REUSABLE_STATUSES),
             GenerationJob.created_at >= created_since,
         ]
         conditions.append(
@@ -936,14 +1159,19 @@ class GenerationJobRepository:
         self,
         owner_id: int,
         *,
-        status: str | None = None,
+        statuses: tuple[str, ...] | None = None,
         solution_id: int | None = None,
         kind: str | None = None,
     ) -> list[GenerationJob]:
-        """列出该 owner 的任务，最近创建在前；可选按 status / solution_id / kind 过滤。"""
+        """列出该 owner 的任务，最近创建在前；可选按**状态集合** / solution_id / kind 过滤。
+
+        `statuses` 是一组取值（对外 `?status=pending,running,cancelling` 的「在途」查询
+        就靠它）：空元组 / `None` 表示不筛。不在这里接单个字符串再拼一次——多值过滤
+        只有这一个入口，避免「单值走一条 SQL、多值走另一条」的两套实现。
+        """
         conditions = [GenerationJob.owner_id == owner_id]
-        if status is not None:
-            conditions.append(GenerationJob.status == status)
+        if statuses:
+            conditions.append(GenerationJob.status.in_(statuses))
         if solution_id is not None:
             conditions.append(GenerationJob.solution_id == solution_id)
         if kind is not None:
@@ -965,7 +1193,7 @@ class GenerationJobRepository:
     def admin_list(
         self,
         *,
-        status: str | None = None,
+        statuses: tuple[str, ...] | None = None,
         username: str | None = None,
         kind: str | None = None,
         limit: int = 100,
@@ -973,17 +1201,21 @@ class GenerationJobRepository:
     ) -> list[AdminJob]:
         """列出任务（管理员视角，JOIN 出用户名），返回 `AdminJob` 投影。
 
+        `statuses` 与用户面同口径：一组取值（可以是七个值里的任意几个）。管理端的
+        「在飞」标签传 `pending,running,cancelling`——一列状态值已经能回答「哪些还没收尾」，
+        不必再按「有没有租约」猜。
+
         排序按状态分开：
-        - `running` 用 `created_at ASC`——卡死任务的特征就是「跑得最久」，
-          把它顶到最前面才看得见；
+        - 在途（`pending` / `running` / `cancelling`）用 `created_at ASC`——卡死任务的特征
+          就是「跑得最久」，把它顶到最前面才看得见；
         - 其余用 `updated_at DESC`——最近有动静的在前。
 
         `username` 是**模糊匹配**（`LIKE`）：管理员通常只记得半个用户名，
         要求精确输入等于让他先去用户页复制一遍。
         """
         conditions = []
-        if status:
-            conditions.append(GenerationJob.status == status)
+        if statuses:
+            conditions.append(GenerationJob.status.in_(statuses))
         if kind:
             conditions.append(GenerationJob.kind == kind)
         if username:
@@ -991,7 +1223,7 @@ class GenerationJobRepository:
 
         order = (
             (GenerationJob.created_at.asc(), GenerationJob.id.asc())
-            if status == STATUS_RUNNING
+            if statuses and all(value in ACTIVE_STATUSES for value in statuses)
             else (GenerationJob.updated_at.desc(), GenerationJob.id.desc())
         )
         rows = self.session.execute(
@@ -1007,14 +1239,14 @@ class GenerationJobRepository:
     def admin_count(
         self,
         *,
-        status: str | None = None,
+        statuses: tuple[str, ...] | None = None,
         username: str | None = None,
         kind: str | None = None,
     ) -> int:
         """与 `admin_list` 同口径的命中总数（分页 / 「还有多少」用）。"""
         conditions = []
-        if status:
-            conditions.append(GenerationJob.status == status)
+        if statuses:
+            conditions.append(GenerationJob.status.in_(statuses))
         if kind:
             conditions.append(GenerationJob.kind == kind)
         if username:

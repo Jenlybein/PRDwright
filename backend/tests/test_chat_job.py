@@ -610,10 +610,10 @@ def test_failed_turn_write_does_not_turn_a_finished_chat_into_a_failure(
         reply="这一轮的回复",
     )
 
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = job_get(owner_id, registered.job_id)
     assert row is not None
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["draft_content"] == "这一轮的回复"
     # 输入轮次已经落库，只是助手回复「升格成轮次」这一步失败。
     assert [turn.role for turn in _turns(owner_id, solution_id)] == ["user"]

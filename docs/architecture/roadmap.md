@@ -237,7 +237,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 ### 9.2 本期不做
 
-#81 的「本期不做」：七态与「取消中」（#84）、租约与周期恢复器（#82 / #83）、事件表与快照（#86）、部分完成落成新版本（#85）、排队 / 抢占 / 退避（#88）。前端不新增界面，只加冲突提示与失败不显示成功。其中 #82 / #83 / #85 已在后续票落地（见 §9.3）。
+#81 的「本期不做」：七态与「取消中」（#84）、租约与周期恢复器（#82 / #83）、事件表与快照（#86）、部分完成落成新版本（#85）、排队 / 抢占 / 退避（#88）。前端不新增界面，只加冲突提示与失败不显示成功。其中 #82 / #83 / #85 / #84 / #88 已在后续票落地（见 §9.3）。
 
 ### 9.3 票序与状态
 
@@ -251,7 +251,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 | **#83** | 恢复器（过期租约收口） | `services/job_recovery.py`：`recover_once(limit)` 可直接调用（不起线程 / 定时器）；扫描时旧凭证 fencing（凭证 + 到期时间两列进 WHERE）；周期档按账本剩余次数回排队 / 判失败（`LEASE_EXPIRED`），启动档一律落终态；`reap_orphans` 收编为 `recover_once(startup=True)` | 已合入（`4f668ff`） |
 | **#86** | 事件表与游标订阅 | `job_events` 表（迁移 `0005`）+ `services/job_events.py`；`GET /api/jobs/{id}/stream` 按游标读表、断线重连不重不漏；快照防冷读回放；清理是可调用单元 | 已合入（`8727973`） |
 | **#88** | 失败延迟退避 | `0006` 一列（`generation_jobs.next_run_at`）、`services/job_backoff.py` 唯一映射表（限流 / 5xx / 超时）、`job_state.transition(REQUEUE)` 同批写退避、仓储到期闸门 `_due_now` 与排队顺序 `_queue_order`、前端等待倒计时与退避期取消 | 本轮（`ticket/88-backoff`，基于 `b3a7940`） |
-| #84 | 七态与「取消中」 | 见 spec 第六节 | 待做 |
+| **#84** | 七态与「取消中」 | `job_state` 七态转换表（`REQUEST_CANCEL` / `CONFIRM_CANCEL` / `EXPIRE_CANCELLING` / `EXPIRE_PENDING` / `SUPERSEDE` / `CONFIRM_SUPERSEDED`）；仓储条件写按七态重写（`pending` 是唯一「排队中」）；`cancelling` 经动作点续租 → `CancelRequestedError` → 确认取消；恢复器兜底 `cancelling` + 启动档收 `pending`；`0007` 旧行一次性映射；前端 / 管理端七态文案与「正在取消」按钮 | 本轮（`ticket/84-seven-states`，基于 `integration/spec-75` tip） |
 
 ### 9.4 验收（#81）
 
@@ -294,7 +294,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 - **入口**：`services/job_recovery.py::recover_once(limit) -> RecoveryReport` 是**可直接调用的单元**——不起线程、不起定时器、不 sleep（接入调度循环是 #88）。`scan` / `recover_one` 也在公开面：AC3 靠它们把「扫描之后、收口之前」的窗口固定在两步之间。
 - **判权**：扫描只挑候选，改不改得到由状态机的条件写回答；`WHERE` 里是**扫描时读到的旧凭证**（`lease_token` + `lease_expire_at` 两列一起）。凭证被换掉、或到期时间被续租推后都改到 0 行——跳过、不报错、不记账（丢弃日志与其它转换同一口径）。
-- **去向**：账本行数 = 已结束的执行次数（本票不加迁移，库里没有 `attempt_count` 列）；`attempts + 1 >= DEFAULT_MAX_ATTEMPTS` 判失败（`failed + LEASE_EXPIRED`），否则回排队（清租约、状态仍 `running`）。**启动档一律落终态**（有租约按 `LEASE_EXPIRED`、从没被领过按旧口径 `INTERNAL_ERROR` +「服务重启，任务已中断」）：那一刻没有执行者会来领，而本票还没有调度循环，回排队等于永远进行中。
+- **去向**：账本行数 = 已结束的执行次数（本票不加迁移，库里没有 `attempt_count` 列）；`attempts + 1 >= DEFAULT_MAX_ATTEMPTS` 判失败（`failed + LEASE_EXPIRED`），否则回排队（清租约；#84 之后落回 `pending`）。**启动档一律落终态**（有租约按 `LEASE_EXPIRED`、从没被领过的排队行按 `INTERNAL_ERROR` +「服务重启，任务已中断」）：那一刻没有执行者会来领，而本票还没有调度循环，回排队等于永远进行中。
 - **账本**：每次交接记一条超时账（`error_code=LEASE_EXPIRED`、摘要写明「执行者进程已消失、租约到期未续」），与状态更新同事务（#80 口径）；执行者不在场，用量与耗时记 0（那是未知，不是没花）。
 - **收编**：`reap_orphans` 改为 `recover_once(startup=True)`，候选集不看到期时间、也含「登记后没派发」的残留行；不再是一次性批量判死。
 - **前端零改动**：原因文案随 `error_message` 由 DB 快照展示；运行视图收到终态后回审阅页并说明「任务已中断」是 #84 的活。
@@ -305,7 +305,7 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 2. 恢复时记一条超时账本、写明超时原因 —— `test_recovery_records_the_timeout_with_a_stable_reason`、`test_each_recovery_round_appends_exactly_one_ledger_row`。
 3. 凭证被换掉的行不被误改（改到 0 行即跳过、不报错） —— `test_a_replaced_token_is_skipped_instead_of_updated`（扫描之后另一执行者抢占换了 token）、`test_a_renewed_lease_is_not_stolen`（凭证不变、只把到期时间续到后面）。
 4. 重启后不存在「永远进行中」的任务 —— `test_startup_recovery_settles_every_job_that_was_executing`、`test_startup_recovery_reports_the_restart_for_a_row_never_claimed`。
-5. 恢复器自身守状态机规则 —— `test_recovery_does_not_touch_a_row_that_is_no_longer_running`、`test_a_row_cancelled_mid_window_is_not_overwritten`、`test_recovery_module_only_writes_state_through_the_state_machine`（AST：必须调 `transition`，不许调 `finish` / `fail` / 取消系列 / 旧的 `reap_running`）。
+5. 恢复器自身守状态机规则 —— `test_recovery_settles_a_cancelling_row_as_cancelled_not_failed`、`test_a_row_cancelled_mid_window_is_settled_as_cancelled_not_overwritten`、`test_recovery_module_only_writes_state_through_the_state_machine`（AST：必须调 `transition`，不许调 `finish` / `fail` / 取消系列 / 旧的 `reap_running`）。
 
 **复测**（`ticket/83-recovery`，基于 `7b9c2ad`；已并入 `integration/spec-75` 的 #85 之后）：后端 `uv run pytest -n auto`（单独跑、不与其它全量并发）**1413 passed / 0 skipped / 0 failed**（收集 1413 = 合并前基线 1401 + 本票 12 条）。第一次全量有 1 条 DB 连接类假红（`test_second_login_revokes_the_first_session` 撞 psycopg `OperationalError`），单跑绿、第二次全量全绿，按「先单跑、再看错误类型、再重跑全量」的口径记为环境串扰，不记回归。**未执行**：push、合并与发布（由用户确认）。
 
@@ -350,3 +350,86 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 - **调度循环**（#89）：到期之后由谁来扫、多久扫一次、扫到怎么派发——本票不起后台定时器，退避只把判据落库。因此在有调度循环之前，真正被回排队的行会停在「等待重试」而没人领。
 - **「可重试失败」转换**（#84）：本票能真实产生的是超时那一路（恢复器回排队带 `LEASE_EXPIRED`）；限流 / 上游 5xx 两档要等 #84 把「执行中 → 排队中」这条转换接上，映射与写入路径已全部定死，接线时不需要动退避代码。
 - **等待中的订阅**：等待态任务没有运行时，DB 兜底快照发完就结束（不是本票改的语义）。等调度循环接上之后，「等服务端事件」这一步才有意义；在那之前靠快照里的 `next_run_at` 显示倒计时。
+
+
+
+### 9.9 范围、验收与复测（#84 七态 + 取消中）
+
+**范围**：把任务状态从「三态 + 两个状态性错误码」扩成**七个值**，并给「取消」补上中间态
+`cancelling`。一次改透后端、用户端、管理端，**不留兼容映射层**。
+
+- **七个值**：`pending` 排队中 / `running` 执行中 / `cancelling` 取消中 / `succeeded` 已定稿 /
+  `failed` 失败 / `superseded` 被取代 / `cancelled` 已取消。对外 `status` 只给这七值；
+  `completed`、`CANCELLED`、`SUPERSEDED` 一起退役（`error_code` 只解释失败原因）。
+- **转换表只有一份**（`backend/src/backend/services/job_state.py` 模块 docstring）：
+  `CLAIM`（pending→running）/ `SUCCEED`（running→succeeded）/ `FAIL`（running→failed）/
+  `REQUEST_CANCEL`（pending→cancelled、running→cancelling，执行中那支**不清租约**）/
+  `CONFIRM_CANCEL`（running/cancelling→cancelled，清租约并补一次载荷）/
+  `EXPIRE_CANCELLING`（cancelling+旧凭证→cancelled，恢复器兜底）/
+  `EXPIRE_PENDING`（启动档 pending→failed）/
+  `SUPERSEDE`（在途三态→superseded，清租约）/ `CONFIRM_SUPERSEDED`（补一次载荷、不改状态）/
+  `REQUEUE`（running→pending，写退避与账本）/ `EXPIRE`（running+旧凭证→failed）。**所有状态写都经它**。
+- **「排队中」只有一个表示**：建行即 `pending`；`claim` 只认 `pending`；回排队写回 `pending`。
+  不存在「`running` + 空租约」这种第二真源；启动档也按 `pending` 收口（否则永远排队中）。
+- **执行者的取消感知**：动作点续租改到 0 行时回读那一行——`cancelling` 抛
+  `CancelRequestedError`（与 `LeaseLostError` 分开），协程跑到下一个动作点后确认取消落 `cancelled`。
+- **迁移 `0007`**（`down_revision = "0006"`）：**不改结构**，只做一次幂等旧行映射——
+  `failed+CANCELLED`→`cancelled`、`failed+SUPERSEDED`→`superseded`（错误码清空）、
+  `running` 且无租约→`pending`、`pending` 带租约→清租约。可重复跑，空库 0 行；
+  `downgrade()` 有意为空（数据映射不可逆，回滚用备份）。
+- **前端**（`frontend/src/utils/jobState.ts` 是唯一一份七态文案/档位表）：运行视图徽标新增
+  「排队中 / 取消中」；点停止后按钮**立刻**变「正在取消…」并置灰（不等网络往返，终态由
+  订阅链收口）；`cancelled` / `superseded` 收尾落到审阅页并说清「不是失败」；
+  查询在途任务统一传 `pending,running,cancelling`（`ACTIVE_JOB_STATE_QUERY`）。
+- **管理端**（`frontend_admin/src/views/JobsView.vue` / `DashboardView.vue`）：任务列表按七值
+  显示，`cancelling` 行给禁用按钮「取消中…」；「在飞」标签查三值；日统计把
+  `succeeded_count` / `failed_count` / `cancelled_count` / `superseded_count` / `active_count`
+  分开显示，失败率只算 `failed/(succeeded+failed)`。管理员的取消是最终裁决（直接确认取消落
+  `cancelled`），不留等人确认的中间态。
+
+**验收（逐条都有对应用例，`backend/tests/test_job_seven_states.py`；前端
+`frontend/src/__tests__/jobSevenStates.spec.ts`；管理端 `jobs.spec.ts` / `dashboard.spec.ts`）**：
+
+1. 排队中取消立刻 `cancelled`；执行中取消先 `cancelling` 且租约不动 ——
+   `test_cancelling_a_queued_job_lands_cancelled_immediately`、
+   `test_cancelling_a_running_job_enters_cancelling_and_keeps_the_lease`、
+   `test_second_cancel_request_on_a_cancelling_job_stays_cancelling`。
+2. 执行者在下一个动作点看到取消、退出并落 `cancelled` ——
+   `test_executor_confirms_the_cancel_at_the_next_action_point`、
+   `test_renewal_on_a_cancelling_job_is_a_cancel_signal_not_a_lease_loss`。
+3. 恢复兜底：`cancelling` + 过期租约收成 `cancelled`；启动档同样收；活租约不碰 ——
+   `test_recovery_settles_a_stuck_cancelling_job_as_cancelled`、
+   `test_recovery_does_not_touch_a_cancelling_job_whose_lease_is_still_alive`、
+   `test_startup_recovery_cancels_a_cancelling_row_instead_of_failing_it`、
+   `test_startup_recovery_settles_a_queued_row_as_interrupted`。
+4. 七值契约与错误码退役：外部 `status` 七值、`error_code` 不再背状态语义、前后台分支同步 ——
+   `test_status_values_are_exactly_the_seven_and_partitioned`、
+   `test_superseded_and_cancelled_are_two_distinct_states_with_empty_codes`、
+   `test_terminal_transitions_clear_all_three_lease_columns`、
+   `test_job_list_filter_accepts_the_active_status_set`、
+   `test_admin_job_list_status_filter_accepts_the_active_set`、
+   `test_admin_state_branches_do_not_guess_status_from_error_codes`、
+   `test_state_machine_module_has_no_status_carrying_error_codes`；前端
+   `jobSevenStates.spec.ts` 的七态文案 / 档位、`cancelling` 按钮、运行态取消标记；
+   管理端七值标签与两数分开。
+5. 被取代与已取消始终是两件事，成功统计排除两者 ——
+   `test_superseded_and_cancelled_are_two_distinct_states_with_empty_codes`、
+   `test_admin_daily_stats_separate_cancelled_from_superseded`（失败率分母不含两者）；
+   管理端 `dashboard.spec.ts` 的「已取消 / 被取代 / 失败率分母」用例。
+
+**复测**（`ticket/84-seven-states`，基于 `integration/spec-75` tip）：后端
+`uv run pytest -n auto`（单独跑、不与其它全量并发）**1474 passed / 0 skipped / 0 failed**；
+用户端 `npm run test:unit -- --run` **813 passed / 43 文件**、`npm run build`（含
+`type-check`）通过；管理端 `npm run test:unit -- --run` **120 passed / 13 文件**、
+`npm run build`（含 `type-check`）通过。**未执行**：push、合并与发布（由用户确认）。
+
+**给后续票的遗留**：
+
+- **调度循环**（#89）：`pending` 现在有唯一的表示，但「谁来领、多久扫一次」仍不存在；
+  启动档只能把上次残留的 `pending` 判死（`EXPIRE_PENDING`），不能重新派发。
+- **真实在途任务的管理端取消**：管理员的 `_force_cancel` 直接确认取消（最终裁决）；
+  若同一进程里确实有协程在跑，它会在下一个动作点发现自己失去写权而停止（协作式，不是强杀）。
+- **回排队与账本**：`REQUEUE` 现在落 `pending`；首次真实「执行中 → 排队中」的可重试生产者
+  仍是 #89 接上调度后的事（#88 的映射已就绪）。
+- **旧行映射只做一次**：`0007` 只在升级时执行；如果存量库里有 `running` + 空租约的行，
+  升级后立刻变成 `pending`，不会被启动回收误判成「重启中断」。

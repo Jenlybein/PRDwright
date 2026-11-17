@@ -347,11 +347,11 @@ def test_generation_job_reaches_finalized_document_version(pg_client, monkeypatc
     assert stream.status_code == 200, stream.text
     events = _events(stream)
     assert events[-1]["type"] == "run_summary", [item["type"] for item in events]
-    assert events[-1]["data"]["status"] == "completed"
+    assert events[-1]["data"]["status"] == "succeeded"
 
     # ① 任务跑到终态（已定稿）
     detail = pg_client.get(f"/api/jobs/{job_id}").json()
-    assert detail["status"] == "completed"
+    assert detail["status"] == "succeeded"
 
     # ② 正文落到文档（当前版本）
     documents = pg_client.get(f"/api/solutions/{solution_id}/documents").json()["documents"]
@@ -380,4 +380,4 @@ def test_generation_job_reaches_finalized_document_version(pg_client, monkeypatc
         ).scalars().all()
         assert len(stored) == 1, f"api_docs 在文档版本表里有 {len(stored)} 条"
         assert "Postgres 主链路定稿正文" in stored[0]
-        assert conn.exec_driver_sql("SELECT status FROM generation_jobs").scalar() == "completed"
+        assert conn.exec_driver_sql("SELECT status FROM generation_jobs").scalar() == "succeeded"

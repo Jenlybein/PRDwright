@@ -39,7 +39,7 @@ from backend.core.contracts import StreamEvent
 from backend.core.engine import session, session_scope
 from backend.repositories.generation_job_repo import GenerationJobRepository
 from backend.repositories.job_attempt_repo import JobAttemptRepository
-from backend.services import job_claimer, job_state
+from backend.services import job_backoff, job_claimer, job_state
 from backend.services.stream_reply import astream_text
 from ticket_support import run_ticket_async
 
@@ -84,6 +84,38 @@ def _expire(lease: job_claimer.Lease, seconds: int = LEASE_SECONDS + 30) -> date
     return datetime.fromisoformat(lease.expire_at) + timedelta(seconds=seconds)
 
 
+def _take_over(
+    owner_id: int,
+    job_id: int,
+    lease: job_claimer.Lease,
+    *,
+    lease_owner: str = "proc-b",
+    now: datetime | None = None,
+) -> job_claimer.Lease:
+    """模拟「恢复器回排队 → 下一个执行者领走」这一次交接（七态，票 #84）。
+
+    三态里可以直接抢一条「过期 running」；七态之后这条路收口到恢复器：过期租约先经
+    `REQUEUE` 落回 `pending`（记一笔超时账），再由下一个执行者 `claim` 领走。用例沿用
+    真实的交接路径，而不是走一条生产里已经不存在的捷径。
+    """
+    moment = now or _expire(lease)
+    row = job_get(owner_id, job_id)
+    assert job_state.transition(
+        job_state.JobEvent.REQUEUE,
+        job_state.job_scope(owner_id, job_id),
+        error_code=job_state.CODE_LEASE_EXPIRED,
+        error_message="执行者进程已消失，租约到期未续",
+        lease_fence=job_state.LeaseFence(
+            token=row["lease_token"], expire_at=row["lease_expire_at"]
+        ),
+        now_text=moment.isoformat(),
+    ).applied
+    due = moment + timedelta(seconds=job_backoff.BACKOFF_TIMEOUT_SECONDS)
+    next_lease = job_claimer.claim(owner_id, job_id, lease_owner=lease_owner, now=due)
+    assert next_lease is not None, "用例前提：交接之后这一行应当能被重新领走"
+    return next_lease
+
+
 # ---------------------------------------------------------------------------
 # 一、AC2：执行权含三件事（谁领的 / 本轮凭证 / 到期时间）
 # ---------------------------------------------------------------------------
@@ -122,8 +154,7 @@ def test_each_round_gets_a_fresh_token_so_owner_name_cannot_reuse_rights(alice):
     assert first is not None
 
     later = _expire(first)
-    second = job_claimer.claim(alice, job_id, lease_owner="同一个进程", now=later)
-    assert second is not None
+    second = _take_over(alice, job_id, first, lease_owner="同一个进程", now=later)
     assert second.token != first.token, "换一轮必须换凭证"
 
     stale = job_state.transition(
@@ -269,8 +300,7 @@ def test_late_success_from_a_stale_token_is_discarded(alice, caplog):
     first = job_claimer.claim(alice, job_id, lease_owner="proc-a")
     assert first is not None
     later = _expire(first)
-    second = job_claimer.claim(alice, job_id, lease_owner="proc-b", now=later)
-    assert second is not None and second.token != first.token
+    second = _take_over(alice, job_id, first, now=later)
 
     with caplog.at_level(logging.INFO):
         late = job_state.transition(
@@ -291,7 +321,9 @@ def test_late_success_from_a_stale_token_is_discarded(alice, caplog):
     discarded = _events(caplog, "job.transition_discarded")
     assert len(discarded) == 1
     assert discarded[0].job_id == job_id
-    assert _attempts(alice, job_id) == [], "失去资格的写入不是执行结论，不许记账本"
+    # 账本只有「恢复器回排队」那一笔；晚到的写入不是执行结论，不许记账本。
+    attempts = _attempts(alice, job_id)
+    assert [item["error_code"] for item in attempts] == ["LEASE_EXPIRED"]
 
 
 def test_late_failure_from_a_stale_token_is_discarded(alice, caplog):
@@ -300,8 +332,7 @@ def test_late_failure_from_a_stale_token_is_discarded(alice, caplog):
     first = job_claimer.claim(alice, job_id, lease_owner="proc-a")
     assert first is not None
     later = _expire(first)
-    second = job_claimer.claim(alice, job_id, lease_owner="proc-b", now=later)
-    assert second is not None
+    second = _take_over(alice, job_id, first, now=later)
 
     with caplog.at_level(logging.INFO):
         late = job_state.transition(
@@ -320,7 +351,7 @@ def test_late_failure_from_a_stale_token_is_discarded(alice, caplog):
     assert row["error_code"] == ""
     assert row["lease_token"] == second.token
     assert len(_events(caplog, "job.transition_discarded")) == 1
-    assert _attempts(alice, job_id) == []
+    assert [item["error_code"] for item in _attempts(alice, job_id)] == ["LEASE_EXPIRED"]
 
 
 def test_an_expired_lease_cannot_write_even_before_someone_takes_over(alice, caplog):
@@ -359,7 +390,7 @@ def test_this_rounds_token_writes_the_result_once(alice):
 
     assert result.rows == 1
     row = job_get(alice, job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["draft_content"] == "本轮结果"
     assert row["lease_token"] == "", "收尾之后这一轮的执行权要交还（清租约）"
 
@@ -409,7 +440,7 @@ def test_a_fifteen_minute_run_never_loses_its_right_to_settle(alice):
     )
 
     assert result.rows == 1, "15 分钟的长任务不该在收尾时才发现租约早过期了"
-    assert job_get(alice, job_id)["status"] == "completed"
+    assert job_get(alice, job_id)["status"] == "succeeded"
 
 
 def test_without_renewal_the_same_fifteen_minute_run_is_discarded(alice, caplog):
@@ -439,7 +470,7 @@ def test_renewal_stops_working_once_the_lease_was_taken_over(alice):
     first = job_claimer.claim(alice, job_id, lease_owner="proc-a")
     assert first is not None
     later = _expire(first)
-    assert job_claimer.claim(alice, job_id, lease_owner="proc-b", now=later) is not None
+    _take_over(alice, job_id, first, now=later)
 
     with pytest.raises(job_claimer.LeaseLostError):
         job_claimer.renew(first, now=later)
@@ -456,7 +487,7 @@ def test_a_model_call_raises_lease_lost_before_it_starts(alice):
     lease = job_claimer.claim(alice, job_id, lease_owner="proc-a")
     assert lease is not None
     later = _expire(lease)
-    assert job_claimer.claim(alice, job_id, lease_owner="proc-b", now=later) is not None
+    _take_over(alice, job_id, lease, now=later)
     llm = ScriptedLLM(["不该出现的一段"])
 
     async def scenario() -> str:
@@ -472,8 +503,9 @@ def test_job_stops_and_writes_nothing_when_the_lease_is_lost_mid_run(client, ali
     """主接缝：任务跑到一半被接手 → 下一次模型调用前续租失败 → 立刻停，什么都不写。
 
     三件事一起成立才算「立刻停止、不再写任何结果」：
-    1. 库里那一行**一动不动**（既不是 completed 也不是 failed，没有被写正文/用量）；
-    2. 没有 `run_summary`（没结论就没有回执），账本也一行都没有；
+    1. 库里那一行**一动不动**（既不是 succeeded 也不是 failed，没有被写正文/用量）；
+    2. 没有 `run_summary`（没结论就没有回执）；账本上只有恢复器那一笔超时账
+       （那是交接时真实发生的结论，不是这一支晚到的写入）；
     3. 留一条 `job.lease_lost`，说明「是我失去资格了，不是上游出错」。
     """
     llm = ScriptedLLM(["第一段", "第二段"])
@@ -491,14 +523,25 @@ def test_job_stops_and_writes_nothing_when_the_lease_is_lost_mid_run(client, ali
     def on_event(event: StreamEvent) -> None:
         if event.type != "chunk" or "taken" in taken:
             return
-        # 另一个执行者接手：把「现在」推到这一轮租约到期之后再去抢，一行就到手了
-        # （等价于恢复器在租约过期后接手；不需要等真的过 120 秒）
+        # 另一个执行者接手：等价于恢复器在租约过期后回排队、再由下一个执行者领走。
+        # 「现在」推到这一轮租约到期之后，一行就到手了（不需要等真的过 120 秒）。
         taken["taken"] = 1
+        row = job_get(alice, taken["job_id"])
+        assert job_state.transition(
+            job_state.JobEvent.REQUEUE,
+            job_state.job_scope(alice, taken["job_id"]),
+            error_code=job_state.CODE_LEASE_EXPIRED,
+            error_message="执行者进程已消失，租约到期未续",
+            lease_fence=job_state.LeaseFence(
+                token=row["lease_token"], expire_at=row["lease_expire_at"]
+            ),
+            now_text=(utc_now() + timedelta(minutes=10)).isoformat(),
+        ).applied
         assert job_claimer.claim(
             alice,
             taken["job_id"],
             lease_owner="proc-b",
-            now=utc_now() + timedelta(minutes=10),
+            now=utc_now() + timedelta(minutes=10, seconds=job_backoff.BACKOFF_TIMEOUT_SECONDS),
         ) is not None
 
     async def scenario():
@@ -533,7 +576,9 @@ def test_job_stops_and_writes_nothing_when_the_lease_is_lost_mid_run(client, ali
     assert not [event for event in events if event.type == "run_summary"], (
         "没有结论就不该有回执"
     )
-    assert _attempts(alice, registered.job_id) == []
+    assert [item["error_code"] for item in _attempts(alice, registered.job_id)] == [
+        "LEASE_EXPIRED"
+    ]
     lost = _events(caplog, "job.lease_lost")
     assert len(lost) == 1
     assert lost[0].job_id == registered.job_id
@@ -565,9 +610,9 @@ def test_registered_job_is_claimed_before_it_is_dispatched(alice):
     registered, events = asyncio.run(scenario())
 
     assert produced.is_set()
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = job_get(alice, registered.job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["lease_token"] == "", "收尾之后执行权交还"
 
 

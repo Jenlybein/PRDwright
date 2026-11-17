@@ -96,7 +96,7 @@ def test_running_list_only_returns_running(client, isolated_db):  # noqa: ARG001
     _as_admin(client)
     owner = _user_id("root")
     running = _job(owner, status="running")
-    _job(owner, status="completed")
+    _job(owner, status="succeeded")
 
     response = client.get("/api/admin/jobs", params={"status": "running"})
     assert response.status_code == 200
@@ -177,8 +177,8 @@ def test_filter_by_kind(client, isolated_db):  # noqa: ARG001
 # ---------------------------------------------------------------------------
 
 
-def test_admin_cancel_marks_failed_and_cancelled(client, isolated_db):  # noqa: ARG001
-    """取消必须**落库**成 failed + CANCELLED，重启后不能还显示「生成中」。"""
+def test_admin_cancel_lands_cancelled(client, isolated_db):  # noqa: ARG001
+    """取消必须**立刻落库**成 `cancelled`，重启后不能还显示「生成中」或「取消中」。"""
     _as_admin(client)
     owner = _user_id("root")
     job_id = _job(owner, status="running")
@@ -188,8 +188,8 @@ def test_admin_cancel_marks_failed_and_cancelled(client, isolated_db):  # noqa: 
     assert response.json()["cancelled"] is True
 
     row = _row(job_id)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     # 措辞要能区分「管理员清理」与「用户点了停止」
     assert "管理员" in row["error_message"]
 
@@ -202,13 +202,13 @@ def test_cancel_finished_job_returns_false(client, isolated_db):  # noqa: ARG001
     """
     _as_admin(client)
     owner = _user_id("root")
-    job_id = _job(owner, status="completed")
+    job_id = _job(owner, status="succeeded")
 
     response = client.post(f"/api/admin/jobs/{job_id}/cancel")
     assert response.status_code == 200
     assert response.json()["cancelled"] is False
     # 终态不能被改坏
-    assert _row(job_id)["status"] == "completed"
+    assert _row(job_id)["status"] == "succeeded"
 
 
 def test_cancel_unknown_job_is_404(client, isolated_db):  # noqa: ARG001
@@ -231,8 +231,8 @@ def test_cancel_stuck_only_touches_stuck(client, isolated_db):  # noqa: ARG001
     assert response.status_code == 200
     assert response.json()["cancelled"] == 2
 
-    assert _row(stuck_a)["status"] == "failed"
-    assert _row(stuck_b)["status"] == "failed"
+    assert _row(stuck_a)["status"] == "cancelled"
+    assert _row(stuck_b)["status"] == "cancelled"
     assert _row(fresh)["status"] == "running"
 
 

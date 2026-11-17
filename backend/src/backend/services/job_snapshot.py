@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend.core.clock import utc_now
 from backend.core.contracts import StreamEvent
-from backend.repositories.generation_job_repo import STATUS_RUNNING
+from backend.repositories.generation_job_repo import ACTIVE_STATUSES
 from backend.services.job_finalize import _document_kind
 from backend.services.job_runtime_events import _finalized_text
 
@@ -90,14 +90,15 @@ def _load_skill_refs(raw: Any) -> list[dict[str, Any]]:
 def _elapsed_ms_from_row(row: dict[str, Any]) -> int:
     """由 DB 行的创建 / 更新时间推算耗时（毫秒）；时间格式异常时返回 0。
 
-    终态任务用 `updated_at - created_at`（≈ 整个过程），仍在跑的任务用「到现在」。
-    这只是给前端的「已用时」一个起点，精度到秒即可，因此不做时区之外的额外校正。
+    终态任务用 `updated_at - created_at`（≈ 整个过程）；**在途**（排队中 / 执行中 /
+    取消中）用「到现在」——七态之后在途不只 `running` 一个值，判据必须取状态集合，
+    否则刷新后「排队中」会显示一个固定在创建时刻的假耗时。
     """
     try:
         created = datetime.fromisoformat(str(row.get("created_at") or ""))
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
-        end = utc_now() if row.get("status") == STATUS_RUNNING else datetime.fromisoformat(
+        end = utc_now() if row.get("status") in ACTIVE_STATUSES else datetime.fromisoformat(
             str(row.get("updated_at") or "")
         )
         if end.tzinfo is None:
@@ -218,9 +219,9 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "elapsed_ms": _elapsed_ms_from_row(row),
             # 失败退避（#88）：这条任务最早什么时候能被再领走（ISO 文本；空串 = 立即）。
             #
-            # 「排队中」在三态里读作 `status='running'` 且没有有效租约——运行时不在场时，
+            # 「排队中」在七态里就是 `status='pending'`（票 #84）：运行时不在场时，
             # 前端只有拿到这一列才能回答「还要等多久」，从而显示「等待重试，约 xx 秒后」
-            # 而不是一个转不完的圈。**不改 `status` 的取值**（七态是 #84 的事）。
+            # 而不是一个转不完的圈。
             "next_run_at": row.get("next_run_at", "") or "",
             # 任务单里不可变数据的完整投影：运行时未命中时，DB 兜底快照仍读得回
             # 「这次生成用的原始请求、哪套配置/供应商、哪套技能包」。坏数据按上面

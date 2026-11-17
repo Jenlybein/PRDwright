@@ -105,7 +105,7 @@ describe('fetchDocuments', () => {
   it('回执按不透明对象透传（结构合格时原样带出）', async () => {
     const summary = {
       kind: 'prd',
-      status: 'completed',
+      status: 'succeeded',
       durationMs: 1200,
       totalCalls: 1,
       failedCalls: 0,
@@ -428,7 +428,7 @@ describe('fetchVersion', () => {
         content: '# 定稿正文',
         last_run_summary: {
           kind: 'prd',
-          status: 'completed',
+          status: 'succeeded',
           duration_ms: 61_000,
           total_calls: 12,
           prompt_tokens: 90_000,
@@ -609,3 +609,4 @@ describe('部分完成标记的解析', () => {
     expect(detail.content).toBe('# 半截正文')
   })
 })
+

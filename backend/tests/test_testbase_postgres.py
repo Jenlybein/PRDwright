@@ -185,7 +185,7 @@ def test_insert_job_writes_a_row_on_postgres(isolated_db):  # noqa: ARG001
             (owner_id,),
         ).fetchone()
     assert row is not None
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert (row["prompt_tokens"], row["completion_tokens"]) == (7, 3)
 
 

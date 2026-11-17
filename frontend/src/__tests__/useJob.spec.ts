@@ -86,7 +86,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
 function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     durationMs: 250,
     totalCalls: 3,
     failedCalls: 0,
@@ -468,3 +468,4 @@ describe('useJob.detach', () => {
     expect(receivedSignal?.aborted).toBe(true)
   })
 })
+

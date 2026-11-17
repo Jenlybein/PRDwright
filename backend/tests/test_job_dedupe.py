@@ -153,8 +153,8 @@ def test_second_identical_submission_reuses_the_running_job(client, alice):
     assert second.reused is True
     assert second.job_id == first.job_id
     assert _row_count() == 1
-    # 既有的任务原样继续跑（没有被这次提交顶替成 failed）
-    assert _raw(first.job_id)["status"] == "running"
+    # 既有的任务原样继续在途（没有被这次提交顶替成 superseded）
+    assert _raw(first.job_id)["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +171,9 @@ def test_fingerprint_change_still_creates_a_new_job(client, alice):
     assert second.reused is False
     assert second.job_id != first.job_id
     assert _row_count() == 2
-    # 正常建单语义不变：同 owner + 方案 + 产物的在途旧任务被顶替（#79 的既有口径）
-    assert _raw(first.job_id)["status"] == "failed"
-    assert _raw(first.job_id)["error_code"] == "SUPERSEDED"
+    # 正常建单语义不变：同 owner + 方案 + 产物的在途旧任务被顶替（七态：superseded）
+    assert _raw(first.job_id)["status"] == "superseded"
+    assert _raw(first.job_id)["error_code"] == ""
 
 
 def test_outside_window_still_creates_a_new_job(client, alice, monkeypatch):
@@ -222,7 +222,7 @@ def test_other_solution_is_not_a_duplicate(client, alice):
     assert second.reused is False
     assert second.job_id != first.job_id
     assert _row_count() == 2
-    assert _raw(first.job_id)["status"] == "running"
+    assert _raw(first.job_id)["status"] == "pending"
 
 
 def test_same_fingerprint_on_another_kind_is_not_a_duplicate(client, alice):
@@ -246,7 +246,7 @@ def test_same_fingerprint_on_another_kind_is_not_a_duplicate(client, alice):
     assert optimize.reused is False
     assert optimize.job_id != prd.job_id
     assert _row_count() == 2
-    assert _raw(prd.job_id)["status"] == "running"
+    assert _raw(prd.job_id)["status"] == "pending"
     assert _raw(prd.job_id)["doc_kind"] == "prd"
     assert _raw(optimize.job_id)["doc_kind"] == "api_docs"
 
@@ -304,7 +304,7 @@ def test_reused_ticket_is_not_dispatched_again(client, alice):
     assert started == [1], "只在跑一次生成；第二次提交又派发了一次"
     assert _row_count() == 1
     assert events[-1].type == "run_summary"
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +376,7 @@ def test_two_identical_http_submissions_share_one_running_job(client, monkeypatc
     assert [runtime.job_id for runtime in job_service.running_runtimes()] == [job_id]
 
     gate.set()
-    _wait_status(client, job_id, "completed")
+    _wait_status(client, job_id, "succeeded")
     assert _row_count() == 1
 
 
@@ -400,7 +400,7 @@ def test_http_submission_after_completion_still_creates_a_new_job(client, monkey
     assert first.status_code == 201, first.text
     first_id = int(first.json()["job_id"])
     assert client.get(f"/api/jobs/{first_id}/stream").status_code == 200
-    _wait_status(client, first_id, "completed")
+    _wait_status(client, first_id, "succeeded")
 
     second = client.post("/api/jobs", json=payload)
     assert second.status_code == 201, second.text
@@ -408,7 +408,7 @@ def test_http_submission_after_completion_still_creates_a_new_job(client, monkey
 
     assert second_id != first_id
     assert _row_count() == 2
-    assert _raw(first_id)["status"] == "completed"
+    assert _raw(first_id)["status"] == "succeeded"
 
 
 # ---------------------------------------------------------------------------

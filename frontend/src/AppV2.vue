@@ -28,6 +28,7 @@ import { useDocumentVersionsStore } from '@/stores/documentVersions'
 import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
+import { ACTIVE_JOB_STATE_QUERY, runBadgeLabel } from '@/utils/jobState'
 import {
   announcesDeliveryReady,
   chatStageForDocument,
@@ -366,7 +367,8 @@ async function resumeAfterRestore(): Promise<void> {
     const running = await fetchActiveJobs({
       solutionId: solutions.currentId,
       kind: 'chat',
-      status: 'running',
+      // 七态（票 #84）：在途是 pending / running / cancelling 三个值，不再只有一个 running
+      status: ACTIVE_JOB_STATE_QUERY,
     }).catch(() => [])
     const match = running[0]
     if (match) {
@@ -400,7 +402,7 @@ async function resumeAfterRestore(): Promise<void> {
   try {
     const jobs = await fetchActiveJobs({
       solutionId: solutions.currentId,
-      status: 'running',
+      status: ACTIVE_JOB_STATE_QUERY,
     })
     const match = pickInFlightDocJob(jobs)
     if (!match) return
@@ -784,15 +786,22 @@ const isWaitingRetryValue = computed(() => runs.hasRunning && retryAt.value !== 
  * 这是已知的口径缺口，写在 [`ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) §5.11。
  */
 const runViewStatusLabel = computed(() => {
-  if (!runs.hasRunning) return '生成中'
-  // 失败退避（票 #88）：等待重试不是「在生成」——那个任务此刻没有执行者，
-  // 说「生成中」会让人以为它卡死了。徽标单独说是「等待重试」。
-  if (isWaitingRetryValue.value) return '等待重试'
-  if (runs.isRunningKind('review-fix')) return '修复中'
-  if (runs.isRunningKind('review')) return '重审中'
-  if (runs.isRunningKind('optimize')) return '优化中'
-  if (runs.isRunningKind('clarify') || runs.isRunningKind('auto-clarify')) return '改写中'
-  return '生成中'
+  // 七态（票 #84）：徽标先看**服务端说这一支在哪个状态**，再按动作细分。
+  // 「取消中」优先于一切动作文案——用户刚按了停止，最想知道的是它停没停。
+  const state = runs.activeRun?.snapshot?.status ?? 'running'
+  const action = runs.isRunningKind('review-fix')
+    ? 'fix'
+    : runs.isRunningKind('review')
+      ? 'review'
+      : runs.isRunningKind('optimize')
+        ? 'optimize'
+        : runs.isRunningKind('clarify') || runs.isRunningKind('auto-clarify')
+          ? 'rewrite'
+          : 'generate'
+  return runBadgeLabel(state, action, {
+    waitingRetry: isWaitingRetryValue.value,
+    cancelling: runs.cancelling,
+  })
 })
 
 /**
@@ -1378,6 +1387,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :hide-back="inputPageOnBar(store.entryMode)"
         :can-view-current-version="canViewCurrentVersion"
         :status-label="runViewStatusLabel"
+        :cancelling="runs.cancelling"
         @back="backToInput"
         @cancel="cancelRun"
         @view-current-version="viewCurrentVersion"

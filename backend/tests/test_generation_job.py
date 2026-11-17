@@ -26,6 +26,7 @@ from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
 from conftest import (
     job_cancel_running,
+    job_claim,
     job_create,
     job_fail,
     job_find_active,
@@ -245,7 +246,7 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     assert summary.type == "run_summary"
     data = summary.data
     assert data["kind"] == "prd"
-    assert data["status"] == "completed"
+    assert data["status"] == "succeeded"
     assert isinstance(data["duration_ms"], int)
     # 假 LLM 不带 usage_metadata，token 按零计；但调用次数与耗时照记（不是「没计量」）
     assert data["total_calls"] >= 1
@@ -286,7 +287,7 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     # 落库：完成态 + 正文与 part 拼接一致
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["draft_content"] == "".join(part.data["text"] for part in parts)
     # 用量与事件同源：落库的 usage 就是流里那份 run_summary，前端「看到的」与「重连读到的」一致
     assert row["usage"] is not None
@@ -363,10 +364,10 @@ def test_resubscribe_after_completion_sends_snapshot_then_summary(client, alice,
     events = _run(scenario())
 
     assert [event.type for event in events] == ["snapshot", "run_summary"]
-    assert events[0].data["status"] == "completed"
+    assert events[0].data["status"] == "succeeded"
     assert events[0].data["finalized_text"].startswith("# 演示产品")
     # 重连补发的汇总与落库同源
-    assert events[1].data["status"] == "completed"
+    assert events[1].data["status"] == "succeeded"
     assert events[1].data["kind"] == "prd"
     assert events[1].data["total_calls"] >= 1
 
@@ -487,7 +488,7 @@ def test_offline_zero_token(alice, monkeypatch):
     job_id = _run(scenario())
     assert calls["count"] == 0
     row = job_get(alice, job_id)
-    assert row is not None and row["status"] == "completed"
+    assert row is not None and row["status"] == "succeeded"
 
 
 # ---------------------------------------------------------------------------
@@ -496,10 +497,11 @@ def test_offline_zero_token(alice, monkeypatch):
 
 
 def test_new_job_supersedes_previous_running(alice):
-    """登记：同一 owner + solution + kind 至多一个 running：登记前旧 running 被取代。
+    """登记：同一 owner + solution + kind 至多一个在途：登记前旧在途被取代。
 
-    跨公开动作断言「顶替库行」：两次 `build_and_register` 之后旧行 `failed +
-    SUPERSEDED`、新行 running。这条语义由「登记」承担，不再有第二个建任务入口。
+    跨公开动作断言「顶替库行」：两次 `build_and_register` 之后旧行 `superseded`、
+    新行 `pending`（只登记、未派发）。七态（票 #84）：顶替终于有**自己的状态值**，
+    不再是「failed + 一个叫 SUPERSEDED 的错误码」——后者会把它和真失败混成一谈。
     """
     old = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
     new = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
@@ -507,22 +509,22 @@ def test_new_job_supersedes_previous_running(alice):
     assert old != new
     old_row = job_get(alice, old)
     assert old_row is not None
-    assert old_row["status"] == "failed"
-    # 有明确原因，不是笼统的 INTERNAL_ERROR：这个任务没出错，是被人接手了
-    assert old_row["error_code"] == "SUPERSEDED"
+    assert old_row["status"] == "superseded"
+    # 被取代不是错误：错误码为空，原因由文案说明
+    assert old_row["error_code"] == ""
     assert old_row["error_message"] == "被新任务取代"
 
-    # 新登记的是 running
-    assert job_get(alice, new)["status"] == "running"
+    # 新登记的还在排队（登记只接单、不派发）
+    assert job_get(alice, new)["status"] == "pending"
 
 
 def test_register_supersedes_old_job_in_db_and_memory(client, alice):
-    """登记顶替旧任务：库行 `failed + SUPERSEDED`，且旧任务收尾不写文档。
+    """登记顶替旧任务：库行落 `superseded`，且旧任务收尾不写文档。
 
-    只把库里那一行改成 failed 是不够的：内存里的旧运行时并不知道自己被取代，
+    只把库里那一行改掉是不够的：内存里的旧运行时并不知道自己被取代，
     它收尾时照样写文档，把旧稿盖在新稿上——用户看到「新任务跑完了，
     正文却是上一版的」，不报错、只是内容对不上。本用例跨公开动作断言「双标记」：
-    旧任务在**新任务登记那一刻**被标记，随后收尾落 `SUPERSEDED` 且不写文档。
+    旧任务在**新任务登记那一刻**被标记，随后收尾确认「被取代」且不写文档。
     """
     from backend.core.contracts import StreamEvent
 
@@ -561,8 +563,8 @@ def test_register_supersedes_old_job_in_db_and_memory(client, alice):
     assert any(event.type == "run_summary" for event in events)
     row = job_get(alice, old_id)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "SUPERSEDED"
+    assert row["status"] == "superseded"
+    assert row["error_code"] == ""
     # 关键：正文没有被写进 documents（这一份是别人要写的位置）
     assert document_store.get_document(alice, solution_id, "prd") is None
 
@@ -589,9 +591,9 @@ def test_find_active_ignores_other_solution_and_kind(client, alice):
 
 
 def test_reap_orphans_marks_running_as_failed(alice):
-    """启动回收：上次残留的 running 全部置 failed。"""
+    """启动回收：上次残留的**非终态**行（这里是一条排队中的）判成「重启中断」。"""
     job_id = job_create(alice, "prd", None)
-    assert job_get(alice, job_id)["status"] == "running"
+    assert job_get(alice, job_id)["status"] == "pending"
 
     job_service.reap_orphans()
 
@@ -613,7 +615,7 @@ def test_finish_and_fail_are_conditional_and_report_affected_rows(alice):
     assert job_finish(alice, job_id, draft_content="第一版", completed_sections=[]) == 1
     assert job_finish(alice, job_id, draft_content="第二版", completed_sections=[]) == 0
     row = job_get(alice, job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["draft_content"] == "第一版"
 
     # 已 completed 的行也不能被 fail 覆写回 failed
@@ -629,7 +631,7 @@ def test_finish_and_fail_are_conditional_and_report_affected_rows(alice):
         == 0
     )
     row = job_get(alice, job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["error_code"] == ""
     assert row["error_message"] == ""
 
@@ -731,7 +733,7 @@ def test_get_job_status(client):
     body = response.json()
     assert body["id"] == job_id
     assert body["kind"] == "prompts"
-    assert body["status"] == "running"
+    assert body["status"] == "pending"
     assert "draft_content" not in body
 
 
@@ -751,27 +753,37 @@ def test_missing_and_cross_owner_jobs_return_404(client):
 
 
 def test_list_jobs_filters_by_status_and_kind(client):
-    """GET /api/jobs 兜底找回：按 status / kind 过滤，命中 running。"""
+    """GET /api/jobs 兜底找回：按 status / kind 过滤，命中在途（七态三个值）。"""
     register(client)
     uid = _alice_id()
 
     running_prd = job_create(uid, "prd", None)
+    job_claim(uid, running_prd)
     running_prompts = job_create(uid, "prompts", None)
+    job_claim(uid, running_prompts)
+    queued = job_create(uid, "prd", None)
     finished = job_create(uid, "prd", None)
-    job_finish(
-        uid, finished, draft_content="正文", completed_sections=[]
+    job_finish(uid, finished, draft_content="正文", completed_sections=[])
+
+    # 七态（票 #84）：在途 = pending / running / cancelling，一次查询取全（AC4）。
+    active = client.get("/api/jobs", params={"status": "pending,running,cancelling"})
+    assert active.status_code == 200
+    active_ids = [item["id"] for item in active.json()["jobs"]]
+    assert running_prd in active_ids
+    assert running_prompts in active_ids
+    assert queued in active_ids
+    assert finished not in active_ids  # 已定稿的不算在途
+
+    only_prompts = client.get(
+        "/api/jobs", params={"kind": "prompts", "status": "pending,running,cancelling"}
     )
-
-    running = client.get("/api/jobs", params={"status": "running"})
-    assert running.status_code == 200
-    running_ids = [item["id"] for item in running.json()["jobs"]]
-    assert running_prd in running_ids
-    assert running_prompts in running_ids
-    assert finished not in running_ids  # 已完成的不算 running
-
-    only_prompts = client.get("/api/jobs", params={"kind": "prompts", "status": "running"})
     ids = [item["id"] for item in only_prompts.json()["jobs"]]
     assert ids == [running_prompts]
+
+    # 单值仍旧可用（旧调用方不该被打断）
+    only_running = client.get("/api/jobs", params={"status": "running"})
+    ids = [item["id"] for item in only_running.json()["jobs"]]
+    assert running_prd in ids and running_prompts in ids and queued not in ids
 
 
 def test_create_job_without_solution_id_is_rejected(client):
@@ -1017,7 +1029,7 @@ def test_optimize_without_doc_kind_writes_nothing(client, monkeypatch):
         {"document": "# 旧接口文档", "instruction": "改一下"},
     )
 
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     assert document_store.list_documents(uid, solution_id) == []
 
 
@@ -1291,7 +1303,7 @@ def test_finish_writes_pending_items(alice):
         pending_items=items,
     )
     row = job_get(alice, job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert json.loads(row["pending_items"]) == items
 
 
@@ -1456,7 +1468,7 @@ def test_generation_flows_pending_items_into_job_and_document(client, monkeypatc
 
 
 def test_cancel_running_only_targets_owner_and_solution(client, alice):
-    """`cancel_running` 只动该 owner + 方案下的 running，不波及别的方案与已终态任务。"""
+    """`cancel_running` 只动该 owner + 方案下的在途，不波及别的方案与已终态任务。"""
     target = job_create(alice, "prd", 11)
     other_solution = job_create(alice, "prd", 12)
     finished = job_create(alice, "prd", 11)
@@ -1474,14 +1486,15 @@ def test_cancel_running_only_targets_owner_and_solution(client, alice):
 
     assert affected == 1
     cancelled = job_get(alice, target)
-    assert cancelled["status"] == "failed"
-    assert cancelled["error_code"] == "CANCELLED"
+    # 排队中的任务没有执行者，取消一步到位落已取消（AC1 前半句）
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["error_code"] == ""
     assert cancelled["error_message"] == "方案已删除，任务已取消"
 
     # 别的方案、别的 owner、已经结束的任务都不动
-    assert job_get(alice, other_solution)["status"] == "running"
-    assert job_get(int(bob["id"]), bob_job)["status"] == "running"
-    assert job_get(alice, finished)["status"] == "completed"
+    assert job_get(alice, other_solution)["status"] == "pending"
+    assert job_get(int(bob["id"]), bob_job)["status"] == "pending"
+    assert job_get(alice, finished)["status"] == "succeeded"
 
 
 def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
@@ -1531,11 +1544,11 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
     job_id, events = _run(scenario())
 
     assert written == [], "方案已删除时不该再往 documents 里写"
-    assert any(event.type == "run_summary" and event.data["status"] == "failed" for event in events)
+    assert any(event.type == "run_summary" and event.data["status"] == "cancelled" for event in events)
     row = job_get(uid, job_id)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     assert document_store.list_documents(uid, solution_id) == []
 
 
@@ -1584,13 +1597,13 @@ def test_run_job_stops_consuming_events_after_cancel(client, alice):
 
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     assert row["draft_content"] == "第一段"
 
 
 def test_delete_solution_endpoint_cancels_its_jobs(client):
-    """HTTP 面：删除方案会连带取消它的 running 任务（路由层的编排没漏接）。"""
+    """HTTP 面：删除方案会连带取消它的在途任务（路由层的编排没漏接）。"""
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
@@ -1602,9 +1615,9 @@ def test_delete_solution_endpoint_cancels_its_jobs(client):
 
     row = job_get(uid, doomed)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
-    assert job_get(uid, untouched)["status"] == "running"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
+    assert job_get(uid, untouched)["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -1848,8 +1861,9 @@ def test_late_subscriber_does_not_replay_an_abort_as_an_error(alice):
     events = _collect(alice, job_id)
 
     assert [event.type for event in events] == ["snapshot", "run_summary"]
-    assert events[0].data["error_code"] == "CANCELLED"
-    assert events[1].data["status"] == "failed"
+    # 已取消不是失败：错误码为空，状态由 status 表达（票 #84 的 AC4）
+    assert events[0].data["error_code"] == ""
+    assert events[1].data["status"] == "cancelled"
 
 
 def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
@@ -1900,7 +1914,7 @@ def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
         # 用公开查询的终态作判据，等两支后台任务各自收尾完毕。
         for _ in range(200):
             rows = [job_get(alice, doomed.job_id), job_get(alice, other.job_id)]
-            if all(row is not None and row["status"] != "running" for row in rows):
+            if all(row is not None and row["status"] not in ("pending", "running", "cancelling") for row in rows):
                 break
             await asyncio.sleep(0.005)
         return doomed.job_id, other.job_id
@@ -1909,13 +1923,13 @@ def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
 
     doomed_row = job_get(alice, doomed_id)
     assert doomed_row is not None
-    assert doomed_row["status"] == "failed"
-    assert doomed_row["error_code"] == "CANCELLED"
+    assert doomed_row["status"] == "cancelled"
+    assert doomed_row["error_code"] == ""
     assert "第二段-doomed" not in doomed_row["draft_content"], "被取消的任务不该继续消费事件"
 
     other_row = job_get(alice, other_id)
     assert other_row is not None
-    assert other_row["status"] == "completed"
+    assert other_row["status"] == "succeeded"
     assert "第二段-other" in other_row["draft_content"], "别的方案上的任务一个字都不该丢"
 
 
@@ -1943,9 +1957,9 @@ def test_skill_registry_failure_degrades_visibility_not_the_job(
     )
 
     summary = events[-1].data
-    assert summary["status"] == "completed"
+    assert summary["status"] == "succeeded"
     assert summary["injected_skills"] == []
-    assert job_get(alice, job_id)["status"] == "completed"
+    assert job_get(alice, job_id)["status"] == "succeeded"
 
 
 def test_pipeline_app_error_keeps_its_own_code(alice, monkeypatch):
@@ -2012,8 +2026,8 @@ def test_write_document_skips_an_empty_reply(client, alice, monkeypatch):
     )
 
     assert written == []
-    assert events[-1].data["status"] == "completed"
-    assert job_get(alice, registered.job_id)["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
+    assert job_get(alice, registered.job_id)["status"] == "succeeded"
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
@@ -2068,9 +2082,9 @@ def test_document_write_skip_is_not_a_failure(client, alice, monkeypatch):
         alice, solution_id, "prd", {}, reply="# 正文"
     )
 
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = job_get(alice, registered.job_id)
-    assert row is not None and row["status"] == "completed"
+    assert row is not None and row["status"] == "succeeded"
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
@@ -2244,7 +2258,7 @@ def test_drain_waits_for_a_job_that_finishes_within_the_window(client, alice, mo
     assert report.hit_deadline is False
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "completed", "排空只负责等；终态仍由任务自己收尾"
+    assert row["status"] == "succeeded", "排空只负责等；终态仍由任务自己收尾"
     assert row["error_code"] == ""
 
 
@@ -2305,21 +2319,19 @@ def test_drain_cancels_a_job_that_outlives_the_window(client, alice, monkeypatch
 
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "failed", "超时任务必须落终态，不能留 running"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled", "超时任务必须落终态，不能留 running"
+    assert row["error_code"] == ""
     assert "重启" in row["error_message"]
 
-    error = next((event for event in events if event.type == "error"), None)
-    assert error is not None, "订阅者必须收到 error 事件，否则「流结束 + 空正文」会被当成成功"
-    assert error.code == "CANCELLED"
-    assert "重启" in error.content
+    # 取消不是失败（票 #84）：终态由 run_summary 的 status 说，不再发 error 事件。
+    assert not [event for event in events if event.type == "error"]
 
     summary = [event for event in events if event.type == "run_summary"]
-    assert summary and summary[-1].data["status"] == "failed"
+    assert summary and summary[-1].data["status"] == "cancelled"
     assert not [
         event
         for event in events
-        if event.type == "run_summary" and event.data.get("status") == "completed"
+        if event.type == "run_summary" and event.data.get("status") == "succeeded"
     ], "被取消的任务不能以「完成」收尾"
 
 

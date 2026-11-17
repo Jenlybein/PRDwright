@@ -394,7 +394,7 @@ def test_closeout_ledger_body_and_conclusion_belong_to_one_version(alice):
     )
 
     row = job_get(alice, registered.job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     usage = json.loads(row["usage"])
 
     versions = _version_rows(solution_id, "prd")
@@ -435,10 +435,10 @@ def test_ledger_failure_keeps_the_closeout_but_loses_only_the_ledger_row(alice, 
     )
 
     row = job_get(alice, registered.job_id)
-    assert row["status"] == "completed", "审计写失败不许把结论判死"
+    assert row["status"] == "succeeded", "审计写失败不许把结论判死"
     assert _attempts(alice, registered.job_id) == []
     assert document_store.get_document(alice, solution_id, "prd")["content"] == "# 正文"
-    assert _summaries(events)[-1].data["status"] == "completed"
+    assert _summaries(events)[-1].data["status"] == "succeeded"
     # 账本没写成必须可见；用 caplog 的 handler 拿不到被 monkeypatch 的 logger 记录，
     # 这里只断「不影响结论」的正面事实（可见性由 #80 的用例负责）。
 

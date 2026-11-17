@@ -371,7 +371,7 @@ def test_partial_version_and_job_marker_come_from_one_closeout(alice, monkeypatc
 def test_user_cancel_also_lands_a_partial_version(alice):
     """用户按「停止」也落一版：取消常常意味着「够了」，已生成的正文不该被丢掉。
 
-    取消的失败码是 `CANCELLED`，走 `fail(abort_code=...)` 那条「补一次载荷」的条件写；
+    取消走的正是 `CONFIRM_CANCEL` 那条「补一次载荷」的条件写（票 #84）；取消不是失败，
     部分完成版本与它同一个事务落库，因此「停止之后界面有内容可用」也成立。
     """
     solution_id = _create_solution(alice)
@@ -391,8 +391,8 @@ def test_user_cancel_also_lands_a_partial_version(alice):
     )
 
     row = job_get(alice, registered.job_id)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     assert row["partial"] is True
 
     version = _current_version(solution_id)

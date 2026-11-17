@@ -158,7 +158,7 @@ def test_drain_waits_and_cancels_without_reading_runtime_fields(alice, monkeypat
     """在途任务超时：drain 只调生成任务一侧的等待能力，运行时对象一个字段都不碰。
 
     把 `in_flight()` 换成不含 task/status 的抽象句柄；若 drain 仍在自己翻字段就红。
-    等满窗口后仍要落 `failed + CANCELLED` 终态——「要不要等 / 超时取消哪几支」
+    等满窗口后仍要落 `cancelled` 终态——「要不要等 / 超时取消哪几支」
     由生成任务一侧按句柄回答。
     """
     never = asyncio.Event()
@@ -179,12 +179,12 @@ def test_drain_waits_and_cancels_without_reading_runtime_fields(alice, monkeypat
 
     assert report.in_flight == 1
     assert report.cancelled == 1
-    assert _row(job_id)["error_code"] == "CANCELLED"
+    assert _row(job_id)["status"] == "cancelled"
     never.set()
 
 
 def test_drain_cancels_a_stuck_job_and_keeps_the_event_contract(alice):
-    """真实在途任务超时：CANCELLED 终态、error → run_summary、报告数字自洽。
+    """真实在途任务超时：cancelled 终态、run_summary（不发 error）、报告数字自洽。
 
     与既有的排空用例同一口径，但任务由**新三步**造出，证明迁移后排水语义不变。
     """
@@ -217,16 +217,14 @@ def test_drain_cancels_a_stuck_job_and_keeps_the_event_contract(alice):
     assert job_drain.drain_controller.is_draining() is True
 
     row = _row(job_id)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     assert "重启" in row["error_message"]
 
-    error = next((event for event in events if event.type == "error"), None)
-    assert error is not None
-    assert error.code == "CANCELLED"
-    assert "重启" in error.content
+    # 取消不是失败（票 #84）：不再发 error 事件，终态由 run_summary 的 status 说。
+    assert not [event for event in events if event.type == "error"]
     summary = [event for event in events if event.type == "run_summary"]
-    assert summary and summary[-1].data["status"] == "failed"
+    assert summary and summary[-1].data["status"] == "cancelled"
 
 
 def test_drain_finalizes_once_and_discards_the_late_second_finalize(alice, caplog):
@@ -279,7 +277,7 @@ def test_drain_finalizes_once_and_discards_the_late_second_finalize(alice, caplo
     assert _row_with_time(job_id) == written_once
     # 2) 收尾只发生过一次（`_finalize` 的终态日志只在真正落库那一次打）
     finalized = [
-        record for record in caplog.records if getattr(record, "event", "") == "job.failed"
+        record for record in caplog.records if getattr(record, "event", "") == "job.cancelled"
     ]
     assert len(finalized) == 1, f"收尾发生了 {len(finalized)} 次，应当恰好一次"
     # 3) 晚到的那一次如实记成「丢弃」
@@ -290,12 +288,12 @@ def test_drain_finalizes_once_and_discards_the_late_second_finalize(alice, caplo
     ]
     assert len(discarded) == 1
     assert discarded[0].job_id == job_id
-    assert discarded[0].attempted_status == "failed"
+    assert discarded[0].attempted_status == "succeeded", "晚到的那一次想落的是成功收尾"
 
     # 结束事件只有一条（live 路：error → run_summary → 哨兵）
     summary = [event for event in events if event.type == "run_summary"]
     assert len(summary) == 1, f"结束事件应当恰好一条，实际 {len(summary)} 条"
-    assert summary[0].data["status"] == "failed"
+    assert summary[0].data["status"] == "cancelled"
 
 
 def test_drain_returns_at_once_when_nothing_is_in_flight(alice):

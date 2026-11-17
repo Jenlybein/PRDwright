@@ -92,7 +92,7 @@ const cards = [
   { key: 'user_count' as const, label: '注册用户', hint: '含已停用' },
   { key: 'admin_count' as const, label: '管理员', hint: '可进后台' },
   { key: 'task_count' as const, label: '生成任务', hint: '含失败' },
-  { key: 'completed_count' as const, label: '成功完成', hint: '任务已收尾' },
+  { key: 'succeeded_count' as const, label: '已定稿', hint: '任务成功收尾' },
   { key: 'prompt_tokens' as const, label: '输入 Token', hint: '累计' },
   { key: 'completion_tokens' as const, label: '输出 Token', hint: '累计' },
 ]
@@ -126,10 +126,7 @@ const bars = computed<Bar[]>(() => {
   if (metric.value === 'tasks') {
     const max = Math.max(1, ...rows.map((r) => r.task_count))
     return rows.map((row, index) => {
-      const other = Math.max(
-        0,
-        row.task_count - row.completed_count - row.failed_count,
-      )
+      const other = Math.max(0, row.task_count - row.succeeded_count - row.failed_count)
       const total = row.task_count
       return {
         day: row.day,
@@ -140,14 +137,17 @@ const bars = computed<Bar[]>(() => {
         segments: total
           ? [
               { cls: 'bg-danger', height: (row.failed_count / total) * 100 },
+              // 已取消 / 被取代各有自己的颜色：两者不能并成一个「未收尾」
+              { cls: 'bg-subtle', height: (row.cancelled_count / total) * 100 },
+              { cls: 'bg-line', height: (row.superseded_count / total) * 100 },
               {
                 cls: 'bg-muted',
-                height: (other / total) * 100,
+                height: ((other - row.cancelled_count - row.superseded_count) / total) * 100,
               },
-              { cls: 'bg-sky', height: (row.completed_count / total) * 100 },
+              { cls: 'bg-sky', height: (row.succeeded_count / total) * 100 },
             ].filter((seg) => seg.height > 0)
           : [],
-        caption: `${row.day}：${total} 个（成功 ${row.completed_count}、失败 ${row.failed_count}）`,
+        caption: `${row.day}：${total} 个（成功 ${row.succeeded_count}、失败 ${row.failed_count}、已取消 ${row.cancelled_count}、被取代 ${row.superseded_count}）`,
         empty: total === 0,
       }
     })
@@ -180,7 +180,7 @@ const bars = computed<Bar[]>(() => {
       caption:
         rate === null
           ? `${row.day}：没有任务`
-          : `${row.day}：${(rate * 100).toFixed(1)}% 失败（${row.failed_count} / ${row.completed_count + row.failed_count}）`,
+          : `${row.day}：${(rate * 100).toFixed(1)}% 失败（${row.failed_count} / ${row.succeeded_count + row.failed_count}）`,
       empty: rate === null,
     }
   })
@@ -192,6 +192,8 @@ const summary = computed(() => {
   return {
     tasks: row?.task_count ?? 0,
     failed: row?.failed_count ?? 0,
+    cancelled: row?.cancelled_count ?? 0,
+    superseded: row?.superseded_count ?? 0,
     tokens: (row?.prompt_tokens ?? 0) + (row?.completion_tokens ?? 0),
     // 后端已按「已收尾」为分母算好；null 表示这段区间没有已收尾任务
     rate: row?.failure_rate === null || row?.failure_rate === undefined
@@ -309,7 +311,7 @@ onMounted(load)
 
         <template v-else>
           <!-- 汇总：图看趋势，这一排看总量 -->
-          <div class="grid grid-cols-2 gap-px border-b-2 border-line bg-line sm:grid-cols-4">
+          <div class="grid grid-cols-2 gap-px border-b-2 border-line bg-line sm:grid-cols-6">
             <div class="bg-card px-4 py-3">
               <p class="kicker">生成</p>
               <p class="tnum mt-1 text-xl font-black text-ink">
@@ -320,6 +322,18 @@ onMounted(load)
               <p class="kicker">失败</p>
               <p class="tnum mt-1 text-xl font-black text-ink">
                 {{ summary.failed.toLocaleString() }}
+              </p>
+            </div>
+            <div class="bg-card px-4 py-3">
+              <p class="kicker">已取消</p>
+              <p class="tnum mt-1 text-xl font-black text-ink">
+                {{ summary.cancelled.toLocaleString() }}
+              </p>
+            </div>
+            <div class="bg-card px-4 py-3">
+              <p class="kicker">被取代</p>
+              <p class="tnum mt-1 text-xl font-black text-ink">
+                {{ summary.superseded.toLocaleString() }}
               </p>
             </div>
             <div class="bg-card px-4 py-3">
@@ -387,7 +401,13 @@ onMounted(load)
               <span class="h-2.5 w-2.5 border border-brut bg-danger"></span>失败
             </span>
             <span class="flex items-center gap-1.5 text-[11px] text-muted">
-              <span class="h-2.5 w-2.5 border border-brut bg-muted"></span>未收尾
+              <span class="h-2.5 w-2.5 border border-brut bg-subtle"></span>已取消
+            </span>
+            <span class="flex items-center gap-1.5 text-[11px] text-muted">
+              <span class="h-2.5 w-2.5 border border-brut bg-line"></span>被取代
+            </span>
+            <span class="flex items-center gap-1.5 text-[11px] text-muted">
+              <span class="h-2.5 w-2.5 border border-brut bg-muted"></span>在途
             </span>
           </div>
         </template>

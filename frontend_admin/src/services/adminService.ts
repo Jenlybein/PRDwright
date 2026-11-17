@@ -40,7 +40,8 @@ export interface AdminStats {
   user_count: number
   admin_count: number
   task_count: number
-  completed_count: number
+  /** 已定稿（七态里的 succeeded；不再叫 completed） */
+  succeeded_count: number
   prompt_tokens: number
   completion_tokens: number
 }
@@ -49,11 +50,16 @@ export interface AdminStats {
 export interface AdminDailyStat {
   day: string
   task_count: number
-  completed_count: number
-  /** 真失败（已排除主动取消与被顶替） */
+  /** 已定稿 */
+  succeeded_count: number
+  /** 真失败（只统计 failed；取消与顶替各有自己的状态） */
   failed_count: number
+  /** 已取消（用户停止 / 方案删除）——与「被取代」必须是两个数 */
   cancelled_count: number
-  running_count: number
+  /** 被取代（系统让位给更新任务） */
+  superseded_count: number
+  /** 在途（排队中 + 执行中 + 取消中） */
+  active_count: number
   prompt_tokens: number
   completion_tokens: number
   /** 分母为 0 时为 null：「那天没任务」与「那天 0% 失败」是两回事 */
@@ -556,11 +562,12 @@ export interface AdminJob {
   owner_id: number
   owner_name: string
   kind: string
-  status: 'running' | 'completed' | 'failed' | string
+  /** 七态取值，见 ADMIN_JOB_STATE_LABELS（票 #84 之后不再有 completed） */
+  status: AdminJobState
   phase: string
   created_at: string
   updated_at: string
-  /** 已运行秒数；running 为「至今」，其余为收尾耗时 */
+  /** 已运行秒数；在途为「至今」，其余为收尾耗时 */
   duration_seconds: number
   /** 是否判定为卡死（running 且超过阈值未更新） */
   is_stuck: boolean
@@ -572,6 +579,16 @@ export interface AdminJob {
   error_message: string
 }
 
+/** 任务状态（七值，与后端 generation_jobs.status 一一对应；票 #84） */
+export type AdminJobState =
+  | 'pending'
+  | 'running'
+  | 'cancelling'
+  | 'succeeded'
+  | 'failed'
+  | 'superseded'
+  | 'cancelled'
+
 /** 任务监控列表的一页 */
 export interface AdminJobPage {
   items: AdminJob[]
@@ -581,7 +598,7 @@ export interface AdminJobPage {
 
 /** 任务列表的筛选条件。空串一律视为「不筛」。 */
 export interface JobQuery {
-  /** running / failed；空串 = 全部 */
+  /** 逗号分隔的状态集合；空串 = 全部 */
   status?: string
   /** 用户名模糊匹配 */
   username?: string

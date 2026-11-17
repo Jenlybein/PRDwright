@@ -90,6 +90,14 @@ const props = withDefaults(
      * 形态：显示倒计时而不是转圈，也不显示成失败——任务没有失败，只是在等下一次尝试。
      */
     retryAt?: string | null
+    /**
+     * 是否**正在取消**（票 #84，七态里的 `cancelling`）。
+     *
+     * 用户按下停止后按钮必须立刻变成「正在取消…」并置灰：取消是两段的（请求 →
+     * 执行者在下一个动作点确认），服务端要等动作点才落终态。不给即时反馈的话，
+     * 这一两秒里用户只会看到按钮毫无反应，然后连点好几次。
+     */
+    cancelling?: boolean
   }>(),
   { withReview: true },
 )
@@ -204,8 +212,14 @@ onBeforeUnmount(stopTicker)
       <p class="text-xs text-amber-700/80">
         上次失败后按退避等待，不会立刻重试；等待期间仍然可以停止这次任务。
       </p>
-      <AppButton variant="secondary" size="sm" class="self-start" @click="emit('cancel')">
-        停止生成
+      <AppButton
+        variant="secondary"
+        size="sm"
+        class="self-start"
+        :disabled="cancelling"
+        @click="emit('cancel')"
+      >
+        {{ cancelling ? '正在取消…' : '停止生成' }}
       </AppButton>
     </div>
 

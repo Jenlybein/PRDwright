@@ -46,7 +46,15 @@ from backend.core.runtime_config import use_config
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
-from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
+from backend.repositories.generation_job_repo import (
+    ACTIVE_STATUSES,
+    STATUS_CANCELLED,
+    STATUS_CANCELLING,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    STATUS_SUCCEEDED,
+    GenerationJobRepository,
+)
 from backend.repositories.job_event_repo import JobEventRepository
 from backend.repositories.solution_repo import SolutionRepository
 from backend.services import (
@@ -82,11 +90,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 失败收尾里「不是错误」的两个终态判定：已取消（用户走开 / 删方案）与被取代（同一份
-# 文档已有更新的任务接手）。它们同样落 failed 状态，但不该作为红色错误弹给用户，
-# 因此补发 `error` 事件时要排除——否则「用户自己按了停止」会被渲染成「生成失败」。
-# 取值住在状态机（`job_state.ABORT_CODES`），这里只借用不另写一份。
-_ABORT_CODES = job_state.ABORT_CODES
+# 终态里「订阅侧该不该补一条 `error` 事件」的唯一判据是**状态**（票 #84 AC4）：
+
+
 
 
 # ----------------------------------------------------------------------------
@@ -157,16 +163,17 @@ def cancel_job(owner_id: int, job_id: int, *, message: str = "用户停止了生
     管理员在后台清理卡死任务写「管理员手动停止」——两者都走 `CANCELLED`，
     但运维看这一行时要知道是谁动的手。
 
-    **改道经状态机（#79）**：这条路径不再自己拼 `failed + CANCELLED` 的规则，
-    只交一次「取消」转换给 `job_state`；改到 0 行（任务已经自然结束）时它如实回答
-    False——「你点的时候它刚好说完了」不是失败。
+    **两阶段取消（#84）**：排队中的任务没有执行者，`REQUEST_CANCEL` 一步把它落成
+    「已取消」；执行中的任务先进入「取消中」——执行者还要用它的租约把半截正文与
+    已经烧掉的用量写下来，真正的终态由它在下一个动作点确认（`CONFIRM_CANCEL`）。
+    改到 0 行（任务已经自然结束）时它如实回答 False——「你点的时候它刚好说完了」不是失败。
     """
     runtime = _RUNTIMES.get(job_id)
     if runtime is not None and runtime.owner_id != owner_id:
         # 归属不符的运行时不能结算（否则等于替别人的任务置取消意图）。
         runtime = None
     result = job_state.transition(
-        job_state.JobEvent.CANCEL,
+        job_state.JobEvent.REQUEST_CANCEL,
         job_state.job_scope(owner_id, job_id),
         runtime=runtime,
         error_message=message,
@@ -203,10 +210,10 @@ def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
         deleted = SolutionRepository(session).delete(owner_id, solution_id)
         if not deleted:
             return False
-        # 改道经状态机（#79）：取消的规则（落 failed + CANCELLED、只动 running）只在
-        # `job_state` 写一份；这里传 session，是为了让取消与删方案同生共死。
+        # 改道经状态机（#84）：取消的规则（排队中一步落已取消、执行中转取消中、
+        # 只动在途行）只在 `job_state` 写一份；这里传 session，是为了让取消与删方案同生共死。
         cancelled = job_state.transition(
-            job_state.JobEvent.CANCEL,
+            job_state.JobEvent.REQUEST_CANCEL,
             job_state.solution_scope(owner_id, solution_id),
             error_message="方案已删除，任务已取消",
             session=session,
@@ -237,7 +244,7 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
     """
     with session_scope() as session:
         cancelled = job_state.transition(
-            job_state.JobEvent.CANCEL,
+            job_state.JobEvent.REQUEST_CANCEL,
             job_state.owner_scope(owner_id),
             error_message=message,
             session=session,
@@ -247,21 +254,22 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
 
 
 def running_runtimes() -> list[JobRuntime]:
-    """当前在途（`status == running`）的运行时的快照。
+    """当前在途（`status` 是执行中 / 取消中）的运行时的快照。
 
     调用方是同一生成任务包内的 `job_wait`：它把这份快照折算成只带 `job_id` 的抽象句柄
     交给包外排空，再由自己按句柄回答「等在途任务跑完、超时取消哪几支」。快照之后自然
     结束的任务会在 `cancel_in_flight` 里按当时的 `status` 被排除。
 
+    「取消中」也算在途：那一支的执行者还活着（租约在它手里），排空同样要等它/收它；
+    把它漏掉，重启时就会留下一条名义上「已请求取消」、实际还在烧 token 的协程。
+
     为什么判据用运行时上的 `status` 而不是 `_TASKS`：任务集合只是保活用的强引用，
     它不知道「这个任务是不是已经收尾了」；运行时上的 `status` 才是权威。
-
-    本函数是 `job_service` 公开面上的正常动作：排空留在包外、只问三个问题，不伸手进
-    `_RUNTIMES`；「谁可以直接读进程内登记表」在生成任务一侧收口，换存储结构时改动面
-    只有本包。
     """
     return [
-        runtime for runtime in list(_RUNTIMES.values()) if runtime.status == STATUS_RUNNING
+        runtime
+        for runtime in list(_RUNTIMES.values())
+        if runtime.status in (STATUS_RUNNING, STATUS_CANCELLING)
     ]
 
 
@@ -274,29 +282,27 @@ def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -
     排空只问三个问题，不直接调这里。
 
     Args:
-        reason: 落进 `error_message` 与 `error` 事件的终止原因。文案要说清**是谁**动的手
-            （例如「服务正在重启」），否则前端与运维会把排空取消当成生成失败。
+        reason: 落进 `error_message` 的终止原因（**不是错误码**）。文案要说清**是谁**动的手
+            （例如「服务正在重启」），否则运维会把排空取消当成生成失败。
         runtimes: 要取消的运行时。`None` 表示「当前全部在途任务」。排空传的是它等待
-            之前的那份快照，这样「取消数 ≤ 开始时在途数」由构造保证，汇总里的三个
-            数字不可能互相对不上。
+            之前的那份快照，这样「取消数 ≤ 开始时在途数」由构造保证。
 
     Returns:
-        真正置为取消的条数；快照里已经自然收尾的任务会被跳过、不计数。
+        真正收成取消的条数；快照里已经自然收尾的任务会被跳过、不计数。
 
-    实现上三步顺序不能换：**先发错误事件、再收尾**。`_finalize` 结尾会广播
-    `run_summary`，订阅者按「error → run_summary」读到的是一条完整的坏消息；反过来
-    先 `run_summary` 的话，前端会在收到「已结束」之后才收到原因。
-    末端那条 `job_bus.close()` 是给订阅者的哨兵：超时者可能正卡在模型调用里，
-    等它自己的 `finally` 放哨兵就是「再等一个 30 秒」。
+    实现上顺序不能换：**先记失败意图、再收尾**。`_finalize` 结尾会广播 `run_summary`，
+    订阅者读到的是一条完整的「已取消」结局。末端那条 `job_bus.close()` 是给订阅者的
+    哨兵：超时者可能正卡在模型调用里，等它自己的 `finally` 放哨兵就是「再等一个 30 秒」。
 
-    **改道经状态机（#79）**：这里只置「取消意图」（`job_state.request_cancel`），
-    落库与内存终态都交给 `_finalize` 那一次转换——于是「排空收一次、协程醒来又收一次」
-    的第二次会被 `_finalize` 的内存闸挡掉，账与结束事件都只有一份。
+    **七态之后的取消结局（#84）**：落 `cancelled`，**不发 `error` 事件**——用户/运维
+    主动取消不是一次生成失败，前端按回执里的 `status` 展示「已取消」即可。这里只置
+    「取消意图」（`job_state.request_cancel`），落库与内存终态都交给 `_finalize` 那一次
+    转换——于是「排空收一次、协程醒来又收一次」的第二次会被 `_finalize` 的内存闸挡掉。
     """
     targets = running_runtimes() if runtimes is None else list(runtimes)
     cancelled = 0
     for runtime in targets:
-        if runtime.status != STATUS_RUNNING:
+        if runtime.status not in (STATUS_RUNNING, STATUS_CANCELLING):
             # 快照之后已经自然收尾：它有自己更准确的结论，别再覆盖成「被取消」。
             continue
         cancelled += 1
@@ -309,20 +315,12 @@ def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -
                 "job_id": runtime.job_id,
                 "user_id": runtime.owner_id,
                 "kind": runtime.kind,
-                "error_code": job_state.CODE_CANCELLED,
                 "reason": reason,
             },
         )
-        # 错误事件走 `_failure_event`（与异常兜底同一个构造）：订阅者只看有没有
-        # `error` 事件判断失败，自造一个形状不同的错误事件等于让前端多一条解析分支。
-        failure = _failure_event(job_state.CODE_CANCELLED, reason)
-        # 同样进过程日志：排空/超时取消时，在途任务的那条订阅需要读到「为什么停」。
-        job_events.record(runtime, failure)
-        job_bus.publish(runtime.job_id, failure)
         _finalize(
             runtime,
-            "failed",
-            error_code=job_state.CODE_CANCELLED,
+            STATUS_CANCELLED,
             error_message=reason,
         )
         # 收尾的哨兵由本任务自己的 `finally` 放；超时者可能卡在模型调用里，这里替它放。
@@ -375,11 +373,15 @@ async def run_job(
     `event_stream_source` 是单②在造单时定格的事件流来源（生产真值 / 测试假值），
     派发时随单递入；本模块只有这一条事件流循环，包裹顺序、广播与收尾都只写一遍。
 
-    ## 失去执行权（#82）就地停止
+    ## 失去执行权 / 被请求取消（#82 + #84）
 
-    续租改到 0 行 = 这一轮已经被取消或被别的执行者接手。此时**什么都不写**：
-    不判失败、不写终态、不广播回执、不记账本——那一行可能正由新的执行者跑着，
-    「我失去资格」不是「任务失败」。只留一条日志，然后走 `finally` 关总线、摘运行时。
+    续租改到 0 行有两种原因：
+
+    - **这一轮已经被请求取消**（行在 `cancelling`）：执行者是唯一还有资格写这一行的人，
+      必须由它**确认取消**（落 `cancelled`，并把半截正文与已经烧掉的用量补一次）；
+    - **执行权已被接手**（凭证对不上 / 行已回排队）：此时**什么都不写**——不判失败、
+      不写终态、不广播回执、不记账本。那一行可能正由新的执行者跑着，「我失去资格」
+      不是「任务失败」。
     """
     guard = job_claimer.guard_for(runtime)
     try:
@@ -388,31 +390,39 @@ async def run_job(
         with use_meter(runtime.meter), use_config(runtime.config), job_claimer.use_lease(guard):
             # 上游正文归服务端取（spec #51 / 票 #53 / #54）：解析发生在**建任务那一刻**
             # （路由层），结果随任务单定格、派发时已合进 `runtime.request`。
-            # 这里不再解析：开流时才查库，会让「缺材料」变成一条流内错误而不是明确 400，
-            # 而且与建任务时看到的库状态可能已经不是同一份。
             async for event in event_stream_source(runtime.kind, runtime.request):
-                # 方案在生成途中被删除：下一个事件不再消费。
+                # 方案在生成途中被删除 / 用户按了停止：下一个事件不再消费。
                 # 判断放在 `_apply_event` **之前**——取消之后不再往运行时里写任何东西，
                 # 收尾时 `_finalize` 也就拿不到新的 `done`，不会把半截过程当成「已产出」。
                 #
                 # `superseded` 同理：同一份文档已经有更新的任务在写，这一支的结果反正不会
-                # 落库，继续烧 token 只是白花钱，而且它的 `done` 还会覆盖运行时的终稿。
+                # 落库，继续烧 token 只是白花钱。
                 #
-                # `guard.lost`（#82）：续租失败过。异常可能被流水线内部的 `except` 吞掉，
-                # 所以这里再挡一道——下一个事件到达就停，不再往运行时里写。
-                if runtime.cancelled or runtime.superseded or (guard is not None and guard.lost):
+                # `guard.lost` / `guard.cancel_requested`（#82 / #84）：续租时已经看见了
+                # 「执行权丢了」或「被请求取消」。异常可能被流水线内部的 `except` 吞掉，
+                # 所以这里再挡一道——下一个事件到达就停。
+                if (
+                    runtime.cancelled
+                    or runtime.superseded
+                    or (guard is not None and (guard.lost or guard.cancel_requested))
+                ):
                     break
                 _apply_event(runtime, event)
                 # 过程日志：先记进待写缓冲，随后与进度列同一笔落盘（见 `job_events`）。
-                # 顺序是「应用 → 记日志 → 合并写 → 唤醒」：唤醒只作**叫醒**用，数据由
-                # 订阅者自己去表里按游标读，因此「醒来时那一笔已经提交」能省一次空读。
                 job_events.record(runtime, event)
                 _maybe_flush(runtime)
                 job_bus.publish(runtime.job_id, event)
+        if guard is not None and guard.cancel_requested and not guard.lost:
+            # 看到取消标记：执行者退出并确认取消（AC2）。结局由运行时上的取消意图结算。
+            _finalize(runtime, STATUS_CANCELLED, error_message="任务已取消")
+            return
         if guard is not None and guard.lost:
             _log_lease_lost(runtime, "续租失败之后的下一个事件点")
             return
-        _finalize(runtime, "failed" if runtime.failed else "completed")
+        _finalize(runtime, STATUS_FAILED if runtime.failed else STATUS_SUCCEEDED)
+    except job_claimer.CancelRequestedError:
+        # 取消信号（#84）：执行者在动作点看到 cancelling，确认退出。
+        _finalize(runtime, STATUS_CANCELLED, error_message="任务已取消")
     except job_claimer.LeaseLostError as lost:
         # **不再写任何结果**，也不走下面的失败兜底：失去执行权 ≠ 这次生成失败。
         _log_lease_lost(runtime, lost.reason)
@@ -452,7 +462,7 @@ async def run_job(
                 "request_id": current_request_id(),
             },
         )
-        _finalize(runtime, "failed")
+        _finalize(runtime, STATUS_FAILED)
     finally:
         # 先关总线（给订阅者放哨兵）再摘运行时：已订阅者仍能读到 run_summary 与结束标记；
         # 之后的迟到订阅者改走 DB 快照分支。
@@ -521,14 +531,11 @@ def _terminal_tail(
 
     带游标的读者**不补**：它读的是回放，游标之后有什么就给什么，不在这条链上加料。
     """
-    if not snapshot_delivered or runtime.status == STATUS_RUNNING:
+    if not snapshot_delivered or runtime.status in (STATUS_RUNNING, STATUS_CANCELLING):
         return []
     events: list[StreamEvent] = []
-    if (
-        runtime.status == "failed"
-        and runtime.error_code not in _ABORT_CODES
-        and not saw_error
-    ):
+    if runtime.status == STATUS_FAILED and not saw_error:
+        # 只有 `failed` 补 error（AC4）：已取消 / 被取代是正常结局，不是红色失败。
         events.append(_failure_event(runtime.error_code, runtime.error_message))
     if not saw_summary:
         events.append(_run_summary_event(_summary_data(runtime, runtime.status)))
@@ -593,11 +600,11 @@ async def _db_stream(
         yield snapshot
         status = str(row.get("status") or "")
         code = str(row.get("error_code") or "")
-        # 已经失败且不是「取消 / 被顶替」：补一条 error，迟到的订阅者才知道为什么空。
-        if status == "failed" and code not in _ABORT_CODES:
+        # 只有真失败补一条 error：已取消 / 被取代按状态展示即可（AC4 / AC5）。
+        if status == STATUS_FAILED:
             yield _failure_event(code, str(row.get("error_message") or ""))
         usage = parse_usage(row.get("usage"))
-        if usage is not None and status != STATUS_RUNNING:
+        if usage is not None and status not in ACTIVE_STATUSES:
             yield _run_summary_event(usage)
         return
     current = cursor
@@ -718,8 +725,11 @@ async def open_stream(
 
 
 def _is_terminal(runtime: JobRuntime) -> bool:
-    """运行时是否已到终态（内存状态由状态机在**提交之后**结算，见 #79）。"""
-    return runtime.status != STATUS_RUNNING
+    """运行时是否已到终态（内存状态由状态机在**提交之后**结算，见 #79）。
+
+    「取消中」不是终态：执行者还活着、还在收口，订阅要继续读（AC2）。
+    """
+    return runtime.status not in (STATUS_RUNNING, STATUS_CANCELLING)
 
 
 def get_job(owner_id: int, job_id: int) -> dict[str, Any] | None:
@@ -736,11 +746,18 @@ def list_jobs(
     kind: str | None = None,
     status: str | None = None,
 ) -> list[dict[str, Any]]:
-    """列出该 owner 的任务，可选按 solution_id / kind / status 过滤。"""
+    """列出该 owner 的任务，可选按 solution_id / kind / **状态集合** 过滤。
+
+    `status` 接受逗号分隔的多个取值（例如 `pending,running,cancelling` = 在途）：
+    七态之后「在途」不再是一个值，对外也就不能只按单个 `running` 过滤。
+    """
+    statuses = tuple(
+        value.strip() for value in (status or "").split(",") if value.strip()
+    )
     with session_scope() as session:
         jobs = GenerationJobRepository(session).list_by_owner(
             owner_id,
-            status=status,
+            statuses=statuses or None,
             solution_id=solution_id,
             kind=kind,
         )
@@ -748,7 +765,7 @@ def list_jobs(
 
 
 def reap_orphans() -> None:
-    """启动回收：把上次进程留下的 `running` 行收成确定终态（票 #83）。
+    """启动回收：把上次进程留下的非终态行收成确定终态（票 #83，七态版 #84）。
 
     收编进恢复器（#83）：这里不再是一次「维护面」的批量判死，而是
     `job_recovery.recover_once(..., startup=True)` 的启动档——同一套判权（扫描时
@@ -756,10 +773,11 @@ def reap_orphans() -> None:
     区别只在候选集：启动档不看到期时间、也不区分「有没有租约」，因为进程刚起来时
     库里不可能有真正的执行者（单 worker 硬约束，`_RUNTIMES` 在进程内）。
 
-    启动档去向见 `job_recovery` 模块 docstring：有租约的行按**租约超时**判失败
-    （`LEASE_EXPIRED`），从没被领过的残留行按**服务重启中断**判失败
-    （`INTERNAL_ERROR` +「服务重启，任务已中断」）。不回排队：本票不引入调度循环
-    （#88），排队的行没人会来领，AC4「重启后不存在永远进行中」就当场红。
+    启动档去向见 `job_recovery` 模块 docstring：取消中的行按**已取消**收口（用户的
+    意图优先于「超时」），有租约的执行中行按**租约超时**判失败（`LEASE_EXPIRED`），
+    从没被领过的残留行（含排队中）按**服务重启中断**判失败（`INTERNAL_ERROR`）。
+    不回排队：本票不引入调度循环（#89），排队的行没人会来领，
+    AC4「重启后不存在永远进行中」就当场红。
     """
     job_recovery.recover_once(startup=True)
 

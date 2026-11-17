@@ -224,10 +224,31 @@ def _job_repo():
 
 
 def job_create(*args, **kwargs):
+    """建一条任务：**排队中**（`pending`，票 #84 起建行即排队）。
+
+    要造「执行中」的行，再调 `job_claim(...)` 或直接用 `job_create_running`——
+    七态之后「排队中」与「执行中」是两个值，不再靠「`running` + 有没有租约」同形表达。
+    """
     session_scope, repo = _job_repo()
     with session_scope() as session:
         job = repo(session).create(*args, **kwargs)
         return int(job.id or 0)
+
+
+def job_claim(owner_id, job_id, **kwargs):
+    """领一条排队中任务的执行权；领不到直接让用例失败（断言前提）。"""
+    from backend.services import job_claimer
+
+    kwargs.setdefault("lease_owner", "test-claim")
+    lease = job_claimer.claim(owner_id, job_id, **kwargs)
+    assert lease is not None, "用例前提：这是一条排队中的任务，应当能领到执行权"
+    return lease
+
+
+def job_create_running(owner_id, kind, solution_id=None, **kwargs):
+    """建一条任务并当场领走：返回 `(job_id, lease)`，行处于**执行中**。"""
+    job_id = job_create(owner_id, kind, solution_id, **kwargs)
+    return job_id, job_claim(owner_id, job_id)
 
 
 def job_get(owner_id, job_id):
@@ -250,17 +271,42 @@ def job_list_by_owner(owner_id, **kwargs):
         return [job.model_dump() for job in repo(session).list_by_owner(owner_id, **kwargs)]
 
 
+def _ensure_running(repo, session, *args, **kwargs) -> None:
+    """夹具收尾前的准备：若这一行还是**排队中**，当场领走再收尾。
+
+    七态（票 #84）之后「建单」= `pending`，而收尾的成功 / 失败只从 `running` 改得到
+    （#79 的条件写）。`job_finish` / `job_fail` 是**造一条已收尾任务**的夹具，
+    它不该逼每个用例先写一遍抢占；这里补上抢占，并把本轮凭证传给收尾（判据仍是
+    「写权在这条协程手里」）。要验抢占本身的用例照旧直接调 `job_claim`。
+    """
+    from backend.core.clock import utc_now
+    from backend.services import job_claimer
+
+    owner_id = args[0] if args else kwargs.get("owner_id")
+    job_id = args[1] if len(args) > 1 else kwargs.get("job_id")
+    row = repo(session).get(owner_id, job_id)
+    if row is None or row.status != "pending":
+        return
+    now = utc_now()
+    lease = job_claimer.claim(owner_id, job_id, lease_owner="test-finish", now=now)
+    assert lease is not None, "夹具前提：这一条排队中的任务应当能领到执行权"
+    kwargs["lease_token"] = lease.token
+    kwargs.setdefault("now_text", now.isoformat())
+
+
 def job_finish(*args, **kwargs):
-    """收尾成 completed，返回**改到的行数**（#79：条件写，判据是影响行数）。"""
+    """收尾成 `succeeded`，返回**改到的行数**（#79：条件写，判据是影响行数）。"""
     session_scope, repo = _job_repo()
     with session_scope() as session:
+        _ensure_running(repo, session, *args, **kwargs)
         return repo(session).finish(*args, **kwargs)
 
 
 def job_fail(*args, **kwargs):
-    """收尾成 failed，返回**改到的行数**（#79：条件写，判据是影响行数）。"""
+    """收尾成 `failed`，返回**改到的行数**（#79：条件写，判据是影响行数）。"""
     session_scope, repo = _job_repo()
     with session_scope() as session:
+        _ensure_running(repo, session, *args, **kwargs)
         return repo(session).fail(*args, **kwargs)
 
 
@@ -271,12 +317,16 @@ def job_persist_progress(*args, **kwargs):
 
 
 def job_cancel_running(*args, **kwargs):
-    """按方案取消（测试薄封装）：错误码 / 文案取状态机的取消口径（#79）。"""
+    """按方案发起取消（测试薄封装）：排队中的立刻落已取消，执行中的转取消中。
+
+    七态之后「取消」是**请求**：执行中的行会停在 `cancelling` 等执行者确认，
+    排队中的行没有执行者，直接落 `cancelled`。返回值是改到的行数。
+    """
     session_scope, repo = _job_repo()
-    kwargs.setdefault("error_code", "CANCELLED")
+    kwargs.pop("error_code", None)
     kwargs.setdefault("error_message", "方案已删除，任务已取消")
     with session_scope() as session:
-        return repo(session).cancel_running(*args, **kwargs)
+        return repo(session).request_cancel_solution(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------

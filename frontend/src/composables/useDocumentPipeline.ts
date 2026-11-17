@@ -906,6 +906,58 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 取消 / 被取代的收尾落点（票 #84）。
+   *
+   * 这两件事都**不是失败**：已取消是用户的明确意图，被取代是系统让位（同一份文档有
+   * 更新的任务接手）。但它们都不能写成「已定稿」——正文可能只有一半。所以落点与
+   * 失败收尾同源：先与后端对齐（取消也可能留下一版部分完成），有内容就带用户去审阅页，
+   * 提示语说明「是取消/被取代，不是出错」。
+   *
+   * 区别只在**不调用 `setReviewFailed`、不显示红色失败**：判据是任务状态而不是
+   * 错误码，界面不许把两者混成一团（AC5）。
+   */
+  async function settleAbortedDocument(
+    target: DocumentKind,
+    state: 'cancelled' | 'superseded',
+    epoch: number,
+  ): Promise<void> {
+    const message = state === 'cancelled' ? '任务已取消' : '任务已被新任务取代'
+    prdBoard.value = null
+    if (isExpired(epoch)) return
+    await documents.reload()
+    if (isExpired(epoch)) return
+    docError.value = message
+    const generating = generatingStateFor(target)
+    if (generating !== null && viewState.value === generating) {
+      goTo(reviewStateFor(target))
+      // `goTo` 清错误回显；这次是取消/让位收尾，说明必须留在页面上。
+      docError.value = message
+    }
+    hooks.onNotice(message)
+  }
+
+  /** 本次订阅的终态是不是「取消 / 被取代」（两者都不是失败，见 `settleAbortedDocument`）。 */
+  function abortedTerminalState(): 'cancelled' | 'superseded' | null {
+    const status = job.snapshot.value?.status
+    return status === 'cancelled' || status === 'superseded' ? status : null
+  }
+
+  /**
+   * 若这一支以「取消 / 被取代」收尾，就地处理并返回 true（调用方直接 return）。
+   *
+   * 集中成一个入口而不是在每个动作里各抄一遍：四条生成入口 + 三条改写入口的落点规则
+   * 必须一致，抄散之后总有一条会忘了判「被取代」。
+   */
+  async function settleIfAborted(epoch: number): Promise<boolean> {
+    const state = abortedTerminalState()
+    if (state === null) return false
+    const run = runs.activeRun
+    const target = run?.docKind ?? (run ? docKeyForJob(run.jobKind) : 'prd')
+    await settleAbortedDocument(target, state, epoch)
+    return true
+  }
+
+  /**
    * 失败收尾的落点：先与后端对齐，再决定「有没有内容可用」（票 #85）。
    *
    * 失败不再等于「什么都没留下」：后端在失败 / 取消收尾时会把已生成的正文落成一版
@@ -947,7 +999,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 刷新后静默重连一个进行中的任务：先收快照补全正文，再接 live。
    *
    * 由 AppV2 在恢复快照后调用——**无需用户点击**。按快照 status 分流：
-   * running 续流 / completed 落稿 / failed 保 partial + 展示错误。
+   * running 续流 / cancelled·superseded 收成「不是失败」的落点 / succeeded 落稿 /\n * failed 保 partial + 展示错误（票 #84 的七态）。
    *
    * **对同一任务幂等**：一进入就要把预览复位，若同一个任务被并发重连两次，
    * 后一次会在前一路已经流出正文之后把预览清空，两路事件随即交错写入同一份缓冲。
@@ -985,15 +1037,25 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epoch = solutions.sessionEpoch
     const jobId = run.jobId
     const target = run.docKind ?? docKeyForJob(run.jobKind)
+    // 先落本地标记：按钮**立刻**变成「正在取消」并置灰。取消是两段的（票 #84）：
+    // 请求只把它推进 cancelling，执行者要等到下一个动作点才确认。不等这个往返，
+    // 用户会以为按钮坏了然后连点。
+    runs.requestCancel(jobId)
     const cancelled = await job.cancel(jobId)
     // 等待期间用户可能已经切了方案 / 换了任务：那份结果不属于现在这一屏。
     if (isExpired(epoch) || runs.activeRun?.jobId !== jobId) return
+    if (cancelled) {
+      // **不 detach**：这一支还要继续收事件，直到执行者确认收口（run_summary 说
+      // cancelled / superseded）。终态落点由那条链自己的 `settleAbortedDocument`
+      // 处理；这里提前退订会让界面停在「正在取消」再也没有下文。
+      return
+    }
+    // 取消没成功不是错误：任务刚好已经结束，也同样离开等待态，只是文案不同。
     job.detach()
     goTo(reviewStateFor(target))
     // `goTo` 会清掉错误回显（那是「开始新一轮」的语义）：取消结果必须留在页面上，
     // 否则用户只看到一份旧正文、不知道自己按的那一下生效了没有。
-    docError.value = cancelled ? '任务已取消' : '这次任务已经结束，无需取消'
-    if (cancelled) hooks.onNotice('任务已取消')
+    docError.value = '这次任务已经结束，无需取消'
   }
 
   /**
@@ -1080,14 +1142,25 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 「已生成完毕」的提示打到用户脸上——不报错，只是内容错了。
     const serverKind = snap === null ? null : fromBackendJobKind(snap.kind)
     if (serverKind !== null && serverKind !== kind) return
-    // 下游阶段与阶段输出由 `applyJobSnapshot` 在**快照那一刻**回填（那是唯一正确的时机：
-    // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
-    // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
+    // 七态（票 #84）：取消 / 被取代不是失败，落点与文案必须与 failed 分开。
+    const abortedState = abortedTerminalState()
     if (kind === 'review') {
       // 重审不产出正文：收尾只有「回审阅页 + 让面板反映这次结果」两件事，
       // 与刚点下去那条路共用 `settleRereview`（同一份收尾逻辑只有一个落点）。
       // 成功时结论已随 `review` 事件写进文档记录，`onRunSummary` 还会再拉一次对齐。
+      if (abortedState !== null) {
+        settleRereview(
+          target,
+          true,
+          abortedState === 'cancelled' ? '任务已取消' : '任务已被新任务取代',
+        )
+        return
+      }
       settleRereview(target, !ok || snap?.status === 'failed')
+      return
+    }
+    if (abortedState !== null) {
+      await settleAbortedDocument(target, abortedState, epochAtStart)
       return
     }
     if (!ok) {
@@ -1156,6 +1229,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 订阅期间会话被换掉、或这一支已被别的任务顶替：成功 / 失败都不要再写回本文件的状态。
     // `aborted` 见 `reconnectAndSettle` 的同名判断：主动退订不是失败，不该弹红字。
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       // 失败：后端可能已经把已生成的内容落成一版部分完成（#85），落点由它决定
       await settleFailedDocument('prd', job.error.value || 'PRD 生成失败', epochAtStart)
@@ -1187,6 +1262,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       handlersForKind('api-docs', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       await settleFailedDocument('api-docs', job.error.value || '接口文档生成失败', epochAtStart)
       return
@@ -1216,6 +1293,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       handlersForKind('prompts', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       await settleFailedDocument('prompts', job.error.value || '提示词生成失败', epochAtStart)
       return
@@ -1260,6 +1339,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       handlersForKind('optimize', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       // 优化失败：保留原文档，错误已写入 docError
       docError.value = job.error.value || '优化失败'
@@ -1363,6 +1444,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       handlersForKind('clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       // 改写失败：留在生成视图，由 `GeneratingStage` 的错误区展示原因（后端失败不覆写正文）
       docError.value = job.error.value || '按澄清结果改写失败'
@@ -1471,6 +1554,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       handlersForKind('auto-clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       docError.value = job.error.value || 'AI 自行澄清失败'
       return
@@ -1512,6 +1597,16 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     )
     // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：重审被取消 / 被取代也只是「没审成」，不该冒充失败原因。
+    const abortedState = abortedTerminalState()
+    if (abortedState !== null) {
+      settleRereview(
+        target,
+        true,
+        abortedState === 'cancelled' ? '任务已取消' : '任务已被新任务取代',
+      )
+      return
+    }
     settleRereview(target, !ok)
   }
 
@@ -1532,11 +1627,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * `failed` 由调用方给出而不是在这里判 `ok`：重连路径上「流读完了、任务终态却是
    * failed」也是失败（例如正文在审的过程中被改过），那时 `ok` 仍是 `true`。
    */
-  function settleRereview(target: DocumentKind, failed: boolean): void {
+  function settleRereview(target: DocumentKind, failed: boolean, message?: string): void {
     if (failed) documents.setReviewFailed(target)
     prdBoard.value = null
     goTo(reviewStateFor(target))
-    if (failed) docError.value = job.error.value || '重新审核失败'
+    if (failed) docError.value = message ?? job.error.value ?? '重新审核失败'
   }
 
   /**
@@ -1579,6 +1674,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     )
     // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       // 修复是**整篇重写**（后端按 `review_fix` 追加版本），因此失败时也可能留下一版
       // 部分完成：由 `settleFailedDocument` 决定是否带用户去看那份可用正文（#85）。
@@ -1902,3 +1999,4 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     reset,
   }
 }
+

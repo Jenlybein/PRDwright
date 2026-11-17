@@ -1,4 +1,4 @@
-"""恢复器（票 #83）：过期租约的收口——接手、回排队或判失败。
+"""恢复器（票 #83）：过期租约的收口——接手、回排队、判失败或**兜底落已取消**。
 
 ## 本模块回答什么问题
 
@@ -7,60 +7,58 @@
 没人接手**。这一行如果没人动，它会永远停在 `running`——用户看到进度条一直转，
 运维看到一条说不清的尸体行。
 
-恢复器就是收这个口的。它是**可直接调用的单元**：`recover_once(limit)` 扫一批、
-逐条收口、返回一份报告。不启动线程、不起定时器、不 sleep——接入调度循环（多久扫
-一次、扫到之后怎么派发）是 #88 的事，本票只把「怎么收口」做成可复用的一个函数，
-好让后续票直接 `while True: recover_once(...)`。
+票 #84 之后，同一个空档还有一个变种：**用户已经请求取消（行处于 `cancelling`），
+执行者却卡在模型调用里不肯退出**。租约到期之后同样由恢复器接手，结局是 `cancelled`
+（用户的明确意图），而不是一次失败（AC3）。
 
-## 两种档位：周期 vs 启动
+恢复器是**可直接调用的单元**：`recover_once(limit)` 扫一批、逐条收口、返回报告。
+不启动线程、不起定时器、不 sleep——接入调度循环（多久扫一次、扫到之后怎么派发）
+是 #89 的事。
+
+## 档位与去向
 
 | 档位 | 候选集 | 去向 |
 |---|---|---|
-| 周期（`startup=False`，默认） | `status='running'` 且**租约已过期** | 按剩余次数：还允许执行就**回排队**（清租约），次数用完就**判失败** |
-| 启动（`startup=True`，`reap_orphans` 用） | 库里所有 `status='running'` 行（不看到期时间） | 一律**落终态**，不等「下一次执行」 |
+| 周期（`startup=False`，默认） | `running` 且租约已过期；`cancelling` 且租约已过期（或没有租约） | `running`：按剩余次数回排队（→ `pending`）或判失败；`cancelling`：**兜底落 `cancelled`** |
+| 启动（`startup=True`，`reap_orphans` 用） | 库里所有**非终态**行（`pending` / `running` / `cancelling`） | 一律**落终态**：`cancelling` → `cancelled`；`running` 有租约 → `failed + LEASE_EXPIRED`；`running` 没租约 / `pending` → `failed + INTERNAL_ERROR`（服务重启中断） |
 
 为什么启动档不看「剩余次数」：**启动那一刻没有任何执行者会来领这一行**。单 worker
 是部署硬约束（`_RUNTIMES` 在进程内），进程刚起来时库里不可能有真正在跑的任务；
-而本票不引入调度循环（那是 #88），把行清成「排队中」等于让它永远排队——AC4
-「重启后不存在永远进行中」当场就红，用户也还是看到那个转不完的进度条。所以启动档
-直接落终态：有租约的行按**租约超时**处理（`failed + LEASE_EXPIRED`），从没被领过的
-残留行按**服务重启中断**处理（旧口径 `INTERNAL_ERROR` +「服务重启，任务已中断」）。
-等 #88 的调度循环落地，「排队中」真的有人领之后，启动档再改成回排队才有意义。
+而本票不引入调度循环（那是 #89），把行清成「排队中」等于让它永远排队——AC4
+「重启后不存在永远进行中」当场就红。
 
 ## 判权：fencing 用扫描时读到的旧凭证
 
 扫描只负责**挑候选**，真正的「改不改得到」由状态机的条件写回答。条件是**扫描时
 读到的那一份旧租约**（`job_state.LeaseFence`：凭证 + 到期时间），不是「刚才查到的
-行」。于是两种竞争都改到 0 行：
-
-- 凭证被换掉（别人已经接手）→ 恢复器手里那份已经失效；
-- 到期时间被推后（执行者其实还在跑，刚续了租）→ 这已经不是那一轮租约。
-
-改到 0 行 = 这一行已经不是我看到的那一份死租约了：**跳过、不报错、不记账**，与
-#82 挡「旧执行者晚到结果」用的是同一条规则（丢弃日志由状态机统一留）。
+行」。于是两种竞争都改到 0 行：凭证被换掉（别人已经接手）、到期时间被推后（执行者
+其实还在跑，刚续了租）。改到 0 行 = 这一行已经不是我扫描时看到的那一份死租约了：
+**跳过、不报错、不记账**（丢弃日志由状态机统一留）。
 
 ## 去向判定规则
 
 按账本（`job_attempts`）已经记了几次来判——账本行数 = 已结束的执行次数。本票
-**不新增迁移**（head 是 `0003`，`0004` 被 #85 占用），所以没有 `attempt_count` 列，
-`job_attempts` 的行数就是唯一的事实来源，与 `append` 的 `MAX(attempt_no)+1` 同源。
+**不新增迁移的列**，`job_attempts` 的行数就是唯一的事实来源，与 `append` 的
+`MAX(attempt_no)+1` 同源。
 
     attempts + 1 >= DEFAULT_MAX_ATTEMPTS  → 判失败（EXPIRE）
     否则                                  → 回排队（REQUEUE）
 
 即「共允许 3 次执行机会」：首次 + 两次恢复接手。第 3 次崩溃之后落终态，不再重试。
 
+**取消中的行不走这套次数规则**：用户已经说要停，再回排队等于把用户叫停的任务重新
+跑起来——直接落 `cancelled`（一次确认，没有「下一轮」）。
+
 ## 账本与状态同事务
 
-每收口一行都记一条超时账本，`error_code=LEASE_EXPIRED`、摘要写明超时原因（谁没了、
-为什么），与状态更新在**同一个事务**里（#80 的口径，写点在 `job_state.transition`）。
-执行者不在场，所以用量与耗时是**未知**而不是 0 成本（记 0，与启动回收同一口径）。
+每收口一行都记一条超时账本（`error_code=LEASE_EXPIRED`，摘要写明超时原因），
+`cancelling` 那一支记 `outcome=cancelled`，与状态更新在**同一个事务**里（#80 的口径）。
+执行者不在场，所以用量与耗时是**未知**而不是 0 成本（记 0）。
 
 ## 本票不做什么
 
-- 调度循环 / 定时器 / 派发（#88）：本模块只提供 `recover_once` 这个入口。
-- 失败退避（`next_run_at`，迁移属 #88）：回排队的行按既有 `updated_at` 语义排到队尾。
-- 七态（#84）：状态仍是三态；「回排队」在库里读作 `running` + 租约三列为空。
+- 调度循环 / 定时器 / 派发（#89）：本模块只提供 `recover_once` 这个入口。
+- 审批 / 人工介入：超时收口是机械规则，不在这里排队等人。
 """
 
 from __future__ import annotations
@@ -72,14 +70,17 @@ from datetime import datetime
 
 from backend.core.clock import utc_now
 from backend.core.engine import session_scope
-from backend.repositories.generation_job_repo import GenerationJobRepository
+from backend.repositories.generation_job_repo import (
+    STATUS_CANCELLING,
+    STATUS_PENDING,
+    GenerationJobRepository,
+)
 from backend.repositories.job_attempt_repo import JobAttemptRepository
 from backend.services import job_state
 
 logger = logging.getLogger(__name__)
 
-# 一条任务共允许几次执行机会（首次 + 恢复接手）。没有 `attempt_count` 列（本票不加
-# 迁移），判据取账本行数；取值口径见模块 docstring「去向判定规则」。
+# 一条任务共允许几次执行机会（首次 + 恢复接手）。判据取账本行数。
 DEFAULT_MAX_ATTEMPTS = 3
 
 # 单次扫描的上限：恢复是**逐条收口**的维护动作，一次收太多会把一批跨用户的写压在
@@ -90,15 +91,17 @@ DEFAULT_RECOVERY_LIMIT = 20
 # 死租约了」（凭证被换 / 续了租 / 已经终态），属于正常竞争，不报错。
 ACTION_REQUEUED = "requeued"
 ACTION_FAILED = "failed"
+ACTION_CANCELLED = "cancelled"
 ACTION_SKIPPED = "skipped"
 
-# 超时的原因文案。写进账本摘要与任务行 `error_message`——用户看的就是这一句，
-# 所以它要说清「谁没了、为什么轮到我判」，而不是只留一个错误码。
+# 超时的原因文案。写进账本摘要与任务行 `error_message`。
 MESSAGE_LEASE_EXPIRED = "执行者进程已消失，租约到期未续，任务已中断"
 # 从没被领过的残留行：租约一次都没发过，说成「过期」会把排查方向带偏。
 MESSAGE_RESTART_INTERRUPTED = "服务重启，任务已中断"
+# 卡住的取消中：执行者没来确认，恢复器替它收口。
+MESSAGE_CANCEL_CONFIRMED = "执行者未确认取消，租约到期后已收为已取消"
 
-# 不是 `ErrorCode` 成员的启动回收码（与 #79 的旧口径一致：`reap_orphans` 的失败收尾）。
+# 不是 `ErrorCode` 成员的启动回收码（`reap_orphans` 的「服务重启中断」失败收尾）。
 CODE_RESTART_INTERRUPTED = "INTERNAL_ERROR"
 
 
@@ -106,13 +109,14 @@ CODE_RESTART_INTERRUPTED = "INTERNAL_ERROR"
 class RecoveryTarget:
     """一条候选任务：扫描时读到的、足以完成收口的最小事实。
 
-    租约三列与归属都是**扫描那一刻**的值，之后不再回查——回查会悄悄换上新的凭证，
-    于是 fencing 失效（那正是 AC3 要挡的）。`kind` / `solution_id` 只用于日志与排查，
-    收口本身不需要它们。
+    `status` 是扫描那一刻的取值（七态）：它决定这一条的去向完全不同——
+    `cancelling` 收成已取消，`running` 才按账本次数回排队 / 判失败。
+    所有字段都是扫描那一刻的值，之后不再回查——回查会悄悄换上新的凭证，于是 fencing 失效。
     """
 
     owner_id: int
     job_id: int
+    status: str = ""
     kind: str = ""
     solution_id: int | None = None
     lease_owner: str = ""
@@ -166,6 +170,10 @@ class RecoveryReport:
         return sum(1 for item in self.outcomes if item.action == ACTION_FAILED)
 
     @property
+    def cancelled(self) -> int:
+        return sum(1 for item in self.outcomes if item.action == ACTION_CANCELLED)
+
+    @property
     def skipped(self) -> int:
         return sum(1 for item in self.outcomes if item.action == ACTION_SKIPPED)
 
@@ -178,9 +186,7 @@ def scan(
 ) -> list[RecoveryTarget]:
     """扫一批该接手的任务（只挑候选，判权在 `recover_one` 的条件写里）。
 
-    条件见模块 docstring 的两档表；排序 `lease_expire_at, id`：过期最久的最先收，
-    同一秒的按自增 id 稳定排序（启动档把没租约的行排在前面——它们的
-    `lease_expire_at` 是空串，字典序最小，同样稳定）。
+    条件见模块 docstring 的档位表；排序 `lease_expire_at, id`：过期最久的最先收。
 
     Args:
         limit: 本次最多扫几条。
@@ -198,6 +204,7 @@ def scan(
             RecoveryTarget(
                 owner_id=int(row.owner_id),
                 job_id=int(row.id or 0),
+                status=row.status,
                 kind=row.kind,
                 solution_id=row.solution_id,
                 lease_owner=row.lease_owner,
@@ -219,12 +226,28 @@ def _decide(
 ) -> tuple[job_state.JobEvent, str, str]:
     """判这一条的去向：返回（事件、错误码、原因文案）。
 
-    规则见模块 docstring「去向判定规则」，这里只强调两件事：
+    优先级按「用户意图 > 机械超时」排：
 
-    1. **没有租约 = 从没被领过**（周期档扫不到这种行）。它的原因是「服务重启中断」，
+    1. `cancelling`：**任何档位**都收成已取消——用户已经说要停，再跑或判失败都读错了
+       他的意思（AC3）。
+    2. 没有租约（`pending`，或启动档里从没被领过的 `running`）：原因是「服务重启中断」，
        不是「租约过期」——租约一次都没发过。
-    2. 启动档**不按剩余次数回排队**：那一刻没有执行者会来领，排队等于永远进行中。
+    3. 启动档的 `running`：一律按租约超时判失败（那一刻没有执行者会来领）。
+    4. 周期档的 `running`：次数用完判失败，否则回排队。
     """
+    if target.status == STATUS_CANCELLING:
+        return (
+            job_state.JobEvent.EXPIRE_CANCELLING,
+            "",
+            MESSAGE_CANCEL_CONFIRMED,
+        )
+    if target.status == STATUS_PENDING:
+        # 启动档才扫得到排队中：登记完还没派发就崩了，本票没有调度循环，留着就是永远排队中。
+        return (
+            job_state.JobEvent.EXPIRE_PENDING,
+            CODE_RESTART_INTERRUPTED,
+            MESSAGE_RESTART_INTERRUPTED,
+        )
     if not target.lease_token:
         return (
             job_state.JobEvent.FAIL,
@@ -254,8 +277,7 @@ def _progress_payload(session, owner_id: int, job_id: int) -> job_state.FinishPa
     """按行上**已有的**进度造一份收尾载荷，用于「服务重启中断」那条失败收尾。
 
     为什么不给空载荷：`fail` 是整段载荷写入（正文 / 章节 / 用量 / 两列 token 一起
-    覆盖）。给空载荷等于把这一行可能已有的半截进度清掉。虽然「从没被领过」的行
-    正常是空的，但让这一段依赖于「正常情况」就是给自己埋雷——按现值回填更诚实。
+    覆盖）。给空载荷等于把这一行可能已有的半截进度清掉——按现值回填更诚实。
     """
 
     def _load(text: str, default):
@@ -283,20 +305,14 @@ def recover_one(
     """接手一条候选：按去向判定走状态机的条件写，返回它实际去了哪里。
 
     整条路径只有**一次状态转换**（`job_state.transition`）：状态机内部完成条件写、
-    账本、丢弃日志与内存结算，本模块不自己写库——AC5「恢复器不越权改状态」就是
-    这条边界。
-
-    Args:
-        target: 扫描读到的候选（**旧凭证**，不要在两次扫描之间回查）。
-        now: 判据用的「现在」，留空取 UTC 当前时刻。
-        startup: 启动档（去向不按剩余次数，见模块 docstring）。
+    账本、丢弃日志与内存结算，本模块不自己写库。
     """
     moment = now or utc_now()
     now_text = moment.isoformat()
     attempts = _attempts_used(target.job_id)
     event, code, message = _decide(target, attempts=attempts, startup=startup)
 
-    if event is job_state.JobEvent.FAIL:
+    if event is job_state.JobEvent.FAIL or event is job_state.JobEvent.EXPIRE_PENDING:
         with session_scope() as session:
             payload = _progress_payload(session, target.owner_id, target.job_id)
         result = job_state.transition(
@@ -317,7 +333,12 @@ def recover_one(
             lease_fence=target.fence,
             now_text=now_text,
         )
-        action = ACTION_REQUEUED if event is job_state.JobEvent.REQUEUE else ACTION_FAILED
+        if event is job_state.JobEvent.REQUEUE:
+            action = ACTION_REQUEUED
+        elif event is job_state.JobEvent.EXPIRE_CANCELLING:
+            action = ACTION_CANCELLED
+        else:
+            action = ACTION_FAILED
 
     if not result.applied:
         # 改到 0 行：凭证被换掉 / 刚续过租 / 行已终态。跳过、不报错、不记账——
@@ -333,6 +354,7 @@ def recover_one(
             "kind": target.kind,
             "solution_id": target.solution_id,
             "lease_owner": target.lease_owner,
+            "status": target.status,
             "attempts": attempts,
             "rows": result.rows,
             "startup": startup,
@@ -356,12 +378,7 @@ def recover_once(
     """**本票的入口**：扫一批、逐条收口、返回报告（不起线程 / 不起定时器）。
 
     每条候选各自一个事务（`recover_one` 里的状态转换），所以一条写失败不会连带
-    别的候选：恢复是维护动作，越能继续越好。#88 的调度循环直接调用它即可。
-
-    Args:
-        limit: 本次最多收几条。
-        now: 判据用的「现在」，留空取 UTC 当前时刻。
-        startup: 启动档（`reap_orphans` 用；候选集与去向见模块 docstring）。
+    别的候选：#89 的调度循环直接调用它即可。
     """
     moment = now or utc_now()
     targets = scan(limit, now=moment, startup=startup)
@@ -375,6 +392,7 @@ def recover_once(
                 "scanned": report.scanned,
                 "requeued": report.requeued,
                 "failed": report.failed,
+                "cancelled": report.cancelled,
                 "skipped": report.skipped,
                 "startup": startup,
             },
@@ -383,11 +401,13 @@ def recover_once(
 
 
 __all__ = [
+    "ACTION_CANCELLED",
     "ACTION_FAILED",
     "ACTION_REQUEUED",
     "ACTION_SKIPPED",
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_RECOVERY_LIMIT",
+    "MESSAGE_CANCEL_CONFIRMED",
     "MESSAGE_LEASE_EXPIRED",
     "MESSAGE_RESTART_INTERRUPTED",
     "RecoveryOutcome",

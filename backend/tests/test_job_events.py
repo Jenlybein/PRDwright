@@ -449,7 +449,7 @@ def test_ac5_purge_removes_expired_events_and_keeps_the_authoritative_body(alice
     # 一条「新终态」与一条「仍旧在跑」的对照：都不该被清理
     fresh_id = job_create(alice, "prd", None, request_params={})
     _append_rows(fresh_id, list(_SCRIPT))
-    _age_job(fresh_id, updated_at=utc_now().isoformat(), status="completed")
+    _age_job(fresh_id, updated_at=utc_now().isoformat(), status="succeeded")
     running_id = job_create(alice, "prd", None, request_params={})
     _append_rows(running_id, list(_SCRIPT))
     _age_job(running_id, updated_at=_OLD)
@@ -476,7 +476,7 @@ def test_ac5_purge_is_bounded_by_retention_window(alice, per_event_flush):
     now = utc_now()
     inside_id = job_create(alice, "prd", None, request_params={})
     _append_rows(inside_id, list(_SCRIPT))
-    _age_job(inside_id, updated_at=(now - timedelta(days=6)).isoformat(), status="completed")
+    _age_job(inside_id, updated_at=(now - timedelta(days=6)).isoformat(), status="succeeded")
     outside_id = job_create(alice, "prd", None, request_params={})
     _append_rows(outside_id, list(_SCRIPT))
     _age_job(outside_id, updated_at=(now - timedelta(days=8)).isoformat(), status="failed")

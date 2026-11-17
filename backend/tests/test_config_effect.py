@@ -296,7 +296,7 @@ def test_job_meter_uses_active_provider(client):
     assert summary["provider_config_id"] == "cfg_claude01"
     assert summary["provider_name"] == "Claude-测试"
     assert summary["model"] == "claude-test"
-    assert summary["status"] == "completed"
+    assert summary["status"] == "succeeded"
     assert registered.job_id > 0
 
 

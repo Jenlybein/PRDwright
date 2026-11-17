@@ -1,4 +1,4 @@
-"""任务状态机（#79）：三态单一转换入口的契约测试。
+"""任务状态机（#79 立起 / #84 扩宽）：七态单一转换入口的契约测试。
 
 接缝说明
 --------
@@ -6,10 +6,18 @@
 它自己就是被检验的公开边界：本文件只跨它断言「改到几行、库里最终是什么、丢弃怎么记」，
 不构造 `JobRuntime`、不探登记表、也不直调 `_finalize`（见 `test_no_internal_positioning.py`）。
 四条真实终止路径（成功 / 失败 / 取消 / 顶替）另在主接缝上覆盖
-（`test_generation_job.py` / `test_job_wait_in_flight.py`）。
+（`test_generation_job.py` / `test_job_wait_in_flight.py` / `test_job_seven_states.py`）。
 
-本票只做三态：`running` / `completed` / `failed`；`CANCELLED` / `SUPERSEDED` 仍是
-`error_code`，不是状态值。七态与「取消中」是 #84 的事。
+## 七态与转换表
+
+完整表在 `job_state` 模块 docstring 里（**唯一一份**）。本文件按行覆盖：抢占、
+成功、失败、请求取消（两种去向）、确认取消、取消兜底、请求顶替、确认顶替（补载荷）、
+回排队、判超时。
+
+## 判据只有一条：影响行数
+
+所有写都是条件写，`rows == 0` = 本次结果被丢弃（留一条丢弃日志），不重试、不重新排队。
+「语句没报错」不算数。
 """
 
 from __future__ import annotations
@@ -17,9 +25,11 @@ from __future__ import annotations
 import logging
 
 import pytest
-from conftest import job_create, job_get, register, users
+from conftest import job_claim, job_create, job_get, register, users
 
 from backend.services import job_service, job_state
+
+CANCEL_MESSAGE = "用户停止了生成"
 
 
 def _alice_id() -> int:
@@ -45,6 +55,12 @@ def _payload(draft: str, usage: str = '{"total_calls": 1}') -> job_state.FinishP
     )
 
 
+def _running(owner_id: int, kind: str = "prd", solution_id: int | None = None):
+    """建一条并领走：行处于执行中，返回 `(job_id, lease)`。"""
+    job_id = job_create(owner_id, kind, solution_id)
+    return job_id, job_claim(owner_id, job_id)
+
+
 def _discards(caplog) -> list:
     return [
         record
@@ -58,24 +74,26 @@ def _discards(caplog) -> list:
 # ---------------------------------------------------------------------------
 
 
-def test_succeed_writes_completed_and_reports_one_row(alice):
-    """running → completed：改到 1 行，正文与用量一起落库。"""
-    job_id = job_create(alice, "prd", None)
+def test_succeed_writes_succeeded_and_reports_one_row(alice):
+    """running → succeeded：改到 1 行，正文与用量一起落库，租约清空。"""
+    job_id, lease = _running(alice)
 
     result = job_state.transition(
         job_state.JobEvent.SUCCEED,
         job_state.job_scope(alice, job_id),
         payload=_payload("正文"),
+        lease_token=lease.token,
     )
 
     assert result.rows == 1
     assert result.applied is True
-    assert result.status == "completed"
+    assert result.status == "succeeded"
     row = job_get(alice, job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded", "成功收尾的对外取值是 succeeded（不再有 completed）"
     assert row["draft_content"] == "正文"
     assert row["usage"] == '{"total_calls": 1}'
     assert row["error_code"] == ""
+    assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
 
 
 def test_repeat_transition_is_discarded_and_logged(alice, caplog):
@@ -84,9 +102,12 @@ def test_repeat_transition_is_discarded_and_logged(alice, caplog):
     判据是**影响行数**，不是「语句没报错」——把这件事当成新的失败去重试或重新排队，
     就等于让一个已经失去资格的执行者继续制造写入。
     """
-    job_id = job_create(alice, "prd", None)
+    job_id, lease = _running(alice)
     first = job_state.transition(
-        job_state.JobEvent.SUCCEED, job_state.job_scope(alice, job_id), payload=_payload("第一版")
+        job_state.JobEvent.SUCCEED,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("第一版"),
+        lease_token=lease.token,
     )
     assert first.rows == 1
 
@@ -100,158 +121,349 @@ def test_repeat_transition_is_discarded_and_logged(alice, caplog):
     assert second.rows == 0
     assert second.discarded is True
     # 丢弃时如实带回库里那一行的事实，调用方才知道「别人已经收尾成了什么」
-    assert second.status == "completed"
+    assert second.status == "succeeded"
     row = job_get(alice, job_id)
     assert row["draft_content"] == "第一版", "第二次的结果不得覆盖已落库的终态"
     discarded = _discards(caplog)
     assert len(discarded) == 1
     assert discarded[0].job_id == job_id
-    assert discarded[0].attempted_status == "completed"
+    assert discarded[0].attempted_status == "succeeded"
 
 
-def test_fail_cannot_flip_a_completed_job(alice):
-    """完成的不能被晚到的失败覆写回 failed（旧代码的「状态与产物不一致」）。"""
-    job_id = job_create(alice, "prd", None)
+def test_fail_cannot_flip_a_succeeded_job(alice):
+    """已定稿的不能被晚到的失败覆写回 failed（旧代码的「状态与产物不一致」）。"""
+    job_id, lease = _running(alice)
     job_state.transition(
-        job_state.JobEvent.SUCCEED, job_state.job_scope(alice, job_id), payload=_payload("正文")
+        job_state.JobEvent.SUCCEED,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("正文"),
+        lease_token=lease.token,
     )
 
     result = job_state.transition(
         job_state.JobEvent.FAIL,
         job_state.job_scope(alice, job_id),
-        payload=_payload(""),
-        error_code="LLM_UPSTREAM_ERROR",
+        payload=_payload("半截"),
+        error_code="INTERNAL_ERROR",
         error_message="晚到的失败",
+        lease_token=lease.token,
     )
 
     assert result.rows == 0
     row = job_get(alice, job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["error_code"] == ""
-    assert row["error_message"] == ""
 
 
-def test_transition_on_unknown_job_is_discarded_without_raising(alice, caplog):
-    """对象不存在 / 归属不符：0 行 + 丢弃日志，不抛异常（不是程序错误）。"""
-    with caplog.at_level(logging.INFO):
-        result = job_state.transition(
-            job_state.JobEvent.SUCCEED,
-            job_state.job_scope(alice, 999_999),
-            payload=_payload("正文"),
-        )
-    assert result.rows == 0
-    assert result.status == ""
-    assert len(_discards(caplog)) == 1
+def test_a_stale_token_cannot_succeed(alice):
+    """旧执行者的收尾写不进去：凭证已经不是本轮（#82 的写权判据）。"""
+    job_id, lease = _running(alice)
+    assert job_service.cancel_job(alice, job_id) is True
+    assert job_state.transition(
+        job_state.JobEvent.CONFIRM_CANCEL,
+        job_state.job_scope(alice, job_id),
+        error_message=CANCEL_MESSAGE,
+        lease_token=lease.token,
+    ).applied
 
-
-# ---------------------------------------------------------------------------
-# 二、取消 / 顶替：按条件批量改，只有 running 会被改到
-# ---------------------------------------------------------------------------
-
-
-def test_cancel_scope_only_touches_running_jobs_of_that_solution(alice):
-    """按方案取消：只改该方案下仍在 running 的行，已终态与别的方案都不动。"""
-    target = job_create(alice, "prd", 11)
-    other_solution = job_create(alice, "prd", 12)
-    finished = job_create(alice, "prd", 11)
-    job_state.transition(
+    stale = job_state.transition(
         job_state.JobEvent.SUCCEED,
-        job_state.job_scope(alice, finished),
-        payload=_payload("正文"),
+        job_state.job_scope(alice, job_id),
+        payload=_payload("晚到的正文"),
+        lease_token=lease.token,
     )
 
+    assert stale.rows == 0
+    assert job_get(alice, job_id)["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# 二、取消：请求是两段，确认与兜底各一段（#84 的 AC1 / AC2 / AC3）
+# ---------------------------------------------------------------------------
+
+
+def test_request_cancel_on_a_queued_job_lands_cancelled_at_once(alice):
+    """排队中取消：没人在跑，一步落已取消（AC1 前半句）。"""
+    job_id = job_create(alice, "prd", None)
+    assert job_get(alice, job_id)["status"] == "pending"
+
     result = job_state.transition(
-        job_state.JobEvent.CANCEL,
-        job_state.solution_scope(alice, 11),
-        error_code=job_state.CODE_CANCELLED,
-        error_message="方案已删除，任务已取消",
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.job_scope(alice, job_id),
+        error_message=CANCEL_MESSAGE,
     )
 
     assert result.rows == 1
-    cancelled = job_get(alice, target)
-    assert cancelled["status"] == "failed"
-    assert cancelled["error_code"] == "CANCELLED"
-    assert cancelled["error_message"] == "方案已删除，任务已取消"
-    assert job_get(alice, other_solution)["status"] == "running"
-    assert job_get(alice, finished)["status"] == "completed"
+    assert result.status == "cancelled"
+    row = job_get(alice, job_id)
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == "", "已取消不带状态性错误码（AC4）"
 
 
-def test_supersede_scope_only_touches_same_owner_solution_and_kind(alice):
-    """顶替：同一 owner + 方案 + 产物下旧的 running 落 failed + SUPERSEDED。"""
-    old = job_create(alice, "prd", None)
-    other_kind = job_create(alice, "prompts", None)
+def test_request_cancel_on_a_running_job_enters_cancelling_keeping_lease(alice):
+    """执行中取消：先进入取消中，租约不动（执行者还要用它确认，AC1 后半句）。"""
+    job_id, lease = _running(alice)
+
+    result = job_state.transition(
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.job_scope(alice, job_id),
+        error_message=CANCEL_MESSAGE,
+    )
+
+    assert result.rows == 1
+    assert result.status == "cancelling"
+    row = job_get(alice, job_id)
+    assert row["status"] == "cancelling"
+    assert row["lease_token"] == lease.token, "取消请求不清租约"
+
+
+def test_confirm_cancel_lands_cancelled_with_one_payload_and_clears_lease(alice):
+    """执行者确认取消：落已取消、清租约、半截正文与用量补一次（AC2）。"""
+    job_id, lease = _running(alice)
+    assert job_state.transition(
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.job_scope(alice, job_id),
+        error_message=CANCEL_MESSAGE,
+    ).applied
+
+    confirmed = job_state.transition(
+        job_state.JobEvent.CONFIRM_CANCEL,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("半截正文"),
+        error_message=CANCEL_MESSAGE,
+        lease_token=lease.token,
+    )
+
+    assert confirmed.applied
+    row = job_get(alice, job_id)
+    assert row["status"] == "cancelled"
+    assert row["draft_content"] == "半截正文"
+    assert row["usage"] == '{"total_calls": 1}'
+    assert row["error_code"] == ""
+    assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
+
+    # 第二次确认改到 0 行：取消确认只发生一次
+    again = job_state.transition(
+        job_state.JobEvent.CONFIRM_CANCEL,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("第二版"),
+        error_message=CANCEL_MESSAGE,
+        lease_token=lease.token,
+    )
+    assert again.rows == 0
+    assert job_get(alice, job_id)["draft_content"] == "半截正文"
+
+
+def test_expire_cancelling_is_the_recovery_fallback(alice):
+    """取消兜底（AC3）：取消中 + 旧凭证 → 已取消；凭证对不上就 0 行。"""
+    job_id, lease = _running(alice)
+    assert job_state.transition(
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.job_scope(alice, job_id),
+        error_message=CANCEL_MESSAGE,
+    ).applied
+
+    result = job_state.transition(
+        job_state.JobEvent.EXPIRE_CANCELLING,
+        job_state.job_scope(alice, job_id),
+        error_message="执行者未确认取消，租约到期后已收为已取消",
+        lease_fence=job_state.LeaseFence(token=lease.token, expire_at=lease.expire_at),
+    )
+
+    assert result.applied
+    row = job_get(alice, job_id)
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
+
+    # 终态之后再来一次：0 行
+    again = job_state.transition(
+        job_state.JobEvent.EXPIRE_CANCELLING,
+        job_state.job_scope(alice, job_id),
+        error_message=CANCEL_MESSAGE,
+        lease_fence=job_state.LeaseFence(token=lease.token, expire_at=lease.expire_at),
+    )
+    assert again.rows == 0
+
+
+# ---------------------------------------------------------------------------
+# 三、顶替：请求落 superseded；执行者醒来只补一次载荷（不写正文）
+# ---------------------------------------------------------------------------
+
+
+def test_supersede_scope_only_touches_active_rows_of_same_owner_solution_and_kind(alice):
+    """顶替的期望条件：同 owner + 同方案 + 同产物 + **在途**；别的行一条都不动。
+
+    七态下前态有三种（排队中 / 执行中 / 取消中）：被顶替的可能是正在取消的那一支。
+    """
+    solution_id = 11
+    other_solution = 12
+    target = _running(alice, "prd", solution_id)[0]
+    queued = job_create(alice, "prd", solution_id)
+    cancelling = _running(alice, "prd", solution_id)[0]
+    assert job_state.transition(
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.job_scope(alice, cancelling),
+        error_message=CANCEL_MESSAGE,
+    ).applied
+    other = _running(alice, "prd", other_solution)[0]
+    other_kind = _running(alice, "prompts", solution_id)[0]
+    finished = _running(alice, "prd", solution_id)
+    assert job_state.transition(
+        job_state.JobEvent.SUCCEED,
+        job_state.job_scope(alice, finished[0]),
+        payload=_payload("正文"),
+        lease_token=finished[1].token,
+    ).applied
 
     result = job_state.transition(
         job_state.JobEvent.SUPERSEDE,
-        job_state.supersede_scope(alice, None, "prd"),
-        error_code=job_state.CODE_SUPERSEDED,
-        error_message="被新任务取代",
+        job_state.supersede_scope(alice, solution_id, "prd"),
     )
 
-    assert result.rows == 1
-    row = job_get(alice, old)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "SUPERSEDED"
-    assert row["error_message"] == "被新任务取代"
+    assert result.rows == 3
+    for job_id in (target, queued, cancelling):
+        row = job_get(alice, job_id)
+        assert row["status"] == "superseded"
+        assert row["error_code"] == "", "被取代不是一个错误码，是一个状态"
+        assert row["error_message"] == "被新任务取代"
+        assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
+    assert job_get(alice, other)["status"] == "running"
     assert job_get(alice, other_kind)["status"] == "running"
+    assert job_get(alice, finished[0])["status"] == "succeeded"
 
 
-# ---------------------------------------------------------------------------
-# 三、0 行之后：abort 已落库时补一次载荷，再来一次同样是丢弃
-# ---------------------------------------------------------------------------
+def test_confirm_superseded_backfills_the_payload_exactly_once(alice):
+    """被顶替的执行者醒来：补一次载荷（状态已经是 superseded，不改状态）。"""
+    job_id, _lease = _running(alice)
+    assert job_state.transition(
+        job_state.JobEvent.SUPERSEDE, job_state.supersede_scope(alice, None, "prd")
+    ).applied
 
-
-def test_aborted_row_accepts_one_payload_completion_then_discards(alice, caplog):
-    """取消先落 `failed + CANCELLED`（还没用量），收尾用同一 abort 码补一次载荷。
-
-    取消是「请求停止」，收尾才是把半截正文与用量记下来那一刻——但只准补一次：
-    第二次同样是 0 行并被丢弃。否则「重复收尾」会变成「重复记账」。
-    """
-    job_id = job_create(alice, "prd", None)
-    assert job_service.cancel_job(alice, job_id) is True
-
-    completed = job_state.transition(
-        job_state.JobEvent.FAIL,
-        job_state.job_scope(alice, job_id),
-        payload=_payload("半截正文", usage='{"total_calls": 2}'),
-        error_code=job_state.CODE_CANCELLED,
-        error_message="用户停止了生成",
-    )
-    assert completed.rows == 1
-    row = job_get(alice, job_id)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
-    assert row["draft_content"] == "半截正文"
-    assert row["usage"] == '{"total_calls": 2}'
-
-    with caplog.at_level(logging.INFO):
-        again = job_state.transition(
-            job_state.JobEvent.FAIL,
-            job_state.job_scope(alice, job_id),
-            payload=_payload("又一次", usage='{"total_calls": 3}'),
-            error_code=job_state.CODE_CANCELLED,
-            error_message="用户停止了生成",
-        )
-    assert again.rows == 0
-    assert job_get(alice, job_id)["draft_content"] == "半截正文"
-    assert len(_discards(caplog)) == 1
-
-
-def test_reaped_row_is_not_overwritten_by_a_late_abort(alice):
-    """启动回收写的 `INTERNAL_ERROR` 不能被晚到的取消收尾覆写（§1.5 的覆盖窗口）。"""
-    job_id = job_create(alice, "prd", None)
-    job_service.reap_orphans()
-
-    result = job_state.transition(
-        job_state.JobEvent.FAIL,
+    backfill = job_state.transition(
+        job_state.JobEvent.CONFIRM_SUPERSEDED,
         job_state.job_scope(alice, job_id),
         payload=_payload("半截正文"),
-        error_code=job_state.CODE_CANCELLED,
-        error_message="用户停止了生成",
     )
 
-    assert result.rows == 0
+    assert backfill.applied
+    row = job_get(alice, job_id)
+    assert row["status"] == "superseded"
+    assert row["draft_content"] == "半截正文"
+    assert row["usage"] == '{"total_calls": 1}'
+
+    again = job_state.transition(
+        job_state.JobEvent.CONFIRM_SUPERSEDED,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("第二版"),
+    )
+    assert again.rows == 0
+    assert job_get(alice, job_id)["draft_content"] == "半截正文"
+
+
+# ---------------------------------------------------------------------------
+# 四、恢复：回排队落 pending；判超时落 failed（都用扫描时的旧凭证 fencing）
+# ---------------------------------------------------------------------------
+
+
+def test_requeue_fence_must_match_the_scan_time_lease(alice):
+    """回排队：凭证 / 到期时间对得上才改到行，且落回 `pending`。"""
+    job_id, lease = _running(alice)
+    fence = job_state.LeaseFence(token=lease.token, expire_at=lease.expire_at)
+
+    result = job_state.transition(
+        job_state.JobEvent.REQUEUE,
+        job_state.job_scope(alice, job_id),
+        error_code=job_state.CODE_LEASE_EXPIRED,
+        error_message="执行者进程已消失，租约到期未续",
+        lease_fence=fence,
+    )
+
+    assert result.applied
+    row = job_get(alice, job_id)
+    assert row["status"] == "pending"
+    assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
+
+    # 同一份旧凭证再来一次：0 行（这一行已经不是那份死租约了）
+    again = job_state.transition(
+        job_state.JobEvent.REQUEUE,
+        job_state.job_scope(alice, job_id),
+        error_code=job_state.CODE_LEASE_EXPIRED,
+        error_message="同一份旧凭证",
+        lease_fence=fence,
+    )
+    assert again.rows == 0
+
+
+def test_expire_writes_failed_with_lease_expired(alice):
+    """判超时：落 `failed + LEASE_EXPIRED`（失败原因仍是错误码），清租约。"""
+    job_id, lease = _running(alice)
+    result = job_state.transition(
+        job_state.JobEvent.EXPIRE,
+        job_state.job_scope(alice, job_id),
+        error_code=job_state.CODE_LEASE_EXPIRED,
+        error_message="执行者进程已消失，租约到期未续",
+        lease_fence=job_state.LeaseFence(token=lease.token, expire_at=lease.expire_at),
+    )
+
+    assert result.applied
     row = job_get(alice, job_id)
     assert row["status"] == "failed"
-    assert row["error_code"] == "INTERNAL_ERROR"
-    assert row["error_message"] == "服务重启，任务已中断"
+    assert row["error_code"] == "LEASE_EXPIRED"
+    assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
+
+
+# ---------------------------------------------------------------------------
+# 五、批量作用域的取消：只动在途，各自去向正确
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_scope_only_touches_active_jobs_of_that_solution(alice):
+    """按方案取消：排队中的立刻已取消，执行中的转取消中，终态与别的方案不动。"""
+    target = _running(alice, "prd", 11)[0]
+    queued = job_create(alice, "prd", 11)
+    other_solution = _running(alice, "prd", 12)[0]
+    finished = _running(alice, "prd", 11)
+    assert job_state.transition(
+        job_state.JobEvent.SUCCEED,
+        job_state.job_scope(alice, finished[0]),
+        payload=_payload("正文"),
+        lease_token=finished[1].token,
+    ).applied
+
+    result = job_state.transition(
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.solution_scope(alice, 11),
+        error_message="方案已删除，任务已取消",
+    )
+
+    assert result.rows == 2
+    assert job_get(alice, target)["status"] == "cancelling"
+    assert job_get(alice, queued)["status"] == "cancelled"
+    assert job_get(alice, other_solution)["status"] == "running"
+    assert job_get(alice, finished[0])["status"] == "succeeded"
+
+
+def test_owner_scope_cancels_every_active_job_of_that_owner(alice):
+    """按 owner 取消（删账号）：覆盖名下所有方案，排队中/执行中各按自己的去向落。"""
+    running = _running(alice, "prd", 11)[0]
+    queued = job_create(alice, "prd", None)
+    other = _running(alice, "prompts", 12)[0]
+    finished = _running(alice, "api_docs", 13)
+    assert job_state.transition(
+        job_state.JobEvent.SUCCEED,
+        job_state.job_scope(alice, finished[0]),
+        payload=_payload("正文"),
+        lease_token=finished[1].token,
+    ).applied
+
+    result = job_state.transition(
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.owner_scope(alice),
+        error_message="账号已删除",
+    )
+
+    assert result.rows == 3
+    for job_id in (running, other):
+        assert job_get(alice, job_id)["status"] == "cancelling"
+    assert job_get(alice, queued)["status"] == "cancelled"
+    assert job_get(alice, finished[0])["status"] == "succeeded"

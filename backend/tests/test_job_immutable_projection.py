@@ -159,8 +159,8 @@ def test_running_query_reads_model_and_skill_identity(alice):
     assert json.loads(row["config_snapshot"])["active_provider"]["provider_model"] == "model-query"
     assert json.loads(row["skill_refs"]) == skills
     assert row["skill_manifest"] == "s-query|2.0|ff00"
-    # 运行态没被查询动作改写：仍是 running，正文仍为空。
-    assert row["status"] == "running"
+    # 运行态没被查询动作改写：仍是排队中（七态：建行即 pending），正文仍为空。
+    assert row["status"] == "pending"
     assert row["draft_content"] == ""
 
 
@@ -315,9 +315,9 @@ def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice, monkeypat
     )
 
     assert events[-1].type == "run_summary"
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = _raw(registered.job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     # 收尾没有覆写四列：仍是建任务时定格的那一份。
     assert row["provider_protocol"] == "ark"
     assert row["provider_config_id"] == "cfg_original"
@@ -367,7 +367,7 @@ def test_db_snapshot_event_reads_back_immutable_fields(alice):
     assert data["request_params"] == {"summary": "重连时还要看得见"}
     assert data["config_snapshot"] == {"active_provider": {"model": "m1"}}
     assert data["skill_refs"] == [{"name": "s1"}]
-    assert data["status"] == "running"
+    assert data["status"] == "pending"
 
 
 def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
@@ -400,7 +400,7 @@ def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
     )
     with connect() as conn:
         conn.execute(
-            "UPDATE generation_jobs SET status = 'completed', "
+            "UPDATE generation_jobs SET status = 'succeeded', "
             "request_params = '', config_snapshot = '', skill_refs = '' WHERE id = %s",
             (legacy.job_id,),
         )

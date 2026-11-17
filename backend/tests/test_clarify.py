@@ -176,7 +176,7 @@ def test_clarify_writes_the_rewritten_body_and_recomputes_pending(client, monkey
         {"document": _ORIGINAL_PRD, "history": _HISTORY, "doc_kind": "prd"},
     )
 
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     done = next(event for event in events if event.type == "done")
 
     doc = document_store.get_document(uid, solution_id, "prd")

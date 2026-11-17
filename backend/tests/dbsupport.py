@@ -323,7 +323,7 @@ def insert_job(
     owner_id: int,
     *,
     kind: str = "prd",
-    status: str = "completed",
+    status: str = "succeeded",
     phase: str = "",
     error_code: str = "",
     created_at: str | None = None,

@@ -533,7 +533,7 @@ describe('生成任务接口（jobs）', () => {
           content: '',
           data: {
             kind: 'prd',
-            status: 'completed',
+            status: 'succeeded',
             duration_ms: 1234,
             total_calls: 3,
             // 中途有过一次失败并被自愈回来
@@ -626,7 +626,7 @@ describe('生成任务接口（jobs）', () => {
     expect(summaries).toEqual([
       {
         kind: 'prd',
-        status: 'completed',
+        status: 'succeeded',
         durationMs: 1234,
         totalCalls: 3,
         failedCalls: 1,
@@ -675,7 +675,7 @@ describe('生成任务接口（jobs）', () => {
             content: '',
             data: {
               kind: 'api_docs',
-              status: 'completed',
+              status: 'succeeded',
               duration_ms: 800,
               // 第一项不是对象、末一项字段类型不对：都不该让整份摘要失败
               steps: ['坏项', { step: 'api_docs', calls: 1 }, 42],
@@ -761,7 +761,7 @@ describe('生成任务接口（jobs）', () => {
           sseFrame('snapshot', {
             type: 'snapshot',
             content: '',
-            data: { job_id: 8, status: 'completed', finalized_text: '# PRD\n\n', live_buffer: '半句' },
+            data: { job_id: 8, status: 'succeeded', finalized_text: '# PRD\n\n', live_buffer: '半句' },
           }),
         ]),
       ),
@@ -959,7 +959,7 @@ describe('结构化选择题的解析（done 事件的 clarification_asks）', (
   it('把结构化块解析成带标号的题目', async () => {
     const result = await readDone({
       job_id: 1,
-      status: 'completed',
+      status: 'succeeded',
       reply: '你更倾向哪种？',
       clarification_asks: [
         {
@@ -991,7 +991,7 @@ describe('结构化选择题的解析（done 事件的 clarification_asks）', (
   })
 
   it('没有这个键时给空数组（生成线本来就不带它，不该因此报错）', async () => {
-    const result = await readDone({ job_id: 1, status: 'completed', reply: '正文' })
+    const result = await readDone({ job_id: 1, status: 'succeeded', reply: '正文' })
 
     expect(result.asks).toEqual([])
     expect(result.reply).toBe('正文')
@@ -1000,7 +1000,7 @@ describe('结构化选择题的解析（done 事件的 clarification_asks）', (
   it('逐项丢弃坏数据：缺题目、选项不足、选项没有文字', async () => {
     const result = await readDone({
       job_id: 1,
-      status: 'completed',
+      status: 'succeeded',
       reply: '正文',
       clarification_asks: [
         { question: '   ', options: [{ text: '甲' }, { text: '乙' }] },
@@ -1017,7 +1017,7 @@ describe('结构化选择题的解析（done 事件的 clarification_asks）', (
   it('后端没给标号时按顺序补 A/B，且 multiple 只认真正的布尔真', async () => {
     const result = await readDone({
       job_id: 1,
-      status: 'completed',
+      status: 'succeeded',
       reply: '正文',
       clarification_asks: [
         {
@@ -1192,3 +1192,4 @@ describe('结构化作答回灌（continue-stream）', () => {
     }
   })
 })
+

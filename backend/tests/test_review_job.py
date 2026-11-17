@@ -291,7 +291,7 @@ def test_rereview_updates_the_conclusion_in_place(client, monkeypatch, doc_kind,
     # 第一轮：从未审核 → 通过
     _fake_service(monkeypatch, WholeDocReviewLLM([_PASS_JSON]))
     _job_id, events, status = _run_job(client, _review_payload(solution_id, doc_kind))
-    assert status == "completed"
+    assert status == "succeeded"
     conclusions = _review_events(events)
     assert len(conclusions) == 1, "一次重审只该给出一条结论"
     first = conclusions[0]
@@ -307,7 +307,7 @@ def test_rereview_updates_the_conclusion_in_place(client, monkeypatch, doc_kind,
     # 第二轮：通过 → 有问题（覆盖同一条，不追加版本）
     _fake_service(monkeypatch, WholeDocReviewLLM([_REVISE_JSON]))
     _job_id, events, status = _run_job(client, _review_payload(solution_id, doc_kind))
-    assert status == "completed"
+    assert status == "succeeded"
     second = _review_events(events)[0]
     assert second["verdict"] == "revise"
     assert second["issues"][0]["severity"] == "high"
@@ -354,7 +354,7 @@ def test_rereview_of_prd_reviews_the_current_body_section_by_section(client, mon
     llm = SectionReviewLLM()
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
-    assert status == "completed"
+    assert status == "succeeded"
     assert llm.calls == 2, "两章各审一次"
 
     conclusion = _review_events(events)[0]
@@ -403,7 +403,7 @@ def test_rereview_of_prd_feeds_the_requirement_thread_into_the_prompt(client, mo
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     assert llm.calls == 1, "这一版只有一章"
     conclusion = _review_events(events)[0]
     assert conclusion["verdict"] == "pass", "重审没有看到需求澄清线程里的拍板细节"
@@ -441,7 +441,7 @@ def test_failed_rereview_is_persisted_on_the_version(client, monkeypatch):
     # 补审一次：拿到结论的同时清掉失败时间
     _fake_service(monkeypatch, WholeDocReviewLLM([_PASS_JSON]))
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
-    assert status == "completed"
+    assert status == "succeeded"
     refreshed = _documents(client, solution_id)["api_docs"]
     assert refreshed["review"]["verdict"] == "pass"
     assert refreshed["review_failed_at"] is None
@@ -486,7 +486,7 @@ def test_rereview_fails_when_the_body_changed_midway(client, monkeypatch):
     # 先有一条真结论（「通过」）：B3 要求不一致时**不覆盖**已有结论
     _fake_service(monkeypatch, WholeDocReviewLLM([_PASS_JSON]))
     _job_id, _first_events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
-    assert status == "completed"
+    assert status == "succeeded"
     baseline = _documents(client, solution_id)["api_docs"]["review"]
     assert baseline["verdict"] == "pass"
 
@@ -552,7 +552,7 @@ def test_second_write_gate_failure_fails_the_job(
     # 先有一条真结论：失败时它必须原样保留（不覆盖、也不清空）
     _fake_service(monkeypatch, WholeDocReviewLLM([_PASS_JSON]))
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
-    assert status == "completed"
+    assert status == "succeeded"
     baseline = _documents(client, solution_id)["api_docs"]["review"]
     assert baseline["verdict"] == "pass"
 
@@ -637,7 +637,7 @@ def test_rereview_of_prd_tolerates_missing_requirement_input(client, monkeypatch
     _fake_service(monkeypatch, SectionReviewLLM())
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     assert conclusion["verdict"] == "revise", "假模型每章都判有问题，汇总也应是「有问题」"
     assert _documents(client, solution_id)["prd"]["review"] == conclusion

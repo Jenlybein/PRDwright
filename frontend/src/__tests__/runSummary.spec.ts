@@ -17,7 +17,7 @@ import { normalizeRunSummary } from '@/utils/runSummary'
 function backendSummary(overrides: Record<string, unknown> = {}) {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     duration_ms: 61_000,
     total_calls: 12,
     failed_calls: 1,
@@ -157,3 +157,4 @@ describe('normalizeRunSummary', () => {
     expect(summary!.failedSections).toEqual([])
   })
 })
+
