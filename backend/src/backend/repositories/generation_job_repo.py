@@ -237,6 +237,7 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        partial: bool = False,
         lease_token: str = "",
         now_text: str = "",
     ) -> int:
@@ -258,6 +259,9 @@ class GenerationJobRepository:
 
         供应商四列**不在这里写**：它们已在建任务时从 `config_snapshot` 那份定格
         一次写全，收尾再写一遍等于从 `summary` 另算一条路径。
+
+        `partial` 是「有内容可用、但不完整」（票 #85）：章节重试用尽后照常收尾的
+        「部分完成」也走本方法，标记与终态同一条语句落下。
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
@@ -284,6 +288,7 @@ class GenerationJobRepository:
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                partial=partial,
                 lease_owner="",
                 lease_token="",
                 lease_expire_at="",
@@ -305,6 +310,7 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        partial: bool = False,
         abort_code: str = "",
         lease_token: str = "",
         now_text: str = "",
@@ -337,6 +343,9 @@ class GenerationJobRepository:
 
         供应商四列**不在这里写**：它们已在建任务时从同一份 `config_snapshot`
         定格，收尾不再从 `summary` 另算一遍。
+
+        `partial` 是「失败但有内容可用」（票 #85）：失败收尾把已生成的正文落成
+        `document_versions.partial=true` 时，任务行同一次事务里留这一份投影。
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
@@ -375,6 +384,7 @@ class GenerationJobRepository:
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                partial=partial,
                 lease_owner="",
                 lease_token="",
                 lease_expire_at="",

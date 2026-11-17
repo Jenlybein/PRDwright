@@ -442,8 +442,8 @@ def test_document_outward_shape_is_unchanged(client) -> None:
 
     本期新增两个字段：`version_no`（结论面板要能说清「这条结论是哪一版的」，US16）
     与 `review_failed_at`（「审核失败」是落库事实，刷新后仍要看得见，US3）。
-    除此以外一个字段都没动 —— 正文、清单、回执、结论、过期标记与上游锚点的名字与含义
-    都还是老样子。
+    票 #85 再加一个：`partial`（这份正文可用但不完整）。除此以外一个字段都没动 ——
+    正文、清单、回执、结论、过期标记与上游锚点的名字与含义都还是老样子。
     """
     register(client, username="alice")
     solution_id = _new_solution(client)
@@ -464,6 +464,7 @@ def test_document_outward_shape_is_unchanged(client) -> None:
         "updated_at",
         "stale",
         "derived_from",
+        "partial",
     }
     assert body["documents"][0]["version_no"] == 1
 

@@ -211,6 +211,14 @@ const props = defineProps<{
    * `0` / 不传表示未知（旧数据或还没拉过文档）：面板此时不显示版本号，不猜一个。
    */
   reviewVersionNo?: number
+  /**
+   * 这份正文是不是**可用但不完整**（票 #85，后端 `document_versions.partial`）。
+   *
+   * 为 true 时页首给一条提示：**已生成的部分可以先用**（下载 / 修复 / 重生成都不禁用）。
+   * 它不是「失败」的另一种说法——任务是失败了，但眼前这份正文确实可用，界面得把这件事
+   * 说清楚，而不是让用户以为只能重新来一遍。
+   */
+  partial?: boolean
 }>()
 
 /** 本次生成消耗的总 token（输入 + 输出）；为 0 时该段不展示 */
@@ -366,6 +374,30 @@ function submitOptimize(): void {
 
 <template>
   <section class="space-y-3">
+    <!--
+      这份正文不完整（票 #85）：生成写到一半失败，或批次/重试用尽后只剩失败占位的章节。
+      后端已经把已生成的内容落成一版正文，因此**能用的部分就是可用的**——下载、修复、
+      重生成都不因此禁用。提示只说事实与出路，不把它写成「生成失败，请重来」：
+      那样用户会以为这一页什么都没有、只能白等一次重跑。
+    -->
+    <p
+      v-if="partial"
+      class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+      role="status"
+    >
+      <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path
+          fill-rule="evenodd"
+          d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm0-12.5a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5A.75.75 0 0 1 10 5.5Zm0 10.25a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"
+          clip-rule="evenodd"
+        />
+      </svg>
+      <span>
+        这份正文不完整，已生成的部分可以先用（可下载、可修复，或重新生成补齐）。
+        它的审核区显示「未审核」——没有结论不等于通过，旧结论也不属于这份正文。
+      </span>
+    </p>
+
     <!-- 优化失败等非正常结尾时展示原因（原文档内容保留不变） -->
     <p
       v-if="error"

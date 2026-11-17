@@ -674,6 +674,8 @@ describe('openSolution', () => {
         updatedAt: '',
         stale: false,
         versionNo: 0,
+        // 「这份正文可用但不完整」（票 #85）
+        partial: false,
         derivedFrom: null,
       },
     ])

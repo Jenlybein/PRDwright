@@ -86,10 +86,10 @@ class _CloseoutVersionConflict(Exception):
     """
 
 
-# 一次收尾的载荷：正文 / 章节 / 用量 / 待确认清单 / token 两列 / 耗时。
+# 一次收尾的载荷：正文 / 章节 / 用量 / 待确认清单 / token 两列 / 耗时 / 部分完成标记。
 # 与 `job_state.FinishPayload` 同形；抽出来是因为一次收尾可能要发两次（见模块 docstring）。
 def _finish_payload(
-    runtime: JobRuntime, summary: dict[str, Any], draft: str
+    runtime: JobRuntime, summary: dict[str, Any], draft: str, *, partial: bool = False
 ) -> job_state.FinishPayload:
     return job_state.FinishPayload(
         draft_content=draft,
@@ -100,6 +100,9 @@ def _finish_payload(
         completion_tokens=int(summary.get("completion_tokens") or 0),
         # 账本要回答「跑了多久」：与 `usage.duration_ms` 同源，一次算好两处用。
         duration_ms=int(summary.get("duration_ms") or 0),
+        # 「有内容可用但不完整」（票 #85）：与终态同一条语句落库，界面的两个问题
+        #（这次任务怎么结束的 / 这份正文能不能用）因此不会各说各话。
+        partial=partial,
     )
 
 
@@ -125,7 +128,20 @@ def _closeout_once(
     它随后既不写正文、也不记账本、不留结论，只走调用方那条「结果已丢弃」的分支。
     """
     event = job_state.JobEvent.SUCCEED if status == "completed" else job_state.JobEvent.FAIL
-    payload = _finish_payload(runtime, summary, draft)
+    # 失败收尾可能要把「已经写出来的正文」落成一版部分完成（票 #85）。这份内容在
+    # **改终态之前**就算好：任务行的 `partial` 与正文写入必须同一条语句 / 同一个事务，
+    # 否则会出现「任务说失败、正文没落」或「正文落了、任务说成功」的错配。
+    partial_content = (
+        "" if status == "completed" else _partial_document_content(runtime, draft)
+    )
+    payload = _finish_payload(
+        runtime,
+        summary,
+        draft,
+        # 成功收尾的「部分完成」来自 `done.partial`（章节重试用尽后落占位，管线照常收尾）；
+        # 失败收尾的则来自「这次真的写出了一版部分完成正文」。
+        partial=bool(runtime.partial) if status == "completed" else bool(partial_content),
+    )
     with session_scope() as session:
         result = job_state.transition(
             event,
@@ -151,6 +167,10 @@ def _closeout_once(
         elif runtime.kind == "review":
             # 重审没跑成也要**落成事实**（US3）：面板据此显示「审核失败（时间）」。
             _mark_review_failed(runtime, session=session)
+        elif partial_content:
+            # 失败（含用户取消）但已经写出了正文：升格成一版「部分完成」（#85）。
+            # 与任务终态 / 账本同一个事务——写不进去就整批回滚，不谎报「有内容可用」。
+            _write_partial_document(runtime, summary, partial_content, session=session)
         return result
 
 
@@ -184,9 +204,15 @@ def _finalize(
 
     保留运行时（直到 `run_job` 的 finally）让已订阅者把这一条读完。
 
-    **只有成功才写文档**：失败的任务保留上一次可用的正文（半截输出不该顶掉一份
-    完整文档）。这正是「文档所有权在后端」的关键收益——「谁写、什么时候写、
-    写完之后长什么样」只在这一处决定，前端只负责读与提交用户变更。
+    **成功与失败都落正文，但落法不同（票 #85）**：
+
+    - 成功 → 追加 / 就地写入这一版的完整正文（失败进不了这条分支）；
+    - 失败 / 用户取消 → 已生成的内容**追加**成一版 `partial=true` 的正文（`write_document(mode="append")`），
+      不覆写当前完整正文，审核两列显式留空；一个字都没写出来时不落版本。
+    - **被取代例外**：那种结局的口径是「本次结果不再写入」，更晚的任务已经接手同一份文档。
+
+    这正是「文档所有权在后端」的关键收益——「谁写、什么时候写、写完之后长什么样」只在
+    这一处决定，前端只负责读与提交用户变更。
 
     ## 幂等闸（#79）
     进来先看内存那份状态：**已经是终态就直接返回**，不落库、不写稿、不广播。
@@ -635,6 +661,88 @@ def _build_derived_from(
     return {"derived_from": derived}
 
 
+def _partial_document_content(runtime: JobRuntime, draft: str) -> str:
+    """失败收尾时「值得升格成一版「部分完成」」的正文；空串表示没有可落的内容。
+
+    判据有三条，缺一不可：
+
+    1. **不是被顶替**（`runtime.superseded`）：那种结局的口径是「本次结果不再写入」——
+       更晚的任务已经接手同一份文档，把这次的半截稿追加成当前版本会把新任务的工作按下去；
+    2. **方案还在**：用户删掉方案时，任务走的是「方案已删除，任务已取消」，这时把半截正文
+       写进一个已经不存在的方案是没有意义的事（文档会跟着方案一起没）；
+    3. **这份任务会产出整篇正文**（`_regenerates_whole_document`）：就地改写（optimize /
+       clarify）动的是当前版本的局部，追加一版半截改写会让「当前正文」变成残缺稿，
+       而那正是它本来要覆盖的那一版；`review` / `chat` 根本不产正文；
+    4. **确实写出了内容**：一个字都没有就没有「可用」可言，落个空版本只是给用户
+       一个点开是空的假产物。
+
+    正文取「定稿正文优先、否则尽力还原」：失败的生成通常没有 `done.reply`，
+    但若 `done` 已经到、随后才失败，定稿值才是权威的那一份。
+    """
+    if runtime.superseded:
+        return ""
+    if runtime.solution_id is None or not solution_service.solution_exists(
+        runtime.owner_id, runtime.solution_id
+    ):
+        # 方案没了 = 用户删掉了这份工作：宁可不写，也不留一份挂在已删方案上的幽灵版本。
+        return ""
+    if not _regenerates_whole_document(runtime.kind):
+        return ""
+    if _document_kind(runtime) is None:
+        # 没有可挂的产物 → 没有可落的版本（宁可不写，也不写错位置）
+        return ""
+    content = (runtime.final_reply or "").strip() or draft.strip()
+    return content
+
+
+def _write_partial_document(
+    runtime: JobRuntime, summary: dict[str, Any], content: str, *, session: Any
+) -> None:
+    """把失败 / 取消时已经写出来的正文升格成一版「部分完成」（票 #85）。
+
+    走 #81 的**唯一写入入口** `document_store.write_document(mode="append")`，
+    并显式把审核两列传成 `None`：
+
+    - `review=None`：这一版没审过。旧结论属于**别的正文**，搬过来会被读成本次结果；
+    - `review_failed_at=None`：这次也没有「审核失败」这件事可记（审核可能压根没跑），
+      把上一版的时间带过来同样是在说一件没发生过的事。
+
+    追加（而不是就地改当前版本）：用户手里那份完整正文不能被半截稿替换，部分完成只进
+    版本链——它可读、可下载、可恢复，但不会让「当前版本」变成一份残缺稿。
+    """
+    kind = _document_kind(runtime)
+    if kind is None or runtime.solution_id is None:  # pragma: no cover - 调用方已判过
+        return
+    result = document_store.write_document(
+        runtime.owner_id,
+        runtime.solution_id,
+        kind,
+        content,
+        mode="append",
+        pending_items=runtime.pending_items,
+        run_summary=summary,
+        # 两列都显式给 None：不带旧结论，也不带旧的审核失败时间（AC2）。
+        review=None,
+        review_failed_at=None,
+        partial=True,
+        source=runtime.kind,
+        metadata=_build_derived_from(runtime, kind, session=session),
+        session=session,
+    )
+    # `result` 可能为 None：测试注入的替身（记录调用）不返回结果对象。真实入口
+    # 总是给 `DocumentWriteResult`，因此只在拿到它时读结果码。
+    if result is not None and result.outcome == "missing":
+        logger.warning(
+            "失败收尾未能写入部分完成版本（方案不存在或归属不符）",
+            extra={
+                "event": "job.partial_document_write_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+
+
 def _write_document(
     runtime: JobRuntime, summary: dict[str, Any], *, session: Any
 ) -> None:
@@ -689,6 +797,9 @@ def _write_document(
         review_failed_at=(
             utc_now_text() if runtime.review is None and runtime.review_attempted else None
         ),
+        # 「部分完成」标记跟着这一版正文走（票 #85）：章节重试用尽后落的是失败占位，
+        # 管线照常收尾，但这份正文可用而不完整——标记随正文同批写入新版本。
+        partial=bool(runtime.partial),
         source=runtime.kind,
         # 只有整篇生成才更新锚点；就地改写沿用当前版本原有的 metadata。
         metadata=_build_derived_from(runtime, kind, session=session)

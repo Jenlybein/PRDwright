@@ -247,6 +247,9 @@ class FinishPayload:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     duration_ms: int = 0
+    # 「有内容可用但不完整」（票 #85）：成功收尾时来自 `done.partial`（章节占位），
+    # 失败收尾时来自「已生成正文已落成一版部分完成版本」。与终态同一条语句落库。
+    partial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +374,7 @@ def _write(
             pending_items=payload.pending_items if payload else None,
             prompt_tokens=payload.prompt_tokens if payload else 0,
             completion_tokens=payload.completion_tokens if payload else 0,
+            partial=bool(payload.partial) if payload else False,
             lease_token=lease_token,
             now_text=now_text,
         )
@@ -386,6 +390,7 @@ def _write(
             pending_items=payload.pending_items if payload else None,
             prompt_tokens=payload.prompt_tokens if payload else 0,
             completion_tokens=payload.completion_tokens if payload else 0,
+            partial=bool(payload.partial) if payload else False,
             # 中止类失败允许「补一次载荷」：状态早已被取消/顶替路径落成终态，
             # 但用量与半截正文还没记下来。条件在仓储里写死（见 `fail` 的注释）。
             abort_code=error_code if error_code in ABORT_CODES else "",

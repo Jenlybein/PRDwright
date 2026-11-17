@@ -151,6 +151,9 @@ function toRecord(data: unknown): DocumentRecord | null {
     reviewFailedAt: typeof raw.review_failed_at === 'string' ? raw.review_failed_at : null,
     // 当前版本号：结论面板用它回答「这条结论是哪一版的」（后端随文档行返回）
     versionNo: typeof raw.version_no === 'number' ? raw.version_no : 0,
+    // 「这份正文可用但不完整」（票 #85）：审阅页据此提示，而不是把半截稿当完整交付。
+    // 后端缺这一格（旧数据 / 旧服务）时按 false：宁可不说「不完整」，也不凭空报警。
+    partial: raw.partial === true,
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
     stale: raw.stale === true,
     derivedFrom: toDerivedFrom(raw.derived_from),
@@ -262,6 +265,8 @@ function toVersionSummary(data: unknown): DocumentVersionSummary | null {
     contentLength: typeof raw.content_length === 'number' ? raw.content_length : 0,
     createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
     isCurrent: raw.is_current === true,
+    // 部分完成标记（票 #85）：版本列表据此与完整版本区分开
+    partial: raw.partial === true,
   }
 }
 
@@ -283,6 +288,8 @@ function toVersionDetail(data: unknown): DocumentVersionDetail | null {
     reviewFailedAt: typeof raw.review_failed_at === 'string' ? raw.review_failed_at : null,
     source: typeof raw.source === 'string' ? raw.source : '',
     note: typeof raw.note === 'string' ? raw.note : '',
+    // 部分完成标记（票 #85）：预览一条历史版本时也看得到它不完整
+    partial: raw.partial === true,
     createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
     isCurrent: raw.is_current === true,

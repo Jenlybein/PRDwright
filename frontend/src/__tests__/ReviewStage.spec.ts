@@ -685,3 +685,77 @@ describe('ReviewStage 的版本入口', () => {
     expect(buttonByText(wrapper, '版本').attributes('disabled')).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// 部分完成（票 #85）：正文可用但不完整，审核区显示「未审核」
+// ---------------------------------------------------------------------------
+
+describe('ReviewStage 的部分完成提示', () => {
+  it('部分完成时页首给提示：这份正文不完整，已生成的部分可以先用', () => {
+    const wrapper = mount(ReviewStage, {
+      props: {
+        title: '产品需求文档',
+        content: '# 半截正文',
+        viewState: 'review-prd',
+        hasPrd: true,
+        hasApiDocs: false,
+        hasPrompts: false,
+        partial: true,
+        error: '生成失败：上游连接中断',
+      },
+    })
+
+    expect(wrapper.text()).toContain('这份正文不完整，已生成的部分可以先用')
+    // 失败原因照实显示：提示不是把失败粉饰成成功
+    expect(wrapper.text()).toContain('生成失败：上游连接中断')
+  })
+
+  it('完整版本不显示这条提示', () => {
+    expect(mountReview().text()).not.toContain('这份正文不完整')
+  })
+
+  it('部分完成版本照旧可下载：下载不禁用，载荷是眼前这半截正文', async () => {
+    const wrapper = mount(ReviewStage, {
+      props: {
+        title: '产品需求文档',
+        content: '# 半截正文',
+        viewState: 'review-prd',
+        hasPrd: true,
+        hasApiDocs: false,
+        hasPrompts: false,
+        partial: true,
+      },
+    })
+
+    await nextTick()
+    const download = buttonByText(wrapper, '下载')
+    expect(download.attributes('disabled')).toBeUndefined()
+
+    await download.trigger('click')
+    expect(wrapper.emitted('download')).toEqual([['# 半截正文']])
+  })
+
+  it('审核区显示「未审核」，且不渲染上一次的结论', () => {
+    const wrapper = mount(ReviewStage, {
+      props: {
+        title: '产品需求文档',
+        content: '# 半截正文',
+        viewState: 'review-prd',
+        hasPrd: true,
+        hasApiDocs: false,
+        hasPrompts: false,
+        partial: true,
+        // 后端给的是空结论（部分完成那一版没审过）；这里再显式传一次，
+        // 证明界面不会把别的结论当成这一版的审核结果。
+        review: null,
+        reviewFailedAt: null,
+        reviewVersionNo: 1,
+      },
+    })
+
+    expect(wrapper.text()).toContain('文档缺陷')
+    expect(wrapper.text()).toContain('未审核')
+    expect(wrapper.text()).toContain('第 1 版')
+    expect(wrapper.text()).not.toContain('审核失败')
+  })
+})

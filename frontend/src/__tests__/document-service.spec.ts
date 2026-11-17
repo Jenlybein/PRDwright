@@ -360,6 +360,8 @@ describe('fetchVersions', () => {
       contentLength: 128,
       createdAt: '2026-10-16T02:00:00',
       isCurrent: true,
+      // 后端没给 partial（这一条是完整版本）→ 收敛成 false（票 #85）
+      partial: false,
     })
   })
 
@@ -552,5 +554,58 @@ describe('deleteVersion', () => {
     vi.mocked(http.delete).mockRejectedValue(new Error('网络断了'))
 
     await expect(deleteVersion(7, 'prd', 11)).rejects.toThrow('删除版本失败')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 部分完成标记（票 #85）：文档 / 版本摘要 / 版本详情三处都要读得到
+// ---------------------------------------------------------------------------
+
+describe('部分完成标记的解析', () => {
+  it('文档的 partial 原样带回来（下载 / 审阅页提示都靠它）', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: { documents: [backendDocument({ partial: true })] },
+    })
+
+    const [record] = await fetchDocuments(1)
+    expect(record?.partial).toBe(true)
+  })
+
+  it('后端没给 partial（旧数据 / 旧服务）时按 false，不凭空报「不完整」', async () => {
+    vi.mocked(http.get).mockResolvedValue({ data: { documents: [backendDocument()] } })
+
+    const [record] = await fetchDocuments(1)
+    expect(record?.partial).toBe(false)
+  })
+
+  it('版本摘要带 partial：版本列表据此与完整版本区分开', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        versions: [
+          { version_id: 1, version_no: 1, source: 'prd', created_at: '', partial: true },
+        ],
+      },
+    })
+
+    const [item] = await fetchVersions(1, 'prd')
+    expect(item?.partial).toBe(true)
+  })
+
+  it('版本详情带 partial：预览一条历史版本也看得出它不完整', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        version_id: 1,
+        version_no: 1,
+        content: '# 半截正文',
+        source: 'prd',
+        created_at: '',
+        updated_at: '',
+        partial: true,
+      },
+    })
+
+    const detail = await fetchVersion(1, 'prd', 1)
+    expect(detail.partial).toBe(true)
+    expect(detail.content).toBe('# 半截正文')
   })
 })
