@@ -43,7 +43,7 @@ def _user_id(username: str) -> int:
 def _job(
     owner_id: int,
     *,
-    status: str = "completed",
+    status: str = "succeeded",
     error_code: str = "",
     created_at: str | None = None,
     prompt_tokens: int = 0,
@@ -113,20 +113,22 @@ def test_daily_fills_missing_days_with_zero(client):
 
 
 def test_cancelled_and_superseded_are_not_counted_as_failures(client):
-    """主动取消 / 被顶替不算真失败，但它们的数量单独可见。
+    """主动取消 / 被顶替不算真失败，但它们的数量单独可见（票 #84 的 AC5）。
 
-    这是本文件最重要的一条。两者在库里都是 `status='failed'`：
-    - `CANCELLED`：用户自己删了方案或点了停止；
-    - `SUPERSEDED`：同一份文档被更晚的任务接手，旧的主动让开。
+    七态之后它们有**自己的状态值**（`cancelled` / `superseded`），不再借
+    `failed + CANCELLED/SUPERSEDED` 表达。统计因此可以只按 `status` 分支，不用猜错误码：
+    - `cancelled`：用户自己点了停止 / 删了方案；
+    - `superseded`：同一份文档被更晚的任务接手，旧的主动让开。
 
-    把它们算进失败率，平台会显得比实际脆弱得多。
+    把它们算进失败率，平台会显得比实际脆弱得多；把它们合在一起，又分不清「用户不要」
+    与「系统让位」。
     """
     _as_admin(client)
     owner_id = _user_id("root")
-    _job(owner_id, status="completed")
+    _job(owner_id, status="succeeded")
     _job(owner_id, status="failed", error_code="LLM_UPSTREAM_ERROR")
-    _job(owner_id, status="failed", error_code="CANCELLED")
-    _job(owner_id, status="failed", error_code="SUPERSEDED")
+    _job(owner_id, status="cancelled")
+    _job(owner_id, status="superseded")
 
     response = client.get(
         "/api/admin/stats/daily", params={"days": 7, "tz_offset_minutes": 0}
@@ -134,11 +136,12 @@ def test_cancelled_and_superseded_are_not_counted_as_failures(client):
     today = response.json()["items"][-1]
 
     assert today["task_count"] == 4
-    assert today["completed_count"] == 1
-    # 4 条 failed 里只有一条是真失败
+    assert today["succeeded_count"] == 1
+    # 4 条里只有一条是真失败
     assert today["failed_count"] == 1, "只有 LLM_UPSTREAM_ERROR 算真失败"
-    assert today["cancelled_count"] == 2, "取消与顶替要单独计数，不能凭空消失"
-    # 分母 = 已收尾（1 成功 + 1 真失败），取消的不进分母
+    assert today["cancelled_count"] == 1, "已取消单独计数，不能凭空消失"
+    assert today["superseded_count"] == 1, "被取代单独计数，不能与已取消混成一个数"
+    # 分母 = 已收尾（1 成功 + 1 真失败），取消/顶替不进分母
     assert today["failure_rate"] == 0.5
 
 
@@ -146,12 +149,13 @@ def test_running_jobs_are_excluded_from_failure_rate_denominator(client):
     """还在跑的任务既不算成功也不算失败，不该进失败率的分母。
 
     放进分母会把失败率人为压低：一个正在跑的任务会把 1/1 的失败率稀释成 1/2。
+    七态之后「在跑」是 pending / running / cancelling 三个值，合计为 `active_count`。
     """
     _as_admin(client)
     owner_id = _user_id("root")
     _job(owner_id, status="failed", error_code="LLM_UPSTREAM_ERROR")
     _job(owner_id, status="running")
-    _job(owner_id, status="running")
+    _job(owner_id, status="cancelling")
 
     response = client.get(
         "/api/admin/stats/daily", params={"days": 7, "tz_offset_minutes": 0}
@@ -159,7 +163,7 @@ def test_running_jobs_are_excluded_from_failure_rate_denominator(client):
     today = response.json()["items"][-1]
 
     assert today["task_count"] == 3
-    assert today["running_count"] == 2
+    assert today["active_count"] == 2
     # 1 失败 / 1 已收尾 = 100%，而不是 1/3
     assert today["failure_rate"] == 1.0
 
@@ -242,7 +246,7 @@ def test_summary_failure_rate_is_weighted_not_averaged(client):
 
     _job(owner_id, status="failed", error_code="LLM_UPSTREAM_ERROR", created_at=_days_ago(1))
     for _ in range(9):
-        _job(owner_id, status="completed", created_at=_days_ago(0))
+        _job(owner_id, status="succeeded", created_at=_days_ago(0))
 
     data = client.get(
         "/api/admin/stats/daily", params={"days": 3, "tz_offset_minutes": 0}
@@ -251,7 +255,7 @@ def test_summary_failure_rate_is_weighted_not_averaged(client):
     summary = data["summary"]
     assert summary is not None, "响应里必须带区间汇总，否则前端只能自己再算一遍"
     assert summary["task_count"] == 10
-    assert summary["completed_count"] == 9
+    assert summary["succeeded_count"] == 9
     assert summary["failed_count"] == 1
     assert summary["failure_rate"] == 0.1, (
         f"应为加权 1/10=0.1，若得到 0.5 说明用了每日平均：{summary['failure_rate']}"

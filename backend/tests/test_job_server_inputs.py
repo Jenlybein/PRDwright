@@ -153,7 +153,7 @@ def _run_to_completion(client, payload: dict[str, Any]) -> None:
     job_id = _create_job(client, payload)
     events = _drain(client, job_id)
     summary = next(event for event in events if event["type"] == "run_summary")
-    assert summary["data"]["status"] == "completed", summary
+    assert summary["data"]["status"] == "succeeded", summary
 
 
 def _generation_prompt(llm: ScriptedLLM) -> str:

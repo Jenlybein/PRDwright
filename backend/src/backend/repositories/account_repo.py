@@ -35,6 +35,7 @@ from backend.core.models import (
     GenerationJob,
     Solution,
 )
+from backend.repositories.generation_job_repo import ACTIVE_STATUSES
 
 
 def _count_where(model: type, *conditions) -> Any:
@@ -85,7 +86,7 @@ class AccountDataRepository:
             _count_where(
                 GenerationJob,
                 GenerationJob.owner_id == user_id,
-                GenerationJob.status == "running",
+                GenerationJob.status.in_(ACTIVE_STATUSES),
             ).label("running_jobs"),
             _count_where(AuthSession, AuthSession.user_id == user_id).label("sessions"),
             func.coalesce(

@@ -119,12 +119,12 @@ def test_backoff_keys_are_all_stable_codes():
     按码值分类而不是按中文文案分类：文案是给人看的，改一个字就静默失效；
     码值是契约（`test_error_contract` 守着它）。这里把「表里的键都在契约里」也钉住。
     """
-    known = {code.value for code in ErrorCode} | {
-        job_state.CODE_CANCELLED,
-        job_state.CODE_SUPERSEDED,
-        job_state.CODE_LEASE_EXPIRED,
-    }
+    known = {code.value for code in ErrorCode} | {job_state.CODE_LEASE_EXPIRED}
     assert set(job_backoff.BACKOFF_SECONDS) <= known, "表里出现了不存在的错误码"
+    # `CANCELLED` / `SUPERSEDED` 不再是错误码（七态，票 #84）：取消/顶替是**状态**，
+    # 不参与退避映射——把「用户不要了」当成可重试失败去排队是语义错误。
+    assert "CANCELLED" not in job_backoff.BACKOFF_SECONDS
+    assert "SUPERSEDED" not in job_backoff.BACKOFF_SECONDS
 
 
 def test_unknown_code_falls_back_to_the_shortest_wait():
@@ -176,8 +176,9 @@ def test_requeue_presses_the_backoff_of_its_failure_code(alice, error_code, expe
     row = job_get(alice, job_id)
     assert row is not None
     assert row["next_run_at"] == (failed_at + timedelta(seconds=expected_seconds)).isoformat()
-    # 回排队本身仍是「排队中」：状态不变、租约清空（等下一次抢占）
-    assert row["status"] == "running"
+    # 回排队之后行回到「排队中」：`pending`，租约清空（等下一次抢占）。
+    # 这正是七态带来的可观察变化——三态里它与执行中共用 `running`，两个真源无从分辨。
+    assert row["status"] == "pending"
     assert row["lease_token"] == "" and row["lease_expire_at"] == ""
 
 
@@ -298,20 +299,24 @@ def test_a_requeued_row_goes_to_the_tail_of_the_due_queue(alice):
     """
     first = job_create(alice, "prd", None)
     second = job_create(alice, "prompts", None)
+    first_lease = _claim(alice, first, now=utc_now())
     sentinel = datetime(2030, 1, 1, 12, 0, 0)
-    _write_row(first, updated_at=(sentinel - timedelta(minutes=2)).isoformat(), next_run_at="")
-    _write_row(second, updated_at=(sentinel - timedelta(minutes=1)).isoformat(), next_run_at="")
 
-    # 把 `first` 回排队一次：`updated_at` 推到 sentinel+5，退避到 sentinel+10
+    # 把 `first` 回排队一次（走真实交接路径：旧凭证 fencing + 落回 pending）：
+    # `updated_at` 推到 sentinel+5，退避到 sentinel+10。
     with session_scope() as session:
-        GenerationJobRepository(session).requeue_lease(
-            alice,
-            first,
-            lease_token="",
-            lease_expire_at="",
-            now_text=(sentinel + timedelta(seconds=5)).isoformat(),
-            next_run_at=(sentinel + timedelta(seconds=10)).isoformat(),
-        )
+        row = GenerationJobRepository(session).get(alice, first)
+        assert row is not None
+        fence = job_state.LeaseFence(token=row.lease_token, expire_at=row.lease_expire_at)
+    assert job_state.transition(
+        job_state.JobEvent.REQUEUE,
+        job_state.job_scope(alice, first),
+        error_code=job_state.CODE_LEASE_EXPIRED,
+        error_message="执行者进程已消失，租约到期未续",
+        lease_fence=fence,
+        now_text=(sentinel + timedelta(seconds=5)).isoformat(),
+    ).applied
+    assert first_lease.token == fence.token  # 同一轮凭证（判据的那一份）
 
     due = sentinel + timedelta(seconds=30)
     with session_scope() as session:
@@ -467,10 +472,11 @@ def test_the_due_judgement_follows_the_injected_moment_not_the_wall_clock(alice)
 
 
 def test_cancelling_a_waiting_job_still_works_immediately(alice):
-    """退避期间用户按停止：立刻落 `failed + CANCELLED`，不用等退避到期。
+    """退避期间用户按停止：立刻落 `cancelled`，不用等退避到期。
 
     取消不是「抢占」：它要的是「这条任务别再跑了」，因此不受到期闸门约束
-    （判据与 `claim` 不同）。前端在等待态仍显示取消入口，依据就是这一条。
+    （判据与 `claim` 不同）。等待态的行走的是「排队中取消」那条路——没有执行者，
+    一步落终态（票 #84 的 AC1 前半句）。
     """
     job_id = job_create(alice, "prd", None)
     started = utc_now()
@@ -479,17 +485,16 @@ def test_cancelling_a_waiting_job_still_works_immediately(alice):
     assert job_recovery.recover_once(10, now=failed_at).requeued == 1
 
     result = job_state.transition(
-        job_state.JobEvent.CANCEL,
+        job_state.JobEvent.REQUEST_CANCEL,
         job_state.job_scope(alice, job_id),
-        error_code=job_state.CODE_CANCELLED,
         error_message="方案已删除，任务已取消",
     )
 
     assert result.applied
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == job_state.CODE_CANCELLED
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
 
 
 def test_the_db_snapshot_tells_the_frontend_when_the_retry_comes(alice):
@@ -506,7 +511,7 @@ def test_the_db_snapshot_tells_the_frontend_when_the_retry_comes(alice):
     snapshot = first_snapshot_event(alice, registered.job_id)
 
     assert snapshot.data["next_run_at"] == due.isoformat()
-    assert snapshot.data["status"] == "running", "等待重试不是失败，状态仍是执行中/排队中"
+    assert snapshot.data["status"] == "pending", "等待重试不是失败，状态是排队中"
 
 
 def test_a_job_that_never_failed_carries_an_empty_next_run_at(alice):

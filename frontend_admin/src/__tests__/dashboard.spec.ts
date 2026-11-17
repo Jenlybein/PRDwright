@@ -43,7 +43,7 @@ const PLATFORM = {
   user_count: 12,
   admin_count: 2,
   task_count: 340,
-  completed_count: 300,
+  succeeded_count: 300,
   prompt_tokens: 1_200_000,
   completion_tokens: 500_000,
 }
@@ -52,10 +52,11 @@ function day(overrides: Partial<AdminDailyStat> = {}): AdminDailyStat {
   return {
     day: '2026-10-22',
     task_count: 10,
-    completed_count: 8,
+    succeeded_count: 8,
     failed_count: 2,
     cancelled_count: 0,
-    running_count: 0,
+    superseded_count: 0,
+    active_count: 0,
     prompt_tokens: 1000,
     completion_tokens: 400,
     failure_rate: 0.2,
@@ -67,16 +68,17 @@ function day(overrides: Partial<AdminDailyStat> = {}): AdminDailyStat {
 function rollup(rows: AdminDailyStat[]): AdminDailyStat {
   const sum = (key: keyof AdminDailyStat) =>
     rows.reduce((acc, row) => acc + (typeof row[key] === 'number' ? (row[key] as number) : 0), 0)
-  const completed = sum('completed_count')
+  const succeeded = sum('succeeded_count')
   const failed = sum('failed_count')
-  const finished = completed + failed
+  const finished = succeeded + failed
   return {
     day: '',
     task_count: sum('task_count'),
-    completed_count: completed,
+    succeeded_count: succeeded,
     failed_count: failed,
     cancelled_count: sum('cancelled_count'),
-    running_count: sum('running_count'),
+    superseded_count: sum('superseded_count'),
+    active_count: sum('active_count'),
     prompt_tokens: sum('prompt_tokens'),
     completion_tokens: sum('completion_tokens'),
     failure_rate: finished ? failed / finished : null,
@@ -156,7 +158,7 @@ describe('概览页', () => {
 
   it('空数据显示说明文案，而不是一张什么都没有的图', async () => {
     const wrapper = await render(
-      [day({ task_count: 0, completed_count: 0, failed_count: 0, prompt_tokens: 0, completion_tokens: 0, failure_rate: null })],
+      [day({ task_count: 0, succeeded_count: 0, failed_count: 0, prompt_tokens: 0, completion_tokens: 0, failure_rate: null })],
       [],
     )
 
@@ -168,21 +170,52 @@ describe('概览页', () => {
   it('失败率显示：没有任务时是「—」，0% 失败时是 0.0%', async () => {
     // 2 失败 / (6 成功 + 2 失败) = 25%
     const withFailure = await render([
-      day({ completed_count: 6, failed_count: 2, failure_rate: 0.25 }),
+      day({ succeeded_count: 6, failed_count: 2, failure_rate: 0.25 }),
     ])
     expect(withFailure.text()).toContain('25.0%')
 
     // 全部成功（分母非 0）→ 0.0%，而不是「—」
     const allPass = await render([
-      day({ failed_count: 0, completed_count: 7, failure_rate: 0 }),
+      day({ failed_count: 0, succeeded_count: 7, failure_rate: 0 }),
     ])
     expect(allPass.text()).toContain('0.0%')
 
     // 没有任何已收尾任务 → 「—」
     const noFinished = await render([
-      day({ completed_count: 0, failed_count: 0, task_count: 3, failure_rate: null }),
+      day({ succeeded_count: 0, failed_count: 0, task_count: 3, failure_rate: null }),
     ])
     expect(noFinished.text()).toContain('—')
+  })
+
+  it('已取消与被取代分开计数，且都不进失败率分母', async () => {
+    const wrapper = await render([
+      day({
+        succeeded_count: 5,
+        failed_count: 1,
+        cancelled_count: 2,
+        superseded_count: 3,
+        failure_rate: 1 / 6,
+      }),
+    ])
+
+    const text = wrapper.text()
+    // 汇总条上有两个独立的格子
+    expect(text).toContain('已取消')
+    expect(text).toContain('被取代')
+    expect(text).toContain('2') // 已取消
+    expect(text).toContain('3') // 被取代
+    // 切到「失败率」：分母只算「已定稿 + 真失败」
+    const rateTab = wrapper.findAll('button').find((b) => b.text() === '失败率')
+    expect(rateTab).toBeTruthy()
+    await rateTab!.trigger('click')
+    await wrapper.vm.$nextTick()
+    const titles = wrapper.findAll('[title]').map((node) => node.attributes('title'))
+    expect(titles.some((t) => t?.includes('失败（1 / 6）'))).toBe(true)
+    // 图例里三者各有自己的色块
+    const legend = wrapper.text()
+    expect(legend).toContain('已取消')
+    expect(legend).toContain('被取代')
+    expect(legend).toContain('在途')
   })
 
   it('切换指标与天数会重新拉数据', async () => {

@@ -7,34 +7,32 @@
 如果没人动，它会永远停在「执行中」——用户看到进度条一直转，运维看到一条说不清的
 running 行。恢复器就是收这个口的：
 
-1. 扫一批「该接手的行」（周期档 = 租约已过期；启动档 = 库里所有 `running` 行，
+1. 扫一批「该接手的行」（周期档 = 租约已过期；启动档 = 库里所有非终态行，
    因为进程刚起来时它上面不可能有真正的执行者）；
 2. 用**扫描时读到的旧凭证**（凭证 + 到期时间）做条件更新去接手——凭证对不上就一行
    都改不到，跟 #82 判权是同一条规则，不另立一套；
-3. 周期档按账本里已经记了几次（剩余次数）决定「回排队（清租约）」还是「判失败
-   （LEASE_EXPIRED）」；启动档没有下一次执行者会来领（本票不引入调度循环，那是
-   #88），所以直接落终态，把 AC4「重启后不存在永远进行中」钉死；
+3. 周期档按账本里已经记了几次（剩余次数）决定「回排队」还是「判失败」；启动档直接
+   落终态，把 AC4「重启后不存在永远进行中」钉死；
 4. 每一轮交接都记一条**超时账本**（`error_code=LEASE_EXPIRED`），写明超时原因，
    与状态更新同事务（#80 的口径）。
+
+## 七态口径（#84）
+
+状态是七个值（见 `test_job_seven_states.py`）。本文件关心恢复器碰得到的那几条：
+
+- 「回排队」现在读作 `status='pending'`（不再与执行中共用 `running`）；
+- 「判失败」落 `failed + LEASE_EXPIRED`；
+- 启动档遇到**取消中**的行落 `cancelled`（用户的意图优先于「超时」）；
+- 「取消中 + 租约过期」由周期档兜底落 `cancelled`（AC3）。
 
 ## 接缝（断言只架在这三处）
 
 1. **`job_recovery.recover_once(limit)`**（本票新增、可直接调用的单元）：定时扫描的
-   入口。它不起线程、不起定时器——接入调度循环是 #88 的事。
+   入口。它不起线程、不起定时器——接入调度循环是 #89 的事。
 2. **`job_recovery.scan` / `recover_one`**：扫描与单条收口。「扫描之后、收口之前
-   凭证被换掉」这段窗口是 AC3 的核心，所以这两个也属于公开面（用例靠它们把窗口
-   固定在两步之间，不需要抢跑）。
+   凭证被换掉」这段窗口是 AC3 的核心，所以这两个也属于公开面。
 3. **`job_service.reap_orphans()`**（启动回收）：进程刚起来，库里任何既有租约都
-   属于已经消失的执行者，所以它调的是 `recover_once(..., startup=True)`——同一套
-   语义、同一个决策，只是候选集宽一档（不看到期时间）。旧实现（把 running 全判
-   `INTERNAL_ERROR`）不再保留。
-
-## 三态口径（七态是 #84）
-
-状态仍是 `running` / `completed` / `failed`。所以「回排队」在库里读作
-`status='running'` + **租约三列为空**（排队中与执行中在 #83 共用 running，区别只在
-有没有有效租约）；「判失败」才落终态。AC1 / AC4 的「离开执行中」就是按这个可观察
-判据钉的，等 #84 落地后它会显示成「排队中」。
+   属于已经消失的执行者，所以它调的是 `recover_once(..., startup=True)`。
 """
 
 from __future__ import annotations
@@ -49,13 +47,15 @@ from conftest import job_create, job_get, register, users
 
 from backend.core.clock import utc_now
 from backend.core.engine import session_scope
-from backend.repositories.job_attempt_repo import OUTCOME_FAILED, JobAttemptRepository
+from backend.repositories.job_attempt_repo import (
+    OUTCOME_CANCELLED,
+    OUTCOME_FAILED,
+    JobAttemptRepository,
+)
 from backend.services import job_backoff, job_claimer, job_recovery, job_service, job_state
 
 # 租约时长与 `job_claimer.DEFAULT_LEASE_SECONDS` 一致：用例只借它算「过期时刻」。
 LEASE_SECONDS = job_claimer.DEFAULT_LEASE_SECONDS
-# 一条已经跑到终态的取消理由（AC5 的「不是 running 的行不该被恢复器碰」用它造）。
-CANCELLED = job_state.CODE_CANCELLED
 
 
 def _alice_id() -> int:
@@ -106,11 +106,11 @@ def _discards(caplog) -> list:
 
 
 def test_a_dead_executors_job_leaves_executing_and_is_claimable_again(alice):
-    """崩溃之后第一次周期恢复：回排队（租约清空、行还能被下一个执行者领走）。
+    """崩溃之后第一次周期恢复：回排队（回到 `pending`、租约清空、还能被领走）。
 
-    「离开执行中」在三态里读作「不再持有有效租约」：`lease_owner/token/expire_at`
-    三列全空。它没有被凭空判死——这一次执行只是没跑成（记进账本，见 AC2），
-    任务本身回到队列里等下一次执行（调度循环是 #88）。
+    七态之后「离开执行中」有一个**确定的取值**：`status='pending'`（不是「`running`
+    加一个空租约」这种同形表达）。它没有被凭空判死——这一次执行只是没跑成（记进账本，
+    见 AC2），任务本身回到队列里等下一次执行（调度循环是 #89）。
     """
     job_id = job_create(alice, "prd", None)
     started = utc_now()
@@ -123,10 +123,8 @@ def test_a_dead_executors_job_leaves_executing_and_is_claimable_again(alice):
     assert report.requeued == 1
     assert report.failed == 0
     row = job_get(alice, job_id)
-    assert row["status"] == "running", "回排队在 #83 仍读作 running（执行中/排队中共用）"
-    assert row["lease_owner"] == ""
-    assert row["lease_token"] == ""
-    assert row["lease_expire_at"] == ""
+    assert row["status"] == "pending", "回排队要落回排队中这个值"
+    assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
     # 不是「永远进行中」：等过失败退避（#88，超时那一路 5 秒）之后，下一个执行者
     # 就能把它领走。退避到期之前领不走——那是 #88 的到期闸门，本文件只借它算时刻。
     due = died_later + timedelta(seconds=job_backoff.BACKOFF_TIMEOUT_SECONDS)
@@ -230,11 +228,11 @@ def test_each_recovery_round_appends_exactly_one_ledger_row(alice):
 
 
 def test_a_replaced_token_is_skipped_instead_of_updated(alice, caplog):
-    """扫描之后凭证被换掉：条件更新改到 0 行 → 跳过，不报错、不记账、不落状态。
+    """扫描之后这一行被回排队又被别人领走：恢复器手里那份死租约改到 0 行 → 跳过。
 
     这条钉住 fencing 的写法：判权用**扫描时读到的旧凭证**，不是「刚才查到的行」。
-    另一个执行者接手之后，恢复器手里那份凭证已经失效——它必须一行都改不到，
-    跟一个晚到的执行者拿旧凭证写结果时的结果完全一致。
+    七态之后「被别人接手」的实际路径是「恢复器先回排队，再由下一个执行者抢占」——
+    无论哪条路径，扫描时那一份凭证都已经失效，必须一行都改不到。
     """
     job_id = job_create(alice, "prd", None)
     started = utc_now()
@@ -245,8 +243,21 @@ def test_a_replaced_token_is_skipped_instead_of_updated(alice, caplog):
     assert [candidate.job_id for candidate in candidates] == [job_id]
     assert candidates[0].lease_token == first.token
 
-    # 窗口内另一个人接手：凭证被换掉（连带到期时间也换了）。
-    second = _claim(alice, job_id, lease_owner="proc-b", now=later)
+    # 窗口内这一行被另一路恢复器回排队、随后被 proc-b 领走：凭证与状态都变了。
+    assert job_state.transition(
+        job_state.JobEvent.REQUEUE,
+        job_state.job_scope(alice, job_id),
+        error_code=job_state.CODE_LEASE_EXPIRED,
+        error_message="执行者进程已消失，租约到期未续",
+        lease_fence=candidates[0].fence,
+        now_text=later.isoformat(),
+    ).applied
+    second = _claim(
+        alice,
+        job_id,
+        lease_owner="proc-b",
+        now=later + timedelta(seconds=job_backoff.BACKOFF_TIMEOUT_SECONDS),
+    )
     assert second.token != first.token
 
     with caplog.at_level(logging.INFO):
@@ -258,7 +269,8 @@ def test_a_replaced_token_is_skipped_instead_of_updated(alice, caplog):
     assert row["status"] == "running"
     assert row["lease_token"] == second.token, "新执行者的租约不许被恢复器清掉"
     assert row["error_code"] == ""
-    assert _attempts(alice, job_id) == [], "没改到行就不是一次执行结论，不许记账"
+    # 上一轮回排队记了一笔（那一笔是真发生的结论）；本次 0 行不记账。
+    assert len(_attempts(alice, job_id)) == 1
     assert len(_discards(caplog)) == 1, "0 行要留可查的丢弃日志（与其它转换同一口径）"
 
 
@@ -344,54 +356,62 @@ def test_startup_recovery_reports_the_restart_for_a_row_never_claimed(alice):
 # ---------------------------------------------------------------------------
 
 
-def test_recovery_does_not_touch_a_row_that_is_no_longer_running(alice):
-    """已终态（这里是被取消）的行不在候选里：恢复器不碰、不改原因、不记账。
+def test_recovery_settles_a_cancelling_row_as_cancelled_not_failed(alice):
+    """取消中的行由恢复器兜底收成已取消（AC3），绝不记成一次超时失败。
 
-    取消先落 `failed + CANCELLED`（这一刻租约还留在行上），恢复器如果按「租约过期」
-    去改它，就会把用户自己按的停止覆写成「超时」。#79 的规则是「只有 running 是合法
-    前态」——恢复器守同一条，所以扫描条件里带 `status='running'`。
+    用户按了停止之后，执行者卡在模型调用里没来确认；租约到期，恢复器接手。
+    「谁按下停止」是用户的意图，所以结局必须是 `cancelled`——把它覆写成
+    `failed + LEASE_EXPIRED` 会让统计与排查都读错（那看起来像模型坏了）。
     """
     job_id = job_create(alice, "prd", None)
     lease = _claim(alice, job_id)
     cancelled = job_state.transition(
-        job_state.JobEvent.CANCEL,
+        job_state.JobEvent.REQUEST_CANCEL,
         job_state.job_scope(alice, job_id),
-        error_code=CANCELLED,
         error_message="用户停止了生成",
     )
     assert cancelled.rows == 1
+    assert job_get(alice, job_id)["status"] == "cancelling"
 
     report = job_recovery.recover_once(10, now=_expired_at(lease))
 
-    assert report.scanned == 0
+    assert report.scanned == 1
+    assert report.cancelled == 1
+    assert report.failed == 0
     row = job_get(alice, job_id)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED", "恢复器不许覆写用户已落库的终态"
-    assert _attempts(alice, job_id) == []
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == "", "已取消不是失败，不许带 LEASE_EXPIRED"
+    assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
+    attempts = _attempts(alice, job_id)
+    assert [item["outcome"] for item in attempts] == [OUTCOME_CANCELLED]
 
 
-def test_a_row_cancelled_mid_window_is_not_overwritten(alice, caplog):
-    """扫描之后行被用户取消：条件写 0 行，用户的停止不许被「超时」覆写。
+def test_a_row_cancelled_mid_window_is_settled_as_cancelled_not_overwritten(alice, caplog):
+    """扫描之后行进入取消中：恢复器的下一次扫描按**取消**（不是超时）接手它。
 
-    AC5 的数据库侧证据：恢复器的那条条件写里带 `status='running'`，行一旦落到终态
-    就一行都改不到——与「凭证被换掉」是同一套「改不到就跳过」的口径。
+    恢复的候选集与去向都由扫描那一刻的状态决定：上一轮扫到的是「执行中」，但在这一轮
+    收口之前用户按了停止，行已变成 `cancelling`——下一次扫描就把它归到取消兜底。
+    写进去的结局是 `cancelled`，`error_code` 保持空串（不是 `LEASE_EXPIRED`）。
     """
     job_id = job_create(alice, "prd", None)
     lease = _claim(alice, job_id)
     later = _expired_at(lease)
-    candidate = job_recovery.scan(10, now=later)[0]
 
     assert job_service.cancel_job(alice, job_id) is True
+    assert job_get(alice, job_id)["status"] == "cancelling"
+
+    # 用取消之后重新扫描到的候选（状态已是 cancelling）；旧候选的状态字段已过期。
+    candidate = job_recovery.scan(10, now=later)[0]
+    assert candidate.status == "cancelling"
 
     with caplog.at_level(logging.INFO):
-        outcome = job_recovery.recover_one(candidate)
+        outcome = job_recovery.recover_one(candidate, now=later)
 
-    assert outcome.action == job_recovery.ACTION_SKIPPED
+    assert outcome.action == job_recovery.ACTION_CANCELLED
     row = job_get(alice, job_id)
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
-    assert _attempts(alice, job_id) == []
-    assert len(_discards(caplog)) == 1
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
+    assert [item["outcome"] for item in _attempts(alice, job_id)] == [OUTCOME_CANCELLED]
 
 
 def test_recovery_module_only_writes_state_through_the_state_machine() -> None:

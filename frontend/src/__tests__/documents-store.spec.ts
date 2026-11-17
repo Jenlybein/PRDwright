@@ -65,7 +65,7 @@ function makeRecord(
 function makeRunSummary(requestId: string): RunSummary {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     durationMs: 1000,
     totalCalls: 1,
     failedCalls: 0,
@@ -526,3 +526,4 @@ describe('clear', () => {
     expect(documents.contentOf('prd')).toBe('')
   })
 })
+

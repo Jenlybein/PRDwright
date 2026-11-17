@@ -28,20 +28,30 @@
    `stream_reply._astream_chunks` 这个唯一入口上，覆盖全部调用点）。上一次续租到下一次
    之间最多隔「一次模型调用」，所以 120 秒的租约足以撑住十几分钟的任务。
 
-## 「排队中」为什么没有第四个状态值
+## 「排队中」就是 `pending`（票 #84）
 
-三态（`running` / `completed` / `failed`）里，「排队中」与「执行中」共用 `running`，
-区别只在**有没有有效租约**：`lease_token` 为空或已过期 = 排队中。七态（含显式的
-`pending` / `cancelled` / `superseded`）是 #84 的事，本票不提前引入——前端契约一个字不变，
-用户看到的仍然是「执行中」，谁领的、哪一轮凭证都不出这个模块。
+七态之后，「排队中」有自己的取值（`pending`），不再是「`running` + 没有租约」：
+登记建行即 `pending`，`claim` 是「排队中 → 执行中」的转换（写状态 + 写租约），
+恢复器回排队也把行写回 `pending`。于是抢占条件只有一条 `WHERE status='pending'`，
+「谁在跑」只看 `running`——同一个问题不会有两个表示。
+
+## 取消：续租失败要先分清「被取消」还是「被接手」
+
+续租改到 0 行有两种原因，处置**相反**（票 #84 的 AC2）：
+
+| 原因 | 信号 | 处置 |
+|---|---|---|
+| 行处于 `cancelling` | `CancelRequestedError` | 由这一位执行者确认取消（落 `cancelled`，补一次载荷） |
+| 凭证不是本轮 / 行已被恢复器回排队 | `LeaseLostError` | 就地停止，**什么都不写**（结果已失去资格） |
+
+把两者混成一个信号，就会出现「用户按了停止、执行者却以为被人抢走而不落终态」
+（任务卡在取消中直到恢复器兜底）或者反过来「被接手的旧执行者去确认取消」。
 
 ## 本票不做什么
 
-- **调度循环**（谁、多久扫一次队列、扫到之后怎么把行还原成可派发的任务单）是 #83 的
-  恢复器；本模块只提供 `claim_once` 这个入口，不启动任何后台轮询。
-- **失败退避**（`next_run_at`）是 #88：抢占条件将来会多一条 `AND next_run_at <= now`，
-  本票不抢那个迁移位（迁移 0003 只加租约三列）。
-- **重试 / 重新排队**：本模块永不自己制造第二次尝试——失去执行权只是「停」，
+- **调度循环**（谁、多久扫一次队列、扫到之后怎么把行还原成可派发的任务单）是 #89；
+  本模块只提供 `claim_once` 这个入口，不启动任何后台轮询。
+- **失败重试**：本模块永不自己制造第二次尝试——失去执行权只是「停」，
   要不要再跑是恢复器与退避的事。
 """
 
@@ -59,7 +69,10 @@ from typing import TYPE_CHECKING, Iterator
 
 from backend.core.clock import utc_now
 from backend.core.engine import session_scope
-from backend.repositories.generation_job_repo import GenerationJobRepository
+from backend.repositories.generation_job_repo import (
+    STATUS_CANCELLING,
+    GenerationJobRepository,
+)
 from backend.services import job_state
 
 if TYPE_CHECKING:
@@ -76,7 +89,7 @@ LEASE_OWNER = f"{socket.gethostname()}/{os.getpid()}"
 
 
 class LeaseLostError(RuntimeError):
-    """本轮执行权已失效（被取消 / 被接手 / 凭证对不上）。
+    """本轮执行权已失效（被接手 / 凭证对不上）。
 
     它是一个**明确的中止信号**，不是「这次生成失败了」：调用方（`run_job`）必须就地
     停下、不写任何结果、也不广播失败——那一行可能正被新的执行者跑着，把「我失去资格」
@@ -86,6 +99,20 @@ class LeaseLostError(RuntimeError):
     def __init__(self, job_id: int, reason: str = "") -> None:
         self.job_id = job_id
         self.reason = reason or "本轮执行权已失效"
+        super().__init__(f"任务 {job_id}：{self.reason}")
+
+
+class CancelRequestedError(RuntimeError):
+    """**用户已经请求取消**（行处于 `cancelling`），不是「执行权丢了」。
+
+    两者的处置相反：失去执行权要什么都不写（别人接手了）；取消请求则要由这一位
+    执行者把行确认成已取消——它是唯一还有资格写这一行的人，半截正文与已经烧掉的
+    用量也要由它补一次（票 #84 的 AC2）。
+    """
+
+    def __init__(self, job_id: int, reason: str = "") -> None:
+        self.job_id = job_id
+        self.reason = reason or "任务已被请求取消"
         super().__init__(f"任务 {job_id}：{self.reason}")
 
 
@@ -109,15 +136,16 @@ class Lease:
 
 @dataclass
 class LeaseGuard:
-    """当前执行者的租约 + 「已经失去」的标记（跨协程共享同一个对象）。
+    """当前执行者的租约 + 「已经失去 / 被请求取消」的标记（跨协程共享同一个对象）。
 
-    为什么要这个标记：续租失败会抛异常，但异常可能被流水线内部的 `except` 吞掉
+    为什么要这两个标记：续租失败会抛异常，但异常可能被流水线内部的 `except` 吞掉
     （分章链路会把单章失败记成 partial 继续跑）。标记让 `run_job` 在下一个事件到达时
-    也能看见「别再写了」，而不只依赖异常穿透。
+    也能看见「别再写了」或「该收成已取消了」，而不只依赖异常穿透。
     """
 
     lease: Lease
     lost: bool = False
+    cancel_requested: bool = False
 
 
 # 当前上下午持有的执行权；没有任务在跑时为 None（续租自动变为无操作）。
@@ -142,10 +170,10 @@ def claim(
     now: datetime | None = None,
     ttl: float = DEFAULT_LEASE_SECONDS,
 ) -> Lease | None:
-    """抢占一条任务：领到返回 `Lease`，没领到（改到 0 行）返回 `None`。
+    """抢占一条**排队中**任务：领到返回 `Lease`，没领到（改到 0 行）返回 `None`。
 
-    改到 0 行有两种情况，对调用方是同一件事——**这一行现在不归你**：别人先领走了，
-    或者它已经不是 `running`（被取消 / 已收尾）。
+    改到 0 行有两种情况，对调用方是同一件事——**这一行现在不归你**：别人先领走了
+    （已变成执行中），或者它已经不是排队中（被取消 / 已经终态）。
 
     Args:
         owner_id: 任务归属。用户面动作必带；恢复器（#83）从扫描结果里取。
@@ -235,19 +263,36 @@ def renew(
     """续租：把到期时间往后推，返回**新的** `Lease`（凭证不变）。
 
     Raises:
-        LeaseLostError: 改到 0 行——状态已不是执行中，或凭证不是这一轮的了。
-            这一条既是返回值也是信号：调用方据此立刻停下（不重试）。
+        CancelRequestedError: 行处于 `cancelling`——用户已经说要停，这一位执行者要
+            在下一个动作点退出并确认取消（不是「失去执行权」）。
+        LeaseLostError: 改到 0 行且不是因为取消——状态已不是执行中、或凭证不是这一轮
+            的了。调用方据此立刻停下（不重试、不写任何结果）。
     """
     started = now or utc_now()
     expire_at = _expire_text(started, ttl)
     with session_scope() as session:
-        rows = GenerationJobRepository(session).renew_lease(
+        repo = GenerationJobRepository(session)
+        rows = repo.renew_lease(
             lease.owner_id,
             lease.job_id,
             lease_token=lease.token,
             expire_at=expire_at,
         )
+        # 0 行时在同一事务里读回那一行：判断「被取消」还是「被接手」不能靠猜。
+        observed = repo.get(lease.owner_id, lease.job_id) if rows == 0 else None
     if rows == 0:
+        if observed is not None and observed.status == STATUS_CANCELLING:
+            logger.info(
+                "续租看到取消标记：本轮执行者应当在下一个动作点确认取消",
+                extra={
+                    "event": "job.cancel_requested",
+                    "job_id": lease.job_id,
+                    "user_id": lease.owner_id,
+                    "kind": lease.kind,
+                    "lease_owner": lease.lease_owner,
+                },
+            )
+            raise CancelRequestedError(lease.job_id, "任务已进入取消中")
         logger.warning(
             "续租未改到任何行：本轮执行权已失效，执行者应当立刻停止",
             extra={
@@ -306,18 +351,24 @@ def renew_before_action(*, now: datetime | None = None, ttl: float = DEFAULT_LEA
     没有执行权上下文时是**无操作**（对话 / 单测这类不经任务运行时的调用不该被拦）。
 
     Raises:
-        LeaseLostError: 这一轮的执行权已经失效。抛出去让链路停；同时把守卫标成
-            `lost`，这样即使异常被流水线内部的 `except` 吞掉，`run_job` 也能在下一个
-            事件到达时看见并停下（不写任何结果）。**不重试**：失去资格的进程重试一次
-            也不会重新获得资格，只会白烧 token 与额度。
+        CancelRequestedError: 这一轮已被用户请求取消。抛出去让链路停；守卫标成
+            `cancel_requested`，`run_job` 据此在下一个事件到达时确认取消并落终态。
+        LeaseLostError: 这一轮的执行权已经失效（被接手）。抛出去让链路停；守卫标成
+            `lost`，异常即使被流水线内部吞掉，`run_job` 也能在下一个事件到达时看见。
+            **不重试**：失去资格的进程重试一次也不会重新获得资格，只会白烧 token 与额度。
     """
     guard = _current_guard.get()
     if guard is None:
         return
     if guard.lost:
         raise LeaseLostError(guard.lease.job_id, "本轮执行权已失效")
+    if guard.cancel_requested:
+        raise CancelRequestedError(guard.lease.job_id, "任务已处于取消中")
     try:
         guard.lease = renew(guard.lease, now=now, ttl=ttl)
+    except CancelRequestedError:
+        guard.cancel_requested = True
+        raise
     except LeaseLostError:
         guard.lost = True
         raise
@@ -326,6 +377,7 @@ def renew_before_action(*, now: datetime | None = None, ttl: float = DEFAULT_LEA
 __all__ = [
     "DEFAULT_LEASE_SECONDS",
     "LEASE_OWNER",
+    "CancelRequestedError",
     "Lease",
     "LeaseGuard",
     "LeaseLostError",

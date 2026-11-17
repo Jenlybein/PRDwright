@@ -515,7 +515,7 @@ class JobAttempt(SQLModel, table=True):
 
     **只有执行有结论时才写一行**（成功 / 失败 / 取消 / 回收判死）。抢占、登记、进度合并写
     都不产生账本行：那只是「开始」与「过程」，不是结论。被取代**不写**——它不是这次执行
-    的结局，而是被更晚的任务接手（`SUPERSEDED` 留在任务行上供排查）。
+    的结局，而是被更晚的任务接手（任务行的 `status` 留着 `superseded` 这个值供排查）。
 
     ## 序号
 
@@ -559,7 +559,7 @@ class JobAttempt(SQLModel, table=True):
     attempt_no: int = Field(sa_column=Column(Integer, nullable=False))
     # 结论：completed / failed / cancelled。取值住在 `repositories/job_attempt_repo.py`。
     outcome: str = Field(sa_column=Column(short_text(32), nullable=False))
-    # 错误分类（`ErrorCode` 的取值或 CANCELLED 这类中止码）；成功时为空串。
+    # 失败原因码（`ErrorCode` 的取值或 `LEASE_EXPIRED`）；成功 / 取消 / 被取代时为空串。
     error_code: str = Field(default="", sa_column=Column(Text, nullable=False))
     # 脱敏后的单行摘要（见类 docstring「脱敏摘要」）；成功时为空串。
     error_summary: str = Field(default="", sa_column=Column(Text, nullable=False))
@@ -914,3 +914,4 @@ __all__ = [
     "SystemConfig",
     "User",
 ]
+

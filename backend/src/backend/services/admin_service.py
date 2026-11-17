@@ -42,7 +42,7 @@ from backend.repositories.auth_repo import (
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.log_repo import LogRepository
 from backend.repositories.quota_repo import QuotaRepository
-from backend.services import auth_service, export_service, job_service, quota_service
+from backend.services import auth_service, export_service, job_service, job_state, quota_service
 from backend.services.auth_service import User
 
 logger = logging.getLogger(__name__)
@@ -292,18 +292,19 @@ def daily_stats(days: int = 7, tz_offset_minutes: int = 0) -> dict[str, Any]:
     def _sum(key: str) -> int:
         return sum(int(row[key]) for row in items)
 
-    completed = _sum("completed_count")
+    succeeded = _sum("succeeded_count")
     failed = _sum("failed_count")
-    finished = completed + failed
+    finished = succeeded + failed
     summary = {
         "task_count": _sum("task_count"),
-        "completed_count": completed,
+        "succeeded_count": succeeded,
         "failed_count": failed,
         "cancelled_count": _sum("cancelled_count"),
-        "running_count": _sum("running_count"),
+        "superseded_count": _sum("superseded_count"),
+        "active_count": _sum("active_count"),
         "prompt_tokens": _sum("prompt_tokens"),
         "completion_tokens": _sum("completion_tokens"),
-        # 区间失败率用**加权**算法（区间失败 / 区间已收尾），不是「每天率的平均」：
+        # 区间失败率用**加权**算法（区间真失败 / 区间已收尾），不是「每天率的平均」：
         # 后者会让任务量少的那天与任务量大的那天等权，把真实的失败率算偏。
         "failure_rate": round(failed / finished, 4) if finished else None,
     }
@@ -754,25 +755,49 @@ def list_jobs(
     Returns:
         `{"items": [...], "total": int}`。`total` 是同口径命中总数，
         前端据此判断「还有多少没显示」。
+    `status` 接受逗号分隔的多个取值（七态，票 #84）：管理端的「在飞」标签传
+    `pending,running,cancelling`，「最近失败」传 `failed`。按状态列过滤而不是按
+    错误码猜——「被取代」与「已取消」各自是一个状态。
     """
     safe_limit = max(1, min(int(limit), 500))
     safe_offset = max(0, int(offset))
     clean_username = username.strip() or None
+    statuses = tuple(value.strip() for value in status.split(",") if value.strip())
     with session_scope() as session:
         rows = GenerationJobRepository(session).admin_list(
-            status=status or None,
+            statuses=statuses or None,
             username=clean_username,
             kind=kind or None,
             limit=safe_limit,
             offset=safe_offset,
         )
         total = GenerationJobRepository(session).admin_count(
-            status=status or None,
+            statuses=statuses or None,
             username=clean_username,
             kind=kind or None,
         )
         items = [_job_view(row.as_dict()) for row in rows]
     return {"items": items, "total": total}
+
+
+def _force_cancel(owner_id: int, job_id: int, message: str) -> bool:
+    """管理员的取消：先走「标记在途协程 + 置取消中」那条链路，再补一步确认取消。
+
+    为什么还要第二步（票 #84）：取消对用户是**两段**的（请求 → 执行者在下一个动作点
+    确认），但管理员清理是最终裁决——不该停在一个等人确认的中间态。这里不传凭证，
+    直接把这一行落成 `cancelled`；在途协程醒来后那次确认会改到 0 行并被丢弃。
+    """
+    changed = job_service.cancel_job(owner_id, job_id, message=message)
+    if not changed:
+        return False
+    with session_scope() as session:
+        job_state.transition(
+            job_state.JobEvent.CONFIRM_CANCEL,
+            job_state.job_scope(owner_id, job_id),
+            error_message=message,
+            session=session,
+        )
+    return True
 
 
 def cancel_job_as_admin(actor: User, job_id: int) -> bool:
@@ -782,8 +807,8 @@ def cancel_job_as_admin(actor: User, job_id: int) -> bool:
 
     - **任务不存在** → 404。静默成功会让管理员以为「已经掐掉了」；
     - **任务已结束** → 返回 False（「你点的时候它刚好说完」不是失败）；
-    - **真正取消** → 走 `job_service.cancel_job`，它同时标记内存运行时
-      （在途协程下一个 await 点跳出）并落库终态。
+    - **真正取消** → 走 `_force_cancel`：标记内存运行时（在途协程下一个 await 点跳出）
+      并把库行落成 `cancelled`（不是停在「取消中」，管理员在这里就是最终裁决）。
 
     ⚠️ 取消是**协作式**的，不是强杀：卡在纯同步阻塞调用上的任务不会立刻退出。
     但库里已是终态，重启后不会再显示「生成中」——卡死最多是临时的。
@@ -795,9 +820,9 @@ def cancel_job_as_admin(actor: User, job_id: int) -> bool:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, "该任务不存在", status_code=404)
 
     owner_id = int(row["owner_id"])
-    # 与用户点「停止」共用同一条链路；只换掉 error_message 的措辞，
-    # 让运维在任务详情里能区分「用户放弃」与「管理员清理」。
-    changed = job_service.cancel_job(owner_id, job_id, message="管理员手动停止了任务")
+    # 与用户点「停止」共用「标记在途协程 + 置取消中」那条链路；再补一步**确认取消**，
+    # 只换掉原因文案，让运维在任务详情里能区分「用户放弃」与「管理员清理」。
+    changed = _force_cancel(owner_id, job_id, "管理员手动停止了任务")
     if changed:
         _audit(
             actor,
@@ -817,7 +842,9 @@ def cancel_stuck_jobs(actor: User) -> int:
     # running 按 created_at 升序，卡死（最久）的必然排在最前；500 条足够覆盖
     # 单机在飞任务的实际量级。
     with session_scope() as session:
-        rows = GenerationJobRepository(session).admin_list(status=STATUS_RUNNING, limit=500)
+        rows = GenerationJobRepository(session).admin_list(
+            statuses=(STATUS_RUNNING,), limit=500
+        )
         views = [_job_view(row.as_dict()) for row in rows]
     stuck = [view for view in views if view["is_stuck"]]
     if not stuck:
@@ -825,9 +852,7 @@ def cancel_stuck_jobs(actor: User) -> int:
 
     cancelled = 0
     for item in stuck:
-        if job_service.cancel_job(
-            int(item["owner_id"]), int(item["id"]), message="管理员清理卡死任务"
-        ):
+        if _force_cancel(int(item["owner_id"]), int(item["id"]), "管理员清理卡死任务"):
             cancelled += 1
 
     if cancelled:

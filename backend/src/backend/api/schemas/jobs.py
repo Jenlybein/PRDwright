@@ -158,7 +158,14 @@ class JobCreated(BaseModel):
     """创建任务响应：返回任务 id 与初始状态。"""
 
     job_id: int = Field(description="任务 id")
-    status: str = Field(default="running", description="任务状态，创建时恒为 running")
+    status: str = Field(
+        default="pending",
+        description=(
+            "任务状态，取值为七个之一：pending / running / cancelling / succeeded / "
+            "failed / superseded / cancelled。新任务建行即 pending，随即抢占；"
+            "抢不到执行权（被别的执行者领走 / 复用等待重试的任务）时如实返回当前值。"
+        ),
+    )
 
 
 class JobStatus(BaseModel):
@@ -185,7 +192,14 @@ class JobStatus(BaseModel):
             "非对话任务为 null。"
         ),
     )
-    status: str = Field(description="任务状态：running / completed / failed")
+    status: str = Field(
+        description=(
+            "任务状态（七值，票 #84）：pending（排队中）/ running（执行中）/"
+            "cancelling（取消中）/ succeeded（已定稿）/ failed（失败）/ "
+            "superseded（被取代）/ cancelled（已取消）。`error_code` 只表达失败原因，"
+            "**不再承担状态语义**——「被取代」与「已取消」靠这个字段区分。"
+        )
+    )
     phase: str = Field(default="", description="当前阶段（如 writing / reviewing）")
     solution_id: int | None = Field(default=None, description="关联方案 id，可空")
     error_code: str = Field(default="", description="失败时的错误码")

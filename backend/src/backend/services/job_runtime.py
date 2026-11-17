@@ -131,6 +131,10 @@ class JobRuntime:
     # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
     # 收尾也**不写**文档——见 `delete_solution_and_cancel_jobs` / `_finalize`。
     cancelled: bool = False
+    # 取消请求的原因文案（「用户停止了生成」/「方案已删除」/「管理员清理卡死」…）。
+    # 与 `error_message` 分开：取消不是失败，不该借失败原因那一列；确认取消时这一句
+    # 就是最终落进 `error_message` 的原因（AC4：状态由 status 表达，原因由文案表达）。
+    cancel_message: str = ""
     # --- 执行权（租约，票 #82）---
     #
     # 这一轮的执行权由三件事构成（判权看凭证、不看归属）：谁领的（仅供排查）、

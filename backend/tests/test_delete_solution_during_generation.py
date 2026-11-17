@@ -103,14 +103,23 @@ def _start_prd_job(client, solution_id: int) -> int:
 
 
 def _wait_settled(owner_id: int, job_id: int) -> dict[str, Any]:
-    """轮询任务终态；超时就让用例失败（把最后一行带出去便于排查）。"""
+    """轮询任务**终态**；超时就让用例失败（把最后一行带出去便于排查）。
+
+    七态（票 #84）之后「取消中」不是终态：它只是「请求已收到、等执行者确认」。
+    判据因此取四个终态值，而不是 `!= running`——否则会在取消中途读到半成品状态。
+    """
+    terminal = ("succeeded", "failed", "superseded", "cancelled")
     deadline = time.monotonic() + _SETTLE_TIMEOUT_SECONDS
     row = job_get(owner_id, job_id)
-    while row is not None and row["status"] == "running" and time.monotonic() < deadline:
+    while (
+        row is not None
+        and row["status"] not in terminal
+        and time.monotonic() < deadline
+    ):
         time.sleep(0.02)
         row = job_get(owner_id, job_id)
     assert row is not None, "任务行被删掉了：用量审计要靠它，必须保留"
-    assert row["status"] != "running", f"任务没有收尾：{row}"
+    assert row["status"] in terminal, f"任务没有收尾：{row}"
     return row
 
 
@@ -129,7 +138,7 @@ def _wait_document(owner_id: int, solution_id: int) -> list[dict[str, Any]]:
 
 
 def test_delete_solution_mid_generation_leaves_no_document(client, monkeypatch):
-    """删除方案会取消在途任务：不写 documents、任务落 failed/CANCELLED、任务行仍存在。
+    """删除方案会取消在途任务：不写 documents、任务落 cancelled、任务行仍存在。
 
     同时用「模型调用次数」证明任务**在途中**就被中止了，而不只是收尾时判了个失败：
     `_finalize` 里那道「方案还在不在」的兜底也能让文档不写，若只用「文档没写」做断言，
@@ -143,7 +152,7 @@ def test_delete_solution_mid_generation_leaves_no_document(client, monkeypatch):
     full_gate.set()  # 闸门一开始就开着，等于没有闸门
     full_llm = _install_doc_service(monkeypatch, full_gate)
     full_job = _start_prd_job(client, _create_solution(client))
-    assert _wait_settled(owner_id, full_job)["status"] == "completed"
+    assert _wait_settled(owner_id, full_job)["status"] == "succeeded"
     full_calls = len(full_llm.calls)
     assert full_calls >= 2, "整篇生成至少要有多次模型调用，否则这条对比没有意义"
 
@@ -169,9 +178,9 @@ def test_delete_solution_mid_generation_leaves_no_document(client, monkeypatch):
     assert len(llm.calls) < full_calls
     # 2. 文档侧干净：方案都删了，documents 里不该有任何一行
     assert document_store.list_documents(owner_id, solution_id) == []
-    # 3. 任务终态：failed + CANCELLED（刻意不新增 cancelled 状态）
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    # 3. 任务终态：cancelled（七态之后取消有自己的状态值，票 #84）
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     # 4. 任务行仍在：用完量审计要能查到「这次烧了 token 但没产出」
     assert job_get(owner_id, job_id) is not None
 
@@ -195,7 +204,7 @@ def test_delete_solution_mid_generation_does_not_touch_other_solutions(client, m
     doomed_row = _wait_settled(owner_id, doomed_job)
     kept_row = _wait_settled(owner_id, kept_job)
 
-    assert doomed_row["error_code"] == "CANCELLED"
+    assert doomed_row["status"] == "cancelled" and doomed_row["error_code"] == ""
     # 另一份方案的任务照常成功，文档也该写进去
-    assert kept_row["status"] == "completed"
+    assert kept_row["status"] == "succeeded"
     assert _wait_document(owner_id, kept) != []

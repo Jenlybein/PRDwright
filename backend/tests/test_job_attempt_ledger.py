@@ -24,7 +24,7 @@ import json
 import logging
 
 import pytest
-from conftest import job_create, job_get, job_persist_progress, register, users
+from conftest import job_claim, job_create, job_get, job_persist_progress, register, users
 from dbsupport import connect
 
 from backend.core import models
@@ -96,6 +96,12 @@ def _events_with(caplog, event: str) -> list:
     return [record for record in caplog.records if getattr(record, "event", "") == event]
 
 
+def _running(owner_id: int, kind: str = "prd"):
+    """建一条任务并领走（执行中），返回 `(job_id, lease)`。"""
+    job_id = job_create(owner_id, kind, None)
+    return job_id, job_claim(owner_id, job_id)
+
+
 # ---------------------------------------------------------------------------
 # 一、AC1：抢占 / 过程不记账本，只有「执行有结论」才写一行
 # ---------------------------------------------------------------------------
@@ -141,7 +147,7 @@ def test_in_flight_execution_has_no_ledger_row_until_it_concludes(alice):
     attempts = _attempts(alice, registered.job_id)
     assert len(attempts) == 1
     assert attempts[0]["outcome"] == OUTCOME_COMPLETED
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
 
 
 def test_successful_execution_records_one_completed_row(alice):
@@ -164,7 +170,7 @@ def test_successful_execution_records_one_completed_row(alice):
     assert attempt["error_summary"] == ""
 
     row = job_get(alice, registered.job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     usage = json.loads(row["usage"])
     assert attempt["duration_ms"] == int(usage["duration_ms"])
     assert attempt["prompt_tokens"] == int(row["prompt_tokens"])
@@ -173,14 +179,19 @@ def test_successful_execution_records_one_completed_row(alice):
 
 def test_repeat_transition_does_not_record_a_second_row(alice):
     """已终态再收尾一次：改到 0 行，账本也不多第二行（一次执行一行账）。"""
-    job_id = job_create(alice, "prd", None)
+    job_id, lease = _running(alice)
     first = job_state.transition(
-        job_state.JobEvent.SUCCEED, job_state.job_scope(alice, job_id), payload=_payload("第一版")
+        job_state.JobEvent.SUCCEED,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("第一版"),
+        lease_token=lease.token,
     )
     assert first.rows == 1
 
     second = job_state.transition(
-        job_state.JobEvent.SUCCEED, job_state.job_scope(alice, job_id), payload=_payload("第二版")
+        job_state.JobEvent.SUCCEED,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("第二版"),
     )
     assert second.rows == 0
     assert [attempt["attempt_no"] for attempt in _attempts(alice, job_id)] == [1]
@@ -310,13 +321,14 @@ def test_job_row_keeps_one_error_while_ledger_keeps_full_history(alice):
     第二次执行经仓储接缝造出来（今天不重跑，`#82` 的重试才会让它成为常态）：
     重点是「历史不依赖任务行」——任务行没有、也不该有一排历史列。
     """
-    job_id = job_create(alice, "prd", None)
+    job_id, lease = _running(alice)
     first = job_state.transition(
         job_state.JobEvent.FAIL,
         job_state.job_scope(alice, job_id),
         payload=_payload("半截正文"),
         error_code="LLM_UPSTREAM_ERROR",
         error_message="第一次：上游 500",
+        lease_token=lease.token,
     )
     assert first.rows == 1
     second_no = _append(
@@ -354,8 +366,9 @@ def test_job_row_keeps_one_error_while_ledger_keeps_full_history(alice):
 def test_cancelled_execution_is_recorded_as_cancelled_not_failed(alice):
     """取消：**请求停止当下不记账**，收尾时记一行 `cancelled`（与普通失败区分）。
 
-    取消在被请求那一刻就把任务行落成 `failed + CANCELLED`（用户要立刻看得见），
-    但账本等到收尾才写：否则一次执行会有「按下停止」与「真正结束」两行账。
+    取消在被请求那一刻先把执行中的行落成 `cancelling`（用户要立刻看得见），
+    但账本等到执行者确认收尾才写：否则一次执行会有「按下停止」与「真正结束」两行账。
+    已取消的账本错误码是空串——状态由 `outcome` / 任务行 `status` 表达（票 #84 AC4）。
     """
     observed: dict[str, list[dict]] = {}
 
@@ -379,18 +392,18 @@ def test_cancelled_execution_is_recorded_as_cancelled_not_failed(alice):
     attempt = attempts[0]
     assert attempt["outcome"] == OUTCOME_CANCELLED
     assert attempt["outcome"] != OUTCOME_FAILED, "取消不是普通失败，口径要分开"
-    assert attempt["error_code"] == "CANCELLED"
-    assert attempt["error_summary"] == "方案已删除，任务已取消"
+    assert attempt["error_code"] == "", "已取消不是错误码，状态由 status / outcome 表达"
+    assert attempt["error_summary"] == "账号已删除，任务已取消"
 
     row = job_get(alice, registered.job_id)
-    assert row["status"] == "failed" and row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled" and row["error_code"] == ""
 
 
 def test_superseded_execution_records_no_ledger_row(alice):
     """被取代：**不记账本**——它不是这次执行的结论，而是被更晚的任务接手。
 
-    取两种口径的交点：登记顶替先把旧行落成 `failed + SUPERSEDED`，旧协程醒来收尾又
-    确认一次「被取代」，两条路径都不该留下账本行（否则一次正常让位会被记成一次失败）。
+    七态之后这是两个状态值：登记顶替先把旧行落成 `superseded`，旧协程醒来又确认一次
+    「被取代」，两条路径都不该留下账本行（否则一次正常让位会被记成一次失败）。
     """
     observed: dict[str, int] = {}
 
@@ -400,7 +413,9 @@ def test_superseded_execution_records_no_ledger_row(alice):
         )
         assert new.job_id > 0
         observed["new_job_id"] = new.job_id
-        assert job_get(alice, new.job_id)["status"] == "running"
+        assert job_get(alice, new.job_id)["status"] == "pending", (
+            "登记只接单、未派发的任务处于排队中"
+        )
 
     old, _ = run_ticket_in_flight(
         alice,
@@ -413,21 +428,21 @@ def test_superseded_execution_records_no_ledger_row(alice):
     )
 
     old_row = job_get(alice, old.job_id)
-    assert old_row["status"] == "failed"
-    assert old_row["error_code"] == "SUPERSEDED"
+    assert old_row["status"] == "superseded"
+    assert old_row["error_code"] == "", "被取代不是错误码，是一个状态"
     assert _attempts(alice, old.job_id) == [], "被取代不是执行结论，不记账本"
-    # 接手的新任务还在跑（没有结论）→ 也没有账本行。
+    # 接手的新任务还在排队（没有结论）→ 也没有账本行。
     assert _attempts(alice, observed["new_job_id"]) == []
 
 
 def test_reaped_execution_is_recorded_as_failed(alice):
-    """启动回收把残留 running 判死：每个被回收的任务记一行 `failed`。
+    """启动回收把残留的非终态行判死：每个被回收的任务记一行 `failed`。
 
     这是「执行有结论」的第四种来源（服务重启后执行者已不在）——不记的话，最需要
     查的「为什么昨天那个任务没了」在账本里反而是一片空白。
     """
     job_id = job_create(alice, "prd", None)
-    assert job_get(alice, job_id)["status"] == "running"
+    assert job_get(alice, job_id)["status"] == "pending"
 
     job_service.reap_orphans()
 
@@ -457,7 +472,7 @@ def test_ledger_and_state_change_share_one_transaction(alice):
     若账本另开事务（或先提交），它会残留一行指向一个仍是 `running` 的任务——
     那种账比没有账更误导（「已经结束了」却还在跑）。
     """
-    job_id = job_create(alice, "prd", None)
+    job_id, lease = _running(alice)
 
     with pytest.raises(RuntimeError, match="同一事务里的后续步骤失败"):
         with session_scope() as session:
@@ -466,6 +481,7 @@ def test_ledger_and_state_change_share_one_transaction(alice):
                 job_state.job_scope(alice, job_id),
                 payload=_payload("# 正文"),
                 session=session,
+                lease_token=lease.token,
             )
             raise RuntimeError("同一事务里的后续步骤失败")
 
@@ -480,7 +496,7 @@ def test_ledger_write_failure_is_logged_but_does_not_kill_the_conclusion(alice, 
     实现上账本那一笔是**保存点**（写坏只回滚这一笔），所以状态更新不受污染——
     若让异常直接飞出去，整笔事务会连那条已写好的终态一起回滚，任务卡回 `running`。
     """
-    job_id = job_create(alice, "prd", None)
+    job_id, lease = _running(alice)
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("账本写不进去")
@@ -492,10 +508,11 @@ def test_ledger_write_failure_is_logged_but_does_not_kill_the_conclusion(alice, 
             job_state.JobEvent.SUCCEED,
             job_state.job_scope(alice, job_id),
             payload=_payload("# 正文"),
+            lease_token=lease.token,
         )
 
     assert result.rows == 1
-    assert job_get(alice, job_id)["status"] == "completed", "不许因为账本写失败而判失败"
+    assert job_get(alice, job_id)["status"] == "succeeded", "不许因为账本写失败而判失败"
     assert _attempts(alice, job_id) == [], "这一笔账确实没写成"
     warnings = _events_with(caplog, "job.attempt_record_failed")
     assert len(warnings) == 1, "写不进去必须可见（留一条 warning）"

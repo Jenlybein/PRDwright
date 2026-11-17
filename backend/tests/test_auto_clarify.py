@@ -186,7 +186,7 @@ def test_auto_clarify_writes_the_body_and_recomputes_pending(client, monkeypatch
         {"document": _ORIGINAL_PRD, "pending_items": list(_ITEMS), "doc_kind": "prd"},
     )
 
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     done = next(event for event in events if event.type == "done")
 
     doc = document_store.get_document(uid, solution_id, "prd")

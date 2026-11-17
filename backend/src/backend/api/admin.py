@@ -545,9 +545,9 @@ async def list_jobs(
 ) -> schemas.AdminJobListResponse:
     """在飞 / 最近失败 / 全部任务（可按状态、用户名、类型筛）。
 
-    `status` 为空表示不筛（页面的「全部」标签）；常用的两个值是 `running`
-    与 `failed`。running 按「跑得最久优先」排序——卡死任务的特征就是时间长，
-    顶到最前面才看得见。
+    `status` 为空表示不筛（页面的「全部」标签）；也接受逗号分隔的多个取值——七态
+    （票 #84）之后，「在飞」= `pending,running,cancelling`、「最近失败」= `failed`。
+    `running` 按「跑得最久优先」排序——卡死任务的特征就是时间长，顶到最前面才看得见。
 
     `is_stuck` 由服务端按「running 且超过 `STUCK_MINUTES` 未更新」判定：
     前端只负责把它画红，不重复实现这条规则。

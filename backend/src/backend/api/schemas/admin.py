@@ -31,8 +31,8 @@ class AdminStatsResponse(BaseModel):
 
     user_count: int = Field(description="注册用户数")
     admin_count: int = Field(description="管理员人数")
-    task_count: int = Field(description="生成任务总数（含失败）")
-    completed_count: int = Field(description="成功完成的任务数")
+    task_count: int = Field(description="生成任务总数（含失败、取消等所有状态）")
+    succeeded_count: int = Field(description="已定稿（`succeeded`）任务数")
     prompt_tokens: int = Field(description="输入 Token 合计")
     completion_tokens: int = Field(description="输出 Token 合计")
 
@@ -257,17 +257,18 @@ class AdminDailyStat(BaseModel):
     """
 
     day: str = Field(description="本地日期，形如 2026-10-22")
-    task_count: int = Field(description="当天创建的任务数（含运行中）")
-    completed_count: int = Field(description="成功完成数")
-    failed_count: int = Field(description="**真失败**数，已排除主动取消与被顶替")
-    cancelled_count: int = Field(description="主动取消 / 被新任务顶替的数量")
-    running_count: int = Field(description="仍在该天创建、尚未收尾的任务数")
+    task_count: int = Field(description="当天创建的任务数（含所有状态）")
+    succeeded_count: int = Field(description="已定稿数")
+    failed_count: int = Field(description="**真失败**数（`status=failed`）")
+    cancelled_count: int = Field(description="已取消数（用户取消 / 方案被删）")
+    superseded_count: int = Field(description="被取代数（同一份文档有更新的任务接手）")
+    active_count: int = Field(description="仍在该天创建、尚未收尾的任务数（排队中/执行中/取消中）")
     prompt_tokens: int = Field(description="输入 Token 合计")
     completion_tokens: int = Field(description="输出 Token 合计")
     failure_rate: float | None = Field(
         default=None,
-        description="失败率（已收尾任务中真失败的比例）。分母为 0 时为 null——"
-        "「那天没有任务」与「那天 0% 失败」是两回事。",
+        description="失败率（**已定稿 + 真失败**中真失败的比例）。取消 / 被取代都不进分母；"
+        "分母为 0 时为 null——「那天没有任务」与「那天 0% 失败」是两回事。",
     )
 
 
@@ -324,7 +325,12 @@ class AdminJobItem(BaseModel):
     owner_id: int = Field(description="归属用户 ID")
     owner_name: str = Field(description="归属用户名")
     kind: str = Field(description="任务类型：prd / api_docs / prompts / optimize / chat")
-    status: str = Field(description="running / completed / failed")
+    status: str = Field(
+        description=(
+            "任务状态（七值）：pending / running / cancelling / succeeded / "
+            "failed / superseded / cancelled"
+        )
+    )
     phase: str = Field(description="当前阶段（如 writing / reviewing）")
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     updated_at: str = Field(description="最后更新时间（UTC ISO 8601）")
@@ -333,7 +339,7 @@ class AdminJobItem(BaseModel):
     stuck_minutes: int = Field(description="已停更分钟数；仅 is_stuck 为 true 时有意义")
     prompt_tokens: int = Field(description="输入 Token")
     completion_tokens: int = Field(description="输出 Token")
-    error_code: str = Field(description="终态错误码（如 CANCELLED / LLM_UPSTREAM_ERROR）")
+    error_code: str = Field(description="失败原因码（如 LEASE_EXPIRED / LLM_UPSTREAM_ERROR）；取消 / 被取代为空串")
     error_message: str = Field(description="终态错误说明")
 
 
@@ -356,3 +362,4 @@ class AdminCancelStuckResponse(BaseModel):
     """批量取消卡死任务的结果。"""
 
     cancelled: int = Field(description="实际取消的任务条数")
+

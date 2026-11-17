@@ -23,10 +23,10 @@ import {
   type AdminJob,
 } from '@/services/adminService'
 
-type TabKey = 'running' | 'failed' | 'all'
+type TabKey = 'active' | 'failed' | 'all'
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: 'running', label: '在飞任务' },
+  { key: 'active', label: '在飞任务' },
   { key: 'failed', label: '最近失败' },
   { key: 'all', label: '全部' },
 ]
@@ -48,7 +48,7 @@ const KIND_OPTIONS = [
   { value: 'chat', label: '对话' },
 ]
 
-const tab = ref<TabKey>('running')
+const tab = ref<TabKey>('active')
 const username = ref('')
 const kind = ref('')
 
@@ -75,7 +75,7 @@ const filtered = computed(() => Boolean(username.value.trim() || kind.value))
 
 const emptyText = computed(() => {
   if (filtered.value) return '没有符合筛选条件的任务'
-  if (tab.value === 'running') return '当前没有正在运行的任务'
+  if (tab.value === 'active') return '当前没有在途任务（排队中 / 执行中 / 取消中）'
   if (tab.value === 'failed') return '最近没有失败任务'
   return '还没有任何任务'
 })
@@ -85,7 +85,13 @@ async function load(silent = false) {
   error.value = ''
   try {
     const page = await fetchJobs({
-      status: tab.value === 'all' ? '' : tab.value,
+      // 七态（票 #84）：在途是三个值，后端接受逗号分隔；单个值仍是合法输入。
+      status:
+        tab.value === 'all'
+          ? ''
+          : tab.value === 'active'
+            ? 'pending,running,cancelling'
+            : tab.value,
       username: username.value.trim(),
       kind: kind.value,
       limit: 100,
@@ -211,29 +217,43 @@ function formatDuration(seconds: number): string {
   return `${hours}h ${minutes % 60}m`
 }
 
+/**
+ * 任务七态的文案（票 #84，与后端 `status` 一一对应）。
+ *
+ * 这里**只按状态**取文案：被取代与已取消是两个值、两个词，绝不合并成「失败」。
+ * 错误码只解释失败原因，不参与状态判断——这正是 #84 要拆掉的旧口径。
+ */
+const STATUS_LABELS: Record<string, string> = {
+  pending: '排队中',
+  running: '运行中',
+  cancelling: '取消中',
+  succeeded: '已定稿',
+  failed: '失败',
+  superseded: '被取代',
+  cancelled: '已取消',
+}
+
 function statusLabel(job: AdminJob): string {
-  if (job.status === 'running') {
-    return job.is_stuck ? `已卡死 ${job.stuck_minutes} 分钟` : '运行中'
+  if (job.status === 'running' && job.is_stuck) {
+    return `已卡死 ${job.stuck_minutes} 分钟`
   }
-  if (job.status === 'completed') return '已完成'
-  if (job.error_code === 'CANCELLED') return '已取消'
-  if (job.error_code === 'SUPERSEDED') return '已被替代'
-  return '失败'
+  return STATUS_LABELS[job.status] ?? job.status
 }
 
 function statusClass(job: AdminJob): string {
   if (job.status === 'running') return job.is_stuck ? 'text-danger-fg' : 'text-success-fg'
-  if (job.status === 'completed') return 'text-muted'
-  if (job.error_code === 'CANCELLED' || job.error_code === 'SUPERSEDED') return 'text-subtle'
-  return 'text-danger-fg'
+  if (job.status === 'pending' || job.status === 'cancelling') return 'text-subtle'
+  if (job.status === 'failed') return 'text-danger-fg'
+  if (job.status === 'cancelled' || job.status === 'superseded') return 'text-subtle'
+  return 'text-muted'
 }
 
 /** 状态小方块。方块比字符「●」更容易和这套硬边视觉对齐 */
 function dotClass(job: AdminJob): string {
   if (job.status === 'running') return job.is_stuck ? 'bg-danger' : 'bg-[var(--ui-sky)]'
-  if (job.status === 'completed') return 'bg-muted'
-  if (job.error_code === 'CANCELLED' || job.error_code === 'SUPERSEDED') return 'bg-line'
-  return 'bg-danger'
+  if (job.status === 'failed') return 'bg-danger'
+  if (job.status === 'succeeded') return 'bg-muted'
+  return 'bg-line'
 }
 
 function kindLabel(value: string): string {
@@ -265,7 +285,7 @@ function totalTokens(job: AdminJob): string {
         <!-- 只在「在飞」页显示：失败页没有 running 数据，按钮会一直是（0），
              反而让人以为「没有卡死任务」，而真正该清理的可能在别处 -->
         <button
-          v-if="tab === 'running'"
+          v-if="tab === 'active'"
           type="button"
           class="brut-btn brut-btn-xs"
           :class="stuckCount > 0 ? 'brut-btn-danger' : ''"
@@ -278,7 +298,7 @@ function totalTokens(job: AdminJob): string {
 
       <template #desc>
         <p>
-          在飞任务超过 30 分钟没有更新会被标记为卡死（判据 running 且 updated_at 超 30 分钟）。
+          在飞任务超过 30 分钟没有更新会被标记为卡死（判据「执行中」且 updated_at 超 30 分钟）。
           取消是协作式的：任务在下一个可中断点停下。
         </p>
       </template>
@@ -370,12 +390,20 @@ function totalTokens(job: AdminJob): string {
                     详情
                   </button>
                   <button
-                    v-if="job.status === 'running'"
+                    v-if="job.status === 'pending' || job.status === 'running'"
                     type="button"
                     class="brut-btn brut-btn-xs border-danger-line text-danger-fg"
                     @click="pendingCancel = job"
                   >
                     取消
+                  </button>
+                  <button
+                    v-else-if="job.status === 'cancelling'"
+                    type="button"
+                    class="brut-btn brut-btn-xs"
+                    disabled
+                  >
+                    取消中…
                   </button>
                 </div>
               </td>

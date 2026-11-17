@@ -36,7 +36,7 @@ from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
 from backend.core.models import GenerationJob, JobEvent
-from backend.repositories.generation_job_repo import STATUS_RUNNING
+from backend.repositories.generation_job_repo import TERMINAL_STATUSES
 
 # 一次读最多取多少行：订阅是流，不是导出。上限存在的意义是「一页别把内存打爆」，
 # 不是分页语义——读到满页就说明还有，下一轮接着读。
@@ -111,10 +111,11 @@ class JobEventRepository:
 
         `cutoff` 是 ISO 8601 文本（字典序 = 时间序，与全库口径一致）；比较对象是
         **任务行的 `updated_at`**——终态就是在那次更新里落下的，所以它等于「收尾时间」。
-        `running` 的任务无论如何都不清理：它的过程日志正是活着的那条订阅要读的。
+        **非终态**（排队中 / 执行中 / 取消中）的任务无论如何都不清理：它的过程日志
+        正是活着的那条订阅要读的。判据取终态集合，不写死某一个值（七态，票 #84）。
         """
         terminal_jobs = select(GenerationJob.id).where(
-            GenerationJob.status != STATUS_RUNNING,
+            GenerationJob.status.in_(TERMINAL_STATUSES),
             GenerationJob.updated_at < cutoff,
         )
         result = self.session.execute(

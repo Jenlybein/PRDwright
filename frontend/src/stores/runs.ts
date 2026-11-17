@@ -87,6 +87,13 @@ export interface ActiveRun extends RunPointer {
   summary: RunSummary | null
   /** 最近一次收到的快照（供上层判断任务终态） */
   snapshot: JobSnapshot | null
+  /**
+   * 用户已经按下停止、但服务端还没确认收口（票 #84）。
+   *
+   * 它与服务端的 `status='cancelling'` 是**同一件事的两个面**：这里的标记让按钮立刻
+   * 变成「正在取消」并置灰（不等一次网络往返），服务端的快照负责最终事实。收尾时清掉。
+   */
+  cancelRequested: boolean
 }
 
 function emptyPreview(): RunPreview {
@@ -108,6 +115,17 @@ export const useRunsStore = defineStore('runs', () => {
 
   /** 是否有任务在跑（信息性判据；**不再用于导航拦截**） */
   const hasRunning = computed(() => activeRun.value?.status === 'running')
+
+  /**
+   * 当前这一支是否**正在取消**（按钮据此显示「正在取消」并置灰，票 #84）。
+   *
+   * 两个来源取并集：用户刚按下（本地标记，零延迟反馈）与服务端快照已经说 `cancelling`。
+   */
+  const cancelling = computed(() => {
+    const run = activeRun.value
+    if (!run || run.status !== 'running') return false
+    return run.cancelRequested || run.snapshot?.status === 'cancelling'
+  })
 
   /**
    * 可持久化的任务指针：只在**运行中**才有值。
@@ -197,6 +215,7 @@ export const useRunsStore = defineStore('runs', () => {
       elapsedMs: 0,
       summary: null,
       snapshot: null,
+      cancelRequested: false,
     }
     // 返回**响应式代理**而不是刚构造的裸对象：计时器与事件回调都拿着这个引用写
     // `elapsedMs` / `snapshot`，写裸对象只会改到 `ref` 内部的目标，界面永远收不到更新。
@@ -220,6 +239,7 @@ export const useRunsStore = defineStore('runs', () => {
       elapsedMs: 0,
       summary: null,
       snapshot: null,
+      cancelRequested: false,
     }
     // 同 `begin`：必须返回代理，否则后续写入不会触发更新
     return activeRun.value
@@ -265,11 +285,25 @@ export const useRunsStore = defineStore('runs', () => {
     run.summary = summary
   }
 
+  /**
+   * 记下「用户已经按下停止」（票 #84）。
+   *
+   * 只认同一支任务；返回是否记上了（迟到的点击属于已经结束的那一支，不返回 true）。
+   * 它不改 `status`：任务仍在跑，直到服务端回执说它落成已取消 / 取消中。
+   */
+  function requestCancel(jobId: number): boolean {
+    const run = activeRun.value
+    if (!run || run.jobId !== jobId || run.status !== 'running') return false
+    run.cancelRequested = true
+    return true
+  }
+
   /** 收尾：只收**同一支**任务；返回是否真的收了（迟到的收尾返回 false） */
   function settle(jobId: number): boolean {
     const run = activeRun.value
     if (!run || run.jobId !== jobId) return false
     run.status = 'settled'
+    run.cancelRequested = false
     return true
   }
 
@@ -287,6 +321,7 @@ export const useRunsStore = defineStore('runs', () => {
     run.snapshot = null
     run.elapsedMs = 0
     run.startedAt = Date.now()
+    run.cancelRequested = false
     return true
   }
 
@@ -317,6 +352,7 @@ export const useRunsStore = defineStore('runs', () => {
     activeRun,
     preview,
     hasRunning,
+    cancelling,
     pointer,
     // 判据
     holds,
@@ -333,6 +369,7 @@ export const useRunsStore = defineStore('runs', () => {
     setElapsed,
     setSummary,
     settle,
+    requestCancel,
     resume,
     detach,
     clear,

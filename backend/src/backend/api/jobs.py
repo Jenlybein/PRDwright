@@ -237,7 +237,12 @@ async def create_job(
     )
     registered = job_ticket.register_job_ticket(ticket)
     job_ticket.start_registered_job(registered)
-    return schemas.JobCreated(job_id=registered.job_id, status="running")
+    # 初始状态取库里那一行的事实，而不是写死 `running`（票 #84）：单进程里抢占就发生在
+    # 起协程之前，正常是新任务 → 执行中；但抢不到执行权（别的执行者已经领走 / 复用了
+    # 一条正在等待重试的任务）时它就是排队中。对外只给七个状态值之一，不猜。
+    row = job_service.get_job(user.id, registered.job_id)
+    initial_status = str((row or {}).get("status") or "pending")
+    return schemas.JobCreated(job_id=registered.job_id, status=initial_status)
 
 
 @router.get("", response_model=schemas.JobListResponse, summary="列出我的生成任务")

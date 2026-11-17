@@ -57,7 +57,7 @@ def _new_solution(client, title: str = "支付方案") -> int:
     return int(response.json()["id"])
 
 
-def _job(owner_id: int, *, status: str = "completed", prompt_tokens: int = 10) -> None:
+def _job(owner_id: int, *, status: str = "succeeded", prompt_tokens: int = 10) -> None:
     """直接插一条任务记录（绕开仓储的 running-only 建法）。"""
     moment = utc_now().isoformat()
     with connect() as conn:
@@ -228,7 +228,7 @@ def test_export_jobs_csv_has_bom_for_excel(client) -> None:
 
     assert files["jobs.csv"].startswith("\ufeff")
     assert "prompt_tokens" in files["jobs.csv"]
-    assert "completed" in files["jobs.csv"]
+    assert "succeeded" in files["jobs.csv"]
 
 
 def test_export_headers_are_download_friendly(client) -> None:

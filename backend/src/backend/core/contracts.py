@@ -183,7 +183,7 @@ class RunSummary(BaseModel):
     """
 
     kind: str = Field(default="", description="任务类型：prd / api_docs / prompts / optimize")
-    status: str = Field(default="", description="终态：completed / failed")
+    status: str = Field(default="", description="终态（七值）：succeeded / failed / superseded / cancelled")
     duration_ms: int = Field(default=0, description="任务总耗时（毫秒）")
     total_calls: int = Field(default=0, description="模型调用总次数（只统计拿到结果的调用）")
     failed_calls: int = Field(
@@ -237,3 +237,4 @@ class RunSummary(BaseModel):
         description="失败章节清单（section_id / title / index / reason）。"
         "与 partial 配套：前者是结论，这里是可定位的细节。",
     )
+

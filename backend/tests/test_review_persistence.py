@@ -214,7 +214,7 @@ def _run_job(client, payload: dict[str, Any]) -> tuple[int, list[dict[str, Any]]
     events = _events(stream)
 
     status = client.get(f"/api/jobs/{job_id}").json()["status"]
-    assert status == "completed", f"任务没有跑完：{status}，事件：{[item['type'] for item in events]}"
+    assert status == "succeeded", f"任务没有跑完：{status}，事件：{[item['type'] for item in events]}"
     return job_id, events
 
 

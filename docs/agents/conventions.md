@@ -71,7 +71,7 @@
 - 两条轨：`chunk` 是过程字（可能缺标题）、`part` 是权威正文（整段覆盖该章）；分章 `chunk` 必须带 `section_id` + `index`。
 - `part` 带 `index`、可乱序：看板装配与 `done.reply` 一律按 index 排序；并行必须关闭逐字 `chunk`（已交付的增量撤不回来）。
 - `stage(writing)` 放在单章重试循环内；按章分缓冲 `live_by_index`；`part` 只清该章；`_draft` 按 index 交错归并。
-- 失败语义：单章每阶段按 `PRD_SECTION_MAX_RETRIES` 重试；撰写用尽写占位继续、仍 `completed` 且 `partial=true`，审核用尽保留正文，改写用尽保留改写前版本，全部章节失败才 `error`。
+- 失败语义：单章每阶段按 `PRD_SECTION_MAX_RETRIES` 重试；撰写用尽写占位继续、仍 `succeeded` 且 `partial=true`，审核用尽保留正文，改写用尽保留改写前版本，全部章节失败才 `error`。
 - `review_enabled=False` 时连 `review` 事件都不发（报「0 个待处理问题」会被读成「审过了、没问题」）；因此那一版也**不写** `review_failed_at`——「没审」不是「审失败」，判据是事件上的 `attempted` 标记而不是结论空串。
 - `review_enabled` 对三份产物都生效：PRD 关逐章审核，接口 / 提示词关「整篇审 + 改写」；默认口径不同——PRD 取 `PRD_SECTION_REVIEW_ENABLED`，另两份 `None` 视为开（只有 `False` 才是关）。
 - 只有 `high` 触发改写（`REVIEW_REWRITE_MIN_SEVERITY`，两链共用）；`verdict` 如实报、只是不动笔；改写后不重审。
@@ -93,7 +93,7 @@
 - 上游正文变化（含手改，按 `content_sha`）只让下游 `stale=true` 亮黄条：不删除、仍可交付、只汇总提示不硬拦。
 - 接口 / 提示词：整篇生成 → 审一次 → 有问题改写一次；**审核结论随版本保存、一版一条**，SSE `review` 只负责订阅期间的即时展示，刷新后从文档接口读；**审核失败不写结论**（没有结论 ≠ 通过，界面标「审核失败」）。面板在「待确认问题」之下、正文之上（`ReviewConclusionPanel`），**四态恒渲染**：通过 / 有问题 / 审核失败 / 未审核；两个动作都在折叠头常驻、不可点时**就地置灰**——「修复」只在「有问题」可点，「重新审核」只在失败 / 未审核 / 通过可点（别把按钮藏起来，也别猜默认值）。**按结论把关时要说明原因**（`title` 与面板里的说明写清为什么不能点）；**按「别处有任务在跑」把关时不写文案**：灰的原因不在这一份的结论上，见 `ARCHITECTURE.md` §5.11。面板同时显示**审核时间**（`reviewed_at`）与**当前版本号**：结论要能回答「哪一版、什么时候审的」。失败态只显示「这次为什么没有结论」，**不渲染 `props.review` 的 summary / issues**（那是上一次的结论，摆在「审核失败」下面会被读成本次结果）。
 - 结论面板的数据源是**文档记录**（`DocumentRecord.review` + `reviewFailedAt`），`review` 事件只做即时更新（`documents.setReview` / `setReviewFailed`）；解析器唯一实现是 `frontend/src/utils/review.ts::parseReview`（`services/api.ts` 只再导出，`documentService` 直接从 utils 引——反向 import `api` 会成环）。「审核失败」是**落库事实**：失败时间写在被审那一版的 `document_versions.review_failed_at` 上（US3，迁移 0007），拿到新结论时清空，因此刷新 / 换设备后仍显示「审核失败（时间）」；读侧三格（结论 / 失败时间 / 版本号）在 `stores/documents.ts` 收成**一张记录表** `reviewSnapshots`，别再拆回三张平行 `Record`。**两种「审失败」写同一列**：`review` 任务的失败与**生成链路的审核降级**（PRD / 接口文档 / 提示词）都落 `review_failed_at`——用户看来都是「审了、没成」。「没审」与「审失败」由**显式标记**区分：`review` 事件带 `attempted`，`JobRuntime.review_attempted` 记下来，收尾按 `review is None and review_attempted` 判；显式关闭审核（`review_enabled=false`）连事件都不发，因此不写、仍是「未审核」。别用判定空串去猜（空正文那条路也是空串，但它不是失败）。PRD 的**逐章**审核失败仍是章级降级：汇总结论照发、不写 `review_failed_at`。
-- 重新审核（`kind=review`）= 只审不改的独立任务：输入由 `job_inputs._review_inputs` 取（`document` 是被审正文 + 与生成同一套上游 + **当前版本的待确认清单**，见 `_current_pending_items`——重审要判「清单漏登记」），PRD 走 `PrdSectionWriter.review_document` 逐章审当前正文并汇总，接口 / 提示词走 `document_review.stream_review_only`；收尾走 `document_store.commit_review`（只写当前版本的 `review` 列）。**审核失败判任务失败、绝不按通过处理**——生成链路那条「审核失败按通过」的口径不适用于「唯一的产出就是判定」的重审。**结论只写到被审的那一份正文上**：被审正文在建任务那一刻快照，收尾时用**条件写**（`expected_content_sha`）比对当前版本指纹；不一致 → 任务失败（`error_code=CONTENT_CHANGED`）、文案「正文已变更，本次审核结论未写入，请重新审核」、**已有结论原样保留**。事前比较（`job_finalize._review_body_changed`）与写入 SQL 各一道，**两道都判失败**（不是只记日志：写不进去却报 completed，用户看到的是一条「成功但结论没变」的记录）；目标缺失（`missing`）同理。失败本身写进 `review_failed_at`（US3）。**需求澄清线程与生成侧同一份内容口径进重审提示词**（PRD 的审核提示词里带一节「需求澄清对话」）：少了它，用户拍板过的细节会被判成编造。
+- 重新审核（`kind=review`）= 只审不改的独立任务：输入由 `job_inputs._review_inputs` 取（`document` 是被审正文 + 与生成同一套上游 + **当前版本的待确认清单**，见 `_current_pending_items`——重审要判「清单漏登记」），PRD 走 `PrdSectionWriter.review_document` 逐章审当前正文并汇总，接口 / 提示词走 `document_review.stream_review_only`；收尾走 `document_store.commit_review`（只写当前版本的 `review` 列）。**审核失败判任务失败、绝不按通过处理**——生成链路那条「审核失败按通过」的口径不适用于「唯一的产出就是判定」的重审。**结论只写到被审的那一份正文上**：被审正文在建任务那一刻快照，收尾时用**条件写**（`expected_content_sha`）比对当前版本指纹；不一致 → 任务失败（`error_code=CONTENT_CHANGED`）、文案「正文已变更，本次审核结论未写入，请重新审核」、**已有结论原样保留**。事前比较（`job_finalize._review_body_changed`）与写入 SQL 各一道，**两道都判失败**（不是只记日志：写不进去却报 succeeded，用户看到的是一条「成功但结论没变」的记录）；目标缺失（`missing`）同理。失败本身写进 `review_failed_at`（US3）。**需求澄清线程与生成侧同一份内容口径进重审提示词**（PRD 的审核提示词里带一节「需求澄清对话」）：少了它，用户拍板过的细节会被判成编造。
 - 四种「没审成 / 没修成」的边界分开写，别混成一个失败：**重审**没跑成 → 任务失败、结论不写（唯一产出就是判定）；**修复的重写**没跑成 → 任务失败、正文与版本都不动；**修复的重写成功而重审没跑成** → 正文照落库、结论留空（任务仍成功，失败时间落进新版本的 `review_failed_at`，面板标「审核失败（时间）」）；**生成时的审核没跑成** → 正文照落库、结论留空（任务仍成功，失败时间同样写进该版本的 `review_failed_at`，刷新后仍是「审核失败」）。四种都不写占位结论。**重审缺上游不 400**：PRD 按「仅依据正文与写作规范核对」，接口 / 提示词在提示词里写「未提供上游材料」——「历史方案也能补审」是用户故事，不该被生成侧那条硬校验挡住。
 - **审核只报缺陷，不报未决**（ADR 0003，C-R5）：结论里的每条都是**缺陷**，六类——编造 / 矛盾 / 结构不符 / 空泛 / 推断未标注 / 清单漏登记；**「缺什么、该怎么定」不进结论**，那是未决、归待确认清单。**类别决定严重度**（编造与矛盾 = high，其余 medium），提示词里逐类写死，不让模型升降。**两个时点两套口径**：生成过程中只判前五类；**只有重审与修复后的重审**才判「清单漏登记」，并把当前版本的待确认清单整份注入提示词（生成时清单还没抽出来，逐章审更看不到别的章）。「推断未标注」**只判形式**（有没有「（建议）」与一句依据），不评判依据强弱——这是同一件事被反复报的来源。**修复提示词必须写死「不得为缺失编造」**：缺就写「待确认」并登记清单，否则修复会把「未决」填成「编造」。界面上这块标题是「**文档缺陷**」，按类分组、类内按严重度排；**旧结论没有类别 → 归「未分类」，不追溯**（重审一次才按新口径重算）。唯一实现点 `services/review_defects.py`：类别→严重度映射、两时点开关（解析的 `allow_missing_pending` 与服务端丢弃第六类）、清单注入的文本、旧形状归一都在这里；`document_review`（接口 / 提示词）与 `prd_section_writer`（PRD 逐章）两条链路都从它取，提示词只有一份、用 `{pending_section}` 占位符区分两态。
 - 澄清提问上限 1-2 个，两处落点必须同步改：后端 `conversation_service.REQUIREMENTS_WRAPPER`（首轮开场白，是最后一条 user 消息）+ 前端 `useClarificationChat.ts::CLARIFICATION_SYSTEM_PROMPT`（开场白更靠后更具体、会盖过系统提示词）；口径由 `test_conversation_prompt.py` 锁死。
@@ -141,7 +141,7 @@
 - 「是否追加版本」与「是否删下游」恒等（都由「是不是整篇重生成」决定），`job_service` 收成一个 `append_version` 标志。
 - 环形外键：先空指针插 `documents` 行 → 插版本 → 回填指针（`_ensure_document()`）。
 - 写正文**只有一个入口**（#81）：`document_store.write_document(mode=append / replace / manual, expected_version_no=…)`——手改、整篇生成、修复、恢复、就地改写都走它；`save_document` / `commit_generated` / `checkpoint` / `restore` 是薄封装。新增产出正文的路径不要自己写库，接进 `_build_event_stream` 的 `done`（收尾经 `_finalize` → `write_document`）。**所有会覆盖当前正文的写入带版本锁**：对不上返回 `version_conflict`（不是「0 行 / 成功」），HTTP 保存回 409 + `CONTENT_CHANGED`，就地改写让任务判失败——旧内容不许覆盖已更新的正文。正文 + 清单 + 回执（就地改写时）同批写入、失败不覆写。
-- **收尾是一个事务**（#81）：`_finalize` 用一个 `session_scope()` 收进「状态机条件写 + 账本（保存点）+ 正文版本 + 审核结论」，提交后才结算内存与广播；写正文失败整批回滚、任务保持 `running`（留 `job.closeout_rolled_back`，由恢复接手），**不许把异常吞成 warning 后照报 completed**。重审结论写不进去仍判失败（第二笔事务只落失败 + 账本）；就地改写撞版本锁以 `CONTENT_CHANGED` 判失败。
+- **收尾是一个事务**（#81）：`_finalize` 用一个 `session_scope()` 收进「状态机条件写 + 账本（保存点）+ 正文版本 + 审核结论」，提交后才结算内存与广播；写正文失败整批回滚、任务保持 `running`（留 `job.closeout_rolled_back`，由恢复接手），**不许把异常吞成 warning 后照报 succeeded**。重审结论写不进去仍判失败（第二笔事务只落失败 + 账本）；就地改写撞版本锁以 `CONTENT_CHANGED` 判失败。
 - `save_document`（手改，就地改当前版本、只动正文）与 `commit_generated`（整批写入：`append_version=True` 追加版本 / `False` 就地替换正文 + 清单 + 回执）都只是 `write_document` 的门面；`optimize` / `clarify` / `auto_clarify` / `review_fix` 落地靠请求体 `doc_kind`，取不到 → 不落库也不猜默认值；`review` 只更新当前版本的结论列（`commit_review`，可入收尾事务）。
 - 版本路由挂 solution 作用域（`.../{kind}/versions`、`.../versions/{vid}`、`POST .../{kind}/checkpoint`、`POST .../{kind}/restore`）；版本不存在复用 `SOLUTION_NOT_FOUND`(404) 不新增错误码：「方案不可见」404、「还没有任何版本」200 + 空列表。
 - 删除只删历史版本，当前版本回 400 `INVALID_REQUEST`；守卫写在仓储 SQL 的 `WHERE`（`v.id != COALESCE(d.current_version_id, -1)`），不是「先查后删」。
@@ -187,9 +187,9 @@
 - 需额外空间的交互一律走 `AdminModal.vue`；弹窗开关与「提交中」是两个变量；行内动作 >3 个收进「操作 ▾」。
 - 主题切换 = 单按钮循环，权威在 `useTheme.ts::cycle()`；`localStorage.theme` 与 `index.html` 内联脚本共用键、解析规则一起改。
 - 视图用例靠文本与结构定位——新增控件别排在被断言的那个前面。
-- 「卡死」= running 且 `updated_at` 30 分钟未更新；`is_stuck` 只由服务端算；自动刷新 10s 轮询不用 SSE。
+- 「卡死」= `running`（执行中）且 `updated_at` 30 分钟未更新；`is_stuck` 只由服务端算；自动刷新 10s 轮询不用 SSE。
 - 级联：`users` → 会话 / 方案（→ 文档 → 版本 / 线程）/ 任务；有意不级联 `admin_audit_log` / `app_logs` / 全局配置；删号必须 `clear_login_failures()`。
-- 删除前 `cancel_for_user()` 停在飞任务（只改库不改内存 → 协程照旧烧 token）；删方案走 `cancel_running` 落 `failed + CANCELLED` + `_finalize` 兜底（`generation_jobs.solution_id` 无外键）；二次确认要求手打用户名。
+- 删除前 `cancel_for_user()` 停在飞任务（只改库不改内存 → 协程照旧烧 token）。七态口径（票 #84）：取消是**两段**——请求把执行中的行落 `cancelling`（不清租约），排队中的行一步落 `cancelled`；执行者在下一个动作点确认才落 `cancelled`（清租约、补一次载荷），租约到期的 `cancelling` 由恢复器兜底。删方案走 `cancel_running` + `_finalize` 兜底（`generation_jobs.solution_id` 无外键）。`error_code` 不再承载「取消 / 被取代」语义，两者各有状态值；二次确认要求手打用户名。
 
 ## 10. 测试
 

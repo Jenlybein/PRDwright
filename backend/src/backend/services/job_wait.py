@@ -21,7 +21,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from backend.repositories.generation_job_repo import STATUS_RUNNING
+from backend.repositories.generation_job_repo import STATUS_CANCELLING, STATUS_RUNNING
 from backend.services import job_service
 
 __all__ = ["InFlightHandle", "WaitOutcome", "in_flight", "wait_for_in_flight"]
@@ -97,7 +97,13 @@ async def wait_for_in_flight(
 
     # 只从「排空开始那一刻在途的任务」里挑超时的：这样 `cancelled ≤ in_flight`
     # 由构造保证，汇总里的三个数字不可能互相对不上。
-    victims = [runtime for runtime in pending if runtime.status == STATUS_RUNNING]
+    # 「取消中」同样算超时受害者（票 #84）：它名义上已经要停，但执行者还握着租约、
+    # 可能仍卡在模型调用里；排空要把它一并收掉，否则重启前它还在烧 token。
+    victims = [
+        runtime
+        for runtime in pending
+        if runtime.status in (STATUS_RUNNING, STATUS_CANCELLING)
+    ]
     cancelled = job_service.cancel_in_flight(reason, runtimes=victims)
     return WaitOutcome(
         in_flight=len(snapshot),

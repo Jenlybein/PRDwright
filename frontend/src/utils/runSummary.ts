@@ -19,7 +19,7 @@
  * 打断整条流或让整页报错。
  */
 
-import type { FailedSection, RunSummary, SkillRef, StepUsage } from '@/types'
+import type { FailedSection, JobState, RunSummary, SkillRef, StepUsage } from '@/types'
 
 /** 取对象；不是对象（含数组）时给 null */
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -110,7 +110,7 @@ export function normalizeRunSummary(value: unknown): RunSummary | null {
 
   return {
     kind,
-    status: pickString(data, 'status'),
+    status: (pickString(data, 'status') || 'failed') as JobState,
     durationMs,
     totalCalls: pickNumber(data, 'total_calls', 'totalCalls') ?? 0,
     failedCalls: pickNumber(data, 'failed_calls', 'failedCalls') ?? 0,
@@ -132,3 +132,5 @@ export function normalizeRunSummary(value: unknown): RunSummary | null {
     requestId: pickString(data, 'request_id', 'requestId'),
   }
 }
+
+

@@ -80,6 +80,36 @@ beforeEach(() => {
 })
 
 describe('任务监控页', () => {
+  it('状态列按七值显示，且被取代 / 已取消与失败是三个词', async () => {
+    const wrapper = await render([
+      job({ id: 1, status: 'pending' }),
+      job({ id: 2, status: 'running' }),
+      job({ id: 3, status: 'cancelling' }),
+      job({ id: 4, status: 'succeeded' }),
+      job({ id: 5, status: 'failed', error_code: 'LLM_UPSTREAM_ERROR' }),
+      job({ id: 6, status: 'superseded' }),
+      job({ id: 7, status: 'cancelled' }),
+    ])
+
+    const text = wrapper.text()
+    for (const label of ['排队中', '运行中', '取消中', '已定稿', '失败', '被取代', '已取消']) {
+      expect(text).toContain(label)
+    }
+    // 被取代不是失败：它那条行不该出现红色失败文案（错误码为空时靠状态区分）
+    expect(text).toContain('被取代')
+    expect(text).toContain('已取消')
+  })
+
+  it('取消中的任务：按钮已是「取消中…」且不可再点', async () => {
+    const wrapper = await render([job({ id: 3, status: 'cancelling' })])
+    const button = wrapper.findAll('button').find((item) => item.text() === '取消中…')
+    expect(button).toBeTruthy()
+    expect(button!.attributes('disabled')).toBeDefined()
+    // 排队中的任务也给取消入口（它还没有执行者，取消会一步落已取消）
+    const queued = await render([job({ id: 1, status: 'pending' })])
+    expect(queued.findAll('button').some((item) => item.text() === '取消')).toBe(true)
+  })
+
   it('列出任务，并把卡死任务标红', async () => {
     const wrapper = await render([
       job(),
@@ -177,7 +207,7 @@ describe('任务监控页', () => {
     await vi.waitFor(() => expect(jobsMock.mock.calls.length).toBeGreaterThanOrEqual(2))
     const calls = jobsMock.mock.calls
     expect(calls[calls.length - 1]![0]).toMatchObject({
-      status: 'running',
+      status: 'pending,running,cancelling',
       username: 'ali',
       kind: 'prompts',
     })

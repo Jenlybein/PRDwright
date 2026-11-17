@@ -108,7 +108,7 @@ def test_successful_login_clears_the_failure_counter(client):
 
 
 def test_delete_solution_cancels_its_jobs(client):
-    """正常路径：方案没了，挂在上面的 running 任务同时被收成终态。"""
+    """正常路径：方案没了，挂在上面的在途任务同时被收成已取消。"""
     owner = _owner(client)
     solution = solution_service.create_solution(owner, "待删", "chat", "draft")
     solution_id = int(solution["id"])
@@ -118,12 +118,13 @@ def test_delete_solution_cancels_its_jobs(client):
 
     assert solution_service.get_solution(owner, solution_id) is None
     row = job_get(owner, job_id)
-    assert row is not None and row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    # 排队中的任务没有执行者，取消一步到位落已取消（票 #84 的 AC1）
+    assert row is not None and row["status"] == "cancelled"
+    assert row["error_code"] == ""
 
 
 def test_delete_solution_does_not_cancel_jobs_when_it_fails(client, monkeypatch):
-    """删除失败（方案不属于本人 / 已被删掉）时，**任务必须原样还在 running**。
+    """删除失败（方案不属于本人 / 已被删掉）时，**任务必须原样还在排队中**。
 
     这条是「一个事务」的判据：若取消是另一个事务先提交，任务会变成 failed，
     而方案还在——用户会看到「我什么都没删，任务却被停了」。
@@ -139,7 +140,7 @@ def test_delete_solution_does_not_cancel_jobs_when_it_fails(client, monkeypatch)
     assert job_service.delete_solution_and_cancel_jobs(owner, solution_id) is False
 
     row = job_get(owner, job_id)
-    assert row is not None and row["status"] == "running", "删除失败不该顺手停任务"
+    assert row is not None and row["status"] == "pending", "删除失败不该顺手停任务"
     assert solution_service.get_solution(owner, solution_id) is not None
 
 

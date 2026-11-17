@@ -14,6 +14,7 @@ import type {
   DocKind,
   DocumentKind,
   JobSnapshot,
+  JobState,
   PendingItem,
   RequirementAnswers,
   RequirementsSummary,
@@ -506,7 +507,7 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     // 目标产物：`kind` 是动作名，`doc_kind` 才是「写哪一份」。旧后端没有这个字段，
     // 解析成 null 由调用方走「按阶段反推」的旧路，不在这里猜。
     docKind: fromBackendKind(data.doc_kind),
-    status: readString(data, 'status'),
+    status: readString(data, 'status') as JobState,
     phase: readString(data, 'phase'),
     finalizedText: readString(data, 'finalized_text'),
     liveBuffer: readString(data, 'live_buffer'),
@@ -910,8 +911,8 @@ function toBackendKind(kind: DocKind): string {
 export interface JobCreated {
   /** 任务 id */
   jobId: number
-  /** 初始状态，创建时恒为 running */
-  status: string
+  /** 初始状态（七值之一：新任务建行即 pending，随即抢占成 running） */
+  status: JobState
 }
 
 /** 任务状态摘要（列表 / 查询共用；**不含正文**） */
@@ -928,7 +929,8 @@ export interface JobStatusSummary {
    * 猜一条默认值等于把 A 的回复写进 B 的列表。
    */
   chatStage: ChatStage | null
-  status: string
+  /** 任务状态（七值，票 #84）：按 @/utils/jobState 取文案，不按错误码猜 */
+  status: JobState
   phase: string
   solutionId: number | null
   errorCode: string
@@ -954,7 +956,7 @@ function toJobStatus(data: unknown): JobStatusSummary {
     chatStage: typeof raw.chat_stage === 'string' && raw.chat_stage
       ? (raw.chat_stage as ChatStage)
       : null,
-    status: typeof raw.status === 'string' ? raw.status : '',
+    status: (typeof raw.status === 'string' ? raw.status : '') as JobState,
     phase: typeof raw.phase === 'string' ? raw.phase : '',
     solutionId: typeof raw.solution_id === 'number' ? raw.solution_id : null,
     errorCode: typeof raw.error_code === 'string' ? raw.error_code : '',
@@ -1100,7 +1102,7 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
   }
   return {
     jobId: typeof data?.job_id === 'number' ? data.job_id : 0,
-    status: typeof data?.status === 'string' ? data.status : 'running',
+    status: (typeof data?.status === 'string' ? data.status : 'pending') as JobState,
   }
 }
 
@@ -1118,12 +1120,12 @@ export async function fetchJob(jobId: number): Promise<JobStatusSummary> {
  * 对应后端 `GET /api/jobs`。
  *
  * 典型用途：刷新后快照里没有 `activeJobId`，用
- * `{solutionId, kind, status:'running'}` 仍能找到那个还在跑的任务并重连。
+ * `{solutionId, kind, status:'pending,running,cancelling'}` 仍能找到那个还在跑的任务并重连。
  */
 export async function fetchActiveJobs(filters: {
   solutionId?: number | null
   kind?: DocKind
-  status?: string
+  status?: JobState | string
 }): Promise<JobStatusSummary[]> {
   const params: Record<string, string | number> = {}
   if (filters.solutionId != null) params.solution_id = filters.solutionId

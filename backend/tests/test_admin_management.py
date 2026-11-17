@@ -203,7 +203,7 @@ def test_platform_stats_counts_everyone(client):
     assert stats["user_count"] == 1
     assert stats["admin_count"] == 1
     assert stats["task_count"] == 1
-    assert stats["completed_count"] == 1
+    assert stats["succeeded_count"] == 1
     assert stats["prompt_tokens"] == 7
 
 

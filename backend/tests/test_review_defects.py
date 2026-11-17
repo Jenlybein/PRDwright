@@ -261,7 +261,7 @@ def _generate_api_docs_with_pending(client, monkeypatch, solution_id: int) -> No
     _job_id, _events, status = _run_job(
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
-    assert status == "completed"
+    assert status == "succeeded"
     assert _documents(client, solution_id)["api_docs"]["pending_items"], (
         "夹具没有把待确认清单落进当前版本"
     )
@@ -292,7 +292,7 @@ def test_rereview_sees_the_pending_list_so_a_registered_item_is_not_a_defect(
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     assert conclusion["verdict"] == "pass", "清单里已经登记过的项不该再被报成缺陷"
     assert conclusion["issues"] == []
@@ -314,7 +314,7 @@ def test_rereview_reports_missing_pending_with_where_and_the_missing_entry(
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     # 重审确实读到了清单（空清单也要显式说明），因此「漏登记」判得出来
     assert "本版没有登记任何待确认项" in llm.reviewer_prompts[0]
     conclusion = _review_events(events)[0]
@@ -347,7 +347,7 @@ def test_generation_never_judges_missing_pending(client, monkeypatch):
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
 
-    assert status == "completed"
+    assert status == "succeeded"
     assert llm.reviewer_prompts, "生成链路应当审了一次"
     generation_prompt = llm.reviewer_prompts[0]
     assert "清单漏登记" not in generation_prompt, "生成时不该出现第六类的判据"
@@ -403,7 +403,7 @@ def test_fix_prompt_forbids_inventing_and_keeps_the_hole_open(client, monkeypatc
     # 先把它判成「有问题」：修复的唯一起点是那条结论
     _fake_service(monkeypatch, FakeLLM(reviewer=lambda prompt: _FABRICATION_REVISE_JSON))
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
-    assert status == "completed"
+    assert status == "succeeded"
     assert _review_events(events)[0]["verdict"] == "revise"
 
     llm = FakeLLM(writers=[_FIXED_API_DOCS], reviewer=lambda prompt: _PASS_JSON)
@@ -411,7 +411,7 @@ def test_fix_prompt_forbids_inventing_and_keeps_the_hole_open(client, monkeypatc
     _job_id, _events, status = _run_job(
         client, {"kind": "review_fix", "solution_id": solution_id, "doc_kind": "api_docs"}
     )
-    assert status == "completed"
+    assert status == "succeeded"
     assert llm.writer_calls == 1
 
     prompt = llm.writer_prompts[0]
@@ -460,7 +460,7 @@ def test_medium_category_is_forced_to_medium_and_never_triggers_rewrite(
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
 
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     issue = conclusion["issues"][0]
     assert issue["category"] == "structure"
@@ -489,7 +489,7 @@ def test_fabrication_is_forced_to_high_and_triggers_one_rewrite(client, monkeypa
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
 
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     assert conclusion["issues"][0]["severity"] == "high"
     assert llm.writer_calls == 2, "编造是 high，改写一次"
@@ -514,7 +514,7 @@ def test_legacy_conclusion_without_a_category_reads_back_as_uncategorized(
     llm = FakeLLM(reviewer=lambda prompt: legacy)
     _fake_service(monkeypatch, llm)
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
-    assert status == "completed"
+    assert status == "succeeded"
 
     doc = _documents(client, solution_id)["api_docs"]
     issue = doc["review"]["issues"][0]
@@ -542,7 +542,7 @@ def test_prd_rereview_also_opens_the_sixth_category_with_an_empty_list(
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     prompt = llm.reviewer_prompts[0]
     assert "清单漏登记" in prompt, "重审是六类全开的那个时点"
     assert "本版没有登记任何待确认项" in prompt, "空清单也要显式说明"
@@ -616,7 +616,7 @@ def test_chinese_category_label_is_normalized_and_still_forces_high(client, monk
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
 
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     issue = conclusion["issues"][0]
     assert issue["category"] == "fabrication"
@@ -654,7 +654,7 @@ def test_missing_pending_spelling_variants_are_dropped_during_generation(
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
 
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     assert conclusion["issues"] == [], "生成过程中报的清单漏登记必须被丢掉"
     assert conclusion["verdict"] == "pass"
@@ -687,7 +687,7 @@ def test_unknown_category_in_new_output_is_kept_as_medium_and_never_rewrites(
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
 
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     issue = conclusion["issues"][0]
     assert issue["category"] is None
@@ -720,7 +720,7 @@ def test_legacy_item_with_empty_severity_is_medium_on_both_products(client, monk
     _job_id, events, status = _run_job(
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
-    assert status == "completed"
+    assert status == "succeeded"
     whole_issue = _review_events(events)[0]["issues"][0]
     assert whole_issue["severity"] == "medium", "空 severity 不许原样存成空徽标"
 
@@ -731,7 +731,7 @@ def test_legacy_item_with_empty_severity_is_medium_on_both_products(client, monk
     llm = FakeLLM(reviewer=lambda prompt: legacy)
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
-    assert status == "completed"
+    assert status == "succeeded"
     prd_issue = _review_events(events)[0]["issues"][0]
     assert prd_issue["severity"] == whole_issue["severity"], (
         "同一份模型输出在两份产物里严重度必须相同"
@@ -760,7 +760,7 @@ def test_sixth_category_rule_demands_the_section_and_the_missing_class(client, m
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     prompt = llm.reviewer_prompts[0]
     assert "在哪一节" in prompt and "哪一类" in prompt, "判据要含定位与缺项类别"
     assert "40 字" in prompt, "detail 仍 ≤40 字，允许 where 承担定位"
@@ -787,7 +787,7 @@ def test_prompts_rereview_opens_all_six_categories_and_injects_the_list(
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prompts"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     prompt = llm.reviewer_prompts[0]
     for label in review_defects.CATEGORY_LABELS.values():
         assert label in prompt, f"提示词产物的重审提示词缺了「{label}」这一类"
@@ -829,7 +829,7 @@ def test_prd_summary_counts_defects_by_category(client, monkeypatch):
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     summary = _review_events(events)[0]["summary"]
     assert summary == "2 章已审，缺陷 2 处（编造 2）"
     assert "待处理问题" not in summary
@@ -948,7 +948,7 @@ def test_rewrite_prompt_gets_plain_severity_not_the_chinese_category_label(
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
 
-    assert status == "completed"
+    assert status == "succeeded"
     rewrite_prompt = llm.writer_prompts[1]
     assert "[high] ## 一、概述：" in rewrite_prompt
     assert "编造" not in rewrite_prompt, "中文类别标签不该进改写提示词"
@@ -1027,6 +1027,5 @@ def test_review_job_reads_the_document_rows_once(client, monkeypatch):
     _fake_service(monkeypatch, llm)
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     assert len(calls) == 1, f"重审输入解析读了 {len(calls)} 次文档行（应只读 1 次）"
-

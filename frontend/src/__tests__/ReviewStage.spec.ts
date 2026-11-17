@@ -44,7 +44,7 @@ function buttonByText(wrapper: VueWrapper, text: string) {
 function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     durationMs: 12_300,
     totalCalls: 8,
     failedCalls: 0,
@@ -759,3 +759,4 @@ describe('ReviewStage 的部分完成提示', () => {
     expect(wrapper.text()).not.toContain('审核失败')
   })
 })
+

@@ -253,7 +253,7 @@ def _establish_revise(client, monkeypatch, solution_id: int, doc_kind: str) -> d
     """先用一次「重新审核」把当前版本判成「有问题」——修复只对它有入口。"""
     _fake_service(monkeypatch, FakeLLM(reviewers=[_REVISE_JSON]))
     _job_id, events, status = _run_job(client, _review_payload(solution_id, doc_kind))
-    assert status == "completed"
+    assert status == "succeeded"
     conclusion = _review_events(events)[0]
     assert conclusion["verdict"] == "revise"
     return conclusion
@@ -324,7 +324,7 @@ def test_fix_appends_a_version_carrying_the_new_conclusion(
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _fix_payload(solution_id, doc_kind))
 
-    assert status == "completed"
+    assert status == "succeeded"
     assert llm.writer_calls == 1, "修复只重写一次"
     assert llm.reviewer_calls == 1, "修复后只重审一次"
 
@@ -383,7 +383,7 @@ def test_fix_injects_the_current_upstream_in_full(client, monkeypatch, doc_kind)
     _fake_service(monkeypatch, llm)
     _job_id, _events, status = _run_job(client, _fix_payload(solution_id, doc_kind))
 
-    assert status == "completed"
+    assert status == "succeeded"
     prompt = llm.writer_prompts[0]
     assert "这一句没有数字，但它必须原样出现在修复提示词里。" in prompt, (
         "修复必须看得见 PRD 当前版本全文"
@@ -411,14 +411,14 @@ def test_fix_of_prd_injects_summary_and_both_clarification_threads(client, monke
 
     _fake_service(monkeypatch, FakeLLM(reviewers=[_PRD_REVISE_JSON]))
     _job_id, events, status = _run_job(client, _review_payload(solution_id, "prd"))
-    assert status == "completed"
+    assert status == "succeeded"
     assert _review_events(events)[0]["verdict"] == "revise"
 
     llm = FakeLLM(writers=[_FIXED_PRD], reviewers=[_PASS_JSON])
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _fix_payload(solution_id, "prd"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     prompt = llm.writer_prompts[0]
     assert "做一个给团队写周报的工具" in prompt, "需求输入要进修复上下文"
     assert "只支持 Web 端" in prompt, "需求澄清线程要进修复上下文"
@@ -458,7 +458,7 @@ def test_fix_reviews_without_rewriting_again(client, monkeypatch):
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _fix_payload(solution_id, "api_docs"))
 
-    assert status == "completed"
+    assert status == "succeeded"
     assert llm.writer_calls == 1, "修复内的重审不得再触发改写"
     doc = _documents(client, solution_id)["api_docs"]
     assert doc["content"] == _FIXED_API_DOCS
@@ -507,7 +507,7 @@ def test_fix_keeps_the_new_body_when_the_rereview_fails(client, monkeypatch):
     _fake_service(monkeypatch, llm)
     _job_id, events, status = _run_job(client, _fix_payload(solution_id, "api_docs"))
 
-    assert status == "completed", "重审失败不该把已经落下的新正文判成失败"
+    assert status == "succeeded", "重审失败不该把已经落下的新正文判成失败"
     # 订阅期间给出的是一条「没审成」的结论（判定空串），界面据此显示「审核失败」
     conclusions = _review_events(events)
     assert conclusions, "重审失败也要有一条 review 事件，否则界面无从显示「审核失败」"
@@ -526,7 +526,7 @@ def test_fix_keeps_the_new_body_when_the_rereview_fails(client, monkeypatch):
     # 「可再点重新审核」：补审一次就能把这一版的结论填回去，并清掉失败时间
     _fake_service(monkeypatch, FakeLLM(reviewers=[_PASS_JSON]))
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
-    assert status == "completed"
+    assert status == "succeeded"
     refreshed = _documents(client, solution_id)["api_docs"]
     assert refreshed["review"]["verdict"] == "pass"
     assert refreshed["review_failed_at"] is None, "拿到新结论就该清掉失败时间"
@@ -551,7 +551,7 @@ def test_fix_requires_a_revise_conclusion(client, monkeypatch):
     # ② 审过、且判了通过：修复没有起点
     _fake_service(monkeypatch, FakeLLM(reviewers=[_PASS_JSON]))
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "api_docs"))
-    assert status == "completed"
+    assert status == "succeeded"
     passed = client.post("/api/jobs", json=_fix_payload(solution_id, "api_docs"))
     assert passed.status_code == 400, passed.text
     assert "有问题" in passed.json()["detail"]
@@ -589,17 +589,17 @@ def test_fix_of_prd_marks_downstream_stale(client, monkeypatch):
     _job_id, _events, status = _run_job(
         client, {"kind": "api_docs", "solution_id": solution_id}
     )
-    assert status == "completed"
+    assert status == "succeeded"
     assert _documents(client, solution_id)["api_docs"]["stale"] is False
 
     # PRD 被判「有问题」，随后按结论修复
     _fake_service(monkeypatch, FakeLLM(reviewers=[_PRD_REVISE_JSON]))
     _job_id, _events, status = _run_job(client, _review_payload(solution_id, "prd"))
-    assert status == "completed"
+    assert status == "succeeded"
 
     _fake_service(monkeypatch, FakeLLM(writers=[_FIXED_PRD], reviewers=[_PASS_JSON]))
     _job_id, _events, status = _run_job(client, _fix_payload(solution_id, "prd"))
-    assert status == "completed"
+    assert status == "succeeded"
 
     documents = _documents(client, solution_id)
     assert documents["prd"]["content"] == _FIXED_PRD
@@ -624,7 +624,7 @@ def test_fix_result_survives_a_new_session(client, monkeypatch):
 
     _fake_service(monkeypatch, FakeLLM(writers=[_FIXED_PROMPTS], reviewers=[_PASS_JSON]))
     _job_id, _events, status = _run_job(client, _fix_payload(solution_id, "prompts"))
-    assert status == "completed"
+    assert status == "succeeded"
 
     client.cookies.clear()
     login(client)

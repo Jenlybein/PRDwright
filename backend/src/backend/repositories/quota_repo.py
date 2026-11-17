@@ -31,16 +31,21 @@ from sqlalchemy import case, func, select
 from sqlmodel import Session
 
 from backend.core.models import GenerationJob, User
+from backend.repositories.generation_job_repo import (
+    ACTIVE_STATUSES,
+    STATUS_SUCCEEDED,
+)
 
 # 计入「今日次数」的状态。
 #
-# ⚠️ **不含 `failed`**：被取消（`CANCELLED`）、被新任务接管（`SUPERSEDED`）
-# 以及上游故障导致失败的任务，都不该吃掉用户的额度——那等于「系统抖动一次，
-# 所有人今天少一次机会」，用户完全无从申诉。防滥用靠并发上限与日志，不靠罚失败。
+# ⚠️ **不含终态里的失败 / 取消 / 被取代**（票 #84 的七态口径）：被取消
+# （`cancelled`）、被新任务接管（`superseded`）以及上游故障导致失败（`failed`）的
+# 任务，都不该吃掉用户的额度——那等于「系统抖动一次，所有人今天少一次机会」。
+# 防滥用靠并发上限与日志，不靠罚失败。
 #
-# ⚠️ **含 `running`**：在飞任务已经占用了名额。不计的话，连发 N 个请求都会通过
-# 检查（每个都还没落终态），而这正是限额要防的事。
-_COUNTED_STATUSES = ("completed", "running")
+# ⚠️ **含在途三态**：`pending` / `running` / `cancelling` 都已经占用了名额。不计的话，
+# 连发 N 个请求都会通过检查（每个都还没落终态），而这正是限额要防的事。
+_COUNTED_STATUSES: tuple[str, ...] = (STATUS_SUCCEEDED, *ACTIVE_STATUSES)
 
 
 def _task_count_expression():
@@ -92,7 +97,7 @@ class QuotaRepository:
             .select_from(GenerationJob)
             .where(
                 GenerationJob.owner_id == user_id,
-                GenerationJob.status == "running",
+                GenerationJob.status.in_(ACTIVE_STATUSES),
             )
         ).one()
 

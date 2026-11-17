@@ -28,11 +28,18 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import case, func, select
 from sqlmodel import Session
 
 from backend.core.clock import utc_now, utc_now_text
 from backend.core.models import AdminAuditLog, GenerationJob, User
+from backend.repositories.generation_job_repo import (
+    ACTIVE_STATUSES,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_SUCCEEDED,
+    STATUS_SUPERSEDED,
+)
 
 
 def _utc_day_bounds(day: date, shift: timedelta) -> tuple[str, str]:
@@ -53,13 +60,9 @@ def _utc_day_bounds(day: date, shift: timedelta) -> tuple[str, str]:
 # 审计一次最多返回多少行。它是给人翻的，不是给机器导的：
 # 真要做全量导出应该另开口子，而不是把这里的上限调到无穷大。
 _AUDIT_MAX_ROWS = 500
-
-# 「不算真失败」的错误码。这两个同样是 `status='failed'`，但成因完全不同：
-# - `CANCELLED`：用户自己删了方案 / 点了停止；
-# - `SUPERSEDED`：同一份文档被更晚的任务接手，旧的那支主动让开。
-# 把它们算进失败率，会让平台看起来比实际脆弱得多——而管理员据此判断「模型稳不稳」，
-# 正是最不该被污染的一个判断。
-_NOT_REAL_FAILURE = ("CANCELLED", "SUPERSEDED")
+# 统计口径（票 #84 AC5）：**按状态判，不按错误码猜**。`failed` 就是真失败；
+# 「被取代」与「已取消」各是一个状态、各有一列计数——它们长得像（都没有结果），
+# 含义却相反，合并统计就再也分不清「用户不要了」还是「被新任务挤掉了」。
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +128,7 @@ class PlatformUsage:
     user_count: int
     admin_count: int
     task_count: int
-    completed_count: int
+    succeeded_count: int
     prompt_tokens: int
     completion_tokens: int
 
@@ -134,7 +137,7 @@ class PlatformUsage:
             "user_count": self.user_count,
             "admin_count": self.admin_count,
             "task_count": self.task_count,
-            "completed_count": self.completed_count,
+            "succeeded_count": self.succeeded_count,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
         }
@@ -142,14 +145,19 @@ class PlatformUsage:
 
 @dataclass(frozen=True, slots=True)
 class DailyUsage:
-    """按本地日期聚合的一天。`failure_rate` 为 None 表示那天没有已收尾任务。"""
+    """按本地日期聚合的一天（七态口径）。`failure_rate` 为 None 表示那天没有已收尾任务。
+
+    `active_count` = 排队中 / 执行中 / 取消中（尚未收尾）；`cancelled_count` 与
+    `superseded_count` **分开**——AC5 要求它们在统计里始终是两件事。
+    """
 
     day: str
     task_count: int
-    completed_count: int
+    succeeded_count: int
     failed_count: int
     cancelled_count: int
-    running_count: int
+    superseded_count: int
+    active_count: int
     prompt_tokens: int
     completion_tokens: int
     failure_rate: float | None = None
@@ -158,10 +166,11 @@ class DailyUsage:
         return {
             "day": self.day,
             "task_count": self.task_count,
-            "completed_count": self.completed_count,
+            "succeeded_count": self.succeeded_count,
             "failed_count": self.failed_count,
             "cancelled_count": self.cancelled_count,
-            "running_count": self.running_count,
+            "superseded_count": self.superseded_count,
+            "active_count": self.active_count,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "failure_rate": self.failure_rate,
@@ -243,8 +252,8 @@ class AdminStatsRepository:
                 _count(User).label("user_count"),
                 _count(User, User.is_admin.is_(True)).label("admin_count"),
                 _count(GenerationJob).label("task_count"),
-                _count(GenerationJob, GenerationJob.status == "completed").label(
-                    "completed_count"
+                _count(GenerationJob, GenerationJob.status == STATUS_SUCCEEDED).label(
+                    "succeeded_count"
                 ),
                 _sum(GenerationJob.prompt_tokens).label("prompt_tokens"),
                 _sum(GenerationJob.completion_tokens).label("completion_tokens"),
@@ -254,7 +263,7 @@ class AdminStatsRepository:
             user_count=int(row[0] or 0),
             admin_count=int(row[1] or 0),
             task_count=int(row[2] or 0),
-            completed_count=int(row[3] or 0),
+            succeeded_count=int(row[3] or 0),
             prompt_tokens=int(row[4] or 0),
             completion_tokens=int(row[5] or 0),
         )
@@ -288,11 +297,13 @@ class AdminStatsRepository:
         是两个完全不同的结论**，图上必须能看出来。补 0 放在 Python 里做：
         SQL 的递归 CTE 虽然也能生成日历，但读起来远比几行 Python 难。
 
-        失败率的口径
-        ------------
-        分母是**已收尾**任务（completed + failed），不含 `running`——还在跑的任务
-        既不算成功也不算失败，放进分母会把失败率人为压低。
-        分子排除 `CANCELLED` / `SUPERSEDED`（见 `_NOT_REAL_FAILURE`）。
+        失败率的口径（七态，票 #84 AC5）
+        ----------------------------------
+        分母是**已收尾的成功与真失败**（`succeeded` + `failed`），不含在途的三个状态
+        （`pending` / `running` / `cancelling`）——它们既不算成功也不算失败。
+        分子只有 `failed`：**按状态判，不按错误码猜**。
+        「被取代」（`superseded`）与「已取消」（`cancelled`）各有一列计数、都不进
+        分母——它们长得像（都没有结果），但一个是系统让位、一个是用户意图。
         分母为 0 时 `failure_rate` 返回 `None` 而不是 0：那一天没有任何任务，
         「0% 失败」会被读成「全成功了」。
 
@@ -311,7 +322,7 @@ class AdminStatsRepository:
         for back in range(safe_days - 1, -1, -1):
             day = today - timedelta(days=back)
             counts = self._count_one_day(*_utc_day_bounds(day, shift))
-            finished = counts["completed_count"] + counts["failed_count"]
+            finished = counts["succeeded_count"] + counts["failed_count"]
             # 失败率由后端算好：前端各算一遍就会与这里漂移
             result.append(
                 DailyUsage(
@@ -325,25 +336,22 @@ class AdminStatsRepository:
         return result
 
     def _count_one_day(self, start: str, end: str) -> dict[str, int]:
-        """统计 `[start, end)` 内的六项指标。
+        """统计 `[start, end)` 内的各项指标（七态，按状态列，不看错误码）。
 
         区间**左闭右开**：`end` 那一刻的任务属于下一天，两边都算会把边界值数两遍。
         无行时 `func.sum` 返回 NULL，统一折成 0——`None` 会让调用方的加法直接炸。
         """
         status_is = lambda value: GenerationJob.status == value  # noqa: E731
-        real_failure = and_(
-            status_is("failed"), GenerationJob.error_code.notin_(_NOT_REAL_FAILURE)
-        )
-        not_real_failure = and_(
-            status_is("failed"), GenerationJob.error_code.in_(_NOT_REAL_FAILURE)
-        )
         row = self.session.execute(
             select(
                 func.count(),
-                func.sum(case((status_is("completed"), 1), else_=0)),
-                func.sum(case((real_failure, 1), else_=0)),
-                func.sum(case((not_real_failure, 1), else_=0)),
-                func.sum(case((status_is("running"), 1), else_=0)),
+                func.sum(case((status_is(STATUS_SUCCEEDED), 1), else_=0)),
+                func.sum(case((status_is(STATUS_FAILED), 1), else_=0)),
+                func.sum(case((status_is(STATUS_CANCELLED), 1), else_=0)),
+                func.sum(case((status_is(STATUS_SUPERSEDED), 1), else_=0)),
+                func.sum(
+                    case((GenerationJob.status.in_(ACTIVE_STATUSES), 1), else_=0)
+                ),
                 func.sum(GenerationJob.prompt_tokens),
                 func.sum(GenerationJob.completion_tokens),
             ).where(
@@ -353,12 +361,13 @@ class AdminStatsRepository:
         ).one()
         return {
             "task_count": int(row[0] or 0),
-            "completed_count": int(row[1] or 0),
+            "succeeded_count": int(row[1] or 0),
             "failed_count": int(row[2] or 0),
             "cancelled_count": int(row[3] or 0),
-            "running_count": int(row[4] or 0),
-            "prompt_tokens": int(row[5] or 0),
-            "completion_tokens": int(row[6] or 0),
+            "superseded_count": int(row[4] or 0),
+            "active_count": int(row[5] or 0),
+            "prompt_tokens": int(row[6] or 0),
+            "completion_tokens": int(row[7] or 0),
         }
 
     def top_users(self, limit: int = 10) -> list[TopUser]:

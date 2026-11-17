@@ -61,7 +61,7 @@ def _new_solution(client, title: str = "支付方案") -> int:
     return int(response.json()["id"])
 
 
-def _job(owner_id: int, *, status: str = "completed", prompt_tokens: int = 10) -> int:
+def _job(owner_id: int, *, status: str = "succeeded", prompt_tokens: int = 10) -> int:
     """直接插一条任务记录，返回其 id。"""
     moment = utc_now().isoformat()
     with connect() as conn:
@@ -273,12 +273,12 @@ def test_delete_clears_login_failures_for_that_username(client) -> None:
 
 
 def test_cancel_for_user_marks_db_rows_and_memory_runtime(client) -> None:
-    """删除前取消任务：库里的行落 CANCELLED，在途任务也不再继续消费事件。
+    """删除前取消任务：库里的行落 `cancelling`，在途任务也不再继续消费事件。
 
     只改库不改内存的话，在途协程不知道自己被取消，收尾时照样去写文档——
     「删了账号，正文却还在往里写」，不报错、只是数据对不上。跨公开动作断言：
     假事件流在造单时传入并卡在第一段，`cancel_for_user` 之后放开流，
-    观察到的结局是「后续事件没被消费 + 库行 failed + CANCELLED」。
+    观察到的结局是「后续事件没被消费 + 库行落成已取消」。
     """
     from backend.core.contracts import StreamEvent
     from ticket_support import run_ticket_in_flight
@@ -300,7 +300,7 @@ def test_cancel_for_user_marks_db_rows_and_memory_runtime(client) -> None:
     )
 
     assert any(
-        event.type == "run_summary" and event.data["status"] == "failed"
+        event.type == "run_summary" and event.data["status"] == "cancelled"
         for event in events
     ), "在途任务被取消后收尾必须落成失败"
     with connect() as conn:
@@ -308,18 +308,18 @@ def test_cancel_for_user_marks_db_rows_and_memory_runtime(client) -> None:
             "SELECT status, error_code, draft_content FROM generation_jobs WHERE id = %s",
             (registered.job_id,),
         ).fetchone()
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     # 取消之后 `done` 不再被消费：正文停在半截，绝不能变成完整的 reply。
     assert row["draft_content"] == "第一段"
-    assert job_service.get_job(owner_id, registered.job_id)["status"] == "failed"
+    assert job_service.get_job(owner_id, registered.job_id)["status"] == "cancelled"
 
 
 def test_cancel_for_user_leaves_finished_jobs_alone(client) -> None:
     """已完成的任务不受影响：只动 running。"""
     register(client, "alice")
     owner_id = _user_id("alice")
-    done_id = _job(owner_id, status="completed")
+    done_id = _job(owner_id, status="succeeded")
 
     assert job_service.cancel_for_user(owner_id) == 0
 
@@ -327,5 +327,5 @@ def test_cancel_for_user_leaves_finished_jobs_alone(client) -> None:
         row = conn.execute(
             "SELECT status, error_code FROM generation_jobs WHERE id = %s", (done_id,)
         ).fetchone()
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert row["error_code"] == ""
