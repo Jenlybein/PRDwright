@@ -211,7 +211,7 @@
 - 四目录：`/opt/prdwright`（代码，必须含 `backend/migrations/` 与 `skills/`）· `/var/lib/prdwright`（DB）· `/var/www/prdwright/releases/<ts>` + `current` 符号链接 · `/var/log/prdwright` + `/etc/prdwright/{backend.env,master.key}`（600）。
 - 发布顺序「先备份 → 换代码 → 重启（迁移自动跑）」；回滚 = 恢复备份（不是反向迁移）；备份没做成不许重启。
 - 恢复后第一次启动会再跑 `upgrade head`：备份的 revision 比代码新则启动失败 → 演练必须用当前代码。
-- 备份用 `VACUUM INTO`，不能 `cp`（WAL 会静默缺最近写入）；追加自检（`integrity_check` + 读 `alembic_version` + sha256）；主密钥保留每一把。
+- 备份用 `pg_dump -Fc`（`deploy/backup.py`），不能 `cp` 数据目录、也不再是 SQLite 时代的 `VACUUM INTO`（#78 起后端只剩 Postgres）；追加自检 = `pg_restore --list` 校验归档可解析 + 读 `alembic_version` + 记 sha256；主密钥保留每一把。回滚演练入口是 `deploy/drill.py`（`make drill`），预案见 `deploy/ROLLBACK.md`。
 - `PRDWRIGHT_MASTER_KEY_PATH` 走 `os.environ` → `.env` 读不到，必须 `EnvironmentFile`；`PRDWRIGHT_SKILLS_DIR` 走 `lookup_env`（两条路都通）。
 - 环境硬事实：`requires-python >=3.12`（Ubuntu 22.04 不够，建议 24.04）、Node `^22.18 || >=24.12`、无 requirements.txt（`uv sync --frozen`）。
 - 管理端挂 `/admin/` 要两处一致：`vite base: '/admin/'` + `createWebHistory(import.meta.env.BASE_URL)`（Vue Router 的 `normalizeBase()` 不跟随 Vite 的 base）。
