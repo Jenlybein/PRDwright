@@ -608,8 +608,8 @@ def test_finish_and_fail_are_conditional_and_report_affected_rows(alice):
     """
     job_id = job_create(alice, "prd", None)
 
-    assert job_finish(alice, job_id, draft_content="第一版", completed_sections=[]) == 1
-    assert job_finish(alice, job_id, draft_content="第二版", completed_sections=[]) == 0
+    assert job_finish(alice, job_id, draft_content="第一版") == 1
+    assert job_finish(alice, job_id, draft_content="第二版") == 0
     row = job_get(alice, job_id)
     assert row["status"] == "succeeded"
     assert row["draft_content"] == "第一版"
@@ -622,7 +622,6 @@ def test_finish_and_fail_are_conditional_and_report_affected_rows(alice):
             error_code="INTERNAL_ERROR",
             error_message="晚到的失败",
             draft_content="",
-            completed_sections=[],
         )
         == 0
     )
@@ -759,7 +758,7 @@ def test_list_jobs_filters_by_status_and_kind(client):
     job_claim(uid, running_prompts)
     queued = job_create(uid, "prd", None)
     finished = job_create(uid, "prd", None)
-    job_finish(uid, finished, draft_content="正文", completed_sections=[])
+    job_finish(uid, finished, draft_content="正文")
 
     # 七态（票 #84）：在途 = pending / running / cancelling，一次查询取全（AC4）。
     active = client.get("/api/jobs", params={"status": "pending,running,cancelling"})
@@ -1279,7 +1278,6 @@ def test_persist_progress_writes_pending_items(alice):
         alice,
         job_id,
         draft_content="正文",
-        completed_sections=[],
         phase="writing",
         pending_items=items,
     )
@@ -1295,7 +1293,6 @@ def test_finish_writes_pending_items(alice):
         alice,
         job_id,
         draft_content="正文",
-        completed_sections=[],
         pending_items=items,
     )
     row = job_get(alice, job_id)
@@ -1313,7 +1310,6 @@ def test_fail_writes_pending_items(alice):
         error_code="LLM_UPSTREAM_ERROR",
         error_message="上游中断",
         draft_content="半截正文",
-        completed_sections=[],
         pending_items=items,
     )
     row = job_get(alice, job_id)
@@ -1468,7 +1464,7 @@ def test_cancel_running_only_targets_owner_and_solution(client, alice):
     target = job_create(alice, "prd", 11)
     other_solution = job_create(alice, "prd", 12)
     finished = job_create(alice, "prd", 11)
-    job_finish(alice, finished, draft_content="正文", completed_sections=[])
+    job_finish(alice, finished, draft_content="正文")
 
     # 另一个 owner 恰好也有一个挂在同一个 solution_id 上的任务
     register(client, username="bob")
@@ -1990,8 +1986,8 @@ def test_db_snapshot_tolerates_corrupt_columns(alice):
     with connect() as conn:
         conn.execute(
             "UPDATE generation_jobs SET status = 'failed', error_code = 'LLM_UPSTREAM_ERROR', "
-            "draft_content = '半截正文', completed_sections = '{坏掉的 JSON', "
-            "usage = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' WHERE id = %s",
+            "draft_content = '半截正文', usage = '{坏掉的 JSON', "
+            "pending_items = '{坏掉的 JSON' WHERE id = %s",
             (registered.job_id,),
         )
         conn.commit()
@@ -2000,7 +1996,8 @@ def test_db_snapshot_tolerates_corrupt_columns(alice):
 
     assert snapshot.data["pending_items"] == []
     assert snapshot.data["partial"] is False
-    assert snapshot.data["failed_sections"] == []
+    # 分章遗留字段在快照里不许回来（#94）：`failed_sections` 已随分章链路删除
+    assert "failed_sections" not in snapshot.data
 
 
 def test_unknown_kind_fails_loudly_through_the_public_seam(alice):

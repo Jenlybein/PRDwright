@@ -19,7 +19,7 @@
  * 打断整条流或让整页报错。
  */
 
-import type { FailedSection, JobState, RunSummary, SkillRef, StepUsage } from '@/types'
+import type { JobState, RunSummary, SkillRef, StepUsage } from '@/types'
 
 /** 取对象；不是对象（含数组）时给 null */
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -81,17 +81,6 @@ function parseSkills(data: Record<string, unknown>): SkillRef[] {
     }))
 }
 
-function parseFailedSections(data: Record<string, unknown>): FailedSection[] {
-  return pickArray(data, 'failed_sections', 'failedSections')
-    .map(asRecord)
-    .filter((row): row is Record<string, unknown> => row !== null)
-    .map((row) => ({
-      sectionId: pickString(row, 'section_id', 'sectionId'),
-      title: pickString(row, 'title'),
-      reason: pickString(row, 'reason'),
-    }))
-}
-
 /**
  * 把一份回执归一成 `RunSummary`；不像回执的东西返回 `null`。
  *
@@ -122,7 +111,6 @@ export function normalizeRunSummary(value: unknown): RunSummary | null {
       (item): item is string => typeof item === 'string',
     ),
     partial: data.partial === true,
-    failedSections: parseFailedSections(data),
     // 供应商身份拆成三个字段（v19）：协议用来解释「走的是哪类接口」，
     // 配置 id 用来定位「具体哪一条」，名字是给人看的那一行。
     protocol: pickString(data, 'protocol'),

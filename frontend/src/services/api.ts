@@ -469,11 +469,6 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
     errorMessage: readString(data, 'error_message'),
     pendingItems: parsePendingItems(data),
     partial: data.partial === true,
-    failedSections: readObjectArray(data, 'failed_sections').map((item) => ({
-      sectionId: readString(item, 'section_id'),
-      title: readString(item, 'title'),
-      reason: readString(item, 'reason'),
-    })),
     elapsedMs: readNumber(data, 'elapsed_ms'),
     // 失败退避（#88）：空串 = 立即可领，读成 null 让调用方走「没在等」的常规路径。
     // 时间换算（含时区）统一在 `@/utils/backoff`，这里只负责把原文搬过来。

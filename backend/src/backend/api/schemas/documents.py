@@ -49,8 +49,9 @@ class DocumentItem(BaseModel):
         default=None,
         description=(
             "**当前版本**那一条审核结论（一版一条，形状与 SSE `review` 事件的数据一致："
-            "kind / verdict / summary / issues / rewritten / failed_sections / reviewed_at / "
-            "attempted；`issues` 每条带 `category`，旧结论没有这一格时由前端归「未分类」）。"
+            "kind / verdict / summary / issues / rewritten / reviewed_at / attempted；"
+            "三份产物的形状逐字相同。`issues` 每条带 `category`，旧结论没有这一格时由前端"
+            "归「未分类」）。"
             "`None` 表示这一版没审过或审核没跑成——**不等于通过**，界面照实标"
             "「未审核 / 审核失败」。刷新与换会话后它是唯一来源。"
         ),

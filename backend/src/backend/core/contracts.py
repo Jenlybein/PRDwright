@@ -94,8 +94,9 @@ class StreamEvent(BaseModel):
             "error_message/elapsed_ms，供前端补全已产出正文与当前阶段输出；"
             "后者在任务收尾时下发本次生成的用量汇总（结构见 `RunSummary`）。"
             "`review` 是审核结论：`data` 含 kind/verdict/summary/issues/rewritten/"
-            "failed_sections/reviewed_at/attempted。它随**被审的那一版正文**一起落库"
-            "（一版一条），事件只负责订阅期间的即时展示；刷新 / 换设备后从文档接口读那条。"
+            "reviewed_at/attempted——三份产物的形状逐字相同（票 #94）。它随**被审的那一版正文**"
+            "一起落库（一版一条），事件只负责订阅期间的即时展示；刷新 / 换设备后从文档接口"
+            "读那条。"
             "审核没跑成时判定为空串且**不写结论**（没有结论 ≠ 通过）；`attempted` 是"
             "「这次到底试没试」的显式标记：审失败要落 `review_failed_at`（刷新后仍显示"
             "「审核失败」），而没审（例如显式关闭审核）不许落——两者不能靠空串去猜。"
@@ -231,10 +232,5 @@ class RunSummary(BaseModel):
         default=False,
         description="本次生成是否有落下一版**可用但不完整**的正文（部分完成）。"
         "true 表示正文可用但不完整，前端据此在审阅页给出提示。",
-    )
-    failed_sections: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="失败章节清单。分章链路已随票 #92 退役，三份产物都整篇生成，"
-        "因此该字段当前恒为空——保留形状是为了 #94 统一收口时不破坏既有结论结构。",
     )
 

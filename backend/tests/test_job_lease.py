@@ -62,7 +62,6 @@ def alice(client):
 def _payload(draft: str, usage: str = '{"total_calls": 1}') -> job_state.FinishPayload:
     return job_state.FinishPayload(
         draft_content=draft,
-        completed_sections=[],
         usage=usage,
         pending_items=[],
     )

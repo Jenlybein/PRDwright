@@ -34,6 +34,9 @@
   #67 文档先行，无前置；#68 依赖 #67；#69 依赖 #68；#70 依赖 #68
   #69 依赖 #68、#70 依赖 #68（两张都吃同一份「按任务种类的在途判据」，不串行会重复一次规则）
   #71 依赖 #68、#69、#70（三张代码票全部完成才收口）
+
+#91 → #92 → #93 → #94   （spec #75 的管线四张，严格串行：后一张吃前一张收口后的形状）
+  #91 大纲扩到三份；#92 退役分章（PRD 整篇化）；#93 三份分批续写；#94 统一审核 / 改写 / 修复并删死字段
 ```
 
 **先文档、后代码**的分界在 #33 / #34 之间：#31~#33 不动生产代码语义，#34 起才改生成任务与数据库投影。第二轮同样先文档、后代码：#44 只把结论写进 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §5.8、本文件、`docs/agents/conventions.md`、`GLOSSARY.md` 与时间线真源 [`README.md`](./README.md)，#45 起才动前端代码，#49 收口三者一致。
@@ -624,3 +627,73 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 - **#94**：`failed_sections` / `partial` / `completed_sections` 等兼容字段的最终去留；`continuation` 目前只在事件里（不落库、不进快照），若将来要在重连后也显示「写到了第几批」，需要给快照加一格——那是契约变更，留给收口票一并定。
 - **审核 / 改写的续写**：若将来确实需要（例如极长的接口文档），要先决定「续写出来的 JSON 怎么合并」，不能照搬正文续写。
+
+---
+
+## 12. 本轮：审核 / 改写 / 修复统一为整篇（#94，spec #75 收口）
+
+### 12.1 范围
+
+- **一条审核 / 改写 / 修复路径，三份产物共用**：PRD / 接口文档 / 提示词套件的审核走 `backend/src/backend/services/document_review.py` 同一段代码（同一份提示词、同一个解析、同一个 `review_data` 形状），产物差异只由 `ProductContext` 表达。结论形状对三份**逐字相同**：`kind / verdict / summary / issues / rewritten / reviewed_at / attempted`。
+- **一版一条**：结论随 `document_versions.review` 保存；重新审核只更新**当前版本**那一条（`document_store.commit_review` + `expected_content_sha` 条件写），不追加版本、不改正文；正文在审的过程中被改过 → 任务失败（`CONTENT_CHANGED`）、原结论原样保留。
+- **只有 high 触发改写，改写后不重审**：门槛判据只在 `review.triggers_rewrite(settings.review_rewrite_min_severity)` 一处，默认 `high`；medium 照实报给用户但不动笔。改写仍只重写受影响的那几节、拼回整篇后**整段覆盖**（`part{replace}`），定位不到时退回整篇重写。
+- **修复 = 整篇重写 + 追加版本**：`document_service.fix_document_stream` 一次整篇重写 → 一次只审不改 → 收尾走 #81 的唯一写入入口 `document_store.write_document(mode="append")`（`source=review_fix`）。旧版正文与它自己那条结论一起留在版本历史里。
+- **审核失败不写结论**：三种「没审成」分开（重审失败 → 任务失败、结论不写；修复的重写失败 → 正文与版本都不动；修复的重写成功而重审失败 / 生成时的审核降级 → 正文照落库、结论留空并写 `review_failed_at`）。「没审」与「审失败」由事件上的显式 `attempted` 标记区分，不判空串。
+- **删前几票的死字段**：`failed_sections`（结论 / `RunSummary` / 快照 / 运行时四处恒空）整条链路删除；`completed_sections` 先在 #92 停写、本票用迁移 `0008` **删列**并撤掉 `FinishPayload` 与仓储参数；`review_defects.defects_count_text`（为分章汇总结论准备、零调用）删除；前端 `FailedSection` / `failedSections` / `sectionId` / `sectionTitle` 四个死形状删除（`review.ts` 的 `where` 保留对旧结论 `section_title` 的读回退）。
+- **前端收口**：`ReviewConclusionPanel` 就是「整篇一条结论」——三份产物同一个面板、同一套按钮条件（修复只在「有问题」可点，重新审核只在其余三态可点）；删掉「本次有 N 章生成失败」那一块分章遗留提示。缺陷仍按类分组、类内按严重度排，旧结论没有类别仍归「未分类」。
+
+### 12.2 本期不做
+
+- 审核结论的历史版本浏览、结论进交付包 / 管理端统计、按正文变化自动判定结论过期（同 §9「本期不做」）。
+- 审核 / 改写 / 修复**不续写**（#93 已定：这几步要的是整段结果，截断续写会产出两段互相矛盾的判定）。
+- 分章历史数据不迁移：`completed_sections` 的旧值随列一起删（它只描述已退役的分章进度）。
+- `continuation` 仍只在事件里、不落库、不进快照（若要重连后也显示「写到了第几批」，那是契约变更，另开票）。
+
+### 12.3 验收与证据
+
+1. **三份产物结论形状一致、一版一条**：`test_review_unify.py::test_conclusion_has_one_shape_for_all_three_products`（三份键集逐项相等）、`::test_one_conclusion_per_version_and_rereview_overwrites_it`（三份参数化：重审覆盖同一条、正文逐字不变、版本仍是 `[1]`、换会话后读到的是新那条）。
+2. **只有 high 触发改写、改写后不重审**：`::test_only_high_severity_triggers_one_rewrite_and_never_rereviews`（三份参数化：审核调用恰好 1 次、high 改写 1 次且改写后不再出现 `reviewing`、medium 一次都不改但判定照实报）。
+3. **修复整篇重写但追加版本**：`::test_fix_rewrites_whole_and_appends_a_version`（三份参数化：写入入口记录到 `mode="append"`、没有 `replace`、版本 `[2,1]`、来源 `review_fix`、旧版正文与旧结论都在）。
+4. **重审只更新结论、不改正文**：`::test_rereview_keeps_the_old_conclusion_when_the_body_changed`（三份参数化：`error_code=CONTENT_CHANGED`、正文保留手改、原结论不动、版本数不变）；旧口径的两道闸门用例仍在 `test_review_job.py`。
+5. **审核失败不写结论、界面照实显示失败**：`::test_failed_rereview_writes_no_conclusion_and_marks_the_failure`（三份参数化：任务失败、无 `review` 事件、`review` 列空、`review_failed_at` 落库、补审后清空）、`::test_attempted_marker_separates_not_reviewed_from_failed`（`attempted` 是「没审 / 审失败」的唯一分界，两条判定都是空串）。前端 `ReviewConclusionPanel.spec.ts` 的失败态用例仍守着「审核失败 + 失败时间、不渲染上一次结论」。
+6. **死字段不许回流**：后端 `::test_chapter_leftover_fields_are_gone`（`RunSummary` / `GenerationJob` 模型字段 + `review_data` 键集）、`test_generation_job.py:1845`（快照里没有 `completed_sections`）与 `:2000`（没有 `failed_sections`）；前端 `dead-code.spec.ts`「分章遗留字段不许回流（#94）」。
+
+### 12.4 复测与收口
+
+- 后端：`cd backend && PRDWRIGHT_TEST_POSTGRES_URL=…:5434 uv run pytest -n auto -q` → **1478 passed，0 skipped，0 failed**（#93 收口基线 **1460 passed**；本票净增 18，全部在新增的 `backend/tests/test_review_unify.py`）。`--collect-only -q` 现取 **1478** 收集 / **1268** 文本计数（含新增文件）/ **210** 参数化展开差额。
+- 前端：`cd frontend && npm run test:unit -- --run` → **760 passed / 43 文件**（#93 基线 **758 / 43**：删除 1 条「失败章节提示」用例、`review.spec.ts` 新增 3 条——定位回退与「结论里没有分章遗留字段」）；`npm run build`（含 `type-check`）通过。
+- 迁移：新增 `0008_drop_completed_sections.py`（`down_revision="0007"`，只删一列，`downgrade` 按原定义加回、数据不恢复）。迁移 head = `0008`，`test_schema_migration` 的「基线库 == 模型库」仍成立。
+- 文档：本文件 §12、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §3.8（「三份产物同构」一段）与 §5.12（取舍）、`GLOSSARY.md`（「审核」「修复」「改写」三条按新行为改正）、[`../agents/conventions.md`](../agents/conventions.md) §5（删字段与单一面板口径）、[`state-flow-design.md`](./state-flow-design.md) 文末「实现落地差异」。
+- **未执行**：push 与合并（由用户确认）。
+
+### 12.5 spec #75 整体完成状态：19 张票全部落地
+
+| 票 | 主题 | 状态 |
+| --- | --- | --- |
+| #76 | Postgres 接入（扩展期） | 已合入（`32d2cf1`） |
+| #77 | 测试基座切 PG（每用例独立库） | 已合入（`4dede30`） |
+| #78 | 收缩单一后端 + 迁移链并为 PG 基线 | 已合入（`7b8bea3`） |
+| #79 | 状态机单一入口（三态先行） | 已合入（`36da093`） |
+| #80 | 执行账本（`job_attempts`，迁移 0002） | 已合入（`1e6b48e`） |
+| #81 | 原子收尾 + 统一版本锁 | 已合入（`7aff1dc`） |
+| #82 | 租约 / 抢占 / 动作点续租（迁移 0003） | 已合入（`d7b89bc`） |
+| #83 | 恢复器（过期租约收口） | 已合入（`4f668ff`） |
+| #84 | 七态 + 取消中（迁移 0007） | 已合入（`5c73162`） |
+| #85 | 部分完成落成一版正文（迁移 0004） | 已合入（`cf2b2a0`） |
+| #86 | 事件表 + 游标订阅（迁移 0005） | 已合入（`8727973`） |
+| #87 | 创建请求去重 | 已合入（`a117c24`） |
+| #88 | 失败延迟退避（迁移 0006） | 已合入（`2c04b27`） |
+| #89 | 管理端四个数字 | 已合入（`d511095`） |
+| #90 | 回滚预案 + 可重复演练 | 已合入（`550308b`） |
+| #91 | 大纲扩到三份 | 已合入（`8d3da77`） |
+| #92 | PRD 整篇化 + 分章退役 | 已合入（`6a8c50c`） |
+| #93 | 三份分批续写 | 已合入（`b17fa80`） |
+| #94 | 审核 / 改写 / 修复统一为整篇（本票） | 本票 |
+
+**判定**：19 张票全部落地，spec #75 可判为**已完成**。仍然悬着的是#75 范围之外或明确遗留的三条：① `backend/scripts/{schema_survey,auth_cli}.py` 是 SQLite 时代死脚本（#78 报告点名，需另票清）；② 去重**未加索引**（#87 显式遗留：判据带 10 秒滚动窗口，唯一索引表达不了）；③ 僵死取消与崩溃场景的用量 / 耗时仍记 0（#80 遗留）。三条都不改变「状态、收尾、审核结论、管线」的对外语义。
+
+### 12.6 给后续票的遗留
+
+- **`continuation` 不落库**（#93）：重连后看不到「写到了第几批」，要显示得给快照加一格——契约变更，另开票。
+- **审核 / 改写的续写**：若将来确实需要（例如极长的接口文档），要先决定「续写出来的 JSON 怎么合并」，不能照搬正文续写。
+- **PRD 的旧结论里可能只有 `section_title`**：前端 `parseReview` 已做读回退（`where` 优先、退回 `section_title`），后端 `conclusion_to_review` 同样回退；等历史数据自然淘汰后可以只留 `where`。

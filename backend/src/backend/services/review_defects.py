@@ -228,32 +228,6 @@ def render_pending_list(items: list[dict[str, Any]] | None) -> str:
     return format_pending_items(list(items))
 
 
-def defects_count_text(issues: list[dict[str, Any]]) -> str:
-    """按类别计数的一句话：`编造 1 · 结构不符 2`；没有类别的归「未分类」。
-
-    这是**界面之外**唯一需要自己数一遍类别的地方（PRD 的汇总结论）：界面自己有一份
-    分组计数，结论里这句话则是落库、要被读出来的那句总结。顺序即类别表顺序，未分类垫底。
-
-    Args:
-        issues: 结论里的逐条问题。
-
-    Returns:
-        形如 `编造 1 · 结构不符 2` 的文本；没有问题时为 `""`。
-    """
-    counts: dict[str | None, int] = {}
-    for issue in issues:
-        key = normalize_category(issue.get("category")) if isinstance(issue, dict) else None
-        counts[key] = counts.get(key, 0) + 1
-    parts: list[str] = []
-    for key in [*CATEGORY_SEVERITY, None]:
-        number = counts.get(key, 0)
-        if not number:
-            continue
-        label = CATEGORY_LABELS[key] if key is not None else "未分类"
-        parts.append(f"{label} {number}")
-    return " · ".join(parts)
-
-
 def finalize_verdict(
     verdict: str, *, issues: list[dict[str, Any]], instruction: str, dropped: int
 ) -> tuple[str, str]:

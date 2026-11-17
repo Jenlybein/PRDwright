@@ -122,8 +122,6 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
     elif event_type == "done":
         runtime.final_reply = str(event.data.get("reply", ""))
         runtime.partial = bool(event.data.get("partial"))
-        failed = event.data.get("failed_sections")
-        runtime.failed_sections = failed if isinstance(failed, list) else []
         # 待确认清单随 `done` 一道抵达：生成器已在定稿正文里剥离标记块并算好。
         # 用 `or []` 兜底，生成器漏带该字段时不至于把整型 / None 写进 DB。
         pending = event.data.get("pending_items")
@@ -231,7 +229,6 @@ def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
         "injected_skills": runtime.skill_refs,
         # 部分完成：正文可用但不完整。随 usage 落库，刷新后 `JobStatus.partial` 仍读得到。
         "partial": runtime.partial,
-        "failed_sections": runtime.failed_sections,
     }
 
 

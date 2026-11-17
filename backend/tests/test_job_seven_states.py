@@ -80,7 +80,6 @@ def alice(client):
 def _payload(draft: str = "", usage: str = '{"total_calls": 1}') -> job_state.FinishPayload:
     return job_state.FinishPayload(
         draft_content=draft,
-        completed_sections=[],
         usage=usage,
         pending_items=[],
         prompt_tokens=3,
@@ -684,12 +683,12 @@ def _insert_job(
             conn.execute(
                 "INSERT INTO generation_jobs "
                 "(owner_id, solution_id, kind, doc_kind, chat_stage, status, phase, "
-                " draft_content, completed_sections, pending_items, input_fingerprint, usage, "
+                " draft_content, pending_items, input_fingerprint, usage, "
                 " max_provider_switches, error_code, error_message, "
                 " provider_protocol, provider_config_id, provider_name, provider_model, "
                 " prompt_tokens, completion_tokens, created_at, updated_at, "
                 " request_params, config_snapshot, skill_refs, skill_manifest) "
-                "VALUES (%s, NULL, 'prd', '', '', %s, '', '', '[]', '[]', NULL, NULL, 2, %s, '', "
+                "VALUES (%s, NULL, 'prd', '', '', %s, '', '', '[]', NULL, NULL, 2, %s, '', "
                 " '', '', '', '', 0, 0, %s, %s, '{}', '{}', '[]', '') RETURNING id",
                 (owner_id, status, error_code, moment, moment),
             ).fetchone()[0]
@@ -708,27 +707,23 @@ def test_migration_0007_maps_legacy_status_rows_and_is_idempotent():
 
     同时在同一条用例里钉住「可重复跑」：把库退回 0006 再升一次，映射结果不变，
     已经映射过的行一行都不再被改（0007 的 downgrade 是空操作，数据映射不回溯）。
+
+    只定位到**这一条迁移**（0006 → 0007），不再断言「head 就是 0007」：迁移链会继续长
+    （#94 追加了 0008 删分章遗留列），写死 head 会让每张加迁移的票都来改这条用例。
     """
     from alembic import command
-    from alembic.script import ScriptDirectory
 
     import dbsupport
     from backend.core.database import build_engine
     from backend.core.schema import (
-        _BACKEND_ROOT,
         _alembic_config,
         current_revision,
         head_revision,
     )
 
-    head = head_revision()
-    assert head == "0007"
-    previous = (
-        ScriptDirectory.from_config(_alembic_config(_BACKEND_ROOT.as_posix()))
-        .get_revision(head)
-        .down_revision
-    )
-    assert previous == "0006"
+    mapping = "0007"
+    previous = "0006"
+    assert head_revision() >= mapping, "七态迁移应仍在链上"
 
     with dbsupport.empty_database() as url:
         engine = build_engine(url)
@@ -745,6 +740,8 @@ def test_migration_0007_maps_legacy_status_rows_and_is_idempotent():
                 )
                 # 五条旧行：两条「failed + 状态性错误码」、一条真失败、
                 # 一条「running 且没有租约」（旧口径的排队中）、一条正常执行中。
+                # ⚠️ 这里显式写 `completed_sections`：0006 时点这一列**还在**且 NOT NULL
+                # （#94 的 0008 才删它）。它们被写进去之后再也没人读——正是删掉它的理由。
                 legacy = [
                     ("failed", "CANCELLED", "", ""),
                     ("failed", "SUPERSEDED", "", ""),
@@ -776,8 +773,8 @@ def test_migration_0007_maps_legacy_status_rows_and_is_idempotent():
                         ),
                     )
 
-            command.upgrade(cfg, head)
-            assert current_revision(engine) == head
+            command.upgrade(cfg, mapping)
+            assert current_revision(engine) == mapping
 
             with engine.connect() as conn:
                 rows = conn.exec_driver_sql(
@@ -801,7 +798,7 @@ def test_migration_0007_maps_legacy_status_rows_and_is_idempotent():
 
             # 可重复跑：退回 0006（数据迁移没有 DDL、downgrade 是空操作）再升一次。
             command.downgrade(cfg, previous)
-            command.upgrade(cfg, head)
+            command.upgrade(cfg, mapping)
             with engine.connect() as conn:
                 again = conn.exec_driver_sql(
                     "SELECT status, error_code FROM generation_jobs ORDER BY id"

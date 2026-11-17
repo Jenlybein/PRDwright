@@ -34,7 +34,6 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     retryAt: null,
     pendingItems: [],
     partial: false,
-    failedSections: [],
     ...overrides,
   }
 }

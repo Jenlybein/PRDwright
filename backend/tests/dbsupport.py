@@ -345,12 +345,12 @@ def insert_job(
         conn.execute(
             "INSERT INTO generation_jobs ("
             "owner_id, solution_id, kind, doc_kind, chat_stage, status, phase, "
-            "draft_content, completed_sections, pending_items, "
+            "draft_content, pending_items, "
             "input_fingerprint, usage, max_provider_switches, "
             "error_code, error_message, prompt_tokens, completion_tokens, "
             "provider_protocol, provider_config_id, provider_name, provider_model, "
             "created_at, updated_at, request_params, config_snapshot, skill_refs, skill_manifest"
-            ") VALUES (%s, NULL, %s, '', '', %s, %s, '', '[]', '[]', NULL, NULL, 2, %s, '', %s, %s, "
+            ") VALUES (%s, NULL, %s, '', '', %s, %s, '', '[]', NULL, NULL, 2, %s, '', %s, %s, "
             "'', '', '', '', %s, %s, '{}', '{}', '[]', '')",
             (
                 owner_id,
