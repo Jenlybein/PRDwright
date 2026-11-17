@@ -113,10 +113,10 @@ class User(SQLModel, table=True):
     salt: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
     created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     is_active: bool = Field(
-        default=True, sa_column=Column(Boolean, nullable=False, server_default=text("1"))
+        default=True, sa_column=Column(Boolean, nullable=False, server_default=text("true"))
     )
     is_admin: bool = Field(
-        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("0"))
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
     )
     # 每日额度覆盖：-1 = 跟随全局，0 = 不限，N > 0 = 该用户上限。默认 -1 保证升级后行为不变。
     daily_task_limit: int = Field(
@@ -492,6 +492,11 @@ class ChatTurn(SQLModel, table=True):
 
     ⚠️ `ux_chat_turns_job_role` 是**部分唯一索引**（只约束 `job_id` 非空的行），
     幂等写轮次靠它：同一个 job 的同一角色只允许一条。
+
+    部分条件要**两个方言都声明**（#76）：`sqlite_where` 在 Postgres 上是被静默
+    忽略的——不是报错，而是建成一条全量唯一索引：SQLite 那份语义还在、PG 那份
+    悄悄丢了 WHERE，两边的结构快照也对不上。非空条件本身在两边同义（NULL 在唯一
+    索引里互不冲突），所以写同一句 `text("job_id IS NOT NULL")` 就够。
     """
 
     __tablename__ = "chat_turns"
@@ -504,6 +509,7 @@ class ChatTurn(SQLModel, table=True):
             "role",
             unique=True,
             sqlite_where=text("job_id IS NOT NULL"),
+            postgresql_where=text("job_id IS NOT NULL"),
         ),
         {"sqlite_autoincrement": True},
     )
@@ -536,7 +542,7 @@ class ChatTurn(SQLModel, table=True):
         default="[]", sa_column=Column(Text, nullable=False)
     )
     interrupted: bool = Field(
-        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("0"))
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
     )
     job_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     created_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
@@ -645,13 +651,13 @@ class ModelProvider(SQLModel, table=True):
         default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
     )
     thinking_enabled: bool = Field(
-        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("0"))
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
     )
     extra_json: str = Field(
         default="{}", sa_column=Column(Text, nullable=False)
     )
     enabled: bool = Field(
-        default=True, sa_column=Column(Boolean, nullable=False, server_default=text("1"))
+        default=True, sa_column=Column(Boolean, nullable=False, server_default=text("true"))
     )
     sort_order: int = Field(
         default=0, sa_column=Column(Integer, nullable=False, server_default=text("0"))
@@ -683,6 +689,13 @@ class SystemConfig(SQLModel, table=True):
 # 所以新增布尔列必须在这里登记，否则会冒出幻影迁移。
 # `tests/test_schema_parity.py` 断言「从模型推导出的布尔列集合 == 这份清单」，
 # 两头对不上就转红（既防漏登记，也防清单过期）。
+#
+# 顺带一条**跨库硬约束**（#76）：布尔列的 `server_default` 必须写 `true` / `false`，
+# 不能写 `0` / `1`。SQLite 把 BOOLEAN 当整数、`DEFAULT 0` 毫无问题——所以这个坑在
+# SQLite 上完全看不出来；而 Postgres 的 `BOOLEAN` 不接受整数默认值，
+# 空库跑 `0001` 的第一条建表语句就会报
+# 「column is of type boolean but default expression is of type integer」。
+# `true` / `false` 在两边都是合法布尔字面量，于是迁移不需要按方言分支。
 BOOLEAN_COLUMNS: frozenset[tuple[str, str]] = frozenset(
     {
         ("users", "is_active"),

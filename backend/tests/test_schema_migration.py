@@ -166,6 +166,38 @@ def test_baseline_produces_exactly_the_model_schema(tmp_path):
         engine.dispose()
 
 
+def test_migration_url_falls_back_to_application_configuration(monkeypatch):
+    """迁移地址的第三级兜底是**应用配置**，不是写死的 SQLite 文件（#76）。
+
+    以前 `migrations/env.py` 的最后一级写死 `sqlite+pysqlite:///{default_db_file()}`：
+    CLI 不带 `-x url=` 时，配了 `DATABASE_URL` 的 Postgres 部署会被迁移到
+    **另一个 SQLite 文件**上（「迁移改了 A 库、服务读的是 B 库」这类最难查的故障）。
+    """
+    from backend.core.config import get_settings
+    from backend.core.schema import migration_url
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@127.0.0.1:5432/prdwright")
+    monkeypatch.delenv("DB_PATH", raising=False)
+    get_settings.cache_clear()
+
+    assert (
+        migration_url(override=None, configured=None)
+        == "postgresql+psycopg://u:p@127.0.0.1:5432/prdwright"
+    )
+    # `-x url=` 仍然第一优先（调试 / 对拍）
+    assert migration_url(override="sqlite+pysqlite:////tmp/probe.db", configured=None) == (
+        "sqlite+pysqlite:////tmp/probe.db"
+    )
+    # 程序化调用传进来的地址第二优先
+    assert migration_url(override=None, configured="mysql+pymysql://u:p@h/db") == (
+        "mysql+pymysql://u:p@h/db"
+    )
+    # `alembic.ini` 里的占位符视为「没配置」
+    assert migration_url(override=None, configured="driver://user:pass@localhost/dbname") == (
+        "postgresql+psycopg://u:p@127.0.0.1:5432/prdwright"
+    )
+
+
 def test_models_declare_no_relationship():
     """模型不声明 `Relationship()`。
 

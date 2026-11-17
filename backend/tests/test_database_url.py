@@ -1,13 +1,16 @@
-"""数据库地址解析（v8 / T18.9）。
+"""数据库地址解析（v8 / T18.9）与方言装配（#76 Postgres 接入）。
 
-这一层要守的是「换库 = 改一个环境变量」这个承诺。三个必须先钉住的点：
+这一层要守的是「换库 = 改一个环境变量」这个承诺。四个必须先钉住的点：
 
 1. **`DATABASE_URL` 优先，`DB_PATH` 是兼容糖**。兼容糖的意义是「已有部署零改动
    升级」——一旦它被当成并列选项，就会出现"两个都设了听谁的"这种没人能答的问题；
 2. **不认识的 scheme 要立刻拒绝**。未适配的后端在第一条 SQL 上才会失败，而那条报错
    指向驱动或语法，看不出真因是"这个后端还没被支持"；
 3. **URL 是「连哪个库」的完整表达**。文件路径只是它的一个特例，所以缓存键、
-   日志、迁移地址都该以 URL 为准。
+   日志、迁移地址都该以 URL 为准；
+4. **连接级 SQL 必须按方言选**（#76 的真因）。以前非 SQLite 一律挂 MySQL 的
+   `SET SESSION sql_mode`，Postgres 接上之后第一条连接就会在那句上失败——而报错
+   出现在驱动里，看不出真因是"把别人的方言配置搬过来了"。
 """
 
 from __future__ import annotations
@@ -60,10 +63,93 @@ def test_unknown_backend_is_rejected_at_build_time():
     报错信息必须点明"该改哪两个文件"，否则下一个人只会知道"连不上"。
     """
     with pytest.raises(ValueError) as caught:
-        database.build_engine("postgresql://u:p@h:5432/prdwright")
+        database.build_engine("oracle+oracledb://u:p@h:1521/prdwright")
     message = str(caught.value)
-    assert "postgresql" in message
+    assert "oracle" in message
     assert "core/database.py" in message
+
+
+def test_postgres_engine_is_accepted_with_network_pool_settings():
+    """Postgres 是**已适配的后端**：建得出引擎，且按网络型后端装配池。
+
+    不连库：`create_engine` 是懒的，建引擎不产生任何连接。这条守的是
+    "配置层认得 Postgres"（`SUPPORTED_BACKENDS` 与池装配），不是"库能跑"——
+    后者由 `test_postgres_integration.py` 在真库上证明。
+    """
+    engine = database.build_engine("postgresql+psycopg://u:p@127.0.0.1:5432/prdwright")
+    try:
+        assert engine.dialect.name == "postgresql"
+        # 网络型后端：连接会掉线，必须 pre_ping + 定期换掉
+        assert engine.pool._pre_ping is True  # noqa: SLF001 - 断言池的装配结果
+        assert engine.pool._recycle == database.DEFAULT_POOL_RECYCLE  # noqa: SLF001
+        # 固定池约定对任何后端都一样：运行期不许扩容
+        assert engine.pool._max_overflow == 0  # noqa: SLF001
+    finally:
+        engine.dispose()
+
+
+def _run_connect_hook(backend: str) -> list[str]:
+    """跑一遍该方言的「连接建立后」钩子，把执行的 SQL 记下来。
+
+    钩子的入参是 DBAPI 连接（只用到 `cursor()`），所以可以用假连接跑，
+    既不建真连接也看得见到底发了哪些语句。
+    """
+    executed: list[str] = []
+
+    class _Cursor:
+        def execute(self, sql: str) -> None:
+            executed.append(sql)
+
+        def close(self) -> None:
+            pass
+
+    class _Connection:
+        def cursor(self) -> _Cursor:
+            return _Cursor()
+
+    database._connect_hook(backend)(_Connection(), None)
+    return executed
+
+
+@pytest.mark.parametrize(
+    ("backend", "required", "forbidden"),
+    [
+        (
+            "sqlite",
+            ("PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON"),
+            ("sql_mode", "TIME ZONE"),
+        ),
+        # Postgres 上**绝不能**出现 sql_mode / BEGIN IMMEDIATE / PRAGMA：
+        # 那是别的方言的语法，执行它等于第一条连接就炸。
+        ("postgresql", ("'UTC'",), ("sql_mode", "BEGIN IMMEDIATE", "PRAGMA")),
+        ("mysql", ("SET time_zone = '+00:00'", "sql_mode"), ("BEGIN IMMEDIATE", "PRAGMA")),
+        ("mariadb", ("SET time_zone = '+00:00'", "sql_mode"), ("BEGIN IMMEDIATE", "PRAGMA")),
+    ],
+)
+def test_connection_setup_is_dialect_specific(backend, required, forbidden):
+    """连接级 SQL 按方言选，不许把一套配置搬到另一套上。
+
+    这是 #76 的**第一条硬约束**：非 SQLite 分支曾经无条件挂 MySQL 的
+    `SET SESSION sql_mode`，Postgres 一进白名单，第一条连接就在那句上失败。
+    """
+    executed = _run_connect_hook(backend)
+    joined = "\n".join(executed)
+    for needle in required:
+        assert needle.lower() in joined.lower(), f"{backend} 的连接配置缺 {needle}：{executed}"
+    for needle in forbidden:
+        assert needle.lower() not in joined.lower(), f"{backend} 的连接配置混进了 {needle}：{executed}"
+
+
+def test_every_supported_backend_has_a_connect_hook():
+    """白名单里的每个后端都必须有连接级配置钩子。
+
+    这条是给下一个人准备的：往 `SUPPORTED_BACKENDS` 加后端时忘了加钩子，
+    症状是 `build_engine` 在这一行抛 `KeyError`（而不是「这个后端没适配」），
+    报错看起来像是字典写错了而不是配置缺了。
+    """
+    for backend in sorted(database.SUPPORTED_BACKENDS):
+        assert callable(database._connect_hook(backend)), f"{backend} 没有连接级配置钩子"
+
 
 
 def test_resolve_url_accepts_three_shapes(tmp_path):

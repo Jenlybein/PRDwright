@@ -133,7 +133,53 @@ def test_boolean_columns_match_whitelist():
     assert declared == set(BOOLEAN_COLUMNS)
 
 
+def test_boolean_server_defaults_are_boolean_literals():
+    """布尔列的 `server_default` 必须是 `true` / `false`，不能是 `0` / `1`（#76）。
+
+    ```sql
+    ALTER TABLE ... ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 0   -- ✗ Postgres
+    ```
+
+    SQLite 把 `BOOLEAN` 当整数、`DEFAULT 0` 毫无问题，所以这个坑在 SQLite 上
+    **完全看不出来**：接上 Postgres 之后，空库跑 `0001` 的第一条建表语句就会报
+    「column is of type boolean but default expression is of type integer」。
+
+    判据落在「字面量本身」：`false` / `true` 在 SQLite（3.23 起）与 Postgres 上
+    都是合法布尔字面量，两边语同一个写法——不需要在迁移里按方言分支。
+    """
+    from backend.core import models  # noqa: F401
+
+    offenders: list[str] = []
+    for table_name, column_name in sorted(BOOLEAN_COLUMNS):
+        column = SQLModel.metadata.tables[table_name].columns[column_name]
+        default = column.server_default
+        literal = getattr(getattr(default, "arg", None), "text", None)
+        if literal is None or literal.strip().lower() not in {"true", "false"}:
+            offenders.append(f"{table_name}.{column_name} → {literal!r}")
+    assert offenders == [], (
+        "布尔列的默认值必须是 true/false 字面量（0/1 在 Postgres 的 BOOLEAN 上非法）：\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_partial_index_declares_predicate_for_both_dialects():
+    """`ux_chat_turns_job_role` 的 WHERE 必须 SQLite / Postgres 都声明（#76）。
+
+    这条索引是**部分唯一索引**（只约束 `job_id` 非空的行）。`sqlite_where` 在
+    Postgres 上会被忽略——不是报错，而是静默建成全量唯一索引：SQLite 那份语义
+    还在，PG 那份悄悄丢了 WHERE，两边结构快照也对不上。
+    """
+    from backend.core import models  # noqa: F401
+
+    table = SQLModel.metadata.tables["chat_turns"]
+    index = next(item for item in table.indexes if item.name == "ux_chat_turns_job_role")
+    for dialect in ("sqlite", "postgresql"):
+        where = index.dialect_options[dialect]["where"]
+        assert where is not None, f"`ux_chat_turns_job_role` 没有声明 {dialect}_where"
+
+
 @pytest.mark.parametrize("table", sorted(_AUTOINCREMENT_TABLES))
+
 def test_autoincrement_is_declared(table):
     """每张自增主键表都带 `sqlite_autoincrement`。
 

@@ -48,6 +48,7 @@ import logging
 from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
+from backend.core.dialect import write_probe
 from backend.core.engine import get_engine
 from backend.core.runtime_config import get_runtime_config, provider_key_present
 from backend.services.job_drain import drain_controller
@@ -198,42 +199,31 @@ async def health() -> dict:
 
 
 def _check_database_writable() -> dict:
-    """探测「库现在能不能写」：借一条连接，拿写锁 + 一次内容不变的页写，然后回滚。
+    """探测「库现在能不能写」：借一条连接，做一次内容不变的真写，然后回滚。
 
-    为什么不是 `SELECT 1`：只读的库（文件权限、只读挂载、磁盘满后的半只读状态）
-    读得出来、写不进去，而「现在能接活」恰恰要求写得进去——存不了方案的服务，
-    「健康」二字没有意义。这就是它与 `_check_database()`（只探「可连接」）的分工：
-    详情端点回答「库通不通」，就绪探针回答「写不写得进去」。
+    为什么不是 `SELECT 1`：只读的库（文件权限、只读挂载、磁盘满后的半只读状态、
+    只读事务）读得出来、写不进去，而「现在能接活」恰恰要求写得进去——存不了方案的
+    服务，「健康」二字没有意义。这就是它与 `_check_database()`（只探「可连接」）的
+    分工：详情端点回答「库通不通」，就绪探针回答「写不写得进去」。
 
-    为什么是 `BEGIN IMMEDIATE`（而不是建一张探针表再回滚）：
-    在 pysqlite 上，SQLAlchemy 的 `conn.begin()` **不发 `BEGIN`**（驱动等到第一条
-    写语句才隐式开事务）。于是「建探针表」那条 DDL 在 SQLite 眼里是一句**没有外层
-    事务的独立写**，自己就提交了——后面那句 `rollback()` 只撤掉了 Python 侧的事务
-    记账，表已经落库（评审实测）。结果是探针每 15 秒真建一次表、真拿一次写锁，
-    还往 `sqlite_master` 里写东西；这与「探活不该有副作用」直接冲突。
-    `BEGIN IMMEDIATE` 是 SQLite 的「我要写」声明：能拿到 RESERVED 锁说明此刻没有
-    别的写者占着（拿不到会立刻报 `SQLITE_BUSY`，不必等满超时），结尾 `ROLLBACK`
-    把这次事务整个撤掉，不留任何痕迹。
+    为什么「写什么」不在这里决定：那是**方言知识**（SQLite 的 `BEGIN IMMEDIATE`
+    与 `PRAGMA`、Postgres 的临时表、MySQL 的「内容不变 UPDATE」三套写法互不兼容），
+    所以语句在 `core/dialect.py::write_probe()`，本函数只管事务的开合：
 
-    为什么在写锁之外还要补一次页写：
-    **SQLite 从 3.53 起会放行只读库的 `BEGIN IMMEDIATE`**（锁是文件级语义，不校验
-    写权限；实测 `mode=ro` 连接上 `BEGIN IMMEDIATE` 成功、下一条写语句才报
-    `attempt to write a readonly database`）。只拿锁会把「只读库」误判成 ready——
-    那是最坏的一种假绿。所以紧接着做一次**内容不变**的页写：把 `application_id`
-    写成它当前的值。可写库上它只是一次会被回滚的脏页（表清单、`freelist_count`、
-    文件内容都不变）；只读库上它当场报 `SQLITE_READONLY`，探针如实转 503。
-    选 `application_id` 而不是 `user_version`：后者是已删除的旧手写迁移链的标识，
-    C9 守卫禁止生产代码里出现它——版本的唯一真源是 `alembic_version`。两者同在库头，
-    `application_id` 本项目从不读，写回原值纯粹是为了触发一次写。
+    1. `conn.begin()` 显式开事务（pysqlite 上它本身不发 `BEGIN`，SQLite 分支因此
+       还要先发 `BEGIN IMMEDIATE`——理由写在 `dialect.write_probe`）；
+    2. 让方言发它那句「真写」；
+    3. `finally` 里 `rollback()` 把这次事务整个撤掉，不留任何痕迹。
+
+    ⚠️ 以前这三步里写死了 SQLite 的语句，Postgres 接上之后探针会一直吐 503
+    （`BEGIN IMMEDIATE` / `PRAGMA` 在 PG 上是语法错误，探针把自己判成「库不可写」）。
     """
     try:
         with get_engine().connect() as conn:
             transaction = conn.begin()
             try:
                 # 走 Engine 的池：与业务请求借同一条通路，才能测出「业务会写不进去」的那种故障。
-                conn.exec_driver_sql("BEGIN IMMEDIATE")
-                current = conn.exec_driver_sql("PRAGMA application_id").scalar()
-                conn.exec_driver_sql(f"PRAGMA application_id = {int(current or 0)}")
+                write_probe(conn)
             finally:
                 transaction.rollback()
     except Exception as exc:  # noqa: BLE001 - 探针要兜住任何异常，否则它自己就 500 了
@@ -244,7 +234,7 @@ def _check_database_writable() -> dict:
         )
         # 只留异常类型：探针和 `/health` 一样是公开路径，不往外吐路径等内部细节
         return {"ok": False, "detail": f"数据库不可写（{type(exc).__name__}）"}
-    return {"ok": True, "detail": "可写（写锁已拿到，页写已回滚）"}
+    return {"ok": True, "detail": "可写（真写已回滚）"}
 
 
 def _check_skills_loadable() -> dict:

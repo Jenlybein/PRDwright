@@ -18,6 +18,19 @@
    `session_scope()` 决定。
 2. **不承载业务判断**。「该不该覆盖」是调用方的决定，本模块只负责翻译。
 
+## 还有两件「只有方言知道」的事
+
+除了 upsert，这里还收了另外两处**同一类知识**——不是业务逻辑，而是「这个数据库
+认哪种写法」：
+
+- `write_probe()`：就绪探针要「真写一次再回滚」。SQLite 的写法是
+  `BEGIN IMMEDIATE` + 页写，Postgres / MySQL 上那两句都是非法语法，各家要各写一条。
+- `needs_batch_mode()`：Alembic 的 batch 模式（「建新表 + 拷数据」）是 SQLite 的补丁，
+  别的方言上开着只是白拷一遍数据。
+
+两处都**只管语句与开关**：事务的开合仍然由调用方（`api/health.py`、`migrations/env.py`）
+负责。
+
 ## ⚠️ MySQL 的两个坑（都与「静默」有关）
 
 - **DO NOTHING 不能用 `INSERT IGNORE`**。它会把「列超长、违反 NOT NULL」这类错误
@@ -188,4 +201,77 @@ def upsert_select(
     )
 
 
-__all__ = ["dialect_name", "upsert_select", "upsert_values"]
+# ---------------------------------------------------------------------------
+# 就绪探针的「真写一次」
+# ----------------------------------------------------------------------------
+
+
+def write_probe(connection: Any) -> None:
+    """在当前事务里做一次**内容不变的真写**，用于就绪探针（调用方负责回滚）。
+
+    ## 为什么不能通用一句话
+
+    「库可写」这条判据必须靠**真写**才测得出来：只读实例、只读挂载、磁盘满后的
+    半只读状态，读得出来、写不进去。但「真写」的写法各方言完全不同：
+
+    - **SQLite**：`BEGIN IMMEDIATE` 是「我要写」的声明（拿不到 RESERVED 锁立刻
+      `SQLITE_BUSY`，不必等满超时）。光拿锁还不够——3.53 起只读库也放行
+      `BEGIN IMMEDIATE`，所以要补一次**内容不变**的页写（把 `application_id`
+      写成它当前的值）。两句都只在 SQLite 上有意义。
+    - **Postgres**：`BEGIN IMMEDIATE` / `PRAGMA` 都是**语法错误**（这正是接上 PG
+      之后探针会一直吐 503 的原因）。PG 的 DDL 可回滚，所以建一张临时表就是
+      「真写一次」：只读实例 / 只读事务会当场报
+      `cannot execute CREATE TABLE in a read-only transaction`，回滚后临时表
+      随事务一起消失，不留痕迹。
+    - **MySQL**：DDL 会隐式提交、临时表又不随回滚消失（留在会话里，下一次探针
+      就会撞「表已存在」），所以改用「内容不变的 UPDATE」：`alembic_version` 只有
+      一行，写回原值不改内容；只读实例（`read_only` / `super_read_only`）在这一句
+      上报 `ER_OPTION_PREVENTS_STATEMENT`。
+
+    ⚠️ **不在这里 commit / rollback**：事务边界仍归调用方（`api/health.py` 先
+    `conn.begin()`，`finally` 里 `rollback()`）。本模块只回答「这个方言该发哪句」。
+
+    Args:
+        connection: 已经开好事务的 SQLAlchemy Connection（不会被关闭）。
+
+    Raises:
+        NotImplementedError: 未适配的方言。宁可报错，也不要发一句在目标库上
+            语法不通的探针——那会把「没适配」伪装成「库坏了」。
+    """
+    # 本地导入类型只为标注，避免本模块在 import 期多一层循环依赖
+    name = connection.dialect.name
+
+    if name == "sqlite":
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        current = connection.exec_driver_sql("PRAGMA application_id").scalar()
+        # 选 `application_id` 而不是 `user_version`：后者是已删除的旧手写迁移链的标识，
+        # C9 守卫禁止生产代码里出现它——版本的唯一真源是 `alembic_version`。
+        # `application_id` 本项目从不读，写回原值纯粹是为了触发一次写。
+        connection.exec_driver_sql(f"PRAGMA application_id = {int(current or 0)}")
+        return
+
+    if name == "postgresql":
+        connection.exec_driver_sql("CREATE TEMP TABLE prdwright_write_probe (id integer)")
+        return
+
+    if name in _MYSQL_FAMILY:
+        connection.exec_driver_sql("UPDATE alembic_version SET version_num = version_num")
+        return
+
+    raise NotImplementedError(
+        f"就绪探针尚未适配方言 {name!r}；新增方言请在本模块加一条分支，"
+        "不要在调用方写 if（那会把方言重新散开）。"
+    )
+
+
+def needs_batch_mode(name: str) -> bool:
+    """该方言是否需要 Alembic 的 batch 模式（「建新表 + 拷数据」）。
+
+    只有 SQLite 需要：它的 `ALTER TABLE` 能力有限，改列 / 删列都要重建整张表。
+    别的方言上开着 `render_as_batch` 只会让每次改列都多写一遍无谓的数据拷贝
+    （大表上那就是停机时间）。
+    """
+    return name == "sqlite"
+
+
+__all__ = ["dialect_name", "needs_batch_mode", "upsert_select", "upsert_values", "write_probe"]
