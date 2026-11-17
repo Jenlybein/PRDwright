@@ -60,6 +60,14 @@ export interface RunPreview {
    * 不落库：进程信息，刷新后由快照的 `stageText` 补（看不到就看不到，不影响产物）。
    */
   outlineText: string
+  /**
+   * 正文正在写第几批（票 #93）：`0` / `1` 表示没有发生续写，`2` 起表示「撞上输出上限，
+   * 已自动接着写」。
+   *
+   * 只增不减、只随新任务清：续写期间阶段仍是撰写，进度条与正文缓冲都不重置——
+   * 这条数字是**纯展示**，让「正文还在长」有一个解释，不参与任何判据。
+   */
+  continuation: number
   /** 审核结论；不持久化，刷新即失 */
   review: ReviewConclusion | null
   /** 生成失败原因（成功时为空串） */
@@ -107,6 +115,7 @@ function emptyPreview(): RunPreview {
       docPhase: 'idle',
     stageText: '',
     outlineText: '',
+    continuation: 0,
     review: null,
     error: '',
   }

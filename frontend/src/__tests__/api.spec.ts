@@ -108,7 +108,7 @@ describe('SSE 事件解析', () => {
     expect(result.reply).toBe('完整正文')
 
     expect(stages).toHaveLength(2)
-    expect(stages[0]).toEqual({ stage: 'writing', note: '', issues: [] })
+    expect(stages[0]).toEqual({ stage: 'writing', note: '', issues: [], continuation: 0 })
     // 跨块拼接后的改写事件：原因与问题清单都要完整解析出来
     expect(stages[1]?.stage).toBe('rewriting')
     expect(stages[1]?.note).toBe('编造了指标')
@@ -161,6 +161,30 @@ describe('SSE 事件解析', () => {
     expect(result.reply).toBe('正文')
   })
 
+  it('stage 事件带续写批次序号时原样解析出来（票 #93）', async () => {
+    // 后端撞上输出上限自动接着写时，补发的仍是 `stage(writing)`，多一个 `continuation`。
+    // 它必须是**数字**：解析成 0 就等于把「续写」当「没续写」，界面再也解释不了正文为什么还在长。
+    const fetchMock = vi.fn(async () =>
+      streamResponse([
+        sseFrame('stage', { type: 'stage', content: '正在生成', data: { stage: 'writing' } }),
+        sseFrame('stage', {
+          type: 'stage',
+          content: '正在续写第 2 段…',
+          data: { stage: 'writing', continuation: 2 },
+        }),
+        sseFrame('done', { type: 'done', content: '', data: { reply: '正文' } }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const stages: StreamStageEvent[] = []
+    await streamOnce({ onStage: (event) => stages.push(event) })
+
+    expect(stages.map((event) => event.continuation)).toEqual([0, 2])
+    // 续写不是新阶段：第二条仍然报 writing
+    expect(stages.map((event) => event.stage)).toEqual(['writing', 'writing'])
+  })
+
   it('stage 事件字段缺失或类型不对时退化为默认值，不打断整条流', async () => {
     const fetchMock = vi.fn(async () =>
       streamResponse([
@@ -176,7 +200,7 @@ describe('SSE 事件解析', () => {
 
     expect(stages).toHaveLength(1)
     // 类型不对的 note 退化为空串（不是 "3"）
-    expect(stages[0]).toEqual({ stage: 'reviewing', note: '', issues: [] })
+    expect(stages[0]).toEqual({ stage: 'reviewing', note: '', issues: [], continuation: 0 })
     expect(result.reply).toBe('仍然后续内容')
   })
 

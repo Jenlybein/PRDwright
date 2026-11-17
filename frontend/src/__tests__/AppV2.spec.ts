@@ -2399,7 +2399,7 @@ describe('AppV2 PRD 与另两份共用阶段展示', () => {
     await confirmSummaryPanel(wrapper)
     await nextTick()
 
-    state.handlers?.onStage?.({ stage: 'outlining', note: '', issues: [] })
+    state.handlers?.onStage?.({ stage: 'outlining', note: '', issues: [], continuation: 0 })
     await nextTick()
     state.handlers?.onStageChunk?.({
       stage: 'outlining',

@@ -71,6 +71,7 @@
 - 两条轨：`chunk` 是过程字（可能缺标题）、`part` 是权威正文；票 #92 起 `chunk` **不带**章节归属，`part` 只剩 `{text, replace}` 整段覆盖语义，三份产物一致。
 - `stage(writing)` 每份产物一次；没有按章分缓冲，`_draft` = 定稿正文 + 单条实时缓冲；快照里的 `completed_sections` / `live_by_section` 随分章链路退役（列留着、不再写）。
 - 失败语义：整篇生成的自愈 / 重试口径不变（`stream_reply._astream_chunks`）；失败收尾照样把已产出正文升格为「部分完成」版本（#85），不再有「逐章占位继续」。
+- **分批续写（票 #93）**：撞上模型单次输出上限（结束原因 `length` / `max_tokens`）时**接着写**，不把整篇判失败；唯一实现在 `stream_reply.iter_continuation_events`，三份产物共用，续写请求由 `document_service._continuation_messages` 统一构造（原提示词 + 已写正文**尾部** + 「接着写、不要重复」）。判据只能是**模型返回的结束原因**（`stream_guard.extract_finish_reason`），**不许用字数阈值猜**——阈值会在偏短文档上误判。续写批次仍报 `stage(writing)` 并带 `data.continuation`：进度不回起点、正文不清空、前端不许把它渲染成新章节；接缝重复由 `_SeamGuard` 逐字去重（只丢「紧挨在正文末尾、逐字存在」那段，其余一个字节都不动），提示词只管「换个说法复述」。**批次级重试 ≠ 任务级退避**（#88）：前者在同一批里从断点再要一次（`MAX_BATCH_ATTEMPTS ≤ 3`，不落库、不等待），后者把整条任务退回排队等 `next_run_at`；重试用尽 → `error` 且不撤已写正文（#85 照旧落「部分完成」）。审核 / 改写 / 修复**不续写**（要整段结果）。
 - `review_enabled=False` 时连 `review` 事件都不发（报「0 个待处理问题」会被读成「审过了、没问题」）；因此那一版也**不写** `review_failed_at`——「没审」不是「审失败」，判据是事件上的 `attempted` 标记而不是结论空串。
 - `review_enabled` 对三份产物都生效且口径一致：`False` 就是「不审不改」，`None` 由后端配置决定（只有 `False` 才是关）。
 - 只有 `high` 触发改写（`REVIEW_REWRITE_MIN_SEVERITY`，两链共用）；`verdict` 如实报、只是不动笔；改写后不重审。
