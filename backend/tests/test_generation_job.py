@@ -1494,8 +1494,10 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
         yield StreamEvent(type="done", content="", data={"reply": "# 已经生成好的正文"})
 
     written: list = []
+    # #81 起正文写入只有这一个公开入口；方案没了就根本走不到它，记录器断言的仍是
+    # 「一条写入都没发生」。
     monkeypatch.setattr(
-        document_store, "commit_generated", lambda *a, **k: written.append((a, k))
+        document_store, "write_document", lambda *a, **k: written.append((a, k))
     )
 
     async def scenario() -> tuple[int, list]:
@@ -1984,13 +1986,13 @@ def test_replace_part_wipes_every_section_buffer(alice):
 def test_write_document_skips_an_empty_reply(client, alice, monkeypatch):
     """定稿正文为空时不写文档：宁可这次不落库，也不要拿空稿顶掉上一版。
 
-    跨主接缝：`done.reply` 是空白，`commit_generated` 是唯一写文档的公开落点，
+    跨主接缝：`done.reply` 是空白，`write_document` 是唯一写正文的公开入口（票 #81），
     用记录器断言它一次都没被调；任务本身照常成功（不写 ≠ 失败）。
     """
     solution_id = _create_solution(client)
     written: list = []
     monkeypatch.setattr(
-        document_store, "commit_generated", lambda *a, **k: written.append((a, k))
+        document_store, "write_document", lambda *a, **k: written.append((a, k))
     )
 
     registered, events = run_ticket_events(
@@ -2003,19 +2005,21 @@ def test_write_document_skips_an_empty_reply(client, alice, monkeypatch):
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
-def test_document_write_failure_keeps_the_job_successful(client, alice, monkeypatch):
-    """写 documents 时库出错：任务**仍然算成功**，正文留在 `draft_content` 里。
+def test_document_write_failure_keeps_the_job_running(client, alice, monkeypatch):
+    """写 documents 时库出错：**整批回滚**，任务停在执行中，不谎报成功。
 
-    正文已经在任务记录里有一份；把整个任务判失败，等于让一次成功的生成看起来像失败。
-    跨主接缝：假事件流给出 `part` 定稿与 `done.reply`，`commit_generated` 抛错，
-    断言可观察的事件回执、库行终态与正文。
+    ⚠️ 这条用例在 #81 被改写（断言的性质没变、方向反了）：旧实现把写正文异常吞成一条
+    warning、照旧报 completed——那正是「任务表说已定稿、文档表却没有这一版」的假成功。
+    本票要求写正文与宣布成功同事务：写不进去就整批回滚，任务保持 `running`，由恢复机制
+    接手。因此这里断言的三条从「成功 + 正文留在 draft」改成「仍执行中 + 无账本 + 无结束
+    事件」；`test_atomic_closeout.py` 另有同型的完整覆盖（含 AC5 的恢复接手）。
     """
     solution_id = _create_solution(client)
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("考核点：写 documents 时库出错")
 
-    monkeypatch.setattr(document_store, "commit_generated", _boom)
+    monkeypatch.setattr(document_store, "write_document", _boom)
 
     registered, events = run_ticket_events(
         alice,
@@ -2026,18 +2030,27 @@ def test_document_write_failure_keeps_the_job_successful(client, alice, monkeypa
         reply="# 正文",
     )
 
-    assert events[-1].data["status"] == "completed"
     row = job_get(alice, registered.job_id)
     assert row is not None
-    assert row["status"] == "completed"
-    assert row["draft_content"] == "# 正文"
+    assert row["status"] == "running", "写正文失败不许装成已定稿"
+    # 事件回执里没有「生成完成」：没写成就没有结束事件
+    assert [event for event in events if event.type == "run_summary"] == []
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
 def test_document_write_skip_is_not_a_failure(client, alice, monkeypatch):
-    """`commit_generated` 返回 `None`（方案不可见 / 归属不符）也不算失败：只是没地方落。"""
+    """`write_document` 返回 `missing`（方案不可见 / 归属不符）不算失败：只是没地方落。
+
+    本票把「没地方落」与「写失败」分开：前者是方案/目标不可见（这次生成本来就没有落点），
+    后者是库真实报错（整批回滚、任务保持执行中，见上一条）。返回 `missing` 时任务
+    照常成功，但文档表里没有这一版。
+    """
     solution_id = _create_solution(client)
-    monkeypatch.setattr(document_store, "commit_generated", lambda *a, **k: None)
+    monkeypatch.setattr(
+        document_store,
+        "write_document",
+        lambda *a, **k: document_store.DocumentWriteResult(outcome="missing"),
+    )
 
     registered, events = run_ticket_events(
         alice, solution_id, "prd", {}, reply="# 正文"

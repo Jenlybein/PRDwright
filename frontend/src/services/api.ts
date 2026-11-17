@@ -959,6 +959,15 @@ export interface CreateJobPayload {
   document?: string
   instruction?: string
   /**
+   * 就地动作（`optimize` / `clarify` / `auto-clarify`）**以为的当前版本号**（票 #81）。
+   *
+   * 这三个动作会覆盖当前正文：任务跑到收尾时若「我以为那一版」已经不是当前版本
+   * （例如期间生成任务追加了新版本），后端拒绝写入、任务判失败（`CONTENT_CHANGED`），
+   * 界面提示「正文已被更新，请刷新后重试」。整篇生成 / 修复是追加新版本、不覆盖当前正文，
+   * 因此不需要带上。
+   */
+  expectedVersionNo?: number
+  /**
    * 要由 AI 自行拍板的待确认清单；只有 `auto-clarify` 用得上。
    *
    * 传**结构化项**而不是拼好的文字：提示词归后端所有，前端只提供数据。
@@ -1042,6 +1051,8 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     doc_kind: payload.docKind ? toBackendKind(payload.docKind) : null,
     document: payload.document ?? '',
     instruction: payload.instruction ?? '',
+    // 就地改写的版本锁（票 #81）：随任务单定格，收尾按它做条件写。不传时不比对。
+    expected_version_no: payload.expectedVersionNo ?? null,
     // 结构化清单原样透传：提示词在后端，前端不拼任何一句话
     pending_items: payload.pendingItems ?? [],
     // 只有 `false` 是「明确关掉」；不传就让后端取配置，不在这里替它挑默认值

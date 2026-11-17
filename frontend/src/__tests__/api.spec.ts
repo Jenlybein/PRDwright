@@ -474,6 +474,26 @@ describe('生成任务接口（jobs）', () => {
     expect(payload.doc_kind).toBe('api_docs')
   })
 
+  it('createJob 把就地改写的版本锁（expectedVersionNo）转成 expected_version_no（#81）', async () => {
+    const post = vi
+      .spyOn(http, 'post')
+      .mockResolvedValue({ data: { job_id: 13, status: 'running' } } as never)
+
+    await createJob({
+      kind: 'optimize',
+      solutionId: 3,
+      docKind: 'prd',
+      document: '# PRD',
+      instruction: '精简一点',
+      expectedVersionNo: 2,
+    })
+
+    const [, body] = post.mock.calls[0] ?? []
+    const payload = body as Record<string, unknown>
+    // 收尾按它做条件写：对不上就拒绝覆盖（任务判失败 CONTENT_CHANGED）
+    expect(payload.expected_version_no).toBe(2)
+  })
+
   it('readJobStream 以 GET 订阅任务流，带凭据、带中止信号且不带 Content-Type', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       streamResponse([

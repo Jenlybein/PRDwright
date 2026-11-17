@@ -82,6 +82,17 @@ class JobCreateRequest(BaseModel):
     # --- optimize / clarify ---
     document: str = Field(default="", description="待优化的原文档正文")
     instruction: str = Field(default="", description="用户的优化要求（仅 optimize）")
+    expected_version_no: int | None = Field(
+        default=None,
+        description=(
+            "就地动作（`optimize` / `clarify` / `auto_clarify`）**以为当前是第几版**"
+            "（票 #81 的统一版本锁）。这三个动作会**覆盖当前正文**：若期间生成任务追加了"
+            "新版本，带着旧版本号写回去就会把新稿悄悄抹掉。对不上时收尾拒绝写入、任务判失败"
+            "（`CONTENT_CHANGED`），正文保持新生成那一版。"
+            "整篇生成 / 修复 / 恢复是追加版本、不覆盖当前正文，因此不需要它；旧客户端不传时"
+            "不做比对（行为与本改造前一致）。"
+        ),
+    )
     # --- auto_clarify ---
     pending_items: list[dict[str, Any]] = Field(
         default_factory=list,

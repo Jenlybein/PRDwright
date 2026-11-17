@@ -1179,7 +1179,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'optimize',
-      { document: content, instruction, docKind: target },
+      {
+        document: content,
+        instruction,
+        docKind: target,
+        // 版本锁（票 #81）：这一版是用户眼前正文的版本号。收尾时若生成任务已经推进了
+        // 当前版本，后端拒绝覆盖并让任务失败（「正文已被更新，请刷新后重试」）。
+        expectedVersionNo: documents.versionNoOf(target),
+      },
       handlersForKind('optimize', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1281,7 +1288,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       'clarify',
       // 对话不随请求下发：后端按 `docKind` 定位那条澄清线程自己读（票 #54）。
       // 这里只用本地镜像做「有没有聊过」的前置判断，聊过就够发任务了。
-      { document, docKind: target },
+      // `expectedVersionNo` 是版本锁（#81）：改写会覆盖当前正文，版本对不上就拒绝。
+      { document, docKind: target, expectedVersionNo: documents.versionNoOf(target) },
       handlersForKind('clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
@@ -1383,7 +1391,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'auto-clarify',
-      { document: content, pendingItems: items, docKind: target },
+      {
+        document: content,
+        pendingItems: items,
+        docKind: target,
+        // 版本锁（#81）：改写会覆盖当前正文，版本对不上就拒绝覆盖。
+        expectedVersionNo: documents.versionNoOf(target),
+      },
       handlersForKind('auto-clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import http from '../services/api'
 import {
+  DocumentVersionConflictError,
   DocumentsNotFoundError,
   checkpointDocument,
   deleteVersion,
@@ -260,7 +261,7 @@ describe('fetchDocuments', () => {
 })
 
 describe('saveDocument', () => {
-  it('PUT 到带下划线的路径，只提交 content', async () => {
+  it('不带版本号时只提交 content（兼容旧调用方 / 还没有版本的文档）', async () => {
     vi.mocked(http.put).mockResolvedValue({
       data: backendDocument({ kind: 'api_docs', content: '# 改过的接口文档' }),
     })
@@ -272,6 +273,26 @@ describe('saveDocument', () => {
     })
     expect(record.kind).toBe('api-docs')
     expect(record.content).toBe('# 改过的接口文档')
+  })
+
+  it('带上 expectedVersionNo 时把它作为版本锁提交（#81）', async () => {
+    vi.mocked(http.put).mockResolvedValue({ data: backendDocument() })
+
+    await saveDocument(7, 'prd', '# PRD', 3)
+
+    expect(http.put).toHaveBeenCalledWith('/api/solutions/7/documents/prd', {
+      content: '# PRD',
+      expected_version_no: 3,
+    })
+  })
+
+  it('版本号对不上（409）抛 DocumentVersionConflictError，文案取后端 detail', async () => {
+    vi.mocked(http.put).mockRejectedValue(axiosError(409, '正文已被更新，请刷新后重试'))
+
+    await expect(saveDocument(7, 'prd', '# PRD', 2)).rejects.toBeInstanceOf(
+      DocumentVersionConflictError,
+    )
+    await expect(saveDocument(7, 'prd', '# PRD', 2)).rejects.toThrow('正文已被更新，请刷新后重试')
   })
 
   it('prd / prompts 路径不带上任何前缀写法', async () => {

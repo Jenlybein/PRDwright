@@ -26,6 +26,12 @@ vi.mock('../services/documentService', () => ({
       this.name = 'DocumentsNotFoundError'
     }
   },
+  DocumentVersionConflictError: class DocumentVersionConflictError extends Error {
+    constructor(message = '正文已被更新，请刷新后重试') {
+      super(message)
+      this.name = 'DocumentVersionConflictError'
+    }
+  },
   fetchDocuments: vi.fn(),
   saveDocument: vi.fn(),
 }))
@@ -244,7 +250,8 @@ describe('save（用户手改）', () => {
     expect(documentApi.saveDocument).not.toHaveBeenCalled()
 
     await advanceDebounce()
-    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 改过的 PRD')
+    // 版本锁（#81）：保存时带上「我以为的当前版本号」（这里还没加载过文档，故为 0）
+    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 改过的 PRD', 0)
   })
 
   it('连续输入合并成一次请求，只发最后那一版', async () => {
@@ -256,7 +263,7 @@ describe('save（用户手改）', () => {
     await advanceDebounce()
 
     expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
-    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '第二版')
+    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '第二版', 0)
   })
 
   it('方案还没有 id 时不排队——没有方案可挂，发出去只会 404', async () => {
@@ -319,7 +326,7 @@ describe('save（用户手改）', () => {
     documents.save('prd', '第二版')
     await advanceDebounce()
 
-    expect(documentApi.saveDocument).toHaveBeenLastCalledWith(3, 'prd', '第二版')
+    expect(documentApi.saveDocument).toHaveBeenLastCalledWith(3, 'prd', '第二版', 0)
     expect(documents.hasPendingSave()).toBe(false)
     expect(documents.saveError).toBe('')
   })
@@ -335,6 +342,46 @@ describe('save（用户手改）', () => {
     // 404 再试也没有意义，队列不放回
     expect(documents.hasPendingSave()).toBe(false)
   })
+
+  it('版本号对不上（409）：拒绝覆盖、不重试，提示刷新后重试（改动留在本地）', async () => {
+    vi.mocked(documentApi.saveDocument).mockRejectedValue(
+      new documentApi.DocumentVersionConflictError('正文已被更新，请刷新后重试'),
+    )
+
+    documents.attach(3)
+    documents.save('prd', '# 基于旧版的手改')
+    await advanceDebounce()
+
+    // 明确提示，而不是静默丢
+    expect(documents.saveError).toBe('正文已被更新，请刷新后重试')
+    // 旧内容不回队列：再试一次就是把刚生成的新正文覆盖回去
+    expect(documents.hasPendingSave()).toBe(false)
+    expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
+    // 但用户的字还在工作副本里——不静默丢改动
+    expect(documents.contentOf('prd')).toBe('# 基于旧版的手改')
+
+    // 冲突未解除期间继续输入也不排队（否则每敲一次就发一次注定被拒的写）
+    documents.save('prd', '# 又改了一笔')
+    await advanceDebounce()
+    expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
+    expect(documents.contentOf('prd')).toBe('# 又改了一笔')
+
+    // 刷新（重新拉文档）拿到库里的新版本号后才解除封锁，之后的手改带新版本号排队
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      { ...makeRecord('prd', '# 新生成的正文'), versionNo: 2 },
+    ])
+    vi.mocked(documentApi.saveDocument).mockImplementation(async (_id, kind, content) => ({
+      ...makeRecord(kind, content),
+      versionNo: 2,
+    }))
+    await documents.loadAll(3)
+    expect(documents.saveError).toBe('')
+
+    documents.save('prd', '# 刷新之后的手改')
+    await advanceDebounce()
+    expect(documentApi.saveDocument).toHaveBeenLastCalledWith(3, 'prd', '# 刷新之后的手改', 2)
+    expect(documents.hasPendingSave()).toBe(false)
+  })
 })
 
 describe('flushPendingSave', () => {
@@ -343,18 +390,31 @@ describe('flushPendingSave', () => {
     documents.save('prd', '# 最后一笔')
 
     // 不推进防抖窗口，直接 flush
-    await documents.flushPendingSave()
+    const flushed = await documents.flushPendingSave()
 
-    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 最后一笔')
+    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 最后一笔', 0)
     expect(documents.hasPendingSave()).toBe(false)
+    expect(flushed).toBe(true)
   })
 
   it('没有待保存的改动时什么也不做', async () => {
     documents.attach(3)
 
-    await documents.flushPendingSave()
+    const flushed = await documents.flushPendingSave()
 
     expect(documentApi.saveDocument).not.toHaveBeenCalled()
+    expect(flushed).toBe(true)
+  })
+
+  it('保存失败时 flush 返回 false——调用方不能把「没写成」当成成功', async () => {
+    vi.mocked(documentApi.saveDocument).mockRejectedValueOnce(new Error('网络断了'))
+    documents.attach(3)
+    documents.save('prd', '第一版')
+
+    const flushed = await documents.flushPendingSave()
+
+    expect(flushed).toBe(false)
+    expect(documents.hasPendingSave()).toBe(true), '失败的那条仍在队列里等着重试'
   })
 })
 

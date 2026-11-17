@@ -183,6 +183,12 @@ vi.mock('../services/documentService', () => ({
       this.name = 'DocumentsNotFoundError'
     }
   },
+  DocumentVersionConflictError: class DocumentVersionConflictError extends Error {
+    constructor(message = '正文已被更新，请刷新后重试') {
+      super(message)
+      this.name = 'DocumentVersionConflictError'
+    }
+  },
   fetchDocuments: vi.fn(async () => []),
   saveDocument: vi.fn(),
   fetchVersions: vi.fn(async () => []),
@@ -1916,7 +1922,8 @@ describe('AppV2 的文档手改自动落库与下载', () => {
       // 窗口走满 → 恰好一次 PUT，载荷是编辑后的**全文**
       await advanceDebounce()
       expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
-      expect(documentApi.saveDocument).toHaveBeenCalledWith(1, 'prd', '# 改过的正文')
+      // 版本锁（#81）：第三参是正文，第四参是本 store 以为的当前版本号（文档未带版本时为 0）
+      expect(documentApi.saveDocument).toHaveBeenCalledWith(1, 'prd', '# 改过的正文', 0)
     } finally {
       vi.useRealTimers()
     }
@@ -1975,6 +1982,32 @@ describe('AppV2 的文档手改自动落库与下载', () => {
 
       // 改动始终留在本地工作副本里：失败不该把用户刚敲的字丢掉
       expect(documentsOf(wrapper).contentOf('prd')).toBe('# 第四版')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('手改撞上版本锁（409）：提示「正文已被更新，请刷新后重试」，且不把旧内容重试回去', async () => {
+    vi.mocked(documentApi.saveDocument).mockRejectedValue(
+      new documentApi.DocumentVersionConflictError('正文已被更新，请刷新后重试'),
+    )
+    const wrapper = await mountPrdReview()
+
+    vi.useFakeTimers()
+    try {
+      await editContent(wrapper, '# 基于旧版的手改')
+      await advanceDebounce()
+
+      // 明确提示（红色浮层），不是静默丢改动
+      expect(failureTip(wrapper)?.text()).toContain('正文已被更新，请刷新后重试')
+      expect(failureTip(wrapper)?.props('variant')).toBe('danger')
+      // 用户的字还在工作副本里
+      expect(documentsOf(wrapper).contentOf('prd')).toBe('# 基于旧版的手改')
+
+      // 冲突未解除期间再输入：不再发一次注定被拒、且可能覆盖新正文的写
+      await editContent(wrapper, '# 又改了一笔')
+      await advanceDebounce()
+      expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
@@ -2919,6 +2952,9 @@ describe('AppV2 文档澄清', () => {
     expect(payload?.pendingItems).toHaveLength(1)
     expect(payload?.pendingItems?.[0]?.question).toBe('分页上限取多少？')
     expect(payload?.docKind).toBe('prd')
+    // 版本锁（#81）：带上「我看到的当前版本号」，收尾据此拒绝覆盖更新的正文。
+    // 这份文档在用例里没有版本号（0），实际链路上就是 `documents.versionNoOf(target)`。
+    expect(payload?.expectedVersionNo).toBe(0)
 
     // 落到 PRD 的审阅页，正文已经是 AI 拍板后的版本
     expect(storeOf(wrapper).viewState).toBe('review-prd')

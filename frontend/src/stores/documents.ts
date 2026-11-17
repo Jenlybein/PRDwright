@@ -23,7 +23,12 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { DocumentsNotFoundError, fetchDocuments, saveDocument } from '@/services/documentService'
+import {
+  DocumentVersionConflictError,
+  DocumentsNotFoundError,
+  fetchDocuments,
+  saveDocument,
+} from '@/services/documentService'
 import type {
   DerivedFrom,
   DocumentKind,
@@ -174,6 +179,24 @@ export const useDocumentsStore = defineStore('documents', () => {
   let inFlight: Promise<void> | null = null
 
   /**
+   * 本轮保存链里有没有失败（网络 / 版本冲突都算）。
+   *
+   * `flushPendingSave` 的返回值要回答「保存链是不是干净地排空了」：`stores/documentVersions.ts`
+   * 在「存为新版本 / 恢复」之前会先冲掉手改，冲不干净就不该继续——否则会在「内容没落库」
+   * 的前提下弹出「已存为新版本」的成功提示（保存失败不能显示成功）。
+   */
+  let saveFailed = false
+
+  /**
+   * 版本锁拒绝了写入的种类（票 #81）。
+   *
+   * 它在 `reload` / `loadAll` 之后清空：这时本地看到的才是库里的新版本。在此之前
+   * **不再把手改排进队列**——带着旧版本号重试只会被后端一次次拒绝，而万一后端放行就是
+   * 把别人刚写好的正文覆盖掉。用户的改动仍留在工作副本里（不静默丢），提示让他刷新。
+   */
+  const conflicted = new Set<DocumentKind>()
+
+  /**
    * 加载请求的序号：只有最新一次加载的结果才允许落地。
    *
    * 切换方案时可能有两个 `loadAll` 在飞（打开 A 之后马上切到 B），先发的那个若后到，
@@ -239,6 +262,10 @@ export const useDocumentsStore = defineStore('documents', () => {
       stale.value = nextStale
       derivedFrom.value = nextDerived
       reviewSnapshots.value = nextReviews
+      // 拉回库里的版本之后，本地这个「以为的版本」才重新可信：解除版本冲突的封锁，
+      // 之后的手改重新排队（此前一直不排队，避免带旧版本号覆盖已更新的正文）。
+      conflicted.clear()
+      saveFailed = false
     } catch (error) {
       if (token !== loadToken) return
       if (error instanceof DocumentsNotFoundError) {
@@ -332,10 +359,15 @@ export const useDocumentsStore = defineStore('documents', () => {
    *
    * 方案还没有 id 时不排队——没有方案可挂，请求发出去只会 404。这种情况只可能
    * 发生在「方案尚未创建」时，而那时也不会有文档可改。
+   *
+   * **版本冲突未解除时只更新本地、不排队**（票 #81）：带着旧版本号重试只会被后端拒绝，
+   * 而这个「拒绝」正是保护「不把旧内容覆盖到刚生成的新正文上」的那道锁。用户的字仍在
+   * 工作副本里，提示他刷新后重试。
    */
   function save(kind: DocumentKind, content: string): void {
     contents.value[kind] = content
     if (solutionId.value === null) return
+    if (conflicted.has(kind)) return
     pending.set(kind, content)
     dirty = true
     changeEpoch += 1
@@ -367,8 +399,16 @@ export const useDocumentsStore = defineStore('documents', () => {
    * 一次只发一条（单飞）：三份文档同属一份方案，并发写没有收益，反而让失败重试的
    * 记账变复杂。失败的那条放回队列——**内容还在本地，下一次变更或 flush 会再试**，
    * 用户不会因为一次网络抖动就丢掉刚敲的字。
+   *
+   * **版本冲突是例外**（票 #81）：那条**不放回队列**。冲突的含义是「库里已经有了更新
+   * 的一版」，再试一次就是拿旧内容覆盖新正文——所以只提示「请刷新后重试」，并把这种类
+   * 封锁到下一次 `loadAll`（拿到库里的新版本号）为止。本地内容不回滚：不静默丢改动。
+   *
+   * 每次保存都带 `expectedVersionNo`（本 store 以为的当前版本号）：手改与生成任务在同一
+   * 份文档上赛跑时，由后端那道版本锁决定谁有资格写，而不是「后到的覆盖先到的」。
    */
   async function saveNow(): Promise<void> {
+    saveFailed = false
     const batch = [...pending.entries()]
     let savedPrd = false
     for (const [kind, content] of batch) {
@@ -376,14 +416,32 @@ export const useDocumentsStore = defineStore('documents', () => {
       if (id === null) return
       pending.delete(kind)
       try {
-        await saveDocument(id, kind, content)
+        const record = await saveDocument(
+          id,
+          kind,
+          content,
+          reviewSnapshots.value[kind].versionNo,
+        )
         saveError.value = ''
+        // 当前版本号以写入结果为准：首次手改会在后端建出版本 1，下一笔保存必须带 1
+        // 而不是还拿 0 去比对（否则自己把自己锁在冲突里）。
+        reviewSnapshots.value[kind] = {
+          ...reviewSnapshots.value[kind],
+          versionNo: record.versionNo,
+        }
         // 这一份真的写进库了——报告一次内容变更，让方案列表的时间与排序跟着走
         markContentWritten()
         if (kind === 'prd') savedPrd = true
       } catch (error) {
+        saveFailed = true
         if (error instanceof DocumentsNotFoundError) {
           // 方案没了：再重试也没有意义，记下原因让用户知道
+          saveError.value = error.message
+          continue
+        }
+        if (error instanceof DocumentVersionConflictError) {
+          // 正文已被更新：**不覆盖、不重试**。本地改动保留，等用户刷新后重来。
+          conflicted.add(kind)
           saveError.value = error.message
           continue
         }
@@ -404,11 +462,17 @@ export const useDocumentsStore = defineStore('documents', () => {
    *
    * 用在「即将切换方案 / 离开页面」这类时机：防抖窗口里可能还压着一次未发出的保存，
    * 不等它就走，最后一次改动就丢了。
+   *
+   * Returns:
+   *   `true` = 队列清空且本轮没有失败；`false` = 至少一条没写成功（网络 / 版本冲突）。
+   *   调用方（版本抽屉的「存为新版本 / 恢复」）据此决定要不要继续——
+   *   **保存失败不能显示成功**。
    */
-  async function flushPendingSave(): Promise<void> {
+  async function flushPendingSave(): Promise<boolean> {
     clearTimer()
     if (dirty || pending.size > 0) scheduleSave()
     while (inFlight) await inFlight
+    return pending.size === 0 && !saveFailed
   }
 
   /** 供测试与调试：是否有尚未落库的改动 */
@@ -421,6 +485,8 @@ export const useDocumentsStore = defineStore('documents', () => {
     clearTimer()
     pending.clear()
     dirty = false
+    conflicted.clear()
+    saveFailed = false
     changeEpoch += 1
     contents.value = emptyContents()
     runSummaries.value = emptySummaries()

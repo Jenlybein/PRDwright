@@ -60,6 +60,12 @@ vi.mock('@/services/documentService', () => ({
       this.name = 'DocumentsNotFoundError'
     }
   },
+  DocumentVersionConflictError: class DocumentVersionConflictError extends Error {
+    constructor(message = '正文已被更新，请刷新后重试') {
+      super(message)
+      this.name = 'DocumentVersionConflictError'
+    }
+  },
   fetchDocuments: vi.fn(async () => []),
   saveDocument: vi.fn(async () => undefined),
   fetchDeliveryZip: vi.fn(),

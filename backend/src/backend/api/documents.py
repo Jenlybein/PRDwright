@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 
 from backend.api import schemas
 from backend.api.deps import acting_user
@@ -65,11 +65,28 @@ async def save_document(
     """保存用户编辑后的正文；方案不存在或非本人返回 404。
 
     只覆盖正文——待确认清单与用量回执是「上一次生成」的事实，不因用户改几个字而改变。
+
+    **版本锁**（票 #81）：`expected_version_no` 与当前版本对不上时返回 409 +
+    `CONTENT_CHANGED`，一个字都不写。用户的自动保存可能带着「读取时的那一版」发出来，
+    而这一版在此期间被生成任务推进过——按当前版本盲改会把新正文悄悄覆盖掉。
     """
-    row = document_store.save_document(user.id, solution_id, kind, payload.content)
-    if row is None:
+    result = document_store.write_document(
+        user.id,
+        solution_id,
+        kind,
+        payload.content,
+        mode="manual",
+        expected_version_no=payload.expected_version_no,
+    )
+    if result.outcome == "version_conflict":
+        raise AppError(
+            ErrorCode.CONTENT_CHANGED,
+            document_store.VERSION_CONFLICT_MESSAGE,
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    if result.outcome == "missing" or result.document is None:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
-    return schemas.DocumentItem(**row)
+    return schemas.DocumentItem(**result.document)
 
 
 # ---------------------------------------------------------------------------
