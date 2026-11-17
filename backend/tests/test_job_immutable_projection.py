@@ -380,7 +380,7 @@ def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
             "UPDATE generation_jobs SET status = 'failed', "
             "request_params = '{坏掉的 JSON', config_snapshot = '[1,2,3]', "
             "skill_refs = '{坏掉的 JSON', usage = '{坏掉的 JSON', "
-            "completed_sections = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' "
+            "pending_items = '{坏掉的 JSON' "
             "WHERE id = %s",
             (broken.job_id,),
         )

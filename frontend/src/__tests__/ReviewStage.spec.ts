@@ -55,7 +55,6 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     injectedSkills: [{ name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' }],
     warnings: [],
     partial: false,
-    failedSections: [],
     protocol: 'ark',
     providerConfigId: 'cfg_ark0001',
     providerName: '火山方舟',

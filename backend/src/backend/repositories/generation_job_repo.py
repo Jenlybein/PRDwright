@@ -147,20 +147,15 @@ def _queue_order() -> tuple:
     return (GenerationJob.updated_at, GenerationJob.id)
 
 
-def _dump_sections(sections: list[dict[str, Any]]) -> str:
-    """把章节列表序列化成 JSON 文本（中文不转义，便于人工排查）。"""
-    return json.dumps(sections or [], ensure_ascii=False)
-
-
 def _dump_pending_items(items: list[dict[str, Any]] | None) -> str:
     """把待确认清单序列化成 JSON 文本（中文不转义）。`None` 视为空清单。"""
     return json.dumps(items or [], ensure_ascii=False)
 
 
-def _ensure_progress_texts(draft_content: str, sections_text: str) -> None:
-    """草稿与章节清单的 60KB 闸门（v8）。
+def _ensure_draft_text(draft_content: str) -> None:
+    """草稿正文的 60KB 闸门（v8）。
 
-    这两列都是**渐进增长**的（分章生成时一章一章追加），所以超上限通常意味着
+    这一列是**渐进增长**的（每 300ms 合并写一次），所以超上限通常意味着
     「这份 PRD 比预期长」，而不是「某个字段填错了」。文案因此指向"精简或拆分"，
     而不是"请求非法"。
 
@@ -168,7 +163,6 @@ def _ensure_progress_texts(draft_content: str, sections_text: str) -> None:
     `ensure_text_within_limit` 的快速路径很重要——见 `core/limits.py` 的说明。
     """
     ensure_text_within_limit(draft_content, field="草稿正文")
-    ensure_text_within_limit(sections_text, field="章节清单")
 
 
 def _dump_immutable(request_params: Any, config_snapshot: Any, skill_refs: Any) -> tuple[str, str, str]:
@@ -294,7 +288,6 @@ class GenerationJobRepository:
             status=STATUS_PENDING,
             phase="",
             draft_content="",
-            completed_sections="[]",
             pending_items="[]",
             input_fingerprint=input_fingerprint,
             usage=None,
@@ -319,7 +312,6 @@ class GenerationJobRepository:
         job_id: int,
         *,
         draft_content: str,
-        completed_sections: list[dict[str, Any]] | None = None,
         phase: str,
         pending_items: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -328,14 +320,12 @@ class GenerationJobRepository:
         高频写（≤300ms / 增量 4KB）：**每次调用仍应是一个短事务**（调用方每次一个
         `session_scope()`），不要与其它写合并——        长事务会持锁，把生成链路卡住。
         """
-        sections_text = _dump_sections(completed_sections or [])
-        _ensure_progress_texts(draft_content, sections_text)
+        _ensure_draft_text(draft_content)
         self.session.execute(
             update(GenerationJob)
             .where(GenerationJob.id == job_id, GenerationJob.owner_id == owner_id)
             .values(
                 draft_content=draft_content,
-                completed_sections=sections_text,
                 phase=phase,
                 pending_items=_dump_pending_items(pending_items),
                 updated_at=utc_now_text(),
@@ -348,7 +338,6 @@ class GenerationJobRepository:
         job_id: int,
         *,
         draft_content: str,
-        completed_sections: list[dict[str, Any]] | None = None,
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
@@ -379,8 +368,7 @@ class GenerationJobRepository:
         `partial` 是「有内容可用、但不完整」（票 #85）：章节重试用尽后照常收尾的
         「部分完成」也走本方法，标记与终态同一条语句落下。
         """
-        sections_text = _dump_sections(completed_sections or [])
-        _ensure_progress_texts(draft_content, sections_text)
+        _ensure_draft_text(draft_content)
         conditions: list[Any] = [
             GenerationJob.id == job_id,
             GenerationJob.owner_id == owner_id,
@@ -397,7 +385,6 @@ class GenerationJobRepository:
             .values(
                 status=STATUS_SUCCEEDED,
                 draft_content=draft_content,
-                completed_sections=sections_text,
                 usage=usage,
                 error_code="",
                 error_message="",
@@ -421,7 +408,6 @@ class GenerationJobRepository:
         error_code: str,
         error_message: str,
         draft_content: str,
-        completed_sections: list[dict[str, Any]] | None = None,
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
@@ -450,8 +436,7 @@ class GenerationJobRepository:
         `partial` 是「失败但有内容可用」（票 #85）：失败收尾把已生成的正文落成
         `document_versions.partial=true` 时，任务行同一次事务里留这一份投影。
         """
-        sections_text = _dump_sections(completed_sections or [])
-        _ensure_progress_texts(draft_content, sections_text)
+        _ensure_draft_text(draft_content)
         conditions: list[Any] = [
             GenerationJob.id == job_id,
             GenerationJob.owner_id == owner_id,
@@ -470,7 +455,6 @@ class GenerationJobRepository:
                 error_code=error_code,
                 error_message=error_message,
                 draft_content=draft_content,
-                completed_sections=sections_text,
                 usage=usage,
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
@@ -576,7 +560,6 @@ class GenerationJobRepository:
         *,
         error_message: str,
         draft_content: str = "",
-        completed_sections: list[dict[str, Any]] | None = None,
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
@@ -611,7 +594,6 @@ class GenerationJobRepository:
                 error_code="",
                 error_message=error_message,
                 draft_content=draft_content,
-                completed_sections=_dump_sections(completed_sections or []),
                 usage=usage,
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
@@ -631,7 +613,6 @@ class GenerationJobRepository:
         job_id: int,
         *,
         draft_content: str = "",
-        completed_sections: list[dict[str, Any]] | None = None,
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
@@ -655,7 +636,6 @@ class GenerationJobRepository:
             )
             .values(
                 draft_content=draft_content,
-                completed_sections=_dump_sections(completed_sections or []),
                 usage=usage,
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,
@@ -721,7 +701,6 @@ class GenerationJobRepository:
         error_code: str,
         error_message: str,
         draft_content: str = "",
-        completed_sections: list[dict[str, Any]] | None = None,
         usage: str | None = None,
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
@@ -749,7 +728,6 @@ class GenerationJobRepository:
                 error_code=error_code,
                 error_message=error_message,
                 draft_content=draft_content,
-                completed_sections=_dump_sections(completed_sections or []),
                 usage=usage,
                 pending_items=_dump_pending_items(pending_items),
                 prompt_tokens=prompt_tokens,

@@ -41,9 +41,6 @@ class JobRuntime:
     live_buffer: str = ""
     # 「有内容可用但不完整」（#85）：由 `done.partial` 带来，随终态同一条语句落库。
     partial: bool = False
-    # 生成失败的章节清单。分章链路已随票 #92 退役，三份产物都整篇生成，因此当前恒为空；
-    # 保留字段是为了既有结论 / 回执形状不变（#94 统一收口时再决定去留）。
-    failed_sections: list[dict[str, Any]] = field(default_factory=list)
     # 当前阶段模型的原始输出（审核意见 / 改写稿），只给阶段条下方的面板看。
     # 与 `live_buffer` 分道：后者是**产物正文**，混进来会把审核 JSON 写进文档预览。
     # 从前端内存独占这份文本，刷新就丢；改为运行时持有后，重连的 `snapshot` 能把它带回来。

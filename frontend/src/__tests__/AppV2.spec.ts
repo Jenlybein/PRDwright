@@ -371,7 +371,6 @@ function makeJobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     retryAt: null,
     pendingItems: [],
     partial: false,
-    failedSections: [],
     ...overrides,
   }
 }
@@ -390,7 +389,6 @@ function makeRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     injectedSkills: [],
     warnings: [],
     partial: false,
-    failedSections: [],
     protocol: 'ark',
     providerConfigId: 'cfg_ark0001',
     providerName: '火山方舟',
@@ -1596,7 +1594,6 @@ describe('AppV2 完整流程编排', () => {
         summary: '2 个待处理问题',
         issues: [],
         rewritten: false,
-        failedSections: [],
         reviewedAt: '2026-11-08T00:00:00',
       }),
       makeDocumentRecord('api-docs', '# 接口文档\n\n## 一、概述\n统一响应结构', null, [], {
@@ -1605,7 +1602,6 @@ describe('AppV2 完整流程编排', () => {
         summary: '2 个待处理问题',
         issues: [],
         rewritten: false,
-        failedSections: [],
         reviewedAt: '2026-11-08T00:00:00',
       }),
     ])
@@ -1644,7 +1640,6 @@ describe('AppV2 完整流程编排', () => {
         summary: '2 个待处理问题',
         issues: [],
         rewritten: false,
-        failedSections: [],
         reviewedAt: '2026-11-08T00:00:00',
       }),
     ])

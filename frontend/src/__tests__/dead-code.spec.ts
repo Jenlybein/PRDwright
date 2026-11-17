@@ -5,6 +5,8 @@ import { JOB_KIND_NAVIGATES_TO_RUN_VIEW } from '@/utils/workflow'
 import apiSource from '../services/api.ts?raw'
 import chatSource from '../composables/useClarificationChat.ts?raw'
 import pipelineSource from '../composables/useDocumentPipeline.ts?raw'
+import reviewSource from '../utils/review.ts?raw'
+import runSummarySource from '../utils/runSummary.ts?raw'
 import typesSource from '../types/index.ts?raw'
 
 /**
@@ -64,6 +66,22 @@ describe('死代码清理', () => {
 
   it('API 客户端不再残留只服务于已删函数的请求体类型', () => {
     expect(apiSource).not.toMatch(/export interface GeneratePrdStreamPayload\s*\{/)
+  })
+
+  /**
+   * 分章遗留字段（#94 收口）：`failed_sections` / `completed_sections` 与章节归属
+   * （`section_id` / `sectionId`）都已随分章链路删除。它们**恒为空**，留着只会让读代码
+   * 的人以为「哪天会有值」；删掉之后这条是唯一的报警点——名字回来就红。
+   */
+  it('分章遗留字段不许回流（#94）', () => {
+    expect(typesSource).not.toMatch(/FailedSection/)
+    expect(typesSource).not.toMatch(/failedSections/)
+    expect(apiSource).not.toMatch(/failed_sections/)
+    expect(apiSource).not.toMatch(/section_id/)
+    for (const source of [reviewSource, runSummarySource]) {
+      expect(source).not.toMatch(/failed_?[sS]ections/)
+      expect(source).not.toMatch(/section_?[iI]d/)
+    }
   })
 
   /**

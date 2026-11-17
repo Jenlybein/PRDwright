@@ -20,7 +20,6 @@ describe('parseReview：缺陷类别归一', () => {
       summary: '2 个待处理问题',
       issues,
       rewritten: false,
-      failed_sections: [],
       reviewed_at: '2026-10-13T00:00:00',
     }
   }
@@ -43,5 +42,27 @@ describe('parseReview：缺陷类别归一', () => {
     const parsed = parseReview(raw([{ category: 'coverage_missing', severity: 'high', detail: 'x' }]))
 
     expect(parsed?.issues[0]?.category).toBeNull()
+  })
+
+  it('定位只认 `where`；旧结论（分章时代只有 `section_title`）退回它', () => {
+    // 三份产物现在的结论都写 `where`；分章时代落库的 PRD 结论只有 `section_title`。
+    // 读历史时退回它，面板才不会把「问题在哪一节」整句丢掉。
+    const parsed = parseReview(
+      raw([
+        { severity: 'high', category: 'fabrication', where: '## 2. 接口列表', detail: '新结论' },
+        { severity: 'high', section_title: '## 1. 产品概述', detail: '旧结论' },
+      ]),
+    )
+
+    expect(parsed?.issues[0]?.where).toBe('## 2. 接口列表')
+    expect(parsed?.issues[1]?.where).toBe('## 1. 产品概述')
+  })
+
+  it('结论形状里没有分章遗留字段（#94）', () => {
+    // `failed_sections` 随分章链路删除：解析结果里出现它就说明契约又长回去了。
+    const parsed = parseReview(raw([]))
+
+    expect(parsed).not.toBeNull()
+    expect(Object.keys(parsed!)).not.toContain('failedSections')
   })
 })

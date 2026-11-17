@@ -404,10 +404,6 @@ class GenerationJob(SQLModel, table=True):
     # 勘察实测 26,957 字 = 36,919 字节：Postgres 的 `TEXT` 无长度上限，不必挑容量档位。
     # ⚠️ 不设 `server_default`：大文本默认值会让「省略该列」静默写入空串。
     draft_content: str = Field(default="", sa_column=Column(_BIG_TEXT, nullable=False))
-    # 分章完成清单（JSON 数组），实测 15,777 字节，贴着 16KB 线，留一档余量
-    completed_sections: str = Field(
-        default="[]", sa_column=Column(_BIG_TEXT, nullable=False)
-    )
     pending_items: str = Field(
         default="[]", sa_column=Column(Text, nullable=False)
     )
@@ -583,7 +579,7 @@ class JobEvent(SQLModel, table=True):
     ## 它回答什么
 
     「这次生成到第几步、已经吐出了哪些字」。任务行的 `phase` / `draft_content` /
-    `completed_sections` 只留**最近一次的合并写**（每 ≤300ms 或 4KB 一次），中间那几次
+    `pending_items` 只留**最近一次的合并写**（每 ≤300ms 或 4KB 一次），中间那几次
     推进没有任何痕迹；浏览器断线重连时，「上次读到哪里」也没有落点。
 
     这张表把**过程日志**独立出来：
@@ -595,7 +591,7 @@ class JobEvent(SQLModel, table=True):
 
     ## 为什么不和「权威正文」混
 
-    任务行上的 `draft_content` / `completed_sections` 是**快照**（冷读者一次拿走即可），
+    任务行上的 `draft_content` / `pending_items` 是**快照**（冷读者一次拿走即可），
     本表是**过程**。两者分工：快照回答「现在长什么样」，事件表回答「一路走来发生了什么」。
     冷读者只取快照 + 快照游标，**不回放**本表历史（否则刷新一次就把整段生成重演一遍）；
     表里的行只是给「已经手持游标的读者」续读用。

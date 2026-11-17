@@ -138,7 +138,6 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "pending_items": runtime.pending_items,
             # 部分完成：刷新后仍能看到「有没有落下一版可用但不完整的正文」
             "partial": runtime.partial,
-            "failed_sections": runtime.failed_sections,
             # 服务端算的已用时：刷新重连后前端接着它继续走，客户端计时器归零也不影响
             "elapsed_ms": int(max(0.0, time.monotonic() - runtime.started_at) * 1000),
             # 失败退避（#88）：内存里的运行时**没有**「等待重试」这一态——退避只发生在
@@ -159,9 +158,6 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
         usage = {}
     if not isinstance(usage, dict):
         usage = {}
-    failed_sections = usage.get("failed_sections")
-    if not isinstance(failed_sections, list):
-        failed_sections = []
     return StreamEvent(
         type="snapshot",
         content="",
@@ -184,7 +180,6 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             # 待确认清单：DB 兜底快照同样携带，刷新重连后前端直接展示。
             "pending_items": pending_items,
             "partial": bool(usage.get("partial")),
-            "failed_sections": failed_sections,
             "elapsed_ms": _elapsed_ms_from_row(row),
             # 失败退避（#88）：这条任务最早什么时候能被再领走（ISO 文本；空串 = 立即）。
             "next_run_at": row.get("next_run_at", "") or "",

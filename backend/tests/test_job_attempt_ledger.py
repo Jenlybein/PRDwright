@@ -85,7 +85,6 @@ def _append(job_id: int, *, outcome: str = OUTCOME_COMPLETED, **kwargs) -> int:
 def _payload(draft: str = "", usage: str = '{"total_calls": 1}', duration_ms: int = 0):
     return job_state.FinishPayload(
         draft_content=draft,
-        completed_sections=[],
         usage=usage,
         pending_items=[],
         duration_ms=duration_ms,
@@ -116,7 +115,7 @@ def test_creating_and_progress_writes_no_ledger_row(alice):
     """
     job_id = job_create(alice, "prd", None)
     job_persist_progress(
-        alice, job_id, draft_content="半截正文", completed_sections=[], phase="writing"
+        alice, job_id, draft_content="半截正文", phase="writing"
     )
 
     assert _attempts(alice, job_id) == []

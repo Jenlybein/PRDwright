@@ -478,7 +478,7 @@ def test_prd_conclusion_lands_on_the_current_version(client, monkeypatch, rewrit
     assert conclusion["verdict"] == ("revise" if rewrite else "pass")
     assert conclusion["rewritten"] is rewrite
     assert bool(conclusion["issues"]) is rewrite
-    assert conclusion["failed_sections"] == []
+    assert "failed_sections" not in conclusion, "分章遗留字段已随 #94 删除"
     if rewrite:
         assert conclusion["issues"][0]["severity"] == "high"
 

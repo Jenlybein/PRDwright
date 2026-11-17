@@ -150,10 +150,7 @@ def test_completed_but_partial_task_marks_the_version_it_wrote(alice):
         "prd",
         {},
         reply="# 正文\n\n## 1. 概述\n正文\n\n## 2. 功能\n（本章生成失败）\n",
-        done_data={
-            "partial": True,
-            "failed_sections": [{"section_id": "features", "title": "功能"}],
-        },
+        done_data={"partial": True},
     )
 
     version = _current_version(solution_id)
@@ -201,7 +198,6 @@ def test_partial_version_carries_no_review_and_no_review_failed_at(alice):
             "rewritten": False,
             "reviewed_at": "2026-01-01T00:00:00",
             "attempted": True,
-            "failed_sections": [],
         },
         review_failed_at="2026-01-02T00:00:00",
     )
@@ -309,7 +305,6 @@ def test_fix_path_accepts_the_partial_version(alice):
             "rewritten": False,
             "reviewed_at": "2026-01-03T00:00:00",
             "attempted": True,
-            "failed_sections": [],
         },
     )
 

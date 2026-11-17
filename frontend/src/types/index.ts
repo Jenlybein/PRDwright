@@ -638,7 +638,7 @@ export interface SummaryChange {
   after: unknown
 }
 
-/** 一条审核问题（PRD 单章审核与下游整篇审核共用展示结构） */
+/** 一条审核问题（三份产物的整篇审核共用这一个展示结构） */
 export interface ReviewIssue {
   severity: string
   /**
@@ -654,19 +654,15 @@ export interface ReviewIssue {
   detail: string
 }
 
-/** 一次失败的章节（PRD 并行生成用；下游恒为空） */
-export interface FailedSection {
-  sectionId: string
-  title: string
-  reason: string
-}
-
 /**
- * 一次审核结论（判定 + 逐条问题 + 是否改写 + 失败章节 + 审核时间）。
+ * 一次审核结论（判定 + 逐条问题 + 是否改写 + 审核时间）。
  *
  * 它随**文档版本**保存（一版一条）：刷新后从 `DocumentRecord.review` 读回来，
  * 订阅期间则由 SSE 的 `review` 事件即时更新同一份形状——两处共用一个解析器
  * （`api.parseReview`），因此「流里看到的」与「刷新后看到的」不会长得不一样。
+ *
+ * 三份产物（PRD / 接口文档 / 提示词套件）的结论形状**逐字相同**（票 #94）：
+ * `kind` 只回答「这是哪一份产物的结论」，不引入任何按产物分叉的字段。
  *
  * `verdict` 为空串表示**没审成**（不是通过）：界面据此显示「审核失败」。
  */
@@ -679,7 +675,6 @@ export interface ReviewConclusion {
   issues: ReviewIssue[]
   /** 本次是否真的执行了改写（重审恒为 false：只审不改） */
   rewritten: boolean
-  failedSections: FailedSection[]
   /**
    * 审核时间（后端 UTC ISO 8601）。
    *
@@ -830,8 +825,6 @@ export interface JobSnapshot {
   pendingItems: PendingItem[]
   /** 是否有落下一版「可用但不完整」的正文（部分完成） */
   partial: boolean
-  /** 失败章节清单（分章链路已退役，当前恒为空；保留形状给 #94 收口） */
-  failedSections: FailedSection[]
   /**
    * 服务端算的任务已用时（毫秒）。
    *
@@ -928,8 +921,6 @@ export interface RunSummary {
   warnings: string[]
   /** 是否有落下一版「可用但不完整」的正文（部分完成） */
   partial: boolean
-  /** 失败章节清单（分章链路已退役，当前恒为空；保留形状给 #94 收口） */
-  failedSections: FailedSection[]
   /** 实际使用的**协议**（openai_compatible / anthropic / ark / google_genai …） */
   protocol: string
   /**

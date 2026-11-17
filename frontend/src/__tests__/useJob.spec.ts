@@ -75,7 +75,6 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     retryAt: null,
     pendingItems: [],
     partial: false,
-    failedSections: [],
     ...overrides,
   }
 }
@@ -94,7 +93,6 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     injectedSkills: [],
     warnings: [],
     partial: false,
-    failedSections: [],
     protocol: 'ark',
     providerConfigId: 'cfg_ark0001',
     providerName: '火山方舟',

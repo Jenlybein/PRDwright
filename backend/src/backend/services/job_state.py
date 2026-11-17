@@ -234,14 +234,13 @@ def supersede_scope(owner_id: int, solution_id: int | None, kind: str) -> JobSco
 
 @dataclass(frozen=True, slots=True)
 class FinishPayload:
-    """收尾要一起落库的载荷（正文 / 章节 / 用量 / 待确认清单 / token 两列 / 耗时）。
+    """收尾要一起落库的载荷（正文 / 用量 / 待确认清单 / token 两列 / 耗时）。
 
     `duration_ms` 与 `usage` 里的 `duration_ms` 是同一个值：账本要回答「跑了多久」，
     而它属于收尾载荷、不该在状态机里再从 usage JSON 里解析一遍。
     """
 
     draft_content: str = ""
-    completed_sections: list[dict[str, Any]] | None = None
     usage: str | None = None
     pending_items: list[dict[str, Any]] | None = None
     prompt_tokens: int = 0
@@ -383,7 +382,6 @@ def _write(
             owner_id,
             int(scope.job_id or 0),
             draft_content=payload.draft_content,
-            completed_sections=list(payload.completed_sections or []),
             usage=payload.usage,
             pending_items=payload.pending_items,
             prompt_tokens=payload.prompt_tokens,
@@ -399,7 +397,6 @@ def _write(
             error_code=error_code or "INTERNAL_ERROR",
             error_message=error_message or "生成失败",
             draft_content=payload.draft_content,
-            completed_sections=list(payload.completed_sections or []),
             usage=payload.usage,
             pending_items=payload.pending_items,
             prompt_tokens=payload.prompt_tokens,
@@ -427,7 +424,6 @@ def _write(
             int(scope.job_id or 0),
             error_message=error_message or "任务已取消",
             draft_content=payload.draft_content,
-            completed_sections=list(payload.completed_sections or []),
             usage=payload.usage,
             pending_items=payload.pending_items,
             prompt_tokens=payload.prompt_tokens,
@@ -453,7 +449,6 @@ def _write(
             error_code=error_code or "INTERNAL_ERROR",
             error_message=error_message or "服务重启，任务已中断",
             draft_content=payload.draft_content,
-            completed_sections=list(payload.completed_sections or []),
             usage=payload.usage,
             pending_items=payload.pending_items,
             prompt_tokens=payload.prompt_tokens,
@@ -473,7 +468,6 @@ def _write(
             owner_id,
             int(scope.job_id or 0),
             draft_content=payload.draft_content,
-            completed_sections=list(payload.completed_sections or []),
             usage=payload.usage,
             pending_items=payload.pending_items,
             prompt_tokens=payload.prompt_tokens,

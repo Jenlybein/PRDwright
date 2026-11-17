@@ -143,7 +143,6 @@ def test_user_list_includes_usage_aggregated_by_sql(client):
         owner_id,
         job_a,
         draft_content="",
-        completed_sections=[],
         prompt_tokens=100,
         completion_tokens=20,
     )
@@ -154,7 +153,6 @@ def test_user_list_includes_usage_aggregated_by_sql(client):
         error_code="INTERNAL_ERROR",
         error_message="炸了",
         draft_content="",
-        completed_sections=[],
         prompt_tokens=50,
         completion_tokens=5,
     )
@@ -193,7 +191,6 @@ def test_platform_stats_counts_everyone(client):
         owner_id,
         job_id,
         draft_content="",
-        completed_sections=[],
         prompt_tokens=7,
         completion_tokens=3,
     )

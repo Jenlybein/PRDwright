@@ -359,7 +359,7 @@ def test_rereview_of_prd_reviews_the_whole_body_once(client, monkeypatch):
     assert conclusion["verdict"] == "revise"
     assert conclusion["rewritten"] is False
     # 分章链路已退役：结论里不再有 section_id / section_title 这类按章字段
-    assert conclusion["failed_sections"] == []
+    assert "failed_sections" not in conclusion, "分章遗留字段已随 #94 删除"
     assert len(conclusion["issues"]) == 1
     assert "section_id" not in conclusion["issues"][0]
 

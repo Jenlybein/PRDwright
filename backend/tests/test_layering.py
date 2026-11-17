@@ -243,7 +243,7 @@ _EXPECTED_SCHEMAS_FIELDS = {
     "QuestionConfig": {"label", "name", "options", "required", "type"},
     "QuestionsConfig": {"advanced_questions", "base_questions"},
     "RegisterRequest": {"invite_code", "password", "username"},
-    "RunSummary": {"completion_tokens", "duration_ms", "failed_calls", "failed_sections", "injected_skills", "kind", "model", "partial", "prompt_tokens", "protocol", "provider_config_id", "provider_name", "request_id", "status", "steps", "total_calls", "warnings"},
+    "RunSummary": {"completion_tokens", "duration_ms", "failed_calls", "injected_skills", "kind", "model", "partial", "prompt_tokens", "protocol", "provider_config_id", "provider_name", "request_id", "status", "steps", "total_calls", "warnings"},
     "SolutionDeleteResponse": {"ok"},
     "SolutionDetail": {"content_updated_at", "created_at", "id", "mode", "stage", "state", "title", "updated_at"},
     "SolutionListResponse": {"solutions"},

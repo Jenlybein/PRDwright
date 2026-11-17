@@ -378,7 +378,6 @@ def test_closeout_ledger_body_and_conclusion_belong_to_one_version(alice):
         "rewritten": False,
         "reviewed_at": "2026-01-01T00:00:00",
         "attempted": True,
-        "failed_sections": [],
     }
     pending = [{"id": "p1", "title": "支付方式", "detail": "待确认"}]
 
