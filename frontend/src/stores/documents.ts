@@ -67,9 +67,9 @@ function emptyDerived(): Record<DocumentKind, DerivedFrom | null> {
 /** 三种产物「当前版本的审核记录」的空值 */
 function emptyReviewSnapshots(): Record<DocumentKind, ReviewSnapshot> {
   return {
-    prd: { review: null, reviewFailedAt: null, versionNo: 0 },
-    'api-docs': { review: null, reviewFailedAt: null, versionNo: 0 },
-    prompts: { review: null, reviewFailedAt: null, versionNo: 0 },
+    prd: { review: null, reviewFailedAt: null, versionNo: 0, partial: false },
+    'api-docs': { review: null, reviewFailedAt: null, versionNo: 0, partial: false },
+    prompts: { review: null, reviewFailedAt: null, versionNo: 0, partial: false },
   }
 }
 
@@ -93,6 +93,13 @@ export interface ReviewSnapshot {
   reviewFailedAt: string | null
   /** 当前版本号（0 = 后端没给，界面不显示） */
   versionNo: number
+  /**
+   * 当前版本是不是「部分完成」（票 #85）：正文可用但不完整。
+   *
+   * 它改变的是**审核区的读法**：这一版没有结论、也没有「审核失败」可讲（旧结论属于
+   * 别的正文）。界面据此提示「已生成的部分可以先用」，并让审核面板显示「未审核」。
+   */
+  partial: boolean
 }
 
 export const useDocumentsStore = defineStore('documents', () => {
@@ -249,9 +256,15 @@ export const useDocumentsStore = defineStore('documents', () => {
           // 失败是**落库事实**，服务端给了就用服务端的；服务端没给、而这一版又确实没有
           // 结论时，保留本会话刚看到的那次失败——生成链路的审核降级不落库（它不是
           // 「重审失败」），本地这条只活到本会话结束。拿到真结论就一并清掉。
-          reviewFailedAt:
-            record.reviewFailedAt ?? (record.review === null ? local.reviewFailedAt : null),
+          //
+          // **部分完成版本例外**（票 #85）：那一版的审核区必须是空的。把本会话里上一版
+          // 的失败时间留在这里，会让用户读到「这份没审成的正文失败于某时」——而它
+          // 根本没被审过，旧时间戳属于别的正文。
+          reviewFailedAt: record.partial
+            ? null
+            : (record.reviewFailedAt ?? (record.review === null ? local.reviewFailedAt : null)),
           versionNo: record.versionNo,
+          partial: record.partial,
         }
       }
       // 尚未落库的手改优先：它们在时间上更新于这次响应
@@ -428,6 +441,9 @@ export const useDocumentsStore = defineStore('documents', () => {
         reviewSnapshots.value[kind] = {
           ...reviewSnapshots.value[kind],
           versionNo: record.versionNo,
+          // 手改不会让「这一版不完整」这件事消失（部分完成的正文仍是那一份），
+          // 因此标记以写入结果为准，与版本号一起对齐。
+          partial: record.partial,
         }
         // 这一份真的写进库了——报告一次内容变更，让方案列表的时间与排序跟着走
         markContentWritten()
@@ -542,6 +558,17 @@ export const useDocumentsStore = defineStore('documents', () => {
     return reviewSnapshots.value[kind].versionNo
   }
 
+  /**
+   * 这份正文是不是**可用但不完整**（票 #85）。
+   *
+   * 读的是当前版本那个落库标记（流式期间不会变）：失败收尾把半截正文升格成版本时，
+   * `loadAll` 之后它为 true。界面据此提示「已生成的部分可以先用」，
+   * 并把用户的落点带到审阅页——那里能下载、能修、能重生成。
+   */
+  function partialOf(kind: DocumentKind): boolean {
+    return reviewSnapshots.value[kind].partial
+  }
+
   const hasPrd = computed(() => contents.value.prd.trim() !== '')
   const hasApiDocs = computed(() => contents.value['api-docs'].trim() !== '')
   const hasPrompts = computed(() => contents.value.prompts.trim() !== '')
@@ -586,5 +613,6 @@ export const useDocumentsStore = defineStore('documents', () => {
     reviewOf,
     reviewFailedAtOf,
     versionNoOf,
+    partialOf,
   }
 })

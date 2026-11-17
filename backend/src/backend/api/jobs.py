@@ -148,6 +148,12 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
 def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
     """把 DB 行（含未对外暴露的列）收敛成 `JobStatus`（不含 draft_content）。"""
     usage = parse_usage(row.get("usage"))
+    # 「有内容可用但不完整」有两个来源（票 #85）：任务行那一列是收尾时定格的结论；
+    # `usage.partial` 是章节级占位的旧口径（历史行与在途快照里只有它）。
+    # 两处取「或」：只要有一处说「不完整」，界面就不该把它当完整交付。
+    partial = bool(row.get("partial")) or (
+        bool(usage.get("partial")) if isinstance(usage, dict) else False
+    )
     return schemas.JobStatus(
         id=int(row.get("id", 0)),
         kind=str(row.get("kind", "")),
@@ -163,7 +169,7 @@ def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
         created_at=str(row.get("created_at", "")),
         updated_at=str(row.get("updated_at", "")),
         usage=usage,
-        partial=bool(usage.get("partial")) if isinstance(usage, dict) else False,
+        partial=partial,
     )
 
 

@@ -246,7 +246,9 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 | **#79** | 状态机单一入口（三态先行） | `services/job_state.py`：四事件 + 期望条件的唯一转换动作；仓储终态写条件化（`WHERE status='running'`）、影响行数为判据；`_finalize` 幂等闸 | 已合入 `integration/spec-75`（`9b7f421`） |
 | **#80** | 执行账本 | `job_attempts` + `repositories/job_attempt_repo.py`；与状态更新同一事务、保存点隔离（审计写坏不杀结论） | 已合入（`cf25ec1`） |
 | **#81** | 原子收尾 + 统一版本锁 | `services/job_finalize.py` 单事务收尾；`services/document_store.py::write_document` 唯一写入入口 + `expected_version_no`；`repositories/document_repo.py::write_current_version` 条件写；`PUT .../documents/{kind}` 409 + `CONTENT_CHANGED`；就地动作的 `expected_version_no` 随任务单定格；前端冲突提示与「保存失败不显示成功」 | 本轮（`ticket/81-atomic-closeout`，基于 `cf25ec1`） |
-| #82~#85 | 租约与恢复 / 事件表 / 七态 / 部分完成 | 见 spec 第六~八节 | 待做 |
+| **#82** | 抢占 + 租约 + 动作点续租 | `0003` 三列（`lease_owner` / `lease_token` / `lease_expire_at`）、`services/job_claimer.py` 抢占 / 续租、状态机 `CLAIM` 事件、收尾三条件回写 | 已合入（`d7b89bc`） |
+| **#85** | 部分完成落成新版本 | `0004` 两列（`document_versions.partial` / `generation_jobs.partial`）、失败收尾追加部分完成版本（审核两列留空、与任务标记同事务）、前端三处提示 | 本轮（`ticket/85-partial`，基于 `7b9c2ad`） |
+| #83 / #84 | 事件表与快照 / 七态与「取消中」 | 见 spec 第六~八节 | 待做 |
 
 ### 9.4 验收（#81）
 
@@ -263,3 +265,22 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 - 后端 `uv run pytest`（`-n auto`，单独跑、不与其它全量并发）：**1368 passed / 0 skipped / 0 failed**；用例基线按 `--collect-only -q` 现取：**1368 收集 / 1164 文本计数 / 204 差额**（口径见 [`../agents/conventions.md`](../agents/conventions.md) §10）。
 - `frontend` 的 `test:unit -- --run`：**773 passed / 41 文件**；`npm run build`（含 `type-check`）通过。
 - **未执行**：push、合并与发布（由用户确认）。
+
+### 9.6 范围、验收与复测（#85 部分完成）
+
+**范围**：失败 / 取消收尾把已生成的正文落成一版带标记的正文，用户可下载、可修、可重生成。
+
+- **落库**（迁移 `0004`）：`document_versions.partial` 与 `generation_jobs.partial`，都是 `BOOLEAN NOT NULL DEFAULT false`。标记的真源在**版本行**（「哪一份正文不完整」），任务行留一份镜像（「这次有没有东西能用」）。
+- **写入**：失败收尾经唯一入口 `document_store.write_document(mode="append")` **追加**一版并标 `partial=true`，同一事务里 `review` / `review_failed_at` 显式留空；任务行标记与终态同一条语句。一个字都没写出来、被取代、以及就地改写 / 重审 / 对话的失败都不落部分完成版本（理由见 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §3.3）。
+- **前端**：审阅页页首提示「这份正文不完整，已生成的部分可以先用」、版本列表 / 预览标「部分完成」、审核区显示「未审核」且不渲染旧结论、下载与修复不被标记禁用；失败收尾若已落这一版，落点从运行视图改到审阅页。
+
+**验收（逐条都有对应用例，`backend/tests/test_partial_completion.py`）**：
+
+1. 重试耗尽 / 中途失败产生一版带标记正文 —— `test_exhausted_retries_land_a_partial_version`、`test_completed_but_partial_task_marks_the_version_it_wrote`。
+2. 那一版审核结论与审核失败时间均为空 —— `test_partial_version_carries_no_review_and_no_review_failed_at`。
+3. 任务失败但看得出「有内容可用」 —— `test_job_row_marks_partial_while_status_stays_failed`、`test_jobs_api_exposes_the_partial_marker`、`test_version_list_exposes_the_partial_marker`。
+4. 下载与修复对该版本可用 —— `test_documents_api_serves_the_partial_version_for_download`、`test_fix_path_accepts_the_partial_version`。
+5. 标记挂版本上、任务上留一份且同一事务 —— `test_marker_is_on_the_version_and_mirrored_on_the_job`、`test_partial_version_and_job_marker_come_from_one_closeout`。
+6. 用户取消也落部分完成版本 —— `test_user_cancel_also_lands_a_partial_version`；负例（没有内容 / 被取代 / 重审）各有断言。
+
+**复测**（`ticket/85-partial`，基于 `7b9c2ad`）：后端 `uv run pytest -n auto`（单独跑）**1401 passed / 0 skipped / 0 failed**（收集 1401）；`frontend npm run test:unit -- --run` **789 passed / 41 文件**；`npm run build`（含 `type-check`）通过。**未执行**：push、合并与发布（由用户确认）。

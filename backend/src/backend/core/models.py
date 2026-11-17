@@ -349,6 +349,17 @@ class DocumentVersion(SQLModel, table=True):
     #
     # 与 `review` 同一行的理由同上（US3）：失败描述的就是这一版。
     review_failed_at: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # 「这一版正文**可用但不完整**」（票 #85）：写到一半失败、或有章节落成失败占位。
+    #
+    # 标记的**真源在版本行**：同一份文档的不同版本里，只有那一版不完整，所以它不能挂在
+    # `documents`（那是文档的身份，不描述某一版的内容）。任务行上再留一份
+    # （`generation_jobs.partial`），两处由同一次收尾事务写入。
+    #
+    # ⚠️ 它**不是**审核状态，也不影响「能不能下载 / 修复 / 重生成」：那三件事由正文与
+    # 结论决定，`partial` 只回答「这份正文完整不完整」。
+    partial: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +474,16 @@ class GenerationJob(SQLModel, table=True):
     lease_expire_at: str = Field(
         default="",
         sa_column=Column(timestamp_text(), nullable=False, server_default=text("''")),
+    )
+    # 「这次生成有内容可用、但不完整」（票 #85）：失败收尾（含用户取消）把已生成的正文
+    # 落成一版 `document_versions.partial=true` 时，任务行同一次事务里留这一份投影。
+    #
+    # 为什么任务行也要一份：界面同时问两个问题——「这次任务怎么结束的」（任务行 status）
+    # 与「这份正文能不能用」（版本行 partial）。只写一处，就有一边说不清。
+    # 与 `usage.partial`（章节级占位的旧口径）并存：那条仍在运行中的快照里用，
+    # 落库的这份是收尾时定格的结论。
+    partial: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
     )
 
 
@@ -776,6 +797,9 @@ BOOLEAN_COLUMNS: frozenset[tuple[str, str]] = frozenset(
         ("model_providers", "enabled"),
         ("model_providers", "thinking_enabled"),
         ("chat_turns", "interrupted"),
+        # 票 #85：部分完成标记，版本行是「这份正文不完整」的真源，任务行是它的镜像。
+        ("document_versions", "partial"),
+        ("generation_jobs", "partial"),
     }
 )
 

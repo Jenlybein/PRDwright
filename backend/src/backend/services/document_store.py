@@ -184,6 +184,7 @@ def write_document(
     run_summary: dict[str, Any] | None = None,
     review: dict[str, Any] | None = None,
     review_failed_at: str | None = None,
+    partial: bool = False,
     source: str | None = None,
     note: str = "",
     metadata: dict[str, Any] | None = None,
@@ -223,6 +224,10 @@ def write_document(
         review: 这一版正文的审核结论（只与 `append` 有关：结论描述的就是这一版正文，
             与正文同批写入新版本）。
         review_failed_at: 「这次审核试过但没跑成」的时间；只与 `append` 有关。
+        partial: 「这一版正文可用但不完整」（票 #85）；只与 `append` 有关——只有一个**新版本**
+            才会有「这一版不完整」这件事，就地改写改的是当前版本已经标好的那一版。
+            它**不**清空 / 改写 `review` / `review_failed_at`：部分完成的那一版本来就没有结论，
+            调用方传 `None` 即不写（旧结论属于别的正文，不许跟过来）。
         source: 版本来源标签；缺省 `append` 取产物类型、`replace`/`manual` 取 `manual`。
         note / metadata: 版本备注与附加信息（`checkpoint` / `restore` 用）。
         session: 调用方持有的 session；为空时本函数自开事务。
@@ -241,6 +246,7 @@ def write_document(
                 run_summary=run_summary,
                 review=review,
                 review_failed_at=review_failed_at,
+                partial=partial,
                 source=source,
                 note=note,
                 metadata=metadata,
@@ -257,6 +263,7 @@ def write_document(
         run_summary=run_summary,
         review=review,
         review_failed_at=review_failed_at,
+        partial=partial,
         source=source,
         note=note,
         metadata=metadata,
@@ -276,6 +283,7 @@ def _write_document_in(
     run_summary: dict[str, Any] | None,
     review: dict[str, Any] | None,
     review_failed_at: str | None,
+    partial: bool,
     source: str | None,
     note: str,
     metadata: dict[str, Any] | None,
@@ -323,6 +331,9 @@ def _write_document_in(
             last_run_summary=summary_json,
             review=review_json,
             review_failed_at=review_failed_at,
+            # 「这一版可用但不完整」的标记只属于**新版本**：它与正文同批写入，
+            # 就地改写路径（`replace` / `manual`）改的是已经标好的那一版，不重新标。
+            partial=partial,
             source=version_source,
             note=note,
             metadata=metadata_json,
@@ -390,6 +401,7 @@ def commit_generated(
     run_summary: dict[str, Any] | None = None,
     review: dict[str, Any] | None = None,
     review_failed_at: str | None = None,
+    partial: bool = False,
     append_version: bool = True,
     source: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -413,6 +425,7 @@ def commit_generated(
         run_summary=run_summary,
         review=review,
         review_failed_at=review_failed_at,
+        partial=partial,
         source=source,
         metadata=metadata,
         session=session,
@@ -574,6 +587,10 @@ def checkpoint(
 
     写入实现只有一份：读当前版本（继承清单 / 回执）与追加版本**在同一个事务里**，
     由统一入口 `write_document(mode="append")` 完成。
+
+    部分完成标记跟着**正文**走（票 #85）：当前版本本身就是「可用但不完整」时，这一版
+    里程碑同样是那一份不完整的正文，因此继承同一个标记。否则用户会把一份半截稿
+    「存为新版本」后，界面突然把它当成完整版。
     """
     with session_scope() as session:
         current = DocumentRepository(session).get(owner_id, solution_id, kind)
@@ -587,6 +604,7 @@ def checkpoint(
             mode="append",
             pending_items=pending,
             run_summary=summary,
+            partial=bool(current.partial) if current else False,
             source="checkpoint",
             note=note,
             session=session,
@@ -605,6 +623,9 @@ def restore(
     恢复的正文、清单、回执都取源版本——「把当时那一版（连同它的待办清单）原样搬回来」。
     源版本不存在或不属于该用户时返回 None（路由翻 404）。读源版本与追加版本在同一个
     事务里，写入仍走唯一入口 `write_document(mode="append")`。
+
+    部分完成标记同样取源版本（票 #85）：恢复一半截稿之后，它就是当前正文，界面必须继续
+    说「这份正文不完整」；否则恢复动作会把一个半成品洗成完整版。
     """
     with session_scope() as session:
         source = DocumentRepository(session).get_version(
@@ -620,6 +641,7 @@ def restore(
             mode="append",
             pending_items=_load_json(source.pending_items, list, []),
             run_summary=_load_json(source.last_run_summary, dict, None),
+            partial=bool(source.partial),
             source="restore",
             note="",
             metadata={"restored_from": source.version_no},
@@ -691,6 +713,9 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         # 当前版本序号：结论面板据此说清「这条结论是哪一版的」（后端已有这一列，
         # 只是在版本行里、从前没随文档下发）。没有版本时是 0。
         "version_no": int(row.version_no or 0),
+        # 「这份正文可用但不完整」（票 #85）：审阅页据此打「部分完成」提示，而不是
+        # 把半截正文当成完整交付。旧数据（列不存在时的历史行）读出来是 False。
+        "partial": bool(row.partial),
         "updated_at": row.updated_at,
         "derived_from": derived,
         "stale": _is_stale(derived, sha_by_kind or {}),
@@ -723,6 +748,8 @@ def _to_version_item(row: VersionSummary) -> dict[str, Any]:
         "content_length": int(row.content_length or 0),
         "created_at": row.created_at,
         "is_current": bool(row.is_current),
+        # 「部分完成」标记（票 #85）：版本列表据此与完整版本区分开。
+        "partial": bool(row.partial),
     }
 
 
@@ -738,6 +765,8 @@ def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
         "review_failed_at": row.review_failed_at,
         "source": row.source,
         "note": row.note or "",
+        # 「部分完成」标记（票 #85）：预览一条历史版本时同样要看得出它不完整。
+        "partial": bool(row.partial),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "is_current": bool(row.is_current),

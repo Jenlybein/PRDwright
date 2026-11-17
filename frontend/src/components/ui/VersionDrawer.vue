@@ -240,6 +240,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             {{ versionSourceLabel(preview.source) }}
           </AppBadge>
           <AppBadge v-if="preview.isCurrent" variant="success">当前</AppBadge>
+          <!-- 部分完成（票 #85）：与完整版本区分开。它只说明「这一版不完整」，
+               恢复 / 删除 / 预览这些动作照旧可用（标记不是禁用理由）。 -->
+          <AppBadge v-if="preview.partial" variant="warning">部分完成</AppBadge>
           <span class="text-[11px] text-subtle">{{ relativeTime(preview.createdAt) }}</span>
           <span class="text-[11px] text-subtle">· 约 {{ preview.content.length }} 字</span>
         </div>
@@ -339,6 +342,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                     {{ versionSourceLabel(version.source) }}
                   </AppBadge>
                   <AppBadge v-if="version.isCurrent" variant="success">当前</AppBadge>
+                  <!-- 部分完成（票 #85）：「正文可用但不完整」。与完整版本区分开，
+                       但恢复 / 删除照旧可用——标记不是禁用理由。 -->
+                  <AppBadge v-if="version.partial" variant="warning">部分完成</AppBadge>
                 </div>
                 <span class="shrink-0 text-[11px] text-subtle">
                   {{ relativeTime(version.createdAt) }}
