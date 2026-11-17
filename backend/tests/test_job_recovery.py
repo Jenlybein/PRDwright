@@ -28,7 +28,7 @@ running 行。恢复器就是收这个口的：
 ## 接缝（断言只架在这三处）
 
 1. **`job_recovery.recover_once(limit)`**（本票新增、可直接调用的单元）：定时扫描的
-   入口。它不起线程、不起定时器——接入调度循环是 #89 的事。
+   入口。它不起线程、不起定时器——生产里由调度循环的收口周期驱动（`job_scheduler.recover_expired`）。
 2. **`job_recovery.scan` / `recover_one`**：扫描与单条收口。「扫描之后、收口之前
    凭证被换掉」这段窗口是 AC3 的核心，所以这两个也属于公开面。
 3. **`job_service.reap_orphans()`**（启动回收）：进程刚起来，库里任何既有租约都
@@ -110,7 +110,7 @@ def test_a_dead_executors_job_leaves_executing_and_is_claimable_again(alice):
 
     七态之后「离开执行中」有一个**确定的取值**：`status='pending'`（不是「`running`
     加一个空租约」这种同形表达）。它没有被凭空判死——这一次执行只是没跑成（记进账本，
-    见 AC2），任务本身回到队列里等下一次执行（调度循环是 #89）。
+    见 AC2），任务本身回到队列里等下一次执行（由调度循环的领取周期领走）。
     """
     job_id = job_create(alice, "prd", None)
     started = utc_now()

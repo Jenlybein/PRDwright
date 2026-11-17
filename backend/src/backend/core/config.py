@@ -213,6 +213,57 @@ class Settings(BaseSettings):
         "否则进程会在排空走完之前被硬杀，任务又变回 `running` 的尸体。",
     )
 
+    # --- 调度循环（票 #89 的遗留，本票 P0-1 接上） ---------------------------
+    # 三个维护单元（`claim_once` / `recover_once` / `purge_expired_events`）此前只有
+    # 用例在调，没有生产调用者：退避到期的行没人领、卡住的取消没人兜底、过程日志
+    # 永不清理。这一组开关把「谁、多久扫一次」变成配置。
+    #
+    # 为什么默认开：它就是生产行为。**测试默认关**（`tests/conftest.py` 把它置 false）：
+    # 一千多条用例各自起一个后台循环只会互相干扰（抢同一批行、在用例收尾时还在跑）。
+    # 少量集成用例显式打开它来验证循环本身。
+    job_scheduler_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("PRDWRIGHT_JOB_SCHEDULER_ENABLED", "JOB_SCHEDULER_ENABLED"),
+        description="是否在应用启动时起单进程后台调度循环（领到期任务 / 收口过期租约 / "
+        "清理过期过程日志）。关掉后这三个动作只能由用例或运维手动调用。",
+    )
+    job_scheduler_claim_interval: float = Field(
+        default=1.0,
+        ge=0.05,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_CLAIM_INTERVAL", "JOB_SCHEDULER_CLAIM_INTERVAL"
+        ),
+        description="领取到期任务的扫描周期（秒）。它**只负责补漏**：新建任务仍在登记后"
+        "立刻抢占派发，交互延迟不经过这个周期。",
+    )
+    job_scheduler_recovery_interval: float = Field(
+        default=30.0,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_RECOVERY_INTERVAL", "JOB_SCHEDULER_RECOVERY_INTERVAL"
+        ),
+        description="收口过期租约 / 取消中任务的扫描周期（秒）。租约本身 120 秒到期，"
+        "30 秒一轮意味着「执行者消失」最多被发觉晚半分钟。",
+    )
+    job_scheduler_purge_interval: float = Field(
+        default=3600.0,
+        ge=60.0,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_PURGE_INTERVAL", "JOB_SCHEDULER_PURGE_INTERVAL"
+        ),
+        description="清理过期过程日志（保留 7 天）的周期（秒）。它删的是 `job_events`，"
+        "权威正文一个字都不动。",
+    )
+    job_scheduler_claim_batch: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_CLAIM_BATCH", "JOB_SCHEDULER_CLAIM_BATCH"
+        ),
+        description="一轮最多领几条到期任务。补漏是逐条收口的维护动作，"
+        "一次领太多会把一批写压在同一轮里。",
+    )
+
     # --- 可观测性（日志） ----------------------------------------------------
     log_level: str = Field(
         default="INFO",

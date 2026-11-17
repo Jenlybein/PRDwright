@@ -231,6 +231,51 @@ def test_daily_aggregates_tokens(client):
     assert today["completion_tokens"] == 130
 
 
+def test_daily_counts_projection_is_a_frozen_dataclass(client):
+    """单日计数是**不可变投影**而不是裸 dict（P1-2）。
+
+    为什么值得一条用例：形状错了不会报错，只会「哪天有人改了 SELECT 的列顺序，某两个
+    整数静默对调」。裸 dict + `row[2]` 的写法没有任何东西能拦住它；`frozen dataclass`
+    让字段名成为唯一的取值方式，少一个字段是导入期就能发现的 `TypeError`。
+    公共读面（`/api/admin/stats/daily`）拿到的数值仍必须与这份投影一致——形状变了，
+    数字不能跟着变。
+    """
+    from dataclasses import is_dataclass
+
+    from backend.core.engine import session_scope
+    from backend.repositories.admin_repo import AdminStatsRepository, _utc_day_bounds
+
+    _as_admin(client)
+    owner_id = _user_id("root")
+    _job(owner_id, status="succeeded", prompt_tokens=7, completion_tokens=3)
+    _job(owner_id, status="failed", error_code="LLM_UPSTREAM_ERROR")
+
+    from datetime import date, timedelta as _timedelta
+
+    today = utc_now().date()
+    with session_scope() as session:
+        counts = AdminStatsRepository(session)._count_one_day(  # noqa: SLF001 - 见 docstring
+            *_utc_day_bounds(today, _timedelta(0))
+        )
+        assert is_dataclass(counts) and counts.__dataclass_params__.frozen, (
+            "单日计数必须是 frozen dataclass（同文件 `JobMetrics` 的写法）"
+        )
+        assert counts.task_count == 2
+        assert counts.failed_count == 1
+        assert counts.prompt_tokens == 7
+        assert counts.completion_tokens == 3
+
+    # 公共读面读的是同一份事实
+    item = client.get(
+        "/api/admin/stats/daily", params={"days": 1, "tz_offset_minutes": 0}
+    ).json()["items"][-1]
+    assert item["task_count"] == counts.task_count
+    assert item["failed_count"] == counts.failed_count
+    assert item["prompt_tokens"] == counts.prompt_tokens
+    assert item["completion_tokens"] == counts.completion_tokens
+    assert date.fromisoformat(item["day"]) == today
+
+
 def test_summary_failure_rate_is_weighted_not_averaged(client):
     """区间失败率是**加权**的（区间失败 / 区间已收尾），不是「每日失败率的平均」。
 

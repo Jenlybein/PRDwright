@@ -363,10 +363,16 @@ def test_job_row_keeps_one_error_while_ledger_keeps_full_history(alice):
 
 
 def test_cancelled_execution_is_recorded_as_cancelled_not_failed(alice):
-    """取消：**请求停止当下不记账**，收尾时记一行 `cancelled`（与普通失败区分）。
+    """取消：记一行 `cancelled`（与普通失败区分），错误码留空。
 
-    取消在被请求那一刻先把执行中的行落成 `cancelling`（用户要立刻看得见），
-    但账本等到执行者确认收尾才写：否则一次执行会有「按下停止」与「真正结束」两行账。
+    **两种取消取消账的时机不同**（P0-4）：
+
+    - 单条任务（用户按停止）：先落「取消中」，账本等执行者确认收尾时才写——否则一次
+      执行会有「按下停止」与「真正结束」两行账；
+    - 批量作用域（删方案 / 删账号，本用例走的是删账号）：方案或账号已经不存在，没有人
+      会来确认退出，因此**请求那一刻就落终态**（`cancelled` + 清租约），账本也就在
+      那一刻写——它已经是一次真的结束了。
+
     已取消的账本错误码是空串——状态由 `outcome` / 任务行 `status` 表达（票 #84 AC4）。
     """
     observed: dict[str, list[dict]] = {}
@@ -385,9 +391,11 @@ def test_cancelled_execution_is_recorded_as_cancelled_not_failed(alice):
         reply="完整正文",
     )
 
-    assert observed["ledger_right_after_cancel"] == [], "取消请求当下不记账本"
+    assert len(observed["ledger_right_after_cancel"]) == 1, (
+        "删账号是单步收口：请求那一刻这一批行就进了终态，账本随之写下唯一一行"
+    )
     attempts = _attempts(alice, registered.job_id)
-    assert len(attempts) == 1
+    assert len(attempts) == 1, "执行者的确认会因为租约已清而改到 0 行，不该有第二行账"
     attempt = attempts[0]
     assert attempt["outcome"] == OUTCOME_CANCELLED
     assert attempt["outcome"] != OUTCOME_FAILED, "取消不是普通失败，口径要分开"
@@ -396,6 +404,38 @@ def test_cancelled_execution_is_recorded_as_cancelled_not_failed(alice):
 
     row = job_get(alice, registered.job_id)
     assert row["status"] == "cancelled" and row["error_code"] == ""
+
+
+def test_single_job_cancel_records_ledger_only_on_confirm(alice):
+    """单条任务（用户按停止）仍是**两阶段**：请求当下不记账，执行者确认时才记一行。
+
+    这条与上一条是同一件事的两面：批量作用域（删方案 / 删账号）一步落终态、当时就记账；
+    单条任务只是「请求停止」，结论要等执行者在动作点确认（`CONFIRM_CANCEL`）。
+    把两者混成一套，就会要么出现两行账（一次执行被记两次），要么一行都没有。
+    """
+    from conftest import job_create_running
+
+    job_id, lease = job_create_running(alice, "prd")
+    assert job_state.transition(
+        job_state.JobEvent.REQUEST_CANCEL,
+        job_state.job_scope(alice, job_id),
+        error_message="用户停止了生成",
+    ).applied
+    assert job_get(alice, job_id)["status"] == "cancelling"
+    assert _attempts(alice, job_id) == [], "请求停止不是结论，账本此时不该有行"
+
+    assert job_state.transition(
+        job_state.JobEvent.CONFIRM_CANCEL,
+        job_state.job_scope(alice, job_id),
+        payload=_payload("半截正文"),
+        error_message="用户停止了生成",
+        lease_token=lease.token,
+    ).applied
+
+    attempts = _attempts(alice, job_id)
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == OUTCOME_CANCELLED
+    assert attempts[0]["error_code"] == ""
 
 
 def test_superseded_execution_records_no_ledger_row(alice):

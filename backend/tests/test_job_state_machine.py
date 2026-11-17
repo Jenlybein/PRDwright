@@ -290,18 +290,20 @@ def test_expire_cancelling_is_the_recovery_fallback(alice):
 
 
 def test_supersede_scope_only_touches_active_rows_of_same_owner_solution_and_kind(alice):
-    """顶替的期望条件：同 owner + 同方案 + 同产物 + **在途**；别的行一条都不动。
+    """顶替的期望条件：同 owner + 同方案 + 同产物 + **排队中 / 执行中**；别的行一条都不动。
 
-    七态下前态有三种（排队中 / 执行中 / 取消中）：被顶替的可能是正在取消的那一支。
+    **「取消中」不在其中**（P0-3）：用户已经表达了停止的意图，把这一行改写成
+    `superseded` 会把「用户不要了」说成「被新任务挤掉」——两个含义相反的状态混成一句，
+    统计与排查都再也分不开。它由执行者确认、或恢复器兜底，收成 `cancelled`。
     """
     solution_id = 11
     other_solution = 12
     target = _running(alice, "prd", solution_id)[0]
     queued = job_create(alice, "prd", solution_id)
-    cancelling = _running(alice, "prd", solution_id)[0]
+    cancelling = _running(alice, "prd", solution_id)
     assert job_state.transition(
         job_state.JobEvent.REQUEST_CANCEL,
-        job_state.job_scope(alice, cancelling),
+        job_state.job_scope(alice, cancelling[0]),
         error_message=CANCEL_MESSAGE,
     ).applied
     other = _running(alice, "prd", other_solution)[0]
@@ -319,13 +321,17 @@ def test_supersede_scope_only_touches_active_rows_of_same_owner_solution_and_kin
         job_state.supersede_scope(alice, solution_id, "prd"),
     )
 
-    assert result.rows == 3
-    for job_id in (target, queued, cancelling):
+    assert result.rows == 2
+    for job_id in (target, queued):
         row = job_get(alice, job_id)
         assert row["status"] == "superseded"
         assert row["error_code"] == "", "被取代不是一个错误码，是一个状态"
         assert row["error_message"] == "被新任务取代"
         assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
+    # 取消中的那一行原样停着：状态与租约都不动（执行者还要用租约确认退出）
+    cancel_row = job_get(alice, cancelling[0])
+    assert cancel_row["status"] == "cancelling"
+    assert cancel_row["lease_token"] == cancelling[1].token
     assert job_get(alice, other)["status"] == "running"
     assert job_get(alice, other_kind)["status"] == "running"
     assert job_get(alice, finished[0])["status"] == "succeeded"
@@ -412,13 +418,18 @@ def test_expire_writes_failed_with_lease_expired(alice):
 
 
 # ---------------------------------------------------------------------------
-# 五、批量作用域的取消：只动在途，各自去向正确
+# 五、批量作用域的取消：只动在途，一步收口成已取消（P0-4）
 # ---------------------------------------------------------------------------
 
 
-def test_cancel_scope_only_touches_active_jobs_of_that_solution(alice):
-    """按方案取消：排队中的立刻已取消，执行中的转取消中，终态与别的方案不动。"""
-    target = _running(alice, "prd", 11)[0]
+def test_cancel_scope_settles_every_active_job_of_that_solution_in_one_step(alice):
+    """按方案取消（删方案）：**任意非终态一步落已取消**并清租约，终态与别的方案不动。
+
+    为什么不是「执行中 → 取消中 → 等确认」（P0-4）：方案已经不存在了，不会再有执行者
+    来确认退出。留着 `cancelling` 只是把这一行交给恢复器、等租约到期才收口——用户会
+    看到一条「正在取消」却没人管的行。
+    """
+    target = _running(alice, "prd", 11)
     queued = job_create(alice, "prd", 11)
     other_solution = _running(alice, "prd", 12)[0]
     finished = _running(alice, "prd", 11)
@@ -436,14 +447,19 @@ def test_cancel_scope_only_touches_active_jobs_of_that_solution(alice):
     )
 
     assert result.rows == 2
-    assert job_get(alice, target)["status"] == "cancelling"
-    assert job_get(alice, queued)["status"] == "cancelled"
+    for job_id in (target[0], queued):
+        row = job_get(alice, job_id)
+        assert row["status"] == "cancelled"
+        assert row["error_code"] == "", "已取消不是一个错误码，是一个状态"
+        assert row["error_message"] == "方案已删除，任务已取消"
+        # 清租约：这一行没有执行者，也再没有「谁来确认」这件事
+        assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
     assert job_get(alice, other_solution)["status"] == "running"
     assert job_get(alice, finished[0])["status"] == "succeeded"
 
 
 def test_owner_scope_cancels_every_active_job_of_that_owner(alice):
-    """按 owner 取消（删账号）：覆盖名下所有方案，排队中/执行中各按自己的去向落。"""
+    """按 owner 取消（删账号）：覆盖名下所有方案，任意非终态一步落已取消。"""
     running = _running(alice, "prd", 11)[0]
     queued = job_create(alice, "prd", None)
     other = _running(alice, "prompts", 12)[0]
@@ -462,7 +478,6 @@ def test_owner_scope_cancels_every_active_job_of_that_owner(alice):
     )
 
     assert result.rows == 3
-    for job_id in (running, other):
-        assert job_get(alice, job_id)["status"] == "cancelling"
-    assert job_get(alice, queued)["status"] == "cancelled"
+    for job_id in (running, other, queued):
+        assert job_get(alice, job_id)["status"] == "cancelled"
     assert job_get(alice, finished[0])["status"] == "succeeded"

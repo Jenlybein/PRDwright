@@ -668,6 +668,51 @@ class DocumentService:
             data={"stage": "writing", "doc_type": doc_type},
         )
 
+        async for event in self._stream_whole_document(
+            prompt.messages,
+            status_text="正在生成 PRD…",
+            doc_type=doc_type,
+            review_enabled=review_enabled,
+            # PRD 的审核上游是**结构化需求**（整篇 JSON）：骨架器会丢掉代码块块体，
+            # 把需求压成空壳——因此这里原样注入，不骨架化。
+            review_context=lambda _clean: ProductContext(
+                doc_kind="prd",
+                doc_type=doc_type,
+                label=label,
+                writing_rules=prompt.writing_rules,
+                upstream=_prd_review_upstream(requirements_text, conversation),
+            ),
+        ):
+            yield event
+
+    async def _stream_whole_document(
+        self,
+        messages: list[BaseMessage],
+        *,
+        status_text: str,
+        doc_type: str,
+        review_enabled: bool | None,
+        review_context: Callable[[str], ProductContext],
+    ) -> AsyncIterator[StreamEvent]:
+        """三份产物**唯一**的整篇生成循环：撰写 →（可选）审核 + 改写一次 → `done`。
+
+        为什么收成一份（P1-1）：三个入口此前各写一遍这段循环（约 110 行重复），于是
+        「失败时把抑制器里扣住的尾字吐出来」**只在 PRD 那一份里**做了。接口文档 /
+        提示词套件在生成途中失败时，最后十几个字（短正文时甚至是整段）还滞留在抑制器
+        的 carry 缓冲里——而失败收尾落的那一版「部分完成」（#85）正是拿这份已产出内容
+        写的，于是用户拿到的版本**比模型实际写出来的少一截**，界面上却没有任何地方能
+        看出这件事。三份产物共用一份实现之后，这种「改一处、漏两处」不再可能。
+
+        `review_context` 是**惰性**的：只在确实要审核时才调用。快捷流程
+        （`review_enabled=False`）整段跳过审核，不该为一次用不上的上下文先算一遍骨架。
+
+        Args:
+            messages: 已组装好的首批提示词。
+            status_text: 首个状态事件的提示语（阶段条要**立刻**亮起）。
+            doc_type: 事件里的产物标识（`prd` / `api_doc` / `prompts`）。
+            review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」。
+            review_context: 由干净正文造出审核上下文（`ProductContext`）。
+        """
         # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
         # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
         # 撞上输出上限时**接着写**（不把整篇判成失败）：续写请求由 `_continuation_messages`
@@ -675,9 +720,9 @@ class DocumentService:
         suppressor = PendingBlockSuppressor()
         async for event in iter_continuation_events(
             self.llm,
-            prompt.messages,
-            continuation_messages=_continuation_messages(prompt.messages),
-            status_text="正在生成 PRD…",
+            messages,
+            continuation_messages=_continuation_messages(messages),
+            status_text=status_text,
             extra_data={"doc_type": doc_type},
         ):
             if event.type == "chunk":
@@ -692,20 +737,20 @@ class DocumentService:
                 clean_reply, items = extract(reply)
                 outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
 
+                # 整篇生成后审一次；有问题则**改写一次**，不再重审。
+                # 审核与改写都是整篇量级的调用，静默期很长，因此两步的原始输出
+                # 都通过 `stage_chunk` 实时推给前端（见 `stream_review_and_rewrite`）。
+                # 初稿已经以 chunk 流出去过，改写稿用 `part{replace}` 整段覆盖，
+                # 避免「初稿 + 改稿」在同一份预览里叠字。
+                #
+                # 快捷流程（`review_enabled=False`）**整段跳过**：连 `review` 结论事件
+                # 一起不发。只跳调用、照样发一条「通过」的结论，会被读成「审过了、没问题」，
+                # 那是假信号（三份产物同口径）。
                 if review_enabled_for_whole_document(review_enabled):
                     async for review_event_or_chunk in stream_review_and_rewrite(
                         self.llm,
                         document=clean_reply,
-                        # 审核要核对的是「有没有编造 / 漏掉」，而 PRD 的上游是**结构化需求**
-                        # （整篇 JSON）。骨架器会丢掉代码块块体，把需求压成空壳——因此这里
-                        # 原样注入，不骨架化。
-                        context=ProductContext(
-                            doc_kind="prd",
-                            doc_type=doc_type,
-                            label=label,
-                            writing_rules=prompt.writing_rules,
-                            upstream=_prd_review_upstream(requirements_text, conversation),
-                        ),
+                        context=review_context(clean_reply),
                         outcome=outcome,
                         review_llm=self.review_llm,
                         section_titles="\n".join(extract_headings(clean_reply)),
@@ -781,68 +826,23 @@ class DocumentService:
             content="正在生成接口文档…",
             data={"stage": "writing", "doc_type": doc_type},
         )
-        # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
-        # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
-        suppressor = PendingBlockSuppressor()
-        async for event in iter_continuation_events(
-            self.llm,
-            messages,
-            continuation_messages=_continuation_messages(messages),
-            status_text="正在生成接口文档…",
-            extra_data={"doc_type": doc_type},
-        ):
-            if event.type == "chunk":
-                clean = suppressor.feed(event.content)
-                if clean:
-                    yield StreamEvent(type="chunk", content=clean, data=event.data)
-            elif event.type == "done":
-                # 流结束，把抑制器残留（不可能是完整块）吐出，保持正文完整；再发 done。
-                trailing = suppressor.flush()
-                if trailing:
-                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
-                reply = str(event.data.get("reply", ""))
-                clean_reply, items = extract(reply)
 
-                # 整篇生成后审一次；有问题则**改写一次**，不再重审。
-                # 审核与改写都是整篇量级的调用，静默期很长，因此两步的原始输出
-                # 都通过 `stage_chunk` 实时推给前端（见 `stream_review_and_rewrite`）。
-                # 初稿已经以 chunk 流出去过，改写稿用 part{replace} 整段覆盖，
-                # 避免「初稿 + 改稿」在同一份预览里叠字。
-                #
-                # 快捷流程（`review_enabled=False`）**整段跳过**：连 `review` 结论事件
-                # 一起不发。只跳调用、照样发一条「通过」的结论，会被读成「审过了、没问题」，
-                # 那是假信号（与 PRD 侧同口径）。
-                outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
-                if review_enabled_for_whole_document(review_enabled):
-                    async for review_event_or_chunk in stream_review_and_rewrite(
-                        self.llm,
-                        document=clean_reply,
-                        # 产出规范与事件身份来自同一份上下文；
-                        # 上游材料骨架化：审核要核对的是「有没有编造 / 漏掉」，
-                        # 需要的是事实索引而不是整篇散文
-                        context=ProductContext(
-                            doc_kind="api_docs",
-                            doc_type=doc_type,
-                            label=label,
-                            writing_rules=api_specs,
-                            upstream=skeletonize(prd_content),
-                        ),
-                        outcome=outcome,
-                        review_llm=self.review_llm,
-                        section_titles="\n".join(extract_headings(clean_reply)),
-                    ):
-                        yield review_event_or_chunk
-                yield StreamEvent(
-                    type="done",
-                    content="",
-                    data={
-                        **(event.data or {}),
-                        "reply": outcome.final_reply,
-                        "pending_items": outcome.pending_items,
-                    },
-                )
-            else:
-                yield event
+        async for event in self._stream_whole_document(
+            messages,
+            status_text="正在生成接口文档…",
+            doc_type=doc_type,
+            review_enabled=review_enabled,
+            # 产出规范与事件身份来自同一份上下文；上游材料骨架化：审核要核对的是
+            # 「有没有编造 / 漏掉」，需要的是事实索引而不是整篇散文。
+            review_context=lambda _clean: ProductContext(
+                doc_kind="api_docs",
+                doc_type=doc_type,
+                label=label,
+                writing_rules=api_specs,
+                upstream=skeletonize(prd_content),
+            ),
+        ):
+            yield event
 
     async def generate_prompts_stream(
         self,
@@ -900,64 +900,33 @@ class DocumentService:
             content="正在生成提示词套件…",
             data={"stage": "writing", "doc_type": doc_type},
         )
-        # 实时 chunk 先过抑制器（块被切在 chunk 边界时只漏安全前缀），`done` 时
-        # 对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
-        suppressor = PendingBlockSuppressor()
-        async for event in iter_continuation_events(
-            self.llm,
-            messages,
-            continuation_messages=_continuation_messages(messages),
-            status_text="正在生成提示词套件…",
-            extra_data={"doc_type": doc_type},
-        ):
-            if event.type == "chunk":
-                clean = suppressor.feed(event.content)
-                if clean:
-                    yield StreamEvent(type="chunk", content=clean, data=event.data)
-            elif event.type == "done":
-                trailing = suppressor.flush()
-                if trailing:
-                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
-                reply = str(event.data.get("reply", ""))
-                clean_reply, items = extract(reply)
 
-                # 与接口文档同构：整篇生成 → 审一次 → 有问题改写一次（不重审）。
-                # 快捷流程（`review_enabled=False`）与接口文档一样整段跳过，不发 `review`。
-                # 与接口文档同口径：审核只看骨架，不看整篇
-                requirements_text = skeletonize(prd_content)
-                if api_docs_content.strip():
-                    requirements_text = (
-                        f"{requirements_text}\n\n## 接口文档\n\n"
-                        f"{skeletonize(api_docs_content)}"
-                    )
-                outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
-                if review_enabled_for_whole_document(review_enabled):
-                    async for review_event_or_chunk in stream_review_and_rewrite(
-                        self.llm,
-                        document=clean_reply,
-                        context=ProductContext(
-                            doc_kind="prompts",
-                            doc_type=doc_type,
-                            label=label,
-                            writing_rules=guide,
-                            upstream=requirements_text,
-                        ),
-                        outcome=outcome,
-                        review_llm=self.review_llm,
-                        section_titles="\n".join(extract_headings(clean_reply)),
-                    ):
-                        yield review_event_or_chunk
-                yield StreamEvent(
-                    type="done",
-                    content="",
-                    data={
-                        **(event.data or {}),
-                        "reply": outcome.final_reply,
-                        "pending_items": outcome.pending_items,
-                    },
+        def _prompts_review_context(_clean: str) -> ProductContext:
+            """提示词套件的审核上下文：上游 = PRD +（可选的）接口文档，都骨架化。
+
+            惰性构造：快捷流程不审，就不必先跑两次 `skeletonize`。
+            """
+            upstream = skeletonize(prd_content)
+            if api_docs_content.strip():
+                upstream = (
+                    f"{upstream}\n\n## 接口文档\n\n{skeletonize(api_docs_content)}"
                 )
-            else:
-                yield event
+            return ProductContext(
+                doc_kind="prompts",
+                doc_type=doc_type,
+                label=label,
+                writing_rules=guide,
+                upstream=upstream,
+            )
+
+        async for event in self._stream_whole_document(
+            messages,
+            status_text="正在生成提示词套件…",
+            doc_type=doc_type,
+            review_enabled=review_enabled,
+            review_context=_prompts_review_context,
+        ):
+            yield event
 
     async def review_document_stream(
         self,

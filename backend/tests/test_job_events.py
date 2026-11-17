@@ -434,8 +434,7 @@ _OLD = "2026-01-01T00:00:00.000000+00:00"
 def test_ac5_purge_removes_expired_events_and_keeps_the_authoritative_body(alice):
     """终态任务过期（>7 天）后清理过程日志；任务行与正文一个字都不动。
 
-    清理单元是**可直接调用的函数**（不起后台定时器、不接调度循环）：调度是 #89 / 清理票
-    的事，本票只交付「按保留期删过程日志」这一个动作。
+    清理单元是**可直接调用的函数**（函数自己不起线程、不起定时器）：生产里由调度循环的清理周期驱动（`job_scheduler.purge_events`，约 1 小时一轮），本函数只负责「按保留期删过程日志」这一个动作。
     """
     registered, _events = run_ticket_events(
         alice, None, "prd", {}, *_SCRIPT, reply=_REPLY
