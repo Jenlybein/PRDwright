@@ -251,15 +251,17 @@ def job_list_by_owner(owner_id, **kwargs):
 
 
 def job_finish(*args, **kwargs):
+    """收尾成 completed，返回**改到的行数**（#79：条件写，判据是影响行数）。"""
     session_scope, repo = _job_repo()
     with session_scope() as session:
-        repo(session).finish(*args, **kwargs)
+        return repo(session).finish(*args, **kwargs)
 
 
 def job_fail(*args, **kwargs):
+    """收尾成 failed，返回**改到的行数**（#79：条件写，判据是影响行数）。"""
     session_scope, repo = _job_repo()
     with session_scope() as session:
-        repo(session).fail(*args, **kwargs)
+        return repo(session).fail(*args, **kwargs)
 
 
 def job_persist_progress(*args, **kwargs):
@@ -269,7 +271,10 @@ def job_persist_progress(*args, **kwargs):
 
 
 def job_cancel_running(*args, **kwargs):
+    """按方案取消（测试薄封装）：错误码 / 文案取状态机的取消口径（#79）。"""
     session_scope, repo = _job_repo()
+    kwargs.setdefault("error_code", "CANCELLED")
+    kwargs.setdefault("error_message", "方案已删除，任务已取消")
     with session_scope() as session:
         return repo(session).cancel_running(*args, **kwargs)
 

@@ -23,8 +23,7 @@ from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services import document_store, solution_service
+from backend.services import document_store, job_state, solution_service
 from backend.services.job_bus import job_bus
 from backend.services.job_product_kind import _target_product_kind
 from backend.services.job_runtime_events import _draft, _run_summary_event, _summary_data
@@ -48,7 +47,13 @@ class _ReviewWriteFailure:
     error_message: str
 
 
-def _finalize(runtime: JobRuntime, status: str) -> None:
+def _finalize(
+    runtime: JobRuntime,
+    status: str,
+    *,
+    error_code: str = "",
+    error_message: str = "",
+) -> None:
     """收尾：置终态、落库（含用量）、**成功时把正文写进 `documents`**、广播 `run_summary`。
 
     保留运行时（直到 `run_job` 的 finally）让已订阅者把这一条读完。
@@ -56,7 +61,35 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     **只有成功才写文档**：失败的任务保留上一次可用的正文（半截输出不该顶掉一份
     完整文档）。这正是「文档所有权在后端」的关键收益——「谁写、什么时候写、
     写完之后长什么样」只在这一处决定，前端只负责读与提交用户变更。
+
+    ## 幂等闸（#79）
+    进来先看内存那份状态：**已经是终态就直接返回**，不落库、不写稿、不广播。
+    「排空取消替任务收了一次尾、卡在模型调用里的协程醒来又收一次」这条路径上，
+    第二次调用就是在这里被挡掉的——账只有一份、`run_summary` 只有一条。
+
+    内存闸之外还有一道数据库闸：终态写是条件更新（`WHERE status='running'`），
+    改到 0 行同样丢弃本次结果（跨进程 / 启动回收那种「别人已经收尾了」的情况）。
+    两道闸的口径一致：**以数据库那一行为唯一裁判**，内存只是它的缓存。
+
+    Args:
+        status: 本次想落的终态（`completed` / `failed`）。
+        error_code / error_message: 调用方已知的失败原因（排空取消传 `CANCELLED` 与原因）。
+            留空时用运行时的失败意图（上游 `error` 事件 / 兜底异常已经记下）。
     """
+    # —— 内存闸：本协程的第二次收尾到此为止 ——
+    if runtime.status != job_state.STATUS_RUNNING:
+        logger.info(
+            "生成任务已是终态，本次收尾丢弃",
+            extra={
+                "event": "job.finalize_discarded",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "status": runtime.status,
+                "attempted_status": status,
+            },
+        )
+        return
+
     # —— 删除与收尾可能赛跑，两道防御都留着 ——
     # 时间窗：用户点删除的那一刻，任务可能正好走到收尾。`delete_solution_and_cancel_jobs`
     # 在事务里先把任务写成终态（`CANCELLED`），提交后才置内存里的 `cancelled`，但收尾可能
@@ -65,27 +98,28 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     # 两道判断覆盖的正是这两个方向，缺任何一道都会留下一条「方案已删、文档却写进去了」
     # 的路径（正文写进一个不存在的 solution_id，前端下次打开就是幽灵文档）。
     if status == "completed":
-        abort_code = ""
-        abort_message = ""
         if runtime.cancelled:
-            abort_code = "CANCELLED"
+            status = "failed"
+            error_code = job_state.CODE_CANCELLED
             # 对话的「取消」有两种来源，文案必须分开：用户按了停止 vs 方案被删除。
             # 混在一起会让用户在自己点过停止之后读到「方案已删除」，以为数据没了。
             if runtime.kind == "chat" and runtime.chat_interrupted:
-                abort_message = "已停止生成"
+                error_message = "已停止生成"
             else:
-                abort_message = "方案已删除，任务已取消"
+                error_message = "方案已删除，任务已取消"
         elif runtime.superseded:
             # 同一份文档已经被更晚的任务接手：本次结果不能落库，否则会把新稿盖回旧版。
             # 用 `SUPERSEDED` 而不是 `CANCELLED`：这是「被顶替」，不是「用户删了东西」，
             # 排查时两者的处理方式完全不同（前者要看谁发起了新任务，后者要看删除路径）。
-            abort_code = "SUPERSEDED"
-            abort_message = "被同一份文档的新任务取代，本次结果不再写入"
+            status = "failed"
+            error_code = job_state.CODE_SUPERSEDED
+            error_message = "被同一份文档的新任务取代，本次结果不再写入"
         elif runtime.solution_id is not None and not solution_service.solution_exists(
             runtime.owner_id, runtime.solution_id
         ):
-            abort_code = "CANCELLED"
-            abort_message = "方案已删除，任务已取消"
+            status = "failed"
+            error_code = job_state.CODE_CANCELLED
+            error_message = "方案已删除，任务已取消"
             logger.warning(
                 "生成任务收尾时方案已不存在，不再写入文档",
                 extra={
@@ -94,13 +128,6 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
                     "solution_id": runtime.solution_id,
                 },
             )
-        if abort_code:
-            # 语义上确实「没有成功」：复用 failed 而不是新造状态（状态值是前后端共享契约，
-            # 新增取值会让前端每一处 status 分支都要多一条分支）。
-            status = "failed"
-            runtime.failed = True
-            runtime.error_code = abort_code
-            runtime.error_message = abort_message
         elif runtime.kind == "review":
             # B3：重审的唯一产出就是判定，结论写不进去等于这次什么也没产出。两道条件写
             # （事前比较 `_review_body_changed` + 写入 SQL 的 `expected_content_sha`）任一
@@ -109,33 +136,62 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             gate = _write_review(runtime)
             if gate is not None:
                 status = "failed"
-                runtime.failed = True
-                runtime.error_code = gate.error_code
-                runtime.error_message = gate.error_message
+                error_code = gate.error_code
+                error_message = gate.error_message
                 # 此刻订阅者还连着：补一条 `error` 事件，前端才拿得到原因。这一步在收尾里
                 # 才发现（正文是在收尾时比的），不像普通失败那样有异常可抛。
                 job_bus.publish(
                     runtime.job_id,
                     StreamEvent(
                         type="error",
-                        content=runtime.error_message,
+                        content=error_message,
                         data={"error_type": "JobFailed"},
-                        code=runtime.error_code,
+                        code=error_code,
                     ),
                 )
 
-    runtime.status = status
     draft = _draft(runtime)
     summary = _summary_data(runtime, status)
     usage = json.dumps(summary, ensure_ascii=False)
-    # 终态日志：无论成功、失败、被取消还是被顶替，都从这里落一条，
-    # 让日志页能把「这一次生成」的结局与 `job.started` 首尾对齐。
-    # 归属字段带全，`request_id` 显式传（落库线程读不到 ContextVar）。
+    # 从汇总里取出两列副本：管理员后台按用户 / 按日统计消耗时用 SQL 求和，
+    # 不用把每行 JSON 取回解析。取不到就当 0——宁可少算，不猜数字。
+    prompt_tokens = int(summary.get("prompt_tokens") or 0)
+    completion_tokens = int(summary.get("completion_tokens") or 0)
+
+    # —— 数据库闸：一次条件写，**以影响行数为唯一判据** ——
+    # 供应商四列已在建任务那一刻从 `config_snapshot` 里的同一份定格一次写全
+    # （见 `GenerationJobRepository.create`）。收尾不再从 `summary` 里另取四格。
+    event = (
+        job_state.JobEvent.SUCCEED if status == "completed" else job_state.JobEvent.FAIL
+    )
+    job_state.transition(
+        event,
+        job_state.job_scope(runtime.owner_id, runtime.job_id),
+        runtime=runtime,
+        payload=job_state.FinishPayload(
+            draft_content=draft,
+            completed_sections=runtime.completed_sections,
+            usage=usage,
+            pending_items=runtime.pending_items,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        ),
+        # 与旧 `fail()` 的兜底口径一致：没有明确原因时记成内部错误，而不是留空。
+        error_code=error_code or runtime.error_code or ErrorCode.INTERNAL_ERROR.value,
+        error_message=error_message or runtime.error_message or "生成失败",
+    )
+    # 改到 0 行时只有「本次结果被丢弃」——`job_state` 已留丢弃日志；内存闸保证这是本协程
+    # 唯一的一次收尾，所以副作用照做一份，事件与账不会翻倍。
+    settled_status = runtime.status or status
+
+    # 终态日志：无论成功、失败、被取消还是被顶替，都从这里落一条，让日志页能把
+    # 「这一次生成」的结局与 `job.started` 首尾对齐。归属字段带全，
+    # `request_id` 显式传（落库线程读不到 ContextVar）。
     logger.info(
         "生成任务收尾：%s",
-        status,
+        settled_status,
         extra={
-            "event": f"job.{status}",
+            "event": f"job.{settled_status}",
             "job_id": runtime.job_id,
             "user_id": runtime.owner_id,
             "solution_id": runtime.solution_id,
@@ -148,47 +204,13 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             "request_id": current_request_id(),
         },
     )
-    # 从汇总里取出两列副本：管理员后台按用户 / 按日统计消耗时用 SQL 求和，
-    # 不用把每行 JSON 取回解析。取不到就当 0——宁可少算，不猜数字。
-    prompt_tokens = int(summary.get("prompt_tokens") or 0)
-    completion_tokens = int(summary.get("completion_tokens") or 0)
-    # 供应商四列已在**建任务那一刻**从 `config_snapshot` 里的同一份定格一次写全
-    # （见 `GenerationJobRepository.create`）。收尾不再从 `summary` 里另取四格、
-    # 不再重读配置或另算一遍：配置会被改名/删除，回查等于让历史账单跟着今天的状态变。
-    # `usage` JSON、token 两列、错误码与终态语义都不改。
-    if status == "completed":
-        with session_scope() as session:
-            GenerationJobRepository(session).finish(
-                runtime.owner_id,
-                runtime.job_id,
-                draft_content=draft,
-                completed_sections=runtime.completed_sections,
-                usage=usage,
-                pending_items=runtime.pending_items,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
+    if settled_status == "completed":
         _write_document(runtime, summary)
-    else:
-        with session_scope() as session:
-            GenerationJobRepository(session).fail(
-                runtime.owner_id,
-                runtime.job_id,
-                error_code=runtime.error_code or ErrorCode.INTERNAL_ERROR.value,
-                error_message=runtime.error_message or "生成失败",
-                draft_content=draft,
-                completed_sections=runtime.completed_sections,
-                # 失败的任务同样烧了 token，用量一并落库——不然「这次为什么这么贵」无从追溯
-                usage=usage,
-                pending_items=runtime.pending_items,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-        if runtime.kind == "review":
-            # 重审没跑成也要**落成事实**（US3）：面板据此显示「审核失败（时间）」，
-            # 刷新之后仍是失败而不是退化成「未审核」。取不到当前版本时静默跳过
-            # （正文都没了，没有「哪一版失败」可言）。
-            _mark_review_failed(runtime)
+    elif runtime.kind == "review":
+        # 重审没跑成也要**落成事实**（US3）：面板据此显示「审核失败（时间）」，
+        # 刷新之后仍是失败而不是退化成「未审核」。取不到当前版本时静默跳过
+        # （正文都没了，没有「哪一版失败」可言）。
+        _mark_review_failed(runtime)
 
     # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`
     # 后会去拉轮次表，晚一步就会拉到「还没有这一轮」的空列表，表现为

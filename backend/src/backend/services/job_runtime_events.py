@@ -17,6 +17,7 @@ from backend.core.engine import session_scope
 from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.generation_job_repo import GenerationJobRepository
+from backend.services import job_state
 from backend.services.job_runtime import _SectionLive
 
 if TYPE_CHECKING:
@@ -161,9 +162,12 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         verdict = str(data.get("verdict") or "").strip().lower()
         runtime.review = dict(data) if verdict in ("pass", "revise") else None
     elif event_type == "error":
-        runtime.failed = True
-        runtime.error_code = event.code or ErrorCode.INTERNAL_ERROR.value
-        runtime.error_message = event.content
+        # 只记「失败意图」：终态（status / 落库）由收尾经状态机结算（#79）。
+        job_state.note_failure(
+            runtime,
+            error_code=event.code or ErrorCode.INTERNAL_ERROR.value,
+            error_message=event.content,
+        )
         # 生成链路内部主动产出的 error 事件（不是 `run_job` 的兜底异常），
         # 单独留一条：它与 `job.crashed` 的区别在于「这是可预期的失败，不是崩了」。
         logger.warning(

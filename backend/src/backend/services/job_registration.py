@@ -24,7 +24,7 @@ from backend.core.request_context import current_request_id
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import job_service_impl
+from backend.services import job_state
 from backend.services.job_service_impl import run_job
 from backend.services.job_runtime import _RUNTIMES, _TASKS, JobRuntime
 from backend.services.job_ticket import (
@@ -61,9 +61,14 @@ def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
             # 单写者：内存权威 + 库残留，与登记的准入判据一致。
             _check_chat_single_writer(session, ticket)
         if ticket.kind != "chat":
-            # 库行顶替：与内存 `_mark_superseded` 是同一判据，两处不能分叉。
-            repo.supersede_active(
-                ticket.owner_id, solution_id=ticket.solution_id, kind=ticket.kind
+            # 库行顶替：改道经状态机（#79），与内存标记是同一份期望条件、同一个入口，
+            # 两处不可能再分叉。传 session 是为了让「顶替 + 建新行」同生共死。
+            superseded = job_state.transition(
+                job_state.JobEvent.SUPERSEDE,
+                job_state.supersede_scope(
+                    ticket.owner_id, ticket.solution_id, ticket.kind
+                ),
+                session=session,
             )
         job = repo.create(
             ticket.owner_id,
@@ -104,9 +109,10 @@ def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
             )
 
     if ticket.kind != "chat":
-        # 事务提交之后才置内存标记：与登记事务「落库之后才置」同一口径。
-        job_service_impl._mark_superseded(  # noqa: SLF001 - 包内互引私有名合法
-            ticket.owner_id, solution_id=ticket.solution_id, kind=ticket.kind
+        # 事务提交之后才置内存标记：事务失败时不会留下「协程停了、库里还在跑」的错位。
+        job_state.settle_after_commit(
+            superseded,
+            job_state.supersede_scope(ticket.owner_id, ticket.solution_id, ticket.kind),
         )
 
     return with_registered_identity(ticket, job_id=job_id, input_turn_id=input_turn_id)

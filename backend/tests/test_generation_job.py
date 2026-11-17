@@ -601,6 +601,39 @@ def test_reap_orphans_marks_running_as_failed(alice):
     assert row["error_message"] == "服务重启，任务已中断"
 
 
+def test_finish_and_fail_are_conditional_and_report_affected_rows(alice):
+    """终态写是**条件更新**：只有 running 的才会被改到，返回「改到了几行」。
+
+    旧写法只按 id + owner 盲写、也不看影响行数：同一个任务被收尾两次时，第二次照样
+    写库（能把 completed 覆回 failed）。本用例钉住判据本身——第一次 1 行，第二次 0 行，
+    第二次的内容一个字都没落进去。
+    """
+    job_id = job_create(alice, "prd", None)
+
+    assert job_finish(alice, job_id, draft_content="第一版", completed_sections=[]) == 1
+    assert job_finish(alice, job_id, draft_content="第二版", completed_sections=[]) == 0
+    row = job_get(alice, job_id)
+    assert row["status"] == "completed"
+    assert row["draft_content"] == "第一版"
+
+    # 已 completed 的行也不能被 fail 覆写回 failed
+    assert (
+        job_fail(
+            alice,
+            job_id,
+            error_code="INTERNAL_ERROR",
+            error_message="晚到的失败",
+            draft_content="",
+            completed_sections=[],
+        )
+        == 0
+    )
+    row = job_get(alice, job_id)
+    assert row["status"] == "completed"
+    assert row["error_code"] == ""
+    assert row["error_message"] == ""
+
+
 def test_owner_isolation_in_repository(alice):
     """仓储层归属隔离：别人的任务等同不存在。"""
     job_id = job_create(alice, "prd", None)
