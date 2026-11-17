@@ -103,6 +103,10 @@ class RegisteredJobTicket:
 
     四个 chat 派生字段——`job_id`、`input_turn_id`、`owner_id`、`solution_id`
     ——明写在本单上；不再原地改写调用方传入的 dict。派发及之后只认这一张单。
+
+    `reused=True` 表示这次**没有新建任务**，`job_id` 指向创建去重（票 #87）命中的
+    既有任务（那张单的载荷字段因此不再参与派发——`start_registered_job` 对复用单
+    是空操作，否则同一个 `job_id` 会有两支协程、模型被调两遍）。
     """
 
     job_id: int
@@ -119,6 +123,8 @@ class RegisteredJobTicket:
     resolved_inputs: Mapping[str, Any] = field(default_factory=dict)
     runtime_config: Any = None
     chat_stage: str = ""
+    # 复用标记：True 时 `job_id` 是既有任务，本次没有落新行、也不派发。
+    reused: bool = False
 
 
 def build_job_ticket(
@@ -201,11 +207,17 @@ def start_registered_job(ticket: RegisteredJobTicket) -> None:
     任何 `await` 之前完成；`run_job` 的 `use_meter` / `use_config` 包裹顺序、
     `job_bus.publish` 同步广播都不变。配置与技能包身份取单②定格的那一份，
     派发侧不再自行 `get_runtime_config()` 各取一次。
+
+    **复用单（`reused=True`）是空操作**：既有任务已经在跑，再派发一次会让同一个
+    `job_id` 有两支协程（模型被调两遍、正文互相覆盖）。创建去重的契约是「第二次
+    直接接到既有任务」——调用方拿同一个 id 去订阅那条流，看到的就是正在生成的内容。
     """
     from backend.services.job_registration import dispatch_registered
 
     if not isinstance(ticket, RegisteredJobTicket):
         raise TypeError("派发只接受登记后的任务单（单②）")
+    if ticket.reused:
+        return
     dispatch_registered(ticket)
 
 
@@ -228,16 +240,22 @@ def as_event_request(ticket: RegisteredJobTicket) -> dict[str, Any]:
 
 
 def with_registered_identity(
-    ticket: JobTicket, *, job_id: int, input_turn_id: int
+    ticket: JobTicket, *, job_id: int, input_turn_id: int, reused: bool = False
 ) -> RegisteredJobTicket:
-    """由单①造出单②（新对象）：不可变数据逐格复制，只补登记产生的身份。"""
+    """由单①造出单②（新对象）：不可变数据逐格复制，只补登记产生的身份。
+
+    `reused=True` 只用于创建去重命中既有任务那一路（票 #87）：`job_id` 是既有任务的
+    id，本次没有落新行；派发侧据这个标记跳过派发（见 `start_registered_job`）。
+    """
     data = {item.name: getattr(ticket, item.name) for item in fields(ticket)}
     data.pop("input_fingerprint", None)
     data.pop("doc_kind", None)
     data.pop("chat_mode", None)
     data.pop("chat_content", None)
     data.pop("chat_tool_result", None)
-    return RegisteredJobTicket(job_id=job_id, input_turn_id=input_turn_id, **data)
+    return RegisteredJobTicket(
+        job_id=job_id, input_turn_id=input_turn_id, reused=reused, **data
+    )
 
 
 __all__ = [
