@@ -30,14 +30,17 @@ batch 重建 = 建新表 + 拷数据 + 换名，建表语句尾部的表选项�
 `downgrade` 仍写了真正的反操作（把列补回来），但它只用于结构演练与对拍，
 不承担生产回滚——旧快照的字节只在删除前的备份里。
 
-反操作要还原成 `0001_baseline.py` 里的原形状：`BOOLEAN NOT NULL DEFAULT 0`。
+反操作要还原成 `0001_baseline.py` 里的原形状：`BOOLEAN NOT NULL DEFAULT false`。
 分三步而不是一步 `add_column(..., nullable=False, server_default=...)`：
 
 1. 先补**可空**列——此刻旧行还没有值；
-2. 把旧行填 0（与退役期间的值一致）；
-3. 再加回 `NOT NULL` 与原来的 `DEFAULT 0`。
+2. 把旧行填 `false`（与退役期间的值一致）；
+3. 再加回 `NOT NULL` 与原来的 `DEFAULT false`。
 
 三步走完，`PRAGMA table_info` 读出的形状才与 `0003` 时的库逐列相等。
+
+⚠️ 这里的 `false` 是**字面量**而不是 `0`（#76）：Postgres 的 `BOOLEAN` 不接受整数
+默认值（`DEFAULT 0` / `SET builtin = 0` 都会报类型不匹配），而 SQLite 两种写法都认。
 """
 from typing import Sequence, Union
 
@@ -57,16 +60,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """反操作：把 `builtin` 补回成 `0001` 的 `BOOLEAN NOT NULL DEFAULT 0`。"""
+    """反操作：把 `builtin` 补回成 `0001` 的 `BOOLEAN NOT NULL DEFAULT false`。"""
     with op.batch_alter_table("model_providers", schema=None) as batch_op:
         batch_op.add_column(sa.Column("builtin", sa.Boolean(), nullable=True))
 
-    op.execute("UPDATE model_providers SET builtin = 0 WHERE builtin IS NULL")
+    op.execute("UPDATE model_providers SET builtin = false WHERE builtin IS NULL")
 
     with op.batch_alter_table("model_providers", schema=None) as batch_op:
         batch_op.alter_column(
             "builtin",
             existing_type=sa.Boolean(),
             nullable=False,
-            server_default=sa.text("0"),
+            server_default=sa.text("false"),
         )

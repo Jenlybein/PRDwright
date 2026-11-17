@@ -17,13 +17,13 @@
 「连接建立之后立刻执行的一段 SQL」。任何 ORM 都表达不了这种「连接生命周期钩子」，
 所以它必须是方言分支，而且**必须只有这一处分支**。
 
-## 为什么要 `pool_pre_ping` 与 `pool_recycle`（仅非 SQLite）
+## 为什么要 `pool_pre_ping` 与 `pool_recycle`（仅网络型后端）
 
-SQLite 的连接是本地文件句柄，不会「掉线」。MySQL 的连接是网络资源：
+SQLite 的连接是本地文件句柄，不会「掉线」。MySQL / Postgres 的连接是网络资源：
 服务端 `wait_timeout`（默认 8 小时）到点会单方面关闭，而客户端池子里那条连接看起来
-还活着——下一次借用就会抛 `MySQL server has gone away`，而且报错位置在业务代码里，
-看起来像是某条 SQL 写错了。`pool_pre_ping` 在借用时先探一下，`pool_recycle` 主动
-在超时前换掉，两道都上。
+还活着——下一次借用就会抛 `MySQL server has gone away` / `server closed the
+connection unexpectedly`，而且报错位置在业务代码里，看起来像是某条 SQL 写错了。
+`pool_pre_ping` 在借用时先探一下，`pool_recycle` 主动在超时前换掉，两道都上。
 """
 
 from __future__ import annotations
@@ -46,15 +46,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_POOL_TIMEOUT = 5.0
 
 # 建连接的 DBAPI 超时（秒）。SQLite 下是写锁等待（与 `busy_timeout` 同源），
-# MySQL 下由驱动的 `connect_timeout` 承担。
+# 网络型后端下由驱动的 `connect_timeout` 承担。
 DEFAULT_CONNECT_TIMEOUT = 10.0
 
-# MySQL 连接在池里最多活多久。必须短于服务端 `wait_timeout`（默认 28800 秒）。
+# 网络型后端（MySQL / Postgres）的连接在池里最多活多久。
+# 必须短于服务端 `wait_timeout`（MySQL 默认 28800 秒；PG 没有这个参数，
+# 但连接同样会被网络设备 / 中间层掐掉，定期换掉是通行的做法）。
 DEFAULT_POOL_RECYCLE = 1800
 
 # 认得出来的后端。**加新后端必须同时改这里和本节顶部的模块清单**：
 # 否则就是「代码里多了一个库，但没人知道它归谁管」。
-SUPPORTED_BACKENDS = frozenset({"sqlite", "mysql", "mariadb"})
+# ⚠️ 放进这里只代表「引擎装得对、连接级配置对、迁移与结构快照能跑」，
+# 不代表「所有测试用例都在这个库上跑过」——那是换测试基座那张票（#77）的事。
+SUPPORTED_BACKENDS = frozenset({"sqlite", "postgresql", "mysql", "mariadb"})
 
 # `sqlite+pysqlite` 之外的写法也常见（`sqlite:///...`），统一归一成前者，
 # 保证 Engine 的 DBAPI 明确——`sqlite://` 在某些环境下会解析到别的驱动。
@@ -85,10 +89,10 @@ def database_url() -> str:
 
 
 def dialect_name(url: str | None = None) -> str:
-    """URL 对应的后端名（`sqlite` / `mysql` / `mariadb`）。
+    """URL 对应的后端名（`sqlite` / `postgresql` / `mysql` / `mariadb`）。
 
     取 `make_url(...).get_backend_name()` 而不是切字符串：SQLAlchemy 已经处理了
-    `mysql+pymysql`、`sqlite+pysqlite` 这类 `backend+driver` 形态。
+    `mysql+pymysql`、`sqlite+pysqlite`、`postgresql+psycopg` 这类 `backend+driver` 形态。
     """
     return make_url(url or database_url()).get_backend_name()
 
@@ -175,6 +179,42 @@ def _mysql_on_connect(dbapi_connection: Any, _record: Any) -> None:
         cursor.close()
 
 
+def _postgresql_on_connect(dbapi_connection: Any, _record: Any) -> None:
+    """Postgres 的连接级配置：**只**固定会话时区。
+
+    为什么只有一句：
+
+    - 时区同样要对齐 SQLite 的「按 UTC 存时间文本」口径：PG 的会话时区默认取
+      服务端（`SHOW timezone` 可能给 `Asia/Shanghai`），`now()` 会写进本地时间，
+      而字段是文本、读出来看不出错了 8 小时。显式 `SET TIME ZONE 'UTC'` 把它钉住。
+    - **不设 `sql_mode`**：Postgres 没有这个东西。这正是本文件历史上最危险的一处
+      假设——非 SQLite 分支无条件挂 MySQL 的钩子，Postgres 接上之后第一条连接就会
+      在那句 `SET SESSION sql_mode` 上报语法错误，而报错长在驱动里、看不出真因。
+      所以连接级配置只能按方言取（见 `_CONNECT_HOOKS`）。
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET TIME ZONE 'UTC'")
+    finally:
+        cursor.close()
+
+
+# 方言 → 连接级配置钩子。**新增后端就在这张表上加一行**：
+# 以前这里默认「非 SQLite 一律按 MySQL 配」，那等于把 MySQL 的方言细节当成了
+# 所有网络库的公共约定。
+_CONNECT_HOOKS: dict[str, Any] = {
+    "sqlite": _sqlite_on_connect,
+    "postgresql": _postgresql_on_connect,
+    "mysql": _mysql_on_connect,
+    "mariadb": _mysql_on_connect,
+}
+
+
+def _connect_hook(backend: str) -> Any:
+    """该方言的「连接建立后」钩子（`SUPPORTED_BACKENDS` 里的每个后端都有）。"""
+    return _CONNECT_HOOKS[backend]
+
+
 # ---------------------------------------------------------------------------
 # 引擎
 # ---------------------------------------------------------------------------
@@ -215,7 +255,7 @@ def build_engine(
 
     # ⚠️ 固定池：`max_overflow=0` 不许运行期扩容。
     # 对 SQLite 是承重设计（躲 WAL `-shm` 的首次映射竞态）；
-    # 对 MySQL 是"池满即报错"的可观测性选择——悄悄扩容会把连接数问题推迟到
+    # 对网络型后端是"池满即报错"的可观测性选择——悄悄扩容会把连接数问题推迟到
     # 服务端的 `max_connections` 上，那时更难查。
     common: dict[str, Any] = {
         "poolclass": QueuePool,
@@ -236,9 +276,11 @@ def build_engine(
             },
             **common,
         )
-        event.listen(engine, "connect", _sqlite_on_connect)
+        event.listen(engine, "connect", _connect_hook(backend))
         return engine
 
+    # 网络型后端（Postgres / MySQL 家族）：池的装配相同（连接会掉线，要 pre_ping +
+    # 定期换掉），**差异只在连接级配置**——按方言取钩子，不是一律挂 MySQL 的那一套。
     engine = create_engine(
         url,
         connect_args={"connect_timeout": int(DEFAULT_CONNECT_TIMEOUT)},
@@ -246,7 +288,7 @@ def build_engine(
         pool_recycle=DEFAULT_POOL_RECYCLE,
         **common,
     )
-    event.listen(engine, "connect", _mysql_on_connect)
+    event.listen(engine, "connect", _connect_hook(backend))
     return engine
 
 

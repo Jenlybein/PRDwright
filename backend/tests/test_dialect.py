@@ -20,6 +20,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from sqlalchemy import literal, select
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
@@ -171,3 +172,78 @@ def test_upsert_select_works_on_mysql():
     sql = str(session.statements[0].compile(dialect=mysql.dialect()))
     assert "INSERT INTO documents" in sql
     assert "ON DUPLICATE KEY UPDATE" in sql
+
+
+# ---------------------------------------------------------------------------
+# 连接级写探针（/readyz 用）：按方言选「真写一次」的语法
+#
+# 就绪探针要把「库可写」这条判成真的，就必须真写一次再回滚。SQLite 走
+# `BEGIN IMMEDIATE` + 页写；Postgres 上那两句都是非法语法（`BEGIN IMMEDIATE`、
+# `PRAGMA` 只属于 SQLite），必须换成 PG 认得的「真写」。
+# ---------------------------------------------------------------------------
+
+
+class _FakeProbeResult:
+    """只够读一次标量（SQLite 分支要读 `PRAGMA application_id` 的当前值）。"""
+
+    def __init__(self, value: Any = 0) -> None:
+        self._value = value
+
+    def scalar(self) -> Any:
+        return self._value
+
+
+class _FakeProbeConnection:
+    """假连接：记下探针发了哪些语句，不连库。"""
+
+    def __init__(self, name: str) -> None:
+        self.dialect = SimpleNamespace(name=name)
+        self.statements: list[str] = []
+
+    def exec_driver_sql(self, statement: str, parameters: Any = None) -> _FakeProbeResult:
+        self.statements.append(statement)
+        return _FakeProbeResult(0)
+
+
+@pytest.mark.parametrize(
+    ("backend", "required", "forbidden"),
+    [
+        ("sqlite", ("BEGIN IMMEDIATE", "PRAGMA application_id"), ("CREATE TEMP TABLE",)),
+        # Postgres：一次事务内的真写（只读实例 / 只读事务会在这一句上抛错）。
+        ("postgresql", ("CREATE TEMP TABLE",), ("BEGIN IMMEDIATE", "PRAGMA", "sql_mode")),
+        # MySQL 家族：DDL 会隐式提交，所以用「内容不变的 UPDATE」当探针。
+        ("mysql", ("UPDATE alembic_version",), ("BEGIN IMMEDIATE", "PRAGMA")),
+        ("mariadb", ("UPDATE alembic_version",), ("BEGIN IMMEDIATE", "PRAGMA")),
+    ],
+)
+def test_write_probe_uses_the_dialect_write_syntax(backend, required, forbidden):
+    """写探针的语句必须落在**该方言真能执行**的那一条上。
+
+    判据是独立事实，不是「跟实现一样」：Postgres 没有 `PRAGMA` / `BEGIN IMMEDIATE`，
+    所以它们出现在 PG 探针里就是错的，不管实现怎么组织。
+    """
+    from backend.core.dialect import write_probe
+
+    connection = _FakeProbeConnection(backend)
+    write_probe(connection)
+    joined = "\n".join(connection.statements)
+    for needle in required:
+        assert needle.lower() in joined.lower(), f"{backend} 探针缺 {needle}：{connection.statements}"
+    for needle in forbidden:
+        assert (
+            needle.lower() not in joined.lower()
+        ), f"{backend} 探针混进了 {needle}：{connection.statements}"
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [("sqlite", True), ("postgresql", False), ("mysql", False), ("mariadb", False)],
+)
+def test_batch_migration_mode_is_only_for_sqlite(backend, expected):
+    """`render_as_batch` 是**SQLite 的补丁**：别的方言上开着它，每次改列都会多写一次
+    「建新表 + 拷数据」，而且拷贝逻辑在 PG 上完全没必要。
+    """
+    from backend.core.dialect import needs_batch_mode
+
+    assert needs_batch_mode(backend) is expected
+

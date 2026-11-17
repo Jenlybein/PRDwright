@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from alembic import command
 from alembic.config import Config
@@ -44,12 +45,21 @@ from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel
 
-from backend.core.schema_snapshot import diff_snapshots, schema_snapshot
+from backend.core.database import database_url
+from backend.core.schema_snapshot import (
+    diff_snapshots,
+    inspector_snapshot,
+    metadata_snapshot,
+    schema_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
 # `migrations/` 目录：`src/backend/core/schema.py` → 上溯到 `backend/`
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]
+
+# `alembic.ini` 里的占位地址：视为「没配置」，继续往下一级找。
+_INERT_URL_PLACEHOLDER = "driver://user:pass@localhost/dbname"
 
 
 class SchemaMismatchError(RuntimeError):
@@ -58,6 +68,37 @@ class SchemaMismatchError(RuntimeError):
     出现它通常意味着两件事之一：有人手工改过库；或者这个库来自更早的版本，
     需要先用当时的代码升级（旧的 20 步链已在 v6.1 删除，不再自动补）。
     """
+
+
+def migration_url(*, override: str | None, configured: str | None) -> str:
+    """迁移要连哪个库：`-x url=` → `Config.sqlalchemy.url` → **应用配置**。
+
+    这个顺序是安全设计（原样搬自 `migrations/env.py` 的模块说明，别调）：
+
+    1. `-x url=...`：CLI 显式指定（调试 / 对拍用）；
+    2. `Config` 里的 `sqlalchemy.url`：程序化调用（`prepare_schema`）从 Engine 反推后
+       传进来，保证「迁移改的库」与「服务读的库」是同一个；
+    3. **`database_url()`**：CLI 不带参数时的兜底。
+
+    ⚠️ 第 3 条以前写死 `sqlite+pysqlite:///{default_db_file()}`（#76 修正）。配了
+    `DATABASE_URL` 的 Postgres 部署上，CLI 迁移会**跑到另一个 SQLite 文件**里去——
+    这是「迁移改了 A 库、服务读的是 B 库」这类最难查的故障：迁移报成功，服务却仍
+    停在旧结构上。走应用配置入口（`DATABASE_URL` → `DB_PATH` → 默认文件）就再也没有
+    第二个真相。
+
+    Args:
+        override: `-x url=` 给出的地址（可为空）。
+        configured: Alembic `Config` 里的地址（可为空，占位符视为没配置）。
+
+    Returns:
+        迁移用的数据库 URL。
+    """
+    if override:
+        return override
+    configured_url = (configured or "").strip()
+    if configured_url and configured_url != _INERT_URL_PLACEHOLDER:
+        return configured_url
+    return database_url()
 
 
 def _alembic_config(url: str) -> Config:
@@ -111,41 +152,70 @@ def _is_empty(engine: Engine) -> bool:
     return not (names - {"alembic_version"})
 
 
-_MODELS_SNAPSHOT: dict | None = None
+_MODELS_SNAPSHOTS: dict[str, dict] = {}
 
 
-def _models_snapshot() -> dict:
-    """用模型建一个临时库，取其结构快照（作为「期望形状」）。
+def _models_snapshot(dialect: Any = "sqlite") -> dict:
+    """模型的「期望形状」快照（`prepare_schema` 对拍用）。
 
     ⚠️ **按进程缓存**：模型在进程生命周期内不会变，而 `prepare_schema` 每次启动都要
     拿它做基准。不缓存的话每个用例的 `client` 夹具都要「建临时库 + create_all +
     读快照」，900 多个用例白白多花十几秒——而这份结果在每个进程里是同一个常量。
+
+    Args:
+        dialect: 目标方言。传 `"sqlite"`（默认，也是既有 SQLite 路径）或一个
+            SQLAlchemy `Dialect` 实例（非 SQLite 走「从元数据按该方言编译」）。
+
+    两条路径产出的快照形状完全一致，见 `core/schema_snapshot.py` 的模块说明：
+
+    - SQLite：在临时文件上用模型 `create_all`，再走 `PRAGMA` 读一遍（既有路径，
+      它能读出部分索引的 WHERE，语义最全）；
+    - 非 SQLite（#76）：不建临时库——Postgres 上没法拿一个「临时 SQLite 库」当期望值
+      （类型名与默认值都是各家的写法），改用 `metadata_snapshot` 按目标方言编译。
     """
-    global _MODELS_SNAPSHOT
-    if _MODELS_SNAPSHOT is not None:
-        return _MODELS_SNAPSHOT
+    name = dialect if isinstance(dialect, str) else dialect.name
+    cached = _MODELS_SNAPSHOTS.get(name)
+    if cached is not None:
+        return cached
 
-    from sqlalchemy import create_engine
+    if name == "sqlite":
+        from sqlalchemy import create_engine
 
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "expected.db"
-        temp_engine = create_engine(f"sqlite+pysqlite:///{path}")
-        try:
-            SQLModel.metadata.create_all(temp_engine)
-        finally:
-            temp_engine.dispose()
-        _MODELS_SNAPSHOT = schema_snapshot(path)
-    return _MODELS_SNAPSHOT
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "expected.db"
+            temp_engine = create_engine(f"sqlite+pysqlite:///{path}")
+            try:
+                SQLModel.metadata.create_all(temp_engine)
+            finally:
+                temp_engine.dispose()
+            snapshot = schema_snapshot(path)
+    else:
+        snapshot = metadata_snapshot(SQLModel.metadata, dialect)
+
+    _MODELS_SNAPSHOTS[name] = snapshot
+    return snapshot
 
 
 def assert_schema_matches_models(engine: Engine) -> None:
     """校验库结构与模型一致；不一致抛 `SchemaMismatchError`。
 
+    两条读法按方言分（#76）：
+
+    - SQLite：`schema_snapshot(engine.url.database)` 读文件（既有路径）；
+    - 其它：`inspector_snapshot(engine)` 走 SQLAlchemy inspector（Postgres 上就是
+      `pg_catalog` 反射），期望值由 `metadata_snapshot` 按目标方言编译。
+
+    ⚠️ **不能因为「换库了」就跳过这条校验**：没有它，`stamp` 会把差异永久藏起来，
+    症状是「写不进去、读出来是默认值」，运行时不报错。
+
     Raises:
         SchemaMismatchError: 存在差异。异常消息里带逐条差异，便于直接定位。
     """
-    actual = schema_snapshot(engine.url.database)
-    problems = diff_snapshots(_models_snapshot(), actual)
+    if engine.dialect.name == "sqlite":
+        actual = schema_snapshot(engine.url.database)
+    else:
+        actual = inspector_snapshot(engine)
+    problems = diff_snapshots(_models_snapshot(engine.dialect), actual)
     if problems:
         detail = "\n  ".join(problems)
         raise SchemaMismatchError(
