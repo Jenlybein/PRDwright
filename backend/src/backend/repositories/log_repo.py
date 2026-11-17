@@ -30,7 +30,7 @@ from sqlmodel import Session
 from backend.core.clock import utc_ms_text, utc_now
 from backend.core.models import AppLog
 
-# 级别映射：SQLite 里没有枚举，靠 `CASE` 把字符串折成可比较的序。
+# 级别映射：库里没有原生枚举，靠 `CASE` 把字符串折成可比较的序。
 # 未登记的级别一律当 0（低于 INFO），于是「按 INFO 过滤」不会把它漏掉。
 _LEVEL_RANK = case(
     (AppLog.level == "DEBUG", 10),
@@ -146,9 +146,9 @@ class LogRepository:
         --------------
         - **级别用 `>=` 而不是等值**：选 `WARNING` 时人想看的是「警告及以上」，
           而不是「只要 WARNING、不要 ERROR」——后者几乎没人需要，却更容易误解。
-          级别在 SQL 里按 `level_rank` 映射成数字比较（SQLite 无枚举类型）。
+          级别在 SQL 里按 `level_rank` 映射成数字比较（库里没有枚举类型）。
         - **关键词只搜 `msg`**：`extra_json` 也被搜的话，一次 `LIKE` 会扫全表两列，
-          在 SQLite 上代价明显；而人找日志时最先记得的是那句话本身。
+          整表扫描的代价明显；而人找日志时最先记得的是那句话本身。
           要按结构化字段找，用 `event` / `request_id` / `user_id` 那几个精确条件。
         - **`logger` 用前缀匹配**（`LIKE 'x%'`）：`backend.services.job_service` 这整棵
           子树一起看是常态，要求精确等于反而更麻烦。

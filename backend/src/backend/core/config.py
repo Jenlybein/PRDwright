@@ -383,17 +383,17 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="",
         description=(
-            "数据库地址（v8）。例如 "
-            "sqlite:////var/lib/prdwright/prdwright.db 或 "
-            "mysql+pymysql://user:pass@host:3306/prdwright?charset=utf8mb4。"
-            "留空时回落到 DB_PATH（兼容糖，见 core/database.py::database_url）。"
+            "数据库地址（唯一入口，本项目只支持 Postgres）。形态："
+            "postgresql+psycopg://user:pass@host:5432/prdwright。"
+            "**没有默认值**：留空（或指向 SQLite / MySQL / 旧 DB_PATH）时服务拒绝启动，"
+            "见 core/database.py::database_url。"
         ),
     )
     db_path: str = Field(
         default="",
         description=(
-            "【兼容糖】SQLite 数据库文件路径；留空则使用后端项目根目录下的 prdwright.db。"
-            "新部署请用 DATABASE_URL——这一项是为已有部署与测试装置保留的。"
+            "【已退役】SQLite 时代的库文件路径。现在只用于「检测到旧库痕迹」时把路径"
+            "写进拒绝启动的报错里——它不会被读取，也不会被自动迁移。"
         ),
     )
     db_pool_size: int = Field(
@@ -447,9 +447,9 @@ class Settings(BaseSettings):
 
     @property
     def db_file(self) -> Path:
-        """SQLite 数据库文件的绝对路径。
+        """旧 SQLite 库文件的绝对路径（**只用于拒绝启动时点名**，不参与连接）。
 
-        未显式配置 `db_path` 时，放在后端项目根目录下的 `prdwright.db`。
+        未显式配置 `db_path` 时，指向后端项目根目录下的 `prdwright.db`。
         """
         if self.db_path:
             return Path(self.db_path).expanduser().resolve()

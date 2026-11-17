@@ -1,21 +1,17 @@
-"""数据库地址解析（v8 / T18.9）与方言装配（#76 Postgres 接入）。
+"""数据库装配与「只接受 Postgres」（v9 / #78）。
 
-这一层要守的是「换库 = 改一个环境变量」这个承诺。四个必须先钉住的点：
+这一层要守的是「单一后端」这个承诺。四个必须先钉住的点：
 
-1. **`DATABASE_URL` 优先，`DB_PATH` 是兼容糖**。兼容糖的意义是「已有部署零改动
-   升级」——一旦它被当成并列选项，就会出现"两个都设了听谁的"这种没人能答的问题；
-2. **不认识的 scheme 要立刻拒绝**。未适配的后端在第一条 SQL 上才会失败，而那条报错
-   指向驱动或语法，看不出真因是"这个后端还没被支持"；
-3. **URL 是「连哪个库」的完整表达**。文件路径只是它的一个特例，所以缓存键、
-   日志、迁移地址都该以 URL 为准；
-4. **连接级 SQL 必须按方言选**（#76 的真因）。以前非 SQLite 一律挂 MySQL 的
-   `SET SESSION sql_mode`，Postgres 接上之后第一条连接就会在那句上失败——而报错
-   出现在驱动里，看不出真因是"把别人的方言配置搬过来了"。
+1. **只认 `DATABASE_URL`，且必须是 Postgres**。SQLite / MySQL 的地址、`DB_PATH` 兼容糖
+   都在这一层被拒绝——不做兼容垫片是有意的，见 `core/database.py` 的模块说明；
+2. **拒绝必须是可操作的**：报错里要写清「为什么」「下一步做什么」（改哪个环境变量、
+   旧库怎么导出），否则下一个人只知道自己起不来；
+3. **旧库痕迹要被认出来**（旧 `DB_PATH` / 旧 `prdwright.db` 文件），并明确说「不再读取」；
+4. **连接级 SQL 只有一套**：Postgres 的 `SET TIME ZONE 'UTC'` 必须显式提交
+   （`SET` 是事务性的，不提交会被池归还时的 rollback 撤掉）。
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
@@ -32,45 +28,99 @@ def _clear_settings_cache():
     get_settings.cache_clear()
 
 
-def test_database_url_wins_over_db_path(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "mysql+pymysql://u:p@h:3306/prdwright")
-    monkeypatch.setenv("DB_PATH", str(Path("/tmp/ignored.db")))
-    assert database.database_url() == "mysql+pymysql://u:p@h:3306/prdwright"
+def test_postgres_database_url_is_accepted(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://u:p@127.0.0.1:5432/prdwright"
+    )
+    assert (
+        database.database_url() == "postgresql+psycopg://u:p@127.0.0.1:5432/prdwright"
+    )
+    assert database.dialect_name() == "postgresql"
 
 
-def test_db_path_is_compat_sugar(monkeypatch, tmp_path):
-    """只设 DB_PATH 时，产出的仍是 SQLite URL——老部署与测试装置都靠这条。"""
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    target = tmp_path / "compat.db"
-    monkeypatch.setenv("DB_PATH", str(target))
+@pytest.mark.parametrize(
+    "url",
+    [
+        "sqlite+pysqlite:////var/lib/prdwright/prdwright.db",
+        "sqlite:///./prdwright.db",
+        "mysql+pymysql://u:p@h:3306/prdwright",
+        "mariadb+pymysql://u:p@h:3306/prdwright",
+        "oracle+oracledb://u:p@h:1521/prdwright",
+    ],
+)
+def test_non_postgres_url_is_rejected_with_actionable_message(monkeypatch, url):
+    """指向别的后端时**在配置阶段就拒绝**，而不是连上去再炸。
 
-    url = database.database_url()
-    assert url.startswith("sqlite+pysqlite:///")
-    assert url.endswith("compat.db")
-    assert database.dialect_name(url) == "sqlite"
+    报错必须同时说清三件事：哪个后端不被支持、为什么（单一后端）、下一步做什么
+    （compose 里的 db 服务、DATABASE_URL 的形态）。少任何一条，读者只能去翻代码。
+    """
+    monkeypatch.setenv("DATABASE_URL", url)
+    with pytest.raises(database.UnsupportedBackendError) as caught:
+        database.database_url()
+    message = str(caught.value)
+    assert database.dialect_name(url) in message, "报错里必须点名是哪个后端"
+    assert "Postgres" in message
+    assert "DATABASE_URL" in message
+    assert "deploy" in message or "compose" in message, "必须给出下一步怎么做"
 
 
-def test_default_when_nothing_configured(monkeypatch):
+def test_missing_database_url_is_rejected(monkeypatch):
+    """没配 `DATABASE_URL` 时不许回落到某个默认 SQLite 文件。
+
+    回落会让「配置漏了」伪装成「服务正常、只是数据不对」，这是最难查的一类故障。
+    """
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("DB_PATH", raising=False)
-    assert database.database_url().startswith("sqlite+pysqlite:///")
-    assert database.database_url().endswith("prdwright.db")
-
-
-def test_unknown_backend_is_rejected_at_build_time():
-    """未适配的后端在**建引擎**时就被拒，而不是等第一条 SQL 失败。
-
-    报错信息必须点明"该改哪两个文件"，否则下一个人只会知道"连不上"。
-    """
-    with pytest.raises(ValueError) as caught:
-        database.build_engine("oracle+oracledb://u:p@h:1521/prdwright")
+    with pytest.raises(database.UnsupportedBackendError) as caught:
+        database.database_url()
     message = str(caught.value)
-    assert "oracle" in message
-    assert "core/database.py" in message
+    assert "DATABASE_URL" in message
+    assert "只有 Postgres" in message or "只支持 Postgres" in message
+
+
+def test_legacy_db_path_is_reported_as_old_sqlite(monkeypatch, tmp_path):
+    """旧 `DB_PATH` 要被认出来并说明「不再读取」，而不是静默忽略。"""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    legacy = tmp_path / "prdwright.db"
+    monkeypatch.setenv("DB_PATH", str(legacy))
+    with pytest.raises(database.UnsupportedBackendError) as caught:
+        database.database_url()
+    message = str(caught.value)
+    assert "DB_PATH" in message
+    assert str(legacy) in message, "报错里要指出看见的是哪一个旧路径"
+
+
+def test_legacy_sqlite_file_is_reported(monkeypatch, tmp_path):
+    """默认位置的旧 SQLite 库文件存在时，要说清「检测到了、但不再读取」。"""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DB_PATH", raising=False)
+    legacy = tmp_path / "prdwright.db"
+    legacy.write_bytes(b"SQLite format 3\x00")
+    # 替换「默认库文件在哪」这处依赖，不往仓库里写文件。
+    monkeypatch.setattr(database, "default_db_file", lambda: legacy)
+
+    with pytest.raises(database.UnsupportedBackendError) as caught:
+        database.database_url()
+    assert str(legacy) in str(caught.value), "出问题时必须指出看见的是哪一个旧文件"
+
+
+def test_build_engine_rejects_non_postgres_target():
+    """`build_engine` 的 target 同样只接受 Postgres URL。"""
+    with pytest.raises(database.UnsupportedBackendError):
+        database.build_engine("sqlite+pysqlite:///:memory:")
+    with pytest.raises(database.UnsupportedBackendError):
+        database.build_engine("mysql+pymysql://u:p@h:3306/prdwright")
+
+
+def test_build_engine_rejects_bare_path(tmp_path):
+    """按文件路径指库是 SQLite 的旧用法，必须报错而不是拼成 SQLite URL。"""
+    with pytest.raises(database.UnsupportedBackendError) as caught:
+        database.build_engine(tmp_path / "a.db")
+    assert "URL" in str(caught.value)
 
 
 def test_postgres_engine_is_accepted_with_network_pool_settings():
-    """Postgres 是**已适配的后端**：建得出引擎，且按网络型后端装配池。
+    """Postgres 引擎按网络型后端装配池。
 
     不连库：`create_engine` 是懒的，建引擎不产生任何连接。这条守的是
     "配置层认得 Postgres"（`SUPPORTED_BACKENDS` 与池装配），不是"库能跑"——
@@ -82,7 +132,7 @@ def test_postgres_engine_is_accepted_with_network_pool_settings():
         # 网络型后端：连接会掉线，必须 pre_ping + 定期换掉
         assert engine.pool._pre_ping is True  # noqa: SLF001 - 断言池的装配结果
         assert engine.pool._recycle == database.DEFAULT_POOL_RECYCLE  # noqa: SLF001
-        # 固定池约定对任何后端都一样：运行期不许扩容
+        # 固定池约定：运行期不许扩容
         assert engine.pool._max_overflow == 0  # noqa: SLF001
     finally:
         engine.dispose()
@@ -96,7 +146,6 @@ def _run_connect_hook(backend: str) -> list[str]:
 
     ⚠️ 假连接必须带 `commit()`：Postgres 的 `SET` 是**事务性**的，钩子里的配置
     不显式提交就会被池归还时的 rollback 撤掉（#77 在真库上实测过）。
-    少了这个方法，这条用例会漏掉「设置了但没落住」这类故障。
     """
     executed: list[str] = []
 
@@ -118,33 +167,23 @@ def _run_connect_hook(backend: str) -> list[str]:
     return executed
 
 
-@pytest.mark.parametrize(
-    ("backend", "required", "forbidden"),
-    [
-        (
-            "sqlite",
-            ("PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON"),
-            ("sql_mode", "TIME ZONE"),
-        ),
-        # Postgres 上**绝不能**出现 sql_mode / BEGIN IMMEDIATE / PRAGMA：
-        # 那是别的方言的语法，执行它等于第一条连接就炸。
-        ("postgresql", ("'UTC'",), ("sql_mode", "BEGIN IMMEDIATE", "PRAGMA")),
-        ("mysql", ("SET time_zone = '+00:00'", "sql_mode"), ("BEGIN IMMEDIATE", "PRAGMA")),
-        ("mariadb", ("SET time_zone = '+00:00'", "sql_mode"), ("BEGIN IMMEDIATE", "PRAGMA")),
-    ],
-)
-def test_connection_setup_is_dialect_specific(backend, required, forbidden):
-    """连接级 SQL 按方言选，不许把一套配置搬到另一套上。
-
-    这是 #76 的**第一条硬约束**：非 SQLite 分支曾经无条件挂 MySQL 的
-    `SET SESSION sql_mode`，Postgres 一进白名单，第一条连接就在那句上失败。
-    """
-    executed = _run_connect_hook(backend)
+def test_connection_setup_is_postgres_only():
+    """连接级 SQL 只有一套：PG 绝不能出现 sql_mode / BEGIN IMMEDIATE / PRAGMA。"""
+    executed = _run_connect_hook("postgresql")
     joined = "\n".join(executed)
-    for needle in required:
-        assert needle.lower() in joined.lower(), f"{backend} 的连接配置缺 {needle}：{executed}"
-    for needle in forbidden:
-        assert needle.lower() not in joined.lower(), f"{backend} 的连接配置混进了 {needle}：{executed}"
+    assert "utc" in joined.lower()
+    for needle in ("sql_mode", "BEGIN IMMEDIATE", "PRAGMA"):
+        assert needle.lower() not in joined.lower(), f"PG 的连接配置混进了 {needle}：{executed}"
+
+
+def test_every_supported_backend_has_a_connect_hook():
+    """白名单里的每个后端都必须有连接级配置钩子。
+
+    往 `SUPPORTED_BACKENDS` 加后端时忘了加钩子，症状是 `build_engine` 抛 `KeyError`，
+    报错看起来像字典写错了而不是配置缺了。
+    """
+    for backend in sorted(database.SUPPORTED_BACKENDS):
+        assert callable(database._connect_hook(backend)), f"{backend} 没有连接级配置钩子"
 
 
 def test_postgres_connect_hook_commits_the_session_setting():
@@ -157,66 +196,18 @@ def test_postgres_connect_hook_commits_the_session_setting():
     assert "<commit>" in executed, f"钩子没有提交会话配置（会被 rollback 撤掉）：{executed}"
 
 
-def test_every_supported_backend_has_a_connect_hook():
-    """白名单里的每个后端都必须有连接级配置钩子。
-
-    这条是给下一个人准备的：往 `SUPPORTED_BACKENDS` 加后端时忘了加钩子，
-    症状是 `build_engine` 在这一行抛 `KeyError`（而不是「这个后端没适配」），
-    报错看起来像是字典写错了而不是配置缺了。
-    """
-    for backend in sorted(database.SUPPORTED_BACKENDS):
-        assert callable(database._connect_hook(backend)), f"{backend} 没有连接级配置钩子"
+def test_supported_backends_is_postgres_only():
+    """白名单只有 Postgres：不是「Postgres 能用」，而是「别的库进不来」。"""
+    assert database.SUPPORTED_BACKENDS == frozenset({"postgresql"})
 
 
-
-def test_resolve_url_accepts_three_shapes(tmp_path):
-    """路径、URL、以及"什么都不给"三种入参都要能归一。
-
-    「什么都不给」的含义是**走应用配置**（`database_url()`），而不是某个写死的形态：
-    #77 之后测试基座把配置指到 Postgres，这条不该因此变成红的。
-    """
+def test_resolve_url_accepts_url_and_none(monkeypatch):
+    """URL 与「什么都不给」两种入参；文件路径不再是合法入参。"""
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://u:p@127.0.0.1:5432/prdwright"
+    )
     assert database.resolve_url(None) == database.database_url()
-    # 路径一律归一成 SQLite URL：`DB_PATH` 兼容糖与历史调用方都靠这个形状
-    assert database.resolve_url(tmp_path / "a.db").startswith("sqlite+pysqlite:///")
-    assert database.resolve_url(str(tmp_path / "b.db")).startswith("sqlite+pysqlite:///")
-    # 带 `://` 的按 URL 处理，不拼 sqlite 前缀
-    assert database.resolve_url("mysql+pymysql://u:p@h/db") == "mysql+pymysql://u:p@h/db"
-
-
-def test_mysql_engine_gets_pool_pre_ping_and_prefixed_scheme():
-    """MySQL 引擎要带 `pool_pre_ping`（防 `server has gone away`）且能建出来。
-
-    不连库：`create_engine` 是懒的，建引擎不产生任何网络连接。这条守的是
-    "配置层认得 MySQL"，而不是"MySQL 能跑"——那是 P2~P5 的事。
-    """
-    engine = database.build_engine("mysql+pymysql://u:p@127.0.0.1:3306/prdwright")
-    try:
-        assert engine.dialect.name == "mysql"
-        assert engine.pool._pre_ping is True  # noqa: SLF001 - 断言池的装配结果
-    finally:
-        engine.dispose()
-
-
-def test_sqlite_engine_keeps_fixed_pool_and_no_pre_ping():
-    """SQLite 不该带 `pool_pre_ping`：本地文件句柄不会掉线，多探一次只是多一条 SQL。"""
-    engine = database.build_engine("sqlite+pysqlite:///:memory:")
-    try:
-        assert engine.dialect.name == "sqlite"
-        assert engine.pool._pre_ping is False  # noqa: SLF001
-        # `max_overflow=0` 是承重设计：运行期一条连接都不许新建
-        assert engine.pool._max_overflow == 0  # noqa: SLF001
-    finally:
-        engine.dispose()
-
-
-def test_sqlite_url_creates_parent_directory(tmp_path):
-    """库文件所在目录不存在时，建引擎这一步就要把它建出来。
-
-    否则报错是 `unable to open database file`，看不出真因是"目录没建"。
-    """
-    nested = tmp_path / "deep" / "dir" / "app.db"
-    engine = database.build_engine(f"sqlite+pysqlite:///{nested}")
-    try:
-        assert nested.parent.is_dir()
-    finally:
-        engine.dispose()
+    assert (
+        database.resolve_url("postgresql+psycopg://u:p@127.0.0.1:5433/other")
+        == "postgresql+psycopg://u:p@127.0.0.1:5433/other"
+    )

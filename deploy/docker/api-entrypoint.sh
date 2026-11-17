@@ -7,9 +7,9 @@
 # 四步的顺序不能换，每一步都在回答一个「不做会怎样」：
 #
 # 1. **校正属主**（只在 root 下做）。命名卷首次创建时属主是 root，而应用以固定 uid
-#    10001 运行。不校正的话症状不是「权限错误」，而是 SQLite 建库时的
-#    `unable to open database file`、日志静默退回「只打 stdout」——两种都难归因，
-#    而且都发生在「你以为服务起来了」之后。校正只发生在启动那一刻，之后进程一直非 root。
+#    10001 运行。不校正的话症状不是「权限错误」，而是日志卷写不进去（静默退回「只打
+#    stdout」）——难归因，而且发生在「你以为服务起来了」之后。校正只发生在启动那一刻，
+#    之后进程一直非 root。数据库文件不在这个镜像的卷里（它是独立的 `db` 服务）。
 #
 # 2. **校验主密钥**。后端只在**第一次真正用到**密钥时才抛 RuntimeError
 #    （`core/crypto.py::_fernet`），而 `/readyz` 只查「库可写 + 技能可加载」，
@@ -35,7 +35,7 @@ IMAGE_REF="${PRDWRIGHT_IMAGE_REF:-prdwright-api:local}"
 # 卷名由 compose 里的 `name: prdwright` 钉死（`prdwright_secrets`），不随目录改名。
 SECRETS_VOLUME="prdwright_secrets"
 #
-# 上面前四个里只有 KEY_FILE 与 IMAGE_REF 读环境变量：它们分别由 compose 的 `.env` 与
+# 上面几个里只有 KEY_FILE / IMAGE_REF / DATABASE_URL 读环境变量：它们分别由 compose 的 `.env` 与
 # Dockerfile 的构建参数给值。`RUN_USER` / `PYTHON` / `SECRETS_VOLUME` 是写死的——它们与
 # 镜像里的 `useradd`、venv 路径、compose 的项目名成对，没有任何编排者会设它们；
 # 留一个可覆盖的口子只会让「镜像与编排不一致」成为可能。
@@ -66,14 +66,9 @@ prepare_dirs() {
         return 0
     fi
 
-    # 需要可写的目录：数据卷 + 日志卷。`DATABASE_URL` 指到别处时那个目录同样是挂载点，
-    # 一并校正——否则「按文档改了库路径」就变成一次静默的「属主没改」。
-    # 本项目固定 SQLite，所以只解析它的绝对路径形态（`sqlite:////abs/path`）；
-    # 其它形态的 URL 在 `core/database.py` 就被拒绝，这里不需要分支。
-    dirs="${PRDWRIGHT_DATA_DIR:-/var/lib/prdwright} ${LOG_DIR:-/var/log/prdwright}"
-    case "${DATABASE_URL:-}" in
-        sqlite*:///*) dirs="$dirs $(dirname "${DATABASE_URL#sqlite*:///}")" ;;
-    esac
+    # 需要可写的目录：只剩日志卷。数据库文件不在这个容器里——v9 起它是 compose 里
+    # 独立的 `db` 服务，data 目录由 Postgres 镜像自己管。
+    dirs="${LOG_DIR:-/var/log/prdwright}"
 
     for dir in $dirs; do
         [ -n "$dir" ] || continue
@@ -84,6 +79,70 @@ prepare_dirs() {
             log "已把 $dir 的属主校正为 $RUN_USER"
         fi
     done
+}
+
+# ---------------------------------------------------------------------------
+# 二、等数据库就绪
+#
+# compose 里 api 已经 `depends_on: db: service_healthy`，正常编排下这一步立刻就过。
+# 但这条等待不是冗余的：
+# - 直接 `docker run`（不经 compose）时没有 depends_on；
+# - db 容器在一次网络抖动 / 重启里短暂不可达时，api 起得太早会因「连不上库」而退出，
+#   然后由 restart 策略反复重启——每次都要重新等一遍，日志里只有连接错误。
+#
+# 判据是**真的能执行一条 SELECT**，不是「端口连得上」：Postgres 接受 TCP 之后还要
+# 等它完成恢复流程才真正能接查询。
+# ---------------------------------------------------------------------------
+wait_for_database() {
+    [ -n "${DATABASE_URL:-}" ] || die "没有配置 DATABASE_URL：本项目只支持 Postgres，且不提供默认库。
+  请用 compose 起栈（它会按 .env 里的凭据拼出 DATABASE_URL），或显式传：
+  -e DATABASE_URL=postgresql+psycopg://<用户>:<口令>@<主机>:5432/<库名>"
+
+    case "${DATABASE_URL}" in
+        postgres*://*) ;;
+        *)
+            die "DATABASE_URL 不是 Postgres 地址：${DATABASE_URL}
+  本项目自 v9 起只支持 Postgres（SQLite / MySQL 的分支已删除，旧库也不会被自动升级）。
+  请改成 postgresql+psycopg://<用户>:<口令>@<主机>:5432/<库名>。"
+            ;;
+    esac
+
+    timeout="${DB_WAIT_TIMEOUT:-60}"
+    log "等待数据库就绪（最多 ${timeout}s）：$(printf '%s' "$DATABASE_URL" | sed -E 's#(://[^:/@]*):[^@]*@#\1:***@#')"
+    status=0
+    # 用镜像里的 python + psycopg，不额外装 psql 客户端；连接串要换成 libpq 认的形态
+    # （去掉 SQLAlchemy 的 `+psycopg` 驱动后缀）。
+    run_as_user "$PYTHON" - "$timeout" <<'PY' || status=$?
+import os
+import sys
+import time
+
+import psycopg
+
+raw = os.environ["DATABASE_URL"]
+url = raw.replace("postgresql+psycopg://", "postgresql://", 1).replace(
+    "postgresql+psycopg2://", "postgresql://", 1
+)
+deadline = time.time() + float(sys.argv[1])
+last_error = None
+while time.time() < deadline:
+    try:
+        with psycopg.connect(url, connect_timeout=3) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+        sys.exit(0)
+    except Exception as exc:  # noqa: BLE001 - 探针要兜住任何连接错误
+        last_error = exc
+        time.sleep(1)
+sys.stderr.write(f"等待数据库超时（{sys.argv[1]}s）：{type(last_error).__name__}: {last_error}\n")
+sys.exit(1)
+PY
+
+    [ "$status" -eq 0 ] || die "数据库在 ${timeout}s 内没有就绪（见上一行的真实错误）。
+  排查：docker compose ps db（容器是否 healthy）、docker compose logs db（initdb / 恢复是否失败）、
+  以及 .env 里的 POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB 是否与已初始化的 pgdata 卷一致
+  （改了凭据但卷没重建时，Postgres 仍用旧口令，见 deploy/README.md §6.5）。"
+    log "数据库已就绪"
 }
 
 # ---------------------------------------------------------------------------
@@ -187,6 +246,7 @@ guard_single_worker() {
 [ "$#" -gt 0 ] || die "没有要执行的命令（ENTRYPOINT 需要 CMD，例如 uvicorn backend.main:app）"
 
 prepare_dirs
+wait_for_database
 check_master_key
 guard_single_worker "$@"
 

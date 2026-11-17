@@ -1,24 +1,27 @@
-"""迁移编排（v6）：把库带到「最新结构」，并对未知来源的库保持怀疑。
+"""迁移编排（v9）：把库带到「最新结构」，并对未知来源的库保持怀疑。
 
 ## 三条路径
 
 | 库的状态 | 走哪条 | 结果 |
 | --- | --- | --- |
-| 空库 | `upgrade head` | 建全量 schema |
+| 空库 | `upgrade head` | 建全量 schema（单份 Postgres 基线） |
 | 结构已是当前形状、但没有 `alembic_version` | 校验 → `stamp head` | **一行 DDL 都不执行**，只登记版本 |
 | 已接管（有 `alembic_version`） | `upgrade head` | 正常增量迁移 |
 
-## 旧版本库不再自动升级（v6.1）
+## 旧数据库不再自动升级（v6.1 起，v9 更硬）
 
-`PRAGMA user_version` 的 20 步手写链**已删除**。它是「把 v1~v19 的库补到 v20」的垫片，
-只在 v6 上线前后那段时间有服务对象；留着它的代价是每个读代码的人都要多理解一套
-并存的历史。
+`PRAGMA user_version` 的 20 步手写链**已删除**；v9 起连 SQLite 后端本身都已删除
+（`core/database.py` 在配置阶段就拒绝 SQLite / MySQL 的地址）。所以「指向旧库启动」
+的行为是**拒绝启动并说清原因**，不是悄悄兼容：
 
-现在遇到那种库，行为是**拒绝启动并说清原因**（`SchemaMismatchError`），
-而不是悄悄 stamp 成最新——后者会把「少两张表」这类差异永久藏起来，
-等到某次生成时才以「no such table」的形式炸出来。
+- 旧 SQLite 地址 / 旧 `DB_PATH` / 旧 `prdwright.db` 文件：`UnsupportedBackendError`
+  （在 `database_url()` 就失败，服务根本不会起来）；
+- Postgres 里结构对不上（手工改库、或从更早版本带过来的库）：`SchemaMismatchError`，
+  逐条打印差异。
 
-需要救那种库时，用升级前的代码跑一次到 v20，或者直接重建（本项目的数据都可导出）。
+不做自动「搬迁」是有意的：SQLite 库的结构（布尔存成 INTEGER、`AUTOINCREMENT` 的自增
+语义、空的默认值形态）与 Postgres 基线并不一一对应，自动猜一个对应关系会把差异悄悄
+留在数据里；启动时明确失败，比运行期「写不进去、读出来是默认值」容易定位得多。
 
 ## 为什么 `stamp` 之前必须校验
 
@@ -34,7 +37,6 @@
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +52,6 @@ from backend.core.schema_snapshot import (
     diff_snapshots,
     inspector_snapshot,
     metadata_snapshot,
-    schema_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,8 @@ class SchemaMismatchError(RuntimeError):
     """库的结构与模型/基线不一致。**这是拒绝启动的理由，不是可以忽略的警告。**
 
     出现它通常意味着两件事之一：有人手工改过库；或者这个库来自更早的版本，
-    需要先用当时的代码升级（旧的 20 步链已在 v6.1 删除，不再自动补）。
+    需要先用当时的代码升级（旧的 20 步链已在 v6.1 删除，v9 起连 SQLite 后端都已删除，
+    不再自动补）。
     """
 
 
@@ -83,8 +85,7 @@ def migration_url(*, override: str | None, configured: str | None) -> str:
     ⚠️ 第 3 条以前写死 `sqlite+pysqlite:///{default_db_file()}`（#76 修正）。配了
     `DATABASE_URL` 的 Postgres 部署上，CLI 迁移会**跑到另一个 SQLite 文件**里去——
     这是「迁移改了 A 库、服务读的是 B 库」这类最难查的故障：迁移报成功，服务却仍
-    停在旧结构上。走应用配置入口（`DATABASE_URL` → `DB_PATH` → 默认文件）就再也没有
-    第二个真相。
+    停在旧结构上。走应用配置入口（唯一的 `DATABASE_URL`）就再也没有第二个真相。
 
     Args:
         override: `-x url=` 给出的地址（可为空）。
@@ -92,6 +93,9 @@ def migration_url(*, override: str | None, configured: str | None) -> str:
 
     Returns:
         迁移用的数据库 URL。
+
+    Raises:
+        UnsupportedBackendError: 三级都没给出可用地址（见 `database.database_url`）。
     """
     if override:
         return override
@@ -126,9 +130,8 @@ def _alembic_config(url: str) -> Config:
 def _database_url(engine: Engine) -> str:
     """从 Engine 反推数据库地址（保证迁移与服务指向同一个库）。
 
-    不手拼 `sqlite+pysqlite:///`：那等于把方言写死在这一行里。换成别的库之后，
-    手拼的结果既不是 SQLite 也不是目标库的地址，而 Alembic 会照着它去连一个
-    不存在的库——报错信息指向"库不存在"，真因是这里拼错了。
+    不手拼 URL 前缀：那等于把方言写死在这一行里，换成别的地址之后 Alembic 会照着它
+    去连一个不存在的库——报错信息指向"库不存在"，真因是这里拼错了。
 
     `render_as_string(hide_password=False)` 是官方的逆序列化方式，任何方言都对。
     ⚠️ `hide_password` 必须显式给 `False`：默认会渲染成 `***`，迁移连不上。
@@ -144,9 +147,9 @@ def _has_alembic_version(engine: Engine) -> bool:
 def _is_empty(engine: Engine) -> bool:
     """库里一张业务表都没有（Alembic 自己的账本不算）。
 
-    不判 `sqlite_sequence`：那是 SQLite `AUTOINCREMENT` 的副产物，只有 SQLite 才有，
-    换库后这个集合永远为空，判断会静默变成"永远非空"。改成只排除迁移账本——
-    「有没有 `alembic_version`」在任何库上的含义都一样。
+    只排除迁移账本——「有没有 `alembic_version`」在任何库上的含义都一样。
+    （v9 之前还排除 `sqlite_sequence`：那是 SQLite `AUTOINCREMENT` 的副产物，
+    换到 Postgres 后这个集合永远为空，判断会静默变成"永远非空"；随 SQLite 后端一起删除了。）
     """
     names = set(inspect(engine).get_table_names())
     return not (names - {"alembic_version"})
@@ -155,43 +158,22 @@ def _is_empty(engine: Engine) -> bool:
 _MODELS_SNAPSHOTS: dict[str, dict] = {}
 
 
-def _models_snapshot(dialect: Any = "sqlite") -> dict:
+def _models_snapshot(dialect: Any) -> dict:
     """模型的「期望形状」快照（`prepare_schema` 对拍用）。
 
     ⚠️ **按进程缓存**：模型在进程生命周期内不会变，而 `prepare_schema` 每次启动都要
-    拿它做基准。不缓存的话每个用例的 `client` 夹具都要「建临时库 + create_all +
-    读快照」，900 多个用例白白多花十几秒——而这份结果在每个进程里是同一个常量。
+    拿它做基准。不缓存的话每个用例的 `client` 夹具都要「按方言编译一遍全部列」，
+    900 多个用例白白多花十几秒——而这份结果在每个进程里是同一个常量。
 
     Args:
-        dialect: 目标方言。传 `"sqlite"`（默认，也是既有 SQLite 路径）或一个
-            SQLAlchemy `Dialect` 实例（非 SQLite 走「从元数据按该方言编译」）。
-
-    两条路径产出的快照形状完全一致，见 `core/schema_snapshot.py` 的模块说明：
-
-    - SQLite：在临时文件上用模型 `create_all`，再走 `PRAGMA` 读一遍（既有路径，
-      它能读出部分索引的 WHERE，语义最全）；
-    - 非 SQLite（#76）：不建临时库——Postgres 上没法拿一个「临时 SQLite 库」当期望值
-      （类型名与默认值都是各家的写法），改用 `metadata_snapshot` 按目标方言编译。
+        dialect: 目标方言（`engine.dialect`）。期望值**按目标方言编译**模型元数据
+            （`metadata_snapshot`），不建临时库：类型名与默认值必须与目标库说同一种语言。
     """
     name = dialect if isinstance(dialect, str) else dialect.name
     cached = _MODELS_SNAPSHOTS.get(name)
     if cached is not None:
         return cached
-
-    if name == "sqlite":
-        from sqlalchemy import create_engine
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.db"
-            temp_engine = create_engine(f"sqlite+pysqlite:///{path}")
-            try:
-                SQLModel.metadata.create_all(temp_engine)
-            finally:
-                temp_engine.dispose()
-            snapshot = schema_snapshot(path)
-    else:
-        snapshot = metadata_snapshot(SQLModel.metadata, dialect)
-
+    snapshot = metadata_snapshot(SQLModel.metadata, dialect)
     _MODELS_SNAPSHOTS[name] = snapshot
     return snapshot
 
@@ -199,11 +181,8 @@ def _models_snapshot(dialect: Any = "sqlite") -> dict:
 def assert_schema_matches_models(engine: Engine) -> None:
     """校验库结构与模型一致；不一致抛 `SchemaMismatchError`。
 
-    两条读法按方言分（#76）：
-
-    - SQLite：`schema_snapshot(engine.url.database)` 读文件（既有路径）；
-    - 其它：`inspector_snapshot(engine)` 走 SQLAlchemy inspector（Postgres 上就是
-      `pg_catalog` 反射），期望值由 `metadata_snapshot` 按目标方言编译。
+    读法只有一条（v9 单后端）：`inspector_snapshot(engine)` 走 SQLAlchemy inspector
+    （Postgres 上就是 `pg_catalog` 反射），期望值由 `metadata_snapshot` 按目标方言编译。
 
     ⚠️ **不能因为「换库了」就跳过这条校验**：没有它，`stamp` 会把差异永久藏起来，
     症状是「写不进去、读出来是默认值」，运行时不报错。
@@ -211,10 +190,7 @@ def assert_schema_matches_models(engine: Engine) -> None:
     Raises:
         SchemaMismatchError: 存在差异。异常消息里带逐条差异，便于直接定位。
     """
-    if engine.dialect.name == "sqlite":
-        actual = schema_snapshot(engine.url.database)
-    else:
-        actual = inspector_snapshot(engine)
+    actual = inspector_snapshot(engine)
     problems = diff_snapshots(_models_snapshot(engine.dialect), actual)
     if problems:
         detail = "\n  ".join(problems)
@@ -222,8 +198,8 @@ def assert_schema_matches_models(engine: Engine) -> None:
             "数据库结构与模型不一致，已拒绝启动（直接 stamp 会把差异永久藏起来）。\n"
             f"共 {len(problems)} 处差异：\n  {detail}\n"
             "若是本次升级引入的变更，请补一条 Alembic 迁移；若是手工改库，请先修复结构。\n"
-            "⚠️ 若这是一个更早版本的库（v20 之前），请先用当时的代码升级到 v20——"
-            "旧的 20 步迁移链已在 v6.1 删除，不再自动补。"
+            "⚠️ 若这是一个更早版本的库（SQLite 时代的 v20 及以前），本项目已不再支持升级："
+            "SQLite 后端已删除，旧的 20 步迁移链也不再自动补。请按 deploy/README.md 用新库重建并导入数据。"
         )
 
 

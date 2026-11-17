@@ -20,9 +20,9 @@ dependencies = [
     "langchain-huggingface>=1.2.0",
     "langchain-nvidia-ai-endpoints>=1.1.0",
     "langchain-openai>=1.6.7",
+    # 唯一的数据库驱动（v9 单后端 #78）：Postgres 走 psycopg 3。MySQL 的 pymysql 已删除。
     "psycopg[binary]>=3.3.9",
     "pydantic-settings>=2.15.0",
-    "pymysql>=1.1.0",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
     # 数据层（v6）。三个包的分工：

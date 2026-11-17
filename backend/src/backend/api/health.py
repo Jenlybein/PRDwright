@@ -67,12 +67,12 @@ logger = logging.getLogger(__name__)
 def _check_database() -> dict:
     """探测数据库：借一条连接执行最小查询。
 
-    刻意用「真的连一次」而不是看文件在不在——SQLite 的问题大多不是文件缺失，
-    而是权限、目录、WAL 文件被占用这类只有连上去才会暴露的情况。
+    刻意用「真的连一次」而不是看配置写没写——连接不上、凭据错、库没建好，这些都只有
+    真的借一条连接才会暴露。
     """
     try:
         # 走 Engine 的池：与业务请求借同一条通路，才能测出「业务真的会用不了的」那种故障。
-        # 直接 `sqlite3.connect(文件)` 会绕过池与 PRAGMA 事件，探活绿着、业务却挂。
+        # 绕过池直连会得到「探活绿着、业务却挂」。
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001 - 体检要兜住任何异常，否则「探活」自己就 500 了
@@ -206,17 +206,15 @@ def _check_database_writable() -> dict:
     服务，「健康」二字没有意义。这就是它与 `_check_database()`（只探「可连接」）的
     分工：详情端点回答「库通不通」，就绪探针回答「写不写得进去」。
 
-    为什么「写什么」不在这里决定：那是**方言知识**（SQLite 的 `BEGIN IMMEDIATE`
-    与 `PRAGMA`、Postgres 的临时表、MySQL 的「内容不变 UPDATE」三套写法互不兼容），
+    为什么「写什么」不在这里决定：那是**方言知识**（建临时表 / 页写等写法互不兼容），
     所以语句在 `core/dialect.py::write_probe()`，本函数只管事务的开合：
 
-    1. `conn.begin()` 显式开事务（pysqlite 上它本身不发 `BEGIN`，SQLite 分支因此
-       还要先发 `BEGIN IMMEDIATE`——理由写在 `dialect.write_probe`）；
-    2. 让方言发它那句「真写」；
+    1. `conn.begin()` 显式开事务；
+    2. 让方言发它那句「真写」（Postgres：建一张临时表）；
     3. `finally` 里 `rollback()` 把这次事务整个撤掉，不留任何痕迹。
 
-    ⚠️ 以前这三步里写死了 SQLite 的语句，Postgres 接上之后探针会一直吐 503
-    （`BEGIN IMMEDIATE` / `PRAGMA` 在 PG 上是语法错误，探针把自己判成「库不可写」）。
+    ⚠️ 这三步以前写死了 SQLite 的语句（`BEGIN IMMEDIATE` + `PRAGMA`），换到 Postgres
+    之后探针会一直吐 503——现在语句按方言取，未适配方言直接报错。
     """
     try:
         with get_engine().connect() as conn:

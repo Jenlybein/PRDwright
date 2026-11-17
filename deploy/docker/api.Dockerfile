@@ -73,7 +73,7 @@ ENV PYTHONUNBUFFERED=1 \
     PRDWRIGHT_SKILLS_DIR=/app/skills \
     PRDWRIGHT_SKILLS_STRICT=true \
     PRDWRIGHT_MASTER_KEY_PATH=/secrets/master.key \
-    DATABASE_URL=sqlite:////var/lib/prdwright/prdwright.db \
+    DATABASE_URL=postgresql+psycopg://prdwright@db:5432/prdwright \
     LOG_DIR=/var/log/prdwright \
     LOG_FORMAT=json \
     PRDWRIGHT_IMAGE_REF=${IMAGE_REF}
@@ -88,8 +88,10 @@ ENV PYTHONUNBUFFERED=1 \
 #   两条路指同一个目录，谁先命中都不会读到另一套资产。
 # · `PRDWRIGHT_SKILLS_STRICT=true`：部署态漏打包技能包要在启动时就炸，而不是某次生成
 #   悄悄退回内置提示词（`skill_registry.ensure_skills` 的 fail-fast）。
-# · `DATABASE_URL` 用 4 个斜杠的绝对路径形态；`LOG_DIR` 指向日志卷。两者都在卷里，
-#   容器重建后还在。
+# · `DATABASE_URL` 是**Postgres 形态且没有口令**：它只是「表单齐全」的默认值，直连会被
+#   Postgres 拒绝。真实地址由 compose 按 `.env` 里的凭据拼出来（`db:5432`）注入——
+#   镜像里绝不内置一个能用的口令。单独 `docker run` 时必须显式传 DATABASE_URL。
+# · `LOG_DIR` 指向日志卷，容器重建后日志还在。
 # · `PRDWRIGHT_IMAGE_REF` 只为报错文案可执行（见启动脚本的密钥指引）。
 
 # 依赖：整棵 venv 从 builder 搬过来，构建工具与 uv 留在上一阶段。
@@ -104,15 +106,16 @@ COPY skills /app/skills
 COPY scripts/keygen /app/scripts/keygen
 COPY deploy/docker/api-entrypoint.sh /usr/local/bin/api-entrypoint
 
-# 三个挂载点先建好并落到运行用户名下：
-#   /var/lib/prdwright  数据卷（SQLite 库 + WAL 的 -wal / -shm 边车）
+# 两个挂载点先建好并落到运行用户名下：
 #   /var/log/prdwright  日志卷（轮转文件）
 #   /secrets            密钥卷（只读挂载，master.key 由运维一次性生成）
+# 数据库文件不在镜像里、也不挂在这里：它是 compose 里的独立 `db` 服务，数据在
+# `prdwright_pgdata` 命名卷里（见 deploy/compose.yaml）。
 # 命名卷首次创建时会**继承镜像里这个目录的属主与权限**，所以「先建好 + 改属主」意味着
 # 多数情况下第一次启动根本不需要 chown。启动脚本里的校正负责兜住其余情况：卷早于本镜像
 # 被创建（属主 root）、从别处恢复，或 uid 与当前镜像不同。
 RUN set -eux; \
-    install -d -o prdwright -g prdwright -m 0750 /var/lib/prdwright /var/log/prdwright /secrets; \
+    install -d -o prdwright -g prdwright -m 0750 /var/log/prdwright /secrets; \
     sed -i 's/\r$//' /usr/local/bin/api-entrypoint; \
     chmod 0755 /usr/local/bin/api-entrypoint; \
     chown -R root:root /app; \
@@ -121,7 +124,8 @@ RUN set -eux; \
 # 变成 CRLF，而 `#!/bin/sh\r` 在容器里等于「解释器不存在」（报错只说 not found）。
 # 去掉行尾 CR 比要求每个人配好 git 属性更可靠，也不依赖构建机的配置。
 # 最后两行是「代码层只读」：/app 里没有一个可写位，运行期想写也写不进去，
-# 于是不存在「容器里改的东西随重建消失」这种模糊地带。可变状态只允许落在三个卷里。
+# 于是不存在「容器里改的东西随重建消失」这种模糊地带。可变状态只允许落在日志、
+# 密钥两个卷与数据库服务里。
 
 EXPOSE 8000
 

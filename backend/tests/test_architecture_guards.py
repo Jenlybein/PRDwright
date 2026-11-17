@@ -114,9 +114,9 @@ def test_c1_repositories_never_commit_or_rollback(path: pathlib.Path) -> None:
 def test_c2_repositories_have_no_sqlite3_import(path: pathlib.Path) -> None:
     """`import sqlite3` 意味着有一条连接绕过了 Engine 的池。
 
-    绕过池不是「性能问题」，而是**竞态**问题：连接在运行期新建时，多线程首次映射
-    WAL 的 `-shm` 会拿到 `SQLITE_READONLY`（不是 `SQLITE_BUSY`，所以 `busy_timeout`
-    救不了它）。Engine 的固定池 (`max_overflow=0`) 存在的理由就是让这件事没有发生的时机。
+    v9 已经没有 SQLite 后端，这个导入连「能跑」都谈不上；但它仍然值得守住——绕过池
+    的直连在单后端下同样是事故：连接数不再受 `pool_size` / `max_overflow=0` 管，
+    事务边界也绕开了 `session_scope()`（提交时机不可预期）。
     """
     tree = _parse(path)
     offenders: list[str] = []
@@ -273,18 +273,17 @@ def test_c4_session_scope_is_never_held_across_await() -> None:
 # C8 · 建表只能由 Alembic 产生
 # ---------------------------------------------------------------------------
 
-# 允许出现 `create_all` 的位置。除测试之外只有一处：`core/schema.py::_models_snapshot`
-# 用模型在**临时目录**里建一个库，作为 C6 对拍的「期望形状」。它不是生产建表路径。
-_CREATE_ALL_ALLOWED = {
-    "core/schema.py": "用模型在临时目录建「期望形状」，供 C6 语义对拍（不碰业务库）",
-}
+# 生产代码里**没有**任何允许出现 `create_all` 的位置（#78）：模型快照已改成
+# 「按目标方言编译 metadata」，不再需要「临时建一个库」。
 
 
-def test_c8_create_all_only_in_tests() -> None:
-    """`SQLModel.metadata.create_all` 不许出现在生产建表路径上。
+def test_c8_create_all_never_in_production() -> None:
+    """`SQLModel.metadata.create_all` 不许出现在生产代码里。
 
     生产建表只能由 Alembic 完成：`create_all` 既不会记版本、也无法表达「已有库怎么演进」，
     一旦它被用来建业务库，`alembic_version` 与现实结构就会永久分叉。
+    （v9 之前还允许 `core/schema.py` 在临时目录建一个库当「期望形状」；#78 改成按目标
+    方言编译 metadata 之后，这个例外也消失了。）
 
     ⚠️ 判据是**真的调用了** `.create_all(...)`（AST 里的调用节点），不是文本里出现过
     这个词：`core/models.py` 的模块说明里就写着「不要用 create_all 建业务库」，
@@ -293,8 +292,6 @@ def test_c8_create_all_only_in_tests() -> None:
     offenders: list[str] = []
     for path in _iter_sources():
         rel = path.relative_to(_SRC).as_posix()
-        if rel in _CREATE_ALL_ALLOWED:
-            continue
         tree = _parse(path)
         for node in ast.walk(tree):
             if (
@@ -336,7 +333,8 @@ def test_c9_legacy_migration_chain_stays_deleted() -> None:
     2. 生产代码里没有 `SCHEMA_SQL` / `init_schema` 的**引用**；
     3. 生产代码里没有 `PRAGMA user_version` 这类字符串（docstring 除外）。
 
-    旧版本库（v20 之前）现在会撞上 `SchemaMismatchError` 拒绝启动，而不是被自动升级。
+    旧版本库现在会撞上 `SchemaMismatchError` 拒绝启动，而不是被自动升级；旧的 SQLite
+    库连启动的机会都没有（在 `core/database.py` 的配置阶段就被拒绝）。
     """
     present = [
         f"{rel}（{why}）" for rel, why in _BANNED_LEGACY_FILES.items()
@@ -366,4 +364,92 @@ def test_c9_legacy_migration_chain_stays_deleted() -> None:
     assert offenders == [], (
         "生产代码里又出现了旧迁移链的痕迹（第二套版本真相）。"
         f"版本的唯一真源是 alembic_version：{offenders}"
+    )
+
+# ---------------------------------------------------------------------------
+# C10 · 单一后端：SQLite / MySQL 的方言分支不许回来
+# ---------------------------------------------------------------------------
+
+# 迁移链的文件清单（`versions/` 下只许有这一条 Postgres 基线）。
+_MIGRATIONS = _BACKEND_ROOT / "migrations"
+_VERSIONS = _MIGRATIONS / "versions"
+
+# 迁移里属于「已删除的 SQLite / MySQL 后端」的写法。出现即说明有人把方言分支请回来了。
+_BACKEND_SPECIFIC_MIGRATION_NEEDLES = {
+    "batch_alter_table",
+    "render_as_batch",
+    "sqlite_autoincrement",
+    "sqlite_where",
+    "sqlite_master",
+    "PRAGMA",
+    "mysql",
+    "mariadb",
+}
+
+# 生产代码里不许出现的后端专属导入。
+_BACKEND_SPECIFIC_IMPORTS = {"sqlite3", "pymysql", "mysql", "mariadb", "psycopg2"}
+
+
+def test_c10_migration_chain_is_single_postgres_baseline() -> None:
+    """迁移链只允许一条 Postgres 基线，且不再出现 SQLite / MySQL 专属写法（#78）。
+
+    判据分三层：
+
+    1. `migrations/versions/` 下只有一个 `.py`（`0001_baseline.py`）——0001~0007 已合并；
+    2. `env.py` 与这份基线里没有 `batch_alter_table` / `sqlite_autoincrement` /
+       `sqlite_where` / `PRAGMA` / `mysql` 之类的写法（docstring 除外）；
+    3. `migrations/env.py` 不再按方言给 Alembic 开关（那是双后端时代的残留）。
+
+    为什么值得一条守卫：这些写法在 Postgres 上要么是语法错误、要么被静默忽略，
+    没人会在「测试全绿」时注意到它们又长回来了。
+    """
+    versions = sorted(
+        path.name for path in _VERSIONS.glob("*.py") if not path.name.startswith("_")
+    )
+    assert versions == ["0001_baseline.py"], (
+        "迁移链应当只有一条 Postgres 基线（0001~0007 已合并）；"
+        f"现在 versions/ 下是 {versions}"
+    )
+
+    offenders: list[str] = []
+    for path in [_MIGRATIONS / "env.py", _VERSIONS / "0001_baseline.py"]:
+        tree = _parse(path)
+        docstrings = _docstring_values(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in docstrings:
+                continue
+            for needle in _BACKEND_SPECIFIC_MIGRATION_NEEDLES:
+                if needle.lower() in node.value.lower():
+                    offenders.append(f"{path.name}:{node.lineno} 出现 {needle}")
+    assert offenders == [], (
+        "迁移里又出现了只为 SQLite / MySQL 存在的写法（这些在 Postgres 上无效）：\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_c10_production_code_has_no_other_backend() -> None:
+    """生产代码里不许再导入任何非 Postgres 的数据库后端（#78）。
+
+    `SUPPORTED_BACKENDS` 是白名单，但白名单只拦「配置」，拦不住有人在某个分支里
+    直接 `import pymysql` 绕过去。这条扫的是导入本身。
+    """
+    offenders: list[str] = []
+    for path in _iter_sources():
+        rel = path.relative_to(_SRC).as_posix()
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in _BACKEND_SPECIFIC_IMPORTS:
+                        offenders.append(f"{rel}:{node.lineno} import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = (node.module or "").split(".")[0]
+                if module in _BACKEND_SPECIFIC_IMPORTS:
+                    offenders.append(f"{rel}:{node.lineno} from {node.module} import …")
+    assert offenders == [], (
+        "生产代码里又导入了非 Postgres 的数据库后端（本项目只支持 Postgres）：\n  "
+        + "\n  ".join(offenders)
     )

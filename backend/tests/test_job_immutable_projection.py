@@ -459,8 +459,9 @@ def test_migration_head_and_old_db_upgrade(isolated_db):  # noqa: ARG001
 
     不写死「第几步」：上一版从迁移链现取，断言的是「库的版本 == 代码里的 head」。
 
-    #77 换库：临时库从「SQLite 文件」换成「空的 Postgres 库」，结构快照换成
-    `inspector_snapshot`（反射，任何方言通用）。被验的性质没变。
+    #78 把迁移链合并成**一条 Postgres 基线**（0001~0007 → 0001），所以 `head` 没有
+    上一版：这条用例的「旧库升上来」退化成「空库直接到 head」；将来再加迁移时，
+    `previous` 会自动出现，这条用例又会覆盖「停在上一版再升上去」的路径。
     """
     from alembic import command
     from alembic.script import ScriptDirectory
@@ -483,16 +484,16 @@ def test_migration_head_and_old_db_upgrade(isolated_db):  # noqa: ARG001
     # 从链上现取「head 的上一版」，不写死编号。
     scripts = ScriptDirectory.from_config(_script_config(_BACKEND_ROOT))
     previous = scripts.get_revision(head).down_revision
-    assert previous is not None
 
     with dbsupport.empty_database() as url:
         engine = build_engine(url)
         try:
             cfg = _alembic_config(url)
-            command.upgrade(cfg, previous)
-            # 「停在上一版」以 `alembic_version` 为据，不拿某一列当探针：
-            # 每加一条迁移，「上一版刚加了哪些列」都会变，列名断言会随迁移链漂。
-            assert current_revision(engine) == previous
+            if previous is not None:
+                command.upgrade(cfg, previous)
+                # 「停在上一版」以 `alembic_version` 为据，不拿某一列当探针：
+                # 每加一条迁移，「上一版刚加了哪些列」都会变，列名断言会随迁移链漂。
+                assert current_revision(engine) == previous
 
             revision = prepare_schema(engine)
             assert revision == head

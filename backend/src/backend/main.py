@@ -73,9 +73,8 @@ async def lifespan(_: FastAPI):
     # 池是懒建的，不预热的话，连接会在「第一次真被借用」时才建；而本项目里有两个
     # 借用者会并发（事件循环线程 + `log-store` 日志线程），第一处并发就发生在**启动期**——
     # `install_log_persistence()` 起线程之后，主线程还要跑 ensure_bootstrap / reap_orphans /
-    # ensure_skills，两边可能同时首次建连接。而「多线程同时首次映射 WAL 的 `-shm`」
-    # 会返回 `SQLITE_READONLY`，`busy_timeout` 对它不生效（只对 `SQLITE_BUSY` 生效），
-    # 于是不重试、直接失败，报错还长得像「文件权限不对」。
+    # ensure_skills，两边可能同时首次建连接。并发建连接本身不会报错，但会让「池里到底
+    # 有几条、为什么少了」变得不可预期；预热把这件事收进启动期，池满/连不上都在这里暴露。
     #
     # 位置有三条硬理由：
     # 1. 在 `prepare_schema` 之后 —— 迁移借的那条先归还，预热才是「从头建满」；

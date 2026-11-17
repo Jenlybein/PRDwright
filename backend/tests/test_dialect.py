@@ -1,18 +1,17 @@
-"""方言适配层的分支正确性（v8）。
+"""方言适配层的分支正确性（v9，单一后端）。
 
-这里**不连数据库**，只把 helper 生成的语句按各地方言编译一遍，断言它落在哪条分支上。
-理由：行为正确性已经被仓储契约用例覆盖（全量跑通即证明），但"分支有没有写错"
-靠行为测不出来——SQLite 上的正确行为不会告诉你 MySQL 的分支是不是悄悄走了
-`INSERT IGNORE`。
+这里**不连数据库**，只把 helper 生成的语句按目标方言编译一遍，断言它落在哪条分支上。
+理由：行为正确性已经被仓储契约用例覆盖（全量跑通即证明），但「分支有没有写错」
+靠行为测不出来——PG 上的正确行为不会告诉你「别的方言悄悄走了另一条分支」。
 
-三条断言各自守一个具体的坑：
+三条断言各自守一个具体的坑（#78 收缩到 Postgres 后仍然成立）：
 
-1. SQLite / PostgreSQL 必须带**冲突目标**（`ON CONFLICT (cols)`）。不带目标的
+1. Postgres 的 upsert 必须带**冲突目标**（`ON CONFLICT (cols)`）。不带目标的
    `DO NOTHING` 语义更宽，会把别的唯一约束错误一起吞掉；
-2. MySQL 的「冲突就跳过」必须是 `ON DUPLICATE KEY UPDATE <pk> = <pk>`，**不能是
-   `INSERT IGNORE`**——后者会把列超长、违反 NOT NULL 一并降级成警告；
-3. MySQL 的 `INSERT ... SELECT` 形态也要能挂上冲突处理（`document_repo` 的归属校验
-   依赖这个形状）。
+2. `INSERT ... SELECT` 形状必须保留——`document_repo._ensure_document` 把归属校验
+   写进 SELECT 的 WHERE，靠它做到「不属于该用户就一行都插不进去」；
+3. 未适配的方言必须**当场报错**，不能回落到某个「看起来差不多」的实现——那样生成的
+   是一条在目标库上语法错误的 SQL，报错会指向数据库而不是这里。
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import literal, select
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import postgresql
 
 from backend.core.dialect import upsert_select, upsert_values
 from backend.core.models import Document, Solution, SystemConfig
@@ -68,69 +67,36 @@ def _compile_do_nothing(name: str, dialect: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# SQLite（当前主路径）
+# PostgreSQL：唯一分支
 # ---------------------------------------------------------------------------
 
 
-def test_sqlite_update_carries_conflict_target():
-    """冲突目标必须在 SQL 里，不能是裸的 DO UPDATE。
+def test_postgresql_update_carries_conflict_target():
+    """冲突目标必须在 SQL 里，不能是裸的 `ON CONFLICT`。
 
-    断言不比对引号形态：SQLite 编译器给标识符加双引号、MySQL 用反引号，
-    写成逐字匹配会让用例在 SQLAlchemy 升级换渲染风格时误红。
+    不带目标的 `DO NOTHING` 语义比调用方以为的宽，会把别的唯一约束错误一起吞掉。
     """
-    sql = _compile("sqlite", sqlite.dialect())
-    assert "ON CONFLICT" in sql
-    assert "DO UPDATE" in sql
-    assert '"key"' in sql, "冲突目标必须显式给出，不能是裸的 ON CONFLICT"
+    sql = _compile("postgresql", postgresql.dialect())
+    assert "ON CONFLICT (key) DO UPDATE" in sql
     assert "excluded" in sql
 
 
-def test_sqlite_do_nothing_carries_conflict_target():
+def test_postgresql_do_nothing_carries_conflict_target():
     """DO NOTHING 同样要带目标——否则会吞掉非目标约束的冲突。"""
-    sql = _compile_do_nothing("sqlite", sqlite.dialect())
-    assert "ON CONFLICT" in sql
-    assert "DO NOTHING" in sql
-    assert '"key"' in sql
+    sql = _compile_do_nothing("postgresql", postgresql.dialect())
+    assert "ON CONFLICT (key) DO NOTHING" in sql
 
 
-# ---------------------------------------------------------------------------
-# PostgreSQL
-# ---------------------------------------------------------------------------
+def test_unknown_dialect_is_rejected():
+    """未适配的方言不许静默回落。
 
-
-def test_postgresql_uses_on_conflict():
-    """PG 与 SQLite 同一套语法，收敛的意义就在这里：调用方无需区分。"""
-    sql = _compile("postgresql", postgresql.dialect())
-    assert "ON CONFLICT (key) DO UPDATE" in sql
-
-
-# ---------------------------------------------------------------------------
-# MySQL
-# ---------------------------------------------------------------------------
-
-
-def test_mysql_update_uses_on_duplicate_key():
-    sql = _compile("mysql", mysql.dialect())
-    assert "ON DUPLICATE KEY UPDATE" in sql
-    assert "IGNORE" not in sql, "不许用 INSERT IGNORE（会吞掉截断与非空错误）"
-
-
-def test_mysql_do_nothing_is_primary_key_noop():
-    """「冲突就跳过」在 MySQL 上只能是把主键更新成自己。
-
-    断言里刻意检查**没有** `IGNORE`：那是最短的写法，也是最容易悄悄丢数据的那种。
+    这是「单一后端」的另一半：不是「PG 能用」就够了，而是「别的库发不出语句」。
+    回落的症状是生成一条在目标库上语法错误的 SQL，报错指向数据库而不是这里，
+    下一个人会以为「库坏了」。
     """
-    sql = _compile_do_nothing("mysql", mysql.dialect())
-    assert "ON DUPLICATE KEY UPDATE" in sql
-    assert "IGNORE" not in sql
-    # 「更新成自己」：MySQL 编译器用反引号包标识符，两种形态都接受
-    assert "VALUES(`key`)" in sql or "VALUES(key)" in sql
-
-
-def test_mariadb_shares_mysql_branch():
-    """MariaDB 的语法与 MySQL 一致，不应各自一套。"""
-    sql = _compile("mariadb", mysql.dialect())
-    assert "ON DUPLICATE KEY UPDATE" in sql
+    with pytest.raises(NotImplementedError) as caught:
+        _compile("sqlite", SimpleNamespace())
+    assert "sqlite" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------
@@ -138,53 +104,35 @@ def test_mariadb_shares_mysql_branch():
 # ---------------------------------------------------------------------------
 
 
-def test_upsert_select_keeps_insert_select_shape_on_sqlite():
+def test_upsert_select_keeps_insert_select_shape():
     """归属校验写在 SELECT 的 WHERE 里，这个形状不能被打散。"""
-    session = _FakeSession("sqlite")
+    session = _FakeSession("postgresql")
     upsert_select(
         session,  # type: ignore[arg-type]
         Document,
         ["solution_id", "kind", "created_at", "updated_at"],
-        select(
-            Solution.id, literal("prd"), literal("t"), literal("t")
-        ).where(Solution.id == 1),
+        select(Solution.id, literal("prd"), literal("t"), literal("t")).where(
+            Solution.id == 1
+        ),
         conflict_cols=["solution_id", "kind"],
     )
-    sql = str(session.statements[0].compile(dialect=sqlite.dialect()))
+    sql = str(session.statements[0].compile(dialect=postgresql.dialect()))
     assert "INSERT INTO documents" in sql
     assert "SELECT" in sql
     assert "WHERE solutions.id =" in sql
     assert "ON CONFLICT (solution_id, kind) DO NOTHING" in sql
 
 
-def test_upsert_select_works_on_mysql():
-    """MySQL 的 INSERT ... SELECT ... ON DUPLICATE KEY 也要能编出来。"""
-    session = _FakeSession("mysql")
-    upsert_select(
-        session,  # type: ignore[arg-type]
-        Document,
-        ["solution_id", "kind", "created_at", "updated_at"],
-        select(
-            Solution.id, literal("prd"), literal("t"), literal("t")
-        ).where(Solution.id == 1),
-        conflict_cols=["solution_id", "kind"],
-    )
-    sql = str(session.statements[0].compile(dialect=mysql.dialect()))
-    assert "INSERT INTO documents" in sql
-    assert "ON DUPLICATE KEY UPDATE" in sql
-
-
 # ---------------------------------------------------------------------------
-# 连接级写探针（/readyz 用）：按方言选「真写一次」的语法
+# 连接级写探针（/readyz 用）：真写一次的语法
 #
-# 就绪探针要把「库可写」这条判成真的，就必须真写一次再回滚。SQLite 走
-# `BEGIN IMMEDIATE` + 页写；Postgres 上那两句都是非法语法（`BEGIN IMMEDIATE`、
-# `PRAGMA` 只属于 SQLite），必须换成 PG 认得的「真写」。
+# 就绪探针要把「库可写」这条判成真的，就必须真写一次再回滚。Postgres 的 DDL 可回滚，
+# 所以建一张临时表就是「真写一次」：只读实例 / 只读事务会当场报错。
 # ---------------------------------------------------------------------------
 
 
 class _FakeProbeResult:
-    """只够读一次标量（SQLite 分支要读 `PRAGMA application_id` 的当前值）。"""
+    """只够读一次标量（探针不会真读，留一个可调用的形状）。"""
 
     def __init__(self, value: Any = 0) -> None:
         self._value = value
@@ -205,45 +153,30 @@ class _FakeProbeConnection:
         return _FakeProbeResult(0)
 
 
-@pytest.mark.parametrize(
-    ("backend", "required", "forbidden"),
-    [
-        ("sqlite", ("BEGIN IMMEDIATE", "PRAGMA application_id"), ("CREATE TEMP TABLE",)),
-        # Postgres：一次事务内的真写（只读实例 / 只读事务会在这一句上抛错）。
-        ("postgresql", ("CREATE TEMP TABLE",), ("BEGIN IMMEDIATE", "PRAGMA", "sql_mode")),
-        # MySQL 家族：DDL 会隐式提交，所以用「内容不变的 UPDATE」当探针。
-        ("mysql", ("UPDATE alembic_version",), ("BEGIN IMMEDIATE", "PRAGMA")),
-        ("mariadb", ("UPDATE alembic_version",), ("BEGIN IMMEDIATE", "PRAGMA")),
-    ],
-)
-def test_write_probe_uses_the_dialect_write_syntax(backend, required, forbidden):
-    """写探针的语句必须落在**该方言真能执行**的那一条上。
+def test_write_probe_on_postgres_does_a_real_write():
+    """写探针必须是**该方言真能执行**的那一条。
 
     判据是独立事实，不是「跟实现一样」：Postgres 没有 `PRAGMA` / `BEGIN IMMEDIATE`，
     所以它们出现在 PG 探针里就是错的，不管实现怎么组织。
     """
     from backend.core.dialect import write_probe
 
-    connection = _FakeProbeConnection(backend)
+    connection = _FakeProbeConnection("postgresql")
     write_probe(connection)
     joined = "\n".join(connection.statements)
-    for needle in required:
-        assert needle.lower() in joined.lower(), f"{backend} 探针缺 {needle}：{connection.statements}"
-    for needle in forbidden:
-        assert (
-            needle.lower() not in joined.lower()
-        ), f"{backend} 探针混进了 {needle}：{connection.statements}"
+    assert "create temp table" in joined.lower()
+    for needle in ("BEGIN IMMEDIATE", "PRAGMA", "sql_mode"):
+        assert needle.lower() not in joined.lower(), f"探针混进了 {needle}：{connection.statements}"
 
 
-@pytest.mark.parametrize(
-    ("backend", "expected"),
-    [("sqlite", True), ("postgresql", False), ("mysql", False), ("mariadb", False)],
-)
-def test_batch_migration_mode_is_only_for_sqlite(backend, expected):
-    """`render_as_batch` 是**SQLite 的补丁**：别的方言上开着它，每次改列都会多写一次
-    「建新表 + 拷数据」，而且拷贝逻辑在 PG 上完全没必要。
+@pytest.mark.parametrize("backend", ["sqlite", "mysql", "mariadb"])
+def test_write_probe_rejects_unadapted_dialects(backend):
+    """未适配方言的探针必须报错，而不是发一句在目标库上语法不通的 SQL。
+
+    后者会把「没适配」伪装成「库坏了」：/readyz 一直 503，看起来像数据库故障。
     """
-    from backend.core.dialect import needs_batch_mode
+    from backend.core.dialect import write_probe
 
-    assert needs_batch_mode(backend) is expected
-
+    with pytest.raises(NotImplementedError) as caught:
+        write_probe(_FakeProbeConnection(backend))
+    assert backend in str(caught.value)
