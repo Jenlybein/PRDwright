@@ -245,6 +245,14 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    */
   const docOutlineText = previewField('outlineText')
 
+  /**
+   * 正文正在写第几批（票 #93）：`0` / `1` = 没发生续写，`2` 起 = 撞上输出上限已自动接着写。
+   *
+   * 它与 `docPhase` 是两件事：续写**不是新阶段**——阶段仍是撰写，进度条不动、
+   * 正文缓冲不清空。它只让「正文为什么还在长」有个可解释的落点。
+   */
+  const docContinuation = previewField('continuation')
+
   // -------------------------------------------------------------------------
   // 确认闸门 1：摘要回填 Diff（生成 PRD 之前）
   // -------------------------------------------------------------------------
@@ -382,6 +390,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       // 换阶段就清空上一阶段的输出：审核意见不该留在改写阶段的面板里
       if (docPhase.value !== stage) docStageText.value = ''
       docPhase.value = stage
+    }
+    // 续写批次（票 #93）：后端撞上输出上限自动接着写，每批补发一条 `stage(writing)`。
+    // 它**不是新阶段**：上面的 `stage` 仍是 `writing`，进度不会回到起点（也不会清正文）；
+    // 这里只记下批次序号，给生成页一句「已续写到第 N 段」的解释。
+    // 只增不减：重连拿不到历史 `stage`，若允许回填小值，序号会倒退。
+    if (event.continuation > docContinuation.value) {
+      docContinuation.value = event.continuation
     }
   }
 
@@ -1699,6 +1714,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   docPhase,
   docStageText,
   docOutlineText,
+  // 分批续写（#93）：生成页据此显示「正文已自动续写到第 N 段」，进度条不受影响
+  docContinuation,
   reviewConclusion,
   reviewFailedAt,
   reviewVersionNo,

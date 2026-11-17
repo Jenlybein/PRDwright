@@ -54,6 +54,14 @@ const props = withDefaults(
      */
     docOutlineText?: string
     /**
+     * 正文正在写第几批（票 #93）：`0` / `1` 表示没发生续写，`2` 起表示「撞上模型输出
+     * 上限，后端已自动接着写」。
+     *
+     * 它是**解释**，不是进度：续写期间阶段仍是撰写，进度条不重置、正文缓冲不清空——
+     * 用户看到的应该是「正文继续长」，而不是「多出一块 / 重头开始」。
+     */
+    continuation?: number
+    /**
      * 本次生成已用时（毫秒），由任务运行态统一维护（见 `composables/useJob.ts`）。
      *
      * 组件自己**不计时**：重连时要用服务端的已用时打底，收尾后要停在权威总耗时上，
@@ -129,6 +137,20 @@ const retryAtValue = computed(() => props.retryAt ?? null)
 /** 是否处于「等待重试」：有等待信息就是（已到点也算——那一刻还没被领走，不能报终态） */
 const waiting = computed(() => isWaitingRetry(retryAtValue.value, nowMs.value))
 
+/**
+ * 续写提示（票 #93）：只在**撰写阶段且真的续写过**时出现。
+ *
+ * 为什么要有这句：续写期间除了正文还在长，界面上没有任何变化——而正文长一截的时间
+ * 恰好是最长的。不解释一句，用户会以为卡住了或者以为进了一个新章节。
+ * 为什么不是新阶段：后端补发的仍是一条 `stage(writing)`，进度条不动、正文不清，
+ * 这里也只加一句话，绝不插新的一格。
+ */
+const continuationText = computed(() => {
+  const batch = props.continuation ?? 0
+  if (batch < 2 || props.docPhase !== 'writing') return ''
+  return `正文较长，已自动续写到第 ${batch} 段（进度与正文不重置）`
+})
+
 /** 倒计时文案：`ceil` + clamp，永不出现负数，也不会在最后一秒反复横跳 */
 const retryText = computed(() =>
   retryNoticeText(retryRemainingMs(retryAtValue.value, nowMs.value) ?? 0),
@@ -177,6 +199,17 @@ onBeforeUnmount(stopTicker)
         :phase="docPhase"
         :with-review="withReview"
       />
+
+      <!-- 续写提示（票 #93）：正文继续长时的解释。刻意不占用阶段条一格、
+           也不清空任何缓冲——它只说「还在写，不是卡住」。 -->
+      <p
+        v-if="!waiting && continuationText"
+        class="flex items-center gap-1.5 px-1 text-xs tabular-nums text-subtle"
+        role="status"
+      >
+        <span class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary-500"></span>
+        <span>{{ continuationText }}</span>
+      </p>
 
       <!-- 阶段输出：紧贴进度条下方。大纲 / 审核 / 改写都是「先定结构」或整篇量级的
            静默步骤，把过程文本实时滚出来，用户才知道「它还在动、它凭什么这么定」 -->

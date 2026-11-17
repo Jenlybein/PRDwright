@@ -395,6 +395,9 @@ function parseStageEvent(data: Record<string, unknown>): StreamStageEvent {
     stage: readString(data, "stage"),
     note: readString(data, "note"),
     issues,
+    // 续写批次序号（票 #93）：缺失 / 类型不对都退化成 0（= 不是续写事件），
+    // 老后端不认这个字段时界面行为与从前完全一致。
+    continuation: readNumber(data, "continuation"),
   }
 }
 

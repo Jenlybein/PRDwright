@@ -586,3 +586,41 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 - **#93**：三份产物的产物级统一（含上游注入字段、审核提示词细节、待确认清单的章节字段）。
 - **#94**：清理兼容字段 / 死列（`completed_sections`、`live_by_section`、`failed_sections`、`partial` 的最终去留）与契约收口；`job_state.FinishPayload.completed_sections` 目前仍作为通用存储在（用例也还在用它），那是 #94 的范围。
+
+---
+
+## 11. 本轮：三份分批续写（#93）
+
+### 11.1 范围
+
+- **撞上限就接着写**：模型单次输出撞上输出上限（结束原因 `length` / `max_tokens`）时**自动续写下一批**，直到模型自己收尾（`stop` / 无 `finish_reason`）。判据只有一处、只看**模型返回的结束原因**（`backend/src/backend/services/stream_guard.py::extract_finish_reason` 读 `response_metadata` 的 `finish_reason` / `stop_reason`），**不设字数阈值**——阈值会在偏短的文档上把一次正常生成拦腰截成两批，也会在该续写时放过。适配层无需改动：方舟封装早已把 `finish_reason` 记进 `response_metadata`（含「用量帧没有 choices」那条路径）。
+- **续写循环只有一份实现**：`backend/src/backend/services/stream_reply.py::iter_continuation_events`。三份产物（PRD / 接口文档 / 提示词套件的整篇撰写）全部改调它，`continuation_messages` 由 `document_service._continuation_messages` 统一构造（原提示词 + 已写正文尾部 + 一句「接着写、不要重复」）；总额上限 `MAX_CONTINUATION_BATCHES = 6` 批。
+- **接缝不重复、不漏字**：`_SeamGuard` 先扣住每批开头，与已写正文做逐字最长后缀匹配，**只丢掉「紧挨在正文末尾、逐字存在」的那一段**，其余原样吐出（扣住的字符在批次结束时一定交出去，含失败路径）。因此「不漏字」是构造性的——除了可证明的重复，正文一个字节都不动。提示词里的「不要重复」负责「换个说法复述」，代码负责「逐字重复不会出现在正文里」，两件事都要。
+- **批次级重试**：某一批写到一半断流（可重试的传输层失败）时**在同一批里从断点再要一次**（`MAX_BATCH_ATTEMPTS = 3`，不落库、不等待、不碰任务状态）；重试用尽则整篇失败（`error`，不发 `done`），已生成的部分留在事件流里，照旧由 #85 落成一版 `partial=true` 的正文（服务层与任务通道两条接缝各有用例）。
+- **续写过程对外可见**：每起一批补发一条 `stage(writing)` + `data.continuation`（第几批）。它**不是新阶段**：进度条不动、正文缓冲不清空、`outlining` 不会再发；前端读这个字段在生成页说一句「正文较长，已自动续写到第 N 段」，**不渲染成新章节**。
+
+### 11.2 本期不做
+
+- 审核 / 改写 / 修复 / 澄清改写**不续写**：这些链路要的是「整段结果」（整体 JSON 或整篇正文），截断续写只会产出两段互相矛盾的判定，仍按原口径抛 `OutputTruncatedError` → `error`。
+- 不引入调度循环，也不改 #88 的任务级退避：批次级重试不改变任务状态，两者不在同一层（见 §9.8）。
+- 不改表结构（无迁移），不给 `continuation` 落库：它是**过程信息**，重连拿不到就当没发生过（正文与阶段仍然正确）。
+
+### 11.3 验收与证据
+
+1. **撞上限后自动续写，最终得到完整正文**：`test_truncated_batch_is_continued_until_the_document_is_finished`（`length` / `max_tokens` 两种标记各一条）、`test_a_batch_that_ended_normally_is_not_continued`（正常收尾不续写）、单元接缝 `test_the_loop_reports_the_final_reply_in_done`。
+2. **批次之间不重复、不漏字**：`test_continuation_does_not_repeat_the_previous_ending`（模型重起头重复上一批结尾 → 用户可见正文里只出现一次）、`test_continuation_repeats_nothing_when_the_model_keeps_writing_forward`（不重合时一个字节都不动）、`test_a_shared_word_across_the_seam_is_not_eaten_twice`（接缝上共用词只留一份）、`test_the_continuation_request_does_not_carry_the_whole_document`（只带尾部、不带全文）。
+3. **某批失败在批次内重试，用尽则整篇失败并保留已生成部分**：`test_a_failed_batch_is_retried_within_the_batch`（同一批重试、从断点继续）、`test_a_batch_that_keeps_failing_fails_the_document_and_keeps_the_written_part`（`error` 且不撤已写正文）、`test_continuation_is_bounded_so_a_runaway_model_cannot_loop_forever`（批数护栏）、端到端 `test_exhausted_batches_land_the_written_part_as_a_partial_version`（任务失败 + `document_versions.partial=true` 且正文含已写部分）。
+4. **续写过程对外可见，进度持续推进**：`test_continuation_is_visible_and_never_rewinds_the_stage`（一批一条 `writing`、`continuation` 递进、`outlining` 不再回头）；前端 `continuation.spec.ts`（阶段条仍是五格且高亮「生成」、正文只出现一次、`continuation < 2` 不出提示、`resetPreview` 归零），`api.spec.ts` 的「stage 事件带续写批次序号」守住解析。
+5. **三份产物行为一致**：`test_all_three_products_continue_the_same_way`（三份产物参数化：同样两批、同样接缝、同样事件形状）。
+
+### 11.4 复测与收口
+
+- 后端：`cd backend && PRDWRIGHT_TEST_POSTGRES_URL=…:5435 uv run pytest -n auto -q` → **1460 passed，0 skipped，0 failed**（#92 收口基线 **1443 passed**；本票净增 17，全部在新增的 `backend/tests/test_continuation.py`）。`--collect-only -q` 现取 **1460** 收集 / **1260** 文本计数 / **200** 参数化展开差额。
+- 前端：`cd frontend && npm run test:unit -- --run` → **758 passed / 43 文件**（#92 基线 **751 passed / 42 文件**）；`npm run build`（含 `type-check`）通过。
+- 文档：本文件 §11、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §3.3（新增「分批续写」条）、`GLOSSARY.md`（新增「分批续写」词条并写明与批次内重试 / 任务级退避的层级差别）、[`../agents/conventions.md`](../agents/conventions.md) §5（新增口径条目）。
+- **未执行**：push 与合并（由用户确认）。
+
+### 11.5 给后续票的遗留
+
+- **#94**：`failed_sections` / `partial` / `completed_sections` 等兼容字段的最终去留；`continuation` 目前只在事件里（不落库、不进快照），若将来要在重连后也显示「写到了第几批」，需要给快照加一格——那是契约变更，留给收口票一并定。
+- **审核 / 改写的续写**：若将来确实需要（例如极长的接口文档），要先决定「续写出来的 JSON 怎么合并」，不能照搬正文续写。

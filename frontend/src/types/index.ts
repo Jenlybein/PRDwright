@@ -725,6 +725,14 @@ export interface StreamStageEvent {
   note: string
   /** 改写原因（审核给出的问题清单） */
   issues: { severity: string; detail: string }[]
+  /**
+   * 续写批次序号（票 #93）：`0` 表示这不是一条续写事件，`2` 表示「正在写第 2 批」。
+   *
+   * 后端撞上模型输出上限时会自动接着写，每起一批补发一条 `stage(writing)`。
+   * 它**不是**新阶段：阶段仍然是撰写，进度条不动、正文缓冲不清空——它只是让
+   * 「正文为什么长得慢」有个可解释的落点（见 `GeneratingStage` 的续写提示）。
+   */
+  continuation: number
 }
 
 /**

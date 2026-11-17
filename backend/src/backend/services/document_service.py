@@ -38,9 +38,9 @@ import copy
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
@@ -76,6 +76,7 @@ from backend.services.prompts import (
     API_DOCS_GENERATION_PROMPT,
     AUTO_CLARIFY_PROMPT,
     CLARIFICATION_REWRITE_PROMPT,
+    CONTINUATION_INSTRUCTION,
     NO_API_DOCS_NOTE,
     OPTIMIZE_DOCUMENT_PROMPT_TEMPLATE,
     PRD_GENERATION_PROMPT,
@@ -86,9 +87,18 @@ from backend.services.prompts import (
     SYSTEM_PROMPT,
 )
 from backend.services.skill_registry import load_skill_artifacts
-from backend.services.stream_reply import astream_text, collect_reply, iter_reply_events
+from backend.services.stream_reply import (
+    astream_text,
+    collect_reply,
+    iter_continuation_events,
+    iter_reply_events,
+)
 
 logger = logging.getLogger(__name__)
+
+# 续写请求里带多少字符的「上一批结尾」。带**尾部**而不是全文：全文会把续写请求自己
+# 顶到上下文窗口上（长文档的正文比它的上游材料还长），而衔接只需要「上一句写到哪」。
+CONTINUATION_TAIL_CHARS = 1200
 
 # 产物种类 → （SSE 事件里的 `doc_type`, 阶段文案里的展示名）。
 #
@@ -350,6 +360,39 @@ def format_rewrite_reference(kind: str) -> str:
         )
         return "（本次未加载产出规范，请严格保持原文的术语、结构与风格。）"
     return "\n\n".join(blocks)
+
+
+def _continuation_messages(base: list[BaseMessage]) -> Callable[[str], list[BaseMessage]]:
+    """三份产物**共用**的续写请求构造器（票 #93）：原提示词 + 上一批结尾 + 「接着写」。
+
+    形状是 `[原系统提示词, 原用户消息, AI(已写正文的尾部), 用户(续写指令)]`：
+
+    - **原提示词原样保留**：写作规范、上游材料都还在里面。续写要的只是「从哪儿接着写」，
+      不是把这一批变成一个独立任务——丢了上游材料，模型会开始编；
+    - **尾部落进 assistant 回合**而不是再塞一条 user 消息：这既是各家协议都接受的形状
+      （连续两条 user 会被 Anthropic 拒绝），也正是「模型自己写的这段」的真实历史。
+      模型看到它，才谈得上「接着写」而不是「另写一份」；
+    - 只带尾部（`CONTINUATION_TAIL_CHARS`）：全文会把续写请求自己顶到上下文窗口上。
+
+    Args:
+        base: 首批的完整消息。
+
+    Returns:
+        接收「已写正文」、返回续写请求消息列表的函数。
+    """
+    head = list(base)
+
+    def build(written: str) -> list[BaseMessage]:
+        excerpt = written[-CONTINUATION_TAIL_CHARS:]
+        # 上文被截掉时明说一句：不然模型会以为「这份文档开头就是半句」
+        prelude = "……（上文从略，以下是已写出正文的结尾）……\n" if len(written) > len(excerpt) else ""
+        return [
+            *head,
+            AIMessage(content=f"{prelude}{excerpt}"),
+            HumanMessage(content=CONTINUATION_INSTRUCTION),
+        ]
+
+    return build
 
 
 class DocumentService:
@@ -627,10 +670,13 @@ class DocumentService:
 
         # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
         # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
+        # 撞上输出上限时**接着写**（不把整篇判成失败）：续写请求由 `_continuation_messages`
+        # 从「已写正文的尾部」构造，三份产物同一份口径。
         suppressor = PendingBlockSuppressor()
-        async for event in iter_reply_events(
+        async for event in iter_continuation_events(
             self.llm,
             prompt.messages,
+            continuation_messages=_continuation_messages(prompt.messages),
             status_text="正在生成 PRD…",
             extra_data={"doc_type": doc_type},
         ):
@@ -738,9 +784,10 @@ class DocumentService:
         # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
         # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
         suppressor = PendingBlockSuppressor()
-        async for event in iter_reply_events(
+        async for event in iter_continuation_events(
             self.llm,
             messages,
+            continuation_messages=_continuation_messages(messages),
             status_text="正在生成接口文档…",
             extra_data={"doc_type": doc_type},
         ):
@@ -856,9 +903,10 @@ class DocumentService:
         # 实时 chunk 先过抑制器（块被切在 chunk 边界时只漏安全前缀），`done` 时
         # 对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
         suppressor = PendingBlockSuppressor()
-        async for event in iter_reply_events(
+        async for event in iter_continuation_events(
             self.llm,
             messages,
+            continuation_messages=_continuation_messages(messages),
             status_text="正在生成提示词套件…",
             extra_data={"doc_type": doc_type},
         ):

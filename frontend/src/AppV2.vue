@@ -611,6 +611,8 @@ const {
   docPhase,
   docStageText,
   docOutlineText,
+  // 分批续写（票 #93）：续写批次不渲染成新章节，只给生成页一句解释
+  docContinuation,
   reviewConclusion,
   reviewFailedAt,
   reviewVersionNo,
@@ -1378,6 +1380,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :doc-phase="docPhase"
         :doc-stage-text="docStageText"
         :doc-outline-text="docOutlineText"
+        :continuation="docContinuation"
         :with-review="hasDocumentReview(store.entryMode)"
         :elapsed-ms="elapsedMs"
         :retry-at="retryAt"
