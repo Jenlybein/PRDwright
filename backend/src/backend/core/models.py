@@ -444,6 +444,26 @@ class GenerationJob(SQLModel, table=True):
     skill_manifest: str = Field(
         default="", sa_column=Column(short_text(64), nullable=False)
     )
+    # --- 执行权（租约，票 #82）---
+    #
+    # 「谁在执行」从进程内存搬进这一行，并**会到期**：三件事合起来才是执行权。
+    # 空串表示「没有人持有有效租约」——三态下这就是「排队中」（七态是 #84 的事）。
+    #
+    # 为什么归属与凭证分开：归属（`lease_owner`）只用来回答「出问题时找哪个进程」，
+    # 判权必须看凭证（`lease_token`）。用归属判权时，同一个进程的上一轮会被认成这一轮，
+    # 「旧执行者的晚到结果」就写得进去——那正是本票要挡的东西。
+    lease_owner: str = Field(
+        default="", sa_column=Column(short_text(64), nullable=False, server_default=text("''"))
+    )
+    lease_token: str = Field(
+        default="", sa_column=Column(short_text(64), nullable=False, server_default=text("''"))
+    )
+    # 到期时间用文本而不是真时间类型：全库口径一致（`core/types.py::timestamp_text`），
+    # ISO 8601 的字典序 = 时间序，可以直接进 `WHERE ... < ?` / `>= ?` 的条件写。
+    lease_expire_at: str = Field(
+        default="",
+        sa_column=Column(timestamp_text(), nullable=False, server_default=text("''")),
+    )
 
 
 class JobAttempt(SQLModel, table=True):

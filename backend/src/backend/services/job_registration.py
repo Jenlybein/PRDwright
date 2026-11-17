@@ -25,7 +25,7 @@ from backend.core.request_context import current_request_id
 from backend.repositories.chat_turn_repo import ChatTurnRepository
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import job_dedupe, job_state
+from backend.services import job_claimer, job_dedupe, job_state
 from backend.services.job_service_impl import run_job
 from backend.services.job_runtime import _RUNTIMES, _TASKS, JobRuntime
 from backend.services.job_ticket import (
@@ -193,12 +193,44 @@ def _check_chat_single_writer(session: Any, ticket: JobTicket) -> None:
         raise AppError(ErrorCode.INVALID_REQUEST, "这条对话还在生成中，等它说完或先点停止")
 
 
-def dispatch_registered(ticket: RegisteredJobTicket) -> None:
+def claim_and_dispatch(ticket: RegisteredJobTicket) -> bool:
+    """**抢占才执行**：先领这一行的执行权，领到了才派发；返回是否真的派发了（#82）。
+
+    为什么把「登记」与「派发」拆开：登记只负责把单①落成单②（一个事务，落库投影 +
+    顶替标记 + chat 输入轮次），它**不再**顺手把协程起起来。派发的前置条件变成
+    「我领到了这一行的执行权」——于是「两个进程同时拿到同一张单」时，只有一个能派发，
+    另一个改到 0 行之后安静退场（日志里能看到 `job.dispatch_skipped`）。
+
+    为什么单进程里仍然**当场**抢占 + 派发（而不是注册后等轮询）：现有的用户体验是
+    「提交完立刻开始生成」。纯队列的调度循环（谁、多久扫一次、崩溃后怎么接手）是 #83
+    的恢复器，本票不把它引入默认路径——否则本票会顺带把交互延迟从毫秒级拖成轮询周期。
+    """
+    lease = job_claimer.claim(ticket.owner_id, ticket.job_id)
+    if lease is None:
+        logger.info(
+            "任务已被别的执行者领走（或已不在执行中），本进程不派发",
+            extra={
+                "event": "job.dispatch_skipped",
+                "job_id": ticket.job_id,
+                "user_id": ticket.owner_id,
+                "kind": ticket.kind,
+                "request_id": current_request_id(),
+            },
+        )
+        return False
+    dispatch_registered(ticket, lease)
+    return True
+
+
+def dispatch_registered(ticket: RegisteredJobTicket, lease: job_claimer.Lease) -> None:
     """只认单②：构造运行时、按定格值造计量器、在**无 await 临界区**起后台任务。
 
     配置冻结（HANDOFF-36 第 2 条）：`runtime.config` 与 `RunMeter` 的
     kind / protocol / model / config_id / name 全部取自单②里那份定格值，
     派发侧**不再**自行 `get_runtime_config()` 各取一次；生成中途改后台配置不漂移。
+
+    `lease`（#82）是**抢占的结果**：这一轮的执行权随运行时走，收尾时把凭证递给状态机，
+    模型调用前靠它续租。派发不是「无脑起一支协程」，而是「领到了才起」。
     """
     config = ticket.runtime_config
     # 计量器四格取深还原后的普通容器：与单②同源，且下游不必认识只读映射。
@@ -223,6 +255,9 @@ def dispatch_registered(ticket: RegisteredJobTicket) -> None:
         last_flush_at=time.monotonic(),
         meter=meter,
         config=config,
+        lease_owner=lease.lease_owner,
+        lease_token=lease.token,
+        lease_expire_at=lease.expire_at,
     )
     runtime.skill_refs = thaw_object(ticket.skill_refs)
 

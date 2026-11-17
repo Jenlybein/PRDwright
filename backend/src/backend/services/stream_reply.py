@@ -33,6 +33,7 @@ from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
 from backend.core.runtime_config import get_runtime_config
 from backend.core.request_context import current_request_id
+from backend.services import job_claimer
 from backend.services.llm_factory import StreamingChatModel
 from backend.services.llm_meter import current_meter
 from backend.services.llm_utils import extract_text
@@ -189,6 +190,11 @@ async def _astream_chunks(
     重开 `astream` 即可。一旦交付过增量就绝不再来：那些字符/工具分片已经流到了下游撤不回来，
     重来会让消费方收到「半截 + 一份完整」的重复内容（T0 时代并发订阅踩过同款的坑）。
 
+    **动作点续租（#82）**：每次模型调用前在这里续一次租约（`_check_budget` 之前）。
+    这里是**唯一入口**——文本产出与工具调用捕获都经由它，所以「每次模型调用续一次」
+    不会漏掉任何一个调用点。续租失败会抛 `LeaseLostError`，且**调用根本不发出去**：
+    已经失去执行权的进程多调一次模型只是白烧钱。
+
     Args:
         llm: 已构造好的流式模型。
         messages: 已组装好的 LangChain 消息。
@@ -197,11 +203,13 @@ async def _astream_chunks(
         原始 `AIMessageChunk`（含文本增量与 `tool_call_chunks`）。
 
     Raises:
+        LeaseLostError: 这一轮的执行权已失效（被取消 / 被接手），本次调用未发出。
         BudgetExceededError: 估算的输入超过预算，本次调用未发出。
         CallTimeoutError: 单次调用超过墙钟硬顶被取消。
         OutputTruncatedError: 模型输出因达到 token 上限被截断。由调用方决定
             转成 `error` 事件还是直接上抛。
     """
+    job_claimer.renew_before_action()
     _check_budget(messages)
     meter = current_meter()
     settings = get_runtime_config().settings

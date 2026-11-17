@@ -48,7 +48,7 @@ from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import conversation_service, document_service, job_state
+from backend.services import conversation_service, document_service, job_claimer, job_state
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import use_meter
 from backend.services.skill_registry import describe_kind
@@ -359,14 +359,23 @@ async def run_job(
 
     `use_meter` 包住整条事件流的消费过程：计量器是环境值，流水线深处的
     `stream_reply.astream_text` 靠它把自己记到这次任务上（见 `llm_meter`）。
+    `use_lease` 同理（#82）：把这一轮的执行权挂到上下文，每次模型调用前由
+    `job_claimer.renew_before_action` 续租。
 
     `event_stream_source` 是单②在造单时定格的事件流来源（生产真值 / 测试假值），
     派发时随单递入；本模块只有这一条事件流循环，包裹顺序、广播与收尾都只写一遍。
+
+    ## 失去执行权（#82）就地停止
+
+    续租改到 0 行 = 这一轮已经被取消或被别的执行者接手。此时**什么都不写**：
+    不判失败、不写终态、不广播回执、不记账本——那一行可能正由新的执行者跑着，
+    「我失去资格」不是「任务失败」。只留一条日志，然后走 `finally` 关总线、摘运行时。
     """
+    guard = job_claimer.guard_for(runtime)
     try:
         # `use_config` 把派发那一刻的配置冻进上下文：整条生成链路（含并行子任务）
         # 读到的是同一份。任务跑到一半有人改配置，也不会让同一次生成前后参数不一致。
-        with use_meter(runtime.meter), use_config(runtime.config):
+        with use_meter(runtime.meter), use_config(runtime.config), job_claimer.use_lease(guard):
             # 上游正文归服务端取（spec #51 / 票 #53 / #54）：解析发生在**建任务那一刻**
             # （路由层），结果随任务单定格、派发时已合进 `runtime.request`。
             # 这里不再解析：开流时才查库，会让「缺材料」变成一条流内错误而不是明确 400，
@@ -378,12 +387,21 @@ async def run_job(
                 #
                 # `superseded` 同理：同一份文档已经有更新的任务在写，这一支的结果反正不会
                 # 落库，继续烧 token 只是白花钱，而且它的 `done` 还会覆盖运行时的终稿。
-                if runtime.cancelled or runtime.superseded:
+                #
+                # `guard.lost`（#82）：续租失败过。异常可能被流水线内部的 `except` 吞掉，
+                # 所以这里再挡一道——下一个事件到达就停，不再往运行时里写。
+                if runtime.cancelled or runtime.superseded or (guard is not None and guard.lost):
                     break
                 _apply_event(runtime, event)
                 job_bus.publish(runtime.job_id, event)
                 _maybe_flush(runtime)
+        if guard is not None and guard.lost:
+            _log_lease_lost(runtime, "续租失败之后的下一个事件点")
+            return
         _finalize(runtime, "failed" if runtime.failed else "completed")
+    except job_claimer.LeaseLostError as lost:
+        # **不再写任何结果**，也不走下面的失败兜底：失去执行权 ≠ 这次生成失败。
+        _log_lease_lost(runtime, lost.reason)
     except Exception as exc:  # noqa: BLE001 - 后台任务必须自兜异常，不能静默消失
         # 管线可能已把错误转成 `error` 事件（运行时因此带着错误码），别重复发第二条。
         already_reported = bool(runtime.error_code)
@@ -428,6 +446,28 @@ async def run_job(
         current = asyncio.current_task()
         if current is not None:
             _TASKS.discard(current)
+
+
+def _log_lease_lost(runtime: JobRuntime, reason: str) -> None:
+    """失去执行权：留一条日志，**别的什么都不做**。
+
+    为什么不发 `error` 事件、不写终态、也不判死：这一行可能正由新的执行者跑完
+    （租约被接手），把「我失去资格」说成「任务失败」会让用户看到一次并不存在的失败，
+    而且晚到的失败写也写不进去（凭证对不上，数据库会改到 0 行）。真正的结局由
+    现在的持有者写。这里只回答「为什么这一支停了」——排障时最常问的那个问题。
+    """
+    logger.warning(
+        "本轮执行权已失效，任务就地停止（不写任何结果）",
+        extra={
+            "event": "job.execution_stopped",
+            "job_id": runtime.job_id,
+            "user_id": runtime.owner_id,
+            "solution_id": runtime.solution_id,
+            "kind": runtime.kind,
+            "reason": reason,
+            "request_id": current_request_id(),
+        },
+    )
 
 
 def _failure_event(code: str, message: str) -> StreamEvent:
