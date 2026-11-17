@@ -16,7 +16,8 @@
 
 `append` 刻意不带 `owner_id`：写入路径不面向用户，归属在「任务状态的条件更新」那一句
 `WHERE owner_id=?` 里已经校验过，这里再查一次只会多一次 SELECT 而不会多一层保护。
-读方法仍强制带归属（经 `generation_jobs` join）——越权读在 SQL 里就查不到。
+读方法仍强制带归属（经 `generation_jobs` join）——越权读在 SQL 里就查不到。唯一的例外
+是系统级维护读 `count_for_job`（恢复器计数用，见该方法的说明）。
 
 ## 序号怎么分配
 
@@ -117,3 +118,21 @@ class JobAttemptRepository:
             select(func.max(JobAttempt.attempt_no)).where(JobAttempt.job_id == job_id)
         ).scalar_one()
         return int(current or 0) + 1
+
+    def count_for_job(self, job_id: int) -> int:
+        """该任务已经记了几次（**系统级维护读**，没有 `owner_id`）。
+
+        调用点只有恢复器（#83）：一行 `job_attempts` = 这一次执行有结论，所以行数就是
+        「已经试过几次」。恢复器据此与允许的最多次数比较，决定超时的行是回排队还是
+        判失败——这是在没有 `attempt_count` 列（本票不允许加迁移）时唯一的事实来源，
+        与 `append` 的 `MAX+1` 同源，不会出现「账本与计数两说」。
+
+        不做归属校验：恢复器的扫描本来就跨用户，而它随后要做的是条件写——真正能改到
+        那一行的判据在 `WHERE owner_id + lease_token + lease_expire_at` 里（见
+        `generation_job_repo.requeue_lease` / `fail_expired`）。这里只回答「记了几次」，
+        不承担授权。
+        """
+        total = self.session.execute(
+            select(func.count()).select_from(JobAttempt).where(JobAttempt.job_id == job_id)
+        ).scalar_one()
+        return int(total or 0)

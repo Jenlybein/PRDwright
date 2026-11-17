@@ -496,15 +496,17 @@ def test_review_conclusion_write_failure_rolls_back_state_ledger_and_conclusion(
 
 
 # ---------------------------------------------------------------------------
-# 六、AC5：回滚之后由恢复机制接手（租约的占位是 #82）
+# 六、AC5：回滚之后由恢复机制接手（#82 的租约 + #83 的恢复器）
 # ---------------------------------------------------------------------------
 
 
 def test_a_rolled_back_closeout_is_reaped_as_a_failure_later(alice, monkeypatch):
-    """回滚留下的 `running` 行不是死尸：启动回收会把它判死并记账。
+    """回滚留下的 `running` 行不是死尸：启动回收（恢复器）会把它判死并记账。
 
     #82 的租约恢复会接走在线上的在途任务；本票能证明的是回滚语义没有把任务卡成
-    「永久 running 却无人知晓」——现有恢复机制仍能观察到它。
+    「永久 running 却无人知晓」——现有恢复机制仍能观察到它。**#83 之后**这条行的
+    死因是确定的：它还持有执行者的租约，所以恢复器按「执行者进程没了、租约到期」
+    判失败（`LEASE_EXPIRED`），而不是笼统的内部错误——台账里也就有了真正的超时原因。
     """
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
@@ -518,10 +520,14 @@ def test_a_rolled_back_closeout_is_reaped_as_a_failure_later(alice, monkeypatch)
 
     row = job_get(alice, registered.job_id)
     assert row["status"] == "running", "回滚语义：任务仍停在执行中"
+    assert row["lease_token"] != "", "回滚的任务仍持有执行者的租约（#82）"
 
     job_service.reap_orphans()
 
     row = job_get(alice, registered.job_id)
-    assert row["status"] == "failed" and row["error_code"] == "INTERNAL_ERROR"
+    assert row["status"] == "failed"
+    assert row["error_code"] == "LEASE_EXPIRED", "启动回收给的是确定的超时原因，不是笼统内部错误"
+    assert (row["lease_owner"], row["lease_token"], row["lease_expire_at"]) == ("", "", "")
     attempts = _attempts(alice, registered.job_id)
     assert len(attempts) == 1 and attempts[0]["outcome"] == OUTCOME_FAILED
+    assert attempts[0]["error_code"] == "LEASE_EXPIRED"

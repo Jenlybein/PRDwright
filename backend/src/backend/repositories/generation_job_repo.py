@@ -1,9 +1,10 @@
 """生成任务（generation_jobs）的数据仓储。
 
-**数据隔离落在这一层，而不是路由层。** 与 `solution_repo` 的口径一致：除系统级维护
-方法 `reap_running` / `running_ids` 与管理员查询外，每个方法的第一个参数都是 `owner_id`
-且**不接受 `None`**——没有「不过滤归属」的逃生口。所有查询、更新都把它写进 SQL 的
-WHERE 条件，越权访问在数据库层面就查不到这一行。
+**数据隔离落在这一层，而不是路由层。** 与 `solution_repo` 的口径一致：除两个系统级
+维护读 `claimable`（扫待领任务，#82）与 `scan_recoverable`（扫该接手的过期租约，#83）
+以及管理员查询外，每个方法的第一个参数都是 `owner_id` 且**不接受 `None`**——没有
+「不过滤归属」的逃生口。所有查询、更新都把它写进 SQL 的 WHERE 条件，越权访问在数据库
+层面就查不到这一行。
 
 `draft_content` 走**合并写**：`job_service` 在内存里维护权威正文，按「≤300ms 或增量
 >4KB」的节奏调用 `persist_progress` 落一份最新快照。因此本层不实现
@@ -15,8 +16,9 @@ WHERE 条件，越权访问在数据库层面就查不到这一行。
 绑定 `Session` 的实例方法：`GenerationJobRepository(session).get(...)`。
 **不 commit、不 rollback、不 close**——事务边界归调用方的 `session_scope()`。
 返回 `GenerationJob` 模型对象；管理面 JOIN 用户名的查询返回只读投影
-`AdminJob`（模型 + owner_name），不返回 dict。条件更新（supersede / cancel / reap）
-一律 `update(...).where(...)` 并返回 `rowcount`——调用方靠它判断「有没有真的改到」。
+`AdminJob`（模型 + owner_name），不返回 dict。条件更新（supersede / cancel / claim /
+恢复接手）一律 `update(...).where(...)` 并返回 `rowcount`——调用方靠它判断「有没有真的
+改到」。
 """
 
 from __future__ import annotations
@@ -514,38 +516,146 @@ class GenerationJobRepository:
         )
         return int(result.rowcount or 0)
 
-    def reap_running(self, *, error_code: str, error_message: str) -> int:
-        """系统级维护：把所有残留的 running 任务置为 failed，返回条数。
+    # ------------------------------------------------------------------
+    # 恢复（租约过期，票 #83）：扫候选 / 回排队 / 判失败
+    # ------------------------------------------------------------------
 
-        **本仓库仅有的两个没有 `owner_id` 的方法之一**（另一个是与它配对的
-        `running_ids`），属于启动运维（进程重启后，内存里的运行时已丢失，DB 里不可能
-        还有真正在跑的任务），**不是用户面接口**。调用点只有 `job_service.reap_orphans()`，
-        即在应用 `lifespan` 启动时回收上次崩溃 / 重启留下的悬挂任务。
+    def scan_recoverable(
+        self, *, now_text: str, limit: int, startup: bool = False
+    ) -> list[GenerationJob]:
+        """系统级维护读：扫一批该接手的 running 行（返回模型对象）。
+
+        本仓库两个系统级维护读之一（另一个是抢占侧的 `claimable`）：恢复天然跨用户。
+        条件分两档（语义与去向见 `services/job_recovery` 的模块 docstring）：
+
+        周期档（`startup=False`，默认）三句，各有各的必要性：
+
+        - `status='running'`：只有执行中才谈得上「接手」（#79 的合法前态）。
+        - `lease_expire_at != ''`：**没有租约的行是「排队中」，不是孤儿**——它本来就
+          该等调度循环来领，恢复器去动它等于把排队中的活判死。
+        - `lease_expire_at < now_text`：到期才轮得到别人接手。时间用 ISO 文本直接比，
+          字典序即时间序（`core/clock.py` 的口径），不把时间取回 Python 再判。
+
+        启动档（`startup=True`）只留 `status='running'` 一句：进程刚起来时它上面
+        不可能有真正的执行者（单 worker 硬约束，`_RUNTIMES` 在进程内），库里任何
+        `running` 行都是上次进程留下的——**包括还没到期的租约**（不看的话「崩溃前
+        1 秒领走」的行要再等满一个租约时长才被动），**也包括从没被领过的残留行**
+        （登记完还没派发就崩了；本票没有调度循环，留着就是永远进行中）。
+
+        排序 `lease_expire_at, id`：过期最久的最先收，同一秒的按自增 id 稳定排序
+        （启动档里没租约的行 `lease_expire_at` 是空串，字典序最小，同样稳定地排在
+        前面）。只挑候选，不判权——真正的「改不改得到」由 `requeue_lease` /
+        `fail_expired` 的条件写回答。
+        """
+        conditions: list[Any] = [GenerationJob.status == STATUS_RUNNING]
+        if not startup:
+            conditions.append(GenerationJob.lease_expire_at != "")
+            conditions.append(GenerationJob.lease_expire_at < now_text)
+        return list(
+            self.session.execute(
+                select(GenerationJob)
+                .where(*conditions)
+                .order_by(GenerationJob.lease_expire_at, GenerationJob.id)
+                .limit(max(1, int(limit)))
+            )
+            .scalars()
+            .all()
+        )
+
+    def requeue_lease(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        lease_token: str,
+        lease_expire_at: str,
+        now_text: str = "",
+    ) -> int:
+        """恢复器：把过期租约交还队列（**状态不变**，只清租约三列），返回改到的行数。
+
+        ## 为什么是条件写
+
+        `WHERE` 里带的是**扫描时读到的旧凭证**（`lease_token` 与 `lease_expire_at`
+        两列一起），不是「刚才查到的行」。数据库在改之前会重新判一次条件，于是两种
+        竞争都改到 0 行：凭证被换掉（别人已经接手）、到期时间被推后（执行者其实还在
+        跑，刚续了租）。恢复器凭的就是「这一行还是我扫描时看到的那一份死租约」——
+        跟一个晚到的执行者拿旧凭证写结果时遵守的是同一条规则。
+
+        ## 清三列 = 回排队
+
+        `lease_owner / lease_token / lease_expire_at` 全清空之后，这一行在
+        `claimable` 眼里就是「还没人领」，下一个执行者能直接领走（#82 的抢占条件
+        正是 `lease_token='' or lease_expire_at < now`）。`updated_at` 一起更新：
+        「回排队就排到同优先级队尾」是既有排序语义（退避 `next_run_at` 是 #88 的事）。
+
+        ## 为什么不在这里改状态
+
+        回排队**不是**一次状态转换（`running` 还是 `running`），改状态只能经状态机；
+        本方法只回答「这一次交接成没成」。账本那一笔由调用方（`job_state.transition`
+        的 `REQUEUE` 分支）与它同事务写入，所以这里不写任何结论。
         """
         result = self.session.execute(
             update(GenerationJob)
-            .where(GenerationJob.status == STATUS_RUNNING)
+            .where(
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
+                GenerationJob.status == STATUS_RUNNING,
+                GenerationJob.lease_token == lease_token,
+                GenerationJob.lease_expire_at == lease_expire_at,
+            )
             .values(
-                status=STATUS_FAILED,
-                error_code=error_code,
-                error_message=error_message,
-                updated_at=utc_now_text(),
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
+                updated_at=now_text or utc_now_text(),
             )
         )
         return int(result.rowcount or 0)
 
-    def running_ids(self) -> list[int]:
-        """系统级维护：当前所有残留 running 任务的 id（供回收前记一笔账）。
+    def fail_expired(
+        self,
+        owner_id: int,
+        job_id: int,
+        *,
+        lease_token: str,
+        lease_expire_at: str,
+        error_code: str,
+        error_message: str,
+        now_text: str = "",
+    ) -> int:
+        """恢复器：把过期租约**判失败**（终态 + 清租约），返回改到的行数。
 
-        与 `reap_running` 同属启动运维、同样**没有 `owner_id`**：`reap_running` 只回一个
-        条数，而账本要**逐任务一行**，所以回收之前先取一份 id 清单（同一个事务里）。
-        读完就改意味着中间没有窗口：这个函数不做任何过滤假设，返回的就是
-        `status='running'` 的全体。
+        与 `requeue_lease` 同一套 fencing（旧凭证 + 旧到期时间两列进 `WHERE`），
+        区别只在写入的结局：`failed + 入参错误码`（超时用 `LEASE_EXPIRED`）+ 清租约。
+
+        **不复用 `fail`**：那个方法叠的是「这一轮凭证还是我的、且**还没到期**」这条
+        判据（#82 的写权口径）。恢复器面对的恰恰是**已经过期**的租约，拿那条条件写
+        永远 0 行；而 `fail` 的 `abort_code` 那条放宽分支只服务于「取消之后补一次
+        载荷」，也不该被超时复用来绕开判权。两个场景的期望条件不同，所以是两个方法。
+
+        不写 `draft_content` / `usage`：恢复器手里没有本轮产物（执行者已经不在场），
+        行上已有的半截进度原样保留，用量保持「未知」而不是伪造成 0。
         """
-        rows = self.session.execute(
-            select(GenerationJob.id).where(GenerationJob.status == STATUS_RUNNING)
-        ).scalars().all()
-        return [int(row) for row in rows if row is not None]
+        result = self.session.execute(
+            update(GenerationJob)
+            .where(
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.id == job_id,
+                GenerationJob.status == STATUS_RUNNING,
+                GenerationJob.lease_token == lease_token,
+                GenerationJob.lease_expire_at == lease_expire_at,
+            )
+            .values(
+                status=STATUS_FAILED,
+                error_code=error_code,
+                error_message=error_message,
+                lease_owner="",
+                lease_token="",
+                lease_expire_at="",
+                updated_at=now_text or utc_now_text(),
+            )
+        )
+        return int(result.rowcount or 0)
 
     # ------------------------------------------------------------------
     # 执行权（租约，票 #82）：抢占 / 续租 / 扫待领
@@ -635,7 +745,8 @@ class GenerationJobRepository:
     def claimable(self, *, now_text: str, limit: int) -> list[tuple[int, int]]:
         """系统级维护：扫一批「还没有有效租约」的待领任务，返回 `(owner_id, id)`。
 
-        本仓库第三个（也是最后一个）没有 `owner_id` 入参的方法：队列扫描天然跨用户。
+        本仓库两个系统级维护读之一（另一个是恢复器的 `scan_recoverable`）：队列扫描
+        天然跨用户。
         它**只挑候选**，判权仍由 `claim` 那条条件写完成——扫描结果过期（被别的进程
         先领走）不会造成两个执行者，`claim` 会如实回 0 行。
 
