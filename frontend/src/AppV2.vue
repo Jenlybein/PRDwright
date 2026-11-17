@@ -616,6 +616,9 @@ const {
   runSummary,
   pendingItems,
   elapsedMs,
+  // 失败退避（票 #88）：等待重试时显示倒计时；等待期间取消仍然可用
+  retryAt,
+  cancelRun,
   summaryChanges,
   summarySyncing,
   summarySyncError,
@@ -765,6 +768,15 @@ function viewCurrentVersion(): void {
 const canViewCurrentVersion = computed(() => runInFlightForThisDoc.value)
 
 /**
+ * 运行视图是否处于「等待重试」（票 #88）。
+ *
+ * 判据只看「快照里有没有 `next_run_at`」，不在 computed 里读 `Date.now()`——
+ * 那会让这个 computed 没有依赖、永远只在首次求值时算一次。倒计时本身在
+ * `GeneratingStage` 里按秒推进（换算在 `@/utils/backoff`），这里只回答「是不是等待态」。
+ */
+const isWaitingRetryValue = computed(() => runs.hasRunning && retryAt.value !== null)
+
+/**
  * 运行视图的标题徽标（票 #67）：按动作区分，不把四件事都叫「生成中」。
  *
  * 修复、重审、优化、按澄清改写都不是「生成一份新文档」，混称会让用户以为自己的稿被整篇重做了。
@@ -773,6 +785,9 @@ const canViewCurrentVersion = computed(() => runInFlightForThisDoc.value)
  */
 const runViewStatusLabel = computed(() => {
   if (!runs.hasRunning) return '生成中'
+  // 失败退避（票 #88）：等待重试不是「在生成」——那个任务此刻没有执行者，
+  // 说「生成中」会让人以为它卡死了。徽标单独说是「等待重试」。
+  if (isWaitingRetryValue.value) return '等待重试'
   if (runs.isRunningKind('review-fix')) return '修复中'
   if (runs.isRunningKind('review')) return '重审中'
   if (runs.isRunningKind('optimize')) return '优化中'
@@ -1358,11 +1373,13 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :with-review="hasDocumentReview(store.entryMode)"
         :draft-only="prdShowingDraft"
         :elapsed-ms="elapsedMs"
+        :retry-at="retryAt"
         :back-label="backLabel"
         :hide-back="inputPageOnBar(store.entryMode)"
         :can-view-current-version="canViewCurrentVersion"
         :status-label="runViewStatusLabel"
         @back="backToInput"
+        @cancel="cancelRun"
         @view-current-version="viewCurrentVersion"
       />
 

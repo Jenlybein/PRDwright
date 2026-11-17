@@ -167,6 +167,8 @@ UPDATE generation_jobs
 
 有一个副作用必须写清：现在「回排队就更新 `updated_at`」是用来让任务排到同优先级队尾的。加了退避之后两套排序语义会叠加，规则固定为——**先看 `next_run_at` 到没到期，到期之后才按 `updated_at` 排队**。
 
+> 落地（#88）：错误码 → 秒数的唯一映射表在 `services/job_backoff.py`；退避与清租约、`updated_at`、账本同批写入（`job_state.transition` 的 `REQUEUE` 分支）；**到期闸门**与**排队顺序**各只有一处定义（`repositories/generation_job_repo.py` 的 `_due_now` / `_queue_order`）。调度循环（谁来扫、多久扫一次）仍不在本期，见 #89。
+
 ---
 
 ## 七、用户是怎么看到进度的

@@ -33,6 +33,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     errorCode: '',
     errorMessage: '',
     elapsedMs: 0,
+    retryAt: null,
     pendingItems: [],
     partial: false,
     failedSections: [],

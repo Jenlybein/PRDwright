@@ -154,6 +154,11 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "failed_sections": runtime.failed_sections,
             # 服务端算的已用时：刷新重连后前端接着它继续走，客户端计时器归零也不影响
             "elapsed_ms": int(max(0.0, time.monotonic() - runtime.started_at) * 1000),
+            # 失败退避（#88）：内存里的运行时**没有**「等待重试」这一态——退避只发生在
+            # 执行者不在场之后（恢复器回排队），那一刻这个任务根本不会有运行时。
+            # 显式给空串而不是省略：与 `stage_text` 同理，让「这个快照里没有等待信息」
+            # 成为契约的一部分，而不是被读成漏实现。
+            "next_run_at": "",
         },
     )
 
@@ -211,6 +216,12 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "partial": bool(usage.get("partial")),
             "failed_sections": failed_sections,
             "elapsed_ms": _elapsed_ms_from_row(row),
+            # 失败退避（#88）：这条任务最早什么时候能被再领走（ISO 文本；空串 = 立即）。
+            #
+            # 「排队中」在三态里读作 `status='running'` 且没有有效租约——运行时不在场时，
+            # 前端只有拿到这一列才能回答「还要等多久」，从而显示「等待重试，约 xx 秒后」
+            # 而不是一个转不完的圈。**不改 `status` 的取值**（七态是 #84 的事）。
+            "next_run_at": row.get("next_run_at", "") or "",
             # 任务单里不可变数据的完整投影：运行时未命中时，DB 兜底快照仍读得回
             # 「这次生成用的原始请求、哪套配置/供应商、哪套技能包」。坏数据按上面
             # 三个容错解析退化成空容器，行为与既有 `usage` / `pending_items` 一致。

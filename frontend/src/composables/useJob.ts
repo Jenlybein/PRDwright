@@ -36,6 +36,7 @@
 import { computed, getCurrentScope, onScopeDispose, ref } from 'vue'
 
 import {
+  cancelJob,
   createJob,
   readJobStream,
   type CreateJobPayload,
@@ -163,6 +164,13 @@ export function useJob() {
   const snapshot = computed<JobSnapshot | null>(() => currentRun.value?.snapshot ?? null)
   /** 任务已用时（毫秒）：生成中每秒自增，重连时按服务端值锚定，收尾后停在总耗时 */
   const elapsedMs = computed(() => currentRun.value?.elapsedMs ?? 0)
+  /**
+   * 失败退避（票 #88）：这条任务最早什么时候能被下一个执行者领走（ISO 文本）。
+   *
+   * `null` = 没在等（绝大多数时候）。**等待态的任务没有运行时**，所以这个值只会从
+   * 快照的 `next_run_at` 来——它是界面回答「还要等多久」的唯一来源。
+   */
+  const retryAt = computed<string | null>(() => currentRun.value?.snapshot?.retryAt ?? null)
 
   // ---- 已用时计时器 ----------------------------------------------------------
   // 每支任务一个：`baseMs` 是锚定时任务已经跑过的毫秒数（来自服务端），`anchorMs` 是本地
@@ -421,6 +429,27 @@ export function useJob() {
   }
 
   /**
+   * 停止一次任务（票 #88：**等待重试期间取消仍然可用**）。
+   *
+   * 与 `detach` 是两件事：`detach` 只退订、服务端任务照跑；这里调
+   * `POST /api/jobs/{id}/cancel`，服务端立刻落终态。等待态的任务**没有运行时**，
+   * 因此服务端不会推任何事件过来——调用方拿到结果后必须自己收尾本地运行态
+   * （订阅还挂在流上，等它自己结束是等不到的）。
+   *
+   * 返回是否真的取消到了：`false` 表示「你按的时候它刚好已经结束」，
+   * 那不是错误（与后端 `cancel_one` 改到 0 行的口径一致）。
+   */
+  async function cancel(jobId: number): Promise<boolean> {
+    try {
+      return await cancelJob(jobId)
+    } catch (caught) {
+      // 取消失败不该把界面卡在等待态：记一条错误，交给调用方决定要不要提示。
+      lastError.value = caught instanceof Error ? caught.message : String(caught)
+      return false
+    }
+  }
+
+  /**
    * 只退订：中止本地读取，**不取消服务端任务**。
    *
    * 这是「生成与连接解耦」的直接体现——离开页面 / 切换方案只影响这些订阅，
@@ -463,9 +492,11 @@ export function useJob() {
     runSummary,
     snapshot,
     elapsedMs,
+    retryAt,
     // 动作
     start,
     reconnect,
+    cancel,
     detach,
     // 便于上层做「这次任务还是不是我的」判断
     isSubscribed,
