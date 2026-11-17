@@ -72,13 +72,13 @@ def test_whitelisted_keys_match_env_when_no_overrides():
 def test_override_applies_and_changes_revision():
     """写入覆盖项后立即生效，且指纹变化（前端据此判断「真的换了一份」）。"""
     before = rc.get_runtime_config()
-    assert before.settings.prd_pipeline_concurrency == 3
+    assert before.settings.doc_review_max_tokens == get_settings().doc_review_max_tokens
 
-    _set(prd_pipeline_concurrency=5)
+    _set(doc_review_max_tokens=3000)
     rc.invalidate()
     after = rc.get_runtime_config()
 
-    assert after.settings.prd_pipeline_concurrency == 5
+    assert after.settings.doc_review_max_tokens == 3000
     assert after.source == "db"
     assert after.revision != before.revision, "指纹没变，前端会误判成「保存了但没生效」"
 
@@ -123,13 +123,13 @@ def test_unknown_rows_in_table_are_ignored():
 def test_out_of_range_override_falls_back_to_env():
     """越界的值跳过该键，其余键照常生效（单个坏值不拖垮整份配置）。"""
     SystemConfigRepository.upsert_many(
-        {"prd_pipeline_concurrency": "99", "llm_max_retries": "3"}
+        {"doc_review_max_tokens": "100", "llm_max_retries": "3"}
     )
     rc.invalidate()
     config = rc.get_runtime_config()
 
-    assert "prd_pipeline_concurrency" not in config.overrides
-    assert config.settings.prd_pipeline_concurrency == get_settings().prd_pipeline_concurrency
+    assert "doc_review_max_tokens" not in config.overrides
+    assert config.settings.doc_review_max_tokens == get_settings().doc_review_max_tokens
     # 好的那个仍然生效
     assert config.settings.llm_max_retries == 3
 
@@ -137,15 +137,15 @@ def test_out_of_range_override_falls_back_to_env():
 def test_validation_reuses_settings_constraints():
     """约束复用 `Settings`，不另写一套。
 
-    `prd_pipeline_concurrency` 是 `ge=1, le=8`，`llm_budget_warn_ratio` 是 `gt=0, le=1`。
-    两处各写一套迟早漂移（配置页允许 99，env 那边只允许 8）。
+    `doc_review_max_tokens` 是 `ge=256`，`llm_budget_warn_ratio` 是 `gt=0, le=1`。
+    两处各写一套迟早漂移（配置页允许 100，env 那边不允许）。
     """
-    assert rc.validate_value("prd_pipeline_concurrency", 1) == 1
-    assert rc.validate_value("prd_pipeline_concurrency", 8) == 8
+    assert rc.validate_value("doc_review_max_tokens", 256) == 256
+    assert rc.validate_value("doc_review_max_tokens", 8192) == 8192
     with pytest.raises(ValueError):
-        rc.validate_value("prd_pipeline_concurrency", 9)
+        rc.validate_value("doc_review_max_tokens", 100)
     with pytest.raises(ValueError):
-        rc.validate_value("prd_pipeline_concurrency", 0)
+        rc.validate_value("doc_review_max_tokens", 0)
 
     assert rc.validate_value("llm_budget_warn_ratio", 0.5) == 0.5
     with pytest.raises(ValueError):
@@ -172,7 +172,7 @@ def test_degraded_when_table_missing():
     assert config.source == "degraded"
     assert config.overrides == {}
     # 降级后每个键仍是 env 值——生成继续能跑
-    assert config.settings.prd_pipeline_concurrency == get_settings().prd_pipeline_concurrency
+    assert config.settings.doc_review_max_tokens == get_settings().doc_review_max_tokens
 
 
 def test_tables_missing_means_no_provider():
@@ -407,17 +407,17 @@ def test_use_config_freezes_snapshot_for_task():
     """
     rc.invalidate()
     frozen = rc.get_runtime_config()
-    assert frozen.settings.prd_pipeline_concurrency == 3
+    assert frozen.settings.doc_review_max_tokens == get_settings().doc_review_max_tokens
 
     with rc.use_config(frozen):
-        _set(prd_pipeline_concurrency=7)
+        _set(doc_review_max_tokens=3000)
         rc.invalidate()
         inside = rc.get_runtime_config()
         assert inside is frozen
-        assert inside.settings.prd_pipeline_concurrency == 3
+        assert inside.settings.doc_review_max_tokens == get_settings().doc_review_max_tokens
 
     # 出了上下文就拿到新配置
-    assert rc.get_runtime_config().settings.prd_pipeline_concurrency == 7
+    assert rc.get_runtime_config().settings.doc_review_max_tokens == 3000
 
 
 def test_invalidate_drops_cache():

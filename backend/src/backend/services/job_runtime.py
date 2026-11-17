@@ -1,10 +1,12 @@
 """任务运行时的内存形状与进程内登记表（`job_service` 的拆分子模块）。
 
 从 `job_service` **机械迁出**（issue #5：单文件压到阈值以下，只搬代码不改行为）：
-`JobRuntime` 的字段定义、`_SectionLive`，以及「进程内运行时表」`_RUNTIMES` 与
-「保活集合」`_TASKS`。字段与注释逐字未改；#40 删空再导出块后，`JobRuntime` /
-`_RUNTIMES` / `_TASKS` 由同一内部包按包内互引直接使用，`_SectionLive` 这类
-名字也只在本包内使用，都不再经 `job_service` 对外再导出。
+`JobRuntime` 的字段定义，以及「进程内运行时表」`_RUNTIMES` 与「保活集合」`_TASKS`。
+`_RUNTIMES` / `_TASKS` 由同一内部包按包内互引直接使用，都不再经 `job_service` 对外再导出。
+
+票 #92 起 PRD 与另两份产物共用同一条**整篇**生成路径，章节级运行时状态
+（`_SectionLive` / `live_by_index` / `parts_by_index` / `completed_sections`）全部退役：
+正文只有「已定稿段 + 一段实时缓冲」两种形态。
 """
 
 from __future__ import annotations
@@ -13,27 +15,13 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.core.contracts import StreamEvent
 from backend.services.llm_meter import RunMeter
 
 # 进程内的任务运行时：`job_id -> JobRuntime`
 _RUNTIMES: dict[int, "JobRuntime"] = {}
 # 保活集合：持有 `asyncio.Task` 强引用，防止未来得及跑完就被垃圾回收
 _TASKS: set[asyncio.Task] = set()
-
-
-@dataclass
-class _SectionLive:
-    """某一章「正在写」的实时缓冲（未定稿的原始增量）。
-
-    只在分章节链路里出现：多章同时吐字，必须各存各的——混在一起就再也分不开，
-    前端也就没法按章渲染（只能等整章定稿）。定稿（`part`）到达时整格丢弃，
-    权威文本由 `parts_by_index` 接管。
-    """
-
-    section_id: str = ""
-    text: str = ""
-    # 该章当前所处阶段（writing / reviewing / rewriting）：快照用它还原卡片车道
-    phase: str = "writing"
 
 
 @dataclass
@@ -46,39 +34,24 @@ class JobRuntime:
     kind: str
     status: str = "running"
     phase: str = ""
-    # 已定稿段落（文档头 + 各章 part.text），按序拼接即「已产出正文」
+    # 已定稿段落。整篇生成只有一个 `part{replace}`（审核发现问题后的那次改写），
+    # 按序拼接即「已产出正文」。
     finalized_parts: list[str] = field(default_factory=list)
-    # 并行分章节：按 index 存放的定稿段（各章 0..n）。与 finalized_parts 分工：
-    # 文档头仍进 finalized_parts（它没有 index），章节进这里，`_draft` 按 index 排序装配。
-    parts_by_index: dict[int, str] = field(default_factory=dict)
-    # 是否有章节失败后被占位（仅 PRD 并行链路）
-    partial: bool = False
-    failed_sections: list[dict[str, Any]] = field(default_factory=list)
     # 当前段的实时缓冲（chunk 原始增量），遇到下一个 part 时清空。
-    # 无章节归属的增量（整篇生成的文档、对话）落这里。
     live_buffer: str = ""
-    # 分章节并行时的**按章**实时缓冲：`index -> 该章已吐出的原始增量`。
-    #
-    # 为什么要按章分：PRD 是多章同时生成的，几章的字混在一个 `live_buffer` 里
-    # 就再也分不开了——那正是「PRD 只能等整章定稿才蹦出来」的历史成因。
-    # 有了这一格，前端刷新重连时能按章把半成品摆回去、并接着往下长。
-    #
-    # 与 `live_buffer` 的分工：带 `section_id` 的 chunk 进这里，其余进 `live_buffer`。
-    # 它**不落库**（过程信息，同 `stage_text`）：F5 不会重启后端进程，内存快照够用。
-    live_by_index: dict[int, "_SectionLive"] = field(default_factory=dict)
+    # 「有内容可用但不完整」（#85）：由 `done.partial` 带来，随终态同一条语句落库。
+    partial: bool = False
     # 当前阶段模型的原始输出（审核意见 / 改写稿），只给阶段条下方的面板看。
     # 与 `live_buffer` 分道：后者是**产物正文**，混进来会把审核 JSON 写进文档预览。
     # 从前端内存独占这份文本，刷新就丢；改为运行时持有后，重连的 `snapshot` 能把它带回来。
     stage_text: str = ""
-    # 已定稿章节的结构化记录（供快照恢复时定位「写到第几章」）
-    completed_sections: list[dict[str, Any]] = field(default_factory=list)
     # 请求参数：派发时是单②摊平后的一份，**服务端解析出的上游输入**在 `as_event_request`
     # 里已经合进来（见 `job_inputs`：解析发生在建任务那一刻）。`_build_event_stream` /
     # `_build_derived_from` 都读这一份；落库的 `request_params` 投影不受影响。
     request: dict[str, Any] = field(default_factory=dict)
     # 本任务的**配置快照**（派发那一刻取的）。`run_job` 用 `use_config` 把它冻进上下文，
-    # 于是整条链路（含并行子任务）读到的是同一份：既满足「改了下次生成生效」，
-    # 又保证「跑到一半不会参数漂移」——后者会让章节乱序、正文重复，且极难归因。
+    # 于是整条链路读到的是同一份：既满足「改了下次生成生效」，
+    # 又保证「跑到一半不会参数漂移」。
     config: Any = None
     task: asyncio.Task | None = None
     failed: bool = False
@@ -87,6 +60,18 @@ class JobRuntime:
     # 上次 flush 的时间与当时 live_buffer 的长度（用于「≤300ms 或增量 >4KB」判断）
     last_flush_at: float = 0.0
     flushed_len: int = 0
+    # --- 过程日志（事件表，票 #86）---
+    #
+    # 已经应用进运行时、但还没落进 `job_events` 的事件。逐条到来（模型增量可能一秒
+    # 几百条），按既有的合并写窗口一批落盘（与进度列同一笔事务），因此这里只是内存
+    # 缓冲，不是第二份正文。
+    #
+    # ⚠️ 只在事务**提交之后**清空（`services.job_events.mark_flushed`）：回滚了还清，
+    # 那一批就永久丢了，症状是「断线重连少了一段」，极难归因。
+    pending_events: list[StreamEvent] = field(default_factory=list)
+    # 已落盘的最后一条事件的游标。订阅者的快照游标就是它——「快照内容覆盖到哪一条」
+    # 的判据，因此快照与事件必须同一笔提交（见 `job_runtime_events._maybe_flush`）。
+    last_event_id: int = 0
     # 任务开始时刻（算 duration_ms）
     started_at: float = 0.0
     # done 事件带来的权威完整正文
@@ -118,6 +103,21 @@ class JobRuntime:
     # 是否已被取消（方案被删除时置位）。取消后事件循环不再消费后续事件，
     # 收尾也**不写**文档——见 `delete_solution_and_cancel_jobs` / `_finalize`。
     cancelled: bool = False
+    # 取消请求的原因文案（「用户停止了生成」/「方案已删除」/「管理员清理卡死」…）。
+    # 与 `error_message` 分开：取消不是失败，不该借失败原因那一列；确认取消时这一句
+    # 就是最终落进 `error_message` 的原因（AC4：状态由 status 表达，原因由文案表达）。
+    cancel_message: str = ""
+    # --- 执行权（租约，票 #82）---
+    #
+    # 这一轮的执行权由三件事构成（判权看凭证、不看归属）：谁领的（仅供排查）、
+    # 本轮凭证、到期时间。派发时从抢占结果里拷进来；收尾时把凭证递给状态机，
+    # 由数据库判「我还有没有资格写这一行」；每次模型调用前续租。
+    #
+    # 没有租约的运行时（本票之前建的老行 / 测试直造的假单）三列都为空：那时判权退回
+    # 「只看状态」，与 #79 / #81 的行为一致。
+    lease_owner: str = ""
+    lease_token: str = ""
+    lease_expire_at: str = ""
     # 是否已被**同一份文档的新任务**顶替（`create_job` 在建新任务时置位）。
     #
     # 与 `cancelled` 分开：那个是「方案没了，谁也别写」，这个是「有更晚的结果要写，

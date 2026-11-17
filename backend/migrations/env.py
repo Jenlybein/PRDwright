@@ -1,28 +1,25 @@
-"""Alembic 环境（v6）。
+"""Alembic 环境（v9，单一后端）。
 
-## 与默认模板的三处不同
+## 与默认模板不同的两处
 
 ### ① 数据库地址不来自 `alembic.ini`，来自应用配置
 
-`alembic.ini` 里的 `sqlalchemy.url` 是个占位符。真实地址由 `core/paths.default_db_file()`
-解析——与运行时**同一口径**。否则会出现「迁移改了 A 库、服务读的是 B 库」这种最难查的故障。
+`alembic.ini` 里的 `sqlalchemy.url` 是个占位符。真实地址由 `core/schema.py::
+migration_url()` 决定，**最后一级兜底是 `core/database.database_url()`**——与运行时
+同一口径。否则会出现「迁移改了 A 库、服务读的是 B 库」这种最难查的故障。
 
 CLI 想临时指定别的库，用 `-x url=...`：
 
 ```
-uv run alembic -x url=sqlite+pysqlite:////tmp/probe.db upgrade head
+uv run alembic -x url=postgresql+psycopg://u:p@127.0.0.1:5432/probe upgrade head
 ```
 
-### ② `compare_type` 对布尔列做归一
+### ② 不按方言开任何补丁（#78）
 
-`bool` 生成 `BOOLEAN`，现有库是 `INTEGER`。SQLite 里两者等价（都存 0/1），
-但 autogenerate 会因此想 ALTER 每一列。白名单在 `core/models.BOOLEAN_COLUMNS`，
-与结构对拍共用同一份——**新增布尔列只需登记一处**。
-
-### ③ `render_as_batch=True`
-
-SQLite 不支持大部分 `ALTER COLUMN`，Alembic 的 batch 模式会「建新表 + 拷数据 + 换名」。
-本期用不上（基线之后还没有新迁移），但第一次真要改列时，没有它就只能手写建表逻辑。
+v9 只有 Postgres，所以不需要 `render_as_batch`（那是 SQLite `ALTER TABLE` 能力不足的
+补丁，「建新表 + 拷数据」），也不需要布尔列的 `compare_type` 归一（Postgres 的 `BOOLEAN`
+就是真布尔，与模型侧同一个类型）。两处都随 SQLite 后端一起删除了：留着它们等于给
+「还有人开 SQLite」留一条暗门。
 """
 
 from __future__ import annotations
@@ -38,8 +35,7 @@ from sqlalchemy.exc import ArgumentError
 # 导入模型 = 把所有表注册进 `SQLModel.metadata`。少了这一句，autogenerate 会认为
 # 「模型是空的」，从而生成一份「删掉所有表」的迁移——这是最危险的空白。
 from backend.core import models  # noqa: F401
-from backend.core.models import BOOLEAN_COLUMNS
-from backend.core.paths import default_db_file
+from backend.core.schema import migration_url
 from sqlmodel import SQLModel
 
 config = context.config
@@ -47,62 +43,34 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-logger = logging.getLogger("alembic.v6")
+logger = logging.getLogger("alembic.v9")
 
 target_metadata = SQLModel.metadata
 
 
 def _database_url() -> str:
-    """迁移用的数据库地址。
+    """迁移用的数据库地址（优先级契约见 `core/schema.py::migration_url`）。
 
-    优先级（**这个顺序是安全设计，别调**）：
+    三级：`-x url=` → `Config.sqlalchemy.url` → **应用配置**（`DATABASE_URL`）。
 
-    1. `-x url=...`：CLI 显式指定（调试 / 对拍用）；
-    2. `Config` 里的 `sqlalchemy.url`：程序化调用（`core/schema.py`）从 Engine 反推后传进来，
-       保证「迁移改的库」与「服务读的库」是同一个；
-    3. `default_db_file()`：CLI 不带参数时的兜底。
-
-    ⚠️ 第 2 条不能省。省掉的后果是：程序化调用时静默回落到**默认库**——
-    迁移跑到了开发库上，而调用方以为在操作临时库。这类错误在测试里表现为
-    「建表已存在」，在生产里表现为「升级了不该升级的库」。
+    ⚠️ 第 3 级以前是写死的 `sqlite+pysqlite:///{default_db_file()}`（#76 修正）：
+    配了 `DATABASE_URL` 的 Postgres 部署上，不带参数的 CLI 迁移会跑到**另一个
+    SQLite 文件**里去。第 2 级也不能省：程序化调用不带它就会静默回落到默认库。
     """
-    override = context.get_x_argument(as_dictionary=True).get("url")
-    if override:
-        return override
-
-    configured = (config.get_main_option("sqlalchemy.url") or "").strip()
-    # `alembic.ini` 里的占位符视为「没配置」
-    if configured and configured != "driver://user:pass@localhost/dbname":
-        return configured
-
-    return f"sqlite+pysqlite:///{default_db_file()}"
-
-
-def _compare_type(
-    _context, inspected_column, _metadata_column, inspected_type, metadata_type
-):  # noqa: ANN001
-    """布尔列的类型比较：`BOOLEAN` 与 `INTEGER` 视为等价。
-
-    返回 `False` = 「没有变化，不生成迁移」；返回 `None` = 「交给默认实现继续判断」。
-    """
-    table_name = getattr(inspected_column.table, "name", None)
-    key = (table_name, getattr(inspected_column, "name", None))
-    if key in BOOLEAN_COLUMNS:
-        names = {type(inspected_type).__name__.upper(), type(metadata_type).__name__.upper()}
-        if names <= {"BOOLEAN", "INTEGER"}:
-            return False
-    return None
+    return migration_url(
+        override=context.get_x_argument(as_dictionary=True).get("url"),
+        configured=(config.get_main_option("sqlalchemy.url") or "").strip(),
+    )
 
 
 def run_migrations_offline() -> None:
     """离线模式：只打印 SQL，不连库。"""
+    url = _database_url()
     context.configure(
-        url=_database_url(),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        compare_type=_compare_type,
-        render_as_batch=True,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -113,9 +81,8 @@ def run_migrations_online() -> None:
     url = _database_url()
     # 明确打印目标库：迁移是「不可逆的写操作」，任何时候都要能一眼看出改的是哪个库。
     #
-    # ⚠️ 必须脱敏。`_database_url()` 目前只产出 SQLite 文件路径（没有密码），但换到
-    # 有密码的库之后它会带凭据，而这个 logger 的输出会进轮转文件与 `app_logs` 表。
-    # 现在就把口子堵上，比换库那天再想起来可靠。
+    # ⚠️ 必须脱敏。这个返回值带密码（Postgres 部署里就是常态），而这个 logger 的输出
+    # 会进轮转文件与 `app_logs` 表。
     try:
         shown = make_url(url).render_as_string(hide_password=True)
     except ArgumentError:
@@ -135,10 +102,8 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            compare_type=_compare_type,
-            # SQLite 的 ALTER 能力有限：改列 / 删列都要「重建表 + 拷数据」，
-            # batch 模式把这件事自动化。只在第一次真正改列时用到。
-            render_as_batch=True,
+            # 方言取自**真实连接**，不重新解析地址：程序化调用时 URL 是 Engine 反推的，
+            # 两者本该一致；万一不一致，以连上的那个为准。
         )
         with context.begin_transaction():
             context.run_migrations()

@@ -10,10 +10,10 @@ import type {
   ChatMessage,
   ChatStage,
   ClarificationAsk,
-  CompletedSection,
   DocKind,
   DocumentKind,
   JobSnapshot,
+  JobState,
   PendingItem,
   RequirementAnswers,
   RequirementsSummary,
@@ -24,7 +24,6 @@ import type {
   StreamDocumentPart,
   StreamChunk,
   StreamStageChunk,
-  SectionDraft,
   StreamStageEvent,
   ToolCallRef,
   ToolResultPayload,
@@ -147,6 +146,14 @@ export interface StreamEventPayload {
    * 因为这条通道上 HTTP 状态码恒为 200，判断「该不该降级重试」只能靠它。
    */
   code?: BackendErrorCode
+  /**
+   * 事件游标（票 #86）：任务订阅的每条事件在服务端 `job_events` 里的全局 id。
+   *
+   * **它不在 JSON 体里**：后端把它放在 SSE 帧的 `id:` 行（标准字段），这里由分帧解析
+   * 补进来。客户端记住最后一条，断线重连时作为 `?cursor=` 带回去，服务端就只发它之后
+   * 的事件——不重复、不缺段。其他流（对话 / 就地生成）没有这个字段。
+   */
+  eventId?: number
 }
 
 /** 流式回复过程中可注册的回调 */
@@ -156,27 +163,24 @@ export interface StreamHandlers {
   /**
    * 收到增量文本时触发。
    *
-   * 参数是**对象**而不是裸字符串：分章节链路里多章同时在吐字，必须带上 `sectionId`
-   * 才知道这一片属于哪一章（否则只能丢弃——那正是「PRD 不流式」的历史成因）。
-   * 不分章的场景（整篇文档、对话）`sectionId` 为空串、`index` 为 -1。
+   * 参数是对象而不是裸字符串：三份产物都整篇生成，正文只有一条缓冲（票 #92 起
+   * `chunk` 不再带章节归属）。
    */
   onChunk?: (chunk: StreamChunk) => void
   /**
-   * 收到 `part` 定稿正文事件时触发。
-   * 目前只有「分章节生成 PRD」会下发：文档头一次、每一章一次。
+   * 收到 `part` 定稿正文事件时触发：审核发现问题后整篇改写一次时，改写稿整段覆盖初稿。
    */
   onPart?: (part: StreamDocumentPart) => void
   /**
-   * 收到 `stage` 阶段事件时触发。
-   * 目前只有「分章节生成 PRD」会下发该事件，用于驱动前端的阶段指示，并在换章 /
-   * 改写时重置本章的实时缓冲。
+   * 收到 `stage` 阶段事件时触发（三份产物共用）：驱动阶段条的「走到哪一步」，
+   * 改写阶段还带审核给的改写原因。
    */
   onStage?: (event: StreamStageEvent) => void
   /**
    * 收到 `stage_chunk` 阶段内输出增量时触发。
    *
-   * 目前由「接口文档 / 提示词」的审核与改写两步下发：它们都是整篇量级的调用，
-   * 静默期很长，把模型的原始输出流出来，用户才看得出「确实在推进」。
+   * 由大纲 / 审核 / 改写三步下发：它们都是整篇量级的调用，静默期很长，
+   * 把模型的原始输出流出来，用户才看得出「确实在推进」。
    * 这些文本**不属于正文**，只用于阶段条下方的输出面板。
    */
   onStageChunk?: (chunk: StreamStageChunk) => void
@@ -196,9 +200,16 @@ export interface StreamHandlers {
    * 收到 `review` 审核结论时触发。
    *
    * **不持久化**：只在本次订阅内展示；刷新后不会补发，结论随之消失。
-   * PRD 是「聚合各章审核」，接口文档 / 提示词是「整篇审一次」。
+   * 三份产物都是整篇审一次（票 #92）。
    */
   onReview?: (review: ReviewConclusion) => void
+  /**
+   * 每收到一条带 `id:` 行的事件时触发，参数是该事件在服务端的游标（票 #86）。
+   *
+   * 调用方（`useJob`）把它记成「这一支任务读到哪了」；订阅中断时凭它续读，
+   * 服务端只发游标之后的事件。**不要在回调里做重活**：它每条事件都触发一次。
+   */
+  onCursor?: (cursor: number) => void
 }
 
 /** 一次流式对话的结果 */
@@ -373,22 +384,20 @@ function parseStageEvent(data: Record<string, unknown>): StreamStageEvent {
   const rawIssues = data.issues
   const issues = Array.isArray(rawIssues)
     ? rawIssues
-        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
         .map((item) => ({
-          severity: readString(item, 'severity'),
-          detail: readString(item, 'detail'),
+          severity: readString(item, "severity"),
+          detail: readString(item, "detail"),
         }))
     : []
 
   return {
-    stage: readString(data, 'stage'),
-    sectionId: readString(data, 'section_id'),
-    sectionTitle: readString(data, 'section_title'),
-    sectionHeading: readString(data, 'section_heading'),
-    index: readNumber(data, 'index'),
-    total: readNumber(data, 'total'),
-    note: readString(data, 'note'),
+    stage: readString(data, "stage"),
+    note: readString(data, "note"),
     issues,
+    // 续写批次序号（票 #93）：缺失 / 类型不对都退化成 0（= 不是续写事件），
+    // 老后端不认这个字段时界面行为与从前完全一致。
+    continuation: readNumber(data, "continuation"),
   }
 }
 
@@ -408,19 +417,10 @@ function parseStageChunkEvent(event: StreamEventPayload): StreamStageChunk {
 /**
  * 把 `chunk` 事件归一成 `StreamChunk`。
  *
- * 增量文本走事件自带的 `content`，`data` 只负责说明「这属于哪一章」。
- * 与 `parseStageChunkEvent` 完全同构（那一路就是这么拿到 `stage` 的）：
- * 分章节链路靠 `section_id` 把字送进对的卡片，缺了就退化空串由调用方丢弃。
+ * 票 #92 起 `chunk` 不带章节归属：正文只有一条缓冲，「这一片归哪一章」不再存在。
  */
 function parseChunkEvent(event: StreamEventPayload): StreamChunk {
-  const rawIndex = event.data.index
-  return {
-    text: event.content,
-    sectionId: readString(event.data, 'section_id'),
-    // 缺失退化成 -1 而不是 0：0 是**合法的第一章**，用它兜底会把无归属的增量
-    // 悄悄塞进第一章。
-    index: typeof rawIndex === 'number' && Number.isFinite(rawIndex) ? rawIndex : -1,
-  }
+  return { text: event.content }
 }
 
 /**
@@ -432,13 +432,8 @@ function parseChunkEvent(event: StreamEventPayload): StreamChunk {
  */
 function parsePartEvent(data: Record<string, unknown>): StreamDocumentPart {
   return {
-    text: readString(data, 'text'),
+    text: readString(data, "text"),
     replace: data.replace === true,
-    sectionId: readString(data, 'section_id'),
-    sectionTitle: readString(data, 'section_title'),
-    sectionHeading: readString(data, 'section_heading'),
-    index: readNumber(data, 'index'),
-    total: readNumber(data, 'total'),
   }
 }
 
@@ -454,61 +449,30 @@ export { parseReview }
  * 把任务流 `snapshot` 事件的 `data` 归一成 `JobSnapshot`。
  *
  * 与其它解析函数同一口径：字段缺失或类型不对只退化那一个字段，不打断整条流。
- * `completedSections` 会逐项校验，坏项被丢弃而不是让整段快照失效。
+ * 票 #92 起章节级字段（`completed_sections` / `live_by_section`）随分章链路退役。
  */
 function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
-  const completedSections: CompletedSection[] = readObjectArray(data, 'completed_sections').map(
-    (item) => {
-      const section: CompletedSection = {
-        sectionId: readString(item, 'section_id'),
-        heading: readString(item, 'heading'),
-        text: readString(item, 'text'),
-      }
-      // 旧快照没有这两个字段：缺省就不写，保持既有形状（并行链路才带 index/failed）
-      if (typeof item.index === 'number') section.index = item.index
-      if (item.failed === true) section.failed = true
-      return section
-    },
-  )
-
   const rawSolutionId = data.solution_id
-  // 按章半成品：只认带 sectionId 且有字的项。缺 index 时用数组序兜底
-  // （与 `completedSections` 同口径：旧后端 / 坏数据不该让整段快照失效）。
-  const liveBySection: SectionDraft[] = readObjectArray(data, 'live_by_section')
-    .map((item, position): SectionDraft => {
-      const rawIndex = item.index
-      return {
-        sectionId: readString(item, 'section_id'),
-        index: typeof rawIndex === 'number' ? rawIndex : position,
-        text: readString(item, 'text'),
-        phase: readString(item, 'phase') || 'writing',
-      }
-    })
-    .filter((item) => item.sectionId !== '' && item.text !== '')
   return {
     jobId: readNumber(data, 'job_id'),
     kind: readString(data, 'kind'),
     // 目标产物：`kind` 是动作名，`doc_kind` 才是「写哪一份」。旧后端没有这个字段，
     // 解析成 null 由调用方走「按阶段反推」的旧路，不在这里猜。
     docKind: fromBackendKind(data.doc_kind),
-    status: readString(data, 'status'),
+    status: readString(data, 'status') as JobState,
     phase: readString(data, 'phase'),
     finalizedText: readString(data, 'finalized_text'),
     liveBuffer: readString(data, 'live_buffer'),
-    liveBySection,
     stageText: readString(data, 'stage_text'),
-    completedSections,
     solutionId: typeof rawSolutionId === 'number' ? rawSolutionId : null,
     errorCode: readString(data, 'error_code'),
     errorMessage: readString(data, 'error_message'),
     pendingItems: parsePendingItems(data),
     partial: data.partial === true,
-    failedSections: readObjectArray(data, 'failed_sections').map((item) => ({
-      sectionId: readString(item, 'section_id'),
-      title: readString(item, 'title'),
-      reason: readString(item, 'reason'),
-    })),
     elapsedMs: readNumber(data, 'elapsed_ms'),
+    // 失败退避（#88）：空串 = 立即可领，读成 null 让调用方走「没在等」的常规路径。
+    // 时间换算（含时区）统一在 `@/utils/backoff`，这里只负责把原文搬过来。
+    retryAt: readString(data, 'next_run_at') || null,
   }
 }
 
@@ -525,11 +489,18 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
 function parseSseBlock(block: string): StreamEventPayload | null {
   const dataLines: string[] = []
   let eventName = ''
+  // 游标只出现在 `id:` 行（SSE 规范字段），不在 JSON 体里；解析器负责把它补进来
+  let eventId: number | undefined
 
   for (const rawLine of block.split('\n')) {
     const line = rawLine.trimEnd()
     if (line.startsWith('event:')) {
       eventName = line.slice('event:'.length).trim()
+    } else if (line.startsWith('id:')) {
+      const raw = line.slice('id:'.length).trim()
+      const parsed = Number(raw)
+      // 非法 id 行整条忽略：它不是数据帧，也不该让这一帧解析失败
+      if (raw && Number.isInteger(parsed) && parsed >= 0) eventId = parsed
     } else if (line.startsWith('data:')) {
       // 规范允许「data:」后跟一个空格，去掉它但保留内容自身的缩进
       dataLines.push(line.slice('data:'.length).replace(/^ /, ''))
@@ -552,6 +523,7 @@ function parseSseBlock(block: string): StreamEventPayload | null {
       // 只有真的带了这个字段才赋值：`code` 缺失与「码未知」是两回事，
       // 都由消费方统一降级成 INTERNAL_ERROR，这里不替它编一个值出来。
       ...(typeof parsed.code === 'string' ? { code: toErrorCode(parsed.code) } : {}),
+      ...(typeof eventId === 'number' ? { eventId } : {}),
     }
   } catch {
     return null
@@ -629,6 +601,10 @@ async function readStreamRequest(
   function handleBlock(block: string): void {
     const event = parseSseBlock(block)
     if (!event) return
+
+    // 游标先交给调用方（每条事件一次）：它决定「断线重连从哪接」，与事件内容无关，
+    // 因此放在类型分发之前——任何一个事件类型上的 `id:` 都必须被记住。
+    if (typeof event.eventId === 'number') handlers.onCursor?.(event.eventId)
 
     switch (event.type) {
       case 'status':
@@ -880,8 +856,8 @@ function toBackendKind(kind: DocKind): string {
 export interface JobCreated {
   /** 任务 id */
   jobId: number
-  /** 初始状态，创建时恒为 running */
-  status: string
+  /** 初始状态（七值之一：新任务建行即 pending，随即抢占成 running） */
+  status: JobState
 }
 
 /** 任务状态摘要（列表 / 查询共用；**不含正文**） */
@@ -898,7 +874,8 @@ export interface JobStatusSummary {
    * 猜一条默认值等于把 A 的回复写进 B 的列表。
    */
   chatStage: ChatStage | null
-  status: string
+  /** 任务状态（七值，票 #84）：按 @/utils/jobState 取文案，不按错误码猜 */
+  status: JobState
   phase: string
   solutionId: number | null
   errorCode: string
@@ -924,7 +901,7 @@ function toJobStatus(data: unknown): JobStatusSummary {
     chatStage: typeof raw.chat_stage === 'string' && raw.chat_stage
       ? (raw.chat_stage as ChatStage)
       : null,
-    status: typeof raw.status === 'string' ? raw.status : '',
+    status: (typeof raw.status === 'string' ? raw.status : '') as JobState,
     phase: typeof raw.phase === 'string' ? raw.phase : '',
     solutionId: typeof raw.solution_id === 'number' ? raw.solution_id : null,
     errorCode: typeof raw.error_code === 'string' ? raw.error_code : '',
@@ -958,6 +935,15 @@ export interface CreateJobPayload {
   docKind?: DocumentKind
   document?: string
   instruction?: string
+  /**
+   * 就地动作（`optimize` / `clarify` / `auto-clarify`）**以为的当前版本号**（票 #81）。
+   *
+   * 这三个动作会覆盖当前正文：任务跑到收尾时若「我以为那一版」已经不是当前版本
+   * （例如期间生成任务追加了新版本），后端拒绝写入、任务判失败（`CONTENT_CHANGED`），
+   * 界面提示「正文已被更新，请刷新后重试」。整篇生成 / 修复是追加新版本、不覆盖当前正文，
+   * 因此不需要带上。
+   */
+  expectedVersionNo?: number
   /**
    * 要由 AI 自行拍板的待确认清单；只有 `auto-clarify` 用得上。
    *
@@ -1042,6 +1028,8 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
     doc_kind: payload.docKind ? toBackendKind(payload.docKind) : null,
     document: payload.document ?? '',
     instruction: payload.instruction ?? '',
+    // 就地改写的版本锁（票 #81）：随任务单定格，收尾按它做条件写。不传时不比对。
+    expected_version_no: payload.expectedVersionNo ?? null,
     // 结构化清单原样透传：提示词在后端，前端不拼任何一句话
     pending_items: payload.pendingItems ?? [],
     // 只有 `false` 是「明确关掉」；不传就让后端取配置，不在这里替它挑默认值
@@ -1059,7 +1047,7 @@ export async function createJob(payload: CreateJobPayload): Promise<JobCreated> 
   }
   return {
     jobId: typeof data?.job_id === 'number' ? data.job_id : 0,
-    status: typeof data?.status === 'string' ? data.status : 'running',
+    status: (typeof data?.status === 'string' ? data.status : 'pending') as JobState,
   }
 }
 
@@ -1077,12 +1065,12 @@ export async function fetchJob(jobId: number): Promise<JobStatusSummary> {
  * 对应后端 `GET /api/jobs`。
  *
  * 典型用途：刷新后快照里没有 `activeJobId`，用
- * `{solutionId, kind, status:'running'}` 仍能找到那个还在跑的任务并重连。
+ * `{solutionId, kind, status:'pending,running,cancelling'}` 仍能找到那个还在跑的任务并重连。
  */
 export async function fetchActiveJobs(filters: {
   solutionId?: number | null
   kind?: DocKind
-  status?: string
+  status?: JobState | string
 }): Promise<JobStatusSummary[]> {
   const params: Record<string, string | number> = {}
   if (filters.solutionId != null) params.solution_id = filters.solutionId
@@ -1099,16 +1087,23 @@ export async function fetchActiveJobs(filters: {
  *
  * 订阅开始时后端会**先发一份 `snapshot`**（补全断线前已产出的正文），再接 live 事件；
  * 因此刷新后重连只需调用它，即可「静默」把进度接上。
+ *
+ * `cursor` 是「上一次订阅读到哪了」（取自事件的 `id:` 行 / `handlers.onCursor`）。
+ * **只有「已经在流中间、且手里还有正文」的续读才带它**：后端会从该游标之后继续发，
+ * 且不再重发快照（那条快照会把客户端已有的内容再铺一遍）。不带游标 = 新读者，
+ * 后端先给快照 + 快照游标，**不回放**历史。
  */
 export function readJobStream(
   jobId: number,
   handlers?: StreamHandlers,
   signal?: AbortSignal,
+  cursor?: number,
 ): Promise<StreamResult> {
-  return readStreamRequest(
-    { method: 'GET', path: `/api/jobs/${jobId}/stream`, signal },
-    handlers,
-  )
+  const path =
+    cursor === undefined
+      ? `/api/jobs/${jobId}/stream`
+      : `/api/jobs/${jobId}/stream?cursor=${cursor}`
+  return readStreamRequest({ method: 'GET', path, signal }, handlers)
 }
 
 export default http

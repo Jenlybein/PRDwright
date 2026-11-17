@@ -1,10 +1,10 @@
 """整篇文档审核与一次改写（接口文档 / 提示词套件共用）。
 
-为什么单独一个模块而不是塞进 `prd_section_writer`：
+为什么单独一个模块而不是塞进 `document_service`：
 - PRD 是**按章节**审核的，每章一次、带前序章节上下文；
 - 接口文档与提示词是**整篇**生成的，只审一次整篇。
 两者共用「结构化 JSON 判定」的形态，但上下文与调用位置不同，混在一起会让
-`prd_section_writer` 的章节循环更难读。
+那里同时管三份产物的生成与下游改写，整篇审核再叠进去更难读。
 
 审核失败不阻断生成、改写失败保留初稿：这两步是锦上添花，不能因为它们挂掉就把已经
 生成的正文丢掉。但「不阻断」不等于「报成通过」——审核没跑成时结论判定为空串、
@@ -462,7 +462,6 @@ def review_data(
     summary: str,
     issues: list[dict[str, Any]] | None = None,
     rewritten: bool = False,
-    failed_sections: list[dict[str, Any]] | None = None,
     attempted: bool = True,
 ) -> dict[str, Any]:
     """构造审核结论的数据形状——**事件与入库共用同一份**。
@@ -471,13 +470,16 @@ def review_data(
     才是刷新 / 换设备后的唯一来源。两处各拼一份 dict 的后果不是报错，而是「同一次
     审核在界面上与刷新后长得不一样」——那种偏差只能靠人眼发现。
 
+    三份产物的结论形状**逐字相同**（票 #94）：`kind` 只回答「这是哪一份产物的结论」，
+    不引入任何按产物分叉的字段。分章时代那个 `failed_sections`（失败章节清单）已随
+    分章链路退役——它恒为空，留在契约里只会让人以为「哪天会有值」。
+
     Args:
         kind: 产物类型（`prd` / `api_docs` / `prompts`）。
         verdict: `pass` / `revise`；**空串表示没审成**（不是通过）。
         summary: 一句话结论。
         issues: 逐条问题与严重度。
         rewritten: 本次是否真的执行了改写。
-        failed_sections: 生成失败的章节（PRD 并行链路才会非空）。
         attempted: 这次审核**有没有真的试过**。它是「审失败」与「没审」的分界：
             调用挂了、回的不是 JSON 都是「试过但没成」；`review_enabled=false` 的
             入口（快捷流程）连事件都不发，压根不存在这个字段。**别靠判定空串去猜**：
@@ -493,7 +495,6 @@ def review_data(
         "summary": summary,
         "issues": list(issues or []),
         "rewritten": bool(rewritten),
-        "failed_sections": list(failed_sections or []),
         "reviewed_at": utc_now_text(),
         "attempted": bool(attempted),
     }
@@ -504,7 +505,6 @@ def review_event(
     review: DocumentReviewResult | None,
     *,
     rewritten: bool = False,
-    failed_sections: list[dict[str, Any]] | None = None,
     attempted: bool = True,
 ) -> StreamEvent:
     """构造 `review` 事件（订阅期间的即时展示；落库另走收尾）。
@@ -526,7 +526,6 @@ def review_event(
                 verdict="",
                 summary=summary,
                 rewritten=rewritten,
-                failed_sections=failed_sections,
                 attempted=attempted,
             ),
         )
@@ -540,7 +539,6 @@ def review_event(
             summary=summary,
             issues=review.issues,
             rewritten=rewritten,
-            failed_sections=failed_sections,
             attempted=attempted,
         ),
     )

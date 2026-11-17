@@ -31,6 +31,7 @@ dataclass 做投影，字段与列一一对应，既拿到属性访问与类型�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import delete, func, literal, select, update
 from sqlmodel import Session
@@ -39,6 +40,15 @@ from backend.core.clock import utc_now_text
 from backend.core.dialect import upsert_select
 from backend.core.limits import ensure_text_within_limit
 from backend.core.models import Document, DocumentVersion, Solution
+
+# 「就地改当前版本」的结果。**机器判据**，服务层据此翻成对外的写结果：
+# - `ok`              写进去了
+# - `missing`         方案不可见 / 文档或当前版本不存在（没有可写的地方）
+# - `version_conflict` 调用方的「我以为当前是第几版」与库里不一致——一个字都不写
+#
+# 判据刻意不是 `False` / `0 行`：把「0 行」当成成功（或当成不存在）正是 #81 要根除的
+# 一类静默错误，版本冲突必须能被调用方分辨出来。
+DocumentRevisionOutcome = Literal["ok", "missing", "version_conflict"]
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +77,8 @@ class DocumentRow:
     review_failed_at: str | None
     source: str | None
     metadata: str | None
+    # 这一版是不是「部分完成」（票 #85）：可用但不完整。NULL/False = 没有不完整记录。
+    partial: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +94,8 @@ class VersionSummary:
     created_at: str
     updated_at: str
     is_current: bool
+    # 这一版是不是「部分完成」（票 #85）：版本列表据此与完整版本区分开。
+    partial: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +115,8 @@ class VersionDetail:
     source: str
     note: str | None
     metadata: str | None
+    # 这一版是不是「部分完成」（票 #85）。读侧据此显示「这份正文不完整」。
+    partial: bool | None
     created_at: str
     updated_at: str
     is_current: bool
@@ -129,6 +145,7 @@ def _merged_select():
             DocumentVersion.last_run_summary.label("last_run_summary"),
             DocumentVersion.review.label("review"),
             DocumentVersion.review_failed_at.label("review_failed_at"),
+            DocumentVersion.partial.label("partial"),
             DocumentVersion.source.label("source"),
             DocumentVersion.meta.label("metadata"),
         )
@@ -190,6 +207,7 @@ class DocumentRepository:
                 func.length(DocumentVersion.content).label("content_length"),
                 DocumentVersion.created_at.label("created_at"),
                 DocumentVersion.updated_at.label("updated_at"),
+                DocumentVersion.partial.label("partial"),
                 (DocumentVersion.id == Document.current_version_id).label("is_current"),
             )
             .select_from(DocumentVersion)
@@ -213,6 +231,7 @@ class DocumentRepository:
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
                 is_current=bool(row["is_current"]),
+                partial=bool(row["partial"]),
             )
             for row in rows
         ]
@@ -234,6 +253,7 @@ class DocumentRepository:
                 DocumentVersion.source.label("source"),
                 DocumentVersion.note.label("note"),
                 DocumentVersion.meta.label("metadata"),
+                DocumentVersion.partial.label("partial"),
                 DocumentVersion.created_at.label("created_at"),
                 DocumentVersion.updated_at.label("updated_at"),
                 (DocumentVersion.id == Document.current_version_id).label("is_current"),
@@ -262,6 +282,7 @@ class DocumentRepository:
             source=row["source"],
             note=row["note"],
             metadata=row["metadata"],
+            partial=row["partial"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             is_current=bool(row["is_current"]),
@@ -324,6 +345,7 @@ class DocumentRepository:
         metadata: str = "{}",
         review: str | None = None,
         review_failed_at: str | None = None,
+        partial: bool = False,
         invalidate: tuple[str, ...] = (),
     ) -> DocumentVersion | None:
         """追加一条新版本并把它设为当前版本；返回新版本**模型对象**，方案不可见时返回 None。
@@ -345,6 +367,10 @@ class DocumentRepository:
         它与正文**同批写入**：结论描述的就是这一版正文，分两次写就会出现「正文换了、
         结论还是旧的」这种无主记录。没有审核结论（没审成 / 该任务本来就不审）时为
         `None`——**不写占位**，读侧据此显示「未审核」。
+
+        `partial` 是「这一版正文可用但不完整」（票 #85）。它与正文同批写入同一个理由：
+        标记描述的就是这一版。**它不改变审核两列**——部分完成的那一版没有结论，
+        调用方照样传 `review=None` / `review_failed_at=None`，不许把上一版的结论顺手带过来。
         """
         now = utc_now_text()
 
@@ -388,6 +414,7 @@ class DocumentRepository:
             last_run_summary=last_run_summary,
             review=review,
             review_failed_at=review_failed_at,
+            partial=partial,
             source=source,
             note=note,
             meta=metadata,
@@ -495,6 +522,7 @@ class DocumentRepository:
         *,
         content: str,
         content_sha: str,
+        expected_version_no: int | None = None,
     ) -> bool:
         """**就地**改写当前版本的正文，成功返回 True（不新增版本条目）。
 
@@ -503,17 +531,25 @@ class DocumentRepository:
 
         文档行还不存在时（手改先于任何生成）会顺势建行 + 建 `version_no=1, source='manual'`，
         保持「没有生成也能手改」这一既有语义。方案不可见时返回 False。
+
+        `expected_version_no` 给出时带版本锁：当前版本号不是「我以为那一版」就一个字都不写
+        （返回 False）。返回布尔是历史形状；需要分辨「不存在 / 版本冲突」的调用方请直接用
+        `write_current_version`（它的机器判据才是 #81 的契约）。
         """
-        return self._update_current_version(
-            owner_id,
-            solution_id,
-            kind,
-            content=content,
-            content_sha=content_sha,
-            pending_items=None,
-            last_run_summary=None,
-            replace_generated_meta=False,
-            source="manual",
+        return (
+            self.write_current_version(
+                owner_id,
+                solution_id,
+                kind,
+                content=content,
+                content_sha=content_sha,
+                pending_items=None,
+                last_run_summary=None,
+                replace_generated_meta=False,
+                source="manual",
+                expected_version_no=expected_version_no,
+            )
+            == "ok"
         )
 
     def replace_current_version(
@@ -527,6 +563,7 @@ class DocumentRepository:
         pending_items: str,
         last_run_summary: str | None,
         source: str = "manual",
+        expected_version_no: int | None = None,
     ) -> bool:
         """**就地**改写当前版本，且正文 + 清单 + 回执**同批替换**（不新增版本条目）。
 
@@ -534,18 +571,111 @@ class DocumentRepository:
         但那三者产自同一次模型调用栈，必须整批落——分开写就会出现「清单与正文对不上」。
 
         `source` 只在「当前版本还不存在、需要顺势建 `version_no=1`」这条兜底路径上用到。
+        版本锁语义与 `update_current_version` 相同；需要机器判据的调用方用
+        `write_current_version`。
         """
-        return self._update_current_version(
-            owner_id,
-            solution_id,
-            kind,
-            content=content,
-            content_sha=content_sha,
-            pending_items=pending_items,
-            last_run_summary=last_run_summary,
-            replace_generated_meta=True,
-            source=source,
+        return (
+            self.write_current_version(
+                owner_id,
+                solution_id,
+                kind,
+                content=content,
+                content_sha=content_sha,
+                pending_items=pending_items,
+                last_run_summary=last_run_summary,
+                replace_generated_meta=True,
+                source=source,
+                expected_version_no=expected_version_no,
+            )
+            == "ok"
         )
+
+    def write_current_version(
+        self,
+        owner_id: int,
+        solution_id: int,
+        kind: str,
+        *,
+        content: str,
+        content_sha: str,
+        pending_items: str | None,
+        last_run_summary: str | None,
+        replace_generated_meta: bool,
+        source: str,
+        expected_version_no: int | None = None,
+    ) -> DocumentRevisionOutcome:
+        """**就地改当前版本**的唯一实现，两种口径共用一个入口（返回机器判据）。
+
+        `replace_generated_meta=True`：正文 + 清单 + 回执同批替换（生成改写的就地落稿）。
+        `replace_generated_meta=False`：只改正文（用户手改）。
+
+        ## 版本锁（#81）
+
+        `expected_version_no` 是调用方「我以为当前是第几版」。它**同时写在 SQL 条件里**
+        （`document_versions.version_no == expected`），而不是「读出来、判断、再写回去」：
+        判定与写入收在同一条语句里，另一次写入插到中间时这条 UPDATE 改到 0 行，于是返回
+        `version_conflict` 而不是悄悄覆盖用户刚改过 / 刚生成的那一版。
+
+        文档行还不存在（`current_version_id IS NULL`）时：`expected` 为空或 0 才允许顺势建
+        `version_no=1`（「先手改、后生成」的既有语义）；给了正的期望版本号说明调用方以为
+        有版本、实际没有，按 `version_conflict` 拒绝，不猜。
+
+        归属仍经 `_ensure_document` 的 `INSERT ... SELECT ... WHERE s.user_id=?` 过滤：
+        方案不可见时返回 `missing`。
+        """
+        now = utc_now_text()
+        document = self._ensure_document(owner_id, solution_id, kind, now)
+        if document is None:
+            return "missing"
+
+        current = document.current_version_id
+        if current is None:
+            if expected_version_no not in (None, 0):
+                return "version_conflict"
+            version = DocumentVersion(
+                document_id=document.id,
+                version_no=1,
+                content=content,
+                content_sha=content_sha,
+                pending_items=pending_items if pending_items is not None else "[]",
+                last_run_summary=last_run_summary,
+                source=source,
+                note="",
+                meta="{}",
+                created_at=now,
+                updated_at=now,
+            )
+            self.session.add(version)
+            self.session.flush()
+            document.current_version_id = version.id
+            document.updated_at = now
+            self.session.flush()
+            return "ok"
+
+        # 条件写：当前版本在 SQL 里判定（`documents.current_version_id` 子查询），
+        # 期望版本号也在同一条语句里。两次查询之间若发生别的写入，这里改到 0 行。
+        current_of_doc = (
+            select(Document.current_version_id)
+            .where(Document.id == document.id)
+            .scalar_subquery()
+        )
+        statement = update(DocumentVersion).where(DocumentVersion.id == current_of_doc)
+        if expected_version_no is not None:
+            statement = statement.where(
+                DocumentVersion.version_no == expected_version_no
+            )
+        values: dict[str, object] = {"content": content, "content_sha": content_sha, "updated_at": now}
+        if replace_generated_meta:
+            values["pending_items"] = pending_items or "[]"
+            values["last_run_summary"] = last_run_summary
+        result = self.session.execute(statement.values(**values))
+        if int(result.rowcount or 0) != 1:
+            # 期望版本号给了却改不到任何行 = 版本对不上（不是「不存在」：文档行刚刚确认过）。
+            return "version_conflict" if expected_version_no is not None else "missing"
+
+        document.updated_at = now
+        self.session.flush()
+        return "ok"
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -560,8 +690,7 @@ class DocumentRepository:
         写在 SELECT 里，因此**归属不通过时一行都插不进去**，不需要「先查一次再写」
         这种两次往返、留下窗口的写法。随后再查一次既拿模型对象又当归属校验的第二道闸。
 
-        冲突处理走方言适配层（v8）：调用方只说「冲突就跳过」，
-        不关心是 `ON CONFLICT DO NOTHING` 还是 MySQL 的主键 no-op 更新。
+        冲突处理走方言适配层（v8）：调用方只说「冲突就跳过」，不写方言语法。
         """
         upsert_select(
             self.session,
@@ -585,64 +714,3 @@ class DocumentRepository:
             .first()
         )
 
-    def _update_current_version(
-        self,
-        owner_id: int,
-        solution_id: int,
-        kind: str,
-        *,
-        content: str,
-        content_sha: str,
-        pending_items: str | None,
-        last_run_summary: str | None,
-        replace_generated_meta: bool,
-        source: str,
-    ) -> bool:
-        """就地改当前版本的实现，两种口径共用一个入口。
-
-        `replace_generated_meta=True`：正文 + 清单 + 回执同批替换（生成改写的就地落稿）。
-        `replace_generated_meta=False`：只改正文（用户手改）。
-
-        当前版本不存在时（`current_version_id IS NULL`）顺势建 `version_no=1`——这样「先手改、
-        后生成」与「先生成、后手改」两条入口都能自洽，不必让调用方先判断有没有版本。
-        """
-        now = utc_now_text()
-        document = self._ensure_document(owner_id, solution_id, kind, now)
-        if document is None:
-            return False
-
-        current = document.current_version_id
-        if current is None:
-            version = DocumentVersion(
-                document_id=document.id,
-                version_no=1,
-                content=content,
-                content_sha=content_sha,
-                pending_items=pending_items if pending_items is not None else "[]",
-                last_run_summary=last_run_summary,
-                source=source,
-                note="",
-                meta="{}",
-                created_at=now,
-                updated_at=now,
-            )
-            self.session.add(version)
-            self.session.flush()
-            document.current_version_id = version.id
-            document.updated_at = now
-            self.session.flush()
-            return True
-
-        version = self.session.get(DocumentVersion, current)
-        if version is None:
-            # 指针指向一条不存在的版本（理论上不该发生）：按「不可见」处理并让事务回滚。
-            return False
-        version.content = content
-        version.content_sha = content_sha
-        if replace_generated_meta:
-            version.pending_items = pending_items or "[]"
-            version.last_run_summary = last_run_summary
-        version.updated_at = now
-        document.updated_at = now
-        self.session.flush()
-        return True

@@ -275,11 +275,11 @@ describe('流式可见性', () => {
     let runAtSubscribe: unknown = 'unset'
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       runAtSubscribe = useRunsStore().activeRun
-      handlers?.onChunk?.({ text: '第一段', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '第一段' })
       await new Promise<void>((resolve) => {
         release = resolve
       })
-      handlers?.onChunk?.({ text: '第二段', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '第二段' })
       return { conversationId: '', reply: '第一段第二段', asks: [] }
     })
 
@@ -368,7 +368,7 @@ describe('中断与串会话', () => {
   it('重连途中被中止不报「接回上一轮对话失败」，并保留已接到的内容', async () => {
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       // 半截内容先摆上来（这正是用户说的「已经接回来了」）
-      handlers?.onChunk?.({ text: '已经接回来的一半', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '已经接回来的一半' })
       detachAllSubscriptions()
       throw abortError()
     })
@@ -453,11 +453,11 @@ describe('刷新接回', () => {
   it('重连时增量写进对话预览，收尾后从服务端拉齐轮次', async () => {
     let release: () => void = () => {}
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
-      handlers?.onChunk?.({ text: '断线前已经说出的一半', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '断线前已经说出的一半' })
       await new Promise<void>((resolve) => {
         release = resolve
       })
-      handlers?.onChunk?.({ text: '，以及后半句', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '，以及后半句' })
       return { conversationId: '', reply: '断线前已经说出的一半，以及后半句', asks: [] }
     })
     // 服务端此时已经有完整轮次

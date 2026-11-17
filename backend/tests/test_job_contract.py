@@ -29,7 +29,6 @@ from backend.services import (
     document_service,
     job_runtime,
     llm_factory,
-    prd_section_writer,
 )
 from backend.services.job_bus import job_bus
 from fakes import ScriptedLLM
@@ -48,7 +47,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
     yield
 
 
@@ -144,7 +142,7 @@ def _run_to_completion(client, payload: dict[str, Any]) -> None:
     job_id = _create_job(client, payload)
     events = _drain(client, job_id)
     summary = next(event for event in events if event["type"] == "run_summary")
-    assert summary["data"]["status"] == "completed", summary
+    assert summary["data"]["status"] == "succeeded", summary
 
 
 def _generation_prompt(llm: ScriptedLLM) -> str:
@@ -154,7 +152,7 @@ def _generation_prompt(llm: ScriptedLLM) -> str:
 
 
 def _all_prompts(llm: ScriptedLLM) -> str:
-    """把所有调用收到的正文拼成一段（PRD 分章节链路一次生成会调很多次）。"""
+    """把所有调用收到的正文拼成一段（撰写 + 审核 / 改写各一次调用，兼容多次调用的拼法）。"""
     assert llm.calls, "生成没有调用模型"
     return "\n".join(
         str(getattr(message, "content", ""))
@@ -335,7 +333,7 @@ def test_prompts_job_only_needs_the_prd(client, monkeypatch):
 # 这些用例从前拿那四条**真实路由 + 真实 SSE 分帧**当接缝；接缝迁到任务通道后，
 # 覆盖落在三处，本文件不重复：
 #
-# - **SSE 端到端**（`part` 按序拼回 `done.reply`）：`test_prd_section_stream.py`；
+# - **SSE 端到端**（撰写 → 审核 → 定稿 → 落版本）：`test_prd_whole_stream.py`；
 # - **请求体只表达「做什么、对哪一份」**（旧字段被忽略、缺材料 400）：本文件一~三节；
 # - **鉴权门禁**：`test_auth_gate.py` 的清单与 OpenAPI 不变量。
 #

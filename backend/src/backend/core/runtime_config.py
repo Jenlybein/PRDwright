@@ -69,16 +69,10 @@ ACTIVE_PROVIDER_KEY = "active_provider_id"
 # 选择标准是「改完之后下一次生成就生效」，凡是「改了必须重启」的一律不收：
 # 日志级别/落盘、db 路径、认证开关、CORS、host/port、技能目录。
 WHITELIST: tuple[str, ...] = (
-    # 分章节生成
-    "prd_section_review_enabled",
-    "prd_section_max_rewrites",
-    "prd_pipeline_concurrency",
-    "prd_section_max_retries",
-    # 审核与改写
+    # 审核与改写（三份产物共用；票 #92 起 PRD 也没有分章专用开关了）
     "review_rewrite_min_severity",
     "doc_section_rewrite_enabled",
     "doc_review_max_tokens",
-    "prd_section_review_max_tokens",
     # 调用与预算
     "llm_timeout",
     "llm_total_timeout",

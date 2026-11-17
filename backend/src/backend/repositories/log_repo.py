@@ -24,13 +24,13 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import case, delete, func, insert, select
+from sqlalchemy import case, delete, func, insert, or_, select
 from sqlmodel import Session
 
 from backend.core.clock import utc_ms_text, utc_now
 from backend.core.models import AppLog
 
-# 级别映射：SQLite 里没有枚举，靠 `CASE` 把字符串折成可比较的序。
+# 级别映射：库里没有原生枚举，靠 `CASE` 把字符串折成可比较的序。
 # 未登记的级别一律当 0（低于 INFO），于是「按 INFO 过滤」不会把它漏掉。
 _LEVEL_RANK = case(
     (AppLog.level == "DEBUG", 10),
@@ -146,9 +146,9 @@ class LogRepository:
         --------------
         - **级别用 `>=` 而不是等值**：选 `WARNING` 时人想看的是「警告及以上」，
           而不是「只要 WARNING、不要 ERROR」——后者几乎没人需要，却更容易误解。
-          级别在 SQL 里按 `level_rank` 映射成数字比较（SQLite 无枚举类型）。
+          级别在 SQL 里按 `level_rank` 映射成数字比较（库里没有枚举类型）。
         - **关键词只搜 `msg`**：`extra_json` 也被搜的话，一次 `LIKE` 会扫全表两列，
-          在 SQLite 上代价明显；而人找日志时最先记得的是那句话本身。
+          整表扫描的代价明显；而人找日志时最先记得的是那句话本身。
           要按结构化字段找，用 `event` / `request_id` / `user_id` 那几个精确条件。
         - **`logger` 用前缀匹配**（`LIKE 'x%'`）：`backend.services.job_service` 这整棵
           子树一起看是常态，要求精确等于反而更麻烦。
@@ -201,10 +201,16 @@ class LogRepository:
         if user_id is not None:
             conditions.append(AppLog.user_id == user_id)
         if exclude_event:
-            # 用 `IS NOT` 而不是 `!=`：`event` 可为 NULL，而 `NULL != 'x'`
-            # 在 SQL 里求值为 NULL（不成立），会把所有「没有事件名」的日志一起丢掉。
-            # `IS NOT` 对 NULL 成立，语义正是「不是这个事件（含没有事件名的）」。
-            conditions.append(AppLog.event.is_not(exclude_event))
+            # 语义是「不是这个事件（含没有事件名的）」：`event` 可为 NULL，而
+            # `NULL != 'x'` 在 SQL 里求值为 NULL（不成立），会把所有「没有事件名」
+            # 的日志一起丢掉，所以要把 `IS NULL` 显式带上。
+            #
+            # ⚠️ 不能写 `AppLog.event.is_not(exclude_event)`（#77 在 Postgres 上撞出真因）：
+            # `IS NOT <值>` 只在 SQLite 上合法，Postgres 的 `IS NOT` 只接受
+            # NULL / TRUE / FALSE / DISTINCT FROM 这几种右值，直接传字符串是**语法错误**
+            # （`syntax error at or near "$1"`）。而 `IS NULL OR event != 值` 两边都合法、
+            # 语义与原来那句完全一致。
+            conditions.append(or_(AppLog.event.is_(None), AppLog.event != exclude_event))
         if keyword:
             # 转义 `%` / `_`：用户搜「50%」时不该被当成通配符，否则会搜出无关的行
             escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

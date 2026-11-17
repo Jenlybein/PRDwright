@@ -1,8 +1,9 @@
 # PRDwright 部署（v9）
 
-两个镜像、一个入口、三个命名卷。**Linux 与 Windows 用同一份编排、同一组命令**——
-持久化全在 Docker 命名卷里，没有宿主目录挂载，所以不需要平台的 override 文件
-（为什么必须这样，见 [`../docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md) §3.6：三个命名卷与唯一部署后端 SQLite）。
+三个进程（`db` / `api` / `web`）、一个入口、三个命名卷。**Linux 与 Windows 用同一份编排、
+同一组命令**——持久化全在 Docker 命名卷里，没有宿主目录挂载，所以不需要平台的 override 文件
+（为什么必须这样，见 [`../docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md) §3.6：
+三个命名卷与唯一部署后端 Postgres）。
 
 第一次部署的完整路径：**准备 `.env` 与主密钥 → 起栈 → 进管理后台配一个模型供应商 → 登录使用**。
 下面的命令都可以直接粘贴，Docker 命令在 PowerShell 与 bash 里一致；只有复制文件那一步不同。
@@ -40,10 +41,11 @@ Windows PowerShell：
 Copy-Item .env.example .env
 ```
 
-打开 `.env`，**至少改这两项**：
+打开 `.env`，**至少改这三项**：
 
 | 变量 | 改什么 |
 | --- | --- |
+| `POSTGRES_PASSWORD` | 数据库口令。compose 用它拼 api 的 `DATABASE_URL`，缺它直接起不来 |
 | `INIT_ADMIN_PASSWORD` | 首个管理员密码（`users` 表为空时自动创建该账号，且直接是管理员） |
 | `INVITE_CODE` | 注册邀请码（`invite_codes` 表为空时自动播种） |
 
@@ -153,6 +155,7 @@ api 的 8000 端口**不发布到宿主**，只能被 web 通过内部网络访�
 | 构建两个镜像 | `make build` |
 | 生成主密钥（仅首次） | `make keygen` |
 | 备份（见 §6） | `make backup` |
+| 回滚预演练（见 §6.7） | `make drill` |
 
 `deploy/Makefile` 的每条目标**只有一条 `docker compose …` / `uv run …`**，没有额外逻辑，
 所以 `make` 与 docker 命令是同一套口径的简写与展开式。没有 `make` 的环境（Windows 原生
@@ -170,23 +173,28 @@ make config  = docker compose config
 make build   = docker compose build
 make keygen  = 上面 §1.2 那条 docker run
 make backup  = uv run --project ../backend python backup.py
+make drill   = uv run --project ../backend python drill.py
 ```
 
 ---
 
 ## 5. 数据、日志、密钥在哪
 
-| 卷（固定名） | 容器内挂载点 | 内容 | 丢了会怎样 |
+| 卷（固定名） | 谁在用 | 内容 | 丢了会怎样 |
 | --- | --- | --- | --- |
-| `prdwright_data` | `/var/lib/prdwright` | SQLite 库 `prdwright.db`（含 `-wal` / `-shm` 边车） | **业务数据全丢** |
-| `prdwright_logs` | `/var/log/prdwright` | 轮转日志文件 | 丢历史日志（`app_logs` 表里还有一份派生数据） |
-| `prdwright_secrets` | `/secrets`（**只读**） | `master.key` | 库里所有模型密钥都解不开 |
+| `prdwright_pgdata` | `db` 服务 | Postgres 的数据目录（**业务数据的唯一真源**） | **业务数据全丢** |
+| `prdwright_logs` | api | 轮转日志文件 | 丢历史日志（`app_logs` 表里还有一份派生数据） |
+| `prdwright_secrets` | api（**只读**） | `master.key` | 库里所有模型密钥都解不开 |
+
+> v9 之前那个 `prdwright_data` 卷（装 SQLite 库文件）**不再挂载、也不再被读取**。
+> 旧库不会被自动迁移，只作历史归档；处置方式见 §6.5。
 
 - 日志同时写 stdout，所以 `make logs` 是第一现场；卷里的文件供跨容器重建后回查。
-- **实时库文件不能双击查看**，这是命名卷的代价。可见性由备份产物补上：备份落到
-  `deploy/backups/`（已被版本控制忽略，由备份脚本创建）。
-- 不要往 compose 里加宿主目录挂载。Windows 上的宿主目录经桥接层会丢掉文件锁与共享内存映射，
-  SQLite 会随机报 I/O 错误甚至静默丢最近写入。换文件系统才能解决，改配置解决不了。
+- **实时库文件不能双击查看**，这是命名卷的代价。可见性由备份产物与 `docker compose exec db psql`
+  补上：备份落到 `deploy/backups/`（已被版本控制忽略，由备份脚本创建）。
+- 不要往 compose 里加宿主目录挂载。Windows 上的宿主目录经桥接层会丢掉文件系统语义
+  （fsync、目录项、锁）；Postgres 会随机报 I/O 错误、启动失败，或静默丢最近写入。
+  换文件系统才能解决，改配置解决不了。
 
 ---
 
@@ -215,94 +223,115 @@ uv run --project backend python deploy/backup.py
 ```
 
 脚本用项目自己的 uv 环境跑（`backend/.venv`，只用 Python stdlib，不要求宿主装
-`sqlite3` CLI）。它按四步走，**任何一步失败都非零退出，并指出失败在哪一步**：
+`pg_dump`）。它按四步走，**任何一步失败都非零退出，并指出失败在哪一步**：
 
-1. **前置检查**：Docker 可用、`prdwright-api:<tag>` 镜像存在、`prdwright_data` 与
+1. **前置检查**：Docker 可用、api 镜像存在（只为了校验主密钥）、与服务端同主版本的
+   `postgres:<tag>` 镜像存在、`prdwright_net` 网络与 `prdwright_pgdata` /
    `prdwright_secrets` 两个卷存在。**主密钥缺失或不可用就拒绝备份**——没有密钥的备份
    解不开库里的模型密钥，等于无用备份。
-2. **在线备份**：把数据卷挂进一个一次性容器，用 `VACUUM INTO` 生成一致快照。不拷库文件：
-   库开了 WAL，直接 `cp` 会静默丢掉还留在 `-wal` 里、尚未 checkpoint 的最近写入。
-3. **自检**：快照必须能打开、`PRAGMA integrity_check` 返回 `ok`、并且读得到
-   `alembic_version`（证明是一份已迁移的 PRDwright 库，而不是空壳）。自检不过的产物会被
-   删掉并报错——不留下一个「看起来可用」的文件。
-4. **落盘与复核**：把自检通过的库放进 `deploy/backups/`，在宿主上再算一遍 sha256 与容器
-   内的值比对（证明拷贝没有坏），然后写同名 `.sha256`。
+2. **数据库导出**：在一次性 `postgres:<tag>` 容器里跑 `pg_dump -Fc`（走 compose 的用户
+   自定义网络、服务名 `db`）。不拷数据目录：Postgres 的数据目录包含 WAL 与共享内存状态，
+   直接拷会得到一份「能启动、不报错、就是少了最近写入」的假备份。
+3. **自检**：`pg_restore --list` 必须能解析这份归档、归档里的 `TABLE DATA` 条目数必须与
+   源库 `public` 下的表数相等、并且能读到 `alembic_version`（证明是一份已迁移的
+   PRDwright 库，而不是空壳）。自检不过的产物会被删掉并报错——不留下一个「看起来可用」的文件。
+4. **落盘与复核**：在宿主上算 sha256 与字节数，写同名 `.sha256`，并把产物属主改回调用者。
 
 产物：
 
 ```
 deploy/backups/
-├── prdwright-20261102-2121.db
-└── prdwright-20261102-2121.db.sha256   # 一行：<sha256>  <文件名>
+├── prdwright-20261117-1400.dump
+└── prdwright-20261117-1400.dump.sha256   # 一行：<sha256>  <文件名>
 ```
 
 成功时的输出如下（数字来自一次实测，会随库变化）：
 
 ```
 [备份] ✓ 备份完成
-        文件         /…/deploy/backups/prdwright-20261102-2121.db
+        文件         /…/deploy/backups/prdwright-20261117-1400.dump
         字节数       200704
         sha256       666137bb…
-        自检结论     ok（库可打开、integrity_check 通过、alembic_version=0004、表 15 张）
-        校验和文件   /…/deploy/backups/prdwright-20261102-2121.db.sha256
+        自检结论     ok（归档可解析、表数 15 与源库一致、alembic_version=0001）
+        校验和文件   /…/deploy/backups/prdwright-20261117-1400.dump.sha256
 ```
 
-**栈起着或停着都能备份**：`VACUUM INTO` 是在线备份，脚本也不依赖 api 容器活着；它唯一
-需要的是**已经构建过的 api 镜像**（只借用里面的 python 与依赖，不启动服务）。所以升级前
-先把栈停掉再备份同样成立。
+**栈起着或停着都能备份**：`pg_dump` 是数据库侧的一致性快照，脚本也不依赖 api 容器活着；
+它唯一需要的是**已经构建过的 api 镜像**（只借用里面的 python 来校验主密钥，不启动服务）。
+所以升级前先把栈停掉再备份同样成立。
 
 失败时的退出码含义（脚本开头有完整表）：
 
 | 退出码 | 失败在哪一步 |
 | --- | --- |
-| `2` | 前置检查：Docker / 镜像 / 卷 / 库文件 / 主密钥 / 库地址判定（只接受 SQLite） |
-| `3` | 在线备份：`VACUUM INTO` 本身失败 |
-| `4` | 自检：打不开、`integrity_check` 不为 `ok`、读不到 `alembic_version` |
-| `5` | 写盘或校验：拷贝到宿主目录失败，或宿主 sha256 与容器内不一致 |
+| `2` | 前置检查：Docker / 镜像 / 网络 / 卷 / 主密钥 / 库地址判定（只接受 Postgres） |
+| `3` | 数据库导出：`pg_dump` 本身失败 |
+| `4` | 自检：归档解析不了、表数对不上、读不到 `alembic_version` |
+| `5` | 写盘或校验：写 sha256 失败，或产物的 sha256 / 字节数对不上 |
 
-**本项目固定 SQLite**：脚本读 `deploy/.env` 的 `DATABASE_URL`，它不是 SQLite 绝对路径时
-明确报「本项目固定使用 SQLite，不支持其它后端」并以 `2` 退出。数据库形态已经定死，
-所以这里没有第二条备份流程。
+**本项目只支持 Postgres**：脚本从 `deploy/.env` 的 `POSTGRES_*`（或显式 `DATABASE_URL`）
+推导连接参数；`DATABASE_URL` 指向 SQLite / MySQL 时明确报错并以 `2` 退出。数据库形态
+已经定死，所以这里没有第二条备份流程。
 
 ### 6.3 校验
 
 在 `deploy/backups/` 里（Linux / WSL / macOS）：
 
 ```bash
-sha256sum -c prdwright-20261102-2121.db.sha256
-# prdwright-20261102-2121.db: OK
+sha256sum -c prdwright-20261117-1400.dump.sha256
+# prdwright-20261117-1400.dump: OK
 ```
 
 Windows PowerShell 没有 `sha256sum`，用两条命令比对即可：
 
 ```powershell
-Get-FileHash .\prdwright-20261102-2121.db -Algorithm SHA256   # 与下一行的首列比
-Get-Content .\prdwright-20261102-2121.db.sha256
+Get-FileHash .\prdwright-20261117-1400.dump -Algorithm SHA256   # 与下一行的首列比
+Get-Content .\prdwright-20261117-1400.dump.sha256
 ```
 
 校验和只证明「文件没被改动」，证明不了「备份可用」——可用性由脚本里的
-`integrity_check` + `alembic_version` 自检负责，恢复演练见 §6.4。
+`pg_restore --list` + 表数对比 + `alembic_version` 自检负责，恢复演练见 §6.4。
 
 ### 6.4 恢复（也是「回滚」）
 
+下面是恢复的**机械命令**。先选场景、再照做、每步怎么判断成功——见 §6.7 的入口与
+[`ROLLBACK.md`](./ROLLBACK.md)（场景 A / B / C 的逐步命令与判据都在那里）。
+
 ```bash
-make down                               # 停栈，保留卷（= docker compose down）
+make down                 # 停栈，保留卷（= docker compose down）
 
-# 用一次性容器把备份放回数据卷；卷名固定为 prdwright_data
-docker run --rm -v prdwright_data:/data -v "${PWD}/backups:/backup" alpine \
-  sh -c "rm -f /data/prdwright.db-wal /data/prdwright.db-shm && cp /backup/prdwright-<日期>.db /data/prdwright.db && chown 10001:10001 /data/prdwright.db"
+# 1) 把备份喂给运行中的 db（先起 db 与空的 api 卷：compose up 之前用一次临时网络）
+cd deploy
+docker compose up -d db
+docker run --rm --network prdwright_net \
+  -e PGPASSWORD="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)" \
+  -v "$PWD/backups:/backup:ro" postgres:16 \
+  sh -c "pg_restore --clean --if-exists --no-owner --no-privileges \
+         -h db -U prdwright -d prdwright -v /backup/prdwright-<日期>.dump"
 
+# 2) 起服务
+#    · 只是「同一版本内恢复数据」：make up
+#    · 回滚到**旧版本代码**：先按 §6.7 场景 B 把旧镜像 tag 指回，再 `docker compose up -d --no-build`
+#      （用 make up 会按当前代码重建镜像，等于没回退）
 make up
 ```
 
-- 恢复前删掉 `-wal` / `-shm`：留着旧边车文件，SQLite 会把它们和新库拼在一起。
+要点：
+
+- 恢复前先让 `db` 起来（迁移与数据都在那个库里；空库也必须是「已初始化」的库）。
+- `--clean --if-exists` 会先删掉现有对象再重建。**确认这是想要的动作**；如果只想追加到
+  空库，去掉这两个参数。
 - 备份来自另一台机器时，**同时**把那份备份对应时期的 `master.key` 放回 `prdwright_secrets`
   卷（否则库里的模型密钥解不开）。
+- 恢复成功后还有一步「**校验**」：`alembic_version` 与表数必须和备份自检输出里记录的一致
+  （命令与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §7 的 B4）。跳过校验等于没验证恢复是否正确。
+- 回滚到旧版本时，**数据库恢复与镜像回退必须成对**：用新代码启动一个旧备份库，会在启动期把库
+  再迁移一次。完整顺序见 [`ROLLBACK.md`](./ROLLBACK.md) §7。
 - 恢复后先打开 `/readyz` 与 `/admin/` 确认，再继续操作。
 
 ### 6.5 `docker compose down -v` 会删数据
 
-| 命令 | 容器 | 网络 | **卷（数据/日志/密钥）** |
+| 命令 | 容器 | 网络 | **卷（数据库/日志/密钥）** |
 | --- | --- | --- | --- |
 | `make down`（= `docker compose down`） | 删 | 删 | **保留** |
 | `docker compose down -v` | 删 | 删 | **连卷一起删，无法撤销** |
@@ -311,8 +340,75 @@ make up
 等于所有加密配置永久作废。普通停栈、升级、重启都**不要**带 `-v`。这一条刻意没有
 `make` 目标：删除数据只该是一次需要人真的把 `-v` 敲出来的动作。
 
----
+### 6.6 历史遗留：旧的 SQLite 备份（`.db` 文件）
 
+v9 之前 `backup.py` 产出的是 `prdwright-<日期>.db`（SQLite 在线快照）。仓库里若还留着
+这种文件（或本机 `deploy/backups/` 里有），**不要删、也不要喂给新的恢复流程**：
+
+- 它不属于新链路：现在的备份是 `pg_dump` 归档（`.dump`），恢复走 `pg_restore`；
+- 它的结构是 SQLite 时代的（布尔存成 0/1、`AUTOINCREMENT` 自增语义），与本项目的
+  Postgres 基线并不一一对应，本项目**不做**旧库自动迁移；
+- 正确处理是把它当**历史归档**单独保管（连同当时的 `master.key`）。要迁到新栈，用旧版代码
+  起一次、导出需要的业务数据，再按业务需要逐条导入——而不是把它塞回数据卷。
+
+同理，`prdwright_data` 这个旧卷（装 SQLite 库文件）不再挂载，也没有任何代码读它。
+
+### 6.7 回滚预案（切换当天照这个做）
+
+**完整的手册在 [`ROLLBACK.md`](./ROLLBACK.md)**：场景 A / B / C 的逐步命令、预期输出、
+「这一步怎么判断成功」、演练记录（含实测耗时）与红线清单都在那里。本节只给入口与最关键的约束。
+
+#### 三个场景，先选一个
+
+| 场景 | 何时用 | 动什么 |
+| --- | --- | --- |
+| **A** 只回退应用镜像 | 新版本代码有问题，本次发布**没跑过迁移**（`alembic_version` 没变） | 停栈 → 旧镜像 tag 指回 → `docker compose up -d --no-build` |
+| **B** 应用 + 数据库一起回退 | 本次发布**跑过迁移**，或数据被新代码写坏 | 停栈 → 起 db → `pg_restore`（§6.4）→ 校验版本/表数 → 起旧镜像 |
+| **C** 只回退某一张表 | 只有一张表的数据被误操作，结构没变，其余表正常 | 停 api → `TRUNCATE` 该表 → `pg_restore --data-only --table=<表名>` → 同步序列 |
+
+**A 与 B 的分界线只有一条：`alembic_version` / 表结构变了没有。** 拿不准就按 B 走（更重，但不会留下「新代码 + 旧库」的错配）。
+每条命令的预期输出与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §6/§7/§8。
+
+#### 切换当天要备份什么、留多久
+
+| 对象 | 怎么备 | 保留期限 |
+| --- | --- | --- |
+| **数据库** | `make backup`（`pg_dump -Fc` + 自检 + sha256，§6.2） | 至少 **90 天**，且至少留最近 **3 次切换**各一份；异地再存一份 |
+| **镜像 tag** | 切换前 `docker tag prdwright-api:local prdwright-api:rollback-<日期>`（web 同样）+ `docker save` | 到下一次发布验收通过，最短 **30 天** |
+| **`deploy/.env`** | 复制进密码管理器/离线加密介质 | 与该版本同寿命 |
+| **`master.key`** | 从 `prdwright_secrets` 卷单独导出 | **永久**（每一把都留） |
+| 代码 / 迁移版本 | `git tag release-<日期>` + 记录 `alembic_version` | 永久 |
+
+**口令与主密钥不进备份包**：`.env` 与 `master.key` 单独保管，不跟 `.dump` 放同一个包、同一个介质
+（`README.md` §1.2 第 4 点）。命令与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §3。
+
+#### 两条边界（别混）
+
+- **回滚 ≠ 并行**：回滚是「停新、起旧」的串行动作，数据单向。本项目的任务运行时、`JobBus`、连接池全在单个 api 进程内，
+  且启动即跑迁移——两个版本同时连一个库会互相把结构改回去或启动失败。设计取舍见
+  [`../docs/architecture/state-flow-design.md`](../docs/architecture/state-flow-design.md)（「一次性切换，不能靠并行运行退回」）。
+- **回滚 ≠ 文档版本历史**：`document_versions` 只增不改，`restore` 是**追加**一版、指针不回拨（业务功能，不停服务）。
+  数据库回滚是**整库退回某个时间点**，会连同回滚点之后新追加的版本行一起丢掉。两者是两层，不能互相替代——
+  详见 [`ROLLBACK.md`](./ROLLBACK.md) §2。
+
+#### 演练过一次（不是生产演练）
+
+```bash
+make drill   # = uv run --project ../backend python drill.py
+```
+
+在本机开发库上真跑「迁移 → 造数据 → `pg_dump` → 砸库 → `pg_restore` → 核对」，逐见证耗时（本机实测总耗时 7.3 秒，
+每步耗时与判据见 [`ROLLBACK.md`](./ROLLBACK.md) §9）。它幂等、只动演练库 `prdwright_drill`、
+不写 `deploy/backups/`、不碰三个命名卷（生产卷）。**这不是生产演练**：生产数据量与磁盘/网络不可比，
+切换窗口必须另做一次并把真实耗时补记进去。
+
+#### 红线（每一条都别做）
+
+`docker compose down -v`；用 `docker compose up -d --build` 当回滚；数据库已迁移后还只回退镜像；
+用新代码启动旧备份库；`alembic downgrade` 当回滚；把 `.db` 旧备份喂回新栈；把 `.env` / `master.key` 打进备份包；
+api 还跑着就 `pg_restore --clean` 或 TRUNCATE；验收前删旧镜像/旧备份。
+
+---
 ## 7. 重启与升级
 
 ### 7.1 `make restart`（重启 api）时正在生成的任务
@@ -348,9 +444,14 @@ make up
 
 ### 7.3 回滚
 
-- **代码**：切回上一个提交后 `make up` 重建镜像。
-- **数据**：如果这次发布动过表结构，按 §6.4 恢复备份。`git revert` 只回退代码，回退不了
-  已经被迁移过的库。
+回滚有独立的一节：[`§6.7`](#67-回滚预案切换当天照这个做) 与完整手册 [`ROLLBACK.md`](./ROLLBACK.md)。
+这里只重复三条最容易被违反的：
+
+- **代码**：切回上一个提交后**必须** `make up` 重建；但「用 `make up` 重建当前代码」不是回滚——
+  回滚要用 §6.7 场景 A 的 `--no-build` + 旧镜像 tag，判据是容器镜像 ID 等于回滚 tag 的 ID。
+- **数据**：动过表结构（`alembic_version` 变了）就必须按 §6.4 / 场景 B 恢复备份。`git revert` 只回退代码，
+  回退不了已经被迁移过的库；恢复旧备份后**也必须**起旧镜像，否则新代码会把库再迁移一次。
+- **顺序**：停新 → （需要时）恢复数据 → 起旧。任何时刻不要让两个版本的 api 同时连同一个库。
 
 ---
 
@@ -367,11 +468,13 @@ make up
 | 登录接口 200，但下个请求又是未登录 | `AUTH_COOKIE_SECURE=true` 却用 HTTP 访问。纯 HTTP 必须 `false`；上前置 HTTPS 后再改 `true`。 |
 | 生成报「还没有模型配置」 | 首次部署没配模型供应商。§3。 |
 | `/health` 显示 `degraded`（llm 项 false） | 同上。另外技能包缺失也会让它是 degraded，但 `/readyz` 会拦下这种。 |
-| 备份报「数据卷不存在」 | 这套栈还没起过，或卷被 `down -v` 删了。先起栈并等 `/readyz` 200（§2）。 |
+| 备份报「数据卷不存在」 | 这套栈还没起过，或卷被 `down -v` 删了。先起栈并等 db 健康、`/readyz` 200（§2）。 |
 | 备份报「找不到主密钥」 | 密钥卷里没有 `master.key`。§1.2 生成后再备份；没有密钥的备份解不开密文，脚本因此拒绝。 |
-| 备份报「镜像不存在」 | 还没构建过 api 镜像。`make build`（或直接 `make up`）。 |
-| 备份报「`integrity_check` 未通过」 | 源库可能已损坏。先看运行中服务的 `/readyz` 与 `/health`，并考虑改用更早的备份。 |
-| 想看实时数据库文件 | 不能直接双击。用 §6 的备份产物看。 |
+| 备份报「镜像不存在」 | 还没构建过 api 镜像（校验主密钥要用），或没拉 `postgres:<tag>`（`pg_dump` 要用）。`make build` + `docker pull postgres:16`。 |
+| 备份报「`pg_restore --list` 解析不了」 | 归档不完整（磁盘满 / dump 期间库不可达）。看 §6.2 的退出码与提示后重跑。 |
+| 备份报「表数与源库不一致」 | dump 期间结构被改过（例如迁移正在跑）。等部署稳定再备份。 |
+| api 起不来，日志说「数据库在 60s 内没有就绪」 | db 没健康，或凭据与已初始化的 `pgdata` 卷不一致。`docker compose ps db`、`docker compose logs db`，必要时按 §6.4 恢复或 `down -v` 从零（后者会删数据）。 |
+| 想看实时数据库 | 不能直接双击。用 `docker compose exec db psql -U prdwright -d prdwright` 查，或用 §6 的备份产物。 |
 | Windows 上想改成 `D:\data` 挂载 | 不要。见 §5 最后一条。 |
 
 ---
@@ -380,12 +483,14 @@ make up
 
 | 文件 | 作用 |
 | --- | --- |
-| `deploy/compose.yaml` | 唯一编排：两个服务（api / web）、三个命名卷、网络、探针、排空宽限 |
+| `deploy/compose.yaml` | 唯一编排：三个服务（db / api / web）、三个命名卷、网络、探针、排空宽限 |
 | `deploy/.env.example` | 每个可调变量的中文说明与默认值 |
 | `deploy/docker/api.Dockerfile` 与 `deploy/docker/api-entrypoint.sh` | 应用镜像（单 worker、非 root、主密钥缺失即拒启动） |
 | `deploy/docker/web.Dockerfile` 与 `deploy/docker/nginx.conf` | 静态站点镜像与三路反代、SSE 不缓冲 |
-| `deploy/backup.py` | 备份脚本：SQLite 在线备份（`VACUUM INTO`）+ 自检 + sha256（§6） |
-| `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份） |
+| `deploy/backup.py` | 备份脚本：`pg_dump -Fc` + `pg_restore --list` 自检 + sha256（§6） |
+| `deploy/drill.py` | 回滚预演练：本机库上「备份 → 破坏 → 恢复」，记每步耗时（§6.7、`make drill`） |
+| `deploy/ROLLBACK.md` | 回滚预案：备份清单与保留期限、三个场景的逐步命令与判据、演练记录 |
+| `deploy/Makefile` | 常用命令的简写（起/停/日志/重启/进容器/备份/演练） |
 | `deploy/backups/` | 备份产物目录（**内容**被版本控制忽略，目录本身靠 `.gitkeep` 入库；产物由 `backup.py` 写入，可整目录删除） |
 
 设计依据与取舍：[`../docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md)（§3.6 部署形态、§5 取舍）。

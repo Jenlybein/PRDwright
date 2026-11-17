@@ -57,6 +57,21 @@ export class DocumentsNotFoundError extends Error {
 }
 
 /**
+ * 版本锁拒绝写入（后端 409 + `CONTENT_CHANGED`）时抛出。
+ *
+ * 含义：客户端保存时带的「我以为当前是第几版」已经不是库里的当前版本——这段时间里
+ * 生成任务追加了新版本（或者别的会话换了版）。此时**绝不能**把本地旧内容重试回去，
+ * 否则会把新正文悄悄覆盖掉。界面提示「正文已被更新，请刷新后重试」，本地改动保留在
+ * 工作副本里（不静默丢）。
+ */
+export class DocumentVersionConflictError extends Error {
+  constructor(message = '正文已被更新，请刷新后重试') {
+    super(message)
+    this.name = 'DocumentVersionConflictError'
+  }
+}
+
+/**
  * 把后端返回的待确认清单收敛成前端结构。
  *
  * 后端返回的 `pending_items` 是对象数组；逐条校验「有 id 且有 question」才收，
@@ -136,6 +151,9 @@ function toRecord(data: unknown): DocumentRecord | null {
     reviewFailedAt: typeof raw.review_failed_at === 'string' ? raw.review_failed_at : null,
     // 当前版本号：结论面板用它回答「这条结论是哪一版的」（后端随文档行返回）
     versionNo: typeof raw.version_no === 'number' ? raw.version_no : 0,
+    // 「这份正文可用但不完整」（票 #85）：审阅页据此提示，而不是把半截稿当完整交付。
+    // 后端缺这一格（旧数据 / 旧服务）时按 false：宁可不说「不完整」，也不凭空报警。
+    partial: raw.partial === true,
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
     stale: raw.stale === true,
     derivedFrom: toDerivedFrom(raw.derived_from),
@@ -189,22 +207,34 @@ export async function fetchDeliveryZip(solutionId: number): Promise<Blob> {
  * 对应 `PUT /api/solutions/{id}/documents/{kind}`。
  *
  * 只覆盖正文——待确认清单与用量回执是「上一次生成」的事实，不因用户改几个字而改变。
+ *
+ * `expectedVersionNo` 是**版本锁**（票 #81）：调用方读到的那份文档的 `version_no`。
+ * 后端对不上时回 409 + `CONTENT_CHANGED`，这里翻成 `DocumentVersionConflictError`——
+ * 调用方（`stores/documents.ts`）据此**停止重试**并提示刷新，而不是把旧内容覆盖回去。
+ * 不传时不做比对（兼容旧调用方 / 还没有版本的文档）。
  */
 export async function saveDocument(
   solutionId: number,
   kind: DocumentKind,
   content: string,
+  expectedVersionNo?: number,
 ): Promise<DocumentRecord> {
   try {
-    const { data } = await http.put(`/api/solutions/${solutionId}/documents/${toBackendKind(kind)}`, {
-      content,
-    })
+    const payload: { content: string; expected_version_no?: number } = { content }
+    if (expectedVersionNo !== undefined) payload.expected_version_no = expectedVersionNo
+    const { data } = await http.put(
+      `/api/solutions/${solutionId}/documents/${toBackendKind(kind)}`,
+      payload,
+    )
     const record = toRecord(data)
     if (record === null) throw new Error('保存文档失败')
     return record
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) {
       throw new DocumentsNotFoundError()
+    }
+    if (axios.isAxiosError(error) && error.response?.status === 409) {
+      throw new DocumentVersionConflictError(backendMessage(error, '正文已被更新，请刷新后重试'))
     }
     // 兜底文案与上面 `toRecord` 失配时抛的错同源：非 axios 错误一律收敛成它，
     // 因此这里不必再分辨「是不是自己抛的」——那会变成拿中文文案做判断。
@@ -235,6 +265,8 @@ function toVersionSummary(data: unknown): DocumentVersionSummary | null {
     contentLength: typeof raw.content_length === 'number' ? raw.content_length : 0,
     createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
     isCurrent: raw.is_current === true,
+    // 部分完成标记（票 #85）：版本列表据此与完整版本区分开
+    partial: raw.partial === true,
   }
 }
 
@@ -256,6 +288,8 @@ function toVersionDetail(data: unknown): DocumentVersionDetail | null {
     reviewFailedAt: typeof raw.review_failed_at === 'string' ? raw.review_failed_at : null,
     source: typeof raw.source === 'string' ? raw.source : '',
     note: typeof raw.note === 'string' ? raw.note : '',
+    // 部分完成标记（票 #85）：预览一条历史版本时也看得到它不完整
+    partial: raw.partial === true,
     createdAt: typeof raw.created_at === 'string' ? raw.created_at : '',
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : '',
     isCurrent: raw.is_current === true,

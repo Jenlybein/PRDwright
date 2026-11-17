@@ -57,19 +57,19 @@ def _new_solution(client, title: str = "支付方案") -> int:
     return int(response.json()["id"])
 
 
-def _job(owner_id: int, *, status: str = "completed", prompt_tokens: int = 10) -> None:
+def _job(owner_id: int, *, status: str = "succeeded", prompt_tokens: int = 10) -> None:
     """直接插一条任务记录（绕开仓储的 running-only 建法）。"""
     moment = utc_now().isoformat()
     with connect() as conn:
         conn.execute(
             "INSERT INTO generation_jobs "
             "(owner_id, solution_id, kind, doc_kind, chat_stage, status, phase, "
-            " draft_content, completed_sections, pending_items, input_fingerprint, usage, "
+            " draft_content, pending_items, input_fingerprint, usage, "
             " max_provider_switches, error_code, error_message, "
             " provider_protocol, provider_config_id, provider_name, provider_model, "
             " prompt_tokens, completion_tokens, created_at, updated_at, "
             " request_params, config_snapshot, skill_refs, skill_manifest) "
-            "VALUES (?, NULL, 'prd', '', '', ?, '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', ?, 7, ?, ?, '{}', '{}', '[]', '')",
+            "VALUES (%s, NULL, 'prd', '', '', %s, '', '', '[]', NULL, NULL, 2, '', '', '', '', '', '', %s, 7, %s, %s, '{}', '{}', '[]', '')",
             (owner_id, status, prompt_tokens, moment, moment),
         )
         conn.commit()
@@ -228,7 +228,7 @@ def test_export_jobs_csv_has_bom_for_excel(client) -> None:
 
     assert files["jobs.csv"].startswith("\ufeff")
     assert "prompt_tokens" in files["jobs.csv"]
-    assert "completed" in files["jobs.csv"]
+    assert "succeeded" in files["jobs.csv"]
 
 
 def test_export_headers_are_download_friendly(client) -> None:

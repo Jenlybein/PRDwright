@@ -54,6 +54,12 @@ vi.mock('@/services/documentService', () => ({
       this.name = 'DocumentsNotFoundError'
     }
   },
+  DocumentVersionConflictError: class DocumentVersionConflictError extends Error {
+    constructor(message = '正文已被更新，请刷新后重试') {
+      super(message)
+      this.name = 'DocumentVersionConflictError'
+    }
+  },
   fetchDocuments: vi.fn(async () => []),
   saveDocument: vi.fn(async () => undefined),
   fetchDeliveryZip: vi.fn(),
@@ -154,7 +160,7 @@ describe('收尾落点：不抢方向盘（D1）', () => {
 
     let release!: () => void
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
-      handlers?.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '# 接口文档\n' })
       await new Promise<void>((resolve) => {
         release = resolve
       })
@@ -240,7 +246,7 @@ describe('跳转不清预览', () => {
 
     let release!: () => void
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
-      handlers?.onChunk?.({ text: '# 接口文档\n', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '# 接口文档\n' })
       await new Promise<void>((resolve) => {
         release = resolve
       })
@@ -261,5 +267,67 @@ describe('跳转不清预览', () => {
     release()
     await generating
     await flushPromises()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 失败但有内容可用（票 #85）：部分完成版本让落点从「运行视图」改到「审阅页」
+// ---------------------------------------------------------------------------
+
+/** 造一条「部分完成」的文档记录（后端失败收尾刚落下的那一版） */
+function partialRecord(kind: 'prd' | 'api-docs' | 'prompts', content: string) {
+  return {
+    kind,
+    content,
+    runSummary: null,
+    pendingItems: [],
+    review: null,
+    reviewFailedAt: null,
+    updatedAt: '2026-11-17T00:00:00',
+    stale: false,
+    versionNo: 1,
+    partial: true,
+    derivedFrom: null,
+  }
+}
+
+describe('失败收尾的落点（部分完成，票 #85）', () => {
+  it('失败但后端落了一版部分完成：带用户去审阅页，错误照实展示、正文在', async () => {
+    await reachReview('review-prd')
+    // 「生成接口文档」要求 PRD 正文已存在（与真实入口的可用条件一致）
+    documents.contents.prd = '# 已有 PRD'
+    // 后端失败收尾已经把半截正文升格成版本：读文档时能看到它
+    documents.attach(1)
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      partialRecord('api-docs', '# 半截接口文档'),
+    ])
+    vi.mocked(api.readJobStream).mockRejectedValue(new Error('生成失败：上游连接中断'))
+
+    const pipeline = useDocumentPipeline({ onNotice: () => {} })
+    await pipeline.handleGenerateApiDocs()
+    await flushPromises()
+
+    // 落点改到审阅页：那里能下载、能修、能重生成，且有「这份正文不完整」的提示
+    expect(workflow.viewState).toBe('review-api-docs')
+    // 失败仍然是失败：错误原因照实留着，不粉饰成成功
+    expect(pipeline.docError.value).toBe('生成失败：上游连接中断')
+    expect(documents.partialOf('api-docs')).toBe(true)
+    expect(documents.contentOf('api-docs')).toBe('# 半截接口文档')
+  })
+
+  it('失败且什么都没留下：留在运行视图看错误（与从前一致）', async () => {
+    await reachReview('review-prd')
+    documents.contents.prd = '# 已有 PRD'
+    documents.attach(1)
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([])
+    vi.mocked(api.readJobStream).mockRejectedValue(new Error('生成失败'))
+
+    const pipeline = useDocumentPipeline({ onNotice: () => {} })
+    await pipeline.handleGenerateApiDocs()
+    await flushPromises()
+
+    expect(workflow.viewState).toBe('generating-api-docs')
+    expect(pipeline.docError.value).toBe('生成失败')
+    expect(documents.partialOf('api-docs')).toBe(false)
   })
 })

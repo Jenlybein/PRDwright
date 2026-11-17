@@ -85,14 +85,10 @@ export function parseReview(raw: unknown): ReviewConclusion | null {
     // 旧结论没有这一格 → `null`（界面归「未分类」）。后端已按类别覆写过严重度，
     // 这里不再按类别反推严重度：那是后端的活，前端只做形状归一。
     category: readCategory(item),
-    sectionId: readString(item, 'section_id'),
-    sectionTitle: readString(item, 'section_title'),
+    // 定位：新结论用 `where`。**旧结论（分章时代的 PRD）只有 `section_title`**——
+    // 读历史时退回它，界面才不会丢掉「问题在哪一节」这半句话。
+    where: readString(item, 'where') || readString(item, 'section_title'),
     detail: readString(item, 'detail'),
-  }))
-  const failedSections = readObjectArray(data, 'failed_sections').map((item) => ({
-    sectionId: readString(item, 'section_id'),
-    title: readString(item, 'title'),
-    reason: readString(item, 'reason'),
   }))
   return {
     kind: readString(data, 'kind'),
@@ -100,7 +96,6 @@ export function parseReview(raw: unknown): ReviewConclusion | null {
     summary: readString(data, 'summary'),
     issues,
     rewritten: data.rewritten === true,
-    failedSections,
     // 审核时间：面板据此回答「什么时候审的」。缺失时为空串（不猜一个时间）
     reviewedAt: readString(data, 'reviewed_at'),
   }

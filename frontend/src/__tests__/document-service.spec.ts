@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import http from '../services/api'
 import {
+  DocumentVersionConflictError,
   DocumentsNotFoundError,
   checkpointDocument,
   deleteVersion,
@@ -104,7 +105,7 @@ describe('fetchDocuments', () => {
   it('回执按不透明对象透传（结构合格时原样带出）', async () => {
     const summary = {
       kind: 'prd',
-      status: 'completed',
+      status: 'succeeded',
       durationMs: 1200,
       totalCalls: 1,
       failedCalls: 0,
@@ -260,7 +261,7 @@ describe('fetchDocuments', () => {
 })
 
 describe('saveDocument', () => {
-  it('PUT 到带下划线的路径，只提交 content', async () => {
+  it('不带版本号时只提交 content（兼容旧调用方 / 还没有版本的文档）', async () => {
     vi.mocked(http.put).mockResolvedValue({
       data: backendDocument({ kind: 'api_docs', content: '# 改过的接口文档' }),
     })
@@ -272,6 +273,26 @@ describe('saveDocument', () => {
     })
     expect(record.kind).toBe('api-docs')
     expect(record.content).toBe('# 改过的接口文档')
+  })
+
+  it('带上 expectedVersionNo 时把它作为版本锁提交（#81）', async () => {
+    vi.mocked(http.put).mockResolvedValue({ data: backendDocument() })
+
+    await saveDocument(7, 'prd', '# PRD', 3)
+
+    expect(http.put).toHaveBeenCalledWith('/api/solutions/7/documents/prd', {
+      content: '# PRD',
+      expected_version_no: 3,
+    })
+  })
+
+  it('版本号对不上（409）抛 DocumentVersionConflictError，文案取后端 detail', async () => {
+    vi.mocked(http.put).mockRejectedValue(axiosError(409, '正文已被更新，请刷新后重试'))
+
+    await expect(saveDocument(7, 'prd', '# PRD', 2)).rejects.toBeInstanceOf(
+      DocumentVersionConflictError,
+    )
+    await expect(saveDocument(7, 'prd', '# PRD', 2)).rejects.toThrow('正文已被更新，请刷新后重试')
   })
 
   it('prd / prompts 路径不带上任何前缀写法', async () => {
@@ -339,6 +360,8 @@ describe('fetchVersions', () => {
       contentLength: 128,
       createdAt: '2026-10-16T02:00:00',
       isCurrent: true,
+      // 后端没给 partial（这一条是完整版本）→ 收敛成 false（票 #85）
+      partial: false,
     })
   })
 
@@ -405,7 +428,7 @@ describe('fetchVersion', () => {
         content: '# 定稿正文',
         last_run_summary: {
           kind: 'prd',
-          status: 'completed',
+          status: 'succeeded',
           duration_ms: 61_000,
           total_calls: 12,
           prompt_tokens: 90_000,
@@ -533,3 +556,57 @@ describe('deleteVersion', () => {
     await expect(deleteVersion(7, 'prd', 11)).rejects.toThrow('删除版本失败')
   })
 })
+
+// ---------------------------------------------------------------------------
+// 部分完成标记（票 #85）：文档 / 版本摘要 / 版本详情三处都要读得到
+// ---------------------------------------------------------------------------
+
+describe('部分完成标记的解析', () => {
+  it('文档的 partial 原样带回来（下载 / 审阅页提示都靠它）', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: { documents: [backendDocument({ partial: true })] },
+    })
+
+    const [record] = await fetchDocuments(1)
+    expect(record?.partial).toBe(true)
+  })
+
+  it('后端没给 partial（旧数据 / 旧服务）时按 false，不凭空报「不完整」', async () => {
+    vi.mocked(http.get).mockResolvedValue({ data: { documents: [backendDocument()] } })
+
+    const [record] = await fetchDocuments(1)
+    expect(record?.partial).toBe(false)
+  })
+
+  it('版本摘要带 partial：版本列表据此与完整版本区分开', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        versions: [
+          { version_id: 1, version_no: 1, source: 'prd', created_at: '', partial: true },
+        ],
+      },
+    })
+
+    const [item] = await fetchVersions(1, 'prd')
+    expect(item?.partial).toBe(true)
+  })
+
+  it('版本详情带 partial：预览一条历史版本也看得出它不完整', async () => {
+    vi.mocked(http.get).mockResolvedValue({
+      data: {
+        version_id: 1,
+        version_no: 1,
+        content: '# 半截正文',
+        source: 'prd',
+        created_at: '',
+        updated_at: '',
+        partial: true,
+      },
+    })
+
+    const detail = await fetchVersion(1, 'prd', 1)
+    expect(detail.partial).toBe(true)
+    expect(detail.content).toBe('# 半截正文')
+  })
+})
+

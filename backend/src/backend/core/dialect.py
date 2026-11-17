@@ -1,9 +1,9 @@
-"""方言适配（v8）：全项目**唯一**知道「数据库品牌」的语句构造层。
+"""方言适配（v9）：全项目**唯一**知道「数据库品牌」的语句构造层。
 
 ## 这个模块存在的理由
 
 本项目要写的 SQL 里，只有一件事是 SQLAlchemy 不提供通用抽象的：**upsert**。
-官方文档说得很直白——`ON CONFLICT` / `ON DUPLICATE KEY` 各方言各写各的，
+官方文档说得很直白——`ON CONFLICT / ON DUPLICATE KEY` 各方言各写各的，
 `sqlalchemy.insert()` 上没有跨方言的 `on_conflict_*` 方法。
 
 收敛之前，这件事散在三个仓库里，每个都写 `from sqlalchemy.dialects.sqlite import insert`。
@@ -18,14 +18,12 @@
    `session_scope()` 决定。
 2. **不承载业务判断**。「该不该覆盖」是调用方的决定，本模块只负责翻译。
 
-## ⚠️ MySQL 的两个坑（都与「静默」有关）
+## 单一后端（#78）
 
-- **DO NOTHING 不能用 `INSERT IGNORE`**。它会把「列超长、违反 NOT NULL」这类错误
-  一并降级成警告——用一个静默的写失败换一行代码。这里改用
-  `ON DUPLICATE KEY UPDATE <pk> = <pk>`（把主键更新成自己），只吃掉唯一冲突。
-- **MySQL 忽略冲突目标**。`ON CONFLICT (a, b)` 里那对列在 MySQL 上没有对应语法，
-  任何唯一键冲突都会触发更新。所以本模块的契约是 **C-D1**：只允许用在
-  「该表只有一个唯一约束」的表上。现有三处调用都已核对满足。
+v9 起只支持 Postgres：SQLite / MySQL 家族的分支已删除。保留「未知方言 →
+`NotImplementedError`」这一层不是因为「快要用到别的库」，而是为了让
+**没适配的后端发不出语句**——静默回落到某个「看起来差不多」的实现，会生成一条在目标库
+上语法错误的 SQL，报错指向数据库而不是这里。就绪探针的「真写一次」同理。
 """
 
 from __future__ import annotations
@@ -34,19 +32,17 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sqlalchemy import Insert, inspect
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Result
 from sqlmodel import Session, SQLModel
 
-# 各家的方言名。`mariadb` 与 `mysql` 的语法一致，共用一条分支。
-_MYSQL_FAMILY = frozenset({"mysql", "mariadb"})
-
 
 def dialect_name(session: Session) -> str:
-    """当前 `Session` 绑定的方言名（`sqlite` / `mysql` / `postgresql` …）。
+    """当前 `Session` 绑定的方言名（本项目只会是 `postgresql`）。
 
-    取 `get_bind()` 而不是读配置：测试里同一个进程会换库（每个用例一个临时 SQLite），
-    读配置会拿到「注册时的那个」而不是「这条 Session 真正连的那个」。
+    取 `get_bind()` 而不是读配置：同一个进程里可能同时存在多个库的 Session
+    （迁移、对拍、一次性诊断），读配置会拿到「注册时的那个」而不是「这条 Session 真正
+    连的那个」。
     """
     return session.get_bind().dialect.name
 
@@ -57,52 +53,30 @@ def _insert_for(model: type[SQLModel], name: str) -> Any:
     未知方言直接抛错，而不是回落到某个「看起来差不多」的实现：
     回落的后果是生成一条在目标库上语法错误的 SQL，错误信息会指向数据库而不是这里。
     """
-    if name in _MYSQL_FAMILY:
-        return mysql.insert(model)
     if name == "postgresql":
         return postgresql.insert(model)
-    if name == "sqlite":
-        return sqlite.insert(model)
     raise NotImplementedError(
         f"upsert 尚未适配方言 {name!r}；新增方言请在本模块加一条分支，"
         "不要在调用方写 if（那会把方言重新散开）。"
     )
 
 
-def _primary_key_name(model: type[SQLModel]) -> str:
-    """单列主键的列名。
-
-    只支持单列主键：复合主键下「把主键更新成自己」要写多列，而这个项目里不存在
-    复合主键（14 张表全部是 `id` 或单列业务键）。真出现时宁可报错，也不要猜一个。
-    """
-    keys = inspect(model).primary_key
-    if len(keys) != 1:
-        raise NotImplementedError(
-            f"{model.__name__} 是复合主键；upsert 的 no-op 更新需要显式指定全部主键列。"
-        )
-    return keys[0].name
-
-
 def _apply_upsert(
     stmt: Insert,
     *,
     name: str,
-    model: type[SQLModel],
     conflict_cols: Sequence[str],
     update_cols: Sequence[str] | None,
 ) -> Insert:
     """把「冲突怎么办」贴到一个已经构造好的 `Insert` 上。
 
     抽出来是因为 `upsert_values` 与 `upsert_select` 只在「行从哪来」上不同，
-    冲突处理完全共享——两处各写一遍，迟早会有一处漏掉 MySQL 的 no-op 写法。
+    冲突处理完全共享——两处各写一遍，迟早会有一处漏掉某个分支。
     """
-    if name in _MYSQL_FAMILY:
-        if update_cols is None:
-            # 只吃掉唯一冲突：把主键更新成自己。见模块 docstring 的第一个坑。
-            pk = _primary_key_name(model)
-            return stmt.on_duplicate_key_update({pk: stmt.inserted[pk]})
-        return stmt.on_duplicate_key_update(
-            {col: stmt.inserted[col] for col in update_cols}
+    if name != "postgresql":
+        raise NotImplementedError(
+            f"upsert 尚未适配方言 {name!r}；新增方言请在本模块加一条分支，"
+            "不要在调用方写 if（那会把方言重新散开）。"
         )
 
     if update_cols is None:
@@ -147,7 +121,6 @@ def upsert_values(
         _apply_upsert(
             stmt,
             name=name,
-            model=model,
             conflict_cols=conflict_cols,
             update_cols=update_cols,
         )
@@ -169,6 +142,9 @@ def upsert_select(
     把**归属校验写进了 SELECT 的 WHERE**（方案不属于该用户时一行都插不进去，不需要
     「先查一次再写」这种两次往返）。那个形状必须保留，所以这里显式接受一个 SELECT。
 
+    契约 **C-D1**：`conflict_cols` 必须是该表唯一的那个约束；PG 的 `ON CONFLICT`
+    只对给出的目标列生效，但调用方仍应按这条契约束手。
+
     Args:
         columns: 目标列名，顺序与 SELECT 的输出列一一对应。
         select_stmt: 提供数据的 SELECT（可带任意 WHERE，包括归属过滤）。
@@ -181,11 +157,49 @@ def upsert_select(
         _apply_upsert(
             stmt,
             name=name,
-            model=model,
             conflict_cols=conflict_cols,
             update_cols=update_cols,
         )
     )
 
 
-__all__ = ["dialect_name", "upsert_select", "upsert_values"]
+# ---------------------------------------------------------------------------
+# 就绪探针的「真写一次」
+# ----------------------------------------------------------------------------
+
+
+def write_probe(connection: Any) -> None:
+    """在当前事务里做一次**内容不变的真写**，用于就绪探针（调用方负责回滚）。
+
+    ## 为什么不能通用一句话
+
+    「库可写」这条判据必须靠**真写**才测得出来：只读实例、只读挂载、磁盘满后的
+    半只读状态，读得出来、写不进去。
+
+    单一后端（#78）之后只剩一套写法：**Postgres 的 DDL 可回滚**，所以建一张临时表
+    就是「真写一次」——只读实例 / 只读事务会当场报
+    `cannot execute CREATE TABLE in a read-only transaction`，回滚后临时表
+    随事务一起消失，不留痕迹。（SQLite 的 `BEGIN IMMEDIATE` + `PRAGMA` 与 MySQL 的
+    「内容不变 UPDATE」两条分支已随对应后端一起删除。）
+
+    ⚠️ **不在这里 commit / rollback**：事务边界仍归调用方（`api/health.py` 先
+    `conn.begin()`，`finally` 里 `rollback()`）。本模块只回答「这个方言该发哪句」。
+
+    Args:
+        connection: 已经开好事务的 SQLAlchemy Connection（不会被关闭）。
+
+    Raises:
+        NotImplementedError: 未适配的方言。宁可报错，也不要发一句在目标库上
+            语法不通的探针——那会把「没适配」伪装成「库坏了」。
+    """
+    name = connection.dialect.name
+    if name == "postgresql":
+        connection.exec_driver_sql("CREATE TEMP TABLE prdwright_write_probe (id integer)")
+        return
+    raise NotImplementedError(
+        f"就绪探针尚未适配方言 {name!r}；新增方言请在本模块加一条分支，"
+        "不要在调用方写 if（那会把方言重新散开）。"
+    )
+
+
+__all__ = ["dialect_name", "upsert_select", "upsert_values", "write_probe"]

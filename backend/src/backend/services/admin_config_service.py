@@ -53,7 +53,6 @@ _ID_ATTEMPTS = 3
 # 配置项的分组与展示元数据。`danger=True` 的项前端要弹二次确认——
 # 它们的共同点是「改错了不明显，但影响很大」。
 _GROUPS: tuple[tuple[str, str, str], ...] = (
-    ("prd", "分章节生成", "控制 PRD 逐章撰写的节奏。并发越高越快，也越容易撞供应商限流。"),
     ("review", "审核与改写", "审核是锦上添花：它自己失败不会拖垮正文，但会多花 token。"),
     ("llm", "调用与预算", "单次调用的超时、重试，以及发出请求前的 token 预算检查。"),
     ("quota", "每日额度", "每个用户每天能生成多少。默认全为不限——不配置就等于没这层限制。"),
@@ -66,27 +65,6 @@ _GROUPS: tuple[tuple[str, str, str], ...] = (
 )
 
 _FIELD_META: dict[str, dict[str, Any]] = {
-    "prd_section_review_enabled": {
-        "group": "prd",
-        "label": "逐章审核",
-        "help": "关闭后只逐章撰写，不再调用审核 Agent。省时省钱，但正文不再被自动检查与改写。",
-        "danger": True,
-    },
-    "prd_section_max_rewrites": {
-        "group": "prd",
-        "label": "单章最多改写轮数",
-        "help": "0 表示只审核不改写。达到上限即保留当前版本，避免审核与改写互相拉扯。",
-    },
-    "prd_pipeline_concurrency": {
-        "group": "prd",
-        "label": "并发章节数",
-        "help": "1 表示退回串行（每章都能带上已定稿的前序章节）；越高越快，也越容易撞限流。",
-    },
-    "prd_section_max_retries": {
-        "group": "prd",
-        "label": "单章失败重试次数",
-        "help": "只重试该阶段本身。与单次调用重试是两层，实际调用次数是两者之积。",
-    },
     "review_rewrite_min_severity": {
         "group": "review",
         "label": "触发改写的最低严重度",
@@ -102,11 +80,6 @@ _FIELD_META: dict[str, dict[str, Any]] = {
         "group": "review",
         "label": "整篇审核输出上限",
         "help": "审核只吐一段 JSON 批注，不需要生成级的上限。太小会导致 JSON 被截断、审核按通过处理。",
-    },
-    "prd_section_review_max_tokens": {
-        "group": "review",
-        "label": "单章审核输出上限",
-        "help": "只审一章，可以比整篇更小。太小同样会让 JSON 被截断。",
     },
     "llm_timeout": {
         "group": "llm",
@@ -549,7 +522,7 @@ def create_provider(actor: User, payload: dict[str, Any]) -> dict[str, Any]:
     # （「先查再写」有竞态，两个并发请求都能查到「不存在」）。
     #
     # ⚠️ 冲突现在是 `sqlalchemy.exc.IntegrityError`（SQLAlchemy 对 DBAPI 异常的包装），
-    # 不再是裸的 `sqlite3.IntegrityError`——照旧捕后者会漏掉，表现是「偶发 500」。
+    # 冲突被 SQLAlchemy 包装成 `sqlalchemy.exc.IntegrityError`，不再是裸的 DBAPI 异常——\n    # 照旧捕裸异常会漏掉，表现是「偶发 500」。
     provider_id = ""
     for _ in range(_ID_ATTEMPTS):
         candidate = new_config_id()

@@ -2,8 +2,8 @@
 
 从 `job_service` **机械迁出**（issue #5），函数体逐字未改：`_apply_event` 把
 `StreamEvent` 归并进 `JobRuntime`；`_finalized_text` / `_draft` 是「已产出正文」
-的两种拼法；`_maybe_flush` 按「≤300ms 或增量 >4KB」合并写进度；
-`_summary_data` / `_run_summary_event` 组装收尾回执。
+的两种拼法（票 #92 起只有整篇形态：已定稿段 + 一段实时缓冲）；`_maybe_flush` 按
+「≤300ms 或增量 >4KB」合并写进度；`_summary_data` / `_run_summary_event` 组装收尾回执。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from backend.core.engine import session_scope
 from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services.job_runtime import _SectionLive
+from backend.services import job_events, job_state
 
 if TYPE_CHECKING:
     from backend.services.job_runtime import JobRuntime
@@ -32,29 +32,19 @@ _FLUSH_BYTES = 4096
 def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
     """把一个事件应用到内存运行时（同步、无 await）。
 
-    对照 `document_service` / `prd_section_writer` 的事件契约：
-    - `chunk` → 追加到缓冲；**带 `section_id` + `index` 时进该章自己的格子**
-      （分章节链路多章并行，混在一起就分不开了）；
-    - `part` → 定稿一段：并入已定稿、清掉**该章**的半成品；带 `section_id` 时登记章节；
+    对照 `document_service` 的事件契约（三份产物同一条整篇路径，票 #92）：
+    - `chunk` → 追加到实时缓冲（不带章节归属，没有第二条轨道）；
+    - `part` → 定稿一段；`replace: true` 是整段覆盖（审核发现问题后的那次改写）；
     - `stage` → 更新 phase（**同时同步给计量器**，计量器据此把调用归到 `类型:阶段` 这一步），
-      换阶段时清空上一阶段的输出；章节级 `writing` / `rewriting` 清掉该章半成品；
-    - `stage_chunk` → 追加到当前阶段的输出（审核意见 / 改写稿），与正文缓冲互不干扰；
+      换阶段时清空上一阶段的输出；
+    - `stage_chunk` → 追加到当前阶段的输出（大纲 / 审核意见 / 改写稿），与正文缓冲互不干扰；
     - `review` → 记下本次审核结论与「这次试没试过」，收尾时随正文写进被审的那一版（一版一条）；
     - `error` → 标记失败并记下错误码 / 文案；
     - `done` → 记下权威完整正文。
     """
     event_type = event.type
     if event_type == "chunk":
-        section_id = str(event.data.get("section_id") or "")
-        index = event.data.get("index")
-        if section_id and isinstance(index, int):
-            # 分章节的增量：按章存。多章同时在吐字，混到一个缓冲里就再也分不开，
-            # 前端只能整批丢弃（「PRD 不流式」的历史成因）。
-            slot = runtime.live_by_index.setdefault(index, _SectionLive())
-            slot.section_id = section_id
-            slot.text += event.content
-        else:
-            runtime.live_buffer += event.content
+        runtime.live_buffer += event.content
     elif event_type == "stage_chunk":
         # 阶段内输出只进 `stage_text`，绝不碰 `live_buffer`：后者会拼进正文预览。
         # 增量自带的 stage 与当前 phase 不一致，说明对应的 `stage` 事件没被收到
@@ -67,56 +57,14 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         runtime.stage_text += event.content
     elif event_type == "part":
         text = str(event.data.get("text", ""))
-        index = event.data.get("index")
         if event.data.get("replace") is True:
-            # 下游改写稿整段覆盖初稿（审核发现问题后的那一次改写）
+            # 改写稿整段覆盖初稿：初稿已经以 `chunk` 流出去过，追加会叠字。
             runtime.finalized_parts = [text]
-            runtime.parts_by_index.clear()
-            # 覆盖是**整篇**语义：所有章节的半成品一并作废，否则它们会浮在权威正文之上
-            runtime.live_by_index.clear()
             runtime.live_buffer = ""
             return
-        if isinstance(index, int):
-            runtime.parts_by_index[index] = text
-            # ⚠️ 只清**这一章**：并行时别的章还在写，清全场会把它们的字一起抹掉
-            runtime.live_by_index.pop(index, None)
-        else:
-            runtime.finalized_parts.append(text)
-            # 文档头（没有 index）：整篇缓冲到此定稿
-            runtime.live_buffer = ""
-        section_id = event.data.get("section_id")
-        if section_id:
-            entry = {
-                "section_id": section_id,
-                "heading": str(event.data.get("section_heading", "")),
-                "text": text,
-                "index": index if isinstance(index, int) else None,
-                "failed": bool(event.data.get("failed")),
-            }
-            # 同一章节以最后一次为准：重试 / 重复订阅都不该留下两条
-            runtime.completed_sections = [
-                item
-                for item in runtime.completed_sections
-                if item.get("section_id") != section_id
-            ]
-            runtime.completed_sections.append(entry)
-            # 章节定稿是「这一章写完了」的可观测信号。分章节链路里多章并行，
-            # 没有它，日志页只能看到一连串 stage，看不出到底写成了几章、哪章失败。
-            logger.info(
-                "章节定稿：%s",
-                section_id,
-                extra={
-                    "event": "job.section_done",
-                    "job_id": runtime.job_id,
-                    "user_id": runtime.owner_id,
-                    "kind": runtime.kind,
-                    "section_id": section_id,
-                    "index": index if isinstance(index, int) else None,
-                    "failed": bool(event.data.get("failed")),
-                    "chars": len(text),
-                    "request_id": current_request_id(),
-                },
-            )
+        runtime.finalized_parts.append(text)
+        # 定稿一段：整篇缓冲到此作废（权威文本已经接管）
+        runtime.live_buffer = ""
     elif event_type == "stage":
         stage = str(event.data.get("stage", ""))
         # 换阶段就清空上一阶段的输出：审核意见不该留在改写阶段的面板里
@@ -126,14 +74,7 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         runtime.meter.set_phase(runtime.phase)
         # 阶段推进是生成生命线的骨架：记一条 INFO，让日志页能看出「走到哪一步」。
         # `chunk`/`stage_chunk` 是高频增量不打日志（会刷屏），边界事件才值得留。
-        index = event.data.get("index")
-        section_id = str(event.data.get("section_id") or "")
-        if section_id and isinstance(index, int) and stage in ("writing", "rewriting"):
-            slot = runtime.live_by_index.setdefault(index, _SectionLive())
-            slot.section_id = section_id
-            slot.text = ""
-            slot.phase = stage
-        if stage in ("writing", "reviewing", "rewriting", "done"):
+        if stage in ("outlining", "writing", "reviewing", "rewriting", "done"):
             logger.info(
                 "生成阶段推进：%s",
                 stage,
@@ -143,15 +84,13 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
                     "user_id": runtime.owner_id,
                     "kind": runtime.kind,
                     "stage": stage,
-                    "section_id": section_id or None,
-                    "index": index if isinstance(index, int) else None,
                     "request_id": current_request_id(),
                 },
             )
     elif event_type == "review":
         # 审核结论：只认真正跑出来的判定（pass / revise）。空串是「没审成」，
         # 收尾时**不写结论**——没有结论 ≠ 通过，写个占位就是一条假记录。
-        # 同一任务内只会有一条（PRD 汇总结论 / 整篇文档那一条），后到覆盖先到即可。
+        # 同一任务内只会有一条，后到覆盖先到即可。
         #
         # `attempted` 是「这次到底试没试」的**显式标记**（#61）：审失败要落
         # `review_failed_at`，而「根本没审」不许落。两者都不能靠空串去猜。
@@ -161,9 +100,12 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
         verdict = str(data.get("verdict") or "").strip().lower()
         runtime.review = dict(data) if verdict in ("pass", "revise") else None
     elif event_type == "error":
-        runtime.failed = True
-        runtime.error_code = event.code or ErrorCode.INTERNAL_ERROR.value
-        runtime.error_message = event.content
+        # 只记「失败意图」：终态（status / 落库）由收尾经状态机结算（#79）。
+        job_state.note_failure(
+            runtime,
+            error_code=event.code or ErrorCode.INTERNAL_ERROR.value,
+            error_message=event.content,
+        )
         # 生成链路内部主动产出的 error 事件（不是 `run_job` 的兜底异常），
         # 单独留一条：它与 `job.crashed` 的区别在于「这是可预期的失败，不是崩了」。
         logger.warning(
@@ -180,8 +122,6 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
     elif event_type == "done":
         runtime.final_reply = str(event.data.get("reply", ""))
         runtime.partial = bool(event.data.get("partial"))
-        failed = event.data.get("failed_sections")
-        runtime.failed_sections = failed if isinstance(failed, list) else []
         # 待确认清单随 `done` 一道抵达：生成器已在定稿正文里剥离标记块并算好。
         # 用 `or []` 兜底，生成器漏带该字段时不至于把整型 / None 写进 DB。
         pending = event.data.get("pending_items")
@@ -202,67 +142,71 @@ def _apply_event(runtime: JobRuntime, event: StreamEvent) -> None:
 
 
 def _finalized_text(runtime: JobRuntime) -> str:
-    """已定稿正文（不含实时缓冲）：文档头 + 按 index 排序的章节。"""
-    if runtime.parts_by_index:
-        header = "".join(runtime.finalized_parts)
-        return header + "".join(
-            runtime.parts_by_index[i] for i in sorted(runtime.parts_by_index)
-        )
+    """已定稿正文（不含实时缓冲）：整篇生成只有一条拼接路径。"""
     return "".join(runtime.finalized_parts)
 
 
 def _draft(runtime: JobRuntime) -> str:
-    """尽力还原的完整正文：已定稿部分 + 各章半成品（**不用原始 chunk 拼**）。
+    """尽力还原的完整正文：已定稿部分 + 实时缓冲（**不用原始 chunk 拼**）。
 
-    ⚠️ 必须**按 index 交错归并**，不能「先所有定稿段、再所有半成品」：并行时第 1 章
-    可能还在写、第 2 章已经定稿，简单拼接会把正文排成 2、3、1。同一 index 上定稿优先
-    （定稿那一刻该章半成品已被清掉，这里再判一次是防御：重复 `part` 也不该出两份）。
+    整篇生成里 `finalized_parts` 只会在「改写稿整段覆盖」时变成一段；其余时刻是
+    「都已定稿 + 最后一段还在长」。因此这里就是直接拼接，不再有按章归并。
     """
-    header = "".join(runtime.finalized_parts)
-    if not runtime.parts_by_index and not runtime.live_by_index:
-        return header + runtime.live_buffer
-
-    merged: list[str] = []
-    for index in sorted(set(runtime.parts_by_index) | set(runtime.live_by_index)):
-        finalized = runtime.parts_by_index.get(index)
-        if finalized is not None:
-            merged.append(finalized)
-            continue
-        slot = runtime.live_by_index.get(index)
-        if slot is not None and slot.text:
-            merged.append(slot.text)
-    # `live_buffer` 在分章节链路里恒为空（那里无归属的增量不会出现），
-    # 保留这一项是为了「整篇文档 + 章节」混用时不丢最后一段。
-    return header + "".join(merged) + runtime.live_buffer
+    return _finalized_text(runtime) + runtime.live_buffer
 
 
 def _live_len(runtime: JobRuntime) -> int:
-    """「还在变的部分」有多长：整篇缓冲 + 各章半成品。
+    """「还在变的部分」有多长（合并写靠它判断「增量是否 >4KB」）。"""
+    return len(runtime.live_buffer)
 
-    合并写靠它判断「增量是否 >4KB」。并行链路里 `live_buffer` 恒为空，若还按它算，
-    进度落库就只剩 300ms 的定时器在兜——长章节会多丢一截，刷新后接回来的字变少。
+
+def _flush_now(runtime: JobRuntime, *, progress: bool = True) -> int:
+    """立刻合并写一笔，返回本次写到的游标。
+
+    `progress=True`（写者的正常路径）：**进度列 + 事件同一笔事务**——两件事必须同生
+    共死，否则「快照游标」就没有意义：
+
+    - 进度列（`draft_content` / `phase` / `pending_items`）是**快照**，冷读者一次拿走；
+    - `job_events` 的追加行是**过程日志**，按游标续读。
+
+    快照游标 = 本笔写到的最后一条事件 id。若两者分两笔提交，就会出现「快照已经包含
+    某段正文、而那条事件还没落盘」的窗口——拿着游标续读的客户端会重复收到那一段。
+
+    `progress=False`（订阅侧的轮询补写，见 `job_service_impl.open_stream`）：**只追加
+    过程日志**。订阅者替卡在模型调用里的写者把事件落盘，让「轮询兜底」真的能推进数据；
+    但它**不碰进度列**——那是写者的产物，读者去写等于在别人的执行里留痕，会破坏
+    「失去执行权后什么都不写」这条判据（进度列写者下一轮会自己补上）。
+
+    调用点有两处：合并写窗口到点（`_maybe_flush`），以及**取快照之前**（`open_stream`
+    必须先把在途事件补写完，否则内存快照领先游标，重连会重放已含内容）。
     """
-    return len(runtime.live_buffer) + sum(
-        len(slot.text) for slot in runtime.live_by_index.values()
-    )
-
-
-def _maybe_flush(runtime: JobRuntime) -> None:
-    """按「≤300ms 或增量 >4KB」的节奏合并写一次进度。"""
-    now = time.monotonic()
-    grew = _live_len(runtime) - runtime.flushed_len
-    if grew >= _FLUSH_BYTES or (now - runtime.last_flush_at) >= _FLUSH_INTERVAL_SECONDS:
-        with session_scope() as session:
+    with session_scope() as session:
+        cursor = job_events.flush_pending(runtime, session)
+        if progress:
             GenerationJobRepository(session).persist_progress(
                 runtime.owner_id,
                 runtime.job_id,
                 draft_content=_draft(runtime),
-                completed_sections=runtime.completed_sections,
                 phase=runtime.phase,
                 pending_items=runtime.pending_items,
             )
-        runtime.last_flush_at = now
+    # 事务提交之后才清空待写缓冲（回滚时那一批必须还在）
+    job_events.mark_flushed(runtime, cursor)
+    if progress:
+        # 只有写者推进了「已落盘的正文」才算窗口到点；订阅侧的补写不动这两项，
+        # 让写者的下一轮合并写尽快把进度列补上。
+        runtime.last_flush_at = time.monotonic()
         runtime.flushed_len = _live_len(runtime)
+    return cursor
+
+
+
+def _maybe_flush(runtime: JobRuntime) -> None:
+    """按「≤300ms 或增量 >4KB」的节奏合并写一次（进度列 + 过程事件）。"""
+    now = time.monotonic()
+    grew = _live_len(runtime) - runtime.flushed_len
+    if grew >= _FLUSH_BYTES or (now - runtime.last_flush_at) >= _FLUSH_INTERVAL_SECONDS:
+        _flush_now(runtime)
 
 
 def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
@@ -285,7 +229,6 @@ def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
         "injected_skills": runtime.skill_refs,
         # 部分完成：正文可用但不完整。随 usage 落库，刷新后 `JobStatus.partial` 仍读得到。
         "partial": runtime.partial,
-        "failed_sections": runtime.failed_sections,
     }
 
 

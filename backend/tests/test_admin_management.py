@@ -56,8 +56,20 @@ def test_migration_adds_token_columns_and_audit_table():
     """
 
     with connect() as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'generation_jobs'"
+            )
+        }
+        tables = {
+            row["table_name"]
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+            )
+        }
 
     assert {"prompt_tokens", "completion_tokens"} <= columns
     assert "admin_audit_log" in tables
@@ -131,7 +143,6 @@ def test_user_list_includes_usage_aggregated_by_sql(client):
         owner_id,
         job_a,
         draft_content="",
-        completed_sections=[],
         prompt_tokens=100,
         completion_tokens=20,
     )
@@ -142,7 +153,6 @@ def test_user_list_includes_usage_aggregated_by_sql(client):
         error_code="INTERNAL_ERROR",
         error_message="炸了",
         draft_content="",
-        completed_sections=[],
         prompt_tokens=50,
         completion_tokens=5,
     )
@@ -181,7 +191,6 @@ def test_platform_stats_counts_everyone(client):
         owner_id,
         job_id,
         draft_content="",
-        completed_sections=[],
         prompt_tokens=7,
         completion_tokens=3,
     )
@@ -191,7 +200,7 @@ def test_platform_stats_counts_everyone(client):
     assert stats["user_count"] == 1
     assert stats["admin_count"] == 1
     assert stats["task_count"] == 1
-    assert stats["completed_count"] == 1
+    assert stats["succeeded_count"] == 1
     assert stats["prompt_tokens"] == 7
 
 

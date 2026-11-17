@@ -37,13 +37,21 @@ def format_sse_block(event: schemas.StreamEvent) -> str:
     再解析 `data` 里的 `type` 字段。事件体统一为 JSON，`content` 里的换行
     会被 JSON 转义，因此 `data:` 始终保持单行，不会破坏 SSE 帧边界。
 
+    带游标时（任务订阅，票 #86）再加一行 `id:`：这是 SSE 规范里「断线重连从哪接」的
+    标准字段，客户端浏览器原生就会把它作为 `Last-Event-ID` 带回；本项目前端用的是
+    `fetch` + `ReadableStream`（没有原生重连），因此自己记住最后一条 `id` 并以
+    `?cursor=` 带回来。`id` **只在这里出现**，不进 JSON 体（见 `StreamEvent.event_id`）。
+
     Args:
         event: 待发送的事件。
 
     Returns:
-        形如 `event: chunk\\ndata: {...}\\n\\n` 的字符串。
+        形如 `id: 12\\nevent: chunk\\ndata: {...}\\n\\n` 的字符串（无游标时无 `id:` 行）。
     """
-    return f"event: {event.type}\ndata: {event.model_dump_json()}\n\n"
+    body = f"event: {event.type}\ndata: {event.model_dump_json()}\n\n"
+    if event.event_id is None:
+        return body
+    return f"id: {event.event_id}\n{body}"
 
 
 def make_sse_generator(events: AsyncIterator[schemas.StreamEvent]) -> AsyncIterator[str]:

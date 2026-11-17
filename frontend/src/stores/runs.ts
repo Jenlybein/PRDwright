@@ -40,21 +40,34 @@ import type {
   DocPhase,
   DocumentKind,
   JobSnapshot,
-  PrdBoardState,
   ReviewConclusion,
   RunSummary,
 } from '@/types'
 
-/** 一次任务的预览态（正文 / 看板 / 阶段 / 审核结论 / 错误），整体随运行态清理 */
+/** 一次任务的预览态（正文 / 阶段 / 审核结论 / 错误），整体随运行态清理 */
 export interface RunPreview {
   /** 流式正文（生成中逐字追加，收尾后即最终正文） */
   content: string
-  /** PRD 分章节看板；其它产物为 null */
-  prdBoard: PrdBoardState | null
   /** 当前阶段（loading 条） */
   docPhase: DocPhase
   /** 当前阶段模型的原始输出（审核意见 / 改写稿），只给阶段面板看 */
   stageText: string
+  /**
+   * 大纲文本（`stage_chunk(outlining)` 的累计，票 #91）。
+   *
+   * 与 `stageText` 分开：那个「换阶段即清空」，而大纲是「这份产物定了哪些结构」，
+   * 正文写到一半时用户还要能回头看——它只在开新任务时清。
+   * 不落库：进程信息，刷新后由快照的 `stageText` 补（看不到就看不到，不影响产物）。
+   */
+  outlineText: string
+  /**
+   * 正文正在写第几批（票 #93）：`0` / `1` 表示没有发生续写，`2` 起表示「撞上输出上限，
+   * 已自动接着写」。
+   *
+   * 只增不减、只随新任务清：续写期间阶段仍是撰写，进度条与正文缓冲都不重置——
+   * 这条数字是**纯展示**，让「正文还在长」有一个解释，不参与任何判据。
+   */
+  continuation: number
   /** 审核结论；不持久化，刷新即失 */
   review: ReviewConclusion | null
   /** 生成失败原因（成功时为空串） */
@@ -87,10 +100,25 @@ export interface ActiveRun extends RunPointer {
   summary: RunSummary | null
   /** 最近一次收到的快照（供上层判断任务终态） */
   snapshot: JobSnapshot | null
+  /**
+   * 用户已经按下停止、但服务端还没确认收口（票 #84）。
+   *
+   * 它与服务端的 `status='cancelling'` 是**同一件事的两个面**：这里的标记让按钮立刻
+   * 变成「正在取消」并置灰（不等一次网络往返），服务端的快照负责最终事实。收尾时清掉。
+   */
+  cancelRequested: boolean
 }
 
 function emptyPreview(): RunPreview {
-  return { content: '', prdBoard: null, docPhase: 'idle', stageText: '', review: null, error: '' }
+  return {
+    content: '',
+      docPhase: 'idle',
+    stageText: '',
+    outlineText: '',
+    continuation: 0,
+    review: null,
+    error: '',
+  }
 }
 
 export const useRunsStore = defineStore('runs', () => {
@@ -108,6 +136,17 @@ export const useRunsStore = defineStore('runs', () => {
 
   /** 是否有任务在跑（信息性判据；**不再用于导航拦截**） */
   const hasRunning = computed(() => activeRun.value?.status === 'running')
+
+  /**
+   * 当前这一支是否**正在取消**（按钮据此显示「正在取消」并置灰，票 #84）。
+   *
+   * 两个来源取并集：用户刚按下（本地标记，零延迟反馈）与服务端快照已经说 `cancelling`。
+   */
+  const cancelling = computed(() => {
+    const run = activeRun.value
+    if (!run || run.status !== 'running') return false
+    return run.cancelRequested || run.snapshot?.status === 'cancelling'
+  })
 
   /**
    * 可持久化的任务指针：只在**运行中**才有值。
@@ -176,7 +215,7 @@ export const useRunsStore = defineStore('runs', () => {
    *
    * **不在这里清预览**：预览的唯一写入方是 `useDocumentPipeline`，它在发起任务**之前**
    * 就按产物种类摆好了现场（PRD 要先把空看板建出来，否则首批 `part` 事件无处可落）。
-   * 这里再清一次会把刚建好的看板抹掉，表现是「生成中一片空白、章节全丢」。
+   * 这里再清一次会把刚建好的看板抹掉，表现是「生成中一片空白」。
    * 需要清的时候它自己调 `resetPreview()`。
    *
    * 若已有一支在跑（正常路径不该发生，重入守卫会挡），后者以新任务为准；
@@ -197,6 +236,7 @@ export const useRunsStore = defineStore('runs', () => {
       elapsedMs: 0,
       summary: null,
       snapshot: null,
+      cancelRequested: false,
     }
     // 返回**响应式代理**而不是刚构造的裸对象：计时器与事件回调都拿着这个引用写
     // `elapsedMs` / `snapshot`，写裸对象只会改到 `ref` 内部的目标，界面永远收不到更新。
@@ -220,6 +260,7 @@ export const useRunsStore = defineStore('runs', () => {
       elapsedMs: 0,
       summary: null,
       snapshot: null,
+      cancelRequested: false,
     }
     // 同 `begin`：必须返回代理，否则后续写入不会触发更新
     return activeRun.value
@@ -265,11 +306,25 @@ export const useRunsStore = defineStore('runs', () => {
     run.summary = summary
   }
 
+  /**
+   * 记下「用户已经按下停止」（票 #84）。
+   *
+   * 只认同一支任务；返回是否记上了（迟到的点击属于已经结束的那一支，不返回 true）。
+   * 它不改 `status`：任务仍在跑，直到服务端回执说它落成已取消 / 取消中。
+   */
+  function requestCancel(jobId: number): boolean {
+    const run = activeRun.value
+    if (!run || run.jobId !== jobId || run.status !== 'running') return false
+    run.cancelRequested = true
+    return true
+  }
+
   /** 收尾：只收**同一支**任务；返回是否真的收了（迟到的收尾返回 false） */
   function settle(jobId: number): boolean {
     const run = activeRun.value
     if (!run || run.jobId !== jobId) return false
     run.status = 'settled'
+    run.cancelRequested = false
     return true
   }
 
@@ -287,6 +342,7 @@ export const useRunsStore = defineStore('runs', () => {
     run.snapshot = null
     run.elapsedMs = 0
     run.startedAt = Date.now()
+    run.cancelRequested = false
     return true
   }
 
@@ -317,6 +373,7 @@ export const useRunsStore = defineStore('runs', () => {
     activeRun,
     preview,
     hasRunning,
+    cancelling,
     pointer,
     // 判据
     holds,
@@ -333,6 +390,7 @@ export const useRunsStore = defineStore('runs', () => {
     setElapsed,
     setSummary,
     settle,
+    requestCancel,
     resume,
     detach,
     clear,

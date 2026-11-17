@@ -42,6 +42,6 @@
 
 如果你的结论和某条既有架构决策冲突（写在 `docs/architecture/ARCHITECTURE.md` 的「取舍」节、`docs/adr/` 或 issue 历史里），明确说出来，不要默默覆盖：
 
-> _与「SQLite 仍是默认后端」这条既有决策冲突，但值得重开，因为……_
+> _与「单 worker 是硬约束」这条既有决策冲突，但值得重开，因为……_
 
 同理，`docs/architecture/README.md` §2 的阶段总表（**时间线真源**）与 `docs/architecture/ARCHITECTURE.md` 说法不一致时，**以时间线真源为准**，并把失真记进那张「已确认的失真」表。

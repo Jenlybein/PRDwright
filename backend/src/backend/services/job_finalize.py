@@ -1,11 +1,30 @@
 """任务收尾与终态落库（`job_service` 的拆分子模块）。
 
-从 `job_service` **机械迁出**（issue #5），函数体逐字未改：`_finalize` 置终态、
-落用量、成功时调 `_write_document`、对话收尾调 `_write_chat_turn`、最后广播
-`run_summary`；`_document_kind` / `_regenerates_whole_document` /
-`_build_derived_from` / `_write_document` 决定「写哪份产物、追加还是就地改」。
+`_finalize` 置终态、落用量、写正文 / 写审核结论、广播 `run_summary`；
+`_document_kind` / `_regenerates_whole_document` / `_build_derived_from` / `_write_document`
+决定「写哪份产物、追加还是就地改」。
 
-事务边界不变：每个落库点仍是 `session_scope()` 各自一个短事务。
+## 事务边界（票 #81：原子收尾）
+
+成功收尾的五件事——**宣布成功 / 记一条账 / 写正文新版本 / 写审核结论 / 广播回执**——
+全部落在 `_finalize` 的**一个** `session_scope()` 里：
+
+1. `job_state.transition(..., session=session)` 一次条件写占住终态，账本那一笔（#80）
+   套在保存点里跟着这一笔走；
+2. 正文写入走 `document_store.write_document(..., session=session)`（统一入口，带版本锁）；
+3. 重审的结论写入走 `document_store.commit_review(..., session=session)`。
+
+任一步抛错 → 事务整批回滚 → **任务仍是 `running`**（不谎报成功、也不凭空判死），
+留一条 `job.closeout_rolled_back` warning，由恢复机制（#82 的租约 / 启动回收）接手。
+例外是**重审结论写不进去**：那一次执行的唯一产出就是结论，写不成必须让任务失败并说明
+原因——调用方据此再开一笔只落失败的事务（`_ReviewGateFailure`）。**版本锁拒绝**同理：
+就地改写撞上「当前版本已经不是我以为那一版」时整批回滚，再以 `CONTENT_CHANGED` 判失败。
+
+## 账本与硬事务的口径取舍（#80 vs #81）
+
+正文与状态是**权威**，账本是**审计**：写正文失败整批回滚（AC1/AC5），而账本写失败
+只丢这一行账（`#80` 的保存点口径）。两者在同一个 `job_state.transition(session=...)`
+里同时满足——硬事务边界只在正文 / 状态 / 结论，账本用 `SAVEPOINT` 自保。
 """
 
 from __future__ import annotations
@@ -23,8 +42,15 @@ from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services import document_store, solution_service
+from backend.repositories.generation_job_repo import (
+    STATUS_CANCELLED,
+    STATUS_CANCELLING,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    STATUS_SUCCEEDED,
+    STATUS_SUPERSEDED,
+)
+from backend.services import document_store, job_events, job_state, solution_service
 from backend.services.job_bus import job_bus
 from backend.services.job_product_kind import _target_product_kind
 from backend.services.job_runtime_events import _draft, _run_summary_event, _summary_data
@@ -48,94 +74,332 @@ class _ReviewWriteFailure:
     error_message: str
 
 
-def _finalize(runtime: JobRuntime, status: str) -> None:
+class _ReviewGateFailure(Exception):
+    """重审结论写不进去：**必须**把这次收尾改判失败（一次执行的唯一产出没落库）。
+
+    在成功事务内部抛它 → 那一笔（状态 + 账本 + 结论）整批回滚 → 调用方再开一笔只落
+    失败的事务，把「为什么没写成」如实写进任务终态与账本。
+    """
+
+    def __init__(self, failure: _ReviewWriteFailure) -> None:
+        super().__init__(failure.error_message)
+        self.failure = failure
+
+
+class _CloseoutVersionConflict(Exception):
+    """正文写入被版本锁拒绝（就地改写的「我以为当前是第几版」已不是当前版本）。
+
+    在成功事务内部抛它 → 整批回滚（任务不进已定稿）→ 调用方再开一笔失败事务，
+    以 `CONTENT_CHANGED` + `VERSION_CONFLICT_MESSAGE` 让用户知道该刷新重试。
+    """
+
+
+# 一次收尾的载荷：正文 / 章节 / 用量 / 待确认清单 / token 两列 / 耗时 / 部分完成标记。
+# 与 `job_state.FinishPayload` 同形；抽出来是因为一次收尾可能要发两次（见模块 docstring）。
+def _finish_payload(
+    runtime: JobRuntime, summary: dict[str, Any], draft: str, *, partial: bool = False
+) -> job_state.FinishPayload:
+    return job_state.FinishPayload(
+        draft_content=draft,
+        usage=json.dumps(summary, ensure_ascii=False),
+        pending_items=runtime.pending_items,
+        prompt_tokens=int(summary.get("prompt_tokens") or 0),
+        completion_tokens=int(summary.get("completion_tokens") or 0),
+        # 账本要回答「跑了多久」：与 `usage.duration_ms` 同源，一次算好两处用。
+        duration_ms=int(summary.get("duration_ms") or 0),
+        # 「有内容可用但不完整」（票 #85）：与终态同一条语句落库，界面的两个问题
+        #（这次任务怎么结束的 / 这份正文能不能用）因此不会各说各话。
+        partial=partial,
+    )
+
+
+def _closeout_once(
+    runtime: JobRuntime,
+    status: str,
+    summary: dict[str, Any],
+    draft: str,
+    *,
+    error_code: str,
+    error_message: str,
+) -> job_state.TransitionResult:
+    """**一个事务**里跑完一次收尾：状态机 → 账本 → 正文/结论，任一步抛错整批回滚。
+
+    顺序与 spec 一致（状态机条件写在前，后续副作用只有「占住终态」才做）：
+    `transition` 改到 0 行 = 本次结果被丢弃，那就什么都不写（正文也不写，否则晚到的
+    执行者会覆盖别人已经写好的终态；#79 的口径）。
+
+    返回值是 `TransitionResult`；调用方在提交之后才结算内存、写日志、广播回执。
+
+    **执行权（#82）**：收尾的条件写带上本轮的 `lease_token`——状态仍是执行中、凭证仍是
+    这一轮、到期时间还没过，三条同时成立才改到那一行。旧执行者的晚到收尾因此是 0 行。
+
+    ## 七态（票 #84）下的四个结局
+
+    - `succeeded`：`SUCCEED`（正文 / 结论照常写）；
+    - `failed`：`FAIL`（失败收尾可能落一版「部分完成」正文；重审失败写 `review_failed_at`）；
+    - `cancelled`：`CONFIRM_CANCEL`（取消确认，清租约，半截正文与用量同样落下来；
+      **不写 `review_failed_at`**——用户主动停止不是审核失败）；
+    - `superseded`：`CONFIRM_SUPERSEDED`（登记路径已经落了终态，这里只补一次载荷，
+      **不写正文**——同一份文档已经有更新的任务接手）。
+    """
+    event = _event_of(status)
+    # 失败 / 取消收尾可能要把「已经写出来的正文」落成一版部分完成（票 #85）。这份内容在
+    # **改终态之前**就算好：任务行的 `partial` 与正文写入必须同一条语句 / 同一个事务。
+    # 被取代不写正文（AC 口径：本次结果不再写入）。
+    partial_content = (
+        "" if status == STATUS_SUCCEEDED else _partial_document_content(runtime, draft)
+    )
+    if status == STATUS_SUPERSEDED:
+        partial_content = ""
+    payload = _finish_payload(
+        runtime,
+        summary,
+        draft,
+        # 成功收尾的「部分完成」来自 `done.partial`；失败 / 取消的则来自
+        # 「这次真的写出了一版部分完成正文」。
+        partial=bool(runtime.partial) if status == STATUS_SUCCEEDED else bool(partial_content),
+    )
+    with session_scope() as session:
+        result = job_state.transition(
+            event,
+            job_state.job_scope(runtime.owner_id, runtime.job_id),
+            payload=payload,
+            error_code=error_code,
+            error_message=error_message,
+            session=session,
+            lease_token=runtime.lease_token,
+        )
+        if not result.applied:
+            return result
+
+        # 过程日志（#86）：待写事件 + 本次回执，与终态写**同一笔事务**提交。
+        cursor = job_events.flush_pending(
+            runtime, session, extra=(_run_summary_event(summary),)
+        )
+
+        if status == STATUS_SUCCEEDED:
+            if runtime.kind == "review":
+                # 重审的产出只有结论：先写结论，写不成整批回滚并改判失败（见下方 catch）。
+                gate = _write_review(runtime, session=session)
+                if gate is not None:
+                    raise _ReviewGateFailure(gate)
+            else:
+                _write_document(runtime, summary, session=session)
+        elif status == STATUS_CANCELLED:
+            # 取消 / 用户停止：文档任务把已经写出来的正文落成一版部分完成（#85），
+            # 一个字都没写出来时不落版本。
+            #
+            # ⚠️ **取消不写 `review_failed_at`**（P0-2）：用户按停止 ≠ 审核失败。
+            # 从前这里对 `review` 任务也走 `_mark_review_failed`，于是「我自己停掉的」
+            # 会在审阅页显示成「审核失败」——把用户的主动意图说成一次失败。
+            # 取消的结局由 `status=cancelled` 表达（AC4），重审没有产出结论这一点
+            # 也已经写在任务的终态里，不需要另记一次「失败时间」。
+            if runtime.kind != "review" and partial_content:
+                _write_partial_document(runtime, summary, partial_content, session=session)
+        elif status == STATUS_FAILED:
+            if runtime.kind == "review":
+                _mark_review_failed(runtime, session=session)
+            elif partial_content:
+                _write_partial_document(runtime, summary, partial_content, session=session)
+        # superseded：终态已由登记路径落下，这里只补载荷（正文不写）。
+    # 事务提交之后才清空待写缓冲：整批回滚时那一批事件必须还在（下一次收尾重写）。
+    job_events.mark_flushed(runtime, cursor)
+    return result
+
+
+# 收尾结局 → 状态机事件的唯一映射（四个终态一一对应）。
+_CLOSEOUT_EVENTS = {
+    STATUS_SUCCEEDED: job_state.JobEvent.SUCCEED,
+    STATUS_FAILED: job_state.JobEvent.FAIL,
+    STATUS_CANCELLED: job_state.JobEvent.CONFIRM_CANCEL,
+    STATUS_SUPERSEDED: job_state.JobEvent.CONFIRM_SUPERSEDED,
+}
+
+
+def _event_of(status: str) -> job_state.JobEvent:
+    """把收尾结局翻成状态机事件；未知结局属于程序错误。"""
+    try:
+        return _CLOSEOUT_EVENTS[status]
+    except KeyError:  # pragma: no cover - 调用方只会传四个终态
+        raise ValueError(f"未知的收尾结局：{status}") from None
+
+
+def _gate_failure_event(code: str, message: str) -> StreamEvent:
+    """收尾里才发现的那条失败（重审结论写不进去 / 版本锁拒绝）对应的 `error` 事件。
+
+    它必须**先记进过程日志、再随第二笔收尾事务一起提交**，最后才广播：按游标续读的
+    读者只从表里取事件，只广播不落盘的话，这条「为什么失败」永远读不到。
+    """
+    return StreamEvent(
+        type="error",
+        content=message,
+        data={"error_type": "JobFailed"},
+        code=code,
+    )
+
+
+def _publish_gate_failure(runtime: JobRuntime, event: StreamEvent) -> None:
+    """把上面那条事件广播给仍连着的订阅者（唤醒用；数据已在表里）。"""
+    job_bus.publish(runtime.job_id, event)
+
+
+def _finalize(
+    runtime: JobRuntime,
+    status: str,
+    *,
+    error_code: str = "",
+    error_message: str = "",
+) -> None:
     """收尾：置终态、落库（含用量）、**成功时把正文写进 `documents`**、广播 `run_summary`。
 
     保留运行时（直到 `run_job` 的 finally）让已订阅者把这一条读完。
 
-    **只有成功才写文档**：失败的任务保留上一次可用的正文（半截输出不该顶掉一份
-    完整文档）。这正是「文档所有权在后端」的关键收益——「谁写、什么时候写、
-    写完之后长什么样」只在这一处决定，前端只负责读与提交用户变更。
-    """
-    # —— 删除与收尾可能赛跑，两道防御都留着 ——
-    # 时间窗：用户点删除的那一刻，任务可能正好走到收尾。`delete_solution_and_cancel_jobs`
-    # 在事务里先把任务写成终态（`CANCELLED`），提交后才置内存里的 `cancelled`，但收尾可能
-    # 已经越过了「检查标记」那一行；反过来，运行时也可能在进程重启后丢失（标记无处可置），
-    # 此时只剩「方案还在不在」这一条事实可查。
-    # 两道判断覆盖的正是这两个方向，缺任何一道都会留下一条「方案已删、文档却写进去了」
-    # 的路径（正文写进一个不存在的 solution_id，前端下次打开就是幽灵文档）。
-    if status == "completed":
-        abort_code = ""
-        abort_message = ""
-        if runtime.cancelled:
-            abort_code = "CANCELLED"
-            # 对话的「取消」有两种来源，文案必须分开：用户按了停止 vs 方案被删除。
-            # 混在一起会让用户在自己点过停止之后读到「方案已删除」，以为数据没了。
-            if runtime.kind == "chat" and runtime.chat_interrupted:
-                abort_message = "已停止生成"
-            else:
-                abort_message = "方案已删除，任务已取消"
-        elif runtime.superseded:
-            # 同一份文档已经被更晚的任务接手：本次结果不能落库，否则会把新稿盖回旧版。
-            # 用 `SUPERSEDED` 而不是 `CANCELLED`：这是「被顶替」，不是「用户删了东西」，
-            # 排查时两者的处理方式完全不同（前者要看谁发起了新任务，后者要看删除路径）。
-            abort_code = "SUPERSEDED"
-            abort_message = "被同一份文档的新任务取代，本次结果不再写入"
-        elif runtime.solution_id is not None and not solution_service.solution_exists(
-            runtime.owner_id, runtime.solution_id
-        ):
-            abort_code = "CANCELLED"
-            abort_message = "方案已删除，任务已取消"
-            logger.warning(
-                "生成任务收尾时方案已不存在，不再写入文档",
-                extra={
-                    "event": "job.solution_gone",
-                    "job_id": runtime.job_id,
-                    "solution_id": runtime.solution_id,
-                },
-            )
-        if abort_code:
-            # 语义上确实「没有成功」：复用 failed 而不是新造状态（状态值是前后端共享契约，
-            # 新增取值会让前端每一处 status 分支都要多一条分支）。
-            status = "failed"
-            runtime.failed = True
-            runtime.error_code = abort_code
-            runtime.error_message = abort_message
-        elif runtime.kind == "review":
-            # B3：重审的唯一产出就是判定，结论写不进去等于这次什么也没产出。两道条件写
-            # （事前比较 `_review_body_changed` + 写入 SQL 的 `expected_content_sha`）任一
-            # 命中，就在这里把任务翻成失败——只记日志会让任务报 completed，而用户看到的
-            # 是一份「成功但结论没变」的记录，比报错更糟：他没有任何线索该重审。
-            gate = _write_review(runtime)
-            if gate is not None:
-                status = "failed"
-                runtime.failed = True
-                runtime.error_code = gate.error_code
-                runtime.error_message = gate.error_message
-                # 此刻订阅者还连着：补一条 `error` 事件，前端才拿得到原因。这一步在收尾里
-                # 才发现（正文是在收尾时比的），不像普通失败那样有异常可抛。
-                job_bus.publish(
-                    runtime.job_id,
-                    StreamEvent(
-                        type="error",
-                        content=runtime.error_message,
-                        data={"error_type": "JobFailed"},
-                        code=runtime.error_code,
-                    ),
-                )
+    ## 结局怎么定（七态，票 #84）
 
-    runtime.status = status
+    调用方给的 `status` 只是「本来想落什么」；三条**意图标记**优先于它：
+
+    - `runtime.cancelled`（用户按停止 / 删方案 / 删账号 / 排空）→ **已取消**；
+    - `runtime.superseded`（同一份文档已有更新的任务接手）→ **被取代**；
+    - 成功收尾时方案已经不存在 → **已取消**（方案没了，正文无处可写）。
+
+    三者的 `error_code` 一律是空串：状态由 `status` 表达（AC4）。
+
+    ## 成功与失败 / 取消都落正文，但落法不同（票 #85）
+
+    - 成功 → 追加 / 就地写入这一版的完整正文；
+    - 失败 / 取消 → 已生成的内容**追加**成一版 `partial=true` 的正文，不覆写当前完整正文；
+    - **被取代例外**：那种结局的口径是「本次结果不再写入」。
+
+    ## 幂等闸（#79）
+    进来先看内存那份状态：**已经终态就直接返回**，不落库、不写稿、不广播。
+    内存闸之外还有一道数据库闸：终态写是条件更新，改到 0 行同样丢弃本次结果。
+
+    ## 原子收尾（#81）
+    成功收尾的五件事在同一事务里（见 `_closeout_once`）。写正文失败时整批回滚，任务
+    **保持执行中**，留一条 `job.closeout_rolled_back` warning 交给恢复机制。
+
+    Args:
+        status: 本次想落的结局（`succeeded` / `failed` / `cancelled`）。
+        error_code / error_message: 调用方已知的失败原因（排空取消传原因文案）。
+            留空时用运行时的失败意图（上游 `error` 事件 / 兜底异常已经记下）。
+    """
+    # —— 内存闸：本协程的第二次收尾到此为止 ——
+    if runtime.status not in (STATUS_RUNNING, STATUS_CANCELLING):
+        logger.info(
+            "生成任务已是终态，本次收尾丢弃",
+            extra={
+                "event": "job.finalize_discarded",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "status": runtime.status,
+                "attempted_status": status,
+            },
+        )
+        return
+
+    # —— 结局裁决：意图标记优先于调用方想落的终态 ——
+    if runtime.cancelled or status == STATUS_CANCELLED:
+        status = STATUS_CANCELLED
+        if not error_message:
+            # 取消原因优先用「请求取消」那一刻记下的文案（用户停止 / 方案被删 / 排空），
+            # 只有缺口时才退回默认句。对话的两种来源还要再分开一次。
+            error_message = runtime.cancel_message or (
+                "已停止生成"
+                if runtime.kind == "chat" and runtime.chat_interrupted
+                else "任务已取消"
+            )
+    elif runtime.superseded:
+        # 同一份文档已经被更晚的任务接手：本次结果不能落库，否则会把新稿盖回旧版。
+        status = STATUS_SUPERSEDED
+        error_message = "被同一份文档的新任务取代，本次结果不再写入"
+    elif status == STATUS_SUCCEEDED and runtime.solution_id is not None and not (
+        solution_service.solution_exists(runtime.owner_id, runtime.solution_id)
+    ):
+        # 删除与收尾可能赛跑：方案没了，这次成功无处可写。两件事同义：
+        # 「没有可落正文的地方」= 任务被取消（不是失败）。
+        status = STATUS_CANCELLED
+        error_message = "方案已删除，任务已取消"
+        logger.warning(
+            "生成任务收尾时方案已不存在，不再写入文档",
+            extra={
+                "event": "job.solution_gone",
+                "job_id": runtime.job_id,
+                "solution_id": runtime.solution_id,
+            },
+        )
+
     draft = _draft(runtime)
     summary = _summary_data(runtime, status)
-    usage = json.dumps(summary, ensure_ascii=False)
-    # 终态日志：无论成功、失败、被取消还是被顶替，都从这里落一条，
-    # 让日志页能把「这一次生成」的结局与 `job.started` 首尾对齐。
-    # 归属字段带全，`request_id` 显式传（落库线程读不到 ContextVar）。
+    prompt_tokens = int(summary.get("prompt_tokens") or 0)
+    completion_tokens = int(summary.get("completion_tokens") or 0)
+
+    if status == STATUS_SUCCEEDED:
+        requested_code = ""
+        requested_message = ""
+    elif status == STATUS_SUPERSEDED:
+        requested_code = ""
+        requested_message = error_message
+    elif status == STATUS_CANCELLED:
+        requested_code = ""
+        requested_message = error_message or "任务已取消"
+    else:
+        # 失败：没有明确原因时记成内部错误，而不是留空。
+        requested_code = error_code or runtime.error_code or ErrorCode.INTERNAL_ERROR.value
+        requested_message = error_message or runtime.error_message or "生成失败"
+
+    try:
+        result = _closeout_once(
+            runtime,
+            status,
+            summary,
+            draft,
+            error_code=requested_code,
+            error_message=requested_message,
+        )
+    except _ReviewGateFailure as failure:
+        _finalize_review_gate_failure(runtime, failure.failure, draft)
+        return
+    except _CloseoutVersionConflict:
+        _finalize_version_conflict(runtime, draft)
+        return
+    except Exception:  # noqa: BLE001 - 收尾整体兜底：整批已回滚，任务保持执行中
+        # 这里**不**再判 failed：事务回滚后库里那一行仍是 running，凭空判死会让「这次
+        # 没写进去」变成一次说不清的失败；正确处置是保持执行中、留痕、由恢复机制接手。
+        logger.warning(
+            "收尾事务失败，整批回滚，任务保持执行中（由恢复机制接手）",
+            extra={
+                "event": "job.closeout_rolled_back",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "kind": runtime.kind,
+                "attempted_status": status,
+                "error_code": requested_code,
+                "request_id": current_request_id(),
+            },
+            exc_info=True,
+        )
+        return
+
+    if not result.applied:
+        # 改到 0 行：本次结果被丢弃（`job_state` 已留丢弃日志），不写稿、不广播。
+        job_state.settle_after_commit(
+            result, job_state.job_scope(runtime.owner_id, runtime.job_id)
+        )
+        return
+
+    job_state.settle_after_commit(
+        result, job_state.job_scope(runtime.owner_id, runtime.job_id)
+    )
+    settled_status = runtime.status or status
+
+    # 终态日志：无论成功、失败、被取消还是被顶替，都从这里落一条，让日志页能把
+    # 「这一次生成」的结局与 `job.started` 首尾对齐。归属字段带全，
+    # `request_id` 显式传（落库线程读不到 ContextVar）。
     logger.info(
         "生成任务收尾：%s",
-        status,
+        settled_status,
         extra={
-            "event": f"job.{status}",
+            "event": f"job.{settled_status}",
             "job_id": runtime.job_id,
             "user_id": runtime.owner_id,
             "solution_id": runtime.solution_id,
@@ -148,47 +412,6 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
             "request_id": current_request_id(),
         },
     )
-    # 从汇总里取出两列副本：管理员后台按用户 / 按日统计消耗时用 SQL 求和，
-    # 不用把每行 JSON 取回解析。取不到就当 0——宁可少算，不猜数字。
-    prompt_tokens = int(summary.get("prompt_tokens") or 0)
-    completion_tokens = int(summary.get("completion_tokens") or 0)
-    # 供应商四列已在**建任务那一刻**从 `config_snapshot` 里的同一份定格一次写全
-    # （见 `GenerationJobRepository.create`）。收尾不再从 `summary` 里另取四格、
-    # 不再重读配置或另算一遍：配置会被改名/删除，回查等于让历史账单跟着今天的状态变。
-    # `usage` JSON、token 两列、错误码与终态语义都不改。
-    if status == "completed":
-        with session_scope() as session:
-            GenerationJobRepository(session).finish(
-                runtime.owner_id,
-                runtime.job_id,
-                draft_content=draft,
-                completed_sections=runtime.completed_sections,
-                usage=usage,
-                pending_items=runtime.pending_items,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-        _write_document(runtime, summary)
-    else:
-        with session_scope() as session:
-            GenerationJobRepository(session).fail(
-                runtime.owner_id,
-                runtime.job_id,
-                error_code=runtime.error_code or ErrorCode.INTERNAL_ERROR.value,
-                error_message=runtime.error_message or "生成失败",
-                draft_content=draft,
-                completed_sections=runtime.completed_sections,
-                # 失败的任务同样烧了 token，用量一并落库——不然「这次为什么这么贵」无从追溯
-                usage=usage,
-                pending_items=runtime.pending_items,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-        if runtime.kind == "review":
-            # 重审没跑成也要**落成事实**（US3）：面板据此显示「审核失败（时间）」，
-            # 刷新之后仍是失败而不是退化成「未审核」。取不到当前版本时静默跳过
-            # （正文都没了，没有「哪一版失败」可言）。
-            _mark_review_failed(runtime)
 
     # 对话的产物是一条轮次，不是文档。**必须在广播之前写**：前端收到 `run_summary`
     # 后会去拉轮次表，晚一步就会拉到「还没有这一轮」的空列表，表现为
@@ -199,7 +422,153 @@ def _finalize(runtime: JobRuntime, status: str) -> None:
     job_bus.publish(runtime.job_id, _run_summary_event(summary))
 
 
-def _review_body_changed(runtime: JobRuntime) -> bool:
+def _finalize_review_gate_failure(
+    runtime: JobRuntime, failure: _ReviewWriteFailure, draft: str
+) -> None:
+    """重审结论写不进去：第二笔事务**只**落失败（含账本与失败时间戳）。
+
+    第一笔事务（声称成功）已经整批回滚——状态、账本、结论都没留下；这一笔把任务如实
+    判为 failed，并补一条 `error` 事件给仍连着的订阅者。
+    """
+    status = "failed"
+    summary = _summary_data(runtime, status)
+    failure_event = _gate_failure_event(failure.error_code, failure.error_message)
+    # 与「改判失败」同一笔事务进过程日志（见 `_gate_failure_event` 的说明）
+    job_events.record(runtime, failure_event)
+    try:
+        result = _closeout_once(
+            runtime,
+            status,
+            summary,
+            draft,
+            error_code=failure.error_code,
+            error_message=failure.error_message,
+        )
+        if result.applied:
+            job_state.settle_after_commit(
+                result, job_state.job_scope(runtime.owner_id, runtime.job_id)
+            )
+            settled_status = runtime.status or status
+            logger.info(
+                "生成任务收尾：%s",
+                settled_status,
+                extra={
+                    "event": f"job.{settled_status}",
+                    "job_id": runtime.job_id,
+                    "user_id": runtime.owner_id,
+                    "solution_id": runtime.solution_id,
+                    "kind": runtime.kind,
+                    "duration_ms": summary.get("duration_ms"),
+                    "total_calls": summary.get("total_calls"),
+                    "prompt_tokens": summary.get("prompt_tokens"),
+                    "completion_tokens": summary.get("completion_tokens"),
+                    "error_code": failure.error_code,
+                    "request_id": current_request_id(),
+                },
+            )
+            _publish_gate_failure(runtime, failure_event)
+            job_bus.publish(runtime.job_id, _run_summary_event(summary))
+        else:
+            job_state.settle_after_commit(
+                result, job_state.job_scope(runtime.owner_id, runtime.job_id)
+            )
+    except Exception:  # noqa: BLE001 - 失败事务也写不进去：保持执行中，交给恢复机制
+        logger.warning(
+            "收尾失败事务写不进去，任务保持执行中（由恢复机制接手）",
+            extra={
+                "event": "job.closeout_rolled_back",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "kind": runtime.kind,
+                "attempted_status": status,
+                "error_code": failure.error_code,
+                "request_id": current_request_id(),
+            },
+            exc_info=True,
+        )
+
+
+def _finalize_version_conflict(runtime: JobRuntime, draft: str) -> None:
+    """就地改写被版本锁拒绝：整批回滚后以 `CONTENT_CHANGED` 判失败并说明原因。
+
+    用户看到的正是「正文已被更新，请刷新后重试」——这时候覆盖回去会把别人（通常是刚
+    生成完的那一版）的正文悄悄抹掉，比失败更糟。
+    """
+    status = "failed"
+    summary = _summary_data(runtime, status)
+    code = ErrorCode.CONTENT_CHANGED.value
+    message = document_store.VERSION_CONFLICT_MESSAGE
+    failure_event = _gate_failure_event(code, message)
+    # 与「改判失败」同一笔事务进过程日志：按游标续读的读者也要看到这条原因
+    job_events.record(runtime, failure_event)
+    try:
+        result = _closeout_once(
+            runtime,
+            status,
+            summary,
+            draft,
+            error_code=code,
+            error_message=message,
+        )
+        if result.applied:
+            job_state.settle_after_commit(
+                result, job_state.job_scope(runtime.owner_id, runtime.job_id)
+            )
+            logger.info(
+                "生成任务收尾：%s",
+                runtime.status or status,
+                extra={
+                    "event": f"job.{runtime.status or status}",
+                    "job_id": runtime.job_id,
+                    "user_id": runtime.owner_id,
+                    "solution_id": runtime.solution_id,
+                    "kind": runtime.kind,
+                    "duration_ms": summary.get("duration_ms"),
+                    "total_calls": summary.get("total_calls"),
+                    "prompt_tokens": summary.get("prompt_tokens"),
+                    "completion_tokens": summary.get("completion_tokens"),
+                    "error_code": code,
+                    "request_id": current_request_id(),
+                },
+            )
+            _publish_gate_failure(runtime, failure_event)
+            job_bus.publish(runtime.job_id, _run_summary_event(summary))
+        else:
+            job_state.settle_after_commit(
+                result, job_state.job_scope(runtime.owner_id, runtime.job_id)
+            )
+    except Exception:  # noqa: BLE001 - 失败事务也写不进去：保持执行中，交给恢复机制
+        logger.warning(
+            "收尾失败事务写不进去，任务保持执行中（由恢复机制接手）",
+            extra={
+                "event": "job.closeout_rolled_back",
+                "job_id": runtime.job_id,
+                "user_id": runtime.owner_id,
+                "kind": runtime.kind,
+                "attempted_status": status,
+                "error_code": code,
+                "request_id": current_request_id(),
+            },
+            exc_info=True,
+        )
+
+
+def _expected_version_no(runtime: JobRuntime) -> int | None:
+    """任务单上定格的「我以为当前是第几版」（就地改写用；整篇生成不带版本期望）。
+
+    `optimize` / `clarify` / `auto_clarify` 的正文由客户端给，版本号也随任务单一起定格；
+    对不上就拒绝写入（见 `document_store.write_document` 的版本锁）。没有这个字段的旧
+    客户端不持版本期望，退化成 `None`（不比对），行为与本改造前一致。
+    """
+    raw = runtime.request.get("expected_version_no")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    return None
+
+
+def _review_body_changed(runtime: JobRuntime, *, session: Any) -> bool:
     """重审的正文在「建任务那一刻」与「收尾写结论」之间被改过没有。
 
     被审的那一份正文由 `job_inputs._review_inputs` 在建任务那一刻从库里取，随任务单进
@@ -208,11 +577,16 @@ def _review_body_changed(runtime: JobRuntime) -> bool:
 
     取不到当前版本（文档被删、方案没了）时返回 `False`：那属于「写不进去」，
     由 `commit_review` 的 `missing` 分支处理，不该在这里报「正文已变更」。
+
+    `session` 是收尾事务：读当前版本与写结论在同一个快照里，避免「比较之后、写入之前」
+    再有第二次读看到不同的库状态。
     """
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
         return False
-    meta = document_store.current_version_meta(runtime.owner_id, runtime.solution_id, kind)
+    meta = document_store.current_version_meta(
+        runtime.owner_id, runtime.solution_id, kind, session=session
+    )
     if meta is None:
         return False
     reviewed_sha = content_fingerprint(str(runtime.request.get("document") or ""))
@@ -315,42 +689,140 @@ def _document_kind(runtime: JobRuntime) -> str | None:
     return _target_product_kind(runtime.kind, runtime.request)
 
 
-def _build_derived_from(runtime: JobRuntime, kind: str) -> dict[str, Any] | None:
+def _build_derived_from(
+    runtime: JobRuntime, kind: str, *, session: Any
+) -> dict[str, Any] | None:
     """为下游版本记录生成时的上游锚点（版本号 + 内容指纹）。
 
     只对首次 / 整篇重生成生效；`optimize` / `clarify` 是就地改写，沿用旧锚点。
     取不到上游（还没生成 PRD）时不写——空锚点会让后续「是否过期」的判断误报。
+
+    `session` 是收尾事务：锚点读的是与写入同一个快照里的上游版本。
     """
     if kind not in ("api_docs", "prompts") or runtime.solution_id is None:
         return None
-    prd = document_store.current_version_meta(runtime.owner_id, runtime.solution_id, "prd")
+    prd = document_store.current_version_meta(
+        runtime.owner_id, runtime.solution_id, "prd", session=session
+    )
     if not prd:
         return None
     derived: dict[str, Any] = {"prd": prd}
     if kind == "prompts" and (runtime.request.get("api_docs_content") or "").strip():
         api = document_store.current_version_meta(
-            runtime.owner_id, runtime.solution_id, "api_docs"
+            runtime.owner_id, runtime.solution_id, "api_docs", session=session
         )
         if api:
             derived["api_docs"] = api
     return {"derived_from": derived}
 
 
-def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
+def _partial_document_content(runtime: JobRuntime, draft: str) -> str:
+    """失败收尾时「值得升格成一版「部分完成」」的正文；空串表示没有可落的内容。
+
+    判据有三条，缺一不可：
+
+    1. **不是被顶替**（`runtime.superseded`）：那种结局的口径是「本次结果不再写入」——
+       更晚的任务已经接手同一份文档，把这次的半截稿追加成当前版本会把新任务的工作按下去；
+    2. **方案还在**：用户删掉方案时，任务走的是「方案已删除，任务已取消」，这时把半截正文
+       写进一个已经不存在的方案是没有意义的事（文档会跟着方案一起没）；
+    3. **这份任务会产出整篇正文**（`_regenerates_whole_document`）：就地改写（optimize /
+       clarify）动的是当前版本的局部，追加一版半截改写会让「当前正文」变成残缺稿，
+       而那正是它本来要覆盖的那一版；`review` / `chat` 根本不产正文；
+    4. **确实写出了内容**：一个字都没有就没有「可用」可言，落个空版本只是给用户
+       一个点开是空的假产物。
+
+    正文取「定稿正文优先、否则尽力还原」：失败的生成通常没有 `done.reply`，
+    但若 `done` 已经到、随后才失败，定稿值才是权威的那一份。
+    """
+    if runtime.superseded:
+        return ""
+    if runtime.solution_id is None or not solution_service.solution_exists(
+        runtime.owner_id, runtime.solution_id
+    ):
+        # 方案没了 = 用户删掉了这份工作：宁可不写，也不留一份挂在已删方案上的幽灵版本。
+        return ""
+    if not _regenerates_whole_document(runtime.kind):
+        return ""
+    if _document_kind(runtime) is None:
+        # 没有可挂的产物 → 没有可落的版本（宁可不写，也不写错位置）
+        return ""
+    content = (runtime.final_reply or "").strip() or draft.strip()
+    return content
+
+
+def _write_partial_document(
+    runtime: JobRuntime, summary: dict[str, Any], content: str, *, session: Any
+) -> None:
+    """把失败 / 取消时已经写出来的正文升格成一版「部分完成」（票 #85）。
+
+    走 #81 的**唯一写入入口** `document_store.write_document(mode="append")`，
+    并显式把审核两列传成 `None`：
+
+    - `review=None`：这一版没审过。旧结论属于**别的正文**，搬过来会被读成本次结果；
+    - `review_failed_at=None`：这次也没有「审核失败」这件事可记（审核可能压根没跑），
+      把上一版的时间带过来同样是在说一件没发生过的事。
+
+    追加（而不是就地改当前版本）：用户手里那份完整正文不能被半截稿替换，部分完成只进
+    版本链——它可读、可下载、可恢复，但不会让「当前版本」变成一份残缺稿。
+    """
+    kind = _document_kind(runtime)
+    if kind is None or runtime.solution_id is None:  # pragma: no cover - 调用方已判过
+        return
+    result = document_store.write_document(
+        runtime.owner_id,
+        runtime.solution_id,
+        kind,
+        content,
+        mode="append",
+        pending_items=runtime.pending_items,
+        run_summary=summary,
+        # 两列都显式给 None：不带旧结论，也不带旧的审核失败时间（AC2）。
+        review=None,
+        review_failed_at=None,
+        partial=True,
+        source=runtime.kind,
+        metadata=_build_derived_from(runtime, kind, session=session),
+        session=session,
+    )
+    # `result` 可能为 None：测试注入的替身（记录调用）不返回结果对象。真实入口
+    # 总是给 `DocumentWriteResult`，因此只在拿到它时读结果码。
+    if result is not None and result.outcome == "missing":
+        logger.warning(
+            "失败收尾未能写入部分完成版本（方案不存在或归属不符）",
+            extra={
+                "event": "job.partial_document_write_skipped",
+                "job_id": runtime.job_id,
+                "kind": kind,
+                "solution_id": runtime.solution_id,
+            },
+        )
+
+
+def _write_document(
+    runtime: JobRuntime, summary: dict[str, Any], *, session: Any
+) -> None:
     """把本次任务的权威正文写进 `documents`（成功收尾的唯一落点）。
 
     用 `done.reply` 而不是 `_draft()`：前者是流水线**定稿**的完整正文，后者是
     「已定稿段落 + 实时缓冲」的尽力还原，两者在正常情况下一致，但定稿值才是权威。
 
+    写入走**唯一入口** `document_store.write_document(..., session=session)`：
+    整篇生成 / 修复 / 恢复是 `append`（追加新版本），`optimize` / `clarify` 是
+    `replace`（就地改当前版本，带版本锁）。
+
     无方案可挂（`solution_id` 为空，如快捷入口的逃生口）或归属不符时静默跳过——
     这属于「这次生成没地方落」，不该让一个已经成功的任务变成失败。
 
-    写库本身出意外也只记日志：正文已经在 `generation_jobs.draft_content` 里存了一份，
-    丢的只是「升格成文档」这一步，不该把整个任务判失败。
+    **写库本身出意外不再吞掉**（#81 / AC1）：异常直接抛出，由 `_closeout_once` 的事务
+    回滚把「宣布成功 + 账本 + 正文」整批撤销，任务保持执行中。旧实现的
+    「记一条 warning 继续报成功」正是「任务报完成、正文其实没进库」。
 
-    **重新审核（`kind='review'`）不走这里**：它不产出正文，收尾要做的是「把结论写进
-    被审的那一版」，而那一步必须在置终态**之前**做完才能判失败（见 `_write_review`）。
+    **重新审核（`kind='review'`）不走这里**：它不产出正文，收尾做的是「把结论写进
+    被审的那一版」（`_write_review`）。
     """
+    if runtime.kind == "review":
+        # 显式排除，而不是靠「final_reply 恰好为空」这条偶然防线（见 #79 勘察 §3.2）。
+        return
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
         return
@@ -358,46 +830,41 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
     if not content.strip():
         return
     append_version = _regenerates_whole_document(runtime.kind)
-    try:
-        written = document_store.commit_generated(
-            runtime.owner_id,
-            runtime.solution_id,
-            kind,
-            content,
-            pending_items=runtime.pending_items,
-            run_summary=summary,
-            # 审核结论与正文**同批写入**：它描述的就是这一版正文，分两次写就会出现
-            # 「正文换了、结论还是旧的那条」。没审成时是 `None`，不写占位。
-            review=runtime.review,
-            # 「审核试过但没跑成」要把失败本身落成事实（`review_failed_at`）：
-            # 刷新后面板才仍旧显示「审核失败（时间）」，而不是退化成「未审核」。
-            # 两条链路同一列、同一展示：生成时审核失败（PRD / 接口文档 / 提示词）
-            # 与修复后的重审失败。判据是运行态上那个**显式的「试过」标记**——
-            # 显式关闭审核的入口（快捷流程）连 `review` 事件都不发，因此不写。
-            review_failed_at=(
-                utc_now_text() if runtime.review is None and runtime.review_attempted else None
-            ),
-            # `append_version=True`（整篇生成）同时意味着「追加新版本」；
-            # `False`（optimize / clarify）就是就地改当前版本。下游不再删除，
-            # 是否过期由读取侧比较 derived_from 得出。
-            append_version=append_version,
-            # 版本来源标签：整篇生成时是产物类型，就地改写时是动作类型（optimize / clarify）
-            source=runtime.kind,
-            # 只有整篇生成才更新锚点；就地改写沿用当前版本原有的 metadata。
-            metadata=_build_derived_from(runtime, kind) if append_version else None,
-        )
-    except Exception:  # noqa: BLE001 - 落文档不该把已成功的任务判失败
-        logger.warning(
-            "生成任务收尾写入文档失败，正文仍保留在任务记录里",
-            extra={
-                "event": "job.document_write_failed",
-                "job_id": runtime.job_id,
-                "kind": kind,
-            },
-            exc_info=True,
-        )
-        return
-    if written is None:
+    result = document_store.write_document(
+        runtime.owner_id,
+        runtime.solution_id,
+        kind,
+        content,
+        mode="append" if append_version else "replace",
+        # 整篇生成 / 修复 / 恢复是追加版本：不覆盖当前正文，因此不持版本期望。
+        # 就地改写（optimize / clarify / auto_clarify）会覆盖当前正文，必须带版本锁。
+        expected_version_no=None if append_version else _expected_version_no(runtime),
+        pending_items=runtime.pending_items,
+        run_summary=summary,
+        # 审核结论与正文**同批写入**：它描述的就是这一版正文，分两次写就会出现
+        # 「正文换了、结论还是旧的那条」。没审成时是 `None`，不写占位。
+        review=runtime.review,
+        # 「审核试过但没跑成」要把失败本身落成事实（`review_failed_at`）：
+        # 刷新后面板才仍旧显示「审核失败（时间）」，而不是退化成「未审核」。
+        # 两条链路同一列、同一展示：生成时审核失败（PRD / 接口文档 / 提示词）
+        # 与修复后的重审失败。判据是运行态上那个**显式的「试过」标记**——
+        # 显式关闭审核的入口（快捷流程）连 `review` 事件都不发，因此不写。
+        review_failed_at=(
+            utc_now_text() if runtime.review is None and runtime.review_attempted else None
+        ),
+        # 「部分完成」标记跟着这一版正文走（票 #85）：章节重试用尽后落的是失败占位，
+        # 管线照常收尾，但这份正文可用而不完整——标记随正文同批写入新版本。
+        partial=bool(runtime.partial),
+        source=runtime.kind,
+        # 只有整篇生成才更新锚点；就地改写沿用当前版本原有的 metadata。
+        metadata=_build_derived_from(runtime, kind, session=session)
+        if append_version
+        else None,
+        session=session,
+    )
+    if result.outcome == "version_conflict":
+        raise _CloseoutVersionConflict()
+    if result.outcome == "missing":
         logger.warning(
             "生成任务收尾未能写入文档（方案不存在或归属不符）",
             extra={
@@ -409,7 +876,7 @@ def _write_document(runtime: JobRuntime, summary: dict[str, Any]) -> None:
         )
 
 
-def _mark_review_failed(runtime: JobRuntime) -> None:
+def _mark_review_failed(runtime: JobRuntime, *, session: Any) -> None:
     """把「这次重审没跑成」记到当前版本上（US3：失败是持久化事实）。
 
     为什么值得一次写库：失败只说在会话内存里，刷新后就退化成「未审核」——用户再也
@@ -418,12 +885,16 @@ def _mark_review_failed(runtime: JobRuntime) -> None:
 
     取不到当前版本（文档被删）时静默跳过：没有「哪一版失败」可言，任务失败本身已经
     写进 `generation_jobs`。
+
+    `session` 是收尾事务：失败时间戳与任务终态 / 账本同一个事务（#81 AC4）。
     """
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
         return
     try:
-        document_store.mark_review_failed(runtime.owner_id, runtime.solution_id, kind)
+        document_store.mark_review_failed(
+            runtime.owner_id, runtime.solution_id, kind, session=session
+        )
     except Exception:  # noqa: BLE001 - 记失败不该把收尾再炸一次
         logger.warning(
             "记录审核失败时间失败（面板刷新后会退化成未审核）",
@@ -436,7 +907,9 @@ def _mark_review_failed(runtime: JobRuntime) -> None:
         )
 
 
-def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
+def _write_review(
+    runtime: JobRuntime, *, session: Any
+) -> _ReviewWriteFailure | None:
     """重新审核收尾：把结论写进**当前版本**的 `review` 列（不追加版本、不改正文）。
 
     返回 `None` 表示写成功了；否则返回任务该报的失败码与文案——**调用方据此把任务判失败**，
@@ -456,6 +929,8 @@ def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
     两道条件写各司其职：`_review_body_changed` 是**事前比较**（建任务那一刻的快照
     vs 收尾时的当前版本），`expected_content_sha` 是**写入 SQL 里的条件**（关掉「比较之后、
     写入之前」那点时间窗）。两道都要判失败，结论也都原样保留。
+
+    `session` 是收尾事务：结论与任务终态 / 账本同事务（#81 AC4）。
     """
     kind = _document_kind(runtime)
     if kind is None or runtime.solution_id is None:
@@ -477,7 +952,7 @@ def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
             ErrorCode.LLM_UPSTREAM_ERROR.value,
             "重新审核没有给出结论，本次审核结论未写入，请重新审核",
         )
-    if _review_body_changed(runtime):
+    if _review_body_changed(runtime, session=session):
         # 结论一旦落在没审过的正文上，它看起来完全正常，却是错的（见 §3.8 / C-R1）。
         logger.warning(
             "重新审核的正文在审的过程中被改过，本次不写入",
@@ -500,6 +975,7 @@ def _write_review(runtime: JobRuntime) -> _ReviewWriteFailure | None:
             kind,
             runtime.review,
             expected_content_sha=expected_sha,
+            session=session,
         )
     except Exception:  # noqa: BLE001 - 落库意外同样是「这次没写成」，任务照实失败
         logger.warning(

@@ -2,13 +2,18 @@
 
 ## 约束的是什么
 
-三列大文本：`document_versions.content`（整篇 PRD）、`generation_jobs.draft_content`
-（分章草稿）、`generation_jobs.completed_sections`（章节清单 JSON）。
+受约束的大文本列（都经 `ensure_text_within_limit` 一道闸门）：
 
-> 历史上还有第四列 `solutions.data`（会话快照 JSON），但它退役之后就**没有接进这道
-> 闸门**：`solution_repo.create` 只写空串、`update` 刻意不碰它，
-> `ensure_text_within_limit` 对它零调用。把「受约束的四列」写成事实是一句自相矛盾的
-> 注释——没有读者会因它超长而失败。该列已在 v8 删除，这里只留三列。
+- `document_versions.content`（整篇正文）；
+- `generation_jobs.draft_content`（生成中的正文快照）；
+- 任务单的三列不可变投影 `generation_jobs.request_params` / `config_snapshot` / `skill_refs`。
+
+> ⚠️ `generation_jobs.completed_sections`（章节清单 JSON）**不再是现存列**：分章链路
+> 在 #94 退役，迁移 `0008` 已把它删掉。这条闸门不再约束它，也不该再有人按「章节清单」
+> 去找那一列。
+>
+> 历史上还有一列 `solutions.data`（会话快照 JSON），它退役之后就没有接进这道闸门：
+> `solution_repo.create` 只写空串、`update` 刻意不碰它，该列已在 v8 删除。
 
 它们的上限是 **60 × 1024 字节**，不是字符。理由是中文的字节数是字符数的 3 倍：
 「6 万字」听起来不多，按 UTF-8 是 180KB。按字符设限会让同一条规则在中文与英文上

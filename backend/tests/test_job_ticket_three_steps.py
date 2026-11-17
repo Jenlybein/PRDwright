@@ -78,9 +78,7 @@ def _use_prd_llm(monkeypatch, pieces: list[str]) -> None:
         raise AssertionError("测试不应触网调用真实 LLM")
 
     monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
-    from backend.services import prd_section_writer
 
-    monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
 
 
 def _use_chat_llm(monkeypatch, pieces: list[str]) -> None:
@@ -96,7 +94,7 @@ def _raw(job_id: int) -> dict[str, Any]:
     """按 id 直读整行（绕开 ORM，验证真的落盘了）。"""
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM generation_jobs WHERE id = %s", (job_id,)
         ).fetchone()
     assert row is not None
     return dict(row)
@@ -207,10 +205,10 @@ def test_three_steps_run_one_minimal_job_to_completion(alice, monkeypatch):
     assert any(event.type == "done" for event in events)
     assert any(event.type == "chunk" for event in events)
     assert events[-1].type == "run_summary"
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     assert events[-1].data["kind"] == "prd"
     assert hasattr(events[0], "model_dump")  # 仍是既有 SSE 契约对象
-    assert _raw(registered.job_id)["status"] == "completed"
+    assert _raw(registered.job_id)["status"] == "succeeded"
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +289,7 @@ def test_build_has_no_side_effects_and_does_not_check_solution(alice, monkeypatc
 
     assert called == {"solution_exists": 0, "publish": 0}
     assert _row_count() == 1  # 只有先前那一行，造单没落库
-    assert _raw(old_id)["status"] == "running"  # 没顶替旧任务
+    assert _raw(old_id)["status"] == "pending"  # 没顶替旧任务
     assert draft.solution_id == 999_999
 
 
@@ -301,7 +299,7 @@ def test_register_checks_solution_on_the_spot(client, alice):
     draft = _ticket(alice, {"summary": "方案会被删"}, solution_id=solution_id)
 
     with connect() as conn:
-        conn.execute("DELETE FROM solutions WHERE id = ?", (solution_id,))
+        conn.execute("DELETE FROM solutions WHERE id = %s", (solution_id,))
         conn.commit()
 
     with pytest.raises(AppError) as caught:
@@ -480,7 +478,7 @@ def test_build_accepts_fake_event_stream_environment(alice, monkeypatch):
     )
     assert any(event.type == "done" for event in events)
     assert events[-1].type == "run_summary"
-    assert _raw(registered.job_id)["status"] == "completed"
+    assert _raw(registered.job_id)["status"] == "succeeded"
     assert draft is not registered
 
 
@@ -587,11 +585,11 @@ def test_registration_failure_leaves_no_half_running_row(client, alice, monkeypa
 
 
 def test_registration_supersedes_old_job_in_db_and_memory(alice, monkeypatch):
-    """登记顶替旧任务：库行 failed+SUPERSEDED，且旧任务收尾不写文档。
+    """登记顶替旧任务：库行落 `superseded`，且旧任务收尾不写文档。
 
     跨公开动作复现「双标记」：旧任务由「造单 → 登记 → 派发」起一支真的在途任务
     （会卡住的假事件流在造单时传入），新任务登记接手时它的库行与在途任务都该
-    被标记；放开流后旧任务收尾落成 `SUPERSEDED`，不写任何文档。
+    被标记；放开流后旧任务收尾落成 `superseded`，不写任何文档。
     """
     from backend.core.contracts import StreamEvent
     from backend.services import document_store
@@ -604,7 +602,7 @@ def test_registration_supersedes_old_job_in_db_and_memory(alice, monkeypatch):
             _ticket(alice, {"requirements": "新任务"})
         )
         assert registered.job_id > 0
-        assert _raw(registered.job_id)["status"] == "running"
+        assert _raw(registered.job_id)["status"] == "pending"
 
     old, events = run_ticket_in_flight(
         alice,
@@ -617,10 +615,10 @@ def test_registration_supersedes_old_job_in_db_and_memory(alice, monkeypatch):
     )
 
     old_row = _raw(old.job_id)
-    assert old_row["status"] == "failed"
-    assert old_row["error_code"] == "SUPERSEDED", "双标记：库行那一半也在"
+    assert old_row["status"] == "superseded"
+    assert old_row["error_code"] == "", "双标记：库行那一半也在"
     assert any(
-        event.type == "run_summary" and event.data["status"] == "failed"
+        event.type == "run_summary" and event.data["status"] == "superseded"
         for event in events
     ), "双标记：内存那一半的结局经回执可见"
     assert document_store.get_document(alice, None, "prd") is None
@@ -644,7 +642,5 @@ def test_registration_is_one_transaction_for_supersede_and_create(alice, monkeyp
     with pytest.raises(RuntimeError, match="落库前失败"):
         _ticket_module().register_job_ticket(draft)
 
-    assert _raw(old_id)["status"] == "running"  # 旧任务没被顶替
+    assert _raw(old_id)["status"] == "pending"  # 旧任务没被顶替
     assert _row_count() == 1
-
-

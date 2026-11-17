@@ -32,7 +32,7 @@ def _documents(solution_id: int) -> dict[str, dict]:
             "SELECT d.kind, v.content, v.content_sha, v.pending_items, v.last_run_summary "
             "FROM documents d "
             "LEFT JOIN document_versions v ON v.id = d.current_version_id "
-            "WHERE d.solution_id = ?",
+            "WHERE d.solution_id = %s",
             (solution_id,),
         ).fetchall()
     return {row["kind"]: dict(row) for row in rows}
@@ -44,7 +44,7 @@ def _versions(solution_id: int, kind: str) -> list[dict]:
         rows = conn.execute(
             "SELECT v.* FROM document_versions v "
             "JOIN documents d ON d.id = v.document_id "
-            "WHERE d.solution_id = ? AND d.kind = ? "
+            "WHERE d.solution_id = %s AND d.kind = %s "
             "ORDER BY v.version_no DESC",
             (solution_id, kind),
         ).fetchall()
@@ -53,7 +53,7 @@ def _versions(solution_id: int, kind: str) -> list[dict]:
 
 def _user_id(username: str) -> int:
     with connect() as conn:
-        row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        row = conn.execute("SELECT id FROM users WHERE username = %s", (username,)).fetchone()
     return int(row["id"])
 
 
@@ -67,13 +67,16 @@ def test_real_plan_creates_documents_table() -> None:
 
     这两张表是「正文只住版本表」的结构前提；缺了它们，写文档会在
     `no such table` 上炸，而那时看起来像是业务代码的问题。
+    查的是库的元数据（Postgres 没有 `sqlite_master`：表清单在 `information_schema`）。
     """
     with connect() as conn:
         row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'documents'"
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name = 'documents'"
         ).fetchone()
         versions = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_versions'"
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name = 'document_versions'"
         ).fetchone()
     assert row is not None
     assert versions is not None
@@ -222,7 +225,7 @@ def test_deleting_solution_cascades_to_documents(client) -> None:
 
     with connect() as conn:
         left = conn.execute(
-            "SELECT COUNT(*) FROM documents WHERE solution_id = ?", (solution_id,)
+            "SELECT COUNT(*) FROM documents WHERE solution_id = %s", (solution_id,)
         ).fetchone()[0]
     assert left == 0
 
@@ -439,8 +442,8 @@ def test_document_outward_shape_is_unchanged(client) -> None:
 
     本期新增两个字段：`version_no`（结论面板要能说清「这条结论是哪一版的」，US16）
     与 `review_failed_at`（「审核失败」是落库事实，刷新后仍要看得见，US3）。
-    除此以外一个字段都没动 —— 正文、清单、回执、结论、过期标记与上游锚点的名字与含义
-    都还是老样子。
+    票 #85 再加一个：`partial`（这份正文可用但不完整）。除此以外一个字段都没动 ——
+    正文、清单、回执、结论、过期标记与上游锚点的名字与含义都还是老样子。
     """
     register(client, username="alice")
     solution_id = _new_solution(client)
@@ -461,6 +464,7 @@ def test_document_outward_shape_is_unchanged(client) -> None:
         "updated_at",
         "stale",
         "derived_from",
+        "partial",
     }
     assert body["documents"][0]["version_no"] == 1
 
@@ -744,7 +748,7 @@ def test_append_version_is_atomic_when_failure_before_commit(client) -> None:
     with connect() as conn:
         before_current = conn.execute(
             "SELECT current_version_id FROM documents "
-            "WHERE solution_id = ? AND kind = 'prd'",
+            "WHERE solution_id = %s AND kind = 'prd'",
             (solution_id,),
         ).fetchone()["current_version_id"]
 
@@ -769,7 +773,7 @@ def test_append_version_is_atomic_when_failure_before_commit(client) -> None:
     with connect() as conn:
         after_current = conn.execute(
             "SELECT current_version_id FROM documents "
-            "WHERE solution_id = ? AND kind = 'prd'",
+            "WHERE solution_id = %s AND kind = 'prd'",
             (solution_id,),
         ).fetchone()["current_version_id"]
     assert after_current == before_current, "回滚后当前版本指针不该变化"

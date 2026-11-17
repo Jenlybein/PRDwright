@@ -36,10 +36,12 @@
 import { computed, getCurrentScope, onScopeDispose, ref } from 'vue'
 
 import {
+  cancelJob,
   createJob,
   readJobStream,
   type CreateJobPayload,
   type StreamHandlers,
+  type StreamResult,
 } from '@/services/api'
 import { ApiError } from '@/services/errors'
 import {
@@ -162,6 +164,13 @@ export function useJob() {
   const snapshot = computed<JobSnapshot | null>(() => currentRun.value?.snapshot ?? null)
   /** 任务已用时（毫秒）：生成中每秒自增，重连时按服务端值锚定，收尾后停在总耗时 */
   const elapsedMs = computed(() => currentRun.value?.elapsedMs ?? 0)
+  /**
+   * 失败退避（票 #88）：这条任务最早什么时候能被下一个执行者领走（ISO 文本）。
+   *
+   * `null` = 没在等（绝大多数时候）。**等待态的任务没有运行时**，所以这个值只会从
+   * 快照的 `next_run_at` 来——它是界面回答「还要等多久」的唯一来源。
+   */
+  const retryAt = computed<string | null>(() => currentRun.value?.snapshot?.retryAt ?? null)
 
   // ---- 已用时计时器 ----------------------------------------------------------
   // 每支任务一个：`baseMs` 是锚定时任务已经跑过的毫秒数（来自服务端），`anchorMs` 是本地
@@ -226,10 +235,35 @@ export function useJob() {
   // 组件卸载时停表。非组件环境（纯逻辑测试）下不注册，避免无谓告警。
   if (getCurrentScope()) onScopeDispose(stopAllTimers)
 
-  /** 包装 handlers：在透传的同时把 snapshot / 摘要 / 已用时记进那一支运行态 */
+  /**
+   * 各任务「已经读到哪了」（事件游标，票 #86）。
+   *
+   * 只在**本页面实例**里存在（不做 localStorage / sessionStorage）：
+   * - 刷新后它是空的，重连走「新读者」路径（先快照、不回放历史）——这是刻意取舍，
+   *   把游标持久化反而会在刷新后用「续读」跳过客户端手里没有的正文；
+   * - 多标签页各有各的实例，互不看对方的进度；
+   * - 正常结束时删掉（下一轮订阅就该重新拿快照），只有「中断后的那一次续读」才用它。
+   */
+  const cursors = new Map<number, number>()
+
+  /** 判断一次异常是不是本地主动中止（浏览器抛 `DOMException`，各环境继承关系不一致） */
+  function isAbortError(caught: unknown): boolean {
+    return (
+      typeof caught === 'object' &&
+      caught !== null &&
+      (caught as { name?: unknown }).name === 'AbortError'
+    )
+  }
+
+  /** 包装 handlers：在透传的同时把 snapshot / 摘要 / 已用时 / 游标记进那一支运行态 */
   function wrapHandlers(jobId: number, handlers: StreamHandlers): StreamHandlers {
     return {
       ...handlers,
+      onCursor: (cursor) => {
+        // 游标**只记不用**：它在订阅中断时才被 `subscribeWithResume` 取走
+        cursors.set(jobId, cursor)
+        handlers.onCursor?.(cursor)
+      },
       onSnapshot: (snap) => {
         runs.applySnapshot(jobId, snap)
         // 快照是订阅开始时的权威进度：用它锚定已用时，客户端从零开始也不影响连续性
@@ -242,6 +276,43 @@ export function useJob() {
         settleTimer(jobId, summary.durationMs)
         handlers.onRunSummary?.(summary)
       },
+    }
+  }
+
+
+  /**
+   * 订阅一次任务流；**传输中断时按游标续读一次**（票 #86）。
+   *
+   * 分支顺序就是判据：
+   * 1. 正常结束 → 删掉游标（这一支跑完了，下次订阅应当重新拿快照，而不是跳过历史）；
+   * 2. 服务端下发的 `error` 事件（`ApiError`）是**结论**，不是断线 —— 重连没有意义；
+   * 3. 主动中止（切方案 / 关页面）→ 不续读；
+   * 4. 其余（网络抖动 / 连接被掐）→ 用最后收到的游标续读**一次**：服务端只发它之后的
+   *    事件，已经显示出来的正文不会重来一遍，也不会断成两截。
+   */
+  async function subscribeWithResume(
+    jobId: number,
+    handlers: StreamHandlers,
+    signal: AbortSignal,
+  ): Promise<StreamResult> {
+    const startCursor = cursors.get(jobId)
+    for (let attempt = 0; ; attempt += 1) {
+      // 首次订阅沿用「进来时的游标」（通常没有）；续读用「这次真的读到了哪」
+      const cursor = attempt === 0 ? startCursor : cursors.get(jobId)
+      try {
+        const result =
+          cursor === undefined
+            ? await readJobStream(jobId, handlers, signal)
+            : await readJobStream(jobId, handlers, signal, cursor)
+        cursors.delete(jobId)
+        return result
+      } catch (caught) {
+        if (caught instanceof ApiError || isAbortError(caught)) throw caught
+        const resume = cursors.get(jobId)
+        // 只续读一次；而且必须「真的收到过新事件」才有续读的落点
+        // （否则等价于从 0 重放全量，客户端会把已显示过的正文再收一遍）
+        if (attempt > 0 || resume === undefined || resume === startCursor) throw caught
+      }
     }
   }
 
@@ -291,12 +362,12 @@ export function useJob() {
       // 5. 再次强制落库：把任务指针写进快照
       await solutions.flushPendingSave()
 
-      // 6. 订阅事件流
+      // 6. 订阅事件流（断网时按游标续读一次，见 `subscribeWithResume`）
       const controller = new AbortController()
       registerSubscription(created.jobId, controller)
       startTimer(created.jobId)
       try {
-        const result = await readJobStream(
+        const result = await subscribeWithResume(
           created.jobId,
           wrapHandlers(created.jobId, handlers),
           controller.signal,
@@ -338,7 +409,11 @@ export function useJob() {
       registerSubscription(jobId, controller)
       startTimer(jobId)
       try {
-        const result = await readJobStream(jobId, wrapHandlers(jobId, handlers), controller.signal)
+        const result = await subscribeWithResume(
+          jobId,
+          wrapHandlers(jobId, handlers),
+          controller.signal,
+        )
         return { reply: result.reply, ok: true, aborted: false, run }
       } finally {
         releaseSubscription(jobId, controller)
@@ -354,6 +429,27 @@ export function useJob() {
   }
 
   /**
+   * 停止一次任务（票 #88：**等待重试期间取消仍然可用**）。
+   *
+   * 与 `detach` 是两件事：`detach` 只退订、服务端任务照跑；这里调
+   * `POST /api/jobs/{id}/cancel`，服务端立刻落终态。等待态的任务**没有运行时**，
+   * 因此服务端不会推任何事件过来——调用方拿到结果后必须自己收尾本地运行态
+   * （订阅还挂在流上，等它自己结束是等不到的）。
+   *
+   * 返回是否真的取消到了：`false` 表示「你按的时候它刚好已经结束」，
+   * 那不是错误（与后端 `cancel_one` 改到 0 行的口径一致）。
+   */
+  async function cancel(jobId: number): Promise<boolean> {
+    try {
+      return await cancelJob(jobId)
+    } catch (caught) {
+      // 取消失败不该把界面卡在等待态：记一条错误，交给调用方决定要不要提示。
+      lastError.value = caught instanceof Error ? caught.message : String(caught)
+      return false
+    }
+  }
+
+  /**
    * 只退订：中止本地读取，**不取消服务端任务**。
    *
    * 这是「生成与连接解耦」的直接体现——离开页面 / 切换方案只影响这些订阅，
@@ -365,6 +461,9 @@ export function useJob() {
   function detach(): void {
     detachAllSubscriptions()
     stopAllTimers()
+    // 预览与运行态已经清空，游标也必须一起清：留着它会让下一次订阅「续读」而跳过
+    // 客户端手里已经没有的正文（表现为重连后正文只有后半截）。
+    cursors.clear()
     runs.detach()
   }
 
@@ -376,11 +475,7 @@ export function useJob() {
    * 反过来 `name` 在真正的 `Error` 与 `DOMException` 上都稳定存在。
    */
   function fail(caught: unknown): JobResult {
-    if (
-      typeof caught === 'object' &&
-      caught !== null &&
-      (caught as { name?: unknown }).name === 'AbortError'
-    ) {
+    if (isAbortError(caught)) {
       // 主动中止：不记错误（`lastError` 保持空串），只标记 `aborted`
       return { reply: '', ok: false, aborted: true, run: null }
     }
@@ -397,9 +492,11 @@ export function useJob() {
     runSummary,
     snapshot,
     elapsedMs,
+    retryAt,
     // 动作
     start,
     reconnect,
+    cancel,
     detach,
     // 便于上层做「这次任务还是不是我的」判断
     isSubscribed,

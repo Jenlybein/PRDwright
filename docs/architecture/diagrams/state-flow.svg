@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1000 540" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="sf-title sf-desc">
+  <title id="sf-title">生成任务的七个状态与流转</title>
+  <desc id="sf-desc">生命周期相位图：主流程为排队中、执行中、已定稿；等待恢复带放取消中；终态带放已取消、失败、被取代；标注了创建、抢占、收尾成功、失败、失败重排、用户取消、确认退出、取消、被顶替九条转换。</desc>
+  <defs>
+    <pattern id="sf-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.9" fill="rgba(45,49,66,0.10)"/></pattern>
+    <marker id="sf-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
+    <marker id="sf-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#f5f5f5"/>
+  <rect width="100%" height="100%" fill="url(#sf-dots)" opacity="0.55"/>
+  <rect x="24" y="44" width="952" height="120" rx="8" fill="rgba(79,93,117,0.035)" stroke="rgba(45,49,66,0.12)"/>
+  <rect x="24" y="400" width="952" height="104" rx="8" fill="rgba(45,49,66,0.035)" stroke="rgba(45,49,66,0.12)"/>
+
+  <g font-family="'Cascadia Mono',Consolas,'Courier New',monospace" font-size="10" letter-spacing="0.14em" fill="#4f5d75">
+    <text x="40" y="64">等待与恢复</text>
+    <text x="40" y="208">主流程</text>
+    <text x="40" y="420">终态</text>
+  </g>
+
+  <!-- 九条转换，先画线，再画方块。 -->
+  <line x1="46" y1="256" x2="114" y2="256" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#sf-arrow)"/>
+  <line x1="270" y1="240" x2="314" y2="240" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#sf-arrow)"/>
+  <line x1="320" y1="282" x2="276" y2="282" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#sf-arrow)"/>
+  <line x1="470" y1="246" x2="634" y2="246" stroke="#bf4520" stroke-width="1.4" marker-end="url(#sf-arrow-accent)"/>
+  <path d="M430 292 V332 Q430,340 438,340 H587 Q595,340 595,348 V410" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#sf-arrow)"/>
+  <line x1="370" y1="292" x2="370" y2="410" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#sf-arrow)"/>
+  <line x1="170" y1="292" x2="170" y2="410" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#sf-arrow)"/>
+  <path d="M395 220 V198 Q395,190 387,190 H203 Q195,190 195,182 V146" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#sf-arrow)"/>
+  <path d="M120 104 H80 Q72,104 72,112 V444 Q72,452 80,452 H114" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#sf-arrow)"/>
+
+  <!-- 每条标签都带一个不透明底衬，且与线留出空隙。 -->
+  <g font-family="'Cascadia Mono',Consolas,'Courier New',monospace" font-size="10" text-anchor="middle" letter-spacing="0.04em" fill="#4f5d75">
+    <rect x="62" y="236" width="36" height="12" rx="2" fill="#f5f5f5"/><text x="80" y="246">创建</text>
+    <rect x="272" y="218" width="40" height="14" rx="2" fill="#f5f5f5"/><text x="292" y="230">抢占</text>
+    <rect x="270" y="258" width="48" height="14" rx="2" fill="#f5f5f5"/><text x="294" y="270">失败重排</text>
+    <rect x="530" y="226" width="44" height="12" rx="2" fill="#f5f5f5"/><text x="552" y="236" fill="#bf4520">收尾成功</text>
+    <rect x="490" y="322" width="44" height="12" rx="2" fill="#f5f5f5"/><text x="512" y="332">被顶替</text>
+    <rect x="382" y="336" width="32" height="12" rx="2" fill="#f5f5f5"/><text x="398" y="346">失败</text>
+    <rect x="184" y="336" width="32" height="12" rx="2" fill="#f5f5f5"/><text x="200" y="346">取消</text>
+    <rect x="273" y="170" width="44" height="12" rx="2" fill="#f5f5f5"/><text x="295" y="180">用户取消</text>
+    <rect x="84" y="300" width="44" height="12" rx="2" fill="#f5f5f5"/><text x="106" y="310">确认退出</text>
+  </g>
+
+  <!-- 起点 -->
+  <circle cx="40" cy="256" r="6" fill="#2d3142"/>
+
+  <!-- 主流程三个状态 -->
+  <g font-family="'Microsoft YaHei','PingFang SC','Segoe UI',system-ui,sans-serif" text-anchor="middle">
+    <g>
+      <rect x="120" y="220" width="150" height="72" rx="8" fill="#f5f5f5"/>
+      <rect x="120" y="220" width="150" height="72" rx="8" fill="#ffffff" stroke="#2d3142"/>
+      <text x="195" y="251" fill="#2d3142" font-size="15" font-weight="600">排队中</text>
+      <text x="195" y="270" fill="#4f5d75" font-size="10" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">已接单，等领取</text>
+    </g>
+    <g>
+      <rect x="320" y="220" width="150" height="72" rx="8" fill="#f5f5f5"/>
+      <rect x="320" y="220" width="150" height="72" rx="8" fill="#ffffff" stroke="#2d3142"/>
+      <text x="395" y="251" fill="#2d3142" font-size="15" font-weight="600">执行中</text>
+      <text x="395" y="270" fill="#4f5d75" font-size="10" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">持有有效租约</text>
+    </g>
+    <g>
+      <rect x="640" y="220" width="150" height="72" rx="8" fill="#f5f5f5"/>
+      <rect x="640" y="220" width="150" height="72" rx="8" fill="rgba(191,69,32,0.08)" stroke="#bf4520"/>
+      <circle cx="664" cy="244" r="7" fill="none" stroke="#bf4520"/>
+      <circle cx="664" cy="244" r="4" fill="#bf4520"/>
+      <text x="720" y="251" fill="#2d3142" font-size="15" font-weight="600">已定稿</text>
+      <text x="720" y="270" fill="#4f5d75" font-size="10" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">正文已可靠入库</text>
+    </g>
+  </g>
+
+  <!-- 等待带：取消中 -->
+  <g font-family="'Microsoft YaHei','PingFang SC','Segoe UI',system-ui,sans-serif" text-anchor="middle">
+    <g>
+      <rect x="120" y="68" width="150" height="72" rx="8" fill="#f5f5f5"/>
+      <rect x="120" y="68" width="150" height="72" rx="8" fill="#f5f5f5" stroke="#4f5d75" stroke-dasharray="5,4"/>
+      <rect x="130" y="78" width="34" height="12" rx="2" fill="none" stroke="rgba(79,93,117,0.45)"/>
+      <text x="147" y="87" fill="#4f5d75" font-size="9" font-family="'Cascadia Mono',Consolas,'Courier New',monospace" text-anchor="middle">等待</text>
+      <text x="195" y="111" fill="#2d3142" font-size="15" font-weight="600">取消中</text>
+      <text x="195" y="126" fill="#4f5d75" font-size="10" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">等任务退出</text>
+    </g>
+  </g>
+
+  <!-- 终态带：已取消 / 失败 / 被取代 -->
+  <g font-family="'Microsoft YaHei','PingFang SC','Segoe UI',system-ui,sans-serif" text-anchor="middle">
+    <g>
+      <rect x="120" y="416" width="150" height="72" rx="8" fill="#f5f5f5"/>
+      <rect x="120" y="416" width="150" height="72" rx="8" fill="rgba(45,49,66,0.04)" stroke="#4f5d75"/>
+      <rect x="130" y="426" width="34" height="12" rx="2" fill="none" stroke="rgba(79,93,117,0.45)"/>
+      <text x="147" y="435" fill="#4f5d75" font-size="9" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">终态</text>
+      <text x="195" y="459" fill="#2d3142" font-size="15" font-weight="600">已取消</text>
+      <text x="195" y="474" fill="#4f5d75" font-size="10" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">用户取消或删方案</text>
+    </g>
+    <g>
+      <rect x="320" y="416" width="150" height="72" rx="8" fill="#f5f5f5"/>
+      <rect x="320" y="416" width="150" height="72" rx="8" fill="rgba(45,49,66,0.04)" stroke="#4f5d75" stroke-width="1.5" stroke-dasharray="3,3"/>
+      <rect x="330" y="426" width="34" height="12" rx="2" fill="none" stroke="rgba(79,93,117,0.45)"/>
+      <text x="347" y="435" fill="#4f5d75" font-size="9" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">终态</text>
+      <text x="395" y="459" fill="#2d3142" font-size="15" font-weight="600">失败</text>
+      <text x="395" y="474" fill="#4f5d75" font-size="10" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">含「部分完成」</text>
+    </g>
+    <g>
+      <rect x="520" y="416" width="150" height="72" rx="8" fill="#f5f5f5"/>
+      <rect x="520" y="416" width="150" height="72" rx="8" fill="rgba(45,49,66,0.04)" stroke="#4f5d75"/>
+      <rect x="530" y="426" width="34" height="12" rx="2" fill="none" stroke="rgba(79,93,117,0.45)"/>
+      <text x="547" y="435" fill="#4f5d75" font-size="9" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">终态</text>
+      <text x="595" y="459" fill="#2d3142" font-size="15" font-weight="600">被取代</text>
+      <text x="595" y="474" fill="#4f5d75" font-size="10" font-family="'Cascadia Mono',Consolas,'Courier New',monospace">不是用户意图</text>
+    </g>
+  </g>
+</svg>

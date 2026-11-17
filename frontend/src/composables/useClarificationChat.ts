@@ -235,6 +235,11 @@ export function useClarificationChat(hooks: ChatHooks, options: ClarificationCha
     await solutions.refreshTurns()
     if (result.ok) {
       runs.preview.content = ''
+      // 七态（票 #84）：取消不是失败，收尾也是「正常读完」，所以不能落到下面的红字
+      // 分支；这里补一句白话说清「为什么没有回复」——用户按了停止就得看见它生效了。
+      const terminal = job.snapshot.value?.status
+      if (terminal === 'cancelled') hooks.onNotice('已停止生成')
+      else if (terminal === 'superseded') hooks.onNotice('这一轮已被新任务取代')
       return
     }
     // 主动退订（切走 / 开新任务）不是失败：没有错误可报，也不抹掉已经接到的半截

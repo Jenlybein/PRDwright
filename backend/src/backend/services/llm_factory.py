@@ -531,7 +531,7 @@ def config_fingerprint(max_tokens: int | None = None) -> tuple[str, str, str, in
 
     为什么必须集中在一处
     --------------------
-    `document_service` / `prd_section_writer` / `conversation_service` 都缓存了
+    `document_service` / `conversation_service` 都缓存了
     LLM 实例。如果三处各写一套「判断配置变没变」的逻辑，就会出现
     「撰写实例换了新模型、审核实例还是旧的」——同一次生成里两个实例参数不一致，
     表现为正文和批注的口径对不上，而且极难归因。

@@ -13,6 +13,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 
 vi.mock('@/services/adminService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/adminService')>()
@@ -58,12 +59,28 @@ function job(overrides: Partial<AdminJob> = {}): AdminJob {
   }
 }
 
-async function render(items: AdminJob[] = [], total = items.length) {
+function makeRouter(): Router {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/jobs', name: 'jobs', component: { template: '<div />' } },
+      { path: '/dashboard', name: 'dashboard', component: { template: '<div />' } },
+    ],
+  })
+}
+
+async function render(
+  items: AdminJob[] = [],
+  total = items.length,
+  query: Record<string, string> = {},
+) {
   jobsMock.mockResolvedValue({ items, total })
-  const wrapper = mount(JobsView, { global: { plugins: [createPinia()] } })
+  const router = makeRouter()
+  await router.push({ name: 'jobs', query })
+  const wrapper = mount(JobsView, { global: { plugins: [createPinia(), router] } })
   await vi.waitFor(() => expect(jobsMock).toHaveBeenCalled())
   await wrapper.vm.$nextTick()
-  return wrapper
+  return { wrapper, router }
 }
 
 function button(wrapper: ReturnType<typeof mount>, label: string) {
@@ -80,8 +97,38 @@ beforeEach(() => {
 })
 
 describe('任务监控页', () => {
+  it('状态列按七值显示，且被取代 / 已取消与失败是三个词', async () => {
+    const { wrapper } = await render([
+      job({ id: 1, status: 'pending' }),
+      job({ id: 2, status: 'running' }),
+      job({ id: 3, status: 'cancelling' }),
+      job({ id: 4, status: 'succeeded' }),
+      job({ id: 5, status: 'failed', error_code: 'LLM_UPSTREAM_ERROR' }),
+      job({ id: 6, status: 'superseded' }),
+      job({ id: 7, status: 'cancelled' }),
+    ])
+
+    const text = wrapper.text()
+    for (const label of ['排队中', '运行中', '取消中', '已定稿', '失败', '被取代', '已取消']) {
+      expect(text).toContain(label)
+    }
+    // 被取代不是失败：它那条行不该出现红色失败文案（错误码为空时靠状态区分）
+    expect(text).toContain('被取代')
+    expect(text).toContain('已取消')
+  })
+
+  it('取消中的任务：按钮已是「取消中…」且不可再点', async () => {
+    const { wrapper } = await render([job({ id: 3, status: 'cancelling' })])
+    const button = wrapper.findAll('button').find((item) => item.text() === '取消中…')
+    expect(button).toBeTruthy()
+    expect(button!.attributes('disabled')).toBeDefined()
+    // 排队中的任务也给取消入口（它还没有执行者，取消会一步落已取消）
+    const { wrapper: queued } = await render([job({ id: 1, status: 'pending' })])
+    expect(queued.findAll('button').some((item) => item.text() === '取消')).toBe(true)
+  })
+
   it('列出任务，并把卡死任务标红', async () => {
-    const wrapper = await render([
+    const { wrapper } = await render([
       job(),
       job({ id: 2, owner_name: 'bob', is_stuck: true, stuck_minutes: 95 }),
     ])
@@ -94,7 +141,7 @@ describe('任务监控页', () => {
   })
 
   it('详情走弹窗，不往表格里插行', async () => {
-    const wrapper = await render([
+    const { wrapper } = await render([
       job({ error_code: 'UPSTREAM_TIMEOUT', error_message: '模型响应超时（60s）' }),
     ])
     const rowsBefore = wrapper.findAll('tbody tr').length
@@ -110,7 +157,7 @@ describe('任务监控页', () => {
   })
 
   it('取消先确认；未确认前不发请求', async () => {
-    const wrapper = await render([job()])
+    const { wrapper } = await render([job()])
 
     await button(wrapper, '取消').trigger('click')
     await wrapper.vm.$nextTick()
@@ -123,7 +170,7 @@ describe('任务监控页', () => {
   })
 
   it('确认后才真正取消，并提示已取消', async () => {
-    const wrapper = await render([job()])
+    const { wrapper } = await render([job()])
     cancelMock.mockResolvedValue({ cancelled: true })
 
     await button(wrapper, '取消').trigger('click')
@@ -134,7 +181,7 @@ describe('任务监控页', () => {
   })
 
   it('任务已结束时提示「无需取消」，不当成失败', async () => {
-    const wrapper = await render([job()])
+    const { wrapper } = await render([job()])
     cancelMock.mockResolvedValue({ cancelled: false })
 
     await button(wrapper, '取消').trigger('click')
@@ -145,7 +192,7 @@ describe('任务监控页', () => {
   })
 
   it('后端回绝时把原因原样显示', async () => {
-    const wrapper = await render([job()])
+    const { wrapper } = await render([job()])
     cancelMock.mockRejectedValue(new ApiError('该任务不存在', 404))
 
     await button(wrapper, '取消').trigger('click')
@@ -155,7 +202,7 @@ describe('任务监控页', () => {
   })
 
   it('批量取消卡死任务', async () => {
-    const wrapper = await render([job({ is_stuck: true, stuck_minutes: 60 })])
+    const { wrapper } = await render([job({ is_stuck: true, stuck_minutes: 60 })])
     stuckMock.mockResolvedValue({ cancelled: 1 })
 
     const bulk = wrapper.findAll('button').find((b) => b.text().startsWith('取消全部卡死'))
@@ -167,7 +214,7 @@ describe('任务监控页', () => {
   })
 
   it('筛选条件原样传给后端', async () => {
-    const wrapper = await render([])
+    const { wrapper } = await render([])
 
     await wrapper.find('input[type="text"]').setValue('ali')
     await wrapper.find('select').setValue('prompts')
@@ -177,17 +224,51 @@ describe('任务监控页', () => {
     await vi.waitFor(() => expect(jobsMock.mock.calls.length).toBeGreaterThanOrEqual(2))
     const calls = jobsMock.mock.calls
     expect(calls[calls.length - 1]![0]).toMatchObject({
-      status: 'running',
+      status: 'pending,running,cancelling',
       username: 'ali',
       kind: 'prompts',
     })
+  })
+
+  it('从概览的卡死数点进来时，落在「卡死」标签并只向后端要卡死任务', async () => {
+    // 概览页的卡死数跳转带 `?stuck=1`（见 DashboardView）
+    const { wrapper } = await render([job({ is_stuck: true, stuck_minutes: 40 })], 1, {
+      stuck: '1',
+    })
+
+    // 「只含卡死任务」由后端的服务端判据筛（stuck=true），不是前端拿一页列表再过滤
+    expect(jobsMock.mock.calls[0]![0]).toMatchObject({ stuck: true })
+    const tab = wrapper.findAll('button').find((b) => b.text() === '卡死')
+    expect(tab, '卡死标签必须存在，否则点进来会落在「在飞」').toBeTruthy()
+    expect(tab!.attributes('aria-pressed')).toBe('true')
+    expect(wrapper.text()).toContain('已卡死 40 分钟')
+  })
+
+  it('切到卡死标签按服务端判据筛，切回来就不再带 stuck', async () => {
+    const { wrapper } = await render([job({ is_stuck: true, stuck_minutes: 40 })])
+
+    await button(wrapper, '卡死').trigger('click')
+    await vi.waitFor(() =>
+      expect(jobsMock.mock.calls[jobsMock.mock.calls.length - 1]![0]).toMatchObject({
+        stuck: true,
+      }),
+    )
+
+    await button(wrapper, '在飞任务').trigger('click')
+    await vi.waitFor(() =>
+      expect(
+        jobsMock.mock.calls[jobsMock.mock.calls.length - 1]![0],
+      ).not.toMatchObject({ stuck: true }),
+    )
   })
 
   it('开启自动刷新后按 10 秒重新拉取', async () => {
     vi.useFakeTimers()
     try {
       jobsMock.mockResolvedValue({ items: [], total: 0 })
-      const wrapper = mount(JobsView, { global: { plugins: [createPinia()] } })
+      const router = makeRouter()
+      await router.push('/jobs')
+      const wrapper = mount(JobsView, { global: { plugins: [createPinia(), router] } })
       await vi.advanceTimersByTimeAsync(0)
       expect(jobsMock).toHaveBeenCalledTimes(1)
 

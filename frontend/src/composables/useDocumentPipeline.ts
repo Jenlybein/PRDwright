@@ -17,14 +17,9 @@ import type {
   DocumentKind,
   JobSnapshot,
   PendingItem,
-  PrdBoardState,
-  PrdGenerationStage,
-  PrdSectionCard,
-  PrdStageProgress,
   RequirementsSummary,
   ReviewConclusion,
   RunSummary,
-  StreamChunk,
   StreamDocumentPart,
   StreamStageChunk,
   StreamStageEvent,
@@ -169,7 +164,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // -------------------------------------------------------------------------
   // 交互态
   //
-  // 这六份状态（正文预览 / 错误 / PRD 看板 / 下游阶段 / 阶段输出 / 审核结论）
+  // 这五份状态（正文预览 / 错误 / 阶段 / 阶段输出 / 大纲 / 审核结论）
   // **都归运行态所有**，住在 `stores/runs` 的 `preview` 里，本文件只是它的门面。
   //
   // 为什么必须搬走：它们从前是本 composable 的局部 ref，而 composable 是 app 级单例——
@@ -184,38 +179,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 生成中实时展示在审阅区的预览文本——**流式预览的唯一出口**。
    *
-   * 接口文档 / 提示词 / AI 优化直接往里追加 `chunk`；分章节 PRD 则由
-   * `syncPrdPreview()` 把「已定稿部分 + 当前章缓冲」拼好写进来。两条路径互不干扰，
-   * 消费方（`GeneratingStage`）也只需要读这一个值。
+   * 三份产物（含 PRD，票 #92）与 AI 优化、澄清改写都直接往里追加 `chunk`；
+   * 整篇改写时 `part{replace}` 整段覆盖。消费方（`GeneratingStage`）只读这一个值。
    */
   const docStreamingContent = previewField('content')
 
   /** 文档生成 / 优化过程中的错误提示 */
   const docError = previewField('error')
-
-  // -------------------------------------------------------------------------
-  // PRD 分章节生成的阶段进度（三车道并行：管道看板）
-  // -------------------------------------------------------------------------
-
-  /**
-   * PRD 管道看板：每章一个卡片，4 列只呈现阶段。
-   *
-   * 并行后章节可能乱序到达，因此**不能**再用「一个字符串不断追加」的预览模型；
-   * 这里按 `sectionId` 存卡片、按 `index` 排序渲染，`part` 到达即覆盖该章。
-   */
-  const prdBoard = previewField('prdBoard')
-
-  /** 下游文档（接口 / 提示词）当前的生成阶段；idle 表示未走该链路 */
-  const docPhase = previewField('docPhase')
-
-  /**
-   * 当前阶段模型的**原始输出增量**（审核意见 / 改写稿），只用于阶段条下方的输出面板。
-   *
-   * 为什么单独一份而不是并进 `docStreamingContent`：那是**正文预览**，审核意见混进去
-   * 会污染文档。两份分开存，切换阶段时清空即可——每个阶段的输出只属于它自己，
-   * 上一阶段的文本留着会让人误以为审核还在继续。
-   */
-  const docStageText = previewField('stageText')
 
   /**
    * 当前审阅阶段那份文档的**审核结论**（当前版本那一条）。
@@ -255,177 +225,33 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     return kind ? documents.versionNoOf(kind) : 0
   })
 
-  /**
-   * 分章节生成的看板；不是 PRD 生成态时恒为 `null`。
-   *
-   * 判据用**阶段**而不是「当前正在处理哪一份」：PRD 生成必然处在 `generating-prd`，
-   * 而按澄清结果改写 PRD 也走这个阶段（那时看板已被显式清空，同样得 `null`）。
-   */
-  const prdStatus = computed<PrdBoardState | null>(() =>
-    viewState.value === 'generating-prd' ? prdBoard.value : null,
-  )
-
-  /** 预览当前是否有章节在改写（供审阅区降透明度提示） */
-  const prdShowingDraft = computed(
-    () => prdBoard.value?.sections.some((section) => section.phase === 'rewriting') ?? false,
-  )
-
-  /** 取（或创建）某章的卡片；新卡片按 index 插到正确位置。 */
-  function sectionCard(
-    board: PrdBoardState,
-    sectionId: string,
-    index: number,
-  ): PrdSectionCard {
-    let card = board.sections.find((item) => item.sectionId === sectionId)
-    if (!card) {
-      card = {
-        sectionId,
-        sectionTitle: '',
-        sectionHeading: '',
-        index,
-        phase: 'pending',
-        failed: false,
-        text: '',
-        draft: '',
-        note: '',
-        issues: [],
-      }
-      board.sections.push(card)
-      board.sections.sort((a, b) => a.index - b.index)
-    }
-    return card
-  }
+  /** 三份产物（含 PRD）共用的当前生成阶段；idle 表示未走该链路 */
+  const docPhase = previewField('docPhase')
 
   /**
-   * 把看板拼成预览，写进 `docStreamingContent`。
+   * 当前阶段模型的**原始输出增量**（大纲 / 审核意见 / 改写稿），只用于阶段条下方的输出面板。
    *
-   * 文档头单独存（`headerText`），章节按 `index` 排序——`part` 可以乱序到达，
-   * 但用户看到的文档必须始终是章节顺序。
-   *
-   * 每章取 `text || draft`：**定稿优先，没有定稿才用正在吐的字**。这样「逐字看着它
-   * 在长」与「最终正文与 `done.reply` 逐字一致」同时成立——半成品再脏也只影响过程
-   * 显示，`part` 一到就被权威文本顶掉。
+   * 为什么单独一份而不是并进 `docStreamingContent`：那是**正文预览**，审核意见混进去
+   * 会污染文档。两份分开存，切换阶段时清空即可——每个阶段的输出只属于它自己，
+   * 上一阶段的文本留着会让人误以为审核还在继续。
    */
-  function syncPrdPreview(): void {
-    const board = prdBoard.value
-    if (!board) {
-      docStreamingContent.value = ''
-      return
-    }
-    const ordered = [...board.sections].sort((a, b) => a.index - b.index)
-    docStreamingContent.value =
-      board.headerText +
-      ordered.map((section) => section.text || section.draft).join('')
-  }
-
-  /** 清空 PRD 看板 */
-  function clearPrdPreview(): void {
-    prdBoard.value = null
-  }
-
-  /** 进入 PRD 生成前的复位：先建一张空看板，等后端 stage 事件再细化 */
-  function beginPrdStages(): void {
-    prdBoard.value = {
-      total: 0,
-      headerReady: false,
-      headerText: '',
-      sections: [],
-      review: null,
-      partial: false,
-      failedSections: [],
-    }
-  }
+  const docStageText = previewField('stageText')
 
   /**
-   * 一段正文已定稿：以权威文本覆盖该章（或文档头）。
+   * 大纲文本（票 #91）：`stage_chunk(outlining)` 的累计，只用于阶段条下方的大纲块。
    *
-   * 并行后 `part` 可能乱序、也可能同一章因重试再次到达，因此语义是**覆盖**而不是
-   * 「只认第一次」。重复订阅仍然幂等——文本相同，覆盖不会产生第二份。
+   * 与 `stageText` 分开存：后者「换阶段即清空」，而大纲是「这份产物定了哪些结构」，
+   * 正文写到一半时用户还要能回头看一眼。开新任务（`resetPreview`）时才清。
    */
-  function handlePrdPart(part: StreamDocumentPart): void {
-    if (!part.text) return
-    const board = prdBoard.value
-    if (!board) return
-    if (!part.sectionId) {
-      // 没有 sectionId 的 `part` 只可能是文档头（后端在正文最前一次性下发）
-      board.headerReady = true
-      board.headerText = part.text
-      syncPrdPreview()
-      return
-    }
-    const card = sectionCard(board, part.sectionId, part.index)
-    card.text = part.text
-    // 定稿即接管：半成品到此作废，否则 `text || draft` 会看不出区别，
-    // 但刷新时若还带着 draft 就会多出一段
-    card.draft = ''
-    if (part.failed) {
-      // 失败占位：停在此前失败的车道（生成），不到「定稿」
-      card.failed = true
-    } else {
-      card.failed = false
-      card.phase = 'done'
-    }
-    syncPrdPreview()
-  }
+  const docOutlineText = previewField('outlineText')
 
   /**
-   * 一片正文增量：按归属送进那一章的卡片。
+   * 正文正在写第几批（票 #93）：`0` / `1` = 没发生续写，`2` 起 = 撞上输出上限已自动接着写。
    *
-   * 多章**同时**在长，所以每片都带 `sectionId`（见后端 `prd_section_writer`）。
-   * 没有归属的增量直接丢弃：宁可少显示几个字，也不能把它们塞进第一章——
-   * 那是「串字」，比不流式更糟。
+   * 它与 `docPhase` 是两件事：续写**不是新阶段**——阶段仍是撰写，进度条不动、
+   * 正文缓冲不清空。它只让「正文为什么还在长」有个可解释的落点。
    */
-  function appendPrdChunk(chunk: StreamChunk): void {
-    if (!chunk.sectionId) return
-    const board = prdBoard.value
-    if (!board) return
-    const card = sectionCard(board, chunk.sectionId, chunk.index)
-    // 已经定稿的章节不该再长：重复订阅 / 迟到增量一律忽略
-    if (card.text) return
-    card.draft += chunk.text
-    if (card.phase === 'pending') card.phase = 'writing'
-    syncPrdPreview()
-  }
-
-  /**
-   * 处理 `stage` 阶段事件：只更新对应章节的卡片，**不清任何别的章节**。
-   *
-   * 并行下车道事件是交错的（第 3 章在写、第 2 章在审、第 1 章在改），
-   * 「换章就清缓冲」的旧逻辑在这里会误伤别的章。
-   *
-   * 但**这一章自己**遇到 `writing` / `rewriting` 时必须清：前者是单章重试从头再来，
-   * 后者是初稿换改写稿，不清就会两轮的字叠着长。`reviewing` 不清——正文已经写完了。
-   */
-  function handlePrdStage(event: StreamStageEvent): void {
-    const board = prdBoard.value
-    if (!board) return
-    if (event.total) board.total = event.total
-    if (!event.sectionId) return
-
-    const card = sectionCard(board, event.sectionId, event.index)
-    card.sectionTitle = event.sectionTitle || card.sectionTitle
-    card.sectionHeading = event.sectionHeading || card.sectionHeading
-    card.note = event.note
-    card.issues = event.issues
-
-    if (event.stage === 'failed') {
-      // 生成失败：停在「生成」车道，红色标记；占位正文由随后的 part 带过来
-      card.phase = 'writing'
-      card.failed = true
-      return
-    }
-    if (event.stage === 'done') return
-    if (event.stage === 'writing' || event.stage === 'reviewing' || event.stage === 'rewriting') {
-      if (event.stage !== 'reviewing') {
-        // 从头重来：清掉这一章上一轮吐出的字（重试 / 初稿→改写稿）
-        card.draft = ''
-        syncPrdPreview()
-      }
-      card.phase = event.stage
-      // 进入审核/改写说明正文已产出；失败标记以随后的 part 为准
-      if (event.stage !== 'writing') card.failed = false
-    }
-  }
+  const docContinuation = previewField('continuation')
 
   // -------------------------------------------------------------------------
   // 确认闸门 1：摘要回填 Diff（生成 PRD 之前）
@@ -536,8 +362,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
         documents.setReviewFailed(kind)
       }
     }
-    // PRD 生成过程中的看板也留一份（它只服务于生成页，与本面板不是同一处展示）
-    if (prdBoard.value) prdBoard.value.review = review
   }
 
   /**
@@ -547,7 +371,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 猜错了会让进度条停在某个看起来合理、其实没发生的阶段上。
    */
   function normalizeDocPhase(raw: string): DocPhase | null {
-    if (raw === 'writing' || raw === 'reviewing' || raw === 'rewriting' || raw === 'done') {
+    if (
+      raw === 'outlining' ||
+      raw === 'writing' ||
+      raw === 'reviewing' ||
+      raw === 'rewriting' ||
+      raw === 'done'
+    ) {
       return raw
     }
     return null
@@ -561,6 +391,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       if (docPhase.value !== stage) docStageText.value = ''
       docPhase.value = stage
     }
+    // 续写批次（票 #93）：后端撞上输出上限自动接着写，每批补发一条 `stage(writing)`。
+    // 它**不是新阶段**：上面的 `stage` 仍是 `writing`，进度不会回到起点（也不会清正文）；
+    // 这里只记下批次序号，给生成页一句「已续写到第 N 段」的解释。
+    // 只增不减：重连拿不到历史 `stage`，若允许回填小值，序号会倒退。
+    if (event.continuation > docContinuation.value) {
+      docContinuation.value = event.continuation
+    }
   }
 
   /**
@@ -569,8 +406,15 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * 增量可能来自审核也可能来自改写，归属以事件自带的 `stage` 为准；万一它跳过了
    * 对应的 `stage` 事件（订阅晚了一步），这里顺手把阶段纠正过来，避免面板标题与
    * 内容对不上。
+   *
+   * 大纲（`outlining`）走**另一个格子**：它不随阶段切换清空，正文写到一半也要能回看。
    */
   function handleDocStageChunk(chunk: StreamStageChunk): void {
+    if (chunk.stage === 'outlining') {
+      if (docPhase.value !== 'outlining') docPhase.value = 'outlining'
+      docOutlineText.value += chunk.text
+      return
+    }
     if (chunk.stage === 'reviewing' || chunk.stage === 'rewriting') {
       if (docPhase.value !== chunk.stage) {
         docStageText.value = ''
@@ -638,8 +482,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       }
     }
     if (raw.onChunk) {
-      // 参数整体转发：分章节的增量带章节归属，少传一层就只剩文本，归属被吞掉后
-      // PRD 的增量会被当成「无归属」全部丢弃（表现为又不流式了）
       guarded.onChunk = (chunk) => {
         if (!isExpired(epoch)) raw.onChunk?.(chunk)
       }
@@ -680,9 +522,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 按文档种类给出事件 handlers，把任务事件映射到本文件的预览状态。
    *
-   * PRD 走三段预览（已定稿 + 当前缓冲 + 上一版草稿）；其余文档只有一段流式缓冲，
-   * 外加「生成 → 审核 → 改写」阶段与整段覆盖。
-   * 快照回调对两者都接——刷新重连时用它补全断线前已产出的正文。
+   * 三份产物同一条整篇路径：一段流式缓冲 +「生成 → 审核 → 改写」阶段与整段覆盖。
+   * 快照回调也接——刷新重连时用它补全断线前已产出的正文。
    *
    * `epoch` 由调用方在**发起任务之前**捕获并传进来：本函数不读也不写任何共享代次，
    * 每个任务的 handlers 只认自己那一个值。
@@ -700,30 +541,19 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const onRunSummary = (): void => {
       void documents.reload()
     }
-    if (kind === 'prd') {
-      return guardJobHandlers(
-        {
-          // 逐字增量按章落卡片（`appendPrdChunk`）；`part` 到了再用权威文本覆盖
-          onChunk: appendPrdChunk,
-          onPart: handlePrdPart,
-          onStage: handlePrdStage,
-          onSnapshot: applyJobSnapshot,
-          onReview: handleReview,
-          onRunSummary,
-        },
-        epoch,
-      )
-    }
+    // 票 #92：PRD 与接口文档 / 提示词共用同一条整篇路径，因此 handlers 只有一套。
+    // `kind` 保留在签名里：它是「这次是哪份产物」的记录，不是分叉依据。
+    void kind
     return guardJobHandlers(
       {
         onChunk: (chunk) => {
-          // 整篇文档只有一个缓冲，归属一概不看：它们的 chunk 本来就不分章
+          // 整篇文档只有一个缓冲：三份产物的 `chunk` 本来就不带章节归属
           docStreamingContent.value += chunk.text
         },
-        // 改写稿整段覆盖初稿；没有审查/改写时这两个回调都不会触发
+        // 改写稿整段覆盖初稿；没有审核 / 改写时这两个回调都不会触发
         onPart: handleDocPart,
         onStage: handleDocStage,
-        // 审核 / 改写的原始输出：只进阶段条下方的面板，不进正文
+        // 大纲 / 审核 / 改写的原始输出：只进阶段条下方的面板，不进正文
         onStageChunk: handleDocStageChunk,
         onSnapshot: applyJobSnapshot,
         onReview: handleReview,
@@ -736,80 +566,16 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   /**
    * 应用任务快照：把「断线前已产出的正文」补齐到预览（刷新重连的落点）。
    *
-   * PRD 还原看板（已定稿章节 + 正在写的半成品）；其余文档直接用快照的实时缓冲。
-   *
-   * **守卫按「有没有内容」判，不按「看板在不在」判**：重连链路会先 `beginPrdStages()`
-   * 建一张**空**看板再订阅，若用「看板为 null」作守卫，PRD 的快照永远进不去——
-   * 表现为「刷新后已定稿的章节也一片空白」。同理，同一任务被订阅两次时第二份快照
-   * 会晚于 live 事件到达，此时看板已有卡片，守卫让这次补全退化成无害的 no-op。
+   * 三份产物同一条整篇路径：正文 =「已定稿」+「实时缓冲」。改写成功后初稿已被
+   * `part{replace}` 整段覆盖，此时只剩 `finalizedText`、缓冲为空；生成途中的情况则相反。
+   * 只在预览还空着时用它初始化，避免第二份快照覆盖已流出的内容。
    */
   function applyJobSnapshot(snap: JobSnapshot): void {
-    if (snap.kind === 'prd') {
-      const current = prdBoard.value
-      const hasCards = (current?.sections.length ?? 0) > 0
-      if (!hasCards) {
-        const board: PrdBoardState = {
-          total: snap.completedSections.length,
-          headerReady: false,
-          headerText: '',
-          sections: [],
-          review: null,
-          partial: snap.partial,
-          failedSections: snap.failedSections,
-        }
-        for (const [position, section] of snap.completedSections.entries()) {
-          board.sections.push({
-            sectionId: section.sectionId,
-            sectionTitle: '',
-            sectionHeading: section.heading,
-            index: typeof section.index === 'number' ? section.index : position,
-            phase: section.failed ? 'writing' : 'done',
-            failed: section.failed === true,
-            text: section.text,
-            draft: '',
-            note: '',
-            issues: [],
-          })
-        }
-        // 正在写的几章：按章摆回各自的卡片，`text` 留空、`draft` 带着已吐出的字，
-        // 于是刷新后「半截内容还在」并接着往下长（定稿章节由上面的循环铺好）
-        for (const live of snap.liveBySection) {
-          if (board.sections.some((item) => item.sectionId === live.sectionId)) continue
-          board.sections.push({
-            sectionId: live.sectionId,
-            sectionTitle: '',
-            sectionHeading: '',
-            index: live.index,
-            phase: 'writing',
-            failed: false,
-            text: '',
-            draft: live.text,
-            note: '',
-            issues: [],
-          })
-        }
-        board.sections.sort((a, b) => a.index - b.index)
-        // 快照的 finalizedText 是「文档头 + 已定稿章节」；把章节部分减掉即文档头。
-        // 旧快照缺 index 时按数组序兜底，拿不准就留空——落稿以 done.reply 为准。
-        const sectionsText = board.sections.map((section) => section.text).join('')
-        if (sectionsText && snap.finalizedText.endsWith(sectionsText)) {
-          board.headerText = snap.finalizedText.slice(
-            0,
-            snap.finalizedText.length - sectionsText.length,
-          )
-          board.headerReady = board.headerText.length > 0
-        }
-        prdBoard.value = board
-        syncPrdPreview()
-      }
-      return
-    }
     if (snap.kind === 'chat') {
       // 对话的正文归 `runs.preview.content`（见 `useClarificationChat`）。走到这里说明
       // 分流又错了——宁可什么都不做，也绝不把聊天正文写进文档预览与工作副本。
       return
     }
-    // 其余文档只有一段流式缓冲：同样只在空着时用快照初始化，避免重复快照覆盖已流出的内容
     if (!docStreamingContent.value) {
       // 正文 =「已定稿」+「实时缓冲」。改写成功后初稿已被 `part{replace}` 整段覆盖，
       // 此时只剩 `finalizedText`、缓冲为空；生成途中的情况则相反。只看 `liveBuffer`
@@ -824,6 +590,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (phase) docPhase.value = phase
     else if (snap.status === 'running') docPhase.value = 'writing'
     if (!docStageText.value && snap.stageText) docStageText.value = snap.stageText
+    // 大纲只有「快照正停在大纲阶段」时补得回来：换成撰写之后阶段输出就换了一格，
+    // 那时快照里也不再有大纲文本——它是过程信息，不落库，看不到不影响产物。
+    if (!docOutlineText.value && snap.stageText && phase === 'outlining') {
+      docOutlineText.value = snap.stageText
+    }
   }
 
   /**
@@ -906,10 +677,98 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   }
 
   /**
+   * 取消 / 被取代的收尾落点（票 #84）。
+   *
+   * 这两件事都**不是失败**：已取消是用户的明确意图，被取代是系统让位（同一份文档有
+   * 更新的任务接手）。但它们都不能写成「已定稿」——正文可能只有一半。所以落点与
+   * 失败收尾同源：先与后端对齐（取消也可能留下一版部分完成），有内容就带用户去审阅页，
+   * 提示语说明「是取消/被取代，不是出错」。
+   *
+   * 区别只在**不调用 `setReviewFailed`、不显示红色失败**：判据是任务状态而不是
+   * 错误码，界面不许把两者混成一团（AC5）。
+   */
+  async function settleAbortedDocument(
+    target: DocumentKind,
+    state: 'cancelled' | 'superseded',
+    epoch: number,
+  ): Promise<void> {
+    const message = state === 'cancelled' ? '任务已取消' : '任务已被新任务取代'
+    if (isExpired(epoch)) return
+    await documents.reload()
+    if (isExpired(epoch)) return
+    docError.value = message
+    const generating = generatingStateFor(target)
+    if (generating !== null && viewState.value === generating) {
+      goTo(reviewStateFor(target))
+      // `goTo` 清错误回显；这次是取消/让位收尾，说明必须留在页面上。
+      docError.value = message
+    }
+    hooks.onNotice(message)
+  }
+
+  /** 本次订阅的终态是不是「取消 / 被取代」（两者都不是失败，见 `settleAbortedDocument`）。 */
+  function abortedTerminalState(): 'cancelled' | 'superseded' | null {
+    const status = job.snapshot.value?.status
+    return status === 'cancelled' || status === 'superseded' ? status : null
+  }
+
+  /**
+   * 若这一支以「取消 / 被取代」收尾，就地处理并返回 true（调用方直接 return）。
+   *
+   * 集中成一个入口而不是在每个动作里各抄一遍：四条生成入口 + 三条改写入口的落点规则
+   * 必须一致，抄散之后总有一条会忘了判「被取代」。
+   */
+  async function settleIfAborted(epoch: number): Promise<boolean> {
+    const state = abortedTerminalState()
+    if (state === null) return false
+    const run = runs.activeRun
+    const target = run?.docKind ?? (run ? docKeyForJob(run.jobKind) : 'prd')
+    await settleAbortedDocument(target, state, epoch)
+    return true
+  }
+
+  /**
+   * 失败收尾的落点：先与后端对齐，再决定「有没有内容可用」（票 #85）。
+   *
+   * 失败不再等于「什么都没留下」：后端在失败 / 取消收尾时会把已生成的正文落成一版
+   * **部分完成**（`document_versions.partial`）。因此这里做三件事：
+   *
+   * 1. 记下错误（运行视图与审阅页都会展示它——**失败仍然是失败**，不粉饰）；
+   * 2. **先拉一次文档**：不拉的话本地看到的还是上一份正文，判断「有没有内容可用」会看错
+   *    （而且恰恰是在「这次留下了一版」的时候看错）；
+   * 3. 若这一份确实有了部分完成版本，把用户带到**审阅页**——那里有正文、有下载、
+   *    有修复 / 重生成入口，还有「这份正文不完整」的提示。留在运行视图只会给他一片
+   *    写着「失败」的空白。
+   *
+   * 与 `finishDoc` 同一条不抢方向盘的规矩：用户已经走开（不在这份文档的生成页）时
+   * **不拽回去**，只把正文照常落库（它已经在库里，他回来就能看到）。
+   */
+  async function settleFailedDocument(
+    target: DocumentKind,
+    message: string,
+    epoch: number,
+  ): Promise<void> {
+    docError.value = message
+    // 会话已被换掉（删方案 / 切到别的方案）时不必再拉，也不该把落点改到别人的页面上
+    if (isExpired(epoch)) return
+    await documents.reload()
+    if (isExpired(epoch)) return
+    // 没有「部分完成版本」= 这次真的没留下可用内容：留在运行视图看错误，行为与从前一致。
+    if (!documents.partialOf(target) || !documents.contentOf(target).trim()) return
+    const generatingState = generatingStateFor(target)
+    if (generatingState !== null && viewState.value === generatingState) {
+      goTo(reviewStateFor(target))
+      // `goTo` 会清掉错误回显（那是「开始新一轮」的语义），但这次是**失败收尾**：
+      // 原因必须留在审阅页上，否则用户只看到一份半截正文、不知道为什么会停在这里。
+      docError.value = message
+    }
+  }
+
+  /**
    * 刷新后静默重连一个进行中的任务：先收快照补全正文，再接 live。
    *
    * 由 AppV2 在恢复快照后调用——**无需用户点击**。按快照 status 分流：
-   * running 续流 / completed 落稿 / failed 保 partial + 展示错误。
+   * running 续流 / cancelled·superseded 收成「不是失败」的落点 / succeeded 落稿 /\n * failed 保 partial + 展示错误（票 #84 的七态）。
    *
    * **对同一任务幂等**：一进入就要把预览复位，若同一个任务被并发重连两次，
    * 后一次会在前一路已经流出正文之后把预览清空，两路事件随即交错写入同一份缓冲。
@@ -921,6 +780,51 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function reconnectJob(jobId: number): Promise<void> {
     if (isSubscribed(jobId)) return
     await reconnectAndSettle(jobId)
+  }
+
+  /**
+   * 等待重试期间按「停止生成」（票 #88）。
+   *
+   * ## 为什么不能只退订
+   *
+   * 等待态的任务**没有运行时**（执行者已经不在场，恢复器刚把它回排队）。`detach` 只
+   * 中止本地读取、服务端任务照跑——对一条要再等 30 秒的任务来说，等于「按了停止，
+   * 它下一轮照样跑」。所以这里调真正的取消端点，服务端立刻落 `failed + CANCELLED`。
+   *
+   * ## 为什么取消之后还要自己收尾
+   *
+   * 那一条任务没有协程可推事件，取消落库之后订阅端**不会**收到任何后续事件（流挂在
+   * 空的唤醒队列上）。于是：先退订（那一支不再有事件、也不该继续占着运行视图），
+   * 再把用户带回这份文档的审阅页，并留下「任务已取消」的说明。
+   *
+   * 取消没成功（`cancelled === false`）不是错误：那一刻任务刚好已经结束，同样不该
+   * 继续挂在等待态上，所以走同一条落点，只是文案不同。
+   */
+  async function cancelRun(): Promise<void> {
+    const run = runs.activeRun
+    if (run === null) return
+    const epoch = solutions.sessionEpoch
+    const jobId = run.jobId
+    const target = run.docKind ?? docKeyForJob(run.jobKind)
+    // 先落本地标记：按钮**立刻**变成「正在取消」并置灰。取消是两段的（票 #84）：
+    // 请求只把它推进 cancelling，执行者要等到下一个动作点才确认。不等这个往返，
+    // 用户会以为按钮坏了然后连点。
+    runs.requestCancel(jobId)
+    const cancelled = await job.cancel(jobId)
+    // 等待期间用户可能已经切了方案 / 换了任务：那份结果不属于现在这一屏。
+    if (isExpired(epoch) || runs.activeRun?.jobId !== jobId) return
+    if (cancelled) {
+      // **不 detach**：这一支还要继续收事件，直到执行者确认收口（run_summary 说
+      // cancelled / superseded）。终态落点由那条链自己的 `settleAbortedDocument`
+      // 处理；这里提前退订会让界面停在「正在取消」再也没有下文。
+      return
+    }
+    // 取消没成功不是错误：任务刚好已经结束，也同样离开等待态，只是文案不同。
+    job.detach()
+    goTo(reviewStateFor(target))
+    // `goTo` 会清掉错误回显（那是「开始新一轮」的语义）：取消结果必须留在页面上，
+    // 否则用户只看到一份旧正文、不知道自己按的那一下生效了没有。
+    docError.value = '这次任务已经结束，无需取消'
   }
 
   /**
@@ -987,11 +891,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       })
     }
     resetDocTransient()
-    if (kind === 'prd') {
-      beginPrdStages()
-    } else {
-      prdBoard.value = null
-    }
 
     // 重连也是一次独立订阅：代次必须在发起之前定格，并沿这条链一路带着走
     const epochAtStart = solutions.sessionEpoch
@@ -1007,22 +906,31 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 「已生成完毕」的提示打到用户脸上——不报错，只是内容错了。
     const serverKind = snap === null ? null : fromBackendJobKind(snap.kind)
     if (serverKind !== null && serverKind !== kind) return
-    // 下游阶段与阶段输出由 `applyJobSnapshot` 在**快照那一刻**回填（那是唯一正确的时机：
-    // 重连不会补发历史 `stage` 事件，而事后读 `job.snapshot.value` 拿到的是订阅开始时的
-    // 旧 phase，会把已经流到改写阶段的指示器倒回生成阶段）。
+    // 七态（票 #84）：取消 / 被取代不是失败，落点与文案必须与 failed 分开。
+    const abortedState = abortedTerminalState()
     if (kind === 'review') {
       // 重审不产出正文：收尾只有「回审阅页 + 让面板反映这次结果」两件事，
       // 与刚点下去那条路共用 `settleRereview`（同一份收尾逻辑只有一个落点）。
       // 成功时结论已随 `review` 事件写进文档记录，`onRunSummary` 还会再拉一次对齐。
+      if (abortedState !== null) {
+        settleRereview(
+          target,
+          true,
+          abortedState === 'cancelled' ? '任务已取消' : '任务已被新任务取代',
+        )
+        return
+      }
       settleRereview(target, !ok || snap?.status === 'failed')
       return
     }
+    if (abortedState !== null) {
+      await settleAbortedDocument(target, abortedState, epochAtStart)
+      return
+    }
     if (!ok) {
-      docError.value = job.error.value || '生成失败'
-      prdBoard.value = null
+      await settleFailedDocument(target, job.error.value || '生成失败', epochAtStart)
     } else if (snap?.status === 'failed') {
-      docError.value = snap.errorMessage || '生成失败'
-      prdBoard.value = null
+      await settleFailedDocument(target, snap.errorMessage || '生成失败', epochAtStart)
     } else {
       // 落点由 `finishDoc` 自己决定：优化留在原审阅页，生成 / 澄清都回到那份文档的审阅页
       finishDoc(kind, reply, target, epochAtStart)
@@ -1074,7 +982,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 按 `derived_from` 的指纹比较标成「可能已过期」。因此这里不清本地副本，
     // 交给收尾的 `documents.reload()` 把 stale 标记拉回来。
     resetDocTransient()
-    beginPrdStages()
+    // 阶段条立即亮起（大纲是最先的一步）：别让用户在等后端 `stage` 事件时盯着空白
+    docPhase.value = 'outlining'
     // 代次在**发起之前**定格：这条链的 handlers、await 之后的判断与 `finishDoc` 全都用它
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
@@ -1085,10 +994,11 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 订阅期间会话被换掉、或这一支已被别的任务顶替：成功 / 失败都不要再写回本文件的状态。
     // `aborted` 见 `reconnectAndSettle` 的同名判断：主动退订不是失败，不该弹红字。
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
-      docError.value = job.error.value || 'PRD 生成失败'
-      // 失败时收掉阶段条：原因由错误提示说明，留着一个「进行中」的指示反而误导
-      prdBoard.value = null
+      // 失败：后端可能已经把已生成的内容落成一版部分完成（#85），落点由它决定
+      await settleFailedDocument('prd', job.error.value || 'PRD 生成失败', epochAtStart)
       return
     }
     finishDoc('prd', reply, 'prd', epochAtStart)
@@ -1104,7 +1014,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (isRunInFlight()) return
     // 提示词不再删除：重新生成接口文档后，它只会被标成 stale（见 generatePrd 的说明）
     resetDocTransient()
-    prdBoard.value = null
     // 先把阶段条点亮：整篇生成是最长的一步，等后端 `stage` 事件到达才显示的话，
     // 用户在这段时间里只看到一片空白（后端随后会补发同一条 writing 事件，幂等）
     docPhase.value = 'writing'
@@ -1117,8 +1026,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       handlersForKind('api-docs', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
-      docError.value = job.error.value || '接口文档生成失败'
+      await settleFailedDocument('api-docs', job.error.value || '接口文档生成失败', epochAtStart)
       return
     }
     finishDoc('api-docs', reply, 'api-docs', epochAtStart)
@@ -1136,7 +1047,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   async function generatePrompts(): Promise<void> {
     if (isRunInFlight()) return
     resetDocTransient()
-    prdBoard.value = null
     // 与接口文档同理：阶段条立即亮起，别让用户在整篇生成期间盯着空白
     docPhase.value = 'writing'
     const epochAtStart = solutions.sessionEpoch
@@ -1146,8 +1056,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       handlersForKind('prompts', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
-      docError.value = job.error.value || '提示词生成失败'
+      await settleFailedDocument('prompts', job.error.value || '提示词生成失败', epochAtStart)
       return
     }
     finishDoc('prompts', reply, 'prompts', epochAtStart)
@@ -1179,10 +1091,19 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'optimize',
-      { document: content, instruction, docKind: target },
+      {
+        document: content,
+        instruction,
+        docKind: target,
+        // 版本锁（票 #81）：这一版是用户眼前正文的版本号。收尾时若生成任务已经推进了
+        // 当前版本，后端拒绝覆盖并让任务失败（「正文已被更新，请刷新后重试」）。
+        expectedVersionNo: documents.versionNoOf(target),
+      },
       handlersForKind('optimize', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       // 优化失败：保留原文档，错误已写入 docError
       docError.value = job.error.value || '优化失败'
@@ -1270,9 +1191,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const history = chatHistoryOf(activeChatTab.value)
     if (history.length === 0) return
 
-    // 就地改写、不是分章节链路：清掉可能残留的阶段进度，否则生成页会顶出一条与本次无关的
-    // 章节条（`goTo` 内部的 `clearTransient` 不碰 `prdBoard`）
-    prdBoard.value = null
     // 阶段先于任务切（理由见上）；`goTo` 顺带清空上一轮的流式缓冲 / 错误 / PRD 三段预览
     goTo(generatingStateFor(target) ?? 'generating-prd')
 
@@ -1281,10 +1199,13 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
       'clarify',
       // 对话不随请求下发：后端按 `docKind` 定位那条澄清线程自己读（票 #54）。
       // 这里只用本地镜像做「有没有聊过」的前置判断，聊过就够发任务了。
-      { document, docKind: target },
+      // `expectedVersionNo` 是版本锁（#81）：改写会覆盖当前正文，版本对不上就拒绝。
+      { document, docKind: target, expectedVersionNo: documents.versionNoOf(target) },
       handlersForKind('clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       // 改写失败：留在生成视图，由 `GeneratingStage` 的错误区展示原因（后端失败不覆写正文）
       docError.value = job.error.value || '按澄清结果改写失败'
@@ -1383,10 +1304,18 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     const epochAtStart = solutions.sessionEpoch
     const { reply, ok, aborted, run } = await job.start(
       'auto-clarify',
-      { document: content, pendingItems: items, docKind: target },
+      {
+        document: content,
+        pendingItems: items,
+        docKind: target,
+        // 版本锁（#81）：改写会覆盖当前正文，版本对不上就拒绝覆盖。
+        expectedVersionNo: documents.versionNoOf(target),
+      },
       handlersForKind('auto-clarify', epochAtStart),
     )
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
       docError.value = job.error.value || 'AI 自行澄清失败'
       return
@@ -1428,6 +1357,16 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     )
     // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：重审被取消 / 被取代也只是「没审成」，不该冒充失败原因。
+    const abortedState = abortedTerminalState()
+    if (abortedState !== null) {
+      settleRereview(
+        target,
+        true,
+        abortedState === 'cancelled' ? '任务已取消' : '任务已被新任务取代',
+      )
+      return
+    }
     settleRereview(target, !ok)
   }
 
@@ -1448,11 +1387,10 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
    * `failed` 由调用方给出而不是在这里判 `ok`：重连路径上「流读完了、任务终态却是
    * failed」也是失败（例如正文在审的过程中被改过），那时 `ok` 仍是 `true`。
    */
-  function settleRereview(target: DocumentKind, failed: boolean): void {
+  function settleRereview(target: DocumentKind, failed: boolean, message?: string): void {
     if (failed) documents.setReviewFailed(target)
-    prdBoard.value = null
     goTo(reviewStateFor(target))
-    if (failed) docError.value = job.error.value || '重新审核失败'
+    if (failed) docError.value = message ?? job.error.value ?? '重新审核失败'
   }
 
   /**
@@ -1481,7 +1419,6 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     if (!generating) return
 
     resetDocTransient()
-    prdBoard.value = null
     // 阶段先于任务切：先切到生成视图，再让这次发起成为唯一发起。
     // `goTo` 不因「有任务在跑」拒绝跳转——重入是开头那道 `isRunInFlight()` 挡的
     goTo(generating)
@@ -1495,8 +1432,12 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     )
     // 会话被换掉、或这一支已被别的任务顶替：这次结果属于别人，不写状态、不导航
     if (isStaleRun(run) || isExpired(epochAtStart) || aborted) return
+    // 七态（票 #84）：取消 / 被取代不是失败，落点必须与 failed 分开。
+    if (await settleIfAborted(epochAtStart)) return
     if (!ok) {
-      docError.value = job.error.value || '按结论修复失败'
+      // 修复是**整篇重写**（后端按 `review_fix` 追加版本），因此失败时也可能留下一版
+      // 部分完成：由 `settleFailedDocument` 决定是否带用户去看那份可用正文（#85）。
+      await settleFailedDocument(target, job.error.value || '按结论修复失败', epochAtStart)
       // 人已经不在这一份的页上了：错误只写在 `docError` 里他看不见（那一页没渲染），
       // 等于「点了修复、任务炸了、界面什么也没说」。这种情况补一句提示。
       // 而停在这一份的审阅页 / 运行视图时，错误由那两页自己显示，不必再弹一次。
@@ -1748,7 +1689,7 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
 
   /** 清空文档流水线相关的全部临时状态（重新开始时用） */
   function reset(): void {
-    // 「重新开始」要连预览一起归零：正文 / 看板 / 阶段 / 阶段输出 / 审核结论 / 错误
+    // 「重新开始」要连预览一起归零：正文 / 阶段 / 阶段输出 / 审核结论 / 错误
     resetDocTransient()
     pendingSummary.value = null
     summaryChanges.value = []
@@ -1767,17 +1708,20 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
   // 临时状态
   docStreamingContent,
   docError,
-  prdStatus,
-  prdShowingDraft,
   // 用量观测：运行摘要（生成后展示，按当前审阅文档取对应桶）+ 已用时（生成中展示）
   runSummary,
   pendingItems,
   docPhase,
   docStageText,
+  docOutlineText,
+  // 分批续写（#93）：生成页据此显示「正文已自动续写到第 N 段」，进度条不受影响
+  docContinuation,
   reviewConclusion,
   reviewFailedAt,
   reviewVersionNo,
   elapsedMs: job.elapsedMs,
+  // 失败退避（#88）：等待重试时的「最早可再领走时刻」；null = 没在等
+  retryAt: job.retryAt,
     summaryChanges,
     summarySyncing,
     summarySyncError,
@@ -1786,6 +1730,8 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     // 生成与优化
     generatePrd,
     reconnectJob,
+    // 等待重试期间取消（票 #88）
+    cancelRun,
     onSaveDocument,
     onAiOptimize,
     handleGenerateApiDocs,
@@ -1812,3 +1758,4 @@ export function useDocumentPipeline(hooks: PipelineHooks) {
     reset,
   }
 }
+

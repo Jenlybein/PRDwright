@@ -8,6 +8,10 @@
 任务最多 `PRDWRIGHT_DRAIN_TIMEOUT` 秒 → 超时者标成已取消并落终态 → 以 0 退出），
 见 `services/job_drain.py`。信号只在 POSIX 主线程上挂得上；装不上时由 lifespan 的
 关闭阶段兜底排空。
+
+启动的最后一步起**单进程后台调度循环**（`services/job_scheduler.py`：领到期任务 →
+收口过期租约 / 陷住的取消 → 清理过期过程日志），关闭的第一步先把它干净停掉
+（cancel + await），再走排空。
 """
 
 from contextlib import asynccontextmanager
@@ -40,7 +44,7 @@ from backend.core.logging_setup import (
     install_log_persistence,
     shutdown_log_persistence,
 )
-from backend.services import auth_service, job_service
+from backend.services import auth_service, job_scheduler, job_service
 from backend.services.job_drain import drain_controller
 from backend.services.skill_registry import ensure_skills
 
@@ -73,9 +77,8 @@ async def lifespan(_: FastAPI):
     # 池是懒建的，不预热的话，连接会在「第一次真被借用」时才建；而本项目里有两个
     # 借用者会并发（事件循环线程 + `log-store` 日志线程），第一处并发就发生在**启动期**——
     # `install_log_persistence()` 起线程之后，主线程还要跑 ensure_bootstrap / reap_orphans /
-    # ensure_skills，两边可能同时首次建连接。而「多线程同时首次映射 WAL 的 `-shm`」
-    # 会返回 `SQLITE_READONLY`，`busy_timeout` 对它不生效（只对 `SQLITE_BUSY` 生效），
-    # 于是不重试、直接失败，报错还长得像「文件权限不对」。
+    # ensure_skills，两边可能同时首次建连接。并发建连接本身不会报错，但会让「池里到底
+    # 有几条、为什么少了」变得不可预期；预热把这件事收进启动期，池满/连不上都在这里暴露。
     #
     # 位置有三条硬理由：
     # 1. 在 `prepare_schema` 之后 —— 迁移借的那条先归还，预热才是「从头建满」；
@@ -148,8 +151,20 @@ async def lifespan(_: FastAPI):
             "本次进程未接管终止信号，排空将在关闭阶段兜底执行",
             extra={"event": "service.drain_signals_unavailable"},
         )
+    # 调度循环（P0-1）：领到期任务 / 收口过期租约与陷住的取消 / 清理过期过程日志。
+    #
+    # 位置在启动的最后一步：三个维护动作都要读库、要派发任务，库、技能、日志、
+    # 运行时登记表必须都已就绪；早一步起来，第一轮就会撞上一个还没准备好的进程。
+    #
+    # 它是**单进程**的（`_RUNTIMES` / `JobBus` 都在进程内，单 worker 是部署硬约束），
+    # 且只补漏——新建任务仍走「登记后立刻抢占派发」，交互延迟不经过任何周期。
+    # 开关在 `job_scheduler_enabled`：生产默认开，**测试默认关**（见 tests/conftest.py）。
+    scheduler = job_scheduler.start(current)
     yield
 
+    # 关闭阶段第一步就停循环：排空要等的是「已经开始的任务」，不该再有新一轮领取
+    # 把新任务塞进来。`stop()` 会 cancel + await，确认三个周期任务真的退出。
+    await job_scheduler.stop(scheduler)
     # 关闭阶段的兜底排空：正常路径上信号已经排空过，这里再调一次是空转，所以先用
     # 「还有没有在途任务」挡一道——没有就不必为每个用例/每次重启的关闭流程都留一行
     # 「开始排空」的告警。有的话（Windows 没信号、uvicorn 自己的收尾、应用被直接关掉），

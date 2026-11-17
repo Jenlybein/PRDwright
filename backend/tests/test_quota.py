@@ -43,19 +43,20 @@ def _user(user_id: int = 1, username: str = "u1") -> User:
 def _ensure_user(user_id: int) -> None:
     """`generation_jobs.owner_id` 有外键指向 `users`，造任务前必须先有这个人。
 
-    用 `INSERT OR IGNORE` 而不是查一下再插：用例里同一个 id 会被反复用到
+    用「撞主键就跳过」而不是查一下再插：用例里同一个 id 会被反复用到
     （多数用例只关心「谁的任务」），重复插入静默跳过最省事。
+    （SQLite 的 `INSERT OR IGNORE` 在 Postgres 上写作 `ON CONFLICT DO NOTHING`。）
     """
     with connect() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO users (id, username, password_hash, salt, created_at)"
-            " VALUES (?, ?, 'hash', X'', ?)",
-            (user_id, f"user{user_id}", utc_now_text()),
+            "INSERT INTO users (id, username, password_hash, salt, created_at) "
+            "VALUES (%s, %s, 'hash', %s, %s) ON CONFLICT (id) DO NOTHING",
+            (user_id, f"user{user_id}", b"", utc_now_text()),
         )
         conn.commit()
 
 
-def _job(owner_id: int, *, status: str = "completed", prompt: int = 0, completion: int = 0,
+def _job(owner_id: int, *, status: str = "succeeded", prompt: int = 0, completion: int = 0,
          error_code: str = "", created_at: str | None = None) -> None:
     """直接写一行任务，用于构造统计口径。
 
@@ -132,7 +133,7 @@ def test_failed_and_cancelled_do_not_consume_quota(isolated_db):  # noqa: ARG001
     否则一次上游故障（或用户自己点了停止）就会把当天的机会扣掉，
     而用户完全无从申诉——他没做错任何事。
     """
-    _job(1, status="completed")
+    _job(1, status="succeeded")
     _job(1, status="failed", error_code="LLM_UPSTREAM_ERROR")
     _job(1, status="failed", error_code="CANCELLED")
     _job(1, status="failed", error_code="SUPERSEDED")
@@ -152,7 +153,7 @@ def test_token_counts_every_status(isolated_db):  # noqa: ARG001
 
     这条与「次数」刻意不同，是本模块最容易顺手写错的地方。
     """
-    _job(1, status="completed", prompt=100, completion=50)
+    _job(1, status="succeeded", prompt=100, completion=50)
     _job(1, status="failed", error_code="LLM_UPSTREAM_ERROR", prompt=30, completion=10)
     _job(1, status="failed", error_code="CANCELLED", prompt=20, completion=5)
 
@@ -194,7 +195,7 @@ def _set_quota(user_id: int, **kwargs) -> bool:
 def test_user_zero_overrides_global_limit(isolated_db):  # noqa: ARG001
     """用户级 `0` 必须能盖掉全局上限——那是「给可信账号开口子」的唯一手段。"""
     _set_global(quota_daily_task_limit=1)
-    _job(1, status="completed")
+    _job(1, status="succeeded")
     assert _set_quota(1, daily_task_limit=0, daily_token_limit=-1, max_running=-1)
 
     # 已用 1 次、全局上限 1，但该用户显式不限 → 放行
@@ -214,8 +215,8 @@ def test_minus_one_follows_global(isolated_db):  # noqa: ARG001
 def test_exceeding_task_limit_raises_429(isolated_db):  # noqa: ARG001
     """超限抛 429，且文案能直接给用户看。"""
     _set_global(quota_daily_task_limit=2)
-    _job(1, status="completed")
-    _job(1, status="completed")
+    _job(1, status="succeeded")
+    _job(1, status="succeeded")
 
     with pytest.raises(Exception) as excinfo:
         quota_service.check(_user(), "prd")
@@ -227,7 +228,7 @@ def test_exceeding_task_limit_raises_429(isolated_db):  # noqa: ARG001
 def test_one_below_limit_passes(isolated_db):  # noqa: ARG001
     """差一个没满时必须放行——边界差一（off-by-one）是这类代码的经典错法。"""
     _set_global(quota_daily_task_limit=2)
-    _job(1, status="completed")
+    _job(1, status="succeeded")
     quota_service.check(_user(), "prd")
 
 
@@ -247,7 +248,7 @@ def test_running_limit_reports_concurrency_not_quota(isolated_db):  # noqa: ARG0
 def test_token_limit_raised_when_tasks_not_exhausted(isolated_db):  # noqa: ARG001
     """token 超限时说的是 token，而不是次数。"""
     _set_global(quota_daily_token_limit=100)
-    _job(1, status="completed", prompt=60, completion=40)
+    _job(1, status="succeeded", prompt=60, completion=40)
 
     with pytest.raises(Exception) as excinfo:
         quota_service.check(_user(), "prd")
@@ -260,7 +261,7 @@ def test_enforce_off_logs_but_allows(isolated_db, caplog):  # noqa: ARG001
     这是「先观察再收紧」的开关：部署方想先看真实用量分布，不想立刻拒绝用户。
     """
     _set_global(quota_daily_task_limit=1, quota_enforce=False)
-    _job(1, status="completed")
+    _job(1, status="succeeded")
 
     with caplog.at_level("WARNING"):
         quota_service.check(_user(), "prd")  # 不抛
@@ -286,7 +287,7 @@ def test_day_boundary_follows_configured_timezone(isolated_db):  # noqa: ARG001
 
     # 日界之前一分钟的任务不算今天
     before = (utc_now() - timedelta(days=1)).isoformat()
-    _job(1, status="completed", created_at=before)
+    _job(1, status="succeeded", created_at=before)
     assert quota_service.usage_today(1).tasks == 0
 
 
@@ -321,7 +322,7 @@ def test_api_rejects_without_creating_a_job_row(client: TestClient, isolated_db)
 
     # 额度设成 0 次（显式不限是 0，所以用「上限 1 且有 1 条已收尾」来卡）
     _set_quota(user_id, daily_task_limit=1, daily_token_limit=-1, max_running=-1)
-    _job(user_id, status="completed")
+    _job(user_id, status="succeeded")
 
     # 请求本身要合法，否则门口的参数校验会先于额度检查把它拒掉（400 而不是 429）：
     # 文档类任务从票 #54 起必须带方案，输入也由服务端按方案取。

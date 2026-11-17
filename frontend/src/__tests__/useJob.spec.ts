@@ -67,16 +67,14 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: 'writing',
     finalizedText: '',
     liveBuffer: '',
-    liveBySection: [],
     stageText: '',
-    completedSections: [],
     solutionId: 1,
     errorCode: '',
     errorMessage: '',
     elapsedMs: 0,
+    retryAt: null,
     pendingItems: [],
     partial: false,
-    failedSections: [],
     ...overrides,
   }
 }
@@ -85,7 +83,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
 function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     durationMs: 250,
     totalCalls: 3,
     failedCalls: 0,
@@ -95,7 +93,6 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     injectedSkills: [],
     warnings: [],
     partial: false,
-    failedSections: [],
     protocol: 'ark',
     providerConfigId: 'cfg_ark0001',
     providerName: '火山方舟',
@@ -176,7 +173,7 @@ describe('useJob.start', () => {
     const snap = snapshot({ phase: 'reviewing', finalizedText: '# 正文\n' })
     vi.mocked(api.readJobStream).mockImplementation(async (_jobId, handlers) => {
       handlers?.onSnapshot?.(snap)
-      handlers?.onChunk?.({ text: '增量', sectionId: '', index: -1 })
+      handlers?.onChunk?.({ text: '增量' })
       handlers?.onRunSummary?.(runSummary())
       return { conversationId: '', reply: '# 正文\n增量', asks: [] }
     })
@@ -330,6 +327,109 @@ describe('useJob.reconnect', () => {
   })
 })
 
+describe('useJob 按游标续读（#86）', () => {
+  /** 让 `readJobStream` 返回一个正常收尾的结果 */
+  function completed(reply = ''): {
+    conversationId: string
+    reply: string
+    asks: never[]
+  } {
+    return { conversationId: '', reply, asks: [] }
+  }
+
+  it('传输中断后按最后收到的游标续读一次，已经显示过的正文不重放', async () => {
+    const job = useJob()
+    // 第一次订阅：快照（游标 0）→ 增量（游标 7）→ 连接被掐断
+    vi.mocked(api.readJobStream).mockImplementationOnce(async (_jobId, handlers) => {
+      handlers?.onCursor?.(0)
+      handlers?.onSnapshot?.(snapshot({ status: 'running' }))
+      handlers?.onCursor?.(7)
+      handlers?.onChunk?.({ text: '甲' })
+      throw new Error('连接被断开')
+    })
+    // 续读：服务端只发游标 7 之后的事件（增量 + 结束）
+    vi.mocked(api.readJobStream).mockImplementationOnce(async (_jobId, handlers) => {
+      handlers?.onCursor?.(8)
+      handlers?.onChunk?.({ text: '乙' })
+      return completed('甲乙')
+    })
+
+    const result = await job.start('prd', {}, {})
+
+    // 续读成功 → 这次生成整体算成功（不把一次网络抖动报成生成失败）
+    expect(result.ok).toBe(true)
+    expect(api.readJobStream).toHaveBeenCalledTimes(2)
+    // 第一次是「新任务」：不带游标（三个实参，路径里也没有查询串）
+    expect(vi.mocked(api.readJobStream).mock.calls[0]?.length).toBe(3)
+    // 续读带的是最后一条已收到事件的游标
+    expect(vi.mocked(api.readJobStream).mock.calls[1]?.[3]).toBe(7)
+    expect(vi.mocked(api.readJobStream).mock.calls[1]?.[0]).toBe(12)
+  })
+
+  it('服务端下发的 error 事件是结论而不是断线：不续读', async () => {
+    const job = useJob()
+    vi.mocked(api.readJobStream).mockImplementationOnce(async (_jobId, handlers) => {
+      handlers?.onCursor?.(3)
+      throw new ApiError('上游连接中断', 'LLM_UPSTREAM_ERROR')
+    })
+
+    const result = await job.reconnect(5, {})
+
+    expect(api.readJobStream).toHaveBeenCalledTimes(1)
+    expect(result.ok).toBe(false)
+    expect(result.errorCode).toBe('LLM_UPSTREAM_ERROR')
+  })
+
+  it('一条事件都没收到就断开：没有续读的落点，不重试', async () => {
+    const job = useJob()
+    vi.mocked(api.readJobStream).mockImplementationOnce(async () => {
+      throw new Error('连不上')
+    })
+
+    const result = await job.start('prd', {}, {})
+
+    expect(api.readJobStream).toHaveBeenCalledTimes(1)
+    expect(result.ok).toBe(false)
+  })
+
+  it('正常结束后清掉游标：下一次订阅重新拿快照（不带游标）', async () => {
+    const job = useJob()
+    useRunsStore().restore({ jobId: 5, solutionId: 1, jobKind: 'prd', docKind: 'prd' })
+    vi.mocked(api.readJobStream).mockImplementationOnce(async (_jobId, handlers) => {
+      handlers?.onCursor?.(11)
+      return completed('完')
+    })
+
+    await job.reconnect(5, {})
+
+    // 第二次订阅（同一任务，但上一次已经正常结束）：必须回到「新读者」路径，
+    // 否则会从游标 11 往后读，而客户端手里已经没有那之前的正文
+    await job.reconnect(5, {})
+    expect(vi.mocked(api.readJobStream).mock.calls[1]?.length).toBe(3)
+  })
+
+  it('detach 清空游标，之后重连不跳过正文', async () => {
+    const job = useJob()
+    vi.mocked(api.readJobStream).mockImplementationOnce((_jobId, handlers, signal) => {
+      handlers?.onCursor?.(5)
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(abortError()))
+      })
+    })
+
+    const pending = job.start('prd', {}, {})
+    await flushPromises()
+    job.detach()
+    await pending
+
+    useRunsStore().restore({ jobId: 12, solutionId: 1, jobKind: 'prd', docKind: 'prd' })
+    vi.mocked(api.readJobStream).mockResolvedValue(completed())
+    await job.reconnect(12, {})
+
+    expect(vi.mocked(api.readJobStream).mock.calls[1]?.length).toBe(3)
+  })
+})
+
 describe('useJob.detach', () => {
   it('只退订本地读取，不取消服务端任务', async () => {
     let receivedSignal: AbortSignal | undefined
@@ -364,3 +464,4 @@ describe('useJob.detach', () => {
     expect(receivedSignal?.aborted).toBe(true)
   })
 })
+

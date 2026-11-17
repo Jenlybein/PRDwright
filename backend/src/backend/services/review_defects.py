@@ -8,7 +8,7 @@
    `high` 下次 `medium`，改写门槛就会随模型心情漂移。
 2. **类别表只有一个生成点**：提示词里的五类判据由 `render_category_rules()` 渲染，
    第六类与清单由 `render_pending_section()` 在同一份提示词的 `{pending_section}` 里给出。
-   PRD 的单章审核（`prd_section_writer`）与整篇审核（`document_review`）都从这里取；
+   三份产物的整篇审核（`document_review`，票 #92 起 PRD 也走这条）都从这里取；
    各写一份的下场是「同一份正文在 PRD 侧判 medium、在接口文档侧判 high」。
 3. **两个时点两套口径**：生成过程只看前五类（那时清单还没抽出来）；重审与修复后的重审
    才看第六类「清单漏登记」，并且必须把当前版本的清单整份注入提示词。
@@ -226,32 +226,6 @@ def render_pending_list(items: list[dict[str, Any]] | None) -> str:
     if not items:
         return "本版没有登记任何待确认项。"
     return format_pending_items(list(items))
-
-
-def defects_count_text(issues: list[dict[str, Any]]) -> str:
-    """按类别计数的一句话：`编造 1 · 结构不符 2`；没有类别的归「未分类」。
-
-    这是**界面之外**唯一需要自己数一遍类别的地方（PRD 的汇总结论）：界面自己有一份
-    分组计数，结论里这句话则是落库、要被读出来的那句总结。顺序即类别表顺序，未分类垫底。
-
-    Args:
-        issues: 结论里的逐条问题。
-
-    Returns:
-        形如 `编造 1 · 结构不符 2` 的文本；没有问题时为 `""`。
-    """
-    counts: dict[str | None, int] = {}
-    for issue in issues:
-        key = normalize_category(issue.get("category")) if isinstance(issue, dict) else None
-        counts[key] = counts.get(key, 0) + 1
-    parts: list[str] = []
-    for key in [*CATEGORY_SEVERITY, None]:
-        number = counts.get(key, 0)
-        if not number:
-            continue
-        label = CATEGORY_LABELS[key] if key is not None else "未分类"
-        parts.append(f"{label} {number}")
-    return " · ".join(parts)
 
 
 def finalize_verdict(

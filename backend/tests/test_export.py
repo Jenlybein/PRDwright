@@ -26,7 +26,7 @@ def _new_solution(client, title: str = "交付测试") -> int:
 def _user_id(username: str) -> int:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id FROM users WHERE username = ?", (username,)
+            "SELECT id FROM users WHERE username = %s", (username,)
         ).fetchone()
     assert row is not None
     return int(row["id"])

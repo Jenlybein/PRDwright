@@ -134,6 +134,10 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
    * 顺序有讲究：**先把在途的手改冲掉**。`documents.loadAll` 会把「尚未落库的手改」
    * 盖在响应之上（那是正确的——刚敲的字比库里的新），但在这里它会盖住恢复结果，
    * 变成「恢复完看起来没变化」。冲干净之后再写版本，回落的数据才是权威的。
+   *
+   * **冲不干净就不继续**（票 #81「保存失败不能显示成功」）：手改没落库（网络 / 版本冲突）
+   * 时，调用方不能再弹「已存为新版本」的成功提示——用户会以为刚才的编辑已经保存了。
+   * 这时把失败原因写进 `error`（由 AppV2 统一提示），动作直接判失败。
    */
   async function runMutation(
     id: number,
@@ -141,8 +145,12 @@ export const useDocumentVersionsStore = defineStore('documentVersions', () => {
     action: () => Promise<unknown>,
   ): Promise<boolean> {
     error.value = ''
+    const flushed = await documents.flushPendingSave()
+    if (!flushed) {
+      error.value = documents.saveError || '还有改动没有保存成功，请稍后重试'
+      return false
+    }
     try {
-      await documents.flushPendingSave()
       await action()
     } catch (e) {
       error.value = e instanceof Error ? e.message : '操作失败'

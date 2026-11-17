@@ -6,10 +6,9 @@ T3 最容易交付成一个「看起来能用」的功能：接口返回 200、�
 
 这里钉的是五条最关键的链路：
 
-1. **死配置被修好**：章节审核的 `max_tokens` 真的取自 `prd_section_review_max_tokens`。
-   修之前它被 `doc_review_max_tokens` 顶掉，改它一点用没有。
+1. **审核窗口可配**：整篇审核的 `max_tokens` 真的取自 `doc_review_max_tokens`
+   （票 #92 起三份产物共用这一个窗口，PRD 也整篇审）。
 2. **LLM 实例按指纹重建**：改配置后拿到的是新实例，同配置则不重建（不白建客户端）。
-3. **构造期快照已拆除**：同一个 `PrdSectionWriter` 实例，改并发度后行为跟着变。
 4. **任务级冻结**：任务跑到一半改配置，这次任务的回执仍记旧供应商。
 5. **自定义供应商的窗口**：填了 `context_window` 就不再被 32k 兜底误判超顶。
 """
@@ -24,11 +23,13 @@ from backend.core import runtime_config as rc
 from backend.core.config import get_settings
 from backend.core.contracts import StreamEvent
 from dbsupport import connect
-from conftest import model_providers as ModelProviderRepository, system_config as SystemConfigRepository
+from conftest import (
+    model_providers as ModelProviderRepository,
+    register,
+    system_config as SystemConfigRepository,
+)
 from backend.services import document_service, llm_factory
-from backend.services.job_bus import job_bus
-from backend.services.job_ticket import start_registered_job
-from ticket_support import fake_registered_ticket
+from ticket_support import run_ticket_events
 
 
 class _FakeLLM:
@@ -68,49 +69,27 @@ def _clear() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_section_review_llm_uses_its_own_token_limit(monkeypatch):
-    """章节审核实例的上限来自 `prd_section_review_max_tokens`。
+def test_review_llm_uses_the_configurable_window(monkeypatch):
+    """整篇审核实例的上限来自 `doc_review_max_tokens`（三份产物共用同一个开关）。
 
-    ⚠️ 这条钉住一个**曾经真实存在的 bug**：`_get_section_writer` 把整篇审核用的
-    `review_llm`（`doc_review_max_tokens`=2048）传给了 writer，于是
-    `prd_section_review_max_tokens` 从未被读取——改它没有任何效果。
+    票 #92 起 PRD 也整篇审，因此「单章审核上限」那份配置随分章链路一起退役：
+    现在只有一个审核窗口，改它就是改三份产物的审核调用。
     """
-    _set(prd_section_review_max_tokens=1234)
-
-    seen: list[dict] = []
-
-    def _fake_get_llm(**kwargs):  # noqa: ANN003
-        seen.append(kwargs)
-        return _FakeLLM(f"mt={kwargs.get('max_tokens')}")
-
-    monkeypatch.setattr(document_service, "get_llm", _fake_get_llm)
-
-    service = document_service.DocumentService()
-    instance = service.section_review_llm
-
-    assert seen, "应当创建了一个审核实例"
-    assert seen[0]["max_tokens"] == 1234
-    assert instance.label == "mt=1234"
-
-
-def test_whole_and_section_review_limits_are_independent(monkeypatch):
-    """整篇审核与单章审核是两个独立配置，各管一处。"""
-    _set(doc_review_max_tokens=3000, prd_section_review_max_tokens=900)
+    _set(doc_review_max_tokens=1234)
 
     seen: list[int | None] = []
 
     def _fake_get_llm(**kwargs):  # noqa: ANN003
         seen.append(kwargs.get("max_tokens"))
-        return _FakeLLM()
+        return _FakeLLM(f"mt={kwargs.get('max_tokens')}")
 
     monkeypatch.setattr(document_service, "get_llm", _fake_get_llm)
 
     service = document_service.DocumentService()
-    service.review_llm
-    service.section_review_llm
+    instance = service.review_llm
 
-    assert 3000 in seen, f"整篇审核上限没生效：{seen}"
-    assert 900 in seen, f"单章审核上限没生效：{seen}"
+    assert seen == [1234], f"审核实例的窗口没取配置：{seen}"
+    assert instance.label == "mt=1234"
 
 
 # ---------------------------------------------------------------------------
@@ -140,100 +119,6 @@ def test_llm_instance_rebuilt_after_config_change(monkeypatch):
     assert len(calls) == 2
 
 
-def test_writer_rebuilds_llm_when_config_changes(monkeypatch):
-    """`PrdSectionWriter` 的 llm 同样按指纹重建。"""
-    from backend.services.prd_section_writer import PrdSectionWriter
-
-    calls: list[int] = []
-
-    def _fake_get_llm(**kwargs):  # noqa: ANN003
-        calls.append(1)
-        return _FakeLLM(f"n={len(calls)}")
-
-    monkeypatch.setattr(
-        "backend.services.prd_section_writer.get_llm", _fake_get_llm, raising=False
-    )
-
-    writer = PrdSectionWriter(llm=None)
-    first = writer.llm
-    assert len(calls) == 1
-
-    _set(llm_retry_delay=2.5)
-    assert writer.llm is not first
-    assert len(calls) == 2
-
-
-def test_writer_review_llm_rebuilds_when_the_window_changes(monkeypatch):
-    """审核实例的窗口是**可配的**：只改 `prd_section_review_max_tokens` 也要换实例。
-
-    它与撰写实例按同一份指纹重建，只是 `max_tokens` 换成审核窗口——
-    少了这一步，「后台把审核窗口调小」会静默不生效（仍用旧实例的旧上限）。
-    """
-    from backend.services.prd_section_writer import PrdSectionWriter
-
-    windows: list[int | None] = []
-
-    def _fake_get_llm(**kwargs):  # noqa: ANN003
-        windows.append(kwargs.get("max_tokens"))
-        return _FakeLLM(f"mt={kwargs.get('max_tokens')}")
-
-    monkeypatch.setattr(
-        "backend.services.prd_section_writer.get_llm", _fake_get_llm, raising=False
-    )
-
-    writer = PrdSectionWriter(llm=None, review_llm=None)
-    first = writer.review_llm
-    assert windows == [get_settings().prd_section_review_max_tokens]
-    # 配置没变就不重建
-    assert writer.review_llm is first
-
-    _set(prd_section_review_max_tokens=get_settings().prd_section_review_max_tokens + 100)
-    assert writer.review_llm is not first
-    assert len(windows) == 2
-
-
-# ---------------------------------------------------------------------------
-# 3. 构造期快照已拆除
-# ---------------------------------------------------------------------------
-
-
-def test_writer_reads_concurrency_at_use_time():
-    """同一个 writer 实例，改并发度后属性值跟着变。
-
-    改造前这五项是 `__init__` 里拷进实例的常量，改了配置要重建 writer 才生效；
-    而 `DocumentService` 会**复用**同一个 writer——于是「改了后台配置，本次生成不变」
-    成了常态。这条断言的是「属性每次现读」这个行为本身。
-    """
-    from backend.services.prd_section_writer import PrdSectionWriter
-
-    writer = PrdSectionWriter(llm=_FakeLLM())
-    assert writer._concurrency == get_settings().prd_pipeline_concurrency  # noqa: SLF001
-
-    _set(prd_pipeline_concurrency=6)
-    assert writer._concurrency == 6, "构造期快照没拆干净"  # noqa: SLF001
-
-    _set(prd_pipeline_concurrency=1)
-    assert writer._concurrency == 1  # noqa: SLF001
-
-
-def test_writer_review_switch_is_live():
-    """审核开关同样现读；但**调用方显式传入的覆盖**优先。"""
-    from backend.services.prd_section_writer import PrdSectionWriter
-
-    writer = PrdSectionWriter(llm=_FakeLLM())
-    default_on = get_settings().prd_section_review_enabled
-    assert writer._review_enabled is default_on  # noqa: SLF001
-
-    _set(prd_section_review_enabled=not default_on)
-    assert writer._review_enabled is (not default_on)  # noqa: SLF001
-
-    # 快捷流程会显式传 False；这种覆盖必须稳定，不能被配置改动顶掉
-    forced = PrdSectionWriter(llm=_FakeLLM(), review_enabled=False)
-    assert forced._review_enabled is False  # noqa: SLF001
-    _set(prd_section_review_enabled=True)
-    assert forced._review_enabled is False  # noqa: SLF001
-
-
 # ---------------------------------------------------------------------------
 # 4. 任务级冻结
 # ---------------------------------------------------------------------------
@@ -247,24 +132,27 @@ def test_task_snapshot_does_not_drift():
     """
     rc.invalidate()
     snapshot = rc.get_runtime_config()
-    before = snapshot.settings.prd_pipeline_concurrency
+    before = snapshot.settings.doc_review_max_tokens
 
     with rc.use_config(snapshot):
-        _set(prd_pipeline_concurrency=before + 1 if before < 8 else before - 1)
+        _set(doc_review_max_tokens=before + 1)
         inside = rc.get_runtime_config()
         assert inside is snapshot
-        assert inside.settings.prd_pipeline_concurrency == before
+        assert inside.settings.doc_review_max_tokens == before
 
     # 出了任务上下文，新任务读到新值
-    assert rc.get_runtime_config().settings.prd_pipeline_concurrency != before
+    assert rc.get_runtime_config().settings.doc_review_max_tokens != before
 
 
-def test_job_meter_uses_active_provider():
+def test_job_meter_uses_active_provider(client):
     """任务回执里记的是**使用中的那条配置**，而不是 `DEFAULT_LLM_PROVIDER`。
 
     切过配置之后，后者可能与实际发出的请求不符——回执与账单就对不上了。
-    只派发不登记的用例归到「造单 + 派发」：造单是公开正门，可直接造假单；
-    假事件流在造单时传入，断言外部可观察的 `run_summary` 回执，不探内部摆位。
+
+    ⚠️ #81 起「收尾」是一次条件写（`WHERE status='running'`）+ 同事务副作用；不登记的假任务
+    改不到任何行，收尾按「本次结果被丢弃」处理、不再广播回执（旧实现会照发一份）。因此
+    这条用例改成走真实的「登记 → 派发 → 订阅」接缝（主接缝 `ticket_support` 本来就是
+    这类用例的标准写法），断言的仍是同一件事：`run_summary` 里的四格供应商身份。
     """
     ModelProviderRepository.create(
         provider_id="cfg_claude01",
@@ -274,42 +162,25 @@ def test_job_meter_uses_active_provider():
     )
     _set(active_provider_id="cfg_claude01")
     rc.invalidate()
+    register(client)
 
-    async def fake_stream(kind, request):  # noqa: ANN001, ARG001
-        yield StreamEvent(type="chunk", content="假流", data={})
-        yield StreamEvent(type="done", content="", data={"reply": "假流", "partial": False})
+    registered, events = run_ticket_events(
+        1,
+        None,
+        "prd",
+        {"requirements": "x", "product_name": "y"},
+        StreamEvent(type="chunk", content="假流", data={}),
+        reply="假流",
+    )
 
-    import asyncio
-
-    async def _run() -> list:
-        # 造单时定格配置快照（生产真值），随即用公开正门补登记身份造假单②。
-        ticket = fake_registered_ticket(
-            owner_id=1,
-            solution_id=None,
-            kind="prd",
-            request={"requirements": "x", "product_name": "y"},
-            job_id=999,
-            event_stream_source=fake_stream,
-        )
-        # 只派发不登记：订阅这个假 id，读回执里的四格供应商身份。
-        queue = job_bus.subscribe(ticket.job_id)
-        start_registered_job(ticket)
-        events = []
-        while True:
-            event = await asyncio.wait_for(queue.get(), timeout=5)
-            if event is None:
-                break
-            events.append(event)
-        return events
-
-    events = asyncio.run(_run())
     summary = next(event for event in reversed(events) if event.type == "run_summary").data
     # 协议与条目 id 必须同时记下：前者用于查限值与聚合账单，后者用于定位到具体一条
     assert summary["protocol"] == "anthropic", f"应按协议记录，实际 {summary['protocol']}"
     assert summary["provider_config_id"] == "cfg_claude01"
     assert summary["provider_name"] == "Claude-测试"
     assert summary["model"] == "claude-test"
-    assert summary["status"] == "completed"
+    assert summary["status"] == "succeeded"
+    assert registered.job_id > 0
 
 
 # ---------------------------------------------------------------------------

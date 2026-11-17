@@ -107,9 +107,21 @@ def test_app_logs_table_has_the_columns_it_needs(isolated_db):  # noqa: ARG001
     全过程的唯一线索，缺任何一个，日志页都会在数据量上来后变成「只能凭时间翻」。
     """
     with connect() as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(app_logs)")}
-        # `index_list` 的第一列是序号，索引名在第二列
-        indexes = {row[1] for row in conn.execute("PRAGMA index_list(app_logs)")}
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'app_logs'"
+            )
+        }
+        # Postgres 里索引的清单在 `pg_indexes`（SQLite 的 `PRAGMA index_list` 没有等价物）
+        indexes = {
+            row["indexname"]
+            for row in conn.execute(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname = current_schema() AND tablename = 'app_logs'"
+            )
+        }
 
     assert {"ts", "level", "logger", "msg", "request_id", "user_id", "event"} <= columns
     # 索引是「按时间翻页 / 按级别过滤 / 按请求号反查」三条查询路径的前提，

@@ -158,40 +158,7 @@ class Settings(BaseSettings):
         "用不上指数退避；留一点间隔是为了避开上游刚抖动完的那几个瞬间。",
     )
 
-    # --- PRD 分章节生成 ------------------------------------------------------
-    # 模板本身就是「6 章 + 待确认附录」，逐章撰写可以让每章都带上已定稿的前序章节，
-    # 从而保证 6.1 引用的功能编号、附录汇总的「待确认」与前文一致；
-    # 代价是 LLM 调用次数从 1 次变成「章节数 × (1 + 审核 + 改写)」次。
-    prd_section_review_enabled: bool = Field(
-        default=True,
-        description="生成 PRD 时是否启用「写作 → 审核 → 改写」中的审核环节。"
-        "关闭后只逐章撰写，不再调用审核 Agent，可显著降低时延与费用。",
-    )
-    prd_section_max_rewrites: int = Field(
-        default=1,
-        ge=0,
-        le=3,
-        description="单个章节最多改写的轮数。0 表示只审核不改写；"
-        "达到上限即保留当前版本，避免审核与改写互相拉扯导致无限循环。",
-    )
-    prd_pipeline_concurrency: int = Field(
-        default=3,
-        ge=1,
-        le=8,
-        description="PRD 分章节生成时同时在飞的模型调用上限（撰写 / 审核 / 改写共用）。"
-        "1 表示退回串行：每章都能带上已定稿的前序章节；大于 1 时后章基于前章草稿，"
-        "跨章一致性由最终的审核结论兜底。并发越高越容易撞单供应商限流。",
-    )
-    prd_section_max_retries: int = Field(
-        default=3,
-        ge=0,
-        le=5,
-        description="单个章节在某一阶段失败后的最多重试次数（总尝试 = 1 + 该值）。"
-        "只重试该阶段本身：撰写用尽后写占位，审核用尽后保留正文，改写用尽后保留改写前版本。"
-        "与 llm_max_retries（单次调用重试）是两层，实际调用次数是两者之积。",
-    )
-
-    # --- 文档审核（整篇 / 分章节共用） ----------------------------------------
+    # --- 文档审核（三份产物共用，票 #92 起 PRD 也整篇审） ----------------------
     # 审核只是「判定 + 批注」，输出量与正文不在一个量级。给它一个远小于生成的上限，
     # 既省时间也省 token；万一被截断，按「审核失败 → 通过」处理（审核是锦上添花，
     # 不能反向拖垮已经生成好的正文）。
@@ -201,19 +168,11 @@ class Settings(BaseSettings):
     doc_review_max_tokens: int = Field(
         default=2048,
         ge=256,
-        description="整篇文档（接口文档 / 提示词套件）审核这次调用的 max_tokens。",
-    )
-    prd_section_review_max_tokens: int = Field(
-        default=2048,
-        ge=256,
-        description="PRD 单章节审核这次调用的 max_tokens。"
-        "默认值与整篇审核（2048）对齐：此前这里是 1024，但章节审核实际复用了整篇的"
-        " `review_llm`（2048），于是这个配置一直是**死配置**——改了没有任何效果。"
-        "把默认值对齐到 2048 并让章节审核真正用自己的实例，才不会一改就改变现有行为。",
+        description="整篇文档（PRD / 接口文档 / 提示词套件）审核这次调用的 max_tokens。",
     )
     review_rewrite_min_severity: Literal["high", "medium", "low"] = Field(
         default="high",
-        description="触发改写的最低严重度，两条链路共用。"
+        description="触发改写的最低严重度，三份产物共用。"
         "默认 `high`：medium 里有「空泛表述」「结构不符」这类几乎必然命中的口径，"
         "按它改写会把「审一次 → 改一次」变成常态，时延翻倍而收益极小。"
         "审核结论里的 issues 不受此影响——medium 照样报给用户，只是不自动改。",
@@ -252,6 +211,57 @@ class Settings(BaseSettings):
         "这是上限不是必等：任务都结束了就立刻退出。超过它仍在跑的任务被标成已取消并"
         "落终态，订阅者收到 error 事件。容器的 `stop_grace_period` 必须大于这个值，"
         "否则进程会在排空走完之前被硬杀，任务又变回 `running` 的尸体。",
+    )
+
+    # --- 调度循环（票 #89 的遗留，本票 P0-1 接上） ---------------------------
+    # 三个维护单元（`claim_once` / `recover_once` / `purge_expired_events`）此前只有
+    # 用例在调，没有生产调用者：退避到期的行没人领、卡住的取消没人兜底、过程日志
+    # 永不清理。这一组开关把「谁、多久扫一次」变成配置。
+    #
+    # 为什么默认开：它就是生产行为。**测试默认关**（`tests/conftest.py` 把它置 false）：
+    # 一千多条用例各自起一个后台循环只会互相干扰（抢同一批行、在用例收尾时还在跑）。
+    # 少量集成用例显式打开它来验证循环本身。
+    job_scheduler_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("PRDWRIGHT_JOB_SCHEDULER_ENABLED", "JOB_SCHEDULER_ENABLED"),
+        description="是否在应用启动时起单进程后台调度循环（领到期任务 / 收口过期租约 / "
+        "清理过期过程日志）。关掉后这三个动作只能由用例或运维手动调用。",
+    )
+    job_scheduler_claim_interval: float = Field(
+        default=1.0,
+        ge=0.05,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_CLAIM_INTERVAL", "JOB_SCHEDULER_CLAIM_INTERVAL"
+        ),
+        description="领取到期任务的扫描周期（秒）。它**只负责补漏**：新建任务仍在登记后"
+        "立刻抢占派发，交互延迟不经过这个周期。",
+    )
+    job_scheduler_recovery_interval: float = Field(
+        default=30.0,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_RECOVERY_INTERVAL", "JOB_SCHEDULER_RECOVERY_INTERVAL"
+        ),
+        description="收口过期租约 / 取消中任务的扫描周期（秒）。租约本身 120 秒到期，"
+        "30 秒一轮意味着「执行者消失」最多被发觉晚半分钟。",
+    )
+    job_scheduler_purge_interval: float = Field(
+        default=3600.0,
+        ge=60.0,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_PURGE_INTERVAL", "JOB_SCHEDULER_PURGE_INTERVAL"
+        ),
+        description="清理过期过程日志（保留 7 天）的周期（秒）。它删的是 `job_events`，"
+        "权威正文一个字都不动。",
+    )
+    job_scheduler_claim_batch: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices(
+            "PRDWRIGHT_JOB_SCHEDULER_CLAIM_BATCH", "JOB_SCHEDULER_CLAIM_BATCH"
+        ),
+        description="一轮最多领几条到期任务。补漏是逐条收口的维护动作，"
+        "一次领太多会把一批写压在同一轮里。",
     )
 
     # --- 可观测性（日志） ----------------------------------------------------
@@ -383,17 +393,17 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="",
         description=(
-            "数据库地址（v8）。例如 "
-            "sqlite:////var/lib/prdwright/prdwright.db 或 "
-            "mysql+pymysql://user:pass@host:3306/prdwright?charset=utf8mb4。"
-            "留空时回落到 DB_PATH（兼容糖，见 core/database.py::database_url）。"
+            "数据库地址（唯一入口，本项目只支持 Postgres）。形态："
+            "postgresql+psycopg://user:pass@host:5432/prdwright。"
+            "**没有默认值**：留空（或指向 SQLite / MySQL / 旧 DB_PATH）时服务拒绝启动，"
+            "见 core/database.py::database_url。"
         ),
     )
     db_path: str = Field(
         default="",
         description=(
-            "【兼容糖】SQLite 数据库文件路径；留空则使用后端项目根目录下的 prdwright.db。"
-            "新部署请用 DATABASE_URL——这一项是为已有部署与测试装置保留的。"
+            "【已退役】SQLite 时代的库文件路径。现在只用于「检测到旧库痕迹」时把路径"
+            "写进拒绝启动的报错里——它不会被读取，也不会被自动迁移。"
         ),
     )
     db_pool_size: int = Field(
@@ -447,9 +457,9 @@ class Settings(BaseSettings):
 
     @property
     def db_file(self) -> Path:
-        """SQLite 数据库文件的绝对路径。
+        """旧 SQLite 库文件的绝对路径（**只用于拒绝启动时点名**，不参与连接）。
 
-        未显式配置 `db_path` 时，放在后端项目根目录下的 `prdwright.db`。
+        未显式配置 `db_path` 时，指向后端项目根目录下的 `prdwright.db`。
         """
         if self.db_path:
             return Path(self.db_path).expanduser().resolve()

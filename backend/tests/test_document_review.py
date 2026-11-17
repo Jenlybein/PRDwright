@@ -279,8 +279,8 @@ def test_api_docs_stream_announces_writing_first_and_streams_review() -> None:
     """接口文档整条链路：阶段条立刻有位、审核/改写的字进阶段面板、正文不被污染。
 
     这是用户反馈的那条：「进度条一开始不显示、审核等很久又不知道在干什么」。
-    守两层——首事件必须是 `stage(writing)`；审核与改写的输出只走 `stage_chunk`，
-    绝不混进正文 `chunk`。
+    守两层——**首事件必须是 `stage`**（阶段条立刻有位；票 #91 起第一格是大纲
+    `outlining`），审核与改写的输出只走 `stage_chunk`，绝不混进正文 `chunk`。
     """
     llm = TwoStageLLM(
         document_pieces=["# 接口文档\n", "\n初稿正文"],
@@ -291,10 +291,12 @@ def test_api_docs_stream_announces_writing_first_and_streams_review() -> None:
 
     events = _drain_events(service.generate_api_docs_stream(prd_content="# PRD"))
 
-    # ① 进度条：第一步是 writing，而且必须在整篇生成之前就发出来
+    # ① 进度条：第一步是大纲，紧接着是 writing，且都在整篇生成之前发出来
     assert events[0].type == "stage"
-    assert events[0].data["stage"] == "writing"
+    assert events[0].data["stage"] == "outlining"
     assert events[0].data["doc_type"] == "api_doc"
+    stage_names = [event.data["stage"] for event in events if event.type == "stage"]
+    assert stage_names[:2] == ["outlining", "writing"]
 
     # ② 审核与改写都有增量，且各自带阶段标签
     review_deltas = [
@@ -335,9 +337,17 @@ def test_api_docs_stream_is_one_pass_when_review_disabled() -> None:
     # ① 只调了一次模型（撰写）；审核与改写一次都没发生
     assert len(llm.calls) == 1
     # ② 没有审核 / 改写的阶段与增量，也没有 review 结论
-    assert not [event for event in events if event.type == "stage_chunk"]
+    assert not [
+        event
+        for event in events
+        if event.type == "stage_chunk" and event.data["stage"] in ("reviewing", "rewriting")
+    ]
     assert not [event for event in events if event.type == "review"]
-    assert [event.data["stage"] for event in events if event.type == "stage"] == ["writing"]
+    # ② 阶段只有大纲与撰写（不过审的链路不出现 reviewing / rewriting）
+    assert [event.data["stage"] for event in events if event.type == "stage"] == [
+        "outlining",
+        "writing",
+    ]
     # ③ 正文与落稿都是初稿
     body = "".join(event.content for event in events if event.type == "chunk")
     assert "初稿正文" in body

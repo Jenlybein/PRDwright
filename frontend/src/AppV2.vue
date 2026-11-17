@@ -28,6 +28,7 @@ import { useDocumentVersionsStore } from '@/stores/documentVersions'
 import { useRunsStore } from '@/stores/runs'
 import { useSolutionsStore } from '@/stores/solutions'
 import { useWorkflowStore } from '@/stores/workflow'
+import { ACTIVE_JOB_STATE_QUERY, runBadgeLabel } from '@/utils/jobState'
 import {
   announcesDeliveryReady,
   chatStageForDocument,
@@ -366,7 +367,8 @@ async function resumeAfterRestore(): Promise<void> {
     const running = await fetchActiveJobs({
       solutionId: solutions.currentId,
       kind: 'chat',
-      status: 'running',
+      // 七态（票 #84）：在途是 pending / running / cancelling 三个值，不再只有一个 running
+      status: ACTIVE_JOB_STATE_QUERY,
     }).catch(() => [])
     const match = running[0]
     if (match) {
@@ -400,7 +402,7 @@ async function resumeAfterRestore(): Promise<void> {
   try {
     const jobs = await fetchActiveJobs({
       solutionId: solutions.currentId,
-      status: 'running',
+      status: ACTIVE_JOB_STATE_QUERY,
     })
     const match = pickInFlightDocJob(jobs)
     if (!match) return
@@ -606,16 +608,20 @@ const {
   formBackLabel,
   docStreamingContent,
   docError,
-  prdStatus,
-  prdShowingDraft,
   docPhase,
   docStageText,
+  docOutlineText,
+  // 分批续写（票 #93）：续写批次不渲染成新章节，只给生成页一句解释
+  docContinuation,
   reviewConclusion,
   reviewFailedAt,
   reviewVersionNo,
   runSummary,
   pendingItems,
   elapsedMs,
+  // 失败退避（票 #88）：等待重试时显示倒计时；等待期间取消仍然可用
+  retryAt,
+  cancelRun,
   summaryChanges,
   summarySyncing,
   summarySyncError,
@@ -765,6 +771,15 @@ function viewCurrentVersion(): void {
 const canViewCurrentVersion = computed(() => runInFlightForThisDoc.value)
 
 /**
+ * 运行视图是否处于「等待重试」（票 #88）。
+ *
+ * 判据只看「快照里有没有 `next_run_at`」，不在 computed 里读 `Date.now()`——
+ * 那会让这个 computed 没有依赖、永远只在首次求值时算一次。倒计时本身在
+ * `GeneratingStage` 里按秒推进（换算在 `@/utils/backoff`），这里只回答「是不是等待态」。
+ */
+const isWaitingRetryValue = computed(() => runs.hasRunning && retryAt.value !== null)
+
+/**
  * 运行视图的标题徽标（票 #67）：按动作区分，不把四件事都叫「生成中」。
  *
  * 修复、重审、优化、按澄清改写都不是「生成一份新文档」，混称会让用户以为自己的稿被整篇重做了。
@@ -772,12 +787,22 @@ const canViewCurrentVersion = computed(() => runInFlightForThisDoc.value)
  * 这是已知的口径缺口，写在 [`ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) §5.11。
  */
 const runViewStatusLabel = computed(() => {
-  if (!runs.hasRunning) return '生成中'
-  if (runs.isRunningKind('review-fix')) return '修复中'
-  if (runs.isRunningKind('review')) return '重审中'
-  if (runs.isRunningKind('optimize')) return '优化中'
-  if (runs.isRunningKind('clarify') || runs.isRunningKind('auto-clarify')) return '改写中'
-  return '生成中'
+  // 七态（票 #84）：徽标先看**服务端说这一支在哪个状态**，再按动作细分。
+  // 「取消中」优先于一切动作文案——用户刚按了停止，最想知道的是它停没停。
+  const state = runs.activeRun?.snapshot?.status ?? 'running'
+  const action = runs.isRunningKind('review-fix')
+    ? 'fix'
+    : runs.isRunningKind('review')
+      ? 'review'
+      : runs.isRunningKind('optimize')
+        ? 'optimize'
+        : runs.isRunningKind('clarify') || runs.isRunningKind('auto-clarify')
+          ? 'rewrite'
+          : 'generate'
+  return runBadgeLabel(state, action, {
+    waitingRetry: isWaitingRetryValue.value,
+    cancelling: runs.cancelling,
+  })
 })
 
 /**
@@ -802,6 +827,17 @@ const isRewritingCurrentDoc = computed(() => {
 const documentStale = computed(() => {
   const kind = activeDocKind.value
   return kind ? documents.staleOf(kind) : false
+})
+
+/**
+ * 当前审阅的这份正文是不是**可用但不完整**（票 #85）。
+ *
+ * 判据是后端的落库标记（`document_versions.partial`），不是「本次任务成没成功」：
+ * 任务失败也可能留下这一版，那正是「已生成的部分可以先用」的场景。
+ */
+const documentPartial = computed(() => {
+  const kind = activeDocKind.value
+  return kind ? documents.partialOf(kind) : false
 })
 
 /** 当前文档线程对应的待确认清单；需求澄清线程没有文档，返回空 */
@@ -1341,17 +1377,20 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :streaming-content="docStreamingContent"
         :error="docError"
         :generating="isGeneratingCurrentDoc"
-        :prd="prdStatus"
         :doc-phase="docPhase"
         :doc-stage-text="docStageText"
+        :doc-outline-text="docOutlineText"
+        :continuation="docContinuation"
         :with-review="hasDocumentReview(store.entryMode)"
-        :draft-only="prdShowingDraft"
         :elapsed-ms="elapsedMs"
+        :retry-at="retryAt"
         :back-label="backLabel"
         :hide-back="inputPageOnBar(store.entryMode)"
         :can-view-current-version="canViewCurrentVersion"
         :status-label="runViewStatusLabel"
+        :cancelling="runs.cancelling"
         @back="backToInput"
+        @cancel="cancelRun"
         @view-current-version="viewCurrentVersion"
       />
 
@@ -1372,6 +1411,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         :review="reviewConclusion"
         :review-failed-at="reviewFailedAt"
         :review-version-no="reviewVersionNo"
+        :partial="documentPartial"
         :fix-in-flight="isFixInFlight"
         :can-return-to-chat="canReturnToChat"
         :keep-back-button="keepBackButton"

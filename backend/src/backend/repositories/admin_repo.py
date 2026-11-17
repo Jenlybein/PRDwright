@@ -28,11 +28,21 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import DateTime, case, cast, extract, func, select
 from sqlmodel import Session
 
 from backend.core.clock import utc_now, utc_now_text
 from backend.core.models import AdminAuditLog, GenerationJob, User
+from backend.repositories.generation_job_repo import (
+    ACTIVE_STATUSES,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUS_SUCCEEDED,
+    STATUS_SUPERSEDED,
+    STUCK_MINUTES,
+    stuck_condition,
+)
 
 
 def _utc_day_bounds(day: date, shift: timedelta) -> tuple[str, str]:
@@ -53,13 +63,29 @@ def _utc_day_bounds(day: date, shift: timedelta) -> tuple[str, str]:
 # 审计一次最多返回多少行。它是给人翻的，不是给机器导的：
 # 真要做全量导出应该另开口子，而不是把这里的上限调到无穷大。
 _AUDIT_MAX_ROWS = 500
+# 统计口径（票 #84 AC5）：**按状态判，不按错误码猜**。`failed` 就是真失败；
+# 「被取代」与「已取消」各是一个状态、各有一列计数——它们长得像（都没有结果），
+# 含义却相反，合并统计就再也分不清「用户不要了」还是「被新任务挤掉了」。
 
-# 「不算真失败」的错误码。这两个同样是 `status='failed'`，但成因完全不同：
-# - `CANCELLED`：用户自己删了方案 / 点了停止；
-# - `SUPERSEDED`：同一份文档被更晚的任务接手，旧的那支主动让开。
-# 把它们算进失败率，会让平台看起来比实际脆弱得多——而管理员据此判断「模型稳不稳」，
-# 正是最不该被污染的一个判断。
-_NOT_REAL_FAILURE = ("CANCELLED", "SUPERSEDED")
+
+@dataclass(frozen=True, slots=True)
+class _DayCounts:
+    """一天之内各项计数的**不可变投影**（`_count_one_day` 的返回值）。
+
+    为什么不是裸 `dict[str, int]`：聚合结果没有对应的模型类，但裸 dict 会把「有哪些
+    字段」变成运行期才知道的事——调用方写错一个键要到用户点开后台才报 500。同文件里
+    对外的聚合行（`UserUsage` / `DailyUsage` / `JobMetrics`）都是这个写法，这里不该破例。
+    私有（下划线）是因为它只在「聚合 → `DailyUsage`」这一跳里存在，不是对外契约。
+    """
+
+    task_count: int
+    succeeded_count: int
+    failed_count: int
+    cancelled_count: int
+    superseded_count: int
+    active_count: int
+    prompt_tokens: int
+    completion_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +151,7 @@ class PlatformUsage:
     user_count: int
     admin_count: int
     task_count: int
-    completed_count: int
+    succeeded_count: int
     prompt_tokens: int
     completion_tokens: int
 
@@ -134,7 +160,7 @@ class PlatformUsage:
             "user_count": self.user_count,
             "admin_count": self.admin_count,
             "task_count": self.task_count,
-            "completed_count": self.completed_count,
+            "succeeded_count": self.succeeded_count,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
         }
@@ -142,14 +168,19 @@ class PlatformUsage:
 
 @dataclass(frozen=True, slots=True)
 class DailyUsage:
-    """按本地日期聚合的一天。`failure_rate` 为 None 表示那天没有已收尾任务。"""
+    """按本地日期聚合的一天（七态口径）。`failure_rate` 为 None 表示那天没有已收尾任务。
+
+    `active_count` = 排队中 / 执行中 / 取消中（尚未收尾）；`cancelled_count` 与
+    `superseded_count` **分开**——AC5 要求它们在统计里始终是两件事。
+    """
 
     day: str
     task_count: int
-    completed_count: int
+    succeeded_count: int
     failed_count: int
     cancelled_count: int
-    running_count: int
+    superseded_count: int
+    active_count: int
     prompt_tokens: int
     completion_tokens: int
     failure_rate: float | None = None
@@ -158,13 +189,52 @@ class DailyUsage:
         return {
             "day": self.day,
             "task_count": self.task_count,
-            "completed_count": self.completed_count,
+            "succeeded_count": self.succeeded_count,
             "failed_count": self.failed_count,
             "cancelled_count": self.cancelled_count,
-            "running_count": self.running_count,
+            "superseded_count": self.superseded_count,
+            "active_count": self.active_count,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "failure_rate": self.failure_rate,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class JobMetrics:
+    """管理端「四个数字」（票 #89）：排队数 / 成功率 / 平均耗时 / 卡死数。
+
+    这四个数回答的是**与按日趋势不同的问题**：趋势说「在变好还是变坏」，
+    它们说「此刻还有没有压在系统里的活、上一次成功收尾的比例高不高」。
+    用来提前发现「重试把任务打成失败」这类恶化——成功率一路下滑时，
+    任务总量可能还很平稳。
+
+    为什么 `success_rate` / `avg_duration_seconds` 可以是 `None`
+    -----------------------------------------------------------
+    它们的分母都是「已收尾」（成功 + 真失败）。一行都没有时返回 `None` 而不是 0：
+    0% 成功率会被读成「全都失败了」，0 秒耗时会被读成「任务瞬间失败」，
+    而真相是「还没有数据」——这与按日趋势里空日返回 `null` 是同一条口径。
+
+    为什么 `stuck_threshold_minutes` 也回传
+    --------------------------------------
+    前端要写一句「超过 N 分钟未更新或租约已过期才叫卡死」。N 只在后端有一份
+    （`generation_job_repo.STUCK_MINUTES`），前端硬编码一个 30 就是在写第二份规则：
+    阈值一改，界面上的口径说明会变成假话。
+    """
+
+    queue_count: int
+    success_rate: float | None
+    avg_duration_seconds: int | None
+    stuck_count: int
+    stuck_threshold_minutes: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "queue_count": self.queue_count,
+            "success_rate": self.success_rate,
+            "avg_duration_seconds": self.avg_duration_seconds,
+            "stuck_count": self.stuck_count,
+            "stuck_threshold_minutes": self.stuck_threshold_minutes,
         }
 
 
@@ -243,8 +313,8 @@ class AdminStatsRepository:
                 _count(User).label("user_count"),
                 _count(User, User.is_admin.is_(True)).label("admin_count"),
                 _count(GenerationJob).label("task_count"),
-                _count(GenerationJob, GenerationJob.status == "completed").label(
-                    "completed_count"
+                _count(GenerationJob, GenerationJob.status == STATUS_SUCCEEDED).label(
+                    "succeeded_count"
                 ),
                 _sum(GenerationJob.prompt_tokens).label("prompt_tokens"),
                 _sum(GenerationJob.completion_tokens).label("completion_tokens"),
@@ -254,9 +324,89 @@ class AdminStatsRepository:
             user_count=int(row[0] or 0),
             admin_count=int(row[1] or 0),
             task_count=int(row[2] or 0),
-            completed_count=int(row[3] or 0),
+            succeeded_count=int(row[3] or 0),
             prompt_tokens=int(row[4] or 0),
             completion_tokens=int(row[5] or 0),
+        )
+
+    def job_metrics(self) -> JobMetrics:
+        """**四个数字**一次查全（票 #89）：排队数 / 成功率 / 平均耗时 / 卡死数。
+
+        ## 每个数的口径（与界面上的说明文字一一对应）
+
+        - **排队数** = `status='pending'` 的行数。**包含还在退避等待里的行**
+          （`next_run_at` 未到期）：它们没在跑、也还没失败，只是要等一会儿；
+          排除它们，排队数会在限流风暴里正好少掉最该被看见的那一批。
+        - **成功率** = 已定稿 /（已定稿 + 真失败）。**分母不含 `superseded` 与
+          `cancelled`**——两者各有状态、都没有结果，把它们算进分母会让平台显得
+          比实际脆弱；分母为 0 时给 `None`。
+        - **平均耗时** = 同一批「已收尾」（成功 + 真失败）从 `created_at` 到
+          `updated_at` 的平均秒数。取消 / 被取代不进：一条「点了一下就取消」的任务
+          会把平均耗时拉低或拉得毫无意义。`updated_at` 是终态写入的时刻，
+          所以重试与退避等待都会算进耗时——这正是要观察的部分。
+        - **卡死数** = 仓储层 `stuck_condition` 的行数：执行中且（租约已过期 或
+          停更超过 `STUCK_MINUTES`）。判据**只有那一处**，列表页的 `stuck_only`
+          筛选用同一个表达式。
+
+        ## 平均耗时为什么在库里算
+
+        库里按 `updated_at - created_at` 求平均，而不是把「已收尾」的行全取回 Python
+        再逐行相减：那是一张会一直增长的表，把时间戳搬过网络只为算一个平均值，
+        后台一打开就先卡住自己。这里用 Postgres 的 `extract(epoch from …)`——
+        它是本模块唯一一处库端函数调用（日趋势的区间比较仍然只用字符串比较）。
+        **为什么现在可以用库端函数**：#78 起后端只剩 Postgres
+        （`core/database.py::SUPPORTED_BACKENDS`），不再需要为一层适配抹平方言。
+
+        空串时间戳（理论上不该有）先被 `!= ''` 挡掉：`CAST('' AS timestamp)` 会
+        在库里直接报错，而统计接口不该因为一条坏行整页 500。
+
+        单个查询、五个标量子查询：四个数字彼此独立，不共享聚合维度，
+        合成一条 `GROUP BY` 反而要把不同分组的行乘起来（那是这类统计最经典的错法）。
+        """
+
+        def _count(where: Any) -> Any:
+            return select(func.count()).select_from(GenerationJob).where(where).scalar_subquery()
+
+        finished = (STATUS_SUCCEEDED, STATUS_FAILED)
+        # ISO 文本 → timestamp → epoch 秒，差值就是这一行的生命周期长度。
+        duration_seconds = extract("epoch", cast(GenerationJob.updated_at, DateTime)) - extract(
+            "epoch", cast(GenerationJob.created_at, DateTime)
+        )
+        avg_duration = (
+            select(func.avg(duration_seconds))
+            .where(
+                GenerationJob.status.in_(finished),
+                GenerationJob.created_at != "",
+                GenerationJob.updated_at != "",
+            )
+            .scalar_subquery()
+        )
+        row = self.session.execute(
+            select(
+                _count(GenerationJob.status == STATUS_PENDING).label("queue_count"),
+                _count(GenerationJob.status == STATUS_SUCCEEDED).label("succeeded_count"),
+                _count(GenerationJob.status == STATUS_FAILED).label("failed_count"),
+                _count(stuck_condition(now_text=utc_now_text())).label("stuck_count"),
+                avg_duration.label("avg_duration_seconds"),
+            )
+        ).one()
+        queue_count = int(row[0] or 0)
+        succeeded = int(row[1] or 0)
+        failed = int(row[2] or 0)
+        stuck_count = int(row[3] or 0)
+        settled = succeeded + failed
+        average = row[4]
+        return JobMetrics(
+            queue_count=queue_count,
+            success_rate=round(succeeded / settled, 4) if settled else None,
+            avg_duration_seconds=(
+                # 四舍五入到整秒：界面按「秒」展示，小数位没有信息量。
+                max(0, int(round(float(average))) if average is not None else 0)
+                if average is not None
+                else None
+            ),
+            stuck_count=stuck_count,
+            stuck_threshold_minutes=STUCK_MINUTES,
         )
 
     def daily(self, days: int, tz_offset_minutes: int) -> list[DailyUsage]:
@@ -288,11 +438,13 @@ class AdminStatsRepository:
         是两个完全不同的结论**，图上必须能看出来。补 0 放在 Python 里做：
         SQL 的递归 CTE 虽然也能生成日历，但读起来远比几行 Python 难。
 
-        失败率的口径
-        ------------
-        分母是**已收尾**任务（completed + failed），不含 `running`——还在跑的任务
-        既不算成功也不算失败，放进分母会把失败率人为压低。
-        分子排除 `CANCELLED` / `SUPERSEDED`（见 `_NOT_REAL_FAILURE`）。
+        失败率的口径（七态，票 #84 AC5）
+        ----------------------------------
+        分母是**已收尾的成功与真失败**（`succeeded` + `failed`），不含在途的三个状态
+        （`pending` / `running` / `cancelling`）——它们既不算成功也不算失败。
+        分子只有 `failed`：**按状态判，不按错误码猜**。
+        「被取代」（`superseded`）与「已取消」（`cancelled`）各有一列计数、都不进
+        分母——它们长得像（都没有结果），但一个是系统让位、一个是用户意图。
         分母为 0 时 `failure_rate` 返回 `None` 而不是 0：那一天没有任何任务，
         「0% 失败」会被读成「全成功了」。
 
@@ -311,55 +463,74 @@ class AdminStatsRepository:
         for back in range(safe_days - 1, -1, -1):
             day = today - timedelta(days=back)
             counts = self._count_one_day(*_utc_day_bounds(day, shift))
-            finished = counts["completed_count"] + counts["failed_count"]
+            finished = counts.succeeded_count + counts.failed_count
             # 失败率由后端算好：前端各算一遍就会与这里漂移
             result.append(
                 DailyUsage(
                     day=day.isoformat(),
                     failure_rate=(
-                        round(counts["failed_count"] / finished, 4) if finished else None
+                        round(counts.failed_count / finished, 4) if finished else None
                     ),
-                    **counts,
+                    task_count=counts.task_count,
+                    succeeded_count=counts.succeeded_count,
+                    failed_count=counts.failed_count,
+                    cancelled_count=counts.cancelled_count,
+                    superseded_count=counts.superseded_count,
+                    active_count=counts.active_count,
+                    prompt_tokens=counts.prompt_tokens,
+                    completion_tokens=counts.completion_tokens,
                 )
             )
         return result
 
-    def _count_one_day(self, start: str, end: str) -> dict[str, int]:
-        """统计 `[start, end)` 内的六项指标。
+    def _count_one_day(self, start: str, end: str) -> _DayCounts:
+        """统计 `[start, end)` 内的各项指标（七态，按状态列，不看错误码）。
 
         区间**左闭右开**：`end` 那一刻的任务属于下一天，两边都算会把边界值数两遍。
         无行时 `func.sum` 返回 NULL，统一折成 0——`None` 会让调用方的加法直接炸。
+
+        返回**不可变投影**而不是裸 dict（P1-2）：裸 dict 会把「有哪些字段」变成运行期
+        才知道的事，`counts["failed_count"]` 打错一个字母要到用户点开后台才炸；而且
+        按位置下标从聚合行取值（`row[2]`）意味着**改一下 SELECT 的列顺序就静默错位**——
+        两列都是整数，错位之后连类型检查都救不了。`frozen dataclass` 把形状钉死：
+        少一个字段是导入期就能发现的 `TypeError`。同一文件里的 `JobMetrics` 是同样的写法。
         """
         status_is = lambda value: GenerationJob.status == value  # noqa: E731
-        real_failure = and_(
-            status_is("failed"), GenerationJob.error_code.notin_(_NOT_REAL_FAILURE)
-        )
-        not_real_failure = and_(
-            status_is("failed"), GenerationJob.error_code.in_(_NOT_REAL_FAILURE)
-        )
         row = self.session.execute(
             select(
-                func.count(),
-                func.sum(case((status_is("completed"), 1), else_=0)),
-                func.sum(case((real_failure, 1), else_=0)),
-                func.sum(case((not_real_failure, 1), else_=0)),
-                func.sum(case((status_is("running"), 1), else_=0)),
-                func.sum(GenerationJob.prompt_tokens),
-                func.sum(GenerationJob.completion_tokens),
+                func.count().label("task_count"),
+                func.sum(case((status_is(STATUS_SUCCEEDED), 1), else_=0)).label(
+                    "succeeded_count"
+                ),
+                func.sum(case((status_is(STATUS_FAILED), 1), else_=0)).label("failed_count"),
+                func.sum(case((status_is(STATUS_CANCELLED), 1), else_=0)).label(
+                    "cancelled_count"
+                ),
+                func.sum(case((status_is(STATUS_SUPERSEDED), 1), else_=0)).label(
+                    "superseded_count"
+                ),
+                func.sum(
+                    case((GenerationJob.status.in_(ACTIVE_STATUSES), 1), else_=0)
+                ).label("active_count"),
+                func.sum(GenerationJob.prompt_tokens).label("prompt_tokens"),
+                func.sum(GenerationJob.completion_tokens).label("completion_tokens"),
             ).where(
                 GenerationJob.created_at >= start,
                 GenerationJob.created_at < end,
             )
         ).one()
-        return {
-            "task_count": int(row[0] or 0),
-            "completed_count": int(row[1] or 0),
-            "failed_count": int(row[2] or 0),
-            "cancelled_count": int(row[3] or 0),
-            "running_count": int(row[4] or 0),
-            "prompt_tokens": int(row[5] or 0),
-            "completion_tokens": int(row[6] or 0),
-        }
+        # 按**列名**取值：与上面的 `.label(...)` 一一对应，列顺序再变也不会错位。
+        mapping = row._mapping
+        return _DayCounts(
+            task_count=int(mapping["task_count"] or 0),
+            succeeded_count=int(mapping["succeeded_count"] or 0),
+            failed_count=int(mapping["failed_count"] or 0),
+            cancelled_count=int(mapping["cancelled_count"] or 0),
+            superseded_count=int(mapping["superseded_count"] or 0),
+            active_count=int(mapping["active_count"] or 0),
+            prompt_tokens=int(mapping["prompt_tokens"] or 0),
+            completion_tokens=int(mapping["completion_tokens"] or 0),
+        )
 
     def top_users(self, limit: int = 10) -> list[TopUser]:
         """用量最高的用户。

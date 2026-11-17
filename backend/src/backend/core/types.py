@@ -1,47 +1,51 @@
-"""列类型策略（v8）：全项目**唯一**决定「一列用什么类型」的地方。
+"""列类型策略（v9）：全项目**唯一**决定「一列用什么类型」的地方。
 
 ## 为什么需要它
 
-SQLite 不校验长度，所以「这一列是 `TEXT` 还是 `VARCHAR(64)`」在 SQLite 上**看不出差别**——
-两种写法都存得下、都读得回。差别只在一个地方出现：**MySQL 的索引**。
+Postgres 的列类型比 SQLite 严格得多（SQLite 不校验长度，`TEXT` 与 `VARCHAR(64)`
+在上面看不出差别）。但本项目仍然保留这一层，理由不是「为了某个后端」，而是
+**两条与具体后端无关的工程约束需要一个唯一的落点**：
 
-`TEXT` 列在 MySQL 上不能整列建索引、不能做主键（必须给前缀长度，而前缀唯一 ≠ 全值唯一）。
-于是「某列能不能建索引」这件事，在 SQLite 上是自由的，在 MySQL 上是硬约束。
-把这条约束集中在三个构造函数里，是唯一能让它在两个后端上都成立的办法。
+1. **被索引的列必须有确定且有界的类型**——索引是 B-tree，条目大小受页大小限制
+   （Postgres 单条目上限约为页的 1/3，即几千字节）；把大文本声明成索引列，
+   建索引时会在数据量上来之后才失败。把「索引列必须 short_text(n)」写成构造器，
+   错误就发生在 import 那一刻，而不是某次生产迁移。
+2. **大段文本不许带 `server_default`**——大文本的默认值会让「裸 SQL 省略这一列」
+   静默写进一个空串，而空串与「没写」在业务上不可区分。本项目选择不给默认值：
+   裸 SQL 省略它应当**失败**（显式错误），而不是静默变成空串。
 
 ## 三条规则
 
 1. **要建索引（含主键、唯一约束）的列必须用 `short_text(n)`**，且 `n ≤ 768`；
 2. **大段文本用 `long_text()`**，它不许进索引、不许带 `server_default`；
-3. 其余普通字符串列仍可用 `Text`（不索引，MySQL 下就是 `TEXT`）。
+3. 其余普通字符串列仍可用 `Text`（不索引）。
 
 第 3 条是刻意的：把所有列都改成 `VARCHAR(n)` 会让改动面大到无法验证，而这些列
 本来就不索引。**只改必须改的**。
 
 ## 为什么 n ≤ 768
 
-InnoDB 单列索引上限 3072 字节，`utf8mb4` 每字符最多 4 字节 → 768 字符。
-超过这个数，MySQL 建索引会报 `Specified key was too long`。
-
-## 为什么大文本不能带默认值
-
-MySQL 的 `BLOB/TEXT` 列不接受字面量默认值（8.0.13 之前完全不行，之后也只能用
-表达式 `DEFAULT ('')`）。我们选择**不给默认值**，靠应用层显式赋值——ORM 插入本来
-就总是带值，而"裸 SQL 省略这一列"应该失败（它是显式错误，不是静默的空串）。
+Postgres 的 B-tree 索引条目不能超过页的 1/3（默认 8KB 页 → 约 2704 字节）。
+按 UTF-8 常见字符宽度留余量，把「可索引的短文本」上界定在 768 字符；超过它就该
+用 `long_text()` 并且不索引。这个数同时也是「别把大文本塞进索引」的硬提示。
 
 ## 自检在 import 时跑
 
 `assert_metadata_is_portable()` 在 `models.py` 末尾调用。这让「索引列没给长度」
-这类错误**发生在 import 那一刻**，而不是等到某天在 MySQL 上跑迁移时才发现。
+这类错误**发生在 import 那一刻**，而不是等到某次上线迁移才失败。
+
+（#78 收缩到 Postgres 单后端时，这里删掉了 `mysql.MEDIUMTEXT` variant 与只在
+MySQL 上有意义的 `索引列必须能建索引` 的部分：Postgres 能索引 `TEXT`，但本项目
+仍然要求索引列有界——规则本身与后端无关。）
 """
 
 from __future__ import annotations
 
 from sqlalchemy import String, Text
-from sqlalchemy.dialects import mysql
 from sqlalchemy.sql.type_api import TypeEngine
 
-# InnoDB 单列索引 3072 字节 ÷ utf8mb4 的 4 字节
+# 可索引短文本的字符上限。Postgres 的 B-tree 条目不能超过页的 1/3
+# （8KB 页 ≈ 2704 字节），这里留余量取 768。
 MAX_INDEX_CHARS = 768
 
 # 时间戳串的固定宽度：`utc_now_text()` 产出 26 字符，`utc_ms_text()` 24 字符（带 Z）。
@@ -53,32 +57,32 @@ def short_text(max_length: int) -> TypeEngine:
     """有长度上限的短文本，**可用于索引 / 主键 / 唯一约束**。
 
     Args:
-        max_length: 字符数上限。SQLite 不校验它；MySQL 的 `VARCHAR(n)` 会校验。
+        max_length: 字符数上限（Postgres 的 `VARCHAR(n)` 会校验它）。
 
     Raises:
-        ValueError: 长度非正或超过 `MAX_INDEX_CHARS`（MySQL 建不了索引）。
+        ValueError: 长度非正或超过 `MAX_INDEX_CHARS`（B-tree 条目会超限）。
     """
     if not 1 <= max_length <= MAX_INDEX_CHARS:
         raise ValueError(
             f"short_text({max_length}) 超出范围 1..{MAX_INDEX_CHARS}；"
-            "MySQL 的单列索引上限是 3072 字节（utf8mb4 下 768 字符）。"
+            "Postgres 的 B-tree 单条目上限约为页的 1/3，可索引短文本一律 ≤768 字符。"
         )
     return String(max_length)
 
 
 def long_text() -> TypeEngine:
-    """大段文本：SQLite `TEXT` / MySQL `MEDIUMTEXT`（16MB）。
+    """大段文本：Postgres 的 `TEXT`（无长度上限）。
 
     容量不是业务约束——「最多 60KB」由 `core/limits.py` 在写入前拦。
     """
-    return Text().with_variant(mysql.MEDIUMTEXT(), "mysql")
+    return Text()
 
 
 def timestamp_text() -> TypeEngine:
     """时间戳串（ISO 8601 文本）。
 
-    为什么不改成真的 `DATETIME`：本项目靠「ISO 字符串的字典序 = 时间序」做比较，
-    改成 `DATETIME` 会同时改变落盘格式、精度与时区解释，
+    为什么不改成真的 `TIMESTAMPTZ`：本项目靠「ISO 字符串的字典序 = 时间序」做比较，
+    改成真时间类型会同时改变落盘格式、精度与时区解释（以及历史数据的含义），
     代价远大于收益。这里只把宽度定下来，让它能建索引。
     """
     return short_text(TIMESTAMP_CHARS)
@@ -90,11 +94,7 @@ def timestamp_text() -> TypeEngine:
 
 
 def _impl(type_: TypeEngine) -> TypeEngine:
-    """剥掉 `Variant` 外壳，拿到实际类型。
-
-    `long_text()` 返回的是 `Variant`，`isinstance(x, Text)` 对它是 False，
-    而 `getattr(x, "length")` 又被代理到 impl——不统一剥壳会让判断逻辑分裂。
-    """
+    """剥掉 `Variant` 外壳，拿到实际类型（`long_text()` 曾经返回 Variant）。"""
     return getattr(type_, "impl", type_)
 
 
@@ -117,14 +117,14 @@ def _indexed_columns(table) -> set[str]:  # noqa: ANN001 - SQLAlchemy Table
 
 
 def assert_metadata_is_portable(metadata) -> None:  # noqa: ANN001 - MetaData
-    """校验整份 metadata 在 MySQL 上建得出来。
+    """校验整份 metadata 满足 `core/types.py` 的两条列类型纪律。
 
-    两条检查，都是「在 SQLite 上完全正常、到 MySQL 才炸」的类型：
+    两条检查都不是「某个后端的语法限制」，而是与后端无关的工程约束：
 
-    1. 索引列必须是 `short_text(n)`（`n ≤ 768`）——否则建索引时会
-       `Specified key was too long`，或主键直接建不出来；
-    2. 无长度上限的文本列不能带 `server_default`——否则报
-       `BLOB, TEXT, GEOMETRY or JSON column can't have a default value`。
+    1. 索引列必须是 `short_text(n)`（`n ≤ 768`）——否则 B-tree 条目会在数据量上来
+       之后才超限；
+    2. 无长度上限的文本列不能带 `server_default`——否则「裸 SQL 省略这一列」会静默
+       写进空串，而空串与「没写」不可区分。
 
     Raises:
         RuntimeError: 存在任一问题。消息里列出全部违规列，便于一次改完。
@@ -143,23 +143,23 @@ def assert_metadata_is_portable(metadata) -> None:  # noqa: ANN001 - MetaData
                 if length is None:
                     problems.append(
                         f"{table.name}.{col.name}：列被索引但没有长度上限，"
-                        "MySQL 建不了索引；改用 short_text(n)"
+                        "B-tree 条目会超限；改用 short_text(n)"
                     )
                 elif length > MAX_INDEX_CHARS:
                     problems.append(
                         f"{table.name}.{col.name}：长度 {length} 超过 {MAX_INDEX_CHARS}，"
-                        "MySQL 建不了索引"
+                        "不适合作为索引列"
                     )
             elif length is None and col.server_default is not None:
                 problems.append(
-                    f"{table.name}.{col.name}：无长度文本带了 server_default，"
-                    "MySQL 建表会报 can't have a default value；去掉默认值"
+                    f"{table.name}.{col.name}：无长度的文本带了 server_default，"
+                    "省略该列时会静默写入空串；去掉默认值"
                 )
 
     if problems:
         detail = "\n  ".join(problems)
         raise RuntimeError(
-            "列类型在 MySQL 上不可移植（在 SQLite 上看不出来）：\n"
+            "列类型违反 core/types.py 的纪律：\n"
             f"  {detail}\n"
             "规则见 core/types.py 的模块 docstring。"
         )

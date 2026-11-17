@@ -17,7 +17,7 @@ import { normalizeRunSummary } from '@/utils/runSummary'
 function backendSummary(overrides: Record<string, unknown> = {}) {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     duration_ms: 61_000,
     total_calls: 12,
     failed_calls: 1,
@@ -36,7 +36,6 @@ function backendSummary(overrides: Record<string, unknown> = {}) {
     injected_skills: [{ name: 'prd-generator', version: '0.1.0', fingerprint: 'e4f928df7be9' }],
     warnings: ['prd:writing 的输入已达预算上限的 88%'],
     partial: true,
-    failed_sections: [{ section_id: 'tech', title: '技术方案', reason: '超时' }],
     protocol: 'ark',
     provider_config_id: 'cfg_ark0001',
     provider_name: '火山方舟',
@@ -71,9 +70,6 @@ describe('normalizeRunSummary', () => {
     ])
     expect(summary!.injectedSkills).toHaveLength(1)
     expect(summary!.warnings).toEqual(['prd:writing 的输入已达预算上限的 88%'])
-    expect(summary!.failedSections).toEqual([
-      { sectionId: 'tech', title: '技术方案', reason: '超时' },
-    ])
   })
 
   it('也认 camelCase（历史快照与迁移数据里出现过）', () => {
@@ -137,7 +133,6 @@ describe('normalizeRunSummary', () => {
         steps: ['坏项', { step: 'prd:writing', calls: 3 }, 42],
         injected_skills: ['坏项', { name: 'prd-generator' }],
         warnings: ['合法告警', 7, null],
-        failed_sections: ['坏项'],
       }),
     )
 
@@ -154,6 +149,6 @@ describe('normalizeRunSummary', () => {
     ])
     expect(summary!.injectedSkills).toEqual([{ name: 'prd-generator', version: '', fingerprint: '' }])
     expect(summary!.warnings).toEqual(['合法告警'])
-    expect(summary!.failedSections).toEqual([])
   })
 })
+

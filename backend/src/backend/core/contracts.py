@@ -80,29 +80,35 @@ class StreamEvent(BaseModel):
         description=(
             "事件类型：状态提示 status / 增量文本 chunk / 定稿正文 part / 阶段进度 stage / "
             "结束 done / 错误 error，tool_call 与 document 为后续扩展预留。"
-            "`stage` 用于分章节生成：`data.stage` 取 writing / reviewing / rewriting / done，"
-            "`data.section_id` 标识当前章节（前端据此重置本章的实时缓冲）。"
-            "`chunk` 在分章节链路里**必须带 `data.section_id` + `data.index`**：多章同时"
-            "吐字，没有归属前端只能整批丢弃（那正是「PRD 不流式」的成因）；它是模型的"
-            "原始输出，只负责「让用户现在就看见它在长」，权威正文仍以 `part` 为准。"
-            "`part` 也用于分章节生成：每段正文（文档头、每一章）一被定稿就整段下发，"
-            "`data.text` 可直接追加到文档末尾，前端据此拼出与最终 `done.reply` 逐字一致的预览。"
+            "`stage` 用于三份产物的生成（票 #92 起 PRD 也整篇生成）：`data.stage` 取 "
+            "outlining / writing / reviewing / rewriting / done。"
+            "三份产物都先发 `outlining`（票 #91，从上游抽取大纲）；抽不出大纲时只发一条说明性的"
+            "`outlining` 后直接进入 `writing`，**不发 `error`**。"
+            "`chunk` 只表示「正文在长」，**不带章节归属**（`section_id` / `index` 已随分章链路"
+            "退役）。它是模型的原始输出，权威正文仍以 `part` 为准。"
+            "`part` 用于整篇改写：`data.text` + `data.replace=true` 表示整段覆盖初稿"
+            "（审核发现问题后的那一次改写）；生成路径不按章节追加。"
             "`snapshot` 与 `run_summary` 用于生成任务（generation_jobs）：前者在每次订阅开始时 "
             "**首发给**，`data` 含 job_id/kind/status/phase/finalized_text/live_buffer/"
-            "live_by_section/stage_text/completed_sections/solution_id/error_code/"
-            "error_message/elapsed_ms，供前端补全已产出正文与当前阶段输出"
-            "（`live_by_section` 是按章的半成品，只有分章节链路非空，不落库）；"
+            "stage_text/solution_id/error_code/"
+            "error_message/elapsed_ms，供前端补全已产出正文与当前阶段输出；"
             "后者在任务收尾时下发本次生成的用量汇总（结构见 `RunSummary`）。"
             "`review` 是审核结论：`data` 含 kind/verdict/summary/issues/rewritten/"
-            "failed_sections/reviewed_at/attempted。它随**被审的那一版正文**一起落库"
-            "（一版一条），事件只负责订阅期间的即时展示；刷新 / 换设备后从文档接口读那条。"
+            "reviewed_at/attempted——三份产物的形状逐字相同（票 #94）。它随**被审的那一版正文**"
+            "一起落库（一版一条），事件只负责订阅期间的即时展示；刷新 / 换设备后从文档接口"
+            "读那条。"
             "审核没跑成时判定为空串且**不写结论**（没有结论 ≠ 通过）；`attempted` 是"
             "「这次到底试没试」的显式标记：审失败要落 `review_failed_at`（刷新后仍显示"
             "「审核失败」），而没审（例如显式关闭审核）不许落——两者不能靠空串去猜。"
-            "`stage_chunk` 是**阶段内的原始输出增量**（审核意见 / 改写稿正文），"
-            "`data` 含 stage（reviewing / rewriting）与 doc_type；"
+            "`stage_chunk` 是**阶段内的原始输出增量**（大纲 / 审核意见 / 改写稿正文），"
+            "`data` 含 stage（outlining / reviewing / rewriting）与 doc_type；"
             "它与 `chunk` 是两条独立通道——`chunk` 进文档预览，它只进阶段输出面板，"
             "混用会把审核意见写进正文。"
+            "**任务订阅的每个事件（含 snapshot）都带 SSE 的 `id:` 行**（票 #86）：它是这条"
+            "事件在 `job_events` 里的全局游标（模型字段 `event_id`，不进 JSON 体）。"
+            "客户端记住最后一条，断线重连时带回来即只收它之后的事件（不重复、不缺段）。"
+            "快照的游标是「快照内容覆盖到的最后一条事件」，因此新读者从它往后追即可，"
+            "服务端不回放历史。"
         )
     )
     content: str = Field(default="", description="文本内容（增量或提示语）")
@@ -115,6 +121,18 @@ class StreamEvent(BaseModel):
             "刻意放在**顶层**而不是塞进 `data`：SSE 流是 HTTP 200，前端拿不到状态码，"
             "判断「该不该降级重试」只能靠这个字段，放在顶层才不会被 `data` 的"
             "其它附加字段淹没。缺失或取值未知时前端一律按 `INTERNAL_ERROR` 处理。"
+        ),
+    )
+    event_id: int | None = Field(
+        default=None,
+        exclude=True,
+        description=(
+            "事件游标（票 #86）：`job_events.id`，只对任务订阅有意义。"
+            "它**不进 JSON 体**（`exclude=True`），只出现在 SSE 的 `id:` 行——"
+            "那是 SSE 规范留给「断线重连从哪里接」的标准位置。客户端在 `id:` 行里读到它、"
+            "原样作为 `Last-Event-ID` 头或 `?cursor=` 带回来，服务端就只发它之后的事件。"
+            "快照事件的 `event_id` 是「快照内容覆盖到的最后一条事件」，所以新读者从它"
+            "往后追即可，服务端不回放历史。"
         ),
     )
 
@@ -166,7 +184,7 @@ class RunSummary(BaseModel):
     """
 
     kind: str = Field(default="", description="任务类型：prd / api_docs / prompts / optimize")
-    status: str = Field(default="", description="终态：completed / failed")
+    status: str = Field(default="", description="终态（七值）：succeeded / failed / superseded / cancelled")
     duration_ms: int = Field(default=0, description="任务总耗时（毫秒）")
     total_calls: int = Field(default=0, description="模型调用总次数（只统计拿到结果的调用）")
     failed_calls: int = Field(
@@ -212,11 +230,7 @@ class RunSummary(BaseModel):
     request_id: str = Field(default="", description="该次生成所属请求的追踪 id")
     partial: bool = Field(
         default=False,
-        description="本次生成是否有章节失败后被占位（仅 PRD 分章节；其余任务恒为 false）。"
+        description="本次生成是否有落下一版**可用但不完整**的正文（部分完成）。"
         "true 表示正文可用但不完整，前端据此在审阅页给出提示。",
     )
-    failed_sections: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="失败章节清单（section_id / title / index / reason）。"
-        "与 partial 配套：前者是结论，这里是可定位的细节。",
-    )
+

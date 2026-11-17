@@ -96,12 +96,16 @@ async def me(user: User = Depends(require_admin)) -> schemas.AdminMeResponse:
     return schemas.AdminMeResponse(id=user.id, username=user.username, is_admin=user.is_admin)
 
 
-@router.get("/stats", response_model=schemas.AdminStatsResponse, summary="平台总量统计")
+@router.get("/stats", response_model=schemas.AdminStatsResponse, summary="平台总量 + 四个数字")
 async def stats(user: User = Depends(require_admin)) -> schemas.AdminStatsResponse:
-    """平台维度的总量：用户数、任务数、Token 合计。
+    """平台维度的总量：用户数、任务数、Token 合计，外加管理端「四个数字」（票 #89）。
 
-    单独成一条 SQL 而不是让前端把用户列表加总——列表以后可能分页或裁剪，
-    拿它算总量会悄悄算少。
+    **四个数字只在服务端算**：排队数、成功率、平均耗时、卡死数各由仓储层一条聚合查询
+    得出，前端只负责展示。前端自己推算有两个代价——列表分页让它算少，
+    成功率这类口径两处各写一遍必然漂移。
+
+    卡死判据与 `GET /jobs?stuck=true` 是**同一个 SQL 表达式**：概览上看到「3 个卡死」，
+    点进去就必须恰好是那 3 条；两处各算一遍会出现「卡片说 3 个、列表里 2 个」。
     """
     del user  # 无需操作者身份：统计不涉及写操作，也因此不记审计
     return schemas.AdminStatsResponse(**admin_service.platform_stats())
@@ -539,24 +543,27 @@ async def list_jobs(
     status: str = "",
     username: str = "",
     kind: str = "",
+    stuck: bool = False,
     limit: int = 100,
     offset: int = 0,
     user: User = Depends(require_admin),
 ) -> schemas.AdminJobListResponse:
-    """在飞 / 最近失败 / 全部任务（可按状态、用户名、类型筛）。
+    """在飞 / 最近失败 / 卡死 / 全部任务（可按状态、用户名、类型筛）。
 
-    `status` 为空表示不筛（页面的「全部」标签）；常用的两个值是 `running`
-    与 `failed`。running 按「跑得最久优先」排序——卡死任务的特征就是时间长，
-    顶到最前面才看得见。
+    `status` 为空表示不筛（页面的「全部」标签）；也接受逗号分隔的多个取值——七态
+    （票 #84）之后，「在飞」= `pending,running,cancelling`、「最近失败」= `failed`。
+    `running` 按「跑得最久优先」排序——卡死任务的特征就是时间长，顶到最前面才看得见。
 
-    `is_stuck` 由服务端按「running 且超过 `STUCK_MINUTES` 未更新」判定：
-    前端只负责把它画红，不重复实现这条规则。
+    `stuck=true` 只回**卡死**的任务（票 #89）：判据是服务端的 `stuck_condition`
+    ——执行中且（租约已过期 或 停更超过阈值）。概览页的「卡死数」用的就是这个判据，
+    点进来看到的是同一批行。前端只负责把它画红，不重复实现这条规则。
     """
     del user
     data = admin_service.list_jobs(
         status=status,
         username=username,
         kind=kind,
+        stuck=stuck,
         limit=limit,
         offset=offset,
     )
@@ -574,8 +581,8 @@ async def list_jobs(
 async def cancel_stuck_jobs(user: User = Depends(require_admin)) -> schemas.AdminCancelStuckResponse:
     """一次性取消所有判定为卡死的任务，返回实际取消条数。
 
-    只动「已停更超过阈值」的那些：正常在跑的任务一个都不碰——批量误伤会让
-    用户的正文断在半截，比卡死更难解释。
+    只动「执行中且（租约已过期 或 停更超阈值）」的那些：正常在跑的任务一个都不碰
+    ——批量误伤会让用户的正文断在半截，比卡死更难解释。判据与概览页卡死数同源。
     """
     return schemas.AdminCancelStuckResponse(cancelled=admin_service.cancel_stuck_jobs(user))
 

@@ -26,6 +26,7 @@ from backend.core.contracts import StreamEvent
 from backend.core.errors import AppError, ErrorCode
 from conftest import (
     job_cancel_running,
+    job_claim,
     job_create,
     job_fail,
     job_find_active,
@@ -42,13 +43,11 @@ from backend.services import (
     job_service,
     job_runtime,
     llm_factory,
-    prd_section_writer,
     solution_service,
 )
 from backend.services.job_bus import job_bus
 from backend.services.job_snapshot import parse_usage
 from backend.services.job_ticket import start_registered_job
-from backend.services.prd_section_writer import PRD_SECTIONS
 from fakes import ScriptedLLM
 from ticket_support import (
     build_and_register,
@@ -100,7 +99,6 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
     yield
 
 
@@ -232,20 +230,17 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     assert events[0].type == "snapshot"
     assert events[0].data["status"] == "running"
 
-    parts = _parts(events)
-    # 文档头 1 段 + 每章 1 段
-    assert len(parts) == len(PRD_SECTIONS) + 1
+    # 整篇生成（票 #92）：正文只走 `chunk`，没有按章 `part`；审核判 pass 时也不发 part
+    assert _parts(events) == []
     done = next(event for event in events if event.type == "done")
-    # 契约：按 index 排序后拼接 == 最终正文（并行时 part 可以乱序到达）
-    ordered = sorted(parts, key=lambda part: part.data.get("index", -1))
-    assert "".join(part.data["text"] for part in ordered).strip() == done.data["reply"]
+    assert done.data["reply"].strip() == "章节正文"
 
     # 收尾：run_summary 的完整契约（用量汇总与任务状态并作一份）
     summary = events[-1]
     assert summary.type == "run_summary"
     data = summary.data
     assert data["kind"] == "prd"
-    assert data["status"] == "completed"
+    assert data["status"] == "succeeded"
     assert isinstance(data["duration_ms"], int)
     # 假 LLM 不带 usage_metadata，token 按零计；但调用次数与耗时照记（不是「没计量」）
     assert data["total_calls"] >= 1
@@ -286,8 +281,8 @@ def test_stream_starts_with_snapshot_and_parts_reassemble_into_reply(client, ali
     # 落库：完成态 + 正文与 part 拼接一致
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "completed"
-    assert row["draft_content"] == "".join(part.data["text"] for part in parts)
+    assert row["status"] == "succeeded"
+    assert row["draft_content"] == done.data["reply"]
     # 用量与事件同源：落库的 usage 就是流里那份 run_summary，前端「看到的」与「重连读到的」一致
     assert row["usage"] is not None
     assert json.loads(row["usage"]) == data
@@ -312,7 +307,8 @@ def test_reconnect_after_unsubscribe_completes_remaining(client, alice, monkeypa
         first: list = []
         async for event in job_service.open_stream(alice, registered.job_id):
             first.append(event)
-            if len(_parts(first)) >= 2:  # 拿到文档头 + 第一章后断线
+            # 整篇路径没有按章 `part`：拿到第一片正文增量就断线（任务必然还没跑完）
+            if any(item.type == "chunk" for item in first):
                 break
 
         # 断线重连：同一协程内立即重订阅，任务尚未跑完，仍能续流
@@ -322,14 +318,16 @@ def test_reconnect_after_unsubscribe_completes_remaining(client, alice, monkeypa
     first, second = _run(scenario())
 
     assert first[0].type == "snapshot"
-    assert len(_parts(first)) >= 2
+    assert any(item.type == "chunk" for item in first)
 
-    # 重连的首事件同样是 snapshot，且带上了断线前已产出的定稿正文
+    # 重连的首事件同样是 snapshot，且带上了断线前已产出的正文（整篇形态下在实时缓冲里）
     assert second[0].type == "snapshot"
-    assert second[0].data["finalized_text"].strip() != ""
+    assert (
+        second[0].data["finalized_text"] + second[0].data["live_buffer"]
+    ).strip() != ""
     # 续流直到 done，正文完整
     done = next(event for event in second if event.type == "done")
-    assert done.data["reply"].startswith("# 演示产品 产品需求文档")
+    assert done.data["reply"].strip() == "章节正文"
 
 
 def test_resubscribe_after_completion_sends_snapshot_then_summary(client, alice, monkeypatch):
@@ -363,10 +361,10 @@ def test_resubscribe_after_completion_sends_snapshot_then_summary(client, alice,
     events = _run(scenario())
 
     assert [event.type for event in events] == ["snapshot", "run_summary"]
-    assert events[0].data["status"] == "completed"
-    assert events[0].data["finalized_text"].startswith("# 演示产品")
+    assert events[0].data["status"] == "succeeded"
+    assert events[0].data["finalized_text"].strip() == "章节正文"
     # 重连补发的汇总与落库同源
-    assert events[1].data["status"] == "completed"
+    assert events[1].data["status"] == "succeeded"
     assert events[1].data["kind"] == "prd"
     assert events[1].data["total_calls"] >= 1
 
@@ -471,7 +469,6 @@ def test_offline_zero_token(alice, monkeypatch):
         raise AssertionError("触网")
 
     monkeypatch.setattr(document_service, "get_llm", _boom)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _boom)
     monkeypatch.setattr(llm_factory, "get_llm", _boom)
     _fake_service(monkeypatch, ScriptedLLM(["正文"]))
 
@@ -487,7 +484,7 @@ def test_offline_zero_token(alice, monkeypatch):
     job_id = _run(scenario())
     assert calls["count"] == 0
     row = job_get(alice, job_id)
-    assert row is not None and row["status"] == "completed"
+    assert row is not None and row["status"] == "succeeded"
 
 
 # ---------------------------------------------------------------------------
@@ -496,10 +493,11 @@ def test_offline_zero_token(alice, monkeypatch):
 
 
 def test_new_job_supersedes_previous_running(alice):
-    """登记：同一 owner + solution + kind 至多一个 running：登记前旧 running 被取代。
+    """登记：同一 owner + solution + kind 至多一个在途：登记前旧在途被取代。
 
-    跨公开动作断言「顶替库行」：两次 `build_and_register` 之后旧行 `failed +
-    SUPERSEDED`、新行 running。这条语义由「登记」承担，不再有第二个建任务入口。
+    跨公开动作断言「顶替库行」：两次 `build_and_register` 之后旧行 `superseded`、
+    新行 `pending`（只登记、未派发）。七态（票 #84）：顶替终于有**自己的状态值**，
+    不再是「failed + 一个叫 SUPERSEDED 的错误码」——后者会把它和真失败混成一谈。
     """
     old = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
     new = build_and_register(owner_id=alice, solution_id=None, kind="prd", request={}).job_id
@@ -507,22 +505,22 @@ def test_new_job_supersedes_previous_running(alice):
     assert old != new
     old_row = job_get(alice, old)
     assert old_row is not None
-    assert old_row["status"] == "failed"
-    # 有明确原因，不是笼统的 INTERNAL_ERROR：这个任务没出错，是被人接手了
-    assert old_row["error_code"] == "SUPERSEDED"
+    assert old_row["status"] == "superseded"
+    # 被取代不是错误：错误码为空，原因由文案说明
+    assert old_row["error_code"] == ""
     assert old_row["error_message"] == "被新任务取代"
 
-    # 新登记的是 running
-    assert job_get(alice, new)["status"] == "running"
+    # 新登记的还在排队（登记只接单、不派发）
+    assert job_get(alice, new)["status"] == "pending"
 
 
 def test_register_supersedes_old_job_in_db_and_memory(client, alice):
-    """登记顶替旧任务：库行 `failed + SUPERSEDED`，且旧任务收尾不写文档。
+    """登记顶替旧任务：库行落 `superseded`，且旧任务收尾不写文档。
 
-    只把库里那一行改成 failed 是不够的：内存里的旧运行时并不知道自己被取代，
+    只把库里那一行改掉是不够的：内存里的旧运行时并不知道自己被取代，
     它收尾时照样写文档，把旧稿盖在新稿上——用户看到「新任务跑完了，
     正文却是上一版的」，不报错、只是内容对不上。本用例跨公开动作断言「双标记」：
-    旧任务在**新任务登记那一刻**被标记，随后收尾落 `SUPERSEDED` 且不写文档。
+    旧任务在**新任务登记那一刻**被标记，随后收尾确认「被取代」且不写文档。
     """
     from backend.core.contracts import StreamEvent
 
@@ -561,8 +559,8 @@ def test_register_supersedes_old_job_in_db_and_memory(client, alice):
     assert any(event.type == "run_summary" for event in events)
     row = job_get(alice, old_id)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "SUPERSEDED"
+    assert row["status"] == "superseded"
+    assert row["error_code"] == ""
     # 关键：正文没有被写进 documents（这一份是别人要写的位置）
     assert document_store.get_document(alice, solution_id, "prd") is None
 
@@ -589,9 +587,9 @@ def test_find_active_ignores_other_solution_and_kind(client, alice):
 
 
 def test_reap_orphans_marks_running_as_failed(alice):
-    """启动回收：上次残留的 running 全部置 failed。"""
+    """启动回收：上次残留的**非终态**行（这里是一条排队中的）判成「重启中断」。"""
     job_id = job_create(alice, "prd", None)
-    assert job_get(alice, job_id)["status"] == "running"
+    assert job_get(alice, job_id)["status"] == "pending"
 
     job_service.reap_orphans()
 
@@ -599,6 +597,38 @@ def test_reap_orphans_marks_running_as_failed(alice):
     assert row["status"] == "failed"
     assert row["error_code"] == "INTERNAL_ERROR"
     assert row["error_message"] == "服务重启，任务已中断"
+
+
+def test_finish_and_fail_are_conditional_and_report_affected_rows(alice):
+    """终态写是**条件更新**：只有 running 的才会被改到，返回「改到了几行」。
+
+    旧写法只按 id + owner 盲写、也不看影响行数：同一个任务被收尾两次时，第二次照样
+    写库（能把 completed 覆回 failed）。本用例钉住判据本身——第一次 1 行，第二次 0 行，
+    第二次的内容一个字都没落进去。
+    """
+    job_id = job_create(alice, "prd", None)
+
+    assert job_finish(alice, job_id, draft_content="第一版") == 1
+    assert job_finish(alice, job_id, draft_content="第二版") == 0
+    row = job_get(alice, job_id)
+    assert row["status"] == "succeeded"
+    assert row["draft_content"] == "第一版"
+
+    # 已 completed 的行也不能被 fail 覆写回 failed
+    assert (
+        job_fail(
+            alice,
+            job_id,
+            error_code="INTERNAL_ERROR",
+            error_message="晚到的失败",
+            draft_content="",
+        )
+        == 0
+    )
+    row = job_get(alice, job_id)
+    assert row["status"] == "succeeded"
+    assert row["error_code"] == ""
+    assert row["error_message"] == ""
 
 
 def test_owner_isolation_in_repository(alice):
@@ -698,7 +728,7 @@ def test_get_job_status(client):
     body = response.json()
     assert body["id"] == job_id
     assert body["kind"] == "prompts"
-    assert body["status"] == "running"
+    assert body["status"] == "pending"
     assert "draft_content" not in body
 
 
@@ -718,27 +748,37 @@ def test_missing_and_cross_owner_jobs_return_404(client):
 
 
 def test_list_jobs_filters_by_status_and_kind(client):
-    """GET /api/jobs 兜底找回：按 status / kind 过滤，命中 running。"""
+    """GET /api/jobs 兜底找回：按 status / kind 过滤，命中在途（七态三个值）。"""
     register(client)
     uid = _alice_id()
 
     running_prd = job_create(uid, "prd", None)
+    job_claim(uid, running_prd)
     running_prompts = job_create(uid, "prompts", None)
+    job_claim(uid, running_prompts)
+    queued = job_create(uid, "prd", None)
     finished = job_create(uid, "prd", None)
-    job_finish(
-        uid, finished, draft_content="正文", completed_sections=[]
+    job_finish(uid, finished, draft_content="正文")
+
+    # 七态（票 #84）：在途 = pending / running / cancelling，一次查询取全（AC4）。
+    active = client.get("/api/jobs", params={"status": "pending,running,cancelling"})
+    assert active.status_code == 200
+    active_ids = [item["id"] for item in active.json()["jobs"]]
+    assert running_prd in active_ids
+    assert running_prompts in active_ids
+    assert queued in active_ids
+    assert finished not in active_ids  # 已定稿的不算在途
+
+    only_prompts = client.get(
+        "/api/jobs", params={"kind": "prompts", "status": "pending,running,cancelling"}
     )
-
-    running = client.get("/api/jobs", params={"status": "running"})
-    assert running.status_code == 200
-    running_ids = [item["id"] for item in running.json()["jobs"]]
-    assert running_prd in running_ids
-    assert running_prompts in running_ids
-    assert finished not in running_ids  # 已完成的不算 running
-
-    only_prompts = client.get("/api/jobs", params={"kind": "prompts", "status": "running"})
     ids = [item["id"] for item in only_prompts.json()["jobs"]]
     assert ids == [running_prompts]
+
+    # 单值仍旧可用（旧调用方不该被打断）
+    only_running = client.get("/api/jobs", params={"status": "running"})
+    ids = [item["id"] for item in only_running.json()["jobs"]]
+    assert running_prd in ids and running_prompts in ids and queued not in ids
 
 
 def test_create_job_without_solution_id_is_rejected(client):
@@ -852,7 +892,12 @@ def test_completed_api_docs_job_writes_its_own_kind(client, monkeypatch):
 
 
 def test_failed_job_keeps_previous_document(client, monkeypatch):
-    """失败的任务**不覆写**已有文档：半截输出不该顶掉上一版可用正文。"""
+    """失败的任务**不覆写**已有文档：半截输出另起一版「部分完成」，旧版原样留着。
+
+    #85 之前这里断言「当前正文仍是上一版」——失败一律不写文档。那套口径的代价是
+    「写到一半的正文直接丢掉」。现在失败也落一版，但**只追加、不就地改**：旧版正文
+    一个字不动、仍在版本链里可恢复，当前指针前移到那版部分完成稿。
+    """
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
@@ -869,9 +914,16 @@ def test_failed_job_keeps_previous_document(client, monkeypatch):
     )
 
     assert events[-1].data["status"] == "failed"
+    versions = document_store.list_versions(uid, solution_id, "prd")
+    assert [item["version_no"] for item in versions] == [2, 1]
+    assert versions[0]["partial"] is True, "失败写出的那一版标成部分完成"
+    old = document_store.get_version(uid, solution_id, "prd", int(versions[1]["version_id"]))
+    assert old is not None
+    assert old["content"] == "# 上一版 PRD", "上一版的正文一个字都没被改"
     doc = document_store.get_document(uid, solution_id, "prd")
     assert doc is not None
-    assert doc["content"] == "# 上一版 PRD"
+    assert doc["content"].strip() != "", "半截正文没丢，而是成了当前版本的那一版"
+    assert doc["partial"] is True
 
 
 def test_document_job_without_solution_is_not_created(client, monkeypatch):
@@ -972,7 +1024,7 @@ def test_optimize_without_doc_kind_writes_nothing(client, monkeypatch):
         {"document": "# 旧接口文档", "instruction": "改一下"},
     )
 
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     assert document_store.list_documents(uid, solution_id) == []
 
 
@@ -1226,7 +1278,6 @@ def test_persist_progress_writes_pending_items(alice):
         alice,
         job_id,
         draft_content="正文",
-        completed_sections=[],
         phase="writing",
         pending_items=items,
     )
@@ -1242,11 +1293,10 @@ def test_finish_writes_pending_items(alice):
         alice,
         job_id,
         draft_content="正文",
-        completed_sections=[],
         pending_items=items,
     )
     row = job_get(alice, job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     assert json.loads(row["pending_items"]) == items
 
 
@@ -1260,7 +1310,6 @@ def test_fail_writes_pending_items(alice):
         error_code="LLM_UPSTREAM_ERROR",
         error_message="上游中断",
         draft_content="半截正文",
-        completed_sections=[],
         pending_items=items,
     )
     row = job_get(alice, job_id)
@@ -1411,11 +1460,11 @@ def test_generation_flows_pending_items_into_job_and_document(client, monkeypatc
 
 
 def test_cancel_running_only_targets_owner_and_solution(client, alice):
-    """`cancel_running` 只动该 owner + 方案下的 running，不波及别的方案与已终态任务。"""
+    """`cancel_running` 只动该 owner + 方案下的在途，不波及别的方案与已终态任务。"""
     target = job_create(alice, "prd", 11)
     other_solution = job_create(alice, "prd", 12)
     finished = job_create(alice, "prd", 11)
-    job_finish(alice, finished, draft_content="正文", completed_sections=[])
+    job_finish(alice, finished, draft_content="正文")
 
     # 另一个 owner 恰好也有一个挂在同一个 solution_id 上的任务
     register(client, username="bob")
@@ -1429,14 +1478,15 @@ def test_cancel_running_only_targets_owner_and_solution(client, alice):
 
     assert affected == 1
     cancelled = job_get(alice, target)
-    assert cancelled["status"] == "failed"
-    assert cancelled["error_code"] == "CANCELLED"
+    # 排队中的任务没有执行者，取消一步到位落已取消（AC1 前半句）
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["error_code"] == ""
     assert cancelled["error_message"] == "方案已删除，任务已取消"
 
     # 别的方案、别的 owner、已经结束的任务都不动
-    assert job_get(alice, other_solution)["status"] == "running"
-    assert job_get(int(bob["id"]), bob_job)["status"] == "running"
-    assert job_get(alice, finished)["status"] == "completed"
+    assert job_get(alice, other_solution)["status"] == "pending"
+    assert job_get(int(bob["id"]), bob_job)["status"] == "pending"
+    assert job_get(alice, finished)["status"] == "succeeded"
 
 
 def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
@@ -1461,8 +1511,10 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
         yield StreamEvent(type="done", content="", data={"reply": "# 已经生成好的正文"})
 
     written: list = []
+    # #81 起正文写入只有这一个公开入口；方案没了就根本走不到它，记录器断言的仍是
+    # 「一条写入都没发生」。
     monkeypatch.setattr(
-        document_store, "commit_generated", lambda *a, **k: written.append((a, k))
+        document_store, "write_document", lambda *a, **k: written.append((a, k))
     )
 
     async def scenario() -> tuple[int, list]:
@@ -1484,11 +1536,11 @@ def test_finalize_skips_document_when_solution_gone(client, monkeypatch):
     job_id, events = _run(scenario())
 
     assert written == [], "方案已删除时不该再往 documents 里写"
-    assert any(event.type == "run_summary" and event.data["status"] == "failed" for event in events)
+    assert any(event.type == "run_summary" and event.data["status"] == "cancelled" for event in events)
     row = job_get(uid, job_id)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     assert document_store.list_documents(uid, solution_id) == []
 
 
@@ -1537,13 +1589,13 @@ def test_run_job_stops_consuming_events_after_cancel(client, alice):
 
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
     assert row["draft_content"] == "第一段"
 
 
 def test_delete_solution_endpoint_cancels_its_jobs(client):
-    """HTTP 面：删除方案会连带取消它的 running 任务（路由层的编排没漏接）。"""
+    """HTTP 面：删除方案会连带取消它的在途任务（路由层的编排没漏接）。"""
     register(client)
     uid = _alice_id()
     solution_id = _create_solution(client)
@@ -1555,166 +1607,10 @@ def test_delete_solution_endpoint_cancels_its_jobs(client):
 
     row = job_get(uid, doomed)
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "CANCELLED"
-    assert job_get(uid, untouched)["status"] == "running"
+    assert row["status"] == "cancelled"
+    assert row["error_code"] == ""
+    assert job_get(uid, untouched)["status"] == "pending"
 
-
-# ---------------------------------------------------------------------------
-# 分章节的按章缓冲：多章同时逐字流，但各存各的
-#
-# 这一组原先直接构造裸运行时、往 `_apply_event` 喂事件。归位后一律把同样的事件
-# 在**造单时**作为假事件流传入，经「登记 → 派发 → 订阅」读在途快照：
-# `live_by_section` / `completed_sections` / `finalized_text` 都是前端重连时
-# 真实拿得到的公开字段，内部实现怎么重排都不影响这些断言。
-# ---------------------------------------------------------------------------
-
-
-def _header_part(text: str) -> StreamEvent:
-    """文档头：没有 `index`、也没有 `section_id`（它不属于任何一章）。"""
-    return StreamEvent(type="part", content="", data={"text": text})
-
-
-def _chunk(text: str, section_id: str, index: int) -> StreamEvent:
-    return StreamEvent(
-        type="chunk", content=text, data={"section_id": section_id, "index": index}
-    )
-
-
-def _part(text: str, section_id: str, index: int) -> StreamEvent:
-    return StreamEvent(
-        type="part", content="", data={"text": text, "section_id": section_id, "index": index}
-    )
-
-
-def _stage(name: str, section_id: str, index: int) -> StreamEvent:
-    return StreamEvent(
-        type="stage",
-        content="",
-        data={"stage": name, "section_id": section_id, "index": index},
-    )
-
-
-def _section_snapshot(alice: int, *events: StreamEvent) -> StreamEvent:
-    """把一组分章节事件走主接缝，返回在途内存快照的第一份。"""
-    _, snapshot, _ = run_ticket_snapshot(alice, None, "prd", {}, *events)
-    return snapshot
-
-
-def test_section_chunks_are_buffered_per_section(alice):
-    """每章的增量各进各的格子。
-
-    混在一个 `live_buffer` 里就再也分不开了——前端只能整批丢弃，
-    那正是「PRD 只能等整章定稿才蹦出来」的成因。
-    """
-    snapshot = _section_snapshot(
-        alice,
-        _chunk("第一章", "overview", 0),
-        _chunk("第二章", "features", 1),
-        _chunk("续写", "overview", 0),
-    )
-    live = snapshot.data["live_by_section"]
-
-    assert [item["section_id"] for item in live] == ["overview", "features"]
-    assert live[0]["text"] == "第一章续写"
-    assert live[1]["text"] == "第二章"
-    # 无归属的整篇缓冲保持干净：它只服务「不分章」的链路（文档 / 对话）
-    assert snapshot.data["live_buffer"] == ""
-
-
-def test_part_clears_only_its_own_section(alice):
-    """一章定稿只清这一章：并行时别的章还在写，清全场会把它们的字一起抹掉。"""
-    snapshot = _section_snapshot(
-        alice,
-        _chunk("甲", "overview", 0),
-        _chunk("乙", "features", 1),
-        _part("## 1. 甲\n\n", "overview", 0),
-    )
-    live = snapshot.data["live_by_section"]
-
-    assert [item["index"] for item in live] == [1], "定稿的章半成品该被清掉"
-    assert live[0]["text"] == "乙", "别的章一个字都不能丢"
-    assert snapshot.data["finalized_text"] == "## 1. 甲\n\n"
-    assert [item["section_id"] for item in snapshot.data["completed_sections"]] == ["overview"]
-
-
-def test_rewriting_clears_the_section_so_draft_and_rewrite_do_not_stack(alice):
-    """改写必须清掉该章半成品：否则初稿与改写稿会在同一张卡片里叠着长。"""
-    snapshot = _section_snapshot(
-        alice,
-        _chunk("初稿", "overview", 0),
-        _stage("rewriting", "overview", 0),
-        _chunk("改后", "overview", 0),
-    )
-    live = snapshot.data["live_by_section"]
-
-    assert live[0]["text"] == "改后"
-    assert live[0]["phase"] == "rewriting"
-
-
-def test_retry_reannounced_writing_resets_the_section(alice):
-    """单章重试会重报 `writing`：那是「从头重来」的信号，必须清该章。"""
-    snapshot = _section_snapshot(
-        alice,
-        _chunk("第一轮的一半", "overview", 0),
-        _stage("writing", "overview", 0),
-        _chunk("第二轮", "overview", 0),
-    )
-    live = snapshot.data["live_by_section"]
-
-    assert live[0]["text"] == "第二轮"
-
-
-def test_draft_interleaves_finalized_and_live_by_index(alice):
-    """正文按 index 交错归并，不能「先定稿、后半成品」。
-
-    并行时第 1 章可能还在写、第 2 章已经定稿；简单拼接会把正文排成 2、3、1，
-    而「已定稿 + 各章半成品」是**进度落库**与「重连兜底」的正文来源——
-    顺序错了刷新后就是错版。快照把两份分开给，前端按 index 拼回去。
-    """
-    snapshot = _section_snapshot(
-        alice,
-        _header_part("# 文档头\n\n"),
-        _chunk("第1章写到一半", "overview", 0),
-        _part("第2章定稿\n\n", "features", 1),
-    )
-
-    assert snapshot.data["finalized_text"] == "# 文档头\n\n第2章定稿\n\n"
-    assert [item["index"] for item in snapshot.data["live_by_section"]] == [0]
-    assert [item["index"] for item in snapshot.data["completed_sections"]] == [1]
-
-
-def test_snapshot_carries_live_by_section_but_not_the_finalized_ones(alice):
-    """快照要带上「正在写的几章」，且不能与已定稿章节重复。
-
-    重复的后果是刷新后同一段正文出现两次；只发定稿章节的后果则是
-    「正在写的那几章刷新后一片空白，直到定稿才整段出现」。
-    """
-    snapshot = _section_snapshot(
-        alice,
-        _chunk("甲半截", "overview", 0),
-        _part("乙定稿\n\n", "features", 1),
-        _chunk("丙半截", "pages", 2),
-    )
-    live = snapshot.data["live_by_section"]
-
-    assert [item["section_id"] for item in live] == ["overview", "pages"]
-    assert [item["index"] for item in live] == [0, 2]
-    assert live[0]["text"] == "甲半截"
-    assert all(item["section_id"] != "features" for item in live)
-    # 定稿章节照旧在 `completed_sections` 里，各走各的字段
-    assert [item["section_id"] for item in snapshot.data["completed_sections"]] == ["features"]
-
-
-def test_db_snapshot_has_no_live_by_section(alice):
-    """DB 兜底快照显式给空数组：过程字不落库（同 `stage_text`）。
-
-    登记（不派发）之后 `open_stream` 走 DB 兜底——正是进程重启后前端重建看板的路径。
-    """
-    registered = build_and_register(
-        owner_id=alice, solution_id=None, kind="prd", request={}
-    )
-    assert first_snapshot_event(alice, registered.job_id).data["live_by_section"] == []
 
 # ---------------------------------------------------------------------------
 # 收尾与终态：被取代 / 已取消的三条路、以及「落库失败不等于任务失败」
@@ -1801,8 +1697,9 @@ def test_late_subscriber_does_not_replay_an_abort_as_an_error(alice):
     events = _collect(alice, job_id)
 
     assert [event.type for event in events] == ["snapshot", "run_summary"]
-    assert events[0].data["error_code"] == "CANCELLED"
-    assert events[1].data["status"] == "failed"
+    # 已取消不是失败：错误码为空，状态由 status 表达（票 #84 的 AC4）
+    assert events[0].data["error_code"] == ""
+    assert events[1].data["status"] == "cancelled"
 
 
 def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
@@ -1853,7 +1750,7 @@ def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
         # 用公开查询的终态作判据，等两支后台任务各自收尾完毕。
         for _ in range(200):
             rows = [job_get(alice, doomed.job_id), job_get(alice, other.job_id)]
-            if all(row is not None and row["status"] != "running" for row in rows):
+            if all(row is not None and row["status"] not in ("pending", "running", "cancelling") for row in rows):
                 break
             await asyncio.sleep(0.005)
         return doomed.job_id, other.job_id
@@ -1862,13 +1759,13 @@ def test_delete_solution_marks_in_flight_runtimes_cancelled(client, alice):
 
     doomed_row = job_get(alice, doomed_id)
     assert doomed_row is not None
-    assert doomed_row["status"] == "failed"
-    assert doomed_row["error_code"] == "CANCELLED"
+    assert doomed_row["status"] == "cancelled"
+    assert doomed_row["error_code"] == ""
     assert "第二段-doomed" not in doomed_row["draft_content"], "被取消的任务不该继续消费事件"
 
     other_row = job_get(alice, other_id)
     assert other_row is not None
-    assert other_row["status"] == "completed"
+    assert other_row["status"] == "succeeded"
     assert "第二段-other" in other_row["draft_content"], "别的方案上的任务一个字都不该丢"
 
 
@@ -1896,9 +1793,9 @@ def test_skill_registry_failure_degrades_visibility_not_the_job(
     )
 
     summary = events[-1].data
-    assert summary["status"] == "completed"
+    assert summary["status"] == "succeeded"
     assert summary["injected_skills"] == []
-    assert job_get(alice, job_id)["status"] == "completed"
+    assert job_get(alice, job_id)["status"] == "succeeded"
 
 
 def test_pipeline_app_error_keeps_its_own_code(alice, monkeypatch):
@@ -1927,37 +1824,37 @@ def test_pipeline_app_error_keeps_its_own_code(alice, monkeypatch):
     assert error.code == "INVALID_REQUEST"
 
 
-def test_replace_part_wipes_every_section_buffer(alice):
-    """`part{replace}` 是**整篇覆盖**：所有章节的半成品一并作废。
+def test_replace_part_wipes_the_whole_live_buffer(alice):
+    """`part{replace}` 是**整篇覆盖**：初稿的实时缓冲一并作废。
 
-    若不清，改写稿会与初稿的半截字并排长在同一张卡片里——两条轨（过程字 / 权威正文）
-    混起来正是「PRD 不流式」与「重复正文」两类事故的同一个根。归位后读在途快照：
-    覆盖之后只剩新版全文，既无按章半成品、也无旧定稿章节。
+    若不清，改写稿会与初稿的半截字叠在同一个预览里——那正是「重复正文」的根。
+    归位后读在途快照：覆盖之后只剩新版全文，实时缓冲为空，且快照里没有章节字段。
     """
-    snapshot = _section_snapshot(
+    _, snapshot, _ = run_ticket_snapshot(
         alice,
-        _header_part("# 文档头\n\n"),
-        _chunk("甲半截", "overview", 0),
-        _chunk("乙半截", "features", 1),
+        None,
+        "prd",
+        {},
+        StreamEvent(type="chunk", content="初稿写到一半", data={}),
         StreamEvent(type="part", content="", data={"text": "# 新版全文", "replace": True}),
     )
 
     assert snapshot.data["finalized_text"] == "# 新版全文"
-    assert snapshot.data["live_by_section"] == []
     assert snapshot.data["live_buffer"] == ""
-    assert snapshot.data["completed_sections"] == []
+    assert "live_by_section" not in snapshot.data
+    assert "completed_sections" not in snapshot.data
 
 
 def test_write_document_skips_an_empty_reply(client, alice, monkeypatch):
     """定稿正文为空时不写文档：宁可这次不落库，也不要拿空稿顶掉上一版。
 
-    跨主接缝：`done.reply` 是空白，`commit_generated` 是唯一写文档的公开落点，
+    跨主接缝：`done.reply` 是空白，`write_document` 是唯一写正文的公开入口（票 #81），
     用记录器断言它一次都没被调；任务本身照常成功（不写 ≠ 失败）。
     """
     solution_id = _create_solution(client)
     written: list = []
     monkeypatch.setattr(
-        document_store, "commit_generated", lambda *a, **k: written.append((a, k))
+        document_store, "write_document", lambda *a, **k: written.append((a, k))
     )
 
     registered, events = run_ticket_events(
@@ -1965,24 +1862,26 @@ def test_write_document_skips_an_empty_reply(client, alice, monkeypatch):
     )
 
     assert written == []
-    assert events[-1].data["status"] == "completed"
-    assert job_get(alice, registered.job_id)["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
+    assert job_get(alice, registered.job_id)["status"] == "succeeded"
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
-def test_document_write_failure_keeps_the_job_successful(client, alice, monkeypatch):
-    """写 documents 时库出错：任务**仍然算成功**，正文留在 `draft_content` 里。
+def test_document_write_failure_keeps_the_job_running(client, alice, monkeypatch):
+    """写 documents 时库出错：**整批回滚**，任务停在执行中，不谎报成功。
 
-    正文已经在任务记录里有一份；把整个任务判失败，等于让一次成功的生成看起来像失败。
-    跨主接缝：假事件流给出 `part` 定稿与 `done.reply`，`commit_generated` 抛错，
-    断言可观察的事件回执、库行终态与正文。
+    ⚠️ 这条用例在 #81 被改写（断言的性质没变、方向反了）：旧实现把写正文异常吞成一条
+    warning、照旧报 completed——那正是「任务表说已定稿、文档表却没有这一版」的假成功。
+    本票要求写正文与宣布成功同事务：写不进去就整批回滚，任务保持 `running`，由恢复机制
+    接手。因此这里断言的三条从「成功 + 正文留在 draft」改成「仍执行中 + 无账本 + 无结束
+    事件」；`test_atomic_closeout.py` 另有同型的完整覆盖（含 AC5 的恢复接手）。
     """
     solution_id = _create_solution(client)
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("考核点：写 documents 时库出错")
 
-    monkeypatch.setattr(document_store, "commit_generated", _boom)
+    monkeypatch.setattr(document_store, "write_document", _boom)
 
     registered, events = run_ticket_events(
         alice,
@@ -1993,26 +1892,35 @@ def test_document_write_failure_keeps_the_job_successful(client, alice, monkeypa
         reply="# 正文",
     )
 
-    assert events[-1].data["status"] == "completed"
     row = job_get(alice, registered.job_id)
     assert row is not None
-    assert row["status"] == "completed"
-    assert row["draft_content"] == "# 正文"
+    assert row["status"] == "running", "写正文失败不许装成已定稿"
+    # 事件回执里没有「生成完成」：没写成就没有结束事件
+    assert [event for event in events if event.type == "run_summary"] == []
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
 def test_document_write_skip_is_not_a_failure(client, alice, monkeypatch):
-    """`commit_generated` 返回 `None`（方案不可见 / 归属不符）也不算失败：只是没地方落。"""
+    """`write_document` 返回 `missing`（方案不可见 / 归属不符）不算失败：只是没地方落。
+
+    本票把「没地方落」与「写失败」分开：前者是方案/目标不可见（这次生成本来就没有落点），
+    后者是库真实报错（整批回滚、任务保持执行中，见上一条）。返回 `missing` 时任务
+    照常成功，但文档表里没有这一版。
+    """
     solution_id = _create_solution(client)
-    monkeypatch.setattr(document_store, "commit_generated", lambda *a, **k: None)
+    monkeypatch.setattr(
+        document_store,
+        "write_document",
+        lambda *a, **k: document_store.DocumentWriteResult(outcome="missing"),
+    )
 
     registered, events = run_ticket_events(
         alice, solution_id, "prd", {}, reply="# 正文"
     )
 
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = job_get(alice, registered.job_id)
-    assert row is not None and row["status"] == "completed"
+    assert row is not None and row["status"] == "succeeded"
     assert document_store.get_document(alice, solution_id, "prd") is None
 
 
@@ -2078,18 +1986,18 @@ def test_db_snapshot_tolerates_corrupt_columns(alice):
     with connect() as conn:
         conn.execute(
             "UPDATE generation_jobs SET status = 'failed', error_code = 'LLM_UPSTREAM_ERROR', "
-            "draft_content = '半截正文', completed_sections = '{坏掉的 JSON', "
-            "usage = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' WHERE id = ?",
+            "draft_content = '半截正文', usage = '{坏掉的 JSON', "
+            "pending_items = '{坏掉的 JSON' WHERE id = %s",
             (registered.job_id,),
         )
         conn.commit()
 
     snapshot = first_snapshot_event(alice, registered.job_id)
 
-    assert snapshot.data["completed_sections"] == []
     assert snapshot.data["pending_items"] == []
     assert snapshot.data["partial"] is False
-    assert snapshot.data["failed_sections"] == []
+    # 分章遗留字段在快照里不许回来（#94）：`failed_sections` 已随分章链路删除
+    assert "failed_sections" not in snapshot.data
 
 
 def test_unknown_kind_fails_loudly_through_the_public_seam(alice):
@@ -2186,7 +2094,7 @@ def test_drain_waits_for_a_job_that_finishes_within_the_window(client, alice, mo
     assert report.hit_deadline is False
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "completed", "排空只负责等；终态仍由任务自己收尾"
+    assert row["status"] == "succeeded", "排空只负责等；终态仍由任务自己收尾"
     assert row["error_code"] == ""
 
 
@@ -2247,21 +2155,19 @@ def test_drain_cancels_a_job_that_outlives_the_window(client, alice, monkeypatch
 
     row = job_get(alice, job_id)
     assert row is not None
-    assert row["status"] == "failed", "超时任务必须落终态，不能留 running"
-    assert row["error_code"] == "CANCELLED"
+    assert row["status"] == "cancelled", "超时任务必须落终态，不能留 running"
+    assert row["error_code"] == ""
     assert "重启" in row["error_message"]
 
-    error = next((event for event in events if event.type == "error"), None)
-    assert error is not None, "订阅者必须收到 error 事件，否则「流结束 + 空正文」会被当成成功"
-    assert error.code == "CANCELLED"
-    assert "重启" in error.content
+    # 取消不是失败（票 #84）：终态由 run_summary 的 status 说，不再发 error 事件。
+    assert not [event for event in events if event.type == "error"]
 
     summary = [event for event in events if event.type == "run_summary"]
-    assert summary and summary[-1].data["status"] == "failed"
+    assert summary and summary[-1].data["status"] == "cancelled"
     assert not [
         event
         for event in events
-        if event.type == "run_summary" and event.data.get("status") == "completed"
+        if event.type == "run_summary" and event.data.get("status") == "succeeded"
     ], "被取消的任务不能以「完成」收尾"
 
 

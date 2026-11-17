@@ -26,6 +26,12 @@ vi.mock('../services/documentService', () => ({
       this.name = 'DocumentsNotFoundError'
     }
   },
+  DocumentVersionConflictError: class DocumentVersionConflictError extends Error {
+    constructor(message = '正文已被更新，请刷新后重试') {
+      super(message)
+      this.name = 'DocumentVersionConflictError'
+    }
+  },
   fetchDocuments: vi.fn(),
   saveDocument: vi.fn(),
 }))
@@ -36,6 +42,7 @@ function makeRecord(
   content: string,
   runSummary: RunSummary | null = null,
   pendingItems: PendingItem[] = [],
+  extra: Partial<DocumentRecord> = {},
 ): DocumentRecord {
   return {
     kind,
@@ -47,7 +54,10 @@ function makeRecord(
     updatedAt: '2026-10-13T00:00:00',
     stale: false,
     versionNo: 0,
+    // 「这份正文可用但不完整」（票 #85）：默认完整
+    partial: false,
     derivedFrom: null,
+    ...extra,
   }
 }
 
@@ -55,7 +65,7 @@ function makeRecord(
 function makeRunSummary(requestId: string): RunSummary {
   return {
     kind: 'prd',
-    status: 'completed',
+    status: 'succeeded',
     durationMs: 1000,
     totalCalls: 1,
     failedCalls: 0,
@@ -65,7 +75,6 @@ function makeRunSummary(requestId: string): RunSummary {
     injectedSkills: [],
     warnings: [],
     partial: false,
-    failedSections: [],
     protocol: 'ark',
     providerConfigId: 'cfg_ark0001',
     providerName: '火山方舟',
@@ -244,7 +253,8 @@ describe('save（用户手改）', () => {
     expect(documentApi.saveDocument).not.toHaveBeenCalled()
 
     await advanceDebounce()
-    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 改过的 PRD')
+    // 版本锁（#81）：保存时带上「我以为的当前版本号」（这里还没加载过文档，故为 0）
+    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 改过的 PRD', 0)
   })
 
   it('连续输入合并成一次请求，只发最后那一版', async () => {
@@ -256,7 +266,7 @@ describe('save（用户手改）', () => {
     await advanceDebounce()
 
     expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
-    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '第二版')
+    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '第二版', 0)
   })
 
   it('方案还没有 id 时不排队——没有方案可挂，发出去只会 404', async () => {
@@ -319,7 +329,7 @@ describe('save（用户手改）', () => {
     documents.save('prd', '第二版')
     await advanceDebounce()
 
-    expect(documentApi.saveDocument).toHaveBeenLastCalledWith(3, 'prd', '第二版')
+    expect(documentApi.saveDocument).toHaveBeenLastCalledWith(3, 'prd', '第二版', 0)
     expect(documents.hasPendingSave()).toBe(false)
     expect(documents.saveError).toBe('')
   })
@@ -335,6 +345,46 @@ describe('save（用户手改）', () => {
     // 404 再试也没有意义，队列不放回
     expect(documents.hasPendingSave()).toBe(false)
   })
+
+  it('版本号对不上（409）：拒绝覆盖、不重试，提示刷新后重试（改动留在本地）', async () => {
+    vi.mocked(documentApi.saveDocument).mockRejectedValue(
+      new documentApi.DocumentVersionConflictError('正文已被更新，请刷新后重试'),
+    )
+
+    documents.attach(3)
+    documents.save('prd', '# 基于旧版的手改')
+    await advanceDebounce()
+
+    // 明确提示，而不是静默丢
+    expect(documents.saveError).toBe('正文已被更新，请刷新后重试')
+    // 旧内容不回队列：再试一次就是把刚生成的新正文覆盖回去
+    expect(documents.hasPendingSave()).toBe(false)
+    expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
+    // 但用户的字还在工作副本里——不静默丢改动
+    expect(documents.contentOf('prd')).toBe('# 基于旧版的手改')
+
+    // 冲突未解除期间继续输入也不排队（否则每敲一次就发一次注定被拒的写）
+    documents.save('prd', '# 又改了一笔')
+    await advanceDebounce()
+    expect(documentApi.saveDocument).toHaveBeenCalledTimes(1)
+    expect(documents.contentOf('prd')).toBe('# 又改了一笔')
+
+    // 刷新（重新拉文档）拿到库里的新版本号后才解除封锁，之后的手改带新版本号排队
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      { ...makeRecord('prd', '# 新生成的正文'), versionNo: 2 },
+    ])
+    vi.mocked(documentApi.saveDocument).mockImplementation(async (_id, kind, content) => ({
+      ...makeRecord(kind, content),
+      versionNo: 2,
+    }))
+    await documents.loadAll(3)
+    expect(documents.saveError).toBe('')
+
+    documents.save('prd', '# 刷新之后的手改')
+    await advanceDebounce()
+    expect(documentApi.saveDocument).toHaveBeenLastCalledWith(3, 'prd', '# 刷新之后的手改', 2)
+    expect(documents.hasPendingSave()).toBe(false)
+  })
 })
 
 describe('flushPendingSave', () => {
@@ -343,18 +393,31 @@ describe('flushPendingSave', () => {
     documents.save('prd', '# 最后一笔')
 
     // 不推进防抖窗口，直接 flush
-    await documents.flushPendingSave()
+    const flushed = await documents.flushPendingSave()
 
-    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 最后一笔')
+    expect(documentApi.saveDocument).toHaveBeenCalledWith(3, 'prd', '# 最后一笔', 0)
     expect(documents.hasPendingSave()).toBe(false)
+    expect(flushed).toBe(true)
   })
 
   it('没有待保存的改动时什么也不做', async () => {
     documents.attach(3)
 
-    await documents.flushPendingSave()
+    const flushed = await documents.flushPendingSave()
 
     expect(documentApi.saveDocument).not.toHaveBeenCalled()
+    expect(flushed).toBe(true)
+  })
+
+  it('保存失败时 flush 返回 false——调用方不能把「没写成」当成成功', async () => {
+    vi.mocked(documentApi.saveDocument).mockRejectedValueOnce(new Error('网络断了'))
+    documents.attach(3)
+    documents.save('prd', '第一版')
+
+    const flushed = await documents.flushPendingSave()
+
+    expect(flushed).toBe(false)
+    expect(documents.hasPendingSave()).toBe(true), '失败的那条仍在队列里等着重试'
   })
 })
 
@@ -375,6 +438,58 @@ describe('派生状态', () => {
 
     expect(documents.hasPrd).toBe(false)
     expect(documents.hasAny).toBe(false)
+  })
+})
+
+describe('部分完成（票 #85）', () => {
+  it('读回的那一版标了 partial 时，store 暴露 partialOf', async () => {
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 半截正文', null, [], { partial: true, versionNo: 1 }),
+    ])
+    await documents.loadAll(1)
+
+    expect(documents.partialOf('prd')).toBe(true)
+    // 另外两份没生成，也就谈不上「不完整」
+    expect(documents.partialOf('api-docs')).toBe(false)
+    expect(documents.contentOf('prd')).toBe('# 半截正文')
+  })
+
+  it('部分完成版本不带本会话里上一版的「审核失败时间」', async () => {
+    // 先读到一份审核失败的版本：本会话记下了那次失败的时间
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 旧稿', null, [], {
+        reviewFailedAt: '2026-01-02T00:00:00',
+        versionNo: 1,
+      }),
+    ])
+    await documents.loadAll(1)
+    expect(documents.reviewFailedAtOf('prd')).toBe('2026-01-02T00:00:00')
+
+    // 失败收尾把半截正文落成一版部分完成：服务端这一版既没有结论、也没有失败记录
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 半截正文', null, [], { partial: true, versionNo: 2 }),
+    ])
+    await documents.loadAll(1)
+
+    expect(documents.reviewOf('prd')).toBeNull()
+    // 审核面板据此显示「未审核」：旧的失败时间属于**别的正文**，不许跟过来
+    expect(documents.reviewFailedAtOf('prd')).toBeNull()
+    expect(documents.partialOf('prd')).toBe(true)
+  })
+
+  it('手改部分完成的正文之后，标记仍在（它描述的仍是同一份不完整正文）', async () => {
+    vi.mocked(documentApi.fetchDocuments).mockResolvedValue([
+      makeRecord('prd', '# 半截正文', null, [], { partial: true, versionNo: 1 }),
+    ])
+    await documents.loadAll(1)
+
+    vi.mocked(documentApi.saveDocument).mockResolvedValue(
+      makeRecord('prd', '# 半截正文（改过）', null, [], { partial: true, versionNo: 1 }),
+    )
+    documents.save('prd', '# 半截正文（改过）')
+    await documents.flushPendingSave()
+
+    expect(documents.partialOf('prd')).toBe(true)
   })
 })
 
@@ -410,3 +525,4 @@ describe('clear', () => {
     expect(documents.contentOf('prd')).toBe('')
   })
 })
+

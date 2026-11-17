@@ -49,6 +49,12 @@ vi.mock('../services/documentService', () => ({
       this.name = 'DocumentsNotFoundError'
     }
   },
+  DocumentVersionConflictError: class DocumentVersionConflictError extends Error {
+    constructor(message = '正文已被更新，请刷新后重试') {
+      super(message)
+      this.name = 'DocumentVersionConflictError'
+    }
+  },
   fetchDocuments: vi.fn(),
   saveDocument: vi.fn(),
 }))
@@ -93,16 +99,15 @@ function jobSnapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: 'writing',
     finalizedText: '',
     liveBuffer: '',
-    liveBySection: [],
     stageText: '',
-    completedSections: [],
     solutionId: 1,
     errorCode: '',
     errorMessage: '',
     pendingItems: [],
     partial: false,
-    failedSections: [],
     elapsedMs: 0,
+    // 失败退避（#88）：快照里 `next_run_at` 为空 = 没在等
+    retryAt: null,
     ...overrides,
   }
 }

@@ -26,6 +26,12 @@ import {
  * 展开按类分组、类内 `high` 在前——严重度决定「先修哪一条」，它由类别固定，不由模型升降。
  * **旧结论没有类别** → 归「未分类」，不推断、不重分类（不追溯历史）。
  *
+ * ## 三份产物共用同一个面板（票 #94 收口）
+ *
+ * PRD / 接口文档 / 提示词套件都走「整篇审一次、问题按类报」，结论都是**一版一条**：
+ * 因此这里没有「逐章汇总」那种装配，也不再有「哪几章生成失败」这类分章遗留块——
+ * 一条结论就是一个面板。`review.kind` 只回答「这是哪一份产物的结论」，不改变展示结构。
+ *
  * ## 数据从哪来
  *
  * `review` 是**当前版本**那一条结论（后端随文档列表返回），所以刷新、换设备之后
@@ -228,11 +234,6 @@ const summary = computed(() => (showsReview.value ? props.review?.summary ?? '' 
 /** 本次是否真的改写过（重审恒为 false——只审不改） */
 const rewritten = computed(() => showsReview.value && props.review?.rewritten === true)
 
-/** 生成失败的章节（PRD 并行链路才会非空） */
-const failedSections = computed(() =>
-  showsReview.value ? props.review?.failedSections ?? [] : [],
-)
-
 /** 「第几版」：结论归属的版本号（未知时不显示，别猜一个） */
 const versionLabel = computed(() =>
   typeof props.versionNo === 'number' && props.versionNo > 0 ? `第 ${props.versionNo} 版` : '',
@@ -414,7 +415,7 @@ const fixHint = computed(() => {
                 {{ severityLabel(issue.severity) }}
               </span>
               <span>
-                <template v-if="issue.sectionTitle">{{ issue.sectionTitle }}：</template>
+                <template v-if="issue.where">{{ issue.where }}：</template>
                 {{ issue.detail }}
               </span>
             </li>
@@ -429,15 +430,6 @@ const fixHint = computed(() => {
       >
         还有 {{ issueCount }} 个未处理的问题。点「修复」会按这条结论重写整篇并追加一个新版本；
         把它们修好之后再来重新审核——现在就审，只会得到同一条结论。
-      </p>
-
-      <p
-        v-if="failedSections.length"
-        class="mt-3 text-xs leading-relaxed text-amber-700 dark:text-amber-300"
-      >
-        本次有 {{ failedSections.length }} 章生成失败：{{
-          failedSections.map((item) => item.title).join('、')
-        }}。可以重新生成补齐。
       </p>
     </div>
   </section>

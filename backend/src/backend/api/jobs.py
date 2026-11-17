@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, Query, status
 
 from backend.api import schemas
 from backend.api.deps import acting_user
@@ -129,6 +129,8 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
         "instruction": payload.instruction,
         # 落库用：`optimize` 靠它知道把结果写进哪一份产物
         "doc_kind": payload.doc_kind,
+        # 就地改写的版本锁（票 #81）：随任务单定格，收尾按它做条件写。
+        "expected_version_no": payload.expected_version_no,
         # 仅 auto_clarify：交给后端拼提示词的**结构化数据**，不是前端拼好的文本
         "pending_items": payload.pending_items,
         # 仅 prd：`None` 时由服务层取配置，显式 `false` 才关掉逐章审核
@@ -146,6 +148,12 @@ def _build_request(payload: schemas.JobCreateRequest) -> dict[str, Any]:
 def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
     """把 DB 行（含未对外暴露的列）收敛成 `JobStatus`（不含 draft_content）。"""
     usage = parse_usage(row.get("usage"))
+    # 「有内容可用但不完整」有两个来源（票 #85）：任务行那一列是收尾时定格的结论；
+    # `usage.partial` 是章节级占位的旧口径（历史行与在途快照里只有它）。
+    # 两处取「或」：只要有一处说「不完整」，界面就不该把它当完整交付。
+    partial = bool(row.get("partial")) or (
+        bool(usage.get("partial")) if isinstance(usage, dict) else False
+    )
     return schemas.JobStatus(
         id=int(row.get("id", 0)),
         kind=str(row.get("kind", "")),
@@ -161,7 +169,7 @@ def _to_status(row: dict[str, Any]) -> schemas.JobStatus:
         created_at=str(row.get("created_at", "")),
         updated_at=str(row.get("updated_at", "")),
         usage=usage,
-        partial=bool(usage.get("partial")) if isinstance(usage, dict) else False,
+        partial=partial,
     )
 
 
@@ -229,7 +237,12 @@ async def create_job(
     )
     registered = job_ticket.register_job_ticket(ticket)
     job_ticket.start_registered_job(registered)
-    return schemas.JobCreated(job_id=registered.job_id, status="running")
+    # 初始状态取库里那一行的事实，而不是写死 `running`（票 #84）：单进程里抢占就发生在
+    # 起协程之前，正常是新任务 → 执行中；但抢不到执行权（别的执行者已经领走 / 复用了
+    # 一条正在等待重试的任务）时它就是排队中。对外只给七个状态值之一，不猜。
+    row = job_service.get_job(user.id, registered.job_id)
+    initial_status = str((row or {}).get("status") or "pending")
+    return schemas.JobCreated(job_id=registered.job_id, status=initial_status)
 
 
 @router.get("", response_model=schemas.JobListResponse, summary="列出我的生成任务")
@@ -294,12 +307,33 @@ async def cancel_job(
 @router.get("/{job_id}/stream", summary="订阅生成任务的事件流（SSE）")
 async def stream_job(
     job_id: int,
+    cursor: int | None = Query(
+        default=None,
+        ge=0,
+        description=(
+            "续读游标：客户端最后收到的那个事件游标（事件 data.cursor 给出）。"
+            "带上它只发该游标之后的事件（断线重连不重不漏）；不带则先发快照再追新事件。"
+        ),
+    ),
     user: User = Depends(acting_user),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ):
-    """订阅任务事件流：先 `snapshot` 补全已产出正文，再接 live 事件。
+    """订阅任务事件流：按游标读表，先 `snapshot` 补全已产出正文，再追新事件。
 
     **先做归属校验**（None → 真 404，HTTP 层面明确），再把它包成 SSE。
+
+    两个续读入口等价：查询参数 `cursor`（前端用这个，游标来自事件 `data.cursor`）与
+    SSE 规范的 `Last-Event-ID` 头（给标准 SSE 客户端留的）。两者都带时以查询参数为准。
     """
     if job_service.get_job(user.id, job_id) is None:
         raise AppError(ErrorCode.SOLUTION_NOT_FOUND, _NOT_FOUND_DETAIL)
-    return sse_response(job_service.open_stream(user.id, job_id))
+    resume = cursor
+    if resume is None and last_event_id:
+        # 头是文本：非法值明确报错，绝不当成 0（那等于「从第一条开始回放」）
+        try:
+            resume = int(last_event_id)
+        except (TypeError, ValueError):
+            raise AppError(ErrorCode.INVALID_REQUEST, "Last-Event-ID 不是合法的游标") from None
+        if resume < 0:
+            raise AppError(ErrorCode.INVALID_REQUEST, "Last-Event-ID 不是合法的游标")
+    return sse_response(job_service.open_stream(user.id, job_id, cursor=resume))

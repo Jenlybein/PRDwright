@@ -375,38 +375,24 @@ def _assert_no_sentinel(*texts: str) -> None:
         assert END_SENTINEL not in text
 
 
-def test_prd_line_strips_block_from_chunks_parts_and_reply() -> None:
-    """PRD 分章线：`chunk` / `part` / `done.reply` 三处都不含哨兵，清单随 `done` 带出。
-
-    每章都会产出自己的块，因此清单条数等于章节数，且 id 按「章节 + 序号」分配——
-    前端拿到后可直接定位是哪一章有待确认项。
-    """
-    from backend.services.prd_section_writer import PRD_SECTIONS, PrdSectionWriter
-
-    body = "章节正文\n\n" + _pending_block("这一章的指标口径谁拍板？")
-    writer = PrdSectionWriter(
-        llm=ScriptedLLM(_in_two_chunks(body)), review_enabled=False
-    )
+def test_prd_line_strips_block_from_chunks_and_reply() -> None:
+    """PRD 整篇线（票 #92）：`chunk` / `done.reply` 都不含哨兵，清单随 `done` 带出。"""
+    body = "# 演示产品 PRD\n\n正文\n\n" + _pending_block("MVP 功能清单谁拍板？")
+    service = DocumentService(llm=ScriptedLLM(_in_two_chunks(body)))
     events = asyncio.run(
-        _drain(writer.stream(requirements="做一个演示产品", product_name="演示产品"))
+        _drain(service.generate_prd_from_summary_stream(requirements="做一个演示产品"))
     )
 
     chunks = "".join(event.content for event in events if event.type == "chunk")
-    parts = "".join(
-        event.data["text"] for event in events if event.type == "part"
-    )
     done = next(event for event in events if event.type == "done")
     reply = str(done.data["reply"])
 
-    _assert_no_sentinel(chunks, parts, reply)
-    # 正文保住了，问题只留在清单里
-    assert "章节正文" in reply
-    assert "指标口径" not in reply
-
-    items = done.data["pending_items"]
-    assert len(items) == len(PRD_SECTIONS)
-    assert [item["id"] for item in items] == [f"{s.id}-1" for s in PRD_SECTIONS]
-    assert all(item["question"] == "这一章的指标口径谁拍板？" for item in items)
+    _assert_no_sentinel(chunks, reply)
+    assert "演示产品 PRD" in reply
+    assert "MVP 功能清单" not in reply
+    assert [item["question"] for item in done.data["pending_items"]] == [
+        "MVP 功能清单谁拍板？"
+    ]
 
 
 def test_api_docs_line_strips_block_from_chunks_and_reply() -> None:
@@ -461,7 +447,8 @@ def test_prompt_templates_carry_the_pending_spec() -> None:
 
     assert "{pending_spec}" in prompts_module.PROMPTS_GENERATION_PROMPT
     assert "{pending_spec}" in prompts_module.API_DOCS_GENERATION_PROMPT
-    assert "{pending_spec}" in prompts_module.PRD_SECTION_GENERATION_PROMPT
+    assert "{pending_spec}" in prompts_module.PRD_SKILL_GENERATION_PROMPT
+    assert "{pending_spec}" in prompts_module.PRD_GENERATION_PROMPT
 
     guide = (load_skill_artifacts("prompts") or {}).get("prompts_guide", "")
     assert "{pending_spec}" in guide
@@ -475,6 +462,64 @@ def test_line_without_block_yields_empty_list() -> None:
     done = next(event for event in events if event.type == "done")
     assert done.data["reply"].strip() == "# 接口文档\n\n接口正文"
     assert done.data["pending_items"] == []
+
+# ---------------------------------------------------------------------------
+# 失败分支也要 flush：被抑制器扣住的尾字不能丢（P1-1）
+# ---------------------------------------------------------------------------
+
+
+class _TailThenFailLLM:
+    """吐一段正文之后**失败**：覆盖「抑制器里还扣着尾字时流就断了」。
+
+    抑制器在块外态只扣住末尾「可能被切断的哨兵前缀」（至多 `len(哨兵)-1` 个字符），
+    因此流一经失败，这段扣住的字必须由 `flush()` 交出去——否则它既没进实时 `chunk`，
+    也没进失败收尾落的那一版「部分完成」（#85）。
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    async def astream(self, messages) -> AsyncIterator[Any]:  # noqa: ANN001, ARG002
+        from langchain_core.messages import AIMessageChunk
+
+        yield AIMessageChunk(content=self._text)
+        raise ValueError("上游断开")
+
+
+def _chunks_of(events: list[StreamEvent]) -> str:
+    return "".join(event.content for event in events if event.type == "chunk")
+
+
+def test_failure_flushes_the_suppressor_tail_on_the_prd_line() -> None:
+    service = DocumentService(llm=_TailThenFailLLM("# 演示 PRD\n\n正文结尾。"))
+    events = asyncio.run(
+        _drain(service.generate_prd_from_summary_stream(requirements="做一个演示产品"))
+    )
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "# 演示 PRD\n\n正文结尾。"
+
+
+def test_failure_flushes_the_suppressor_tail_on_the_api_docs_line() -> None:
+    service = DocumentService(llm=_TailThenFailLLM("# 接口文档\n\n接口正文结尾。"))
+    events = asyncio.run(_drain(service.generate_api_docs_stream(prd_content="# PRD")))
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "# 接口文档\n\n接口正文结尾。"
+
+
+def test_failure_flushes_the_suppressor_tail_on_the_prompts_line() -> None:
+    service = DocumentService(llm=_TailThenFailLLM("# 提示词套件\n\n正文结尾。"))
+    events = asyncio.run(_drain(service.generate_prompts_stream(prd_content="# PRD")))
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "# 提示词套件\n\n正文结尾。"
+
+
+def test_failure_flush_also_covers_a_short_body_held_entirely() -> None:
+    """短正文整段都被扣住的情形：不 flush 就一个字都留不下（失败落版会是空稿）。"""
+    service = DocumentService(llm=_TailThenFailLLM("正文很短"))
+    events = asyncio.run(_drain(service.generate_api_docs_stream(prd_content="# PRD")))
+    assert any(event.type == "error" for event in events)
+    assert _chunks_of(events) == "正文很短"
+
 
 # ---------------------------------------------------------------------------
 # format_pending_items：把**已有**清单渲染进提示词

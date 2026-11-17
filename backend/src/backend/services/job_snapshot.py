@@ -1,8 +1,11 @@
 """快照与回放：把内存运行时 / DB 行还原成 `snapshot` 事件（`job_service` 的拆分子模块）。
 
 从 `job_service` **机械迁出**（issue #5），函数体逐字未改：`_snapshot_event` 读内存
-运行时（含按章半成品），`_db_snapshot_event` 在运行时未命中时用 DB 行兜底；
-`parse_usage` / `_load_pending_items` / `_elapsed_ms_from_row` 是它们的三条容错解析。
+运行时，`_db_snapshot_event` 在运行时未命中时用 DB 行兜底；
+`parse_usage` / `_load_pending_items` / `_elapsed_ms_from_row` 是三条容错解析。
+
+票 #92：章节级快照字段（`completed_sections` / `live_by_section`）随分章链路退役。
+三份产物共用整篇形态，快照只需给「已定稿正文 + 一段实时缓冲 + 当前阶段输出」。
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend.core.clock import utc_now
 from backend.core.contracts import StreamEvent
-from backend.repositories.generation_job_repo import STATUS_RUNNING
+from backend.repositories.generation_job_repo import ACTIVE_STATUSES
 from backend.services.job_finalize import _document_kind
 from backend.services.job_runtime_events import _finalized_text
 
@@ -90,14 +93,15 @@ def _load_skill_refs(raw: Any) -> list[dict[str, Any]]:
 def _elapsed_ms_from_row(row: dict[str, Any]) -> int:
     """由 DB 行的创建 / 更新时间推算耗时（毫秒）；时间格式异常时返回 0。
 
-    终态任务用 `updated_at - created_at`（≈ 整个过程），仍在跑的任务用「到现在」。
-    这只是给前端的「已用时」一个起点，精度到秒即可，因此不做时区之外的额外校正。
+    终态任务用 `updated_at - created_at`（≈ 整个过程）；**在途**（排队中 / 执行中 /
+    取消中）用「到现在」——七态之后在途不只 `running` 一个值，判据必须取状态集合，
+    否则刷新后「排队中」会显示一个固定在创建时刻的假耗时。
     """
     try:
         created = datetime.fromisoformat(str(row.get("created_at") or ""))
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
-        end = utc_now() if row.get("status") == STATUS_RUNNING else datetime.fromisoformat(
+        end = utc_now() if row.get("status") in ACTIVE_STATUSES else datetime.fromisoformat(
             str(row.get("updated_at") or "")
         )
         if end.tzinfo is None:
@@ -109,10 +113,6 @@ def _elapsed_ms_from_row(row: dict[str, Any]) -> int:
 
 def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
     """由内存运行时构造 `snapshot` 事件（补全已产出正文）。"""
-    ordered_sections = sorted(
-        runtime.completed_sections,
-        key=lambda item: (item.get("index") is None, item.get("index") or 0),
-    )
     return StreamEvent(
         type="snapshot",
         content="",
@@ -125,54 +125,32 @@ def _snapshot_event(runtime: JobRuntime) -> StreamEvent:
             "status": runtime.status,
             "phase": runtime.phase,
             "finalized_text": _finalized_text(runtime),
+            # 整篇形态的实时缓冲：刷新重连时前端据此把「正在长的那一段」摆回去。
             "live_buffer": runtime.live_buffer,
-            # 分章节的**按章半成品**：刷新重连时前端据此把「正在写的几章」摆回去，
-            # 并接着往下长。只含还没定稿的章——定稿的已在 `completed_sections` 里，
-            # 两边都发会让同一段正文出现两次。
-            "live_by_section": [
-                {
-                    "section_id": slot.section_id,
-                    "index": index,
-                    "text": slot.text,
-                    "phase": slot.phase,
-                }
-                for index, slot in sorted(runtime.live_by_index.items())
-                if slot.text
-            ],
             # 当前阶段模型的原始输出（审核意见 / 改写稿）：刷新重连后接着展示，
             # 否则面板会空着，用户看不到「审核到哪一步了」。它**不落库**（见 `_db_snapshot_event`），
             # 因为它是过程信息、且整篇量级、重复写没有收益。
             "stage_text": runtime.stage_text,
-            "completed_sections": ordered_sections,
             "solution_id": runtime.solution_id,
             "error_code": runtime.error_code,
             "error_message": runtime.error_message,
             # 待确认清单：刷新重连时一并恢复，前端无需另发一次请求就能展示。
             "pending_items": runtime.pending_items,
-            # 部分完成：刷新后仍能看到「哪几章失败了」
+            # 部分完成：刷新后仍能看到「有没有落下一版可用但不完整的正文」
             "partial": runtime.partial,
-            "failed_sections": runtime.failed_sections,
             # 服务端算的已用时：刷新重连后前端接着它继续走，客户端计时器归零也不影响
             "elapsed_ms": int(max(0.0, time.monotonic() - runtime.started_at) * 1000),
+            # 失败退避（#88）：内存里的运行时**没有**「等待重试」这一态——退避只发生在
+            # 执行者不在场之后（恢复器回排队），那一刻这个任务根本不会有运行时。
+            # 显式给空串而不是省略：与 `stage_text` 同理，让「这个快照里没有等待信息」
+            # 成为契约的一部分，而不是被读成漏实现。
+            "next_run_at": "",
         },
     )
 
 
 def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
     """由 DB 行构造 `snapshot` 事件（运行时未命中时的兜底）。"""
-    try:
-        sections = json.loads(row.get("completed_sections") or "[]")
-    except (json.JSONDecodeError, TypeError):
-        sections = []
-    if not isinstance(sections, list):
-        sections = []
-    sections = sorted(
-        sections,
-        key=lambda item: (
-            item.get("index") is None if isinstance(item, dict) else True,
-            item.get("index") or 0 if isinstance(item, dict) else 0,
-        ),
-    )
     pending_items = _load_pending_items(row.get("pending_items"))
     try:
         usage = json.loads(row.get("usage") or "{}")
@@ -180,9 +158,6 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
         usage = {}
     if not isinstance(usage, dict):
         usage = {}
-    failed_sections = usage.get("failed_sections")
-    if not isinstance(failed_sections, list):
-        failed_sections = []
     return StreamEvent(
         type="snapshot",
         content="",
@@ -195,22 +170,19 @@ def _db_snapshot_event(row: dict[str, Any]) -> StreamEvent:
             "phase": row.get("phase", ""),
             "finalized_text": row.get("draft_content", "") or "",
             "live_buffer": "",
-            # 按章半成品同样只活在内存运行时里（不落库，见 `JobRuntime.live_by_index`）：
-            # DB 兜底快照拿不到它，显式给空数组，语义与 `stage_text` 一致。
-            "live_by_section": [],
             # 阶段输出只活在内存运行时里，DB 没有这一列：进程重启后的兜底快照拿不到它。
             # 这里**显式给空串而不是省略**——前端解析器对缺失字段同样退化为空串，
             # 但显式写出来能让「这份快照没有该字段」的语义出现在契约里，不至于被当成漏实现。
             "stage_text": "",
-            "completed_sections": sections,
             "solution_id": row.get("solution_id"),
             "error_code": row.get("error_code", "") or "",
             "error_message": row.get("error_message", "") or "",
             # 待确认清单：DB 兜底快照同样携带，刷新重连后前端直接展示。
             "pending_items": pending_items,
             "partial": bool(usage.get("partial")),
-            "failed_sections": failed_sections,
             "elapsed_ms": _elapsed_ms_from_row(row),
+            # 失败退避（#88）：这条任务最早什么时候能被再领走（ISO 文本；空串 = 立即）。
+            "next_run_at": row.get("next_run_at", "") or "",
             # 任务单里不可变数据的完整投影：运行时未命中时，DB 兜底快照仍读得回
             # 「这次生成用的原始请求、哪套配置/供应商、哪套技能包」。坏数据按上面
             # 三个容错解析退化成空容器，行为与既有 `usage` / `pending_items` 一致。

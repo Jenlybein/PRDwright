@@ -26,16 +26,14 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     phase: 'writing',
     finalizedText: '',
     liveBuffer: '',
-    liveBySection: [],
     stageText: '',
-    completedSections: [],
     solutionId: 1,
     errorCode: '',
     errorMessage: '',
     elapsedMs: 0,
+    retryAt: null,
     pendingItems: [],
     partial: false,
-    failedSections: [],
     ...overrides,
   }
 }
@@ -148,25 +146,19 @@ describe('响应式：写进去的值必须能被界面看见', () => {
   /**
    * 开新任务时**不清预览**。
    *
-   * 预览只有 `useDocumentPipeline` 一个写入方，它在发起任务之前就按产物种类摆好了现场：
-   * PRD 要先把空看板建出来，否则首批 `part` 事件无处可落。`begin` 若顺手清一次，
-   * 表现就是「生成中一片空白、章节全丢」——这一条正是回归用例跑出来的真实症状。
+   * 预览只有 `useDocumentPipeline` 一个写入方，它在发起任务之前就按产物种类摆好了现场
+   * （阶段条先点亮、断线重连时先摆好已产出的正文）。`begin` 若顺手清一次，
+   * 表现就是「生成中一片空白」——这一条正是回归用例跑出来的真实症状。
    */
   it('begin 不清预览（调用方先摆好现场，别把它抹掉）', () => {
     const runs = useRunsStore()
-    runs.preview.prdBoard = {
-      total: 3,
-      headerReady: false,
-      headerText: '',
-      sections: [],
-      review: null,
-      partial: false,
-      failedSections: [],
-    }
+    runs.preview.content = '半截正文'
+    runs.preview.docPhase = 'writing'
 
     begin(runs, 12)
 
-    expect(runs.preview.prdBoard?.total).toBe(3)
+    expect(runs.preview.content).toBe('半截正文')
+    expect(runs.preview.docPhase).toBe('writing')
   })
 })
 

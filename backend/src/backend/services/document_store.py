@@ -8,38 +8,46 @@
 当前指向哪一版」。对外结构（`_to_item`）与版本化之前**逐字段一致**，因此读文档的所有
 调用方（路由、前端）无需改动。
 
-**四种写入语义，不要混用**：
+**正文写入只有一个入口（票 #81）**：
 
-- `save_document`：**用户手改**。就地改当前版本的正文，不新增版本条目；
-  `pending_items` 与 `last_run_summary` 原样保留——清单是模型产出的元数据，
-  用户改几个字不构成「清单过期」。审核结论同样原样保留（本轮不按正文变化判定
-  结论过期，见 ADR 0002）。
-- `commit_generated(append_version=True)`：**整篇生成**。追加一条新版本，并让下游产物
-  失效（见 `DOWNSTREAM_KINDS`）；正文 + 清单 + 回执 + **审核结论**同批写入新版本。
-  这一版审核**试过但没跑成**时，同批写入的是一条 `review_failed_at` 而不是结论。
-- `commit_generated(append_version=False)`：**`optimize` / `clarify` 的就地改写**。
-  就地改当前版本，不新增条目、不删下游；但正文 + 清单 + 回执仍是同批替换——
-  它们产自同一次模型调用栈，分开写就会各自漂移。
-- `checkpoint` / `restore`：用户主动「存为新版本」/「恢复某一版」。两者都**追加新版本**。
+- `write_document(mode=...)`：手改 / 整篇生成 / 修复 / 恢复 / 就地改写**全部**走它，
+  实现只有一份（见 `DocumentWriteMode`）。带 `expected_version_no` 时做版本锁：
+  调用方「我以为当前是第几版」与库里对不上就返回 `version_conflict`、一个字都不写。
+  这三种语义分别是：
+  - `append`：**整篇生成 / 修复 / 存为新版本 / 恢复**。追加一条新版本，正文 + 清单 +
+    回执 + **审核结论**同批写入新版本；审核试过但没跑成时同批写 `review_failed_at`。
+  - `replace`：**`optimize` / `clarify` 的就地改写**。就地改当前版本，不新增条目、不删
+    下游；但正文 + 清单 + 回执仍是同批替换（它们产自同一次模型调用栈）。
+  - `manual`：**用户手改**。就地改当前版本正文，`pending_items` 与 `last_run_summary`
+    原样保留——清单是模型产出的元数据，用户改几个字不构成「清单过期」。
+- `checkpoint` / `restore` 是 `write_document(mode="append")` 的薄封装；
+  `commit_generated` / `save_document` 同理（保留旧形状给非收尾调用方）。
 - `commit_review`：**重新审核**的收尾。只更新当前版本的 `review` 列，
-  不追加版本、不改正文、不动清单与回执（ADR 0002 第 2 条）。
+  不追加版本、不改正文、不动清单与回执（ADR 0002 第 2 条）。它不是「写正文」，
+  但可以写进调用方的事务（收尾把结论与任务终态 / 账本收在同一个事务里）。
 
-## 事务（v6 / T16.7）
+## 事务（v6 / T16.7；#81 扩展为可入外部事务）
 
 每个对外函数用**一个** `session_scope()` 包住整次操作：读写落在同一个 session 里，
 不再出现「写完关连接、再开连接读回」的中间态。仓储返回模型对象/投影，
 本层把它们翻成对外的 `dict`（路由与前端契约不变）。
+
+写正文与写结论的入口还接受 `session`（#81）：收尾（`_finalize`）持有事务，把
+「宣布成功 / 记一条账 / 写正文 / 写结论」收进同一个事务；给了 session 时本层
+**不提交、不回滚**，事务边界仍只在调用方。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.core.clock import utc_now_text
 from backend.core.digest import content_fingerprint
 from backend.core.engine import session_scope
+from backend.core.limits import ensure_text_within_limit
 from backend.repositories.document_repo import (
     DocumentRepository,
     DocumentRow,
@@ -106,13 +114,25 @@ def get_document(owner_id: int, solution_id: int, kind: str) -> dict[str, Any] |
         return _read_document(session, owner_id, solution_id, kind)
 
 
-def current_version_meta(owner_id: int, solution_id: int, kind: str) -> dict[str, Any] | None:
+def current_version_meta(
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    *,
+    session: Any | None = None,
+) -> dict[str, Any] | None:
     """取某份文档当前版本的「版本号 + 内容指纹」，供下游记录 `derived_from`。
 
     只读两个字段：调用方（生成收尾）不需要正文本身，只需要一个能在日后比较的锚点。
     文档不存在时返回 None，调用方据此不写 `derived_from`（而不是写一个空锚点）。
+
+    `session` 给定时在调用方事务里读（收尾算派生锚点用的就是同一个快照，不再另开
+    一次连接看到可能已经变过的库状态）。
     """
-    with session_scope() as session:
+    if session is None:
+        with session_scope() as own_session:
+            row = DocumentRepository(own_session).get(owner_id, solution_id, kind)
+    else:
         row = DocumentRepository(session).get(owner_id, solution_id, kind)
     if not row:
         return None
@@ -123,25 +143,252 @@ def current_version_meta(owner_id: int, solution_id: int, kind: str) -> dict[str
 
 
 # ---------------------------------------------------------------------------
-# 写：手改 / 生成收尾
+# 写：**唯一**的正文写入入口（手改 / 整篇生成 / 修复 / 恢复 / 就地改写）
 # ---------------------------------------------------------------------------
 
+# 一次正文写入的语义。三条都是「把一份正文写进 documents」，区别只在写进哪一版：
+# - `append`  追加一条新版本并前移当前版本指针（整篇生成 / 修复 / 恢复 / 存为新版本）
+# - `replace` 就地改当前版本，正文 + 清单 + 回执**同批替换**（optimize / clarify）
+# - `manual`  就地改当前版本，**只**动正文（用户手改；清单与回执原样保留）
+DocumentWriteMode = Literal["append", "replace", "manual"]
 
-def save_document(
-    owner_id: int, solution_id: int, kind: str, content: str
-) -> dict[str, Any] | None:
-    """保存用户手改后的正文（就地改当前版本），返回更新后的文档；方案不可见时返回 None。"""
-    with session_scope() as session:
-        ok = DocumentRepository(session).update_current_version(
+# 一次正文写入的结果。**机器判据**，调用方据此决定界面与任务终态，不拿「0 行 / None」猜：
+# - `ok`             写进去了
+# - `version_conflict` 版本号对不上（调用方以为的当前版本已不是当前版本）——一个字都没写
+# - `missing`        方案不可见 / 目标不存在（这次生成没有地方可落）
+DocumentWriteOutcome = Literal["ok", "version_conflict", "missing"]
+
+# 版本锁拒绝时给用户看的那句话（任务终态 error_message 与 HTTP 409 的 detail 共用一份）：
+# 手改 / 就地改写撞上「当前版本已经不是我以为那一版」时，覆盖回去会把别人的新正文抹掉，
+# 正确处置是拒绝写入并让用户刷新后重试。前端 `stores/documents.ts` 原样展示这一句。
+VERSION_CONFLICT_MESSAGE = "正文已被更新，请刷新后重试"
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentWriteResult:
+    """统一写入入口的返回值：结果码 + （写成时的）读回文档。"""
+
+    outcome: DocumentWriteOutcome
+    document: dict[str, Any] | None = None
+
+
+def write_document(
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    content: str,
+    *,
+    mode: DocumentWriteMode,
+    expected_version_no: int | None = None,
+    pending_items: list[dict[str, Any]] | None = None,
+    run_summary: dict[str, Any] | None = None,
+    review: dict[str, Any] | None = None,
+    review_failed_at: str | None = None,
+    partial: bool = False,
+    source: str | None = None,
+    note: str = "",
+    metadata: dict[str, Any] | None = None,
+    session: Any | None = None,
+) -> DocumentWriteResult:
+    """**正文写入的唯一入口**（票 #81）：手改 / 整篇生成 / 修复 / 恢复 / 就地改写都走这里。
+
+    ## 为什么收成一个入口
+
+    从前有四条各写一遍的路径：`save_document`、`commit_generated(append_version=True/False)`、
+    `checkpoint`、`restore`。每一条自己决定「追加还是就地改、带不带清单 / 回执 / 结论」，
+    于是「哪一版是当前版本」这个判据只有三条腿中的一条知道。收成一个带 `mode` 与
+    `expected_version_no` 的入口之后：写入语义只剩一份实现，版本锁只有一处，测试也只需要
+    盯一处。
+
+    ## 版本锁
+
+    `expected_version_no` 是调用方「我以为当前是第几版」（用 `documents.version_no` 表示）。
+    给出时**对不上就拒绝**（返回 `version_conflict`，一个字都不写）——这是「手改与生成互相
+    覆盖」的结构性修复：用户在版本 1 上编辑、生成期间追加了版本 2，手改的自动保存会带着
+    版本 1 发出去，必须在写之前被拒，而不是按「当前版本」盲改。
+    `None` 表示调用方不持版本期望（整篇生成 / 恢复这类追加写入本来就不覆盖当前正文）。
+
+    ## 事务
+
+    `session` 为空时本函数自己开一个 `session_scope()`（非收尾调用方的便捷形态）；
+    给了 session 就**不提交、不回滚**，写入落在调用方的事务里——收尾（`_finalize`）用它把
+    「宣布成功 / 记一条账 / 写正文 / 写结论」收进同一个事务。版本冲突的判定发生在任何写入
+    之前（先读当前版本号再动笔），因此外部事务里返回 `version_conflict` 时库里什么都没变，
+    调用方可以直接据此把这次收尾整批回滚并按失败处理。
+
+    Args:
+        mode: 见 `DocumentWriteMode`。
+        expected_version_no: 「我以为当前是第几版」；`None` = 不做版本比对。
+            0 表示「我认为还没有任何版本」（首次手改时允许顺势建版本 1）。
+        pending_items / run_summary: 本次产出的待确认清单与用量回执；`manual` 模式忽略。
+        review: 这一版正文的审核结论（只与 `append` 有关：结论描述的就是这一版正文，
+            与正文同批写入新版本）。
+        review_failed_at: 「这次审核试过但没跑成」的时间；只与 `append` 有关。
+        partial: 「这一版正文可用但不完整」（票 #85）；只与 `append` 有关——只有一个**新版本**
+            才会有「这一版不完整」这件事，就地改写改的是当前版本已经标好的那一版。
+            它**不**清空 / 改写 `review` / `review_failed_at`：部分完成的那一版本来就没有结论，
+            调用方传 `None` 即不写（旧结论属于别的正文，不许跟过来）。
+        source: 版本来源标签；缺省 `append` 取产物类型、`replace`/`manual` 取 `manual`。
+        note / metadata: 版本备注与附加信息（`checkpoint` / `restore` 用）。
+        session: 调用方持有的 session；为空时本函数自开事务。
+    """
+    if session is None:
+        with session_scope() as own_session:
+            return _write_document_in(
+                own_session,
+                owner_id,
+                solution_id,
+                kind,
+                content,
+                mode=mode,
+                expected_version_no=expected_version_no,
+                pending_items=pending_items,
+                run_summary=run_summary,
+                review=review,
+                review_failed_at=review_failed_at,
+                partial=partial,
+                source=source,
+                note=note,
+                metadata=metadata,
+            )
+    return _write_document_in(
+        session,
+        owner_id,
+        solution_id,
+        kind,
+        content,
+        mode=mode,
+        expected_version_no=expected_version_no,
+        pending_items=pending_items,
+        run_summary=run_summary,
+        review=review,
+        review_failed_at=review_failed_at,
+        partial=partial,
+        source=source,
+        note=note,
+        metadata=metadata,
+    )
+
+
+def _write_document_in(
+    session: Any,
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    content: str,
+    *,
+    mode: DocumentWriteMode,
+    expected_version_no: int | None,
+    pending_items: list[dict[str, Any]] | None,
+    run_summary: dict[str, Any] | None,
+    review: dict[str, Any] | None,
+    review_failed_at: str | None,
+    partial: bool,
+    source: str | None,
+    note: str,
+    metadata: dict[str, Any] | None,
+) -> DocumentWriteResult:
+    """统一写入的实现（在给定 session 里跑，不碰事务边界）。
+
+    三件事必须在这里**一次**做完，不许散到各调用方：
+
+    1. **版本锁**：先读当前版本号。期望对不上就返回 `version_conflict`，此时库里一个字
+       都还没写——这正是它能被收尾事务当成「可回滚的拒绝」用的前提。
+    2. **写**：`append` 走 `append_version`；`replace` / `manual` 走
+       `write_current_version`（后者把「当前版本号 == 期望」放进 SQL 条件，兜住第一步
+       之后到写入之前的时间窗）。
+    3. **读回**：同一个 session 读回对外结构（路由与调用方契约不变）。
+    """
+    content_sha = content_fingerprint(content)
+    # 上限口径对所有写入一致：以前只有追加版本那条走闸门，就地改写能绕过它
+    # （优化稿超 60KB 会直接写进库）。统一入口之后不再有第二条路。
+    ensure_text_within_limit(content, field="文档正文")
+
+    repo = DocumentRepository(session)
+    existing = repo.get(owner_id, solution_id, kind)
+    current_no = 0 if existing is None or existing.version_no is None else int(existing.version_no)
+    if expected_version_no is not None and current_no != expected_version_no:
+        return DocumentWriteResult(outcome="version_conflict")
+
+    # 缺省来源标签：追加版本记「产物类型」（prd / api_docs / prompts），就地改写记动作
+    # （调用方显式给 optimize / clarify / manual）。
+    version_source = source or (kind if mode == "append" else "manual")
+    pending_json = json.dumps(pending_items or [], ensure_ascii=False)
+    summary_json = (
+        json.dumps(run_summary, ensure_ascii=False) if run_summary is not None else None
+    )
+    metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata is not None else "{}"
+    review_json = json.dumps(review, ensure_ascii=False) if review is not None else None
+
+    if mode == "append":
+        version = repo.append_version(
             owner_id=owner_id,
             solution_id=solution_id,
             kind=kind,
             content=content,
-            content_sha=content_fingerprint(content),
+            content_sha=content_sha,
+            pending_items=pending_json,
+            last_run_summary=summary_json,
+            review=review_json,
+            review_failed_at=review_failed_at,
+            # 「这一版可用但不完整」的标记只属于**新版本**：它与正文同批写入，
+            # 就地改写路径（`replace` / `manual`）改的是已经标好的那一版，不重新标。
+            partial=partial,
+            source=version_source,
+            note=note,
+            metadata=metadata_json,
+            # 下游不再删除：上游换版后下游保留，由读取侧的 `stale` 提示用户。
+            invalidate=(),
         )
-        if not ok:
-            return None
-        return _read_document(session, owner_id, solution_id, kind)
+        if version is None:
+            return DocumentWriteResult(outcome="missing")
+    else:
+        revision = repo.write_current_version(
+            owner_id=owner_id,
+            solution_id=solution_id,
+            kind=kind,
+            content=content,
+            content_sha=content_sha,
+            pending_items=pending_json if mode == "replace" else None,
+            last_run_summary=summary_json if mode == "replace" else None,
+            replace_generated_meta=mode == "replace",
+            source=version_source,
+            expected_version_no=expected_version_no,
+        )
+        if revision == "version_conflict":
+            return DocumentWriteResult(outcome="version_conflict")
+        if revision == "missing":
+            return DocumentWriteResult(outcome="missing")
+
+    return DocumentWriteResult(
+        outcome="ok", document=_read_document(session, owner_id, solution_id, kind)
+    )
+
+
+def save_document(
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    content: str,
+    *,
+    expected_version_no: int | None = None,
+    session: Any | None = None,
+) -> dict[str, Any] | None:
+    """保存用户手改后的正文（就地改当前版本），返回更新后的文档；方案不可见时返回 None。
+
+    薄封装：写入实现只有 `write_document` 一份。需要分辨「版本冲突」的调用方
+    （保存路由）直接用 `write_document` 拿机器判据；这里保持既有的 `dict | None` 形状。
+    """
+    result = write_document(
+        owner_id,
+        solution_id,
+        kind,
+        content,
+        mode="manual",
+        expected_version_no=expected_version_no,
+        session=session,
+    )
+    return result.document
 
 
 def commit_generated(
@@ -154,75 +401,37 @@ def commit_generated(
     run_summary: dict[str, Any] | None = None,
     review: dict[str, Any] | None = None,
     review_failed_at: str | None = None,
+    partial: bool = False,
     append_version: bool = True,
     source: str | None = None,
     metadata: dict[str, Any] | None = None,
+    expected_version_no: int | None = None,
+    session: Any | None = None,
 ) -> dict[str, Any] | None:
     """生成（或改写）收尾落稿：正文 + 待确认清单 + 用量回执一同写入。
 
-    Args:
-        owner_id: 文档所属用户。
-        solution_id: 文档所属方案。
-        kind: 产物类型（`prd` / `api_docs` / `prompts`）。
-        content: 已剥离标记块的正文。
-        pending_items: 本次产出的待确认清单；`None` 视为空清单。
-        run_summary: 本次生成的用量回执；`None` 表示该版本没有回执。
-        review: 这一版正文的审核结论（形状与 SSE `review` 事件的数据一致）。
-            **只在追加版本时写入**——结论与它描述的那一版正文同批落库；`None`
-            表示这次没审成（或本来就不审），写进去的列留空 = 读侧「未审核」。
-        review_failed_at: 这一版「上一次审核试过但没跑成」的时间。两种链路同一列：
-            **生成时**的审核失败（PRD / 接口文档 / 提示词）与**修复后**的重审失败——
-            两种都是「正文照落库、但这次没审成」，成功时间（`reviewed_at`）的对应物
-            就是它。显式关闭审核的入口（快捷流程）不写：那一次压根没审过。
-        append_version: `True` 追加一条新版本并让下游失效（整篇生成）；
-            `False` 就地改写当前版本、不牵动下游（`optimize` / `clarify`）。
-        source: 版本来源标签；缺省取产物类型（`prd` / `api_docs` / `prompts`）。
-            就地改写时由调用方显式传动作类型（`optimize` / `clarify`）。
-        metadata: 版本附加信息（当前用于 `derived_from`）。**只在追加版本时生效**：
-            就地改写沿用当前版本原有的 metadata，不会被覆盖。
-
-    Returns:
-        更新后的文档；方案不可见时返回 None。
+    薄封装：`append_version=True` → `write_document(mode="append")`；
+    `False` → `write_document(mode="replace")`。**写入实现只有一份**，收尾（`_finalize`）
+    直接调 `write_document` 并把它放进自己的事务里（本封装保留给非收尾调用方与既有用例）。
     """
-    source = source or kind
-    pending_json = json.dumps(pending_items or [], ensure_ascii=False)
-    summary_json = json.dumps(run_summary, ensure_ascii=False) if run_summary is not None else None
-    metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata is not None else "{}"
-    review_json = json.dumps(review, ensure_ascii=False) if review is not None else None
-    content_sha = content_fingerprint(content)
+    result = write_document(
+        owner_id,
+        solution_id,
+        kind,
+        content,
+        mode="append" if append_version else "replace",
+        expected_version_no=expected_version_no,
+        pending_items=pending_items,
+        run_summary=run_summary,
+        review=review,
+        review_failed_at=review_failed_at,
+        partial=partial,
+        source=source,
+        metadata=metadata,
+        session=session,
+    )
+    return result.document
 
-    with session_scope() as session:
-        if append_version:
-            version = DocumentRepository(session).append_version(
-                owner_id=owner_id,
-                solution_id=solution_id,
-                kind=kind,
-                content=content,
-                content_sha=content_sha,
-                pending_items=pending_json,
-                last_run_summary=summary_json,
-                review=review_json,
-                review_failed_at=review_failed_at,
-                source=source,
-                metadata=metadata_json,
-                # 下游不再删除：上游换版后下游保留，由读取侧的 `stale` 提示用户。
-                invalidate=(),
-            )
-            ok = version is not None
-        else:
-            ok = DocumentRepository(session).replace_current_version(
-                owner_id=owner_id,
-                solution_id=solution_id,
-                kind=kind,
-                content=content,
-                content_sha=content_sha,
-                pending_items=pending_json,
-                last_run_summary=summary_json,
-                source=source,
-            )
-        if not ok:
-            return None
-        return _read_document(session, owner_id, solution_id, kind)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +453,7 @@ def commit_review(
     review: dict[str, Any],
     *,
     expected_content_sha: str | None = None,
+    session: Any | None = None,
 ) -> ReviewCommitOutcome:
     """**重新审核**收尾：只更新当前版本的审核结论（不追加版本、不动正文）。
 
@@ -256,6 +466,9 @@ def commit_review(
     这道闸门的理由见 §3.8：结论是「这一版被审成什么样」的记录，写到一个没被审过的
     版本上不会报错，只会变成一条看着正常、实则指向别的正文的假记录。
 
+    `session` 给定时不提交、不回滚：收尾（`_finalize`）用它把结论与任务终态 / 账本收进
+    同一个事务（#81 的 AC4：收尾后账本、正文、结论属于同一版本）。
+
     Args:
         owner_id: 文档所属用户。
         solution_id: 文档所属方案。
@@ -263,31 +476,67 @@ def commit_review(
         review: 本次结论（形状与 SSE `review` 事件的数据一致，见 `document_review.review_data`）。
         expected_content_sha: 被审正文的内容指纹；`None` 表示不做比对（仅供不关心
             「写之前正文是否变过」的内部调用）。
+        session: 调用方持有的事务；为空时本函数自开一个短事务。
 
     Returns:
         见 `ReviewCommitOutcome`；没有正文就没有「被审的那一版」，写一条无主结论只会
         让读侧以为审过（`missing`）。
     """
     review_json = json.dumps(review, ensure_ascii=False)
-    with session_scope() as session:
-        repo = DocumentRepository(session)
-        ok = repo.replace_current_review(
-            owner_id,
-            solution_id,
-            kind,
-            review=review_json,
-            expected_content_sha=expected_content_sha,
-        )
-        if ok:
-            return "ok"
-        # 没能写入：区分「根本没有这一版」与「有，但正文已经换了」
-        row = repo.get(owner_id, solution_id, kind)
-        if row is None or row.current_version_id is None:
-            return "missing"
-        return "content_changed"
+    if session is None:
+        with session_scope() as own_session:
+            return _commit_review_in(
+                own_session,
+                owner_id,
+                solution_id,
+                kind,
+                review_json,
+                expected_content_sha=expected_content_sha,
+            )
+    return _commit_review_in(
+        session,
+        owner_id,
+        solution_id,
+        kind,
+        review_json,
+        expected_content_sha=expected_content_sha,
+    )
 
 
-def mark_review_failed(owner_id: int, solution_id: int, kind: str) -> bool:
+def _commit_review_in(
+    session: Any,
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    review_json: str,
+    *,
+    expected_content_sha: str | None,
+) -> ReviewCommitOutcome:
+    """`commit_review` 的实现（在给定 session 里跑；不碰事务边界）。"""
+    repo = DocumentRepository(session)
+    ok = repo.replace_current_review(
+        owner_id,
+        solution_id,
+        kind,
+        review=review_json,
+        expected_content_sha=expected_content_sha,
+    )
+    if ok:
+        return "ok"
+    # 没能写入：区分「根本没有这一版」与「有，但正文已经换了」
+    row = repo.get(owner_id, solution_id, kind)
+    if row is None or row.current_version_id is None:
+        return "missing"
+    return "content_changed"
+
+
+def mark_review_failed(
+    owner_id: int,
+    solution_id: int,
+    kind: str,
+    *,
+    session: Any | None = None,
+) -> bool:
     """把「这次重审没跑成」记到当前版本上（时间戳），返回是否写进去了。
 
     为什么这条事实要落库：重审的唯一产出就是判定，而「没审成」不是「没审过」——
@@ -295,11 +544,16 @@ def mark_review_failed(owner_id: int, solution_id: int, kind: str) -> bool:
     被审过、且没审成（US3）。拿不到当前版本时返回 `False`（没有「哪一版失败」可言）。
 
     与结论同一行：失败描述的就是这一版；`commit_review` 写入成功时会把它清空。
+    `session` 给定时写进调用方的事务（收尾失败那一笔与任务终态 / 账本同事务，#81）。
     """
-    with session_scope() as session:
-        return DocumentRepository(session).mark_review_failed(
-            owner_id, solution_id, kind, at=utc_now_text()
-        )
+    if session is None:
+        with session_scope() as own_session:
+            return DocumentRepository(own_session).mark_review_failed(
+                owner_id, solution_id, kind, at=utc_now_text()
+            )
+    return DocumentRepository(session).mark_review_failed(
+        owner_id, solution_id, kind, at=utc_now_text()
+    )
 
 
 def list_versions(owner_id: int, solution_id: int, kind: str) -> list[dict[str, Any]]:
@@ -330,25 +584,32 @@ def checkpoint(
     正文取自客户端（可能比库里新——防抖窗口内用户刚敲的字还没落库，直接存库里那份会
     丢掉它）；清单与回执从**当前版本**继承——打里程碑不改变「这份文档还差哪些问题没敲定」
     这一事实。方案不可见时返回 None。
+
+    写入实现只有一份：读当前版本（继承清单 / 回执）与追加版本**在同一个事务里**，
+    由统一入口 `write_document(mode="append")` 完成。
+
+    部分完成标记跟着**正文**走（票 #85）：当前版本本身就是「可用但不完整」时，这一版
+    里程碑同样是那一份不完整的正文，因此继承同一个标记。否则用户会把一份半截稿
+    「存为新版本」后，界面突然把它当成完整版。
     """
     with session_scope() as session:
         current = DocumentRepository(session).get(owner_id, solution_id, kind)
-        pending = current.pending_items if current else None
-        summary = current.last_run_summary if current else None
-        version = DocumentRepository(session).append_version(
-            owner_id=owner_id,
-            solution_id=solution_id,
-            kind=kind,
-            content=content,
-            content_sha=content_fingerprint(content),
-            pending_items=pending if isinstance(pending, str) and pending else "[]",
-            last_run_summary=summary if isinstance(summary, str) and summary else None,
+        pending = _load_json(current.pending_items if current else None, list, [])
+        summary = _load_json(current.last_run_summary if current else None, dict, None)
+        result = write_document(
+            owner_id,
+            solution_id,
+            kind,
+            content,
+            mode="append",
+            pending_items=pending,
+            run_summary=summary,
+            partial=bool(current.partial) if current else False,
             source="checkpoint",
             note=note,
+            session=session,
         )
-        if version is None:
-            return None
-        return _read_document(session, owner_id, solution_id, kind)
+        return result.document
 
 
 def restore(
@@ -360,7 +621,11 @@ def restore(
     就地改（手改/优化）就会篡改历史。追加新版本让历史只增不改，恢复动作本身也留痕。
 
     恢复的正文、清单、回执都取源版本——「把当时那一版（连同它的待办清单）原样搬回来」。
-    源版本不存在或不属于该用户时返回 None（路由翻 404）。
+    源版本不存在或不属于该用户时返回 None（路由翻 404）。读源版本与追加版本在同一个
+    事务里，写入仍走唯一入口 `write_document(mode="append")`。
+
+    部分完成标记同样取源版本（票 #85）：恢复一半截稿之后，它就是当前正文，界面必须继续
+    说「这份正文不完整」；否则恢复动作会把一个半成品洗成完整版。
     """
     with session_scope() as session:
         source = DocumentRepository(session).get_version(
@@ -368,21 +633,21 @@ def restore(
         )
         if source is None:
             return None
-        version = DocumentRepository(session).append_version(
-            owner_id=owner_id,
-            solution_id=solution_id,
-            kind=kind,
-            content=source.content or "",
-            content_sha=source.content_sha or "",
-            pending_items=source.pending_items or "[]",
-            last_run_summary=source.last_run_summary,
+        result = write_document(
+            owner_id,
+            solution_id,
+            kind,
+            source.content or "",
+            mode="append",
+            pending_items=_load_json(source.pending_items, list, []),
+            run_summary=_load_json(source.last_run_summary, dict, None),
+            partial=bool(source.partial),
             source="restore",
             note="",
-            metadata=json.dumps({"restored_from": source.version_no}, ensure_ascii=False),
+            metadata={"restored_from": source.version_no},
+            session=session,
         )
-        if version is None:
-            return None
-        return _read_document(session, owner_id, solution_id, kind)
+        return result.document
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +713,9 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         # 当前版本序号：结论面板据此说清「这条结论是哪一版的」（后端已有这一列，
         # 只是在版本行里、从前没随文档下发）。没有版本时是 0。
         "version_no": int(row.version_no or 0),
+        # 「这份正文可用但不完整」（票 #85）：审阅页据此打「部分完成」提示，而不是
+        # 把半截正文当成完整交付。旧数据（列不存在时的历史行）读出来是 False。
+        "partial": bool(row.partial),
         "updated_at": row.updated_at,
         "derived_from": derived,
         "stale": _is_stale(derived, sha_by_kind or {}),
@@ -480,6 +748,8 @@ def _to_version_item(row: VersionSummary) -> dict[str, Any]:
         "content_length": int(row.content_length or 0),
         "created_at": row.created_at,
         "is_current": bool(row.is_current),
+        # 「部分完成」标记（票 #85）：版本列表据此与完整版本区分开。
+        "partial": bool(row.partial),
     }
 
 
@@ -495,6 +765,8 @@ def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
         "review_failed_at": row.review_failed_at,
         "source": row.source,
         "note": row.note or "",
+        # 「部分完成」标记（票 #85）：预览一条历史版本时同样要看得出它不完整。
+        "partial": bool(row.partial),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "is_current": bool(row.is_current),

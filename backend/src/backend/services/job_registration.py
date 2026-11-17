@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
@@ -22,9 +23,13 @@ from backend.core.engine import session_scope
 from backend.core.errors import AppError, ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.chat_turn_repo import ChatTurnRepository
-from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
+from backend.repositories.generation_job_repo import (
+    STATUS_CANCELLING,
+    STATUS_RUNNING,
+    GenerationJobRepository,
+)
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import job_service_impl
+from backend.services import job_claimer, job_dedupe, job_state
 from backend.services.job_service_impl import run_job
 from backend.services.job_runtime import _RUNTIMES, _TASKS, JobRuntime
 from backend.services.job_ticket import (
@@ -38,78 +43,110 @@ from backend.services.llm_meter import RunMeter
 
 logger = logging.getLogger(__name__)
 
+# 登记的进程内互斥：把「查重 → 顶替 → 建行 → 提交」收进一段临界区（票 #87）。
+# 为什么需要它：去重判据带滚动的 10 秒时间窗，唯一索引表达不了；没有互斥时两个
+# 同时到达的相同提交会各自查不到、各自建一行。单 worker 是部署硬约束（运行时、
+# JobBus、运行时快照都在进程内，见约定 §11），所以进程内锁足够。
+_REGISTER_LOCK = threading.Lock()
+
 
 def register_in_transaction(ticket: JobTicket) -> RegisteredJobTicket:
     """把单①登记成单②：一个事务完成全部落库动作，产出新的不可变对象。
 
-    顺序按新三步行事：先校验 chat 线程/并发、当场查方案是否仍存在；文档任务
-    在同一事务里 `supersede_active` + `create`，chat 任务在同一事务里 `create`
-    + 写输入轮次。`GenerationJobRepository.create` 沿用 #34 的签名，
+    顺序按新三步行事：先校验 chat 线程/并发、当场查方案是否仍存在；创建去重
+    （票 #87）命中既有任务时**复用**它（不落新行、不顶替、不经状态机）；否则
+    文档任务在同一事务里 `supersede_active` + `create`，chat 任务在同一事务里
+    `create` + 写输入轮次。`GenerationJobRepository.create` 沿用 #34 的签名，
     `request_params` / `config_snapshot` / `skill_refs` / 供应商四列一次写全。
 
     内存里旧运行时的顶替标记放在事务**提交之后**：事务失败时不会留下
     「协程停了、库里还在跑」的错位。登记失败即单①丢弃、不产生单②、不派发。
+
+    并发：整个事务收在进程内互斥锁里（判据带滚动时间窗，唯一索引表达不了；
+    单 worker 是部署硬约束，见 `core` 约定 §11）。锁在事务提交后才释放，
+    同时到达的第二个请求因此一定能看到第一个请求已提交的任务行。
     """
     if ticket.kind == "chat":
         _validate_chat(ticket)
 
-    with session_scope() as session:
-        repo = GenerationJobRepository(session)
-        # 「方案是否仍存在」是**登记当场查询**：与库写在同一事务里，不冻结在单上。
-        _check_solution_exists(session, ticket)
-        if ticket.kind == "chat":
-            # 单写者：内存权威 + 库残留，与登记的准入判据一致。
-            _check_chat_single_writer(session, ticket)
+    with _REGISTER_LOCK:
+        reused = None
+        with session_scope() as session:
+            repo = GenerationJobRepository(session)
+            # 「方案是否仍存在」是**登记当场查询**：与库写在同一事务里，不冻结在单上。
+            # 去重之前先过这一关——复用不能把一个已经消失的方案「复活」成一次成功建单。
+            _check_solution_exists(session, ticket)
+            if ticket.kind == "chat":
+                # 单写者：内存权威 + 库残留，与登记的准入判据一致。
+                _check_chat_single_writer(session, ticket)
+            reused_job = job_dedupe.find_reusable_job(session, ticket)
+            if reused_job is not None:
+                # 复用既有任务：不顶替、不建行、不经状态机；既有任务原样继续跑。
+                reused = int(reused_job.id or 0)
+            else:
+                if ticket.kind != "chat":
+                    # 库行顶替：改道经状态机（#79），与内存标记是同一份期望条件、
+                    # 同一个入口，两处不可能再分叉。传 session 是为了让
+                    # 「顶替 + 建新行」同生共死。
+                    superseded = job_state.transition(
+                        job_state.JobEvent.SUPERSEDE,
+                        job_state.supersede_scope(
+                            ticket.owner_id, ticket.solution_id, ticket.kind
+                        ),
+                        session=session,
+                    )
+                job = repo.create(
+                    ticket.owner_id,
+                    ticket.kind,
+                    ticket.solution_id,
+                    ticket.input_fingerprint,
+                    doc_kind=ticket.doc_kind,
+                    chat_stage=ticket.chat_stage,
+                    request_params=thaw_object(ticket.request_params),
+                    config_snapshot=thaw_object(ticket.config_snapshot),
+                    skill_refs=thaw_object(ticket.skill_refs),
+                )
+                job_id = int(job.id or 0)
+
+                input_turn_id = 0
+                if ticket.kind == "chat" and ticket.chat_mode != "start" and (
+                    ticket.chat_content.strip() or ticket.chat_tool_result is not None
+                ):
+                    # 先整体深还原再取值：嵌套的 answers 也要从 tuple 变回 list，
+                    # 否则 `ChatTurnRepository._dumps` 的 json.dumps 会撞上 mappingproxy。
+                    tool_result = (
+                        thaw_object(ticket.chat_tool_result)
+                        if ticket.chat_tool_result is not None
+                        else None
+                    )
+                    role = "tool" if tool_result is not None else "user"
+                    # 同一事务里写输入轮次：失败时连那条 running 行一起回滚。
+                    input_turn_id = ChatTurnRepository(session).create(
+                        ticket.owner_id,
+                        int(ticket.solution_id),
+                        stage=ticket.chat_stage,
+                        role=role,
+                        content=ticket.chat_content,
+                        job_id=job_id,
+                        tool_call_id=str((tool_result or {}).get("tool_call_id") or ""),
+                        tool_result=tool_result,
+                        answers=(tool_result or {}).get("answers") if tool_result else None,
+                    )
+
+        if reused is not None:
+            # 复用路径不落库、不顶替，也就没有内存标记要结算。
+            return with_registered_identity(
+                ticket, job_id=reused, input_turn_id=0, reused=True
+            )
+
         if ticket.kind != "chat":
-            # 库行顶替：与内存 `_mark_superseded` 是同一判据，两处不能分叉。
-            repo.supersede_active(
-                ticket.owner_id, solution_id=ticket.solution_id, kind=ticket.kind
-            )
-        job = repo.create(
-            ticket.owner_id,
-            ticket.kind,
-            ticket.solution_id,
-            ticket.input_fingerprint,
-            doc_kind=ticket.doc_kind,
-            chat_stage=ticket.chat_stage,
-            request_params=thaw_object(ticket.request_params),
-            config_snapshot=thaw_object(ticket.config_snapshot),
-            skill_refs=thaw_object(ticket.skill_refs),
-        )
-        job_id = int(job.id or 0)
-
-        input_turn_id = 0
-        if ticket.kind == "chat" and ticket.chat_mode != "start" and (
-            ticket.chat_content.strip() or ticket.chat_tool_result is not None
-        ):
-            # 先整体深还原再取值：嵌套的 answers 也要从 tuple 变回 list，
-            # 否则 `ChatTurnRepository._dumps` 的 json.dumps 会撞上 mappingproxy。
-            tool_result = (
-                thaw_object(ticket.chat_tool_result)
-                if ticket.chat_tool_result is not None
-                else None
-            )
-            role = "tool" if tool_result is not None else "user"
-            # 同一事务里写输入轮次：失败时连那条 running 行一起回滚。
-            input_turn_id = ChatTurnRepository(session).create(
-                ticket.owner_id,
-                int(ticket.solution_id),
-                stage=ticket.chat_stage,
-                role=role,
-                content=ticket.chat_content,
-                job_id=job_id,
-                tool_call_id=str((tool_result or {}).get("tool_call_id") or ""),
-                tool_result=tool_result,
-                answers=(tool_result or {}).get("answers") if tool_result else None,
+            # 事务提交之后才置内存标记：事务失败时不会留下「协程停了、库里还在跑」的错位。
+            job_state.settle_after_commit(
+                superseded,
+                job_state.supersede_scope(ticket.owner_id, ticket.solution_id, ticket.kind),
             )
 
-    if ticket.kind != "chat":
-        # 事务提交之后才置内存标记：与登记事务「落库之后才置」同一口径。
-        job_service_impl._mark_superseded(  # noqa: SLF001 - 包内互引私有名合法
-            ticket.owner_id, solution_id=ticket.solution_id, kind=ticket.kind
-        )
-
-    return with_registered_identity(ticket, job_id=job_id, input_turn_id=input_turn_id)
+        return with_registered_identity(ticket, job_id=job_id, input_turn_id=input_turn_id)
 
 
 def _check_solution_exists(session: Any, ticket: JobTicket) -> None:
@@ -144,7 +181,7 @@ def _check_chat_single_writer(session: Any, ticket: JobTicket) -> None:
             and runtime.solution_id == ticket.solution_id
             and runtime.kind == "chat"
             and runtime.chat_stage == ticket.chat_stage
-            and runtime.status == STATUS_RUNNING
+            and runtime.status in (STATUS_RUNNING, STATUS_CANCELLING)
         ):
             raise AppError(
                 ErrorCode.INVALID_REQUEST,
@@ -160,12 +197,44 @@ def _check_chat_single_writer(session: Any, ticket: JobTicket) -> None:
         raise AppError(ErrorCode.INVALID_REQUEST, "这条对话还在生成中，等它说完或先点停止")
 
 
-def dispatch_registered(ticket: RegisteredJobTicket) -> None:
+def claim_and_dispatch(ticket: RegisteredJobTicket) -> bool:
+    """**抢占才执行**：先领这一行的执行权，领到了才派发；返回是否真的派发了（#82）。
+
+    为什么把「登记」与「派发」拆开：登记只负责把单①落成单②（一个事务，落库投影 +
+    顶替标记 + chat 输入轮次），它**不再**顺手把协程起起来。派发的前置条件变成
+    「我领到了这一行的执行权」——于是「两个进程同时拿到同一张单」时，只有一个能派发，
+    另一个改到 0 行之后安静退场（日志里能看到 `job.dispatch_skipped`）。
+
+    为什么单进程里仍然**当场**抢占 + 派发（而不是注册后等轮询）：现有的用户体验是
+    「提交完立刻开始生成」。补漏用的调度循环（谁、多久扫一次、扫到怎么派发）在 `services/job_scheduler.py`；崩溃后怎么接手是 #83
+    的恢复器，本票不把它引入默认路径——否则本票会顺带把交互延迟从毫秒级拖成轮询周期。
+    """
+    lease = job_claimer.claim(ticket.owner_id, ticket.job_id)
+    if lease is None:
+        logger.info(
+            "任务已被别的执行者领走（或已不在执行中），本进程不派发",
+            extra={
+                "event": "job.dispatch_skipped",
+                "job_id": ticket.job_id,
+                "user_id": ticket.owner_id,
+                "kind": ticket.kind,
+                "request_id": current_request_id(),
+            },
+        )
+        return False
+    dispatch_registered(ticket, lease)
+    return True
+
+
+def dispatch_registered(ticket: RegisteredJobTicket, lease: job_claimer.Lease) -> None:
     """只认单②：构造运行时、按定格值造计量器、在**无 await 临界区**起后台任务。
 
     配置冻结（HANDOFF-36 第 2 条）：`runtime.config` 与 `RunMeter` 的
     kind / protocol / model / config_id / name 全部取自单②里那份定格值，
     派发侧**不再**自行 `get_runtime_config()` 各取一次；生成中途改后台配置不漂移。
+
+    `lease`（#82）是**抢占的结果**：这一轮的执行权随运行时走，收尾时把凭证递给状态机，
+    模型调用前靠它续租。派发不是「无脑起一支协程」，而是「领到了才起」。
     """
     config = ticket.runtime_config
     # 计量器四格取深还原后的普通容器：与单②同源，且下游不必认识只读映射。
@@ -190,6 +259,9 @@ def dispatch_registered(ticket: RegisteredJobTicket) -> None:
         last_flush_at=time.monotonic(),
         meter=meter,
         config=config,
+        lease_owner=lease.lease_owner,
+        lease_token=lease.token,
+        lease_expire_at=lease.expire_at,
     )
     runtime.skill_refs = thaw_object(ticket.skill_refs)
 

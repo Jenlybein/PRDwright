@@ -9,18 +9,17 @@ function review(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
   return {
     kind: 'prd',
     verdict: 'revise',
-    summary: '2 章完成，2 个待处理问题',
+    summary: '整篇审出 2 个待处理问题',
     issues: [
       {
         severity: 'high',
         category: 'fabrication',
         detail: '出现了输入中没有的性能指标',
-        sectionTitle: '产品概述',
+        where: '产品概述',
       },
       { severity: 'medium', category: 'structure', detail: '缺少异常流程' },
     ],
     rewritten: false,
-    failedSections: [],
     reviewedAt: '2026-10-13T00:00:00',
     ...overrides,
   }
@@ -33,7 +32,7 @@ function review(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
 function legacyReview(overrides: Partial<ReviewConclusion> = {}): ReviewConclusion {
   return review({
     issues: [
-      { severity: 'high', detail: '出现了输入中没有的性能指标', sectionTitle: '产品概述' },
+      { severity: 'high', detail: '出现了输入中没有的性能指标', where: '产品概述' },
       { severity: 'medium', detail: '缺少异常流程' },
     ],
     ...overrides,
@@ -132,7 +131,7 @@ describe('ReviewConclusionPanel', () => {
     expect(text).toContain('产品概述')
     expect(text).toContain('缺少异常流程')
     // 摘要也在折叠体里（它比一行标题长，属于「想看细节才展开」的部分）
-    expect(text).toContain('2 章完成，2 个待处理问题')
+    expect(text).toContain('整篇审出 2 个待处理问题')
   })
 
   it('再点一下收起（同一个按钮切两态）', async () => {
@@ -179,25 +178,6 @@ describe('ReviewConclusionPanel', () => {
     )
 
     expect(wrapper.text()).toContain('已改写一次')
-  })
-
-  it('有章节失败时，提示只在展开后出现', async () => {
-    const wrapper = mount(ReviewConclusionPanel, {
-      props: {
-        review: review({
-          failedSections: [
-            { sectionId: 'pages', title: '页面设计', reason: '正文为空' },
-          ],
-        }),
-      },
-    })
-
-    // 收起时连失败章节的名字都不出现：那一行摘要已经用「有问题」讲了结论
-    expect(wrapper.text()).not.toContain('页面设计')
-
-    await wrapper.find('button').trigger('click')
-    expect(body(wrapper).text()).toContain('本次有 1 章生成失败')
-    expect(body(wrapper).text()).toContain('页面设计')
   })
 
   it('审核失败时不渲染上一次结论的内容：失败下面是「这次没有结论」', async () => {

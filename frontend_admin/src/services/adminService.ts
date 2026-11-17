@@ -35,25 +35,42 @@ export interface LoginPayload {
 // 后台管理对象
 // ---------------------------------------------------------------------------
 
-/** 平台总量（`GET /api/admin/stats`） */
+/** 平台总量 + 管理端「四个数字」（`GET /api/admin/stats`） */
 export interface AdminStats {
   user_count: number
   admin_count: number
   task_count: number
-  completed_count: number
+  /** 已定稿（七态里的 succeeded；不再叫 completed） */
+  succeeded_count: number
   prompt_tokens: number
   completion_tokens: number
+  // --- 四个数字（票 #89）---
+  /** 当前排队中的任务数（`pending`，含在退避等待里、尚未到期的行） */
+  queue_count: number
+  /** 成功率 = 已定稿 /（已定稿 + 真失败）；被取代 / 已取消不进分母。分母为 0 时为 null */
+  success_rate: number | null
+  /** 已收尾（已定稿 + 真失败）任务的平均耗时秒数；分母为 0 时为 null */
+  avg_duration_seconds: number | null
+  /** 当前判定为卡死的任务数（执行中且：租约已过期 或 停更超过阈值） */
+  stuck_count: number
+  /** 卡死判据里的停更阈值分钟数。由后端给，前端不硬编码第二份规则 */
+  stuck_threshold_minutes: number
 }
 
 /** 按天的一行用量（`GET /api/admin/stats/daily`） */
 export interface AdminDailyStat {
   day: string
   task_count: number
-  completed_count: number
-  /** 真失败（已排除主动取消与被顶替） */
+  /** 已定稿 */
+  succeeded_count: number
+  /** 真失败（只统计 failed；取消与顶替各有自己的状态） */
   failed_count: number
+  /** 已取消（用户停止 / 方案删除）——与「被取代」必须是两个数 */
   cancelled_count: number
-  running_count: number
+  /** 被取代（系统让位给更新任务） */
+  superseded_count: number
+  /** 在途（排队中 + 执行中 + 取消中） */
+  active_count: number
   prompt_tokens: number
   completion_tokens: number
   /** 分母为 0 时为 null：「那天没任务」与「那天 0% 失败」是两回事 */
@@ -556,11 +573,12 @@ export interface AdminJob {
   owner_id: number
   owner_name: string
   kind: string
-  status: 'running' | 'completed' | 'failed' | string
+  /** 七态取值，见 ADMIN_JOB_STATE_LABELS（票 #84 之后不再有 completed） */
+  status: AdminJobState
   phase: string
   created_at: string
   updated_at: string
-  /** 已运行秒数；running 为「至今」，其余为收尾耗时 */
+  /** 已运行秒数；在途为「至今」，其余为收尾耗时 */
   duration_seconds: number
   /** 是否判定为卡死（running 且超过阈值未更新） */
   is_stuck: boolean
@@ -572,6 +590,16 @@ export interface AdminJob {
   error_message: string
 }
 
+/** 任务状态（七值，与后端 generation_jobs.status 一一对应；票 #84） */
+export type AdminJobState =
+  | 'pending'
+  | 'running'
+  | 'cancelling'
+  | 'succeeded'
+  | 'failed'
+  | 'superseded'
+  | 'cancelled'
+
 /** 任务监控列表的一页 */
 export interface AdminJobPage {
   items: AdminJob[]
@@ -581,22 +609,28 @@ export interface AdminJobPage {
 
 /** 任务列表的筛选条件。空串一律视为「不筛」。 */
 export interface JobQuery {
-  /** running / failed；空串 = 全部 */
+  /** 逗号分隔的状态集合；空串 = 全部 */
   status?: string
   /** 用户名模糊匹配 */
   username?: string
   /** 任务类型 */
   kind?: string
+  /**
+   * 只看卡死任务（票 #89）。判据在服务端（执行中且：租约已过期 或 停更超阈值），
+   * 与概览页的卡死数是同一个 SQL 表达式——前端只传这个开关，不自己判断。
+   */
+  stuck?: boolean
   limit?: number
   offset?: number
 }
 
 /** 任务列表。对应 `GET /api/admin/jobs`。 */
 export async function fetchJobs(query: JobQuery = {}): Promise<AdminJobPage> {
-  const params: Record<string, string | number> = {}
+  const params: Record<string, string | number | boolean> = {}
   for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === '') continue
-    params[key] = value as string | number
+    // `false` 一律不发：它的语义是「不要这个筛选」，发过去只会多一个噪音参数。
+    if (value === undefined || value === null || value === '' || value === false) continue
+    params[key] = value
   }
   const { data } = await http.get<AdminJobPage>('/api/admin/jobs', { params })
   return { items: data.items ?? [], total: data.total ?? 0 }

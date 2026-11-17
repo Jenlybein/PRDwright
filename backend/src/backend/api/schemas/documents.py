@@ -49,8 +49,9 @@ class DocumentItem(BaseModel):
         default=None,
         description=(
             "**当前版本**那一条审核结论（一版一条，形状与 SSE `review` 事件的数据一致："
-            "kind / verdict / summary / issues / rewritten / failed_sections / reviewed_at / "
-            "attempted；`issues` 每条带 `category`，旧结论没有这一格时由前端归「未分类」）。"
+            "kind / verdict / summary / issues / rewritten / reviewed_at / attempted；"
+            "三份产物的形状逐字相同。`issues` 每条带 `category`，旧结论没有这一格时由前端"
+            "归「未分类」）。"
             "`None` 表示这一版没审过或审核没跑成——**不等于通过**，界面照实标"
             "「未审核 / 审核失败」。刷新与换会话后它是唯一来源。"
         ),
@@ -72,6 +73,14 @@ class DocumentItem(BaseModel):
         ),
     )
     updated_at: str = Field(default="", description="最近更新时间（UTC ISO 8601）")
+    partial: bool = Field(
+        default=False,
+        description=(
+            "当前版本是否**可用但不完整**（票 #85）：失败收尾把已生成的正文落成新版本、"
+            "或有章节落成失败占位时为 true。它只说明「这份正文完整不完整」，"
+            "**不**影响下载 / 修复 / 重生成是否可用。旧数据恒为 false。"
+        ),
+    )
     stale: bool = Field(
         default=False,
         description="这份下游文档是否基于旧版上游（按 `derived_from` 记录的指纹比较）。"
@@ -95,11 +104,25 @@ class DocumentListResponse(BaseModel):
 class DocumentSaveRequest(BaseModel):
     """用户手改正文的提交体。
 
-    只有 `content`：归属由路径上的方案 id 决定、产物类型由路径上的 kind 决定。
-    刻意**不接收**待确认清单——它是模型产出的元数据，不该由用户或客户端改写。
+    只有 `content` + 可选的 `expected_version_no`：归属由路径上的方案 id 决定、产物类型由
+    路径上的 kind 决定。刻意**不接收**待确认清单——它是模型产出的元数据，不该由用户或
+    客户端改写。
+
+    `expected_version_no` 是**版本锁**（票 #81）：客户端提交时「我以为当前是第几版」
+    （来自它读到的那份文档的 `version_no`）。不给时不比对（兼容旧客户端 / 内部调用）；
+    给了且与库里当前版本号不一致时后端**拒绝写入**（HTTP 409 + `CONTENT_CHANGED`），
+    不按「当前版本」盲改——那一版很可能已经是刚生成好的新正文，覆盖回去就是静默丢稿。
     """
 
     content: str = Field(description="用户编辑后的完整文档正文")
+    expected_version_no: int | None = Field(
+        default=None,
+        description=(
+            "客户端以为的当前版本序号（`documents.version_no`）。对不上时拒绝保存："
+            "409 + `CONTENT_CHANGED`，界面提示「正文已被更新，请刷新后重试」。"
+            "0 表示「我认为这份文档还没有任何版本」（首次手改时允许建版本 1）。"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +146,13 @@ class DocumentVersionItem(BaseModel):
     content_length: int = Field(default=0, description="正文字符数（概览用，不下发正文）")
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     is_current: bool = Field(default=False, description="是否为当前版本")
+    partial: bool = Field(
+        default=False,
+        description=(
+            "这一版是否**部分完成**（票 #85）：正文可用但不完整。版本列表据此把它与"
+            "完整版本区分开，并说明它带着「已生成的部分可以先用」的性质。"
+        ),
+    )
 
 
 class DocumentVersionDetail(BaseModel):
@@ -153,6 +183,13 @@ class DocumentVersionDetail(BaseModel):
     )
     source: str = Field(description="这一版的来源（见 DocumentVersionItem.source）")
     note: str = Field(default="", description="备注")
+    partial: bool = Field(
+        default=False,
+        description=(
+            "这一版是否**部分完成**（票 #85）：正文可用但不完整。"
+            "与 `DocumentVersionItem.partial` 同一个后端列（`document_versions.partial`）。"
+        ),
+    )
     created_at: str = Field(description="创建时间（UTC ISO 8601）")
     updated_at: str = Field(description="最近更新时间（UTC ISO 8601）")
     is_current: bool = Field(default=False, description="是否为当前版本")

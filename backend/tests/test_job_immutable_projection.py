@@ -56,7 +56,7 @@ def _raw(job_id: int) -> dict[str, Any]:
     """按 id 直读整行（绕开 ORM，验证真的落盘了）。"""
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM generation_jobs WHERE id = %s", (job_id,)
         ).fetchone()
     assert row is not None
     return dict(row)
@@ -100,7 +100,7 @@ def test_create_writes_all_immutable_data_at_creation(alice):
         "provider_name": "定格用配置",
         "provider_model": "doubao-frozen-01",
     }
-    config = {"active_provider": provider, "prd_pipeline_concurrency": 1}
+    config = {"active_provider": provider, "doc_review_max_tokens": 1}
     skills = [{"name": "prd-generator", "version": "0.1.0", "fingerprint": "abc123"}]
 
     with session_scope() as session:
@@ -159,8 +159,8 @@ def test_running_query_reads_model_and_skill_identity(alice):
     assert json.loads(row["config_snapshot"])["active_provider"]["provider_model"] == "model-query"
     assert json.loads(row["skill_refs"]) == skills
     assert row["skill_manifest"] == "s-query|2.0|ff00"
-    # 运行态没被查询动作改写：仍是 running，正文仍为空。
-    assert row["status"] == "running"
+    # 运行态没被查询动作改写：仍是排队中（七态：建行即 pending），正文仍为空。
+    assert row["status"] == "pending"
     assert row["draft_content"] == ""
 
 
@@ -170,7 +170,7 @@ def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypa
     走「造单 → 登记 → 派发 → 订阅」真实链路（离线假 LLM），只断言两个公开
     出口一致：DB 行的不可变投影，以及订阅者收到的回执；收尾也不覆写四列。
     """
-    from backend.services import document_service, prd_section_writer
+    from backend.services import document_service
     from backend.services.job_bus import job_bus
     from fakes import ScriptedLLM
     from ticket_support import run_ticket
@@ -187,7 +187,6 @@ def test_db_projection_and_run_summary_share_one_frozen_provider(alice, monkeypa
         raise AssertionError("测试不应触网调用真实 LLM")
 
     monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
     job_runtime._RUNTIMES.clear()  # noqa: SLF001 - 清掉别的用例留下的运行时
     job_bus._subscribers.clear()  # noqa: SLF001
 
@@ -265,7 +264,7 @@ def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice, monkeypat
     """
     import backend.core.runtime_config as rc
     from backend.core.providers import ProviderSpec
-    from backend.services import document_service, prd_section_writer
+    from backend.services import document_service
     from backend.services.job_bus import job_bus
     from fakes import ScriptedLLM
     from ticket_support import run_ticket_in_flight
@@ -296,7 +295,6 @@ def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice, monkeypat
         raise AssertionError("测试不应触网调用真实 LLM")
 
     monkeypatch.setattr(document_service, "get_llm", _no_real_llm)
-    monkeypatch.setattr(prd_section_writer, "get_llm", _no_real_llm)
     job_bus._subscribers.clear()  # noqa: SLF001
 
     def switch_provider_while_running() -> None:
@@ -315,9 +313,9 @@ def test_finalize_keeps_the_provider_columns_frozen_at_creation(alice, monkeypat
     )
 
     assert events[-1].type == "run_summary"
-    assert events[-1].data["status"] == "completed"
+    assert events[-1].data["status"] == "succeeded"
     row = _raw(registered.job_id)
-    assert row["status"] == "completed"
+    assert row["status"] == "succeeded"
     # 收尾没有覆写四列：仍是建任务时定格的那一份。
     assert row["provider_protocol"] == "ark"
     assert row["provider_config_id"] == "cfg_original"
@@ -352,8 +350,8 @@ def test_db_snapshot_event_reads_back_immutable_fields(alice):
     # 证明 DB 兜底快照读的是**库里那一份**，不是运行时内存。
     with connect() as conn:
         conn.execute(
-            "UPDATE generation_jobs SET request_params = ?, config_snapshot = ?, "
-            "skill_refs = ? WHERE id = ?",
+            "UPDATE generation_jobs SET request_params = %s, config_snapshot = %s, "
+            "skill_refs = %s WHERE id = %s",
             (
                 json.dumps({"summary": "重连时还要看得见"}),
                 json.dumps({"active_provider": {"model": "m1"}}),
@@ -367,7 +365,7 @@ def test_db_snapshot_event_reads_back_immutable_fields(alice):
     assert data["request_params"] == {"summary": "重连时还要看得见"}
     assert data["config_snapshot"] == {"active_provider": {"model": "m1"}}
     assert data["skill_refs"] == [{"name": "s1"}]
-    assert data["status"] == "running"
+    assert data["status"] == "pending"
 
 
 def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
@@ -382,8 +380,8 @@ def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
             "UPDATE generation_jobs SET status = 'failed', "
             "request_params = '{坏掉的 JSON', config_snapshot = '[1,2,3]', "
             "skill_refs = '{坏掉的 JSON', usage = '{坏掉的 JSON', "
-            "completed_sections = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' "
-            "WHERE id = ?",
+            "pending_items = '{坏掉的 JSON' "
+            "WHERE id = %s",
             (broken.job_id,),
         )
         conn.commit()
@@ -400,8 +398,8 @@ def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
     )
     with connect() as conn:
         conn.execute(
-            "UPDATE generation_jobs SET status = 'completed', "
-            "request_params = '', config_snapshot = '', skill_refs = '' WHERE id = ?",
+            "UPDATE generation_jobs SET status = 'succeeded', "
+            "request_params = '', config_snapshot = '', skill_refs = '' WHERE id = %s",
             (legacy.job_id,),
         )
         conn.commit()
@@ -454,15 +452,21 @@ def test_create_rejects_oversized_immutable_text(alice, field):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_head_and_old_db_upgrade(isolated_db, tmp_path):  # noqa: ARG001
+def test_migration_head_and_old_db_upgrade(isolated_db):  # noqa: ARG001
     """手写迁移是唯一 head；旧库升上来后 `alembic_version` 是真源、结构对拍通过。
 
     不写死「第几步」：上一版从迁移链现取，断言的是「库的版本 == 代码里的 head」。
+
+    #78 把迁移链合并成**一条 Postgres 基线**（0001~0007 → 0001），所以 `head` 没有
+    上一版：这条用例的「旧库升上来」退化成「空库直接到 head」；将来再加迁移时，
+    `previous` 会自动出现，这条用例又会覆盖「停在上一版再升上去」的路径。
     """
     from alembic import command
     from alembic.script import ScriptDirectory
-    from sqlalchemy import create_engine
+    from sqlalchemy import inspect as sa_inspect
 
+    import dbsupport
+    from backend.core.database import build_engine
     from backend.core.schema import (
         _BACKEND_ROOT,
         _alembic_config,
@@ -471,43 +475,36 @@ def test_migration_head_and_old_db_upgrade(isolated_db, tmp_path):  # noqa: ARG0
         head_revision,
         prepare_schema,
     )
-    from backend.core.schema_snapshot import diff_snapshots, schema_snapshot
+    from backend.core.schema_snapshot import diff_snapshots, inspector_snapshot
 
     head = head_revision()
     assert head is not None
     # 从链上现取「head 的上一版」，不写死编号。
     scripts = ScriptDirectory.from_config(_script_config(_BACKEND_ROOT))
     previous = scripts.get_revision(head).down_revision
-    assert previous is not None
 
-    path = tmp_path / "old.db"
-    engine = create_engine(f"sqlite+pysqlite:///{path}")
-    conn = None
-    try:
-        cfg = _alembic_config(f"sqlite+pysqlite:///{path}")
-        command.upgrade(cfg, previous)
-        # 「停在上一版」以 `alembic_version` 为据，不拿某一列当探针：
-        # 每加一条迁移，「上一版刚加了哪些列」都会变，列名断言会随迁移链漂。
-        assert current_revision(engine) == previous
+    with dbsupport.empty_database() as url:
+        engine = build_engine(url)
+        try:
+            cfg = _alembic_config(url)
+            if previous is not None:
+                command.upgrade(cfg, previous)
+                # 「停在上一版」以 `alembic_version` 为据，不拿某一列当探针：
+                # 每加一条迁移，「上一版刚加了哪些列」都会变，列名断言会随迁移链漂。
+                assert current_revision(engine) == previous
 
-        revision = prepare_schema(engine)
-        assert revision == head
-        assert current_revision(engine) == head
-        conn = engine.connect()
-        after_cols = {
-            row[1] for row in conn.exec_driver_sql(
-                "PRAGMA table_info(generation_jobs)"
-            ).fetchall()
-        }
-        conn.close()
-        conn = None
-        assert {"request_params", "config_snapshot", "skill_refs", "skill_manifest"} <= after_cols
-        # 迁移前后结构对拍：升上来的库 == 模型直接建出来的库。
-        assert diff_snapshots(_models_snapshot(), schema_snapshot(path)) == []
-    finally:
-        if conn is not None:
-            conn.close()
-        engine.dispose()
+            revision = prepare_schema(engine)
+            assert revision == head
+            assert current_revision(engine) == head
+            after_cols = {
+                column["name"] for column in sa_inspect(engine).get_columns("generation_jobs")
+            }
+            assert {"request_params", "config_snapshot", "skill_refs", "skill_manifest"} <= after_cols
+            # 迁移前后结构对拍：升上来的库 == 模型按同方言编译出来的期望形状。
+            problems = diff_snapshots(_models_snapshot(engine.dialect), inspector_snapshot(engine))
+            assert problems == [], "旧库升到 head 之后结构与模型不一致：\n  " + "\n  ".join(problems)
+        finally:
+            engine.dispose()
 
 
 def _script_config(backend_root):
