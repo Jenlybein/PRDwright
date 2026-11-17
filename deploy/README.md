@@ -442,6 +442,35 @@ make up
 
 重启会让在途任务有确定结局（跑完或被取消），不会凭空消失。
 
+#### 从 SQLite 时代（v9 之前）升级上来
+
+这一段是**升级**独有的，全新安装不需要看。v9 把后端换成 Postgres 单一后端，所以旧 `.env`
+与旧镜像**不能直接沿用**：
+
+```bash
+# 1) 先确认旧 .env 里有没有 Postgres 三件套；没有就补上（否则 compose 直接起不来，
+#    报错只有一句 "required variable POSTGRES_PASSWORD is missing a value"）
+grep -E '^(POSTGRES_USER|POSTGRES_PASSWORD|POSTGRES_DB)=' .env || \
+  printf '\nPOSTGRES_USER=prdwright\nPOSTGRES_PASSWORD=%s\nPOSTGRES_DB=prdwright\n' \
+    "$(openssl rand -base64 24)" >> .env
+
+# 2) 必须重建镜像：旧镜像的默认 DATABASE_URL 是 sqlite 形态，api 会拒绝启动
+make build
+
+# 3) 起栈（首次启动由 api 自己把迁移跑到 head）
+make up
+```
+
+三条要知道的边界：
+
+- **旧数据不迁移**：v9 之前那个装 SQLite 库文件的 `prdwright_data` 卷不再被挂载、也不再被读取
+  （见 §3 的卷说明）。要保留历史数据，请按 §6 把旧 `.db` 备份留档，再按上面的步骤起新库。
+- **`DATABASE_URL` 不用手写**：compose 用 `POSTGRES_*` 拼出 `postgresql+psycopg://…@db:5432/…`；
+  只有在要连外部数据库时才在 `.env` 里显式覆盖它。
+- **主密钥沿用旧的**：`prdwright_secrets` 卷不需要重建，换库不影响它；反过来，删掉它等于所有
+  已录入的模型密钥作废（§5）。
+
+
 ### 7.3 回滚
 
 回滚有独立的一节：[`§6.7`](#67-回滚预案切换当天照这个做) 与完整手册 [`ROLLBACK.md`](./ROLLBACK.md)。
