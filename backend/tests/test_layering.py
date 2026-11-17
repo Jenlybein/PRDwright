@@ -208,7 +208,7 @@ _EXPECTED_SCHEMAS_FIELDS = {
     "AdminSetActiveRequest": {"is_active"},
     "AdminSetAdminRequest": {"is_admin"},
     "AdminSetQuotaRequest": {"daily_task_limit", "daily_token_limit", "max_running"},
-    "AdminStatsResponse": {"admin_count", "completion_tokens", "prompt_tokens", "succeeded_count", "task_count", "user_count"},
+    "AdminStatsResponse": {"admin_count", "completion_tokens", "prompt_tokens", "succeeded_count", "task_count", "user_count", "queue_count", "success_rate", "avg_duration_seconds", "stuck_count", "stuck_threshold_minutes"},
     "AdminTopUserItem": {"completion_tokens", "id", "is_active", "prompt_tokens", "task_count", "username"},
     "AdminTopUsersResponse": {"users"},
     "AdminUpdateConfigRequest": {"updates"},

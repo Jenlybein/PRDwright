@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import DateTime, case, cast, extract, func, select
 from sqlmodel import Session
 
 from backend.core.clock import utc_now, utc_now_text
@@ -37,8 +37,11 @@ from backend.repositories.generation_job_repo import (
     ACTIVE_STATUSES,
     STATUS_CANCELLED,
     STATUS_FAILED,
+    STATUS_PENDING,
     STATUS_SUCCEEDED,
     STATUS_SUPERSEDED,
+    STUCK_MINUTES,
+    stuck_condition,
 )
 
 
@@ -177,6 +180,44 @@ class DailyUsage:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class JobMetrics:
+    """管理端「四个数字」（票 #89）：排队数 / 成功率 / 平均耗时 / 卡死数。
+
+    这四个数回答的是**与按日趋势不同的问题**：趋势说「在变好还是变坏」，
+    它们说「此刻还有没有压在系统里的活、上一次成功收尾的比例高不高」。
+    用来提前发现「重试把任务打成失败」这类恶化——成功率一路下滑时，
+    任务总量可能还很平稳。
+
+    为什么 `success_rate` / `avg_duration_seconds` 可以是 `None`
+    -----------------------------------------------------------
+    它们的分母都是「已收尾」（成功 + 真失败）。一行都没有时返回 `None` 而不是 0：
+    0% 成功率会被读成「全都失败了」，0 秒耗时会被读成「任务瞬间失败」，
+    而真相是「还没有数据」——这与按日趋势里空日返回 `null` 是同一条口径。
+
+    为什么 `stuck_threshold_minutes` 也回传
+    --------------------------------------
+    前端要写一句「超过 N 分钟未更新或租约已过期才叫卡死」。N 只在后端有一份
+    （`generation_job_repo.STUCK_MINUTES`），前端硬编码一个 30 就是在写第二份规则：
+    阈值一改，界面上的口径说明会变成假话。
+    """
+
+    queue_count: int
+    success_rate: float | None
+    avg_duration_seconds: int | None
+    stuck_count: int
+    stuck_threshold_minutes: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "queue_count": self.queue_count,
+            "success_rate": self.success_rate,
+            "avg_duration_seconds": self.avg_duration_seconds,
+            "stuck_count": self.stuck_count,
+            "stuck_threshold_minutes": self.stuck_threshold_minutes,
+        }
+
+
 class AdminStatsRepository:
     """管理员后台的统计查询。全部只读，不产生任何副作用。"""
 
@@ -266,6 +307,86 @@ class AdminStatsRepository:
             succeeded_count=int(row[3] or 0),
             prompt_tokens=int(row[4] or 0),
             completion_tokens=int(row[5] or 0),
+        )
+
+    def job_metrics(self) -> JobMetrics:
+        """**四个数字**一次查全（票 #89）：排队数 / 成功率 / 平均耗时 / 卡死数。
+
+        ## 每个数的口径（与界面上的说明文字一一对应）
+
+        - **排队数** = `status='pending'` 的行数。**包含还在退避等待里的行**
+          （`next_run_at` 未到期）：它们没在跑、也还没失败，只是要等一会儿；
+          排除它们，排队数会在限流风暴里正好少掉最该被看见的那一批。
+        - **成功率** = 已定稿 /（已定稿 + 真失败）。**分母不含 `superseded` 与
+          `cancelled`**——两者各有状态、都没有结果，把它们算进分母会让平台显得
+          比实际脆弱；分母为 0 时给 `None`。
+        - **平均耗时** = 同一批「已收尾」（成功 + 真失败）从 `created_at` 到
+          `updated_at` 的平均秒数。取消 / 被取代不进：一条「点了一下就取消」的任务
+          会把平均耗时拉低或拉得毫无意义。`updated_at` 是终态写入的时刻，
+          所以重试与退避等待都会算进耗时——这正是要观察的部分。
+        - **卡死数** = 仓储层 `stuck_condition` 的行数：执行中且（租约已过期 或
+          停更超过 `STUCK_MINUTES`）。判据**只有那一处**，列表页的 `stuck_only`
+          筛选用同一个表达式。
+
+        ## 平均耗时为什么在库里算
+
+        库里按 `updated_at - created_at` 求平均，而不是把「已收尾」的行全取回 Python
+        再逐行相减：那是一张会一直增长的表，把时间戳搬过网络只为算一个平均值，
+        后台一打开就先卡住自己。这里用 Postgres 的 `extract(epoch from …)`——
+        它是本模块唯一一处库端函数调用（日趋势的区间比较仍然只用字符串比较）。
+        **为什么现在可以用库端函数**：#78 起后端只剩 Postgres
+        （`core/database.py::SUPPORTED_BACKENDS`），不再需要为一层适配抹平方言。
+
+        空串时间戳（理论上不该有）先被 `!= ''` 挡掉：`CAST('' AS timestamp)` 会
+        在库里直接报错，而统计接口不该因为一条坏行整页 500。
+
+        单个查询、五个标量子查询：四个数字彼此独立，不共享聚合维度，
+        合成一条 `GROUP BY` 反而要把不同分组的行乘起来（那是这类统计最经典的错法）。
+        """
+
+        def _count(where: Any) -> Any:
+            return select(func.count()).select_from(GenerationJob).where(where).scalar_subquery()
+
+        finished = (STATUS_SUCCEEDED, STATUS_FAILED)
+        # ISO 文本 → timestamp → epoch 秒，差值就是这一行的生命周期长度。
+        duration_seconds = extract("epoch", cast(GenerationJob.updated_at, DateTime)) - extract(
+            "epoch", cast(GenerationJob.created_at, DateTime)
+        )
+        avg_duration = (
+            select(func.avg(duration_seconds))
+            .where(
+                GenerationJob.status.in_(finished),
+                GenerationJob.created_at != "",
+                GenerationJob.updated_at != "",
+            )
+            .scalar_subquery()
+        )
+        row = self.session.execute(
+            select(
+                _count(GenerationJob.status == STATUS_PENDING).label("queue_count"),
+                _count(GenerationJob.status == STATUS_SUCCEEDED).label("succeeded_count"),
+                _count(GenerationJob.status == STATUS_FAILED).label("failed_count"),
+                _count(stuck_condition(now_text=utc_now_text())).label("stuck_count"),
+                avg_duration.label("avg_duration_seconds"),
+            )
+        ).one()
+        queue_count = int(row[0] or 0)
+        succeeded = int(row[1] or 0)
+        failed = int(row[2] or 0)
+        stuck_count = int(row[3] or 0)
+        settled = succeeded + failed
+        average = row[4]
+        return JobMetrics(
+            queue_count=queue_count,
+            success_rate=round(succeeded / settled, 4) if settled else None,
+            avg_duration_seconds=(
+                # 四舍五入到整秒：界面按「秒」展示，小数位没有信息量。
+                max(0, int(round(float(average))) if average is not None else 0)
+                if average is not None
+                else None
+            ),
+            stuck_count=stuck_count,
+            stuck_threshold_minutes=STUCK_MINUTES,
         )
 
     def daily(self, days: int, tz_offset_minutes: int) -> list[DailyUsage]:

@@ -35,7 +35,7 @@ export interface LoginPayload {
 // 后台管理对象
 // ---------------------------------------------------------------------------
 
-/** 平台总量（`GET /api/admin/stats`） */
+/** 平台总量 + 管理端「四个数字」（`GET /api/admin/stats`） */
 export interface AdminStats {
   user_count: number
   admin_count: number
@@ -44,6 +44,17 @@ export interface AdminStats {
   succeeded_count: number
   prompt_tokens: number
   completion_tokens: number
+  // --- 四个数字（票 #89）---
+  /** 当前排队中的任务数（`pending`，含在退避等待里、尚未到期的行） */
+  queue_count: number
+  /** 成功率 = 已定稿 /（已定稿 + 真失败）；被取代 / 已取消不进分母。分母为 0 时为 null */
+  success_rate: number | null
+  /** 已收尾（已定稿 + 真失败）任务的平均耗时秒数；分母为 0 时为 null */
+  avg_duration_seconds: number | null
+  /** 当前判定为卡死的任务数（执行中且：租约已过期 或 停更超过阈值） */
+  stuck_count: number
+  /** 卡死判据里的停更阈值分钟数。由后端给，前端不硬编码第二份规则 */
+  stuck_threshold_minutes: number
 }
 
 /** 按天的一行用量（`GET /api/admin/stats/daily`） */
@@ -604,16 +615,22 @@ export interface JobQuery {
   username?: string
   /** 任务类型 */
   kind?: string
+  /**
+   * 只看卡死任务（票 #89）。判据在服务端（执行中且：租约已过期 或 停更超阈值），
+   * 与概览页的卡死数是同一个 SQL 表达式——前端只传这个开关，不自己判断。
+   */
+  stuck?: boolean
   limit?: number
   offset?: number
 }
 
 /** 任务列表。对应 `GET /api/admin/jobs`。 */
 export async function fetchJobs(query: JobQuery = {}): Promise<AdminJobPage> {
-  const params: Record<string, string | number> = {}
+  const params: Record<string, string | number | boolean> = {}
   for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === '') continue
-    params[key] = value as string | number
+    // `false` 一律不发：它的语义是「不要这个筛选」，发过去只会多一个噪音参数。
+    if (value === undefined || value === null || value === '' || value === false) continue
+    params[key] = value
   }
   const { data } = await http.get<AdminJobPage>('/api/admin/jobs', { params })
   return { items: data.items ?? [], total: data.total ?? 0 }

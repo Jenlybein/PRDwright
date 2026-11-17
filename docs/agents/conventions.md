@@ -187,7 +187,8 @@
 - 需额外空间的交互一律走 `AdminModal.vue`；弹窗开关与「提交中」是两个变量；行内动作 >3 个收进「操作 ▾」。
 - 主题切换 = 单按钮循环，权威在 `useTheme.ts::cycle()`；`localStorage.theme` 与 `index.html` 内联脚本共用键、解析规则一起改。
 - 视图用例靠文本与结构定位——新增控件别排在被断言的那个前面。
-- 「卡死」= `running`（执行中）且 `updated_at` 30 分钟未更新；`is_stuck` 只由服务端算；自动刷新 10s 轮询不用 SSE。
+- 「卡死」= `running`（执行中）且（`lease_expire_at` 已过期 **或** `updated_at` 30 分钟未更新）：判据唯一一处是 `generation_job_repo.stuck_condition`；`is_stuck` 只由服务端算（含「仍 running 但租约已过期」这个 #83 恢复器收口之前的窗口），概览页卡死数与任务列表 `?stuck=true` 共用它；自动刷新 10s 轮询不用 SSE。
+- 概览页「四个数字」（票 #89）= 排队数 / 成功率 / 平均耗时 / 卡死数，全部由 `GET /api/admin/stats` 从库里算好（前端不推算）：成功率分母只含已定稿 + 真失败，**排除被取代与已取消**；平均耗时只算已收尾（成功 + 真失败），取消 / 被取代不进；卡死数见上一条。卡死数可点，落 `/jobs?stuck=1`（`stuck` 是服务端筛选），不新建看板。
 - 级联：`users` → 会话 / 方案（→ 文档 → 版本 / 线程）/ 任务；有意不级联 `admin_audit_log` / `app_logs` / 全局配置；删号必须 `clear_login_failures()`。
 - 删除前 `cancel_for_user()` 停在飞任务（只改库不改内存 → 协程照旧烧 token）。七态口径（票 #84）：取消是**两段**——请求把执行中的行落 `cancelling`（不清租约），排队中的行一步落 `cancelled`；执行者在下一个动作点确认才落 `cancelled`（清租约、补一次载荷），租约到期的 `cancelling` 由恢复器兜底。删方案走 `cancel_running` + `_finalize` 兜底（`generation_jobs.solution_id` 无外键）。`error_code` 不再承载「取消 / 被取代」语义，两者各有状态值；二次确认要求手打用户名。
 

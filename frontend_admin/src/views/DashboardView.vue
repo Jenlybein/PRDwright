@@ -18,10 +18,20 @@
  *    `failed` 状态，但成因不是「模型坏了」。这个口径在后端算，前端只显示。
  * 3. **空数据不画空图**。全员为 0 时给一句明确文案：一张什么都没有的图
  *    看起来像「页面坏了」，而不是「这段时间确实没人用」。
+ *
+ * 四个数字（票 #89）
+ * -----------------
+ * 总量卡片回答「一共多少」，四个数字回答「此刻有没有在恶化」——排队数、
+ * 成功率、平均耗时、卡死数各带一句口径说明。**四个数都由后端查询直接给出**，
+ * 这一页只做展示与格式换算：前端手里的是一页列表，由它加总会漏掉翻页之外的行，
+ * 成功率这类口径写两遍也必然漂移。卡死数可点，点进去是任务监控页的「卡死」标签
+ * （只含卡死任务，筛选同样在服务端做）。
  */
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import PageHeader from '@/components/PageHeader.vue'
+import { formatDuration } from '@/format'
 import {
   fetchDailyStats,
   fetchStats,
@@ -96,6 +106,35 @@ const cards = [
   { key: 'prompt_tokens' as const, label: '输入 Token', hint: '累计' },
   { key: 'completion_tokens' as const, label: '输出 Token', hint: '累计' },
 ]
+
+const router = useRouter()
+
+/**
+ * 成功率：后端给的是 0-1 的比率（口径已在后端定死），这里只做百分比换算。
+ *
+ * `null` 显示「—」而不是 0.0%：它表示「还没有任何已收尾任务」，
+ * 0% 会被读成「全都失败了」——这是两个完全不同的结论。
+ */
+const successRateText = computed(() => {
+  const rate = stats.value?.success_rate
+  return rate === null || rate === undefined ? '—' : `${(rate * 100).toFixed(1)}%`
+})
+
+/** 平均耗时：后端给秒数（只在已收尾任务上算），这里换算成人读时长 */
+const avgDurationText = computed(() => {
+  const seconds = stats.value?.avg_duration_seconds
+  return seconds === null || seconds === undefined ? '—' : formatDuration(seconds)
+})
+
+/**
+ * 卡死数可点：跳到任务监控页的「卡死」标签。
+ *
+ * `stuck=1` 是**服务端筛选**的开关（与概览页的卡死数同一个 SQL 判据），
+ * 不是把任务列表拉回来再在前端过滤：列表有分页上限，前端过滤会少掉翻页之外的行。
+ */
+function openStuckJobs() {
+  void router.push({ name: 'jobs', query: { stuck: '1' } })
+}
 
 /** 这段时间内一条业务数据都没有——用于决定显示空态而不是空图 */
 const isEmpty = computed(() =>
@@ -263,6 +302,82 @@ onMounted(load)
           <p class="mt-1.5 text-xs text-subtle">{{ card.hint }}</p>
         </div>
       </div>
+
+      <!--
+        四个数字（票 #89）：不新建看板，就在概览里加这一块。
+        每个数各带一句口径说明——同一个数字在不同的分母下含义完全不同，
+        不写清楚就会被读成「系统很脆弱」或「任务都很慢」。
+      -->
+      <section v-if="stats" class="brut-card-lg">
+        <header
+          class="flex flex-wrap items-end justify-between gap-2 border-b-2 border-brut px-4 py-3"
+        >
+          <div>
+            <p class="kicker">Health</p>
+            <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">四个数字</h2>
+          </div>
+          <p class="max-w-lg text-xs text-subtle">
+            用来提前发现「重试把任务打成失败」这类恶化。四个数都由服务端查询得出，
+            这里只展示、不推算。
+          </p>
+        </header>
+
+        <div class="grid grid-cols-1 gap-px bg-line sm:grid-cols-2 xl:grid-cols-4">
+          <!-- 排队数：当前快照 -->
+          <div data-metric="queue" class="bg-card px-4 py-3">
+            <p class="kicker">排队数</p>
+            <p class="tnum mt-1 text-xl font-black text-ink">
+              {{ stats.queue_count.toLocaleString() }}
+            </p>
+            <p class="mt-1 text-[11px] text-subtle">
+              当前排队中，<b>含等待退避到期</b>、还没被领走的任务。一直堆着说明重试或上游在变慢。
+            </p>
+          </div>
+
+          <!-- 成功率：分母只含已定稿 + 真失败 -->
+          <div data-metric="success" class="bg-card px-4 py-3">
+            <p class="kicker">成功率</p>
+            <p class="tnum mt-1 text-xl font-black text-ink">{{ successRateText }}</p>
+            <p class="mt-1 text-[11px] text-subtle">
+              已定稿 /（已定稿 + 真失败）：<b>排除被取代与已取消</b>，
+              它们没有结果、也不代表模型坏了，算进分母会把系统读得很脆弱。
+            </p>
+          </div>
+
+          <!-- 平均耗时：同一批已收尾任务 -->
+          <div data-metric="duration" class="bg-card px-4 py-3">
+            <p class="kicker">平均耗时</p>
+            <p class="tnum mt-1 text-xl font-black text-ink">{{ avgDurationText }}</p>
+            <p class="mt-1 text-[11px] text-subtle">
+              已收尾（已定稿 + 真失败）从创建到收尾的平均时长；重试与退避都会算进去，
+              所以它变长往往先于成功率下滑出现。
+            </p>
+          </div>
+
+          <!-- 卡死数：可点，点进去是只含卡死任务的任务列表 -->
+          <button
+            type="button"
+            data-metric="stuck"
+            class="bg-card px-4 py-3 text-left transition-colors hover:bg-field"
+            @click="openStuckJobs"
+          >
+            <p class="kicker flex items-center justify-between gap-2">
+              <span>卡死数</span>
+              <span class="text-[10px] font-bold text-ink underline">查看列表 →</span>
+            </p>
+            <p
+              class="tnum mt-1 text-xl font-black"
+              :class="stats.stuck_count > 0 ? 'text-danger-fg' : 'text-ink'"
+            >
+              {{ stats.stuck_count.toLocaleString() }}
+            </p>
+            <p class="mt-1 text-[11px] text-subtle">
+              执行中且<b>租约已过期</b>，或停更超过
+              <b>{{ stats.stuck_threshold_minutes }} 分钟</b>——由服务端判定，点进去看列表。
+            </p>
+          </button>
+        </div>
+      </section>
 
       <!-- 趋势 -->
       <section class="brut-card-lg">
