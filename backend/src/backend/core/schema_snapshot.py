@@ -64,6 +64,10 @@ from backend.core.models import BOOLEAN_COLUMNS
 # 语义等价，只在声明名上不同。
 _TYPE_ALIASES = {"BOOLEAN": "INTEGER"}
 
+# 布尔默认值的两种等价写法：旧库（v6 之前的 DDL）里是 `DEFAULT 0/1`，
+# `0001` 起模型与迁移统一成 `false/true`（Postgres 的 BOOLEAN 只收后者）。
+_BOOLEAN_DEFAULT_ALIASES = {"0": "false", "1": "true"}
+
 # 这些表不属于业务结构，不参与比较：
 # - `sqlite_sequence`：`AUTOINCREMENT` 的副产物，有没有取决于「是否插入过行」，不是结构；
 # - `alembic_version`：迁移工具自己的账本。
@@ -81,7 +85,9 @@ def _norm_type(table: str, column: str, declared: str | None) -> str:
     return kind
 
 
-def _norm_default(declared: str | None) -> str | None:
+def _norm_default(
+    declared: str | None, table: str | None = None, column: str | None = None
+) -> str | None:
     """归一默认值。`''` 与 `'{}'` 这类默认值在两种建表方式下引号风格会不同。
 
     非 SQLite 的 inspector 还会多出两类「不是字面量本身」的东西，一并归一：
@@ -90,6 +96,11 @@ def _norm_default(declared: str | None) -> str | None:
       `DEFAULT -1` 反射成 `'-1'::integer`——去掉 `::type` 才是那个值；
     - **自增序列**：自增主键的默认值反射成 `nextval('…'::regclass)`。这不是列默认值
       （SQLite 侧对应 `AUTOINCREMENT`，PRAGMA 根本不报），两边都按「无默认值」记。
+
+    布尔列的默认值额外**按值归一**（`0`/`1` ↔ `false`/`true`，#76）：白名单里的列
+    （`BOOLEAN_COLUMNS`）在 SQLite 上两种写法等价，而 `0001` 起模型与迁移统一用
+    `false`/`true`。不归一的话，v6 之前建的旧库（DDL 里是 `DEFAULT 0`）在
+    `stamp` 路径上会被误判成「结构漂移」而拒绝启动。
     """
     if declared is None:
         return None
@@ -107,6 +118,11 @@ def _norm_default(declared: str | None) -> str | None:
     # `DEFAULT ''` 与 `DEFAULT ""` 等价；统一成不带外层引号的裸形式再比
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
         text = text[1:-1]
+    # 布尔列的 `0`/`1` 与 `false`/`true` 在库里是同义的两种写法
+    if (table, column) in BOOLEAN_COLUMNS:
+        aliased = _BOOLEAN_DEFAULT_ALIASES.get(text.lower())
+        if aliased is not None:
+            return aliased
     return text
 
 
@@ -169,7 +185,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> list[tuple[Any, ...]]:
             r[1],
             _norm_type(table, r[1], r[2]),
             1 if (r[3] or r[5]) else 0,
-            _norm_default(r[4]),
+            _norm_default(r[4], table, r[1]),
             r[5],
         )
         for r in rows
@@ -255,7 +271,7 @@ def _inspector_columns(insp: Any, dialect: Any, table: str) -> list[tuple[Any, .
                 _norm_type(table, name, _type_text(column["type"], dialect)),
                 # 主键在语义上恒非空（与 SQLite 那份同一归一）
                 1 if (not column["nullable"] or pk_position) else 0,
-                _norm_default(column.get("default")),
+                _norm_default(column.get("default"), table, name),
                 pk_position,
             )
         )
@@ -362,7 +378,7 @@ def metadata_snapshot(metadata: Any, dialect: Any) -> dict[str, Any]:
                     column.name,
                     _norm_type(table.name, column.name, _type_text(column.type, dialect)),
                     1 if (not column.nullable or pk_position) else 0,
-                    _norm_default(default),
+                    _norm_default(default, table.name, column.name),
                     pk_position,
                 )
             )

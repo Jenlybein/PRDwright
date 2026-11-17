@@ -178,6 +178,26 @@ def test_partial_index_declares_predicate_for_both_dialects():
         assert where is not None, f"`ux_chat_turns_job_role` 没有声明 {dialect}_where"
 
 
+def test_boolean_default_normalization_accepts_legacy_zero_one():
+    """布尔列的默认值 `0/1` 与 `false/true` 视为同一个（#76 的兼容面）。
+
+    `0001` 起模型与迁移统一写 `false`/`true`（Postgres 的 BOOLEAN 只收后者）；
+    v6 之前的老 DDL 里是 `DEFAULT 0`/`1`。两者在库里同义，所以结构对拍必须归一——
+    否则「已有结构、没有 `alembic_version`」的老 SQLite 库会在 `stamp` 路径上被
+    误判成漂移、拒绝启动。
+    """
+    from backend.core.schema_snapshot import _norm_default
+
+    assert _norm_default("0", "users", "is_active") == _norm_default(
+        "false", "users", "is_active"
+    )
+    assert _norm_default("1", "users", "is_admin") == _norm_default(
+        "true", "users", "is_admin"
+    )
+    # 非布尔列不参与这条归一：整数 `0` 就是 `0`
+    assert _norm_default("0", "invite_codes", "max_uses") == "0"
+
+
 @pytest.mark.parametrize("table", sorted(_AUTOINCREMENT_TABLES))
 
 def test_autoincrement_is_declared(table):
