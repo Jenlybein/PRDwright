@@ -32,7 +32,11 @@ from backend.core.schema_snapshot import diff_snapshots, inspector_snapshot
 #
 # VARCHAR 是**故意**的：索引列必须有长度（`short_text`），
 # 所以判据是「不许**没有长度**的 String」——那才是裸 str 的特征。
-_ALLOWED_TYPES = {"TEXT", "INTEGER", "BOOLEAN", "BLOB", "LARGEBINARY", "STRING"}
+#
+# BIGINTEGER（`BIGINT`）是 #86 登记进来的：`job_events.id` 是**全局自增游标**，
+# 事件表是增长最快的一张表，`INTEGER`（21 亿）不该成为它的天花板。它是一个标准整型，
+# 与其余整型列同族，不影响本用例要防的两件事（裸 str / 未登记的奇特类型）。
+_ALLOWED_TYPES = {"TEXT", "INTEGER", "BOOLEAN", "BLOB", "LARGEBINARY", "STRING", "BIGINTEGER"}
 
 
 def _build_models_db(url: str):

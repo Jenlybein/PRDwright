@@ -13,6 +13,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.core.contracts import StreamEvent
 from backend.services.llm_meter import RunMeter
 
 # 进程内的任务运行时：`job_id -> JobRuntime`
@@ -87,6 +88,18 @@ class JobRuntime:
     # 上次 flush 的时间与当时 live_buffer 的长度（用于「≤300ms 或增量 >4KB」判断）
     last_flush_at: float = 0.0
     flushed_len: int = 0
+    # --- 过程日志（事件表，票 #86）---
+    #
+    # 已经应用进运行时、但还没落进 `job_events` 的事件。逐条到来（模型增量可能一秒
+    # 几百条），按既有的合并写窗口一批落盘（与进度列同一笔事务），因此这里只是内存
+    # 缓冲，不是第二份正文。
+    #
+    # ⚠️ 只在事务**提交之后**清空（`services.job_events.mark_flushed`）：回滚了还清，
+    # 那一批就永久丢了，症状是「断线重连少了一段」，极难归因。
+    pending_events: list[StreamEvent] = field(default_factory=list)
+    # 已落盘的最后一条事件的游标。订阅者的快照游标就是它——「快照内容覆盖到哪一条」
+    # 的判据，因此快照与事件必须同一笔提交（见 `job_runtime_events._maybe_flush`）。
+    last_event_id: int = 0
     # 任务开始时刻（算 duration_ms）
     started_at: float = 0.0
     # done 事件带来的权威完整正文

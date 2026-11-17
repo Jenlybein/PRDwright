@@ -251,7 +251,10 @@ _EXPECTED_SCHEMAS_FIELDS = {
     "SolutionStatePayload": {"active_job_doc_kind", "active_job_id", "active_job_kind", "chat_tab", "draft_prd_text", "entry_mode", "paste_api_docs_text", "paste_prd_text", "quick_product_name", "quick_requirements", "summary", "view_state"},
     "SolutionSummary": {"content_updated_at", "created_at", "id", "mode", "stage", "title", "updated_at"},
     "StepUsage": {"calls", "completion_tokens", "duration_ms", "failed_calls", "prompt_tokens", "step"},
-    "StreamEvent": {"code", "content", "data", "type"},
+    # `event_id`：任务订阅的游标（票 #86）。它是**内部传输字段**——`exclude=True`，
+    # 不进 JSON 体（对外字段仍是 code/content/data/type），只出现在 SSE 的 `id:` 行。
+    # 冻结集合照实登记它，是为了让「又往对外契约里加字段」仍然需要过一次次显式裁决。
+    "StreamEvent": {"code", "content", "data", "type", "event_id"},
     "SummarySyncRequest": {"history", "summary"},
     "SummarySyncResponse": {"changed", "summary"},
     "ToolResultPayload": {"answers", "tool_call_id"},

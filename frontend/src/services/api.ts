@@ -147,6 +147,14 @@ export interface StreamEventPayload {
    * 因为这条通道上 HTTP 状态码恒为 200，判断「该不该降级重试」只能靠它。
    */
   code?: BackendErrorCode
+  /**
+   * 事件游标（票 #86）：任务订阅的每条事件在服务端 `job_events` 里的全局 id。
+   *
+   * **它不在 JSON 体里**：后端把它放在 SSE 帧的 `id:` 行（标准字段），这里由分帧解析
+   * 补进来。客户端记住最后一条，断线重连时作为 `?cursor=` 带回去，服务端就只发它之后
+   * 的事件——不重复、不缺段。其他流（对话 / 就地生成）没有这个字段。
+   */
+  eventId?: number
 }
 
 /** 流式回复过程中可注册的回调 */
@@ -199,6 +207,13 @@ export interface StreamHandlers {
    * PRD 是「聚合各章审核」，接口文档 / 提示词是「整篇审一次」。
    */
   onReview?: (review: ReviewConclusion) => void
+  /**
+   * 每收到一条带 `id:` 行的事件时触发，参数是该事件在服务端的游标（票 #86）。
+   *
+   * 调用方（`useJob`）把它记成「这一支任务读到哪了」；订阅中断时凭它续读，
+   * 服务端只发游标之后的事件。**不要在回调里做重活**：它每条事件都触发一次。
+   */
+  onCursor?: (cursor: number) => void
 }
 
 /** 一次流式对话的结果 */
@@ -525,11 +540,18 @@ function parseSnapshotEvent(data: Record<string, unknown>): JobSnapshot {
 function parseSseBlock(block: string): StreamEventPayload | null {
   const dataLines: string[] = []
   let eventName = ''
+  // 游标只出现在 `id:` 行（SSE 规范字段），不在 JSON 体里；解析器负责把它补进来
+  let eventId: number | undefined
 
   for (const rawLine of block.split('\n')) {
     const line = rawLine.trimEnd()
     if (line.startsWith('event:')) {
       eventName = line.slice('event:'.length).trim()
+    } else if (line.startsWith('id:')) {
+      const raw = line.slice('id:'.length).trim()
+      const parsed = Number(raw)
+      // 非法 id 行整条忽略：它不是数据帧，也不该让这一帧解析失败
+      if (raw && Number.isInteger(parsed) && parsed >= 0) eventId = parsed
     } else if (line.startsWith('data:')) {
       // 规范允许「data:」后跟一个空格，去掉它但保留内容自身的缩进
       dataLines.push(line.slice('data:'.length).replace(/^ /, ''))
@@ -552,6 +574,7 @@ function parseSseBlock(block: string): StreamEventPayload | null {
       // 只有真的带了这个字段才赋值：`code` 缺失与「码未知」是两回事，
       // 都由消费方统一降级成 INTERNAL_ERROR，这里不替它编一个值出来。
       ...(typeof parsed.code === 'string' ? { code: toErrorCode(parsed.code) } : {}),
+      ...(typeof eventId === 'number' ? { eventId } : {}),
     }
   } catch {
     return null
@@ -629,6 +652,10 @@ async function readStreamRequest(
   function handleBlock(block: string): void {
     const event = parseSseBlock(block)
     if (!event) return
+
+    // 游标先交给调用方（每条事件一次）：它决定「断线重连从哪接」，与事件内容无关，
+    // 因此放在类型分发之前——任何一个事件类型上的 `id:` 都必须被记住。
+    if (typeof event.eventId === 'number') handlers.onCursor?.(event.eventId)
 
     switch (event.type) {
       case 'status':
@@ -1110,16 +1137,23 @@ export async function fetchActiveJobs(filters: {
  *
  * 订阅开始时后端会**先发一份 `snapshot`**（补全断线前已产出的正文），再接 live 事件；
  * 因此刷新后重连只需调用它，即可「静默」把进度接上。
+ *
+ * `cursor` 是「上一次订阅读到哪了」（取自事件的 `id:` 行 / `handlers.onCursor`）。
+ * **只有「已经在流中间、且手里还有正文」的续读才带它**：后端会从该游标之后继续发，
+ * 且不再重发快照（那条快照会把客户端已有的内容再铺一遍）。不带游标 = 新读者，
+ * 后端先给快照 + 快照游标，**不回放**历史。
  */
 export function readJobStream(
   jobId: number,
   handlers?: StreamHandlers,
   signal?: AbortSignal,
+  cursor?: number,
 ): Promise<StreamResult> {
-  return readStreamRequest(
-    { method: 'GET', path: `/api/jobs/${jobId}/stream`, signal },
-    handlers,
-  )
+  const path =
+    cursor === undefined
+      ? `/api/jobs/${jobId}/stream`
+      : `/api/jobs/${jobId}/stream?cursor=${cursor}`
+  return readStreamRequest({ method: 'GET', path, signal }, handlers)
 }
 
 export default http

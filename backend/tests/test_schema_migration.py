@@ -56,7 +56,7 @@ def _forget_alembic_adoption() -> None:
 
 
 def test_empty_db_gets_baseline():
-    """空库 → `upgrade head` → 15 张业务表 + `alembic_version` = 当前 head。
+    """空库 → `upgrade head` → 16 张业务表 + `alembic_version` = 当前 head。
 
     不写死版本号：这条用例要表达的是「到最新」，不是「到某一号迁移」。
     表数是逐条迁移累加的结果（#78 合并成一条基线，`0002` 起是增量），所以新加一张表
@@ -73,7 +73,7 @@ def test_empty_db_gets_baseline():
 
             tables = set(inspect(engine).get_table_names())
             assert "alembic_version" in tables
-            assert len(tables) == 16, f"应当是 15 张业务表 + alembic_version，实际 {sorted(tables)}"
+            assert len(tables) == 17, f"应当是 16 张业务表 + alembic_version，实际 {sorted(tables)}"
         finally:
             engine.dispose()
 

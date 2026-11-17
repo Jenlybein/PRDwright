@@ -50,6 +50,16 @@ function sseFrame(type: string, payload: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`
 }
 
+/**
+ * 任务订阅的帧：`id:` 行是游标的唯一出口（票 #86）。
+ *
+ * 事件体里**没有**游标字段（后端把它 exclude 出 JSON），所以「客户端怎么知道读到哪」
+ * 只能靠这一行——这正是要被钉住的契约。
+ */
+function sseFrameWithId(id: number, type: string, payload: Record<string, unknown>): string {
+  return `id: ${id}\n${sseFrame(type, payload)}`
+}
+
 const SUMMARY = { product_name: 'PRDwright' } as RequirementsSummary
 
 /**
@@ -788,6 +798,52 @@ describe('生成任务接口（jobs）', () => {
 
     expect(snapshots[0]?.phase).toBe('reviewing')
     expect(snapshots[0]?.stageText).toBe('{"verdict":"revise"}')
+  })
+
+  it('任务帧的 id: 行被解析成游标交给 onCursor，事件体本身不含游标', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        streamResponse([
+          sseFrameWithId(0, 'snapshot', {
+            type: 'snapshot',
+            content: '',
+            data: { job_id: 5, status: 'running' },
+          }),
+          sseFrameWithId(7, 'chunk', { type: 'chunk', content: '甲', data: {} }),
+          // 非法 id 行整条忽略，但这一帧的数据照常解析（不因坏帧断流）
+          `id: abc\n${sseFrame('chunk', { type: 'chunk', content: '乙', data: {} })}`,
+          sseFrameWithId(8, 'done', { type: 'done', content: '', data: { reply: '甲乙' } }),
+          'data: [DONE]\n\n',
+        ]),
+      ),
+    )
+
+    const cursors: number[] = []
+    const chunks: StreamChunk[] = []
+    const result = await readJobStream(5, {
+      onCursor: (cursor) => cursors.push(cursor),
+      onChunk: (chunk) => chunks.push(chunk),
+    })
+
+    // 游标按帧顺序到达；非法 `id:` 行不产生游标，也不吞掉那一帧
+    expect(cursors).toEqual([0, 7, 8])
+    expect(chunks.map((chunk) => chunk.text)).toEqual(['甲', '乙'])
+    expect(result.reply).toBe('甲乙')
+  })
+
+  it('续读时把游标拼进查询串；新读者（不带游标）的路径一字不变', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
+      streamResponse(['data: [DONE]\n\n']),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await readJobStream(9, {}, undefined, 42)
+    await readJobStream(9)
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/jobs/9/stream?cursor=42')
+    // 「不带游标」必须真的不带查询串：它决定服务端走快照而不是回放
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/jobs/9/stream')
   })
 
   it('chunk 帧带章节归属：并行时前端才知道这一片属于哪一章', async () => {

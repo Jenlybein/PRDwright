@@ -17,7 +17,7 @@ from backend.core.engine import session_scope
 from backend.core.errors import ErrorCode
 from backend.core.request_context import current_request_id
 from backend.repositories.generation_job_repo import GenerationJobRepository
-from backend.services import job_state
+from backend.services import job_events, job_state
 from backend.services.job_runtime import _SectionLive
 
 if TYPE_CHECKING:
@@ -251,12 +251,30 @@ def _live_len(runtime: JobRuntime) -> int:
     )
 
 
-def _maybe_flush(runtime: JobRuntime) -> None:
-    """按「≤300ms 或增量 >4KB」的节奏合并写一次进度。"""
-    now = time.monotonic()
-    grew = _live_len(runtime) - runtime.flushed_len
-    if grew >= _FLUSH_BYTES or (now - runtime.last_flush_at) >= _FLUSH_INTERVAL_SECONDS:
-        with session_scope() as session:
+def _flush_now(runtime: JobRuntime, *, progress: bool = True) -> int:
+    """立刻合并写一笔，返回本次写到的游标。
+
+    `progress=True`（写者的正常路径）：**进度列 + 事件同一笔事务**——两件事必须同生
+    共死，否则「快照游标」就没有意义：
+
+    - 进度列（`draft_content` / `completed_sections` / `phase` / `pending_items`）是
+      **快照**，冷读者一次拿走；
+    - `job_events` 的追加行是**过程日志**，按游标续读。
+
+    快照游标 = 本笔写到的最后一条事件 id。若两者分两笔提交，就会出现「快照已经包含
+    某段正文、而那条事件还没落盘」的窗口——拿着游标续读的客户端会重复收到那一段。
+
+    `progress=False`（订阅侧的轮询补写，见 `job_service_impl.open_stream`）：**只追加
+    过程日志**。订阅者替卡在模型调用里的写者把事件落盘，让「轮询兜底」真的能推进数据；
+    但它**不碰进度列**——那是写者的产物，读者去写等于在别人的执行里留痕，会破坏
+    「失去执行权后什么都不写」这条判据（进度列写者下一轮会自己补上）。
+
+    调用点有两处：合并写窗口到点（`_maybe_flush`），以及**取快照之前**（`open_stream`
+    必须先把在途事件补写完，否则内存快照领先游标，重连会重放已含内容）。
+    """
+    with session_scope() as session:
+        cursor = job_events.flush_pending(runtime, session)
+        if progress:
             GenerationJobRepository(session).persist_progress(
                 runtime.owner_id,
                 runtime.job_id,
@@ -265,8 +283,22 @@ def _maybe_flush(runtime: JobRuntime) -> None:
                 phase=runtime.phase,
                 pending_items=runtime.pending_items,
             )
-        runtime.last_flush_at = now
+    # 事务提交之后才清空待写缓冲（回滚时那一批必须还在）
+    job_events.mark_flushed(runtime, cursor)
+    if progress:
+        # 只有写者推进了「已落盘的正文」才算窗口到点；订阅侧的补写不动这两项，
+        # 让写者的下一轮合并写尽快把进度列补上。
+        runtime.last_flush_at = time.monotonic()
         runtime.flushed_len = _live_len(runtime)
+    return cursor
+
+
+def _maybe_flush(runtime: JobRuntime) -> None:
+    """按「≤300ms 或增量 >4KB」的节奏合并写一次（进度列 + 过程事件）。"""
+    now = time.monotonic()
+    grew = _live_len(runtime) - runtime.flushed_len
+    if grew >= _FLUSH_BYTES or (now - runtime.last_flush_at) >= _FLUSH_INTERVAL_SECONDS:
+        _flush_now(runtime)
 
 
 def _summary_data(runtime: JobRuntime, status: str) -> dict[str, Any]:
