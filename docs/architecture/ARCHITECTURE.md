@@ -29,7 +29,7 @@
 | 4 | 技能包 | §3.4 |
 | 5 | 鉴权与配额 | §3.5 |
 | 6 | 部署形态（单域名 / 单 worker / 命名卷 / 探针 / 排空 / 备份） | §3.6 |
-| 7 | 唯一部署后端 SQLite | §3.7 |
+| 7 | 唯一部署后端 Postgres | §3.7 |
 | 8 | 现行契约 | §4 |
 | 9 | 取舍、接受的风险、否决的方案与风险登记 | §5 |
 | 10 | 九层摘要表（演进索引） | §6 |
@@ -41,11 +41,11 @@
 
 | 事项 | 为什么本期不做 |
 | --- | --- |
-| **换数据库后端** | 项目固定 SQLite；没有第二个部署形态要支持，换库要连迁移链、结构对拍与备份链一起重做，收益不抵成本 |
+| **再引入第二个数据库后端** | v9 已收缩为 Postgres 单后端（#78）：SQLite / MySQL 的方言分支、迁移链、测试基座与部署面都已删除。再加一个后端要连迁移基线、结构对拍、测试基座与备份链一起重做，收益不抵成本 |
 | **k8s / Swarm、多副本、外置运行时表或跨进程事件总线** | 目标是单机 compose，滚动更新与探针权重还没有需要它的人；多副本要先外置 `_RUNTIMES` / `JobBus`，那是另一版的工作 |
 | **全库真类型化**（时间从 ISO 文本改真时间、布尔改原生） | 自带 API 时间契约变更与两个前端的适配，改动面与收益不成比例 |
 | **容器内 TLS、多架构镜像、开发者热重载容器** | 证书生命周期不放进取舍受限的单机 compose；开发仍走本机 `uv run uvicorn` 与两个 `npm run dev` |
-| **业务链路自动化测试 / 老数据迁移** | 容器冒烟只验「主链路可达」；SQLite 库不搬迁，旧库结构不符时按「检测到旧结构就拒绝启动」处理 |
+| **业务链路自动化测试 / 老数据迁移** | 容器冒烟只验「主链路可达」；不提供旧 SQLite 库的自动迁移：地址指向 SQLite / 旧 `DB_PATH` / 旧库文件时，启动即拒绝并给出迁移指引 |
 | **在途任务续跑或回放** | 运行态以内存为权威；重启仍中断在途任务，数据库投影只保证可读，不保证可继续执行 |
 | **重开已关闭的双后端系列** | 那批 v10 issue 是历史记录，不是架构层 |
 | **按层重写演进史** | 演进史只在 §6 留九行索引；阶段规模、界碑与失真由时间线真源独占，不在本文重复 |
@@ -72,11 +72,11 @@
 | --- | --- | --- |
 | `api/` | 解析 / 校验 / 封装 | Pydantic 模型集中在 `api/schemas/`（按领域拆成 9 个子模块，`__init__.py` 是唯一出口）；Router 各带完整 prefix，`main.py` 不叠加 |
 | `services/` | 业务编排 | 一个业务操作 = 一个事务；事务边界唯一落点 `session_scope()`，不许在 `async def` 里跨 `await` 持有 |
-| `repositories/` | 唯一碰模型与查询的地方 | 绑定 `Session` 的实例方法；返回模型对象或 frozen dataclass 投影，不返回裸 dict；不许 `import sqlite3`、不许 `.commit()` / `.rollback()`、不许 SQL 字符串字面量 |
-| `core/` | 引擎、事务、类型、时钟、限制、方言、配置 | `expire_on_commit=False` 防 `DetachedInstanceError`、`autoflush=False`（要自增 id 就自己 `flush()`）、`max_overflow=0` 躲 WAL `-shm` 竞态 |
+| `repositories/` | 唯一碰模型与查询的地方 | 绑定 `Session` 的实例方法；返回模型对象或 frozen dataclass 投影，不返回裸 dict；不许绕过 Engine 的直连（`sqlite3` / 原生 DBAPI）、不许 `.commit()` / `.rollback()`、不许 SQL 字符串字面量 |
+| `core/` | 引擎、事务、类型、时钟、限制、方言、配置 | `expire_on_commit=False` 防 `DetachedInstanceError`、`autoflush=False`（要自增 id 就自己 `flush()`）、`max_overflow=0`（池满即报错，连接数问题不推迟到服务端 `max_connections`） |
 
 - 列类型只走 `core/types.py`（`short_text(n)` / `long_text()` / `timestamp_text()`）；大段文本上限 60KB 字节，闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`。
-- Schema 只走 Alembic：手写迁移落 `backend/migrations/versions/`，入口 `core/schema.py::prepare_schema`，在 `lifespan` 里跑（重启 = 跑迁移）；autogenerate 在 SQLite 会生成 `drop_constraint(None)`，因此迁移必须手写。
+- Schema 只走 Alembic：迁移落 `backend/migrations/versions/`，入口 `core/schema.py::prepare_schema`，在 `lifespan` 里跑（重启 = 跑迁移）。v9 只有一份 Postgres 基线（`0001_baseline.py`，由 `autogenerate` 从模型生成并人工修环形外键）；**后续迁移仍要人工复核**——autogenerate 对外键 `ON DELETE`、主键 `nullable` 与表达式索引有已知的反射缺陷（见 `tests/test_schema_migration.py`）。
 - 删列 / 退役列是**单向门**（回滚靠备份、不设兼容期）；**加列不是单向门**。
 - 提示词只在后端；前端只能点名场景（`profile_key`），不能递剧本文本。
 
@@ -125,18 +125,22 @@
 
 - **两个镜像**：应用镜像（`python:3.12-slim`，多阶段，`uv sync --frozen --no-dev`，`CMD` 写死 `--workers 1`）+ 静态站点镜像（`nginx:alpine`，node 构建两个前端）。`uv sync` 与 `npm install` 缓存键不同、两进程重启语义不同；合并成单容器会让「重启 Nginx 杀掉在途任务」。
 - **单 worker 硬约束**：`_RUNTIMES` / `JobBus` / runtime 配置快照 / 固定连接池 / 技能包缓存都在进程内，多 worker 会让任务与 SSE 分属不同进程。不提供环境变量覆盖、不写 `replicas`、不引 gunicorn。
-- **三个命名卷**：数据（SQLite 库 + `-wal` / `-shm` 边车）、日志、密钥（只读 `master.key`）。命名卷是**语义问题不是配置问题**：WAL 的 `-shm` 是 mmap 共享内存，Docker Desktop for Windows 的 bind mount 不支持 SQLite 需要的文件锁语义，症状是随机 `disk I/O error` 或静默丢最近几分钟写入。宿主目录挂载 + Windows 专用覆盖文件因此被否决；实时库不能双击查看，可见性由备份产物补上。
+- **三个命名卷**：数据库（`pgdata`，Postgres 的整个 data 目录）、日志、密钥（只读 `master.key`）。命名卷是**语义问题不是配置问题**：数据库文件需要原生文件系统语义（fsync、目录项、锁），Docker Desktop for Windows 的 bind mount 经桥接层会丢掉它们，症状是随机 I/O 错误、启动失败或静默丢最近几分钟写入。宿主目录挂载 + Windows 专用覆盖文件因此被否决；实时库不能双击查看，可见性由备份产物与 `docker compose exec db psql` 补上。
 - **两个探针**：`GET /healthz` 恒 200、不查库不查配置不发外部请求（判生死）；`GET /readyz` 判「库可写」且「技能包可加载」，任一不满足返回 503 且响应体指出是哪一项（判就绪）。两者都进认证白名单，漏了会表现为「容器永远不健康」。`/health` 语义不变（恒 200、`status` 只有 `ok` / `degraded`、三项体检），它是人看的详情页，不是机器闸门；探针也不查模型供应商配置（依赖外部网络、高频会烧额度会误报）。
 - **排空**：见 §3.3。就绪探针转 503 给「摘流」留时间，新的生成请求返回明确失败而不是排进一个马上要死的队列。
-- **备份**：一条命令产出带日期的 `.db` 与同名 `.sha256`，落 `deploy/backups/`；SQLite 在线备份 `VACUUM INTO`（不能 `cp`，开了 WAL 会静默缺最近写入），自检 `integrity_check` = `ok` + 读得到 `alembic_version` + sha256。迁移之前必须先有备份，备份没做成不许起栈；删列与改类型后的回滚方式是恢复备份，不是 `git revert`。恢复演练要求整段见附录 C。
-- 启动脚本以 root 校正数据 / 日志目录属主后降权 `exec`，代码层只读；迁移只由 `lifespan` 跑一次（C-V9-4）。主密钥缺失即拒绝启动并打印生成指引，绝不自动生成。`PRDWRIGHT_MASTER_KEY_PATH` 只经 `os.environ` 读，`.env` 文件读不到，必须走 `EnvironmentFile`；`PRDWRIGHT_SKILLS_DIR` 走 `lookup_env`。日志双写 stdout + 日志卷。
+- **备份**：一条命令产出带日期的 `.dump` 与同名 `.sha256`，落 `deploy/backups/`；`pg_dump -Fc` 走数据库侧一致性快照（不能拷 data 目录：WAL 与共享内存状态会让它静默缺最近写入），自检 `pg_restore --list` 可解析 + 归档表数与源库一致 + 读得到 `alembic_version` + sha256。迁移之前必须先有备份，备份没做成不许起栈；删列与改类型后的回滚方式是恢复备份，不是 `git revert`。恢复演练要求整段见附录 C。
+- 启动脚本以 root 校正日志目录属主后降权 `exec`，代码层只读；起应用前先等数据库就绪（判据是真能执行一条 `SELECT`，不是端口通）；迁移只由 `lifespan` 跑一次（C-V9-4）。主密钥缺失即拒绝启动并打印生成指引，绝不自动生成。`PRDWRIGHT_MASTER_KEY_PATH` 只经 `os.environ` 读，`.env` 文件读不到，必须走 `EnvironmentFile`；`PRDWRIGHT_SKILLS_DIR` 走 `lookup_env`。日志双写 stdout + 日志卷。
 - 镜像 tag 用 `git describe`；CI **只构建不推送**，整栈冒烟轮询 `/readyz` 直到响应体 `status == "ready"`（只看 200 会假绿），并断言 api 的 PID 1 以非 root uid 运行。
 
-### 3.7 唯一部署后端：SQLite
+### 3.7 唯一部署后端：Postgres
 
-数据库固定是数据命名卷里的那个 SQLite 文件，编排里只有 `api` 与 `web` 两个服务，没有第三个数据库容器，也没有留给它的端口或卷。可移植性四模块边界 = `core/database.py`（连哪个库）/ `core/dialect.py`（语句）/ `core/types.py`（列声明）/ `core/schema.py`（迁移）；MySQL 相关分支是遗留代码（未验收、不再扩展），不计划引入其它后端。改动遗留 MySQL 分支时仍守三条：`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+数据库是 compose 里独立的 `db` 服务（Postgres 16），数据在 `pgdata` 命名卷里；编排是 **db / api / web 三个服务**，只发布 `80`，数据库端口不出宿主。`api` 的 `DATABASE_URL` 由编排层按 `.env` 的凭据拼出来（`db:5432`），镜像里没有可用的内置口令；`api` 用 `depends_on: db: service_healthy` 等数据库健康再起。
 
-结构对拍保留 `PRAGMA` 实现（实测 `sqlalchemy.inspect` 会丢外键 `ON DELETE`，那会让判据消失而不是变宽松）；完整方言台账与 C-D1~C-D6 在附录 A，库结构勘察实测数据在附录 B。
+**为什么不再留 SQLite / MySQL**（这是 v9 的收缩决定，票 #75~#78）：双后端意味着测试基座、迁移基线、结构对拍、就绪探针与备份链各自分叉成两份，而两份里只有一份每天被跑——另一份会静默烂掉（#76 实测：非 SQLite 引擎分支无条件挂 MySQL 的 `SET sql_mode`，Postgres 接上后第一条连接就报语法错误）。单后端的代价是「不能换库」，收益是所有东西只有一份真相。SQLite 的 `mode=ro`、`VACUUM INTO`、`BEGIN IMMEDIATE`、`PRAGMA`、单写者写锁语义，以及 MySQL 的 `ON DUPLICATE KEY`、`MEDIUMTEXT`、`utf8mb4` collation 变体，全部随之删除；旧 SQLite 库既不读取也不自动迁移。
+
+可移植性四模块边界保留 = `core/database.py`（连哪个库）/ `core/dialect.py`（语句）/ `core/types.py`（列声明）/ `core/schema.py`（迁移）。它们现在的意义不是「为换库留口」，而是「方言知识只出现在一处」：`SUPPORTED_BACKENDS` 只含 `postgresql`，非 Postgres 地址在配置阶段即拒绝并给出可操作的迁移指引；`core/dialect.py` 保留「未知方言 → `NotImplementedError`」这一层，让没适配的方言发不出语句（而不是悄悄生成一条在目标库上语法错误的 SQL）。
+
+结构对拍用 SQLAlchemy inspector 反射（`inspector_snapshot`），期望形状由 `metadata_snapshot` 按目标方言编译模型元数据；不再有 SQLite 私有接口（`sqlite_master` / `PRAGMA`）参与「判断迁移是否安全」这件事——工具和被检查对象用同一个库的私有接口，等于没有独立验证。完整方言台账与 C-D1~C-D6 在附录 A，库结构勘察实测数据在附录 B。
 
 ### 3.8 审核结论、修复与重新审核
 
@@ -180,17 +184,17 @@
 | **C-V9-6** | 主密钥缺失即拒绝启动，绝不自动生成 | 换机器时旧密文永久解不开，且当场无人发现 |
 | **C-V9-7** | `/health` 语义不变（恒 200）；探针一律用 `/healthz` / `/readyz` | 可降级状态被当成故障，容器被反复重启 |
 | **C-V9-8** | 排空窗口 30 秒；超时的在途任务落「已取消」终态，不留 `running` | 每次重启都留尸体，只能等下一条启动的 `reap_orphans` 收尾 |
-| **C-V9-9** | 备份以 SQLite 在线备份（`VACUUM INTO`）产出，产物必须有 `sha256` 且自检通过 | 「备份完成」变成一句没有证据的话 |
+| **C-V9-9** | 备份以 `pg_dump -Fc` 产出，产物必须有 `sha256`，且 `pg_restore --list` 自检（可解析、表数与源库一致、读得到 `alembic_version`）通过 | 「备份完成」变成一句没有证据的话 |
 | **C-V9-10** | CI 只构建镜像，不推送；tag 用 `git describe` | 没有凭据通道的推送会把 CI 变成不可复现的猜谜 |
 
 ### 4.2 C-D1 ~ C-D6（方言可移植性）
 
 | 契约 | 内容 | 破了会怎样 |
 | --- | --- | --- |
-| **C-D1** | `upsert` 的冲突目标只在「该表只有一个唯一约束」时等价。新增表若有两个以上唯一约束，MySQL 下 `ON DUPLICATE KEY` 会命中非目标约束 | 静默写错行。三个现有调用点都已核对：`documents` 仅 `(solution_id, kind)`、`chat_sessions` 仅 `ux_chat_sessions_thread`、`system_config` 仅主键 |
+| **C-D1** | `upsert` 必须显式给冲突目标列，且这些列必须是该表唯一的那个唯一约束。新增表若有两个以上唯一约束，`ON CONFLICT` 只能命中给出的那一组（写错目标会命中非预期约束） | 静默写错行。三个现有调用点都已核对：`documents` 仅 `(solution_id, kind)`、`chat_sessions` 仅 `ux_chat_sessions_thread`、`system_config` 仅主键 |
 | **C-D2** | 布尔列一律登记 `BOOLEAN_COLUMNS`；`is_` / `has_` 命名不作为判据 | 类型归一漏一项 → 幻影迁移。`test_schema_parity` 已在守这条 |
 | **C-D3** | 时间列只允许两种形态：业务表 26 字符无 `Z`、`app_logs.ts` 24 字符带 `Z`。**`+00:00Z` 零容忍** | 勘察已捞出 16 行脏格式；转 `DATETIME` 时解析失败 |
-| **C-D4** | 结构对拍必须在两种库上都能跑（SQLite 现状 + 将来的目标库），不接受「只在 SQLite 上成立」的实现 | D6 白做 |
+| **C-D4** | 结构对拍只能走「目标库的反射 + 按目标方言编译的期望形状」，不接受依赖某个库私有接口（SQLite `PRAGMA` / `sqlite_master`）的实现 | 工具与被检查对象用同一套私有接口，等于没有独立验证 |
 | **C-D5** | 搜索的大小写行为必须显式（`lower()` 或方言 `ILIKE`），不依赖库默认 | 换库后「搜 admin 搜不到 Admin」，被当成业务 bug 报上来 |
 | **C-D6** | 业务不变量（「至多一个 running」「额度不超过上限」）不能只靠「单写者」保证。换库前每条都必须落成唯一约束、条件更新或显式锁 | 并发下静默出现两条 `running`、额度被击穿。这类错不报错，只在对账时才发现 |
 
@@ -218,7 +222,7 @@
 | 风险 | 为什么接受 | 缓解 |
 | --- | --- | --- |
 | 单副本 → 重启必然中断在途任务 | 多副本要先外置 `_RUNTIMES` / `JobBus`，那是另一版的工作 | 排空 + `stop_grace_period` 大于 30 秒（C-V9-8） |
-| 命名卷不能直接双击查看 | 它是 SQLite 在 Windows 上不坏的**唯一**做法 | 备份产物落宿主目录，可见性由它补上 |
+| 命名卷不能直接双击查看 | 数据库文件在 Windows 的 bind mount 上会丢文件系统语义，命名卷是**唯一**不坏的做法 | 备份产物落宿主目录，可见性由它与 `docker compose exec db psql` 补上 |
 | 镜像体积（含 langchain 全家桶） | 多阶段构建已把构建工具剥掉 | 只装 `--no-dev`；必要时按协议拆镜像 |
 | 容器内时区是 UTC | 项目本来就按 UTC 存（`backend/src/backend/core/clock.py`） | 显式 `TZ=UTC`，不继承宿主机 |
 | 就绪探针不覆盖「模型供应商配置是否可用」 | 依赖外部网络，探针高频触发会烧额度、会误报 | 留给 `/health` 三项体检与人工判断 |
@@ -229,14 +233,14 @@
 | 方案 | 否决理由 |
 | --- | --- |
 | 单容器塞 Nginx + uvicorn（supervisord） | 重启 Nginx 会杀掉生成任务；两个进程的失败语义不同 |
-| 三个容器（再加一个 DB 容器） | 数据库固定是 SQLite 文件库，独立 DB 容器没有对象 |
-| 换数据库后端 | 维护者已决定固定 SQLite：没有第二个部署形态要支持，换库要连迁移链、结构对拍与备份链一起重做，收益不抵成本 |
+| 把数据库塞进 api 容器（省一个服务） | 数据库的生命周期、健康判据与数据卷都和 api 不同；塞在一起会让「api 重启」与「数据库重启」绑死，数据库也无法独立备份/恢复。v9 用独立 `db` 服务 |
+| 同时保留两个数据库后端 | v9 已收缩为 Postgres 单后端（#78）：双后端会让测试基座、迁移基线、结构对拍与备份链各分叉成两份，而只有一份每天被跑。再引入第二个后端要连这些都做一遍，收益不抵成本 |
 | Windows 专用 compose + 宿主目录挂载 | bind mount 在 Windows 上是语义问题不是配置问题；两份编排会让「哪些目录要持久化」写两遍 |
 | 技能包挂载进容器 | 让「镜像与技能包版本不一致」成为可能，而这正是就绪探针要保证的事 |
 | 用 `/health` 当 `healthcheck` | 恒 200，等于没配；技能包缺失时会把还能用的容器反复踢掉 |
 | 自动生成主密钥 | 换机时旧密文永久解不开，且没人会发现 |
 | 容器里跑两个前端 dev server / 热重载 | 开发体验不如本机；容器只承载部署形态 |
-| 系统级 `sqlite3` CLI 做备份 | 多一个「目标机上装没装」的变量；用项目自己的 venv，脚本还能顺手做自检 |
+| 用宿主机的 `pg_dump` / 数据库 CLI 做备份 | 多一个「目标机上装没装、版本对不对」的变量；脚本改用一次性 `postgres:<tag>` 容器（与服务端同主版本），还能顺手做 `pg_restore --list` 自检 |
 
 ### 5.3 风险登记
 
@@ -328,7 +332,7 @@
 | **v6** | 数据层重构（SQLModel） | 手写 `sqlite3` + 自建连接池换成 SQLModel + Alembic；环形外键靠「先空指针插行再回填」 |
 | **v7** | 部署与上线 | 单域名 + 路径前缀、单 worker、`VACUUM INTO` 备份、回滚 = 恢复备份而非反向迁移；恢复演练是验收项（附录 C） |
 | **v8** | 方言收敛与清理 | 品牌感知收进 `core/dialect.py` 一个模块；结构对拍保留 `PRAGMA`（实测否决 inspector）；删列不可逆、靠备份 |
-| **v9** | 容器化 | 两个镜像 + 三个命名卷 + 两个探针 + 一次可预期的排空；固定 SQLite 单后端，否决宿主目录挂载与多副本 |
+| **v9** | 容器化 + 收口单一后端 | 两个镜像 + 独立 `db` 服务 + 三个命名卷 + 两个探针 + 一次可预期的排空；收缩为 **Postgres 单后端**（#78：删 SQLite / MySQL 分支、迁移链只剩一份 PG 基线、旧 SQLite 库拒绝启动），否决宿主目录挂载与多副本 |
 
 ---
 
@@ -343,6 +347,10 @@
 > 正文由 v8 附录 B 原文逐字移入，仅标题降两级以适应附录层级；内部交叉引用已改指本文对应附录。
 >
 > **曾计划 MySQL、后评估 PostgreSQL，最终决定固定 SQLite。**
+>
+> ⚠️ **v9 已改判（#75~#78，票面 #78）：收缩为 Postgres 单后端。** 本附录保留 v8 期的决策原文，
+> 以追溯「方言知识为什么必须收进一个模块」的理由；其中「固定 SQLite」「本期不选目标库」
+> 这类**结论性口径已被取代**，现行口径以正文 §3.7 为准。下面 3.6 的台账行已标注 v9 的落地/删除结果。
 
 > 主题：让「这个项目跑在 SQLite 上」这件事只出现在一个文件里。
 > 本文只写**设计与契约**，不含实施记录；实测数据见本文附录 B。
@@ -389,7 +397,7 @@ D1~D4 是纯粹的"搬运"，可以按批做、每批跑全量；D5、D6 各自�
 - **不改任何列的类型**（`Text` → `String(n)`）。理由见 3.3：这会改变 SQLite 的建表语句，让结构对拍从"全绿"变成"全红"，属于换库那次的活。
 - **不引入目标库**、不写 docker-compose 的 db 服务、不搭 CI 矩阵。
 - **不做数据迁移 ETL**。`upsert` 收敛与 ETL 没有依赖关系，后者只在真换库时才有对象。
-- **不动 `engine._on_connect` 的三条 PRAGMA**。它无法被收敛——连接建立时要执行什么 SQL，只能按方言分支。它属于"永久适配点"，归在 3.2 的边界里说明，不算遗漏。
+- ~~不动 `engine._on_connect` 的三条 PRAGMA~~ **v9 已收口**：SQLite 的三条 PRAGMA 已随后端删除，连接级配置只剩 Postgres 的 `SET TIME ZONE ''UTC''`（必须显式提交）。它属于"永久适配点"，归在 3.2 的边界里说明。
 - **不改时间列的存储格式**。业务表 26 字符无 `Z`、日志表 24 字符带 `Z`，这个双轨是承重设计，本期一个字都不动。
 - **不处理语义差异**（`LIKE` 大小写、`ORDER BY` 排序、事务隔离）。它们不需要"收敛"，需要的是"到了目标库上重新审一遍"。本期只把它们列进 3.6，让换库那次的清单是完整的——**清单不完整比清单难做更危险**。
 
@@ -531,18 +539,18 @@ upsert_select(session, select_stmt, model, *, conflict_cols, update_cols=None)
 
 | 类 | 项 | 具体位置 | 处置 |
 |---|---|---|---|
-| **永久适配** | 连接级配置 | `engine._on_connect` 的三条 `PRAGMA` | 按 `dialect.name` 分支。连接建立时执行什么 SQL，只能由 SQL 决定，任何 ORM 都管不了 |
-| **永久适配** | 迁移的 batch 模式 | `migrations/env.py` 的 `render_as_batch=True` | SQLite 专用的"建新表+拷数据"。换库前必须关掉，否则每次改列都会生成无谓的中转表 |
-| **永久适配** | 连接池参数 | `max_overflow=0`、`pool_size` | 这条不变量的**理由**是 WAL `-shm` 竞态，换库后理由消失。此时要补 `pool_pre_ping=True`（防 `MySQL server has gone away`）与 `pool_recycle`（短于服务的 `wait_timeout`） |
-| **永久适配** | 类型归一表 | `BOOLEAN_COLUMNS` | `BOOLEAN`/`INTEGER` 的等价只对 SQLite 成立。换库后要重算：MySQL 是 `TINYINT(1)`，PG 是真 `BOOLEAN`。C-D2 登记的是"哪些列是布尔"，映射规则得跟着库走 |
-| **换模型** | 列长度 | 全部 `Column(Text)` | 换库那次改 `String(n)`，档位见勘察报告（3.3 已说明为何本期不做） |
-| **换模型** | 部分唯一索引 | `models.py` 的 `ux_chat_turns_job_role` 带 `sqlite_where` | 功能上可去掉：三库的唯一索引都把 NULL 视为互不相等，普通 `UNIQUE(job_id, role)` 语义等价（`chat_turn_repo` 的幂等本来就靠"先查 + SAVEPOINT + 撞索引回查"，不依赖 partial）。但它会改变索引定义 → 结构快照变红，所以归到换库那次与列长度一起改 |
-| **换模型** | `length()` 的返回语义 | `document_repo.py:181` 的 `content_length` | MySQL 返回字节、SQLite/PG 返回字符。换库那次改冗余列（写入时 Python `len()`），或按方言选函数 |
+| **永久适配** | 连接级配置 | `core/database.py::_postgresql_on_connect` | 按 `dialect.name` 分支。连接建立时执行什么 SQL，只能由 SQL 决定，任何 ORM 都管不了。**v9 只剩 `SET TIME ZONE 'UTC'`**（且必须显式提交，`SET` 是事务性的） |
+| **永久适配** | 迁移的 batch 模式 | ~~`migrations/env.py` 的 `render_as_batch=True`~~ | SQLite 专用的"建新表+拷数据"。**v9 已删**：单后端之后 `env.py` 不再按方言给 Alembic 开关 |
+| **永久适配** | 连接池参数 | `max_overflow=0`、`pool_size` | **v9 已落地**：`pool_pre_ping=True` + `pool_recycle`（短于网络中间层的掐断时间）已作为网络型后端默认；`max_overflow=0` 保留为「池满即报错」的可观测性选择 |
+| **永久适配** | 类型归一表 | `BOOLEAN_COLUMNS` | **v9 已收口**：PG 就是真 `BOOLEAN`，`BOOLEAN`/`INTEGER` 的归一已删除；白名单只保留「哪些列是布尔」这一事实，用于默认值必须为 `true`/`false` 的守卫（C-D2） |
+| **换模型** | 列长度 | 索引列 `short_text(n)`、大文本 `long_text()` | **v9 已落地**：索引列一律 `short_text(n)`（n≤768），大文本是 PG `Text`；`assert_metadata_is_portable` 在 import 时自检 |
+| **换模型** | 部分唯一索引 | `models.py` 的 `ux_chat_turns_job_role` | **v9 已落地**：只声明 `postgresql_where`；保留 partial 语义（只约束 `job_id` 非空的行），`chat_turn_repo` 的幂等不依赖它 |
+| **换模型** | `length()` 的返回语义 | `document_repo.py` 的 `content_length` | **v9 已复核**：PG 的 `length()` 返回字符，与写入侧 Python `len()` 一致，无需再改 |
 | **语义差异** | **事务隔离与并发** | 见下方专述 | **方案原稿漏项。** 换库前必须逐条审"先查后写" |
 | **语义差异** | **`LIKE` 的大小写** | `generation_job_repo.py:483`、`:514`（用户名搜索）、`log_repo.py:196`、`:211`（日志搜索） | **方案原稿漏项。** 三库行为不同，见下方专述 |
 | **语义差异** | **`ORDER BY` 的排序** | 方案列表按标题、日志按 `logger` | 排序结果受 collation 影响（`ci` 下大小写混排）。属于"看起来没坏、但顺序变了" |
-| **语义差异** | **布尔默认值字面量** | `server_default=text("1")` / `text("0")` | MySQL 可以；PG 的 `BOOLEAN` 列遇到 `DEFAULT 1` 会报类型错误，要改成 `true`/`false` 的方言表达式 |
-| 无需处理 | `sqlite_autoincrement=True` | 所有自增表 | SQLAlchemy 对非 SQLite 方言静默忽略该参数，语义由目标库的 `AUTO_INCREMENT`/`SERIAL` 承担。**不是遗漏** |
+| **语义差异** | **布尔默认值字面量** | `server_default=text("true")` / `text("false")` | **v9 已落地**：模型与基线统一写 `true`/`false`；`tests/test_schema_parity.py` 断言整份白名单都是布尔字面量（C-D2） |
+| ~~无需处理~~ **已删除** | `sqlite_autoincrement=True` | 所有自增表 | SQLAlchemy 对非 SQLite 方言静默忽略该参数，语义由 `SERIAL` 序列承担。**v9 已从模型里删除**（单后端之后它是死配置，C10 守卫禁止它回来） |
 
 ###### 事务隔离：唯一"不报错、只在并发时偶发"的一类
 
@@ -655,6 +663,10 @@ D6（snapshot 换 inspector） ← **已否决**（3.5）；原计划独立一�
 ## 附录 B：库结构勘察（prdwright.db 实测）
 
 > 正文由 v8 附录 D 原文逐字移入，仅标题降两级以适应附录层级；各表「建议」列是当时的列长度取值来源。
+>
+> ⚠️ **数据采集自 SQLite 时代的库**（`backend/scripts/schema_survey.py` 读 `prdwright.db`），
+> 保留它是为了追溯「索引列 768 字符、大文本 60KB 闸门」这些取值的依据。v9 的现行库是 Postgres，
+> 结构以 `core/models.py` 与 `migrations/versions/0001_baseline.py` 为准。
 
 - 表 14 张，共 2001 行，文件 1788 KB
 - 只读打开（`mode=ro`），不存在任何写入路径
@@ -911,7 +923,7 @@ SQLite 这边约束**已经生效**（`PRAGMA foreign_keys=ON`），所以正常
 
 1. 停掉生产实例（或换一个空闲端口）；
 2. 把一份备份恢复到临时库路径，权限设成 `prdwright`；
-3. 用**当前代码**起一个只监听回环的实例（`DB_PATH` 指向临时库）；
+3. 用**当前代码**起一个只监听回环的实例（`DATABASE_URL` 指向临时恢复出来的库）；
 4. `/health` 三项全绿、能登录、能看到方案列表、能打开一份文档的版本抽屉。
 
 没演练过的备份，在真正需要它的那天只是个文件。

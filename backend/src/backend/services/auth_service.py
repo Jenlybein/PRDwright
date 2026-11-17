@@ -3,7 +3,7 @@
 职责边界：
 - **这里负责业务判断**：密码怎么算、会话多久过期、邀请码是否合法、失败时怎么报错。
 - 数据读写一律委托 `repositories/auth_repo`，本模块**不出现 SQL**。
-- 登录凭据的表示方式被抽象成 `TokenIssuer`。当前实现是不透明 token + SQLite 会话表；
+- 登录凭据的表示方式被抽象成 `TokenIssuer`。当前实现是不透明 token + 会话表；
   将来若确实需要 JWT，只需新增一个实现并在 `get_token_issuer()` 里替换，其余代码零改动。
 """
 
@@ -167,7 +167,7 @@ class TokenIssuer(Protocol):
 
 
 class OpaqueSessionIssuer:
-    """不透明 token + SQLite 会话表。
+    """不透明 token + 会话表。
 
     选择它的理由：可以**即时吊销**（登出即删记录、改密码可强制下线、新登录踢掉旧的），
     而 JWT 在有效期内收不回来。代价是每次校验要查一次库——本项目里这是微秒级开销，

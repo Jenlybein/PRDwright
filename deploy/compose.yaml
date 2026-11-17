@@ -9,19 +9,21 @@
 # 注入 api 容器）。缺 `.env` 时 compose 会直接报「env file not found」——这是有意
 # 的：宁可起不来，也不要拿默认邀请码 123456 悄悄跑起来。
 #
-# ## 只开一个端口
+# ## 三个进程：db / api / web
 #
-# 宿主机只发布 web 的 80；api 的 8000 只 `expose`，在宿主机上不可达，只能被 web
-# 通过内部网络访问（v7 的「后端只听回环」在容器里的等价形式）。
+# 数据库是**独立的服务**（Postgres 16），不再是「api 容器里的一个文件」：
+# - api 的 `DATABASE_URL` 由本文件按 `.env` 里的凭据拼出来（`db:5432`），镜像里不再
+#   内置可用的默认地址（内置地址没有口令，直连会被拒——见 deploy/docker/api.Dockerfile）；
+# - api 用 `depends_on: db: service_healthy` 等数据库**健康**再起，而不是只等「容器被创建」；
+# - `pgdata` 命名卷保存数据库文件。Docker 负责建库目录与权限，不需要 api 侧再挂数据卷。
 #
-# ## 为什么全用命名卷、不挂宿主目录（这不是配置问题，是语义问题）
+# ## 为什么全用命名卷、不挂宿主目录
 #
-# 容器里的 SQLite 需要的不是「一个能读写的目录」，而是**文件锁与共享内存映射**：
-# WAL 模式要在库文件旁建 `-wal` / `-shm`，而 `-shm` 是 mmap 的共享内存。
-# Windows 上的宿主目录挂载走 grpc-fuse / 9p，不支持这两样——症状不是「挂载错了」，
-# 而是随机 `disk I/O error`、`database is locked`，或者容器重启后看见一个
-# 「少了最近几分钟写入」的库。命名卷在虚拟机内部是原生文件系统，语义与裸机一致。
-# 代价是实时库不能双击查看，这份可见性由备份产物（deploy/backups/）补上。
+# 数据库文件的读写是**原生文件语义**（fsync、目录项、锁）。Windows 上的宿主目录挂载走
+# grpc-fuse / 9p，不支持这些语义——症状不是「挂载错了」，而是随机 I/O 错误、启动失败，
+# 或者容器重启后看见一个「少了最近几分钟写入」的库。命名卷在虚拟机内部是原生文件系统，
+# 语义与裸机一致。代价是实时库文件不能双击查看，这份可见性由备份产物
+# （`deploy/backups/`，见 §6）补上。
 #
 # 因为持久化全在卷里，「哪些目录要持久化、怎么挂」这份知识只写一次，
 # 所以**不需要 Windows 专用 override 文件**，两个平台是同一条命令。
@@ -34,11 +36,41 @@
 # 8000 直接暴露在宿主上，也会让上面的服务名失效。
 # ---------------------------------------------------------------------------
 
-# 项目名钉死：卷名因此稳定为 prdwright_data / prdwright_logs / prdwright_secrets，
-# 与目录名无关。README 里的主密钥生成命令、#18 的备份/恢复都按这个卷名写。
+# 项目名钉死：卷名因此稳定为 prdwright_pgdata / prdwright_logs / prdwright_secrets，
+# 与目录名无关。README 里的主密钥生成命令、备份/恢复流程都按这个卷名写。
 name: prdwright
 
 services:
+  # =========================================================================
+  # 数据库：Postgres 16（本项目唯一支持的数据库）
+  # =========================================================================
+  db:
+    # 镜像钉到主版本：备份脚本用同一主版本的 `pg_dump`（版本不一致时 pg_dump 会拒绝）。
+    image: postgres:${PRDWRIGHT_PG_TAG:-16}
+    environment:
+      # 与 compose 是同一个项目名。库名与用户同时决定「卷里有没有已初始化的库」：
+      # 改了用户名/密码之后，**已存在的 pgdata 卷不会被重初始化**（Postgres 只在
+      # 空卷上跑 initdb），这时旧口令仍然生效——见 README §6.5。
+      POSTGRES_USER: ${POSTGRES_USER:-prdwright}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须在 deploy/.env 里设置}"
+      POSTGRES_DB: ${POSTGRES_DB:-prdwright}
+      TZ: UTC
+      # 只接受本地 docker 网络内的连接（端口不 publish，宿主上不可达）
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # 用 pg_isready 而不是 `pg_isready` 的空参形态：它需要一个真实存在的库名，
+      # 否则「server 起来了但库还没建好」也会被算成健康，api 会在迁移时撞空库。
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-prdwright} -d ${POSTGRES_DB:-prdwright} -h 127.0.0.1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # initdb 首次运行要几十秒；给足时间再判不健康。
+      start_period: 20s
+    restart: unless-stopped
+
   # =========================================================================
   # 应用（API + 技能包）：唯一的业务进程，单 worker
   # =========================================================================
@@ -54,8 +86,7 @@ services:
         IMAGE_REF: prdwright-api:${PRDWRIGHT_IMAGE_TAG:-local}
 
     # `.env` 里的变量原样进容器（后端认得的那些）。镜像 ENV 已有部署默认值
-    # （DATABASE_URL / LOG_DIR / PRDWRIGHT_MASTER_KEY_PATH / PRDWRIGHT_SKILLS_*），
-    # 这里不重复声明；`.env.example` 把那些默认值写成注释，供核对。
+    # （LOG_DIR / PRDWRIGHT_MASTER_KEY_PATH / PRDWRIGHT_SKILLS_*），这里不重复声明。
     env_file:
       - .env
 
@@ -63,10 +94,19 @@ services:
       # 容器内时区固定 UTC，不继承宿主机：项目本来就按 UTC 存时间，
       # 继承宿主时区只会让日志与库里的时间差 8 小时。
       TZ: UTC
+      # 数据库地址由编排层拼：凭据只存在于 `.env` / compose，镜像里的默认值不含口令。
+      # 走服务名 `db`（同一网络内由 Docker 内嵌 DNS 解析）。
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-prdwright}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须在 deploy/.env 里设置}@db:5432/${POSTGRES_DB:-prdwright}"
+
+    depends_on:
+      # 不是「启动顺序」，是「等它健康」：api 的 lifespan 第一件事就是跑迁移，
+      # 数据库还没接受连接时它会在启动期报连接错误并退出，进而进重启循环。
+      # 用 service_healthy 之后，api 拿到的一定是一个能正常接命令的 Postgres。
+      db:
+        condition: service_healthy
 
     volumes:
-      # 三个命名卷 = 三层持久化。只有密钥卷只读——应用永远不该改主密钥。
-      - data:/var/lib/prdwright
+      # 两个命名卷 = 两层持久化。只有密钥卷只读——应用永远不该改主密钥。
       - logs:/var/log/prdwright
       - secrets:/secrets:ro
 
@@ -75,7 +115,7 @@ services:
       - "8000"
 
     # 就绪探针，不是生死探针：它查「库可写 + 技能包可加载」。
-    # 用 /healthz 做 healthcheck 等于没配（恒 200，库坏了也说健康）。
+    # 用 `/healthz` 做 healthcheck 等于没配（恒 200，库坏了也说健康）。
     # 探针失败不会让 docker 重启容器（restart 策略只管进程退出），
     # 这正合适：库坏了重启治不好，只会反复杀掉还能看日志的进程。
     healthcheck:
@@ -87,8 +127,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
-      # 首次启动要跑迁移（lifespan 里一次），给足冷启动时间再判不健康。
-      start_period: 30s
+      # 首次启动要等 db 健康 + 跑迁移（lifespan 里一次），给足冷启动时间再判不健康。
+      start_period: 40s
 
     # 必须**大于**排空窗口（PRDWRIGHT_DRAIN_TIMEOUT，默认 30 秒）。
     # 排空走完就自然退出；只有排空卡住时才会用到这里剩下的 15 秒余量。
@@ -119,22 +159,19 @@ services:
 
     restart: unless-stopped
 
-  # =========================================================================
-  # 本项目固定使用 SQLite：没有独立的数据库服务
-  # =========================================================================
-  # 库就是 data 卷里的那个文件（含 WAL 的 -wal / -shm 边车）。没有第二个服务、
-  # 也没有第二个端口——这不是「暂时没加」，而是本项目的数据库形态已经定死。
-
 volumes:
-  # SQLite 库（含 WAL 的 -wal / -shm 边车）。丢了 = 业务数据全丢。
-  data:
+  # 数据库文件（Postgres 的整个 data 目录）。丢了 = 业务数据全丢。
+  # 注意：不是 v9 之前那个 `prdwright_data`（SQLite 库文件的卷）——旧卷既不挂载、
+  # 也不会被新链路读取，只作历史归档，见 README §6.5。
+  pgdata:
   # 轮转日志文件。丢了只丢历史日志（app_logs 表里还有一份派生数据）。
   logs:
   # 只读挂进 api 的 master.key。丢了 = 库里所有模型密钥都解不开。
   secrets:
 
 networks:
-  # 显式命名默认网络：容器内的服务名解析（api → 容器 IP）由 Docker 内嵌 DNS
-  # 提供，而内嵌 DNS 只在用户自定义网络上生效。名字钉死，方便排查。
+  # 显式命名默认网络：容器内的服务名解析（db → 容器 IP）由 Docker 内嵌 DNS
+  # 提供，而内嵌 DNS 只在用户自定义网络上生效。名字钉死，方便排查
+  # （备份脚本也是按这个网络名跑 pg_dump 的）。
   default:
     name: prdwright_net

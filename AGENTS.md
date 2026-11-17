@@ -8,7 +8,7 @@
 
 | 目录 | 技术栈 | 端口 | 说明 |
 | --- | --- | --- | --- |
-| `backend/` | Python 3.12 · uv · FastAPI · SQLModel · SQLite/MySQL | 8000 | 全部业务逻辑、鉴权、持久化、LLM 管线 |
+| `backend/` | Python 3.12 · uv · FastAPI · SQLModel · Postgres | 8000 | 全部业务逻辑、鉴权、持久化、LLM 管线 |
 | `frontend/` | Vue 3 · Vite | 5173 | 用户端 |
 | `frontend_admin/` | Vue 3 · Vite | 5174 | 管理端（与用户端零共享，`npm install` 需 `--legacy-peer-deps`） |
 | `skills/` | —— | —— | 生成管线的技能包（`prd-generator` 等），是管线知识的唯一来源 |

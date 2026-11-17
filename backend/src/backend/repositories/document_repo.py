@@ -560,8 +560,7 @@ class DocumentRepository:
         写在 SELECT 里，因此**归属不通过时一行都插不进去**，不需要「先查一次再写」
         这种两次往返、留下窗口的写法。随后再查一次既拿模型对象又当归属校验的第二道闸。
 
-        冲突处理走方言适配层（v8）：调用方只说「冲突就跳过」，
-        不关心是 `ON CONFLICT DO NOTHING` 还是 MySQL 的主键 no-op 更新。
+        冲突处理走方言适配层（v8）：调用方只说「冲突就跳过」，不写方言语法。
         """
         upsert_select(
             self.session,

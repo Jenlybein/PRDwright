@@ -549,7 +549,7 @@ def create_provider(actor: User, payload: dict[str, Any]) -> dict[str, Any]:
     # （「先查再写」有竞态，两个并发请求都能查到「不存在」）。
     #
     # ⚠️ 冲突现在是 `sqlalchemy.exc.IntegrityError`（SQLAlchemy 对 DBAPI 异常的包装），
-    # 不再是裸的 `sqlite3.IntegrityError`——照旧捕后者会漏掉，表现是「偶发 500」。
+    # 冲突被 SQLAlchemy 包装成 `sqlalchemy.exc.IntegrityError`，不再是裸的 DBAPI 异常——\n    # 照旧捕裸异常会漏掉，表现是「偶发 500」。
     provider_id = ""
     for _ in range(_ID_ATTEMPTS):
         candidate = new_config_id()

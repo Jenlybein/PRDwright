@@ -20,7 +20,7 @@ help:
 	@echo "make shell    进 api 容器"
 	@echo "make volumes  列出本项目的命名卷"
 	@echo "make config   打印展开后的完整编排"
-	@echo "make backup   备份数据库（VACUUM INTO + sha256，产物落 backups/）"
+	@echo "make backup   备份数据库（pg_dump + 自检 + sha256，产物落 backups/）"
 
 build:
 	$(COMPOSE) build
@@ -56,8 +56,9 @@ volumes:
 config:
 	$(COMPOSE) config
 
-# 备份：产出 backups/prdwright-<日期>.db 与同名 .sha256（VACUUM INTO + 自检）。
-# 脚本本体跑在宿主的项目 uv 环境里；库的读写发生在一次性容器里，
-# 所以栈起着或停着都能备份。前置条件是 api 镜像已构建（make build 或 make up）。
+# 备份：产出 backups/prdwright-<日期>.dump 与同名 .sha256（pg_dump -Fc + 自检）。
+# 脚本本体跑在宿主的项目 uv 环境里；pg_dump 发生在一次性 postgres 容器里（走
+# prdwright_net 连 db 服务），所以栈起着或停着都能备份。前置条件是 api 镜像已构建
+# （make build 或 make up），以及本机有与服务端同主版本的 postgres 镜像。
 backup:
 	uv run --project ../backend python backup.py

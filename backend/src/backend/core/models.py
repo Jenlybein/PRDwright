@@ -1,4 +1,4 @@
-"""数据层模型（v6）：14 张表的**唯一结构真源**。
+"""数据层模型（v9）：14 张表的**唯一结构真源**。
 
 ## 这个文件是什么
 
@@ -7,18 +7,20 @@
 
 ## 四条必须遵守的写法（每一条都有对应的静默失败模式）
 
-### ① 字符串列必须显式 `Column(Text)`
+### ① 字符串列必须显式 `Column(...)`，且不容许裸 `str`
 
-SQLModel 把 `str` 映射成 **`VARCHAR`**，而现有库是 **`TEXT`**。两者在 SQLite 里亲和性相同、
-行为一致，但 `PRAGMA table_info` 报的类型名不同 → 结构对拍全表报「漂移」，
-Alembic autogenerate 会想 ALTER 每一列。
-**所以本文件里没有裸的 `str` 字段，全部是 `sa_column=Column(Text, ...)`。**
+SQLModel 把裸 `str` 映射成**没有长度**的 `VARCHAR`。它本身能建表，但「哪些列有长度、
+哪些列是大文本」这件事必须显式声明：索引列要有界（`short_text(n)`），大文本用
+`long_text()`。结构对拍按列类型比较，裸 `str` 会让「模型以为的」与「迁移建出来的」
+悄悄分叉。**所以本文件里没有裸的 `str` 字段。**
 
-### ② 每张有自增主键的表都要 `sqlite_autoincrement`
+### ② 自增主键在 Postgres 上由序列提供，不要声明 SQLite 的表选项
 
-SQLModel 的 `id: int | None = Field(default=None, primary_key=True)` 生成的是
-`INTEGER NOT NULL PRIMARY KEY`，**没有 `AUTOINCREMENT`**。少了它，SQLite 会复用已被删除的最大 rowid。
+SQLModel 的 `id: int | None = Field(default=None, primary_key=True)` 在 Postgres 上
+映射成 `SERIAL`/identity 列：序列只增不回退，删掉最大 id 也不会复用它。
 `app_logs` / `admin_audit_log` 的 id 被当作翻页游标用，复用会让「下一页」看见已删除的行。
+（v9 之前的 `sqlite_autoincrement` 表选项已随 SQLite 后端一起删除——它只在 SQLite 上
+有意义，在 Postgres 上是被静默忽略的死配置。）
 
 ### ③ 列名叫 `metadata` 的那个必须改属性名
 
@@ -35,20 +37,19 @@ ISO 8601 的字典序等于时间序，这是承重设计。换 `DateTime` 会�
 
 ## 关于索引里的 `DESC`
 
-现有库有 4 个索引写成 `(a, b DESC)`。模型里**不带 `DESC`**，理由有两条：
+模型里的索引**不带 `DESC`**，理由有两条：
 
-1. SQLite 可以**反向遍历** B 树，`INDEX(a, b)` 对 `ORDER BY b DESC` 同样有效——
-   `DESC` 在 SQLite 里只是写法，不是行为；
-2. 带 `DESC` 的索引在 SQLAlchemy 里是「表达式索引」，**SQLite 方言无法反射它**
-   → `alembic autogenerate` 会**静默跳过**，基线里就少 4 个索引（第一次生成基线时实测：
-   16 个索引只出来了 12 个）。这种缺失不报错，只是查询慢，属于最难发现的一类退化。
+1. Postgres 可以**反向扫描** B-tree（`Index Scan Backward`），`INDEX(a, b)` 对
+   `ORDER BY b DESC` 同样有效——`DESC` 只是写法，不是行为；
+2. 带 `DESC` 的索引在 SQLAlchemy 里是「表达式索引」，反射出来与模型声明不是同一份
+   形状 → 结构对拍会出现幻影差异，基线里还可能少几个索引。这种缺失不报错，
+   只是查询慢，属于最难发现的一类退化。
 
 ## 关于布尔列
 
-`bool` 会映射成 `BOOLEAN`，现有库是 `INTEGER`。SQLite 两者都存 0/1、读回都是 Python `bool`，
-所以行为零变化；类型名差异由两份白名单归一：
-`tests/support/schema_snapshot.py::BOOLEAN_COLUMNS` 与 `migrations/env.py` 的 `compare_type`。
-**新增布尔列必须在两处同时登记**，否则 `alembic check` 会报幻影迁移。
+`bool` 映射成 Postgres 的真 `BOOLEAN`；默认值必须是 `true` / `false` 字面量，
+不能写 `0` / `1`（Postgres 的 `BOOLEAN` 不接受整数默认值）。`BOOLEAN_COLUMNS` 是
+布尔列的登记清单，守卫用例靠它检查「新增布尔列必须同时登记、且默认值写成布尔字面量」。
 """
 
 from __future__ import annotations
@@ -64,12 +65,11 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects import mysql
 from sqlmodel import Field, SQLModel
 
 # 列类型策略统一走 `core/types.py`（v8）。本文件**不给索引列声明裸 Text**：
-# 索引列一旦没有长度上限，MySQL 建索引会失败，而 SQLite 上完全正常——那种错误只有
-# 到换库那天才暴露，所以由 `assert_metadata_is_portable` 在 import 时统一拦。
+# 索引列一旦没有长度上限，B-tree 条目会在数据量上来之后超限——那种错误只有到
+# 生产迁移才暴露，所以由 `assert_metadata_is_portable` 在 import 时统一拦。
 from backend.core.types import (
     assert_metadata_is_portable,
     long_text,
@@ -77,22 +77,18 @@ from backend.core.types import (
     timestamp_text,
 )
 
-# 大段文本（SQLite TEXT / MySQL MEDIUMTEXT）。容量不是业务约束——60KB 由
-# `core/limits.py` 在写入前拦。
+# 大段文本（Postgres TEXT）。容量不是业务约束——60KB 由 `core/limits.py` 在写入前拦。
 _BIG_TEXT = long_text()
 
-# 用户名：**大小写敏感**的唯一键（v8）。
+# 用户名：大小写敏感的唯一键。
 #
-# 不能写 `mysql_collate=...`（SQLAlchemy 2.0 已移除），也不能用
-# `String(32, collation=...)`——类型级 collation 会无条件写进 DDL，SQLite 会收到
-# `VARCHAR(32) COLLATE utf8mb4_0900_as_cs` 并报 "no such collation"。
-# `with_variant` 是唯一只影响目标方言的写法。
+# Postgres 的 `VARCHAR` 默认就是大小写敏感的比较（不依赖 collation），所以这里
+# 只需 `short_text(32)`（= `VARCHAR(32)`），不再需要 `with_variant`（#78 删掉了
+# MySQL 的 `utf8mb4_0900_as_cs` 变体，那个分支已随 MySQL 后端一起移除）。
 #
 # 长度 32 与 `auth_service._USERNAME_MAX`（=32）对齐：校验与列宽必须是同一个数，
 # 否则会出现「能注册但存不进去」或「列比校验宽一倍」这类不一致。
-_USERNAME_TEXT = short_text(32).with_variant(
-    mysql.VARCHAR(32, collation="utf8mb4_0900_as_cs"), "mysql"
-)
+_USERNAME_TEXT = short_text(32)
 
 # ---------------------------------------------------------------------------
 # 用户与会话
@@ -103,7 +99,6 @@ class User(SQLModel, table=True):
     """用户。密码只存 scrypt 哈希与独立 salt，绝不存明文。"""
 
     __tablename__ = "users"
-    __table_args__ = {"sqlite_autoincrement": True}
 
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(
@@ -139,7 +134,7 @@ class AuthSession(SQLModel, table=True):
         Index("idx_auth_sessions_expires", "expires_at"),
     )
 
-    # 主键是 token 哈希本身，不是自增 id → 不能声明 sqlite_autoincrement
+    # 主键是 token 哈希本身，不是自增 id → 没有序列（也不需要任何自增表选项）
     token_hash: str = Field(sa_column=Column(short_text(64), primary_key=True))
     user_id: int = Field(
         sa_column=Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -178,7 +173,6 @@ class LoginFailure(SQLModel, table=True):
         Index("idx_login_failures_user", "username", "created_at"),
         # 清理按时间扫全表（无用户名条件），单独一个索引避免退化成全表扫描
         Index("idx_login_failures_created", "created_at"),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -207,7 +201,6 @@ class Solution(SQLModel, table=True):
         Index("idx_solutions_owner_content", "user_id", "content_updated_at"),
         # 「最近打开」这类查询用的旧索引，保留
         Index("idx_solutions_owner", "user_id", "updated_at"),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -280,7 +273,6 @@ class Document(SQLModel, table=True):
     __table_args__ = (
         # ⚠️ upsert 的冲突目标，不能省：document_repo 靠它做「有就跳过、没有才插」
         UniqueConstraint("solution_id", "kind"),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -304,7 +296,6 @@ class DocumentVersion(SQLModel, table=True):
     __tablename__ = "document_versions"
     __table_args__ = (
         UniqueConstraint("document_id", "version_no"),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -312,10 +303,10 @@ class DocumentVersion(SQLModel, table=True):
         sa_column=Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     )
     version_no: int = Field(sa_column=Column(Integer, nullable=False))
-    # 一整篇 PRD：勘察实测 11,566 字 = 24,534 字节，已占 MySQL `TEXT` 的 37%。
-    # ⚠️ 不设 `server_default`：MySQL 的 TEXT/MEDIUMTEXT 不接受字面量默认值
-    # （会报 can't have a default value）。ORM 插入总是显式带值，裸 SQL 省略该列
-    # 应该失败——那是显式错误，比静默的空串好。
+    # 一整篇 PRD：勘察实测 11,566 字 = 24,534 字节。
+    # ⚠️ 不设 `server_default`：大文本默认空串会让「裸 SQL 省略这一列」静默写进空串，
+    # 而空串与「没写」不可区分。ORM 插入总是显式带值，裸 SQL 省略该列应该失败——
+    # 那是显式错误，比静默的空串好。
     content: str = Field(default="", sa_column=Column(_BIG_TEXT, nullable=False))
     content_sha: str = Field(
         default="", sa_column=Column(Text, nullable=False)
@@ -346,7 +337,7 @@ class DocumentVersion(SQLModel, table=True):
     # ⚠️ 声明顺序 = 物理列序：迁移 0006 追加 `review`、0007 追加 `review_failed_at`，
     # 所以这两列都必须在老列之后、且保持这个先后。模型这边换个位置，`create_all`
     # 建出来的库列序就与迁移建的不同，`test_schema_migration` 的整份快照对比会转红。
-    # ⚠️ 不设 `server_default`：MySQL 的 TEXT 不接受字面量默认值。
+    # ⚠️ 不设 `server_default`：大文本默认值会让「省略该列」静默写入空串。
     review: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     # 「这一版上一次审核试过但没跑成」的时间（UTC ISO 8601 文本）；NULL = 没有失败记录。
     # 生成时的审核失败与修复后的重审失败写同一列（#61）：两者都是「这份正文被审过、
@@ -379,7 +370,6 @@ class GenerationJob(SQLModel, table=True):
         Index("idx_generation_jobs_recover", "status", "owner_id", "kind"),
         # 运行中回答「这次用的是哪套技能包」：身份短串可索引，长度 ≤768
         Index("idx_generation_jobs_skill_manifest", "skill_manifest"),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -399,8 +389,8 @@ class GenerationJob(SQLModel, table=True):
     )
     phase: str = Field(default="", sa_column=Column(Text, nullable=False))
     # 进程重启后的兜底恢复用；快照读内存运行时而非本列。
-    # 勘察实测 26,957 字 = 36,919 字节：已占 MySQL `TEXT` 的 56%，必须 MEDIUMTEXT。
-    # ⚠️ 不设 server_default：MEDIUMTEXT 在 MySQL 下不接受字面量默认值。
+    # 勘察实测 26,957 字 = 36,919 字节：Postgres 的 `TEXT` 无长度上限，不必挑容量档位。
+    # ⚠️ 不设 `server_default`：大文本默认值会让「省略该列」静默写入空串。
     draft_content: str = Field(default="", sa_column=Column(_BIG_TEXT, nullable=False))
     # 分章完成清单（JSON 数组），实测 15,777 字节，贴着 16KB 线，留一档余量
     completed_sections: str = Field(
@@ -445,7 +435,7 @@ class GenerationJob(SQLModel, table=True):
     updated_at: str = Field(sa_column=Column(timestamp_text(), nullable=False))
     # --- 任务单里不可变数据的完整投影（票 #34）---
     # 建任务那一刻一次写全，之后任何运行态写入路径都不碰这四列。
-    # ⚠️ 不设 server_default：MEDIUMTEXT 在遗留 MySQL 上不接受字面量默认值
+    # ⚠️ 不设 server_default：大文本默认值会让「省略该列」静默写入空串
     # （`assert_metadata_is_portable` 会在 import 时自检）。
     request_params: str = Field(default="{}", sa_column=Column(_BIG_TEXT, nullable=False))
     config_snapshot: str = Field(default="{}", sa_column=Column(_BIG_TEXT, nullable=False))
@@ -470,7 +460,6 @@ class ChatSession(SQLModel, table=True):
     __tablename__ = "chat_sessions"
     __table_args__ = (
         Index("ux_chat_sessions_thread", "solution_id", "stage", unique=True),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -493,10 +482,10 @@ class ChatTurn(SQLModel, table=True):
     ⚠️ `ux_chat_turns_job_role` 是**部分唯一索引**（只约束 `job_id` 非空的行），
     幂等写轮次靠它：同一个 job 的同一角色只允许一条。
 
-    部分条件要**两个方言都声明**（#76）：`sqlite_where` 在 Postgres 上是被静默
-    忽略的——不是报错，而是建成一条全量唯一索引：SQLite 那份语义还在、PG 那份
-    悄悄丢了 WHERE，两边的结构快照也对不上。非空条件本身在两边同义（NULL 在唯一
-    索引里互不冲突），所以写同一句 `text("job_id IS NOT NULL")` 就够。
+    部分条件只声明 `postgresql_where`（#78）：SQLAlchemy 的 `Index` 不把 `sqlite_where`
+    传给 Postgres，若只写它，PG 上会被**静默忽略**——不是报错，而是建成一条全量唯一
+    索引（语义少了 WHERE 那一层）。非空条件在唯一索引里同义（NULL 互不冲突），
+    所以写同一句 `text("job_id IS NOT NULL")` 就够。
     """
 
     __tablename__ = "chat_turns"
@@ -508,10 +497,8 @@ class ChatTurn(SQLModel, table=True):
             "job_id",
             "role",
             unique=True,
-            sqlite_where=text("job_id IS NOT NULL"),
             postgresql_where=text("job_id IS NOT NULL"),
         ),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -564,7 +551,6 @@ class AppLog(SQLModel, table=True):
         Index("idx_app_logs_ts", "ts"),
         Index("idx_app_logs_level", "level", "ts"),
         Index("idx_app_logs_request", "request_id"),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -590,7 +576,6 @@ class AdminAuditLog(SQLModel, table=True):
     __table_args__ = (
         Index("idx_admin_audit_ts", "ts"),
         Index("idx_admin_audit_actor", "actor_id", "ts"),
-        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -683,19 +668,11 @@ class SystemConfig(SQLModel, table=True):
 
 
 # 布尔列白名单。这不是「一份可以偷懒的清单」，而是一道**显式闸门**：
-# `bool` 在 SQLite 里声明为 `BOOLEAN`，现有库是 `INTEGER`。两者行为一致（都存 0/1），
-# 但类型名不同会让 `alembic check` 想 ALTER 每一列（幻影迁移）。
-# 处置方式是让 alembic 的 `compare_type` 对这**些**列把 BOOLEAN/INTEGER 视为等价——
-# 所以新增布尔列必须在这里登记，否则会冒出幻影迁移。
+# 布尔列的 `server_default` 必须写 `true` / `false`，不能写 `0` / `1`——Postgres
+# 的 `BOOLEAN` 不接受整数默认值，空库跑基线的第一条建表语句就会报
+# 「column is of type boolean but default expression is of type integer」。
 # `tests/test_schema_parity.py` 断言「从模型推导出的布尔列集合 == 这份清单」，
 # 两头对不上就转红（既防漏登记，也防清单过期）。
-#
-# 顺带一条**跨库硬约束**（#76）：布尔列的 `server_default` 必须写 `true` / `false`，
-# 不能写 `0` / `1`。SQLite 把 BOOLEAN 当整数、`DEFAULT 0` 毫无问题——所以这个坑在
-# SQLite 上完全看不出来；而 Postgres 的 `BOOLEAN` 不接受整数默认值，
-# 空库跑 `0001` 的第一条建表语句就会报
-# 「column is of type boolean but default expression is of type integer」。
-# `true` / `false` 在两边都是合法布尔字面量，于是迁移不需要按方言分支。
 BOOLEAN_COLUMNS: frozenset[tuple[str, str]] = frozenset(
     {
         ("users", "is_active"),
@@ -710,7 +687,8 @@ BOOLEAN_COLUMNS: frozenset[tuple[str, str]] = frozenset(
 # 供 alembic 与测试引用的全部表模型（顺序与建表无关，SQLAlchemy 自己按外键排序）
 #
 # ⚠️ 自检放在**最后**：所有表都注册进 metadata 之后才能扫。
-# 它拦的是"在 SQLite 上完全正常、到 MySQL 才炸"的两类写法，让错误发生在 import 时。
+# 它拦的是「索引列没有长度上限 / 大文本带 server_default」这两类写法，让错误发生在
+# import 时。
 assert_metadata_is_portable(SQLModel.metadata)
 
 __all__ = [

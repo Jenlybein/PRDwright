@@ -1,4 +1,4 @@
-"""迁移编排守卫（v6 / T16.4；#77 起跑在 Postgres 上）。
+"""迁移编排守卫（v9 / #78 起只有一份 Postgres 基线）。
 
 四条用例，守的是**升级安全性**，不是功能正确性：
 
@@ -9,14 +9,16 @@
 | 结构不符 → 拒绝启动 | 差异被永久藏起来，之后某个列「消失」 |
 | 基线库 == 模型库（语义快照） | 模型改了却忘了写迁移，只在某些部署上炸 |
 
-> **旧版本库（v20 之前）不再支持自动升级。** `PRAGMA user_version` 的 20 步链已在
-> v6.1 删除；那种库现在会撞上第三条用例（拒绝启动），并在错误信息里被告知该怎么做。
+> **旧的 SQLite 库不再支持。** `PRAGMA user_version` 的 20 步链已在 v6.1 删除，
+> v9 起连 SQLite 后端本身都已删除（`core/database.py` 在配置阶段就拒绝它的地址）；
+> 那种库现在会撞上第三条用例（拒绝启动），并在错误信息里被告知该怎么做。
 > 这是有意的：宁可起不来，也不要「悄悄 stamp 成最新、把少掉的结构永久藏起来」。
 
-⚠️ #77 把这几条从「临时 SQLite 文件」搬到「临时 Postgres 库」时**只换了手段**：
+这几条从「临时 SQLite 文件」搬到「临时 Postgres 库」时**只换了手段**：
 建库走 `dbsupport.empty_database()`（一个真正空着的库），读结构走
-`schema_snapshot.inspector_snapshot(engine)`（SQLAlchemy 反射，任何方言通用）。
+`schema_snapshot.inspector_snapshot(engine)`（SQLAlchemy 反射）。
 被验的性质一条没变：到最新、stamp 零 DDL、漂移即拒启动、基线 == 模型。
+另外 #78 把 0001~0007 合并成一条基线：空库只需要跑**一条**迁移。
 """
 
 from __future__ import annotations
@@ -114,7 +116,7 @@ def test_mismatched_db_refuses_to_start(isolated_db):  # noqa: ARG001
         prepare_schema(_case_engine())
 
     assert "users.legacy_extra" in str(excinfo.value), "差异明细里必须指出是哪一列"
-    assert "v20" in str(excinfo.value), "必须告诉人这是旧库、以及该怎么做"
+    assert "SQLite" in str(excinfo.value), "必须告诉人这是旧库、以及该怎么做"
 
 
 def test_baseline_produces_exactly_the_model_schema():
@@ -155,6 +157,7 @@ def test_migration_url_falls_back_to_application_configuration(monkeypatch):
     以前 `migrations/env.py` 的最后一级写死 `sqlite+pysqlite:///{default_db_file()}`：
     CLI 不带 `-x url=` 时，配了 `DATABASE_URL` 的 Postgres 部署会被迁移到
     **另一个 SQLite 文件**上（「迁移改了 A 库、服务读的是 B 库」这类最难查的故障）。
+    现在只有 `DATABASE_URL` 一个入口，所以不存在第二份真相。
     """
     from backend.core.config import get_settings
     from backend.core.schema import migration_url
@@ -167,13 +170,13 @@ def test_migration_url_falls_back_to_application_configuration(monkeypatch):
         migration_url(override=None, configured=None)
         == "postgresql+psycopg://u:p@127.0.0.1:5432/prdwright"
     )
-    # `-x url=` 仍然第一优先（调试 / 对拍）
-    assert migration_url(override="sqlite+pysqlite:////tmp/probe.db", configured=None) == (
-        "sqlite+pysqlite:////tmp/probe.db"
+    # `-x url=` 仍然第一优先（调试 / 对拍；这里不校验后端，它只是把地址交给 Alembic）
+    assert migration_url(override="postgresql+psycopg://u:p@127.0.0.1:5433/probe", configured=None) == (
+        "postgresql+psycopg://u:p@127.0.0.1:5433/probe"
     )
     # 程序化调用传进来的地址第二优先
-    assert migration_url(override=None, configured="mysql+pymysql://u:p@h/db") == (
-        "mysql+pymysql://u:p@h/db"
+    assert migration_url(override=None, configured="postgresql+psycopg://u:p@h/prdwright") == (
+        "postgresql+psycopg://u:p@h/prdwright"
     )
     # `alembic.ini` 里的占位符视为「没配置」
     assert migration_url(override=None, configured="driver://user:pass@localhost/dbname") == (

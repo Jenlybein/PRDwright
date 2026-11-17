@@ -28,27 +28,27 @@
 - `api/` 只解析 / 校验 / 封装 → `services/` 业务 → `repositories/`（唯一碰模型与查询的地方）。
 - Pydantic 模型集中 `api/schemas/`（按领域拆成 9 个子模块，`__init__.py` 是唯一出口），被引用的模型必须先定义；Router 各自带完整 prefix，`main.py` 不叠加。
 - 仓储返回模型对象或 frozen dataclass 投影，不返回裸 dict。
-- 仓库是绑定 `Session` 的实例方法：不许 `import sqlite3`、不许 `.commit()` / `.rollback()`、不许 SQL 字符串字面量（守卫 C1/C2/C3）。
+- 仓库是绑定 `Session` 的实例方法：不许绕过 Engine 的直连（`sqlite3` / 原生 DBAPI / `pymysql`）、不许 `.commit()` / `.rollback()`、不许 SQL 字符串字面量（守卫 C1/C2/C3）。
 - 事务边界唯一落点是 `session_scope()`（正常提交 / 异常回滚 / 必定关闭）：仓库只管翻译，服务层负责「一个业务操作 = 一个事务」；不许在 `async def` 里跨 `await` 持有（C4）。
 - 引擎参数固定 `expire_on_commit=False`（防 `DetachedInstanceError`）+ `autoflush=False`（要自增 id 就自己 `flush()`）。
-- `max_overflow=0` 是承重设计：运行期一条连接都不许新建（躲 T15 的 WAL `-shm` `SQLITE_READONLY` 竞态）；启动路径必须在 `prepare_schema` 之后调 `warmup(engine)`。
+- `max_overflow=0` 是承重设计：运行期一条连接都不许新建（池满就报错，连接数问题不推迟到服务端 `max_connections`）；启动路径必须在 `prepare_schema` 之后调 `warmup(engine)`。
 - 数据层是 SQLModel：时间工具在 `core/clock.py`，引擎 / 事务在 `core/engine.py`，连哪个库在 `core/database.py`。
 - 列类型只走 `core/types.py`：`short_text(n)`（可索引）/ `long_text()`（大段文本）/ `timestamp_text()`（=32）；`models.py` import 时 `assert_metadata_is_portable` 自检，违反即抛错（v8）。
 - 大段文本上限 60KB（字节），闸门在 `core/limits.py::ensure_text_within_limit`，接在 `append_version` 与 `persist_progress/finish/fail`，超限抛 `INVALID_REQUEST`（v8）。
-- upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；MySQL 的 DO NOTHING 用主键 no-op，绝不用 `INSERT IGNORE`（会吞列超长 / NOT NULL）；只准用在「该表只有一个唯一约束」的表上（契约 C-D1，v8）。
-- SQLite 与 MySQL 的差异收在 `core/dialect.py`：四模块边界 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），可移植性台账与 C-D1~C-D6 见 `docs/architecture/ARCHITECTURE.md 附录 A`。**唯一部署后端是 SQLite**；MySQL 相关分支是遗留代码（未验收、不再扩展），不计划引入其它后端。改动遗留 MySQL 分支时仍守三条——`TEXT` 列不能有字面量 `server_default`、索引列必须 `short_text(n)`（n≤768）、死锁要重试整个事务。
+- upsert 只走 `core/dialect.py`：`upsert_values` / `upsert_select`，仓库里不许再 import `sqlalchemy.dialects.*`；必须显式给 `conflict_cols`（不带目标的 `DO NOTHING` 语义更宽），只准用在「该表只有一个唯一约束」的表上（契约 C-D1）。
+- **唯一部署后端是 Postgres**（v9 起，票 #75~#78）：SQLite / MySQL 的方言分支、迁移链、测试基座与备份链都已删除；`SUPPORTED_BACKENDS` 只含 `postgresql`，非 Postgres 地址在 `core/database.py` 就被拒绝并给出迁移指引，旧 SQLite 库拒绝启动。四模块边界仍在 = `core/database.py`（连哪个库）/ `dialect.py`（语句）/ `types.py`（列声明）/ `schema.py`（迁移），意义是「方言知识只出现一处」；可移植性台账与 C-D1~C-D6 见 `docs/architecture/ARCHITECTURE.md 附录 A`（v8 原文，结论已被 #78 取代）。两条列类型纪律继续守：索引列必须 `short_text(n)`（n≤768）、大文本（`long_text()`）不得带 `server_default`。
 - `get_settings()` 走 lru_cache：改环境变量后必须 `cache_clear()`；`prompts.py` 走 `str.format()`，字面量花括号写 `{{ }}`，给 LLM 的指令用 `<!-- -->` 注释。
 
 ## 3. 迁移（Alembic）
 
 - schema 只走 Alembic：新表 / 新列写 `backend/migrations/versions/`，入口 `core/schema.py::prepare_schema`，迁移在 `lifespan` 里跑（重启 = 跑迁移）。
-- v20 之前的旧库拒绝启动并打印逐条差异；不要再写兼容垫片。
-- 迁移手写：autogenerate 会生成 `drop_constraint(None)`，在 SQLite 上必失败。
-- batch 迁移会丢 `sqlite_autoincrement`（反射读不到表级参数，重建后 id 开始复用）→ `batch_alter_table(..., table_kwargs={"sqlite_autoincrement": True})`；自增表全集在 `0002_typed_columns.py::_AUTOINCREMENT_TABLES`。
+- 旧的 SQLite 库（含旧 `DB_PATH` / 旧 `prdwright.db` 文件）在配置阶段就拒绝启动；Postgres 里结构不符时由 `SchemaMismatchError` 拒绝启动并打印逐条差异。不要再写兼容垫片。
+- 迁移链只有**一份 Postgres 基线**（`0001_baseline.py`，由 autogenerate 从模型生成并人工修环形外键）；新表 / 新列写**新的**迁移文件，不许改基线。
+- 后续迁移仍要人工复核：autogenerate 对外键 `ON DELETE`、主键 `nullable` 与表达式索引有已知反射缺陷。不再有 batch 模式（`render_as_batch`）与 `sqlite_autoincrement` 的坑——那两样随 SQLite 后端一起删除，C10 守卫禁止它们回来。
 - 删列只用原生 `ALTER TABLE … DROP COLUMN`：`PRAGMA foreign_keys` 在事务内是空操作，「关外键 + 重建表 + 改回」那套在步骤内关不掉。
-- 删列 / 退役列是单向门：删完旧代码读不到该列，回滚只能靠备份库文件，不设兼容期；**加列不是单向门**，新增列不拿迁移成本当架构理由。
+- 删列 / 退役列是单向门：删完旧代码读不到该列，回滚只能靠恢复备份（`pg_dump` 归档），不设兼容期；**加列不是单向门**，新增列不拿迁移成本当架构理由。
 - 迁移用例别写死「第几步」：真假源是 `alembic_version`，新迁移比对 head 而不是抄字面量。
-- 守卫 C9 = 旧迁移链不许回来（文件存在性 + AST，docstring 豁免）。
+- 守卫 C9 = 旧迁移链不许回来（文件存在性 + AST，docstring 豁免）；守卫 C10 = 单后端不许回潮（`versions/` 只许一条 PG 基线、迁移与生产代码里不许 SQLite / MySQL 专属写法与导入）。
 
 ## 4. LLM 与 SSE
 

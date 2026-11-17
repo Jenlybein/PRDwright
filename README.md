@@ -3,7 +3,7 @@
 > 用大模型生成结构化产品需求文档（PRD）的**本地优先**平台，带独立的管理员后台与可审计的运营能力。
 
 输入一段需求或想法，PRDwright 走一条多阶段管线（需求澄清 → 大纲 → 分章撰写 → 质量审核），
-产出一份可编辑、可迭代的 PRD。模型接入、密钥、系统参数都在**管理后台**里管，数据库用 SQLite，
+产出一份可编辑、可迭代的 PRD。模型接入、密钥、系统参数都在**管理后台**里管，数据库用 Postgres，
 整栈可单机部署。
 
 ---
@@ -12,7 +12,7 @@
 
 | 目录 | 技术栈 | 端口 | 说明 |
 | --- | --- | --- | --- |
-| `backend/` | Python 3.12 · [uv](https://docs.astral.sh/uv/) · FastAPI · SQLite | 8000 | 全部业务逻辑、鉴权、持久化、LLM 管线 |
+| `backend/` | Python 3.12 · [uv](https://docs.astral.sh/uv/) · FastAPI · Postgres | 8000 | 全部业务逻辑、鉴权、持久化、LLM 管线 |
 | `frontend/` | Vue 3 · Vite | 5173 | 用户端：写 PRD、看生成进度、编辑产物 |
 | `frontend_admin/` | Vue 3 · Vite | 5174 | 管理端：用户 / 邀请码 / 审计 / 任务监控 / 模型配置 |
 | `skills/` | —— | —— | 生成管线使用的技能包（`prd-generator` 等） |
