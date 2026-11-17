@@ -56,7 +56,7 @@ def _raw(job_id: int) -> dict[str, Any]:
     """按 id 直读整行（绕开 ORM，验证真的落盘了）。"""
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM generation_jobs WHERE id = %s", (job_id,)
         ).fetchone()
     assert row is not None
     return dict(row)
@@ -352,8 +352,8 @@ def test_db_snapshot_event_reads_back_immutable_fields(alice):
     # 证明 DB 兜底快照读的是**库里那一份**，不是运行时内存。
     with connect() as conn:
         conn.execute(
-            "UPDATE generation_jobs SET request_params = ?, config_snapshot = ?, "
-            "skill_refs = ? WHERE id = ?",
+            "UPDATE generation_jobs SET request_params = %s, config_snapshot = %s, "
+            "skill_refs = %s WHERE id = %s",
             (
                 json.dumps({"summary": "重连时还要看得见"}),
                 json.dumps({"active_provider": {"model": "m1"}}),
@@ -383,7 +383,7 @@ def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
             "request_params = '{坏掉的 JSON', config_snapshot = '[1,2,3]', "
             "skill_refs = '{坏掉的 JSON', usage = '{坏掉的 JSON', "
             "completed_sections = '{坏掉的 JSON', pending_items = '{坏掉的 JSON' "
-            "WHERE id = ?",
+            "WHERE id = %s",
             (broken.job_id,),
         )
         conn.commit()
@@ -401,7 +401,7 @@ def test_db_snapshot_tolerates_corrupt_immutable_json(alice):
     with connect() as conn:
         conn.execute(
             "UPDATE generation_jobs SET status = 'completed', "
-            "request_params = '', config_snapshot = '', skill_refs = '' WHERE id = ?",
+            "request_params = '', config_snapshot = '', skill_refs = '' WHERE id = %s",
             (legacy.job_id,),
         )
         conn.commit()
@@ -454,15 +454,20 @@ def test_create_rejects_oversized_immutable_text(alice, field):
 # ---------------------------------------------------------------------------
 
 
-def test_migration_head_and_old_db_upgrade(isolated_db, tmp_path):  # noqa: ARG001
+def test_migration_head_and_old_db_upgrade(isolated_db):  # noqa: ARG001
     """手写迁移是唯一 head；旧库升上来后 `alembic_version` 是真源、结构对拍通过。
 
     不写死「第几步」：上一版从迁移链现取，断言的是「库的版本 == 代码里的 head」。
+
+    #77 换库：临时库从「SQLite 文件」换成「空的 Postgres 库」，结构快照换成
+    `inspector_snapshot`（反射，任何方言通用）。被验的性质没变。
     """
     from alembic import command
     from alembic.script import ScriptDirectory
-    from sqlalchemy import create_engine
+    from sqlalchemy import inspect as sa_inspect
 
+    import dbsupport
+    from backend.core.database import build_engine
     from backend.core.schema import (
         _BACKEND_ROOT,
         _alembic_config,
@@ -471,7 +476,7 @@ def test_migration_head_and_old_db_upgrade(isolated_db, tmp_path):  # noqa: ARG0
         head_revision,
         prepare_schema,
     )
-    from backend.core.schema_snapshot import diff_snapshots, schema_snapshot
+    from backend.core.schema_snapshot import diff_snapshots, inspector_snapshot
 
     head = head_revision()
     assert head is not None
@@ -480,34 +485,27 @@ def test_migration_head_and_old_db_upgrade(isolated_db, tmp_path):  # noqa: ARG0
     previous = scripts.get_revision(head).down_revision
     assert previous is not None
 
-    path = tmp_path / "old.db"
-    engine = create_engine(f"sqlite+pysqlite:///{path}")
-    conn = None
-    try:
-        cfg = _alembic_config(f"sqlite+pysqlite:///{path}")
-        command.upgrade(cfg, previous)
-        # 「停在上一版」以 `alembic_version` 为据，不拿某一列当探针：
-        # 每加一条迁移，「上一版刚加了哪些列」都会变，列名断言会随迁移链漂。
-        assert current_revision(engine) == previous
+    with dbsupport.empty_database() as url:
+        engine = build_engine(url)
+        try:
+            cfg = _alembic_config(url)
+            command.upgrade(cfg, previous)
+            # 「停在上一版」以 `alembic_version` 为据，不拿某一列当探针：
+            # 每加一条迁移，「上一版刚加了哪些列」都会变，列名断言会随迁移链漂。
+            assert current_revision(engine) == previous
 
-        revision = prepare_schema(engine)
-        assert revision == head
-        assert current_revision(engine) == head
-        conn = engine.connect()
-        after_cols = {
-            row[1] for row in conn.exec_driver_sql(
-                "PRAGMA table_info(generation_jobs)"
-            ).fetchall()
-        }
-        conn.close()
-        conn = None
-        assert {"request_params", "config_snapshot", "skill_refs", "skill_manifest"} <= after_cols
-        # 迁移前后结构对拍：升上来的库 == 模型直接建出来的库。
-        assert diff_snapshots(_models_snapshot(), schema_snapshot(path)) == []
-    finally:
-        if conn is not None:
-            conn.close()
-        engine.dispose()
+            revision = prepare_schema(engine)
+            assert revision == head
+            assert current_revision(engine) == head
+            after_cols = {
+                column["name"] for column in sa_inspect(engine).get_columns("generation_jobs")
+            }
+            assert {"request_params", "config_snapshot", "skill_refs", "skill_manifest"} <= after_cols
+            # 迁移前后结构对拍：升上来的库 == 模型按同方言编译出来的期望形状。
+            problems = diff_snapshots(_models_snapshot(engine.dialect), inspector_snapshot(engine))
+            assert problems == [], "旧库升到 head 之后结构与模型不一致：\n  " + "\n  ".join(problems)
+        finally:
+            engine.dispose()
 
 
 def _script_config(backend_root):

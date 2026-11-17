@@ -96,7 +96,7 @@ def _raw(job_id: int) -> dict[str, Any]:
     """按 id 直读整行（绕开 ORM，验证真的落盘了）。"""
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            "SELECT * FROM generation_jobs WHERE id = %s", (job_id,)
         ).fetchone()
     assert row is not None
     return dict(row)
@@ -301,7 +301,7 @@ def test_register_checks_solution_on_the_spot(client, alice):
     draft = _ticket(alice, {"summary": "方案会被删"}, solution_id=solution_id)
 
     with connect() as conn:
-        conn.execute("DELETE FROM solutions WHERE id = ?", (solution_id,))
+        conn.execute("DELETE FROM solutions WHERE id = %s", (solution_id,))
         conn.commit()
 
     with pytest.raises(AppError) as caught:

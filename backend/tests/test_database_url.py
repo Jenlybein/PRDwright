@@ -91,8 +91,12 @@ def test_postgres_engine_is_accepted_with_network_pool_settings():
 def _run_connect_hook(backend: str) -> list[str]:
     """跑一遍该方言的「连接建立后」钩子，把执行的 SQL 记下来。
 
-    钩子的入参是 DBAPI 连接（只用到 `cursor()`），所以可以用假连接跑，
+    钩子的入参是 DBAPI 连接（用到 `cursor()` 与 `commit()`），所以可以用假连接跑，
     既不建真连接也看得见到底发了哪些语句。
+
+    ⚠️ 假连接必须带 `commit()`：Postgres 的 `SET` 是**事务性**的，钩子里的配置
+    不显式提交就会被池归还时的 rollback 撤掉（#77 在真库上实测过）。
+    少了这个方法，这条用例会漏掉「设置了但没落住」这类故障。
     """
     executed: list[str] = []
 
@@ -106,6 +110,9 @@ def _run_connect_hook(backend: str) -> list[str]:
     class _Connection:
         def cursor(self) -> _Cursor:
             return _Cursor()
+
+        def commit(self) -> None:
+            executed.append("<commit>")
 
     database._connect_hook(backend)(_Connection(), None)
     return executed
@@ -140,6 +147,16 @@ def test_connection_setup_is_dialect_specific(backend, required, forbidden):
         assert needle.lower() not in joined.lower(), f"{backend} 的连接配置混进了 {needle}：{executed}"
 
 
+def test_postgres_connect_hook_commits_the_session_setting():
+    """PG 的 `SET` 是**事务性**的：钩子必须提交它，否则等于没设。
+
+    池归还连接时会 `rollback()`，那条 `SET TIME ZONE 'UTC'` 就会被悄悄撤掉：
+    **池里的第一条连接是 UTC，之后全是服务端时区**。这条钉住「设置了就要落住」。
+    """
+    executed = _run_connect_hook("postgresql")
+    assert "<commit>" in executed, f"钩子没有提交会话配置（会被 rollback 撤掉）：{executed}"
+
+
 def test_every_supported_backend_has_a_connect_hook():
     """白名单里的每个后端都必须有连接级配置钩子。
 
@@ -153,8 +170,13 @@ def test_every_supported_backend_has_a_connect_hook():
 
 
 def test_resolve_url_accepts_three_shapes(tmp_path):
-    """路径、URL、以及"什么都不给"三种入参都要能归一。"""
-    assert database.resolve_url(None).startswith("sqlite+pysqlite:///")
+    """路径、URL、以及"什么都不给"三种入参都要能归一。
+
+    「什么都不给」的含义是**走应用配置**（`database_url()`），而不是某个写死的形态：
+    #77 之后测试基座把配置指到 Postgres，这条不该因此变成红的。
+    """
+    assert database.resolve_url(None) == database.database_url()
+    # 路径一律归一成 SQLite URL：`DB_PATH` 兼容糖与历史调用方都靠这个形状
     assert database.resolve_url(tmp_path / "a.db").startswith("sqlite+pysqlite:///")
     assert database.resolve_url(str(tmp_path / "b.db")).startswith("sqlite+pysqlite:///")
     # 带 `://` 的按 URL 处理，不拼 sqlite 前缀

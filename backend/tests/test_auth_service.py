@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 from sqlalchemy.exc import IntegrityError
 import threading
 from datetime import datetime
@@ -317,8 +315,9 @@ def test_replace_for_user_is_atomic():
     alice_id = int(UserRepository.get_by_username("alice")["id"])  # type: ignore[index]
     # 拿 bob 的哈希去给 alice 换发 → 撞 `auth_sessions` 的主键
     #
-    # ⚠️ 捕获的异常类型随数据层变了：SQLAlchemy 把 DBAPI 的 `sqlite3.IntegrityError`
-    # 包装成 `sqlalchemy.exc.IntegrityError`（`orig` 里才是原来那个）。
+    # ⚠️ 捕获的异常类型随数据层变了：SQLAlchemy 把 DBAPI 的完整性错误（psycopg 的
+    # UniqueViolation / SQLite 的 IntegrityError）统一包装成
+    # `sqlalchemy.exc.IntegrityError`（`orig` 里才是驱动那个）。
     # 这条用例要守的是「插入失败时旧会话还在」，与异常来自哪一层无关。
     with pytest.raises(IntegrityError):
         AuthSessionRepository.replace_for_user(

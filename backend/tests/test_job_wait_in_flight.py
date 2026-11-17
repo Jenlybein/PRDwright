@@ -90,7 +90,7 @@ def _row(job_id: int) -> dict[str, Any]:
     """按 id 直读任务行终态。"""
     with connect() as conn:
         row = conn.execute(
-            "SELECT status, error_code, error_message FROM generation_jobs WHERE id = ?",
+            "SELECT status, error_code, error_message FROM generation_jobs WHERE id = %s",
             (job_id,),
         ).fetchone()
     assert row is not None

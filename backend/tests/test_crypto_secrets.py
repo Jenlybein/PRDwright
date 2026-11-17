@@ -46,7 +46,13 @@ def test_missing_master_key_fails_with_actionable_message(tmp_path, monkeypatch)
 def test_model_providers_schema_uses_value_token():
     """迁移后表里只有 value_token，旧的环境变量名列已删除。"""
     with connect() as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(model_providers)")}
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'model_providers'"
+            )
+        }
     assert "value_token" in columns
     assert "api_key_env_var" not in columns
 

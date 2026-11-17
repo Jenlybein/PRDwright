@@ -1,4 +1,4 @@
-"""迁移编排守卫（v6 / T16.4）。
+"""迁移编排守卫（v6 / T16.4；#77 起跑在 Postgres 上）。
 
 四条用例，守的是**升级安全性**，不是功能正确性：
 
@@ -12,36 +12,34 @@
 > **旧版本库（v20 之前）不再支持自动升级。** `PRAGMA user_version` 的 20 步链已在
 > v6.1 删除；那种库现在会撞上第三条用例（拒绝启动），并在错误信息里被告知该怎么做。
 > 这是有意的：宁可起不来，也不要「悄悄 stamp 成最新、把少掉的结构永久藏起来」。
+
+⚠️ #77 把这几条从「临时 SQLite 文件」搬到「临时 Postgres 库」时**只换了手段**：
+建库走 `dbsupport.empty_database()`（一个真正空着的库），读结构走
+`schema_snapshot.inspector_snapshot(engine)`（SQLAlchemy 反射，任何方言通用）。
+被验的性质一条没变：到最新、stamp 零 DDL、漂移即拒启动、基线 == 模型。
 """
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import inspect
 
+import dbsupport
+from backend.core.database import build_engine
 from backend.core.schema import (
     SchemaMismatchError,
     current_revision,
     head_revision,
     prepare_schema,
 )
-from backend.core.schema_snapshot import schema_snapshot
+from backend.core.schema_snapshot import diff_snapshots, inspector_snapshot
 
 
-def _db_path() -> str:
-    """当前用例的库文件路径（conftest 已把 DB_PATH 指到 tmp_path）。"""
-    from backend.core.paths import default_db_file
+def _case_engine():
+    """当前用例那个库的 Engine（`isolated_db` 已经把 `DATABASE_URL` 指过去）。"""
+    from backend.core.engine import get_engine
 
-    return str(default_db_file())
-
-
-def _connect() -> sqlite3.Connection:
-    """直接用 DBAPI 连库（避免与被测代码争 Engine 池里的连接）。"""
-    conn = sqlite3.connect(_db_path())
-    conn.row_factory = sqlite3.Row
-    return conn
+    return get_engine()
 
 
 def _forget_alembic_adoption() -> None:
@@ -50,69 +48,55 @@ def _forget_alembic_adoption() -> None:
     这正是「从 v6 之前的部署直接过来」的样子：结构是对的，只差一行版本登记。
     删 `alembic_version` 比另建一个库更贴近现实，也不受 conftest 已建库的影响。
     """
-    conn = _connect()
-    try:
+    with dbsupport.connect() as conn:
         conn.execute("DROP TABLE IF EXISTS alembic_version")
         conn.commit()
-    finally:
-        conn.close()
 
 
-def test_empty_db_gets_baseline(tmp_path):
+def test_empty_db_gets_baseline():
     """空库 → `upgrade head` → 14 张业务表 + `alembic_version` = 当前 head。
 
     不写死版本号：这条用例要表达的是「到最新」，不是「到某一号迁移」。
     """
-    path = tmp_path / "empty.db"
-    engine = create_engine(f"sqlite+pysqlite:///{path}")
-    try:
-        revision = prepare_schema(engine)
-        # 不写死 "0001"：这条用例要表达的是「到最新」，不是「到第 1 步」。
-        # 写死之后每加一条迁移都要回来改一次，而改的过程最容易把断言改成恒真。
-        assert revision == head_revision()
-        assert current_revision(engine) == head_revision()
+    with dbsupport.empty_database() as url:
+        engine = build_engine(url)
+        try:
+            revision = prepare_schema(engine)
+            # 不写死 "0001"：这条用例要表达的是「到最新」，不是「到第 1 步」。
+            # 写死之后每加一条迁移都要回来改一次，而改的过程最容易把断言改成恒真。
+            assert revision == head_revision()
+            assert current_revision(engine) == head_revision()
 
-        tables = {
-            row[0]
-            for row in sqlite3.connect(path)
-            .execute("SELECT name FROM sqlite_master WHERE type='table'")
-            .fetchall()
-        }
-        assert "alembic_version" in tables
-        assert len([t for t in tables if not t.startswith("sqlite_")]) == 15  # 14 + alembic
-    finally:
-        engine.dispose()
+            tables = set(inspect(engine).get_table_names())
+            assert "alembic_version" in tables
+            assert len(tables) == 15, f"应当是 14 张业务表 + alembic_version，实际 {sorted(tables)}"
+        finally:
+            engine.dispose()
 
 
 def test_existing_current_db_is_stamped_without_any_ddl(isolated_db):  # noqa: ARG001
     """已有当前结构的库 → `stamp head`：**结构一个字节都不变**，数据一行不少。"""
     _forget_alembic_adoption()
-    before = schema_snapshot(_db_path())
+    engine = _case_engine()
+    before = inspector_snapshot(engine)
 
-    conn = _connect()
-    try:
+    with dbsupport.connect() as conn:
         conn.execute(
-            "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?,?,?,?)",
+            "INSERT INTO users (username, password_hash, salt, created_at) VALUES (%s,%s,%s,%s)",
             ("keep-me", "h", b"s", "2026-01-01T00:00:00"),
         )
         conn.commit()
-    finally:
-        conn.close()
 
-    from backend.core.engine import get_engine
-
-    revision = prepare_schema(get_engine())
+    revision = prepare_schema(engine)
 
     assert revision == head_revision()
-    assert schema_snapshot(_db_path()) == before, "stamp 路径执行了 DDL：结构被改了"
+    assert inspector_snapshot(engine) == before, "stamp 路径执行了 DDL：结构被改了"
 
-    conn = _connect()
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM users WHERE username='keep-me'").fetchone()[0] == 1
+    with dbsupport.connect() as conn:
+        kept = conn.execute("SELECT COUNT(*) FROM users WHERE username='keep-me'").fetchone()[0]
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == head_revision()
-    finally:
-        conn.close()
+    assert kept == 1
+    assert version == head_revision()
 
 
 def test_mismatched_db_refuses_to_start(isolated_db):  # noqa: ARG001
@@ -121,33 +105,28 @@ def test_mismatched_db_refuses_to_start(isolated_db):  # noqa: ARG001
     这也是「更早版本的库」现在的归宿：不再有自动升级，只有一条说清原因的拒绝。
     """
     _forget_alembic_adoption()
-    conn = _connect()
-    try:
+    with dbsupport.connect() as conn:
         # 造一个真实存在的漂移：多一个模型里没有的列
         conn.execute("ALTER TABLE users ADD COLUMN legacy_extra TEXT NOT NULL DEFAULT ''")
         conn.commit()
-    finally:
-        conn.close()
-
-    from backend.core.engine import get_engine
 
     with pytest.raises(SchemaMismatchError) as excinfo:
-        prepare_schema(get_engine())
+        prepare_schema(_case_engine())
 
     assert "users.legacy_extra" in str(excinfo.value), "差异明细里必须指出是哪一列"
     assert "v20" in str(excinfo.value), "必须告诉人这是旧库、以及该怎么做"
 
 
-def test_baseline_produces_exactly_the_model_schema(tmp_path):
+def test_baseline_produces_exactly_the_model_schema():
     """基线迁移建出来的库 == 模型建出来的库（守卫 C6 的实际实现）。
 
     ## 为什么不用 `alembic check`
 
-    实测（SQLAlchemy 2.1.6 + SQLite 方言）有两个**反射缺陷**，会让 `alembic check` 恒红：
+    实测（SQLAlchemy 2.1.6 + 反射）有两个让 `alembic check` 恒红的缺陷：
 
-    1. `PRAGMA foreign_key_list` 里的 `on_delete=...` 没有被反射进 `options`
+    1. 外键 `on_delete=...` 没有被反射进 `options`
        → 每个带 `ON DELETE` 的外键都被判成 `remove_fk` + `add_fk`；
-    2. 主键列反射出来 `nullable=True`（`INTEGER PRIMARY KEY` 的声明里没有 `NOT NULL`）
+    2. 主键列反射出来 `nullable=True`
        → 每个主键都被判成 `modify_nullable`。
 
     两者都不是真实漂移。与其在测试里过滤幻影差异（过滤条件一多，真差异也会被吞掉），
@@ -157,13 +136,17 @@ def test_baseline_produces_exactly_the_model_schema(tmp_path):
     """
     from backend.core.schema import _models_snapshot
 
-    path = tmp_path / "baseline.db"
-    engine = create_engine(f"sqlite+pysqlite:///{path}")
-    try:
-        prepare_schema(engine)
-        assert schema_snapshot(path) == _models_snapshot()
-    finally:
-        engine.dispose()
+    with dbsupport.empty_database() as url:
+        engine = build_engine(url)
+        try:
+            prepare_schema(engine)
+            # 「期望形状」按**目标方言**编译（没有任何临时库），实际形状用反射读
+            problems = diff_snapshots(
+                _models_snapshot(engine.dialect), inspector_snapshot(engine)
+            )
+            assert problems == [], "基线迁移与模型不一致：\n  " + "\n  ".join(problems)
+        finally:
+            engine.dispose()
 
 
 def test_migration_url_falls_back_to_application_configuration(monkeypatch):

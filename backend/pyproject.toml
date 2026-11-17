@@ -50,8 +50,13 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# 每个用例用 `tmp_path` 里的独立 SQLite 文件，进程间不共享任何路径，
-# 所以可以安全地按进程并行。
+# 每个用例一个**独立的 Postgres 库**（每 worker 建一次模板库，每用例
+# `CREATE DATABASE … TEMPLATE` 派生一个，用完删掉，见 `tests/conftest.py`），
+# 库名带进程内唯一后缀，所以可以安全地按进程并行。
+#
+# 前提：需要一个**集成库**，地址来自 `PRDWRIGHT_TEST_POSTGRES_URL`
+# （⚠️ 维护库地址、不带库名，缺省 `postgresql+psycopg://postgres:postgres@127.0.0.1:5433`）。
+# 连不上时用例**直接失败**并给出操作指引——不再静默跳过。
 #
 # 为什么默认并行：全量千余例单进程要数分钟，等于没人会随手跑；
 # 并行后多核机器显著变快、CI 的少核机器自动降路数。

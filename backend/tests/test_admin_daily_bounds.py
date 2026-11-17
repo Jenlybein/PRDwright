@@ -53,7 +53,7 @@ def _job_at(owner_id: int, moment: datetime) -> None:
             " provider_protocol, provider_config_id, provider_name, provider_model, "
             " prompt_tokens, completion_tokens, created_at, updated_at, "
             " request_params, config_snapshot, skill_refs, skill_manifest) "
-            "VALUES (?, NULL, 'prd', '', '', 'completed', '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', 0, 0, ?, ?, '{}', '{}', '[]', '')",
+            "VALUES (%s, NULL, 'prd', '', '', 'completed', '', '', '[]', '[]', NULL, NULL, 2, '', '', '', '', '', '', 0, 0, %s, %s, '{}', '{}', '[]', '')",
             (owner_id, text, text),
         )
         conn.commit()

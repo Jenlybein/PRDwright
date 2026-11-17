@@ -200,19 +200,23 @@ def test_health_route_is_registered_exactly_once() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _read_only_engine(db_file: pathlib.Path):
+def _read_only_engine(url: str):
     """造一个「连得上、读得出、写不进」的 Engine。
 
-    用 SQLite 的 `mode=ro` URI 打开同一个库文件，故障就精确落在**写**这一步：
-    连接成功、查询成功，只有写会报 `attempt to write a readonly database`。
-    这正是「库可写」这一项要抓的状态——「连不上」与「读得挺好、一写就废」是两种病，
+    Postgres 没有 SQLite 那种 `mode=ro`（以只读方式打开库文件），等价手段是
+    **只读事务**：每条连接都带 `default_transaction_read_only=on`（走 libpq 的
+    `options`），于是连接成功、查询成功，只有**写**会报
+    `cannot execute … in a read-only transaction`。故障精确落在「写」这一步——
+    这正是「库可写」那一项要抓的状态：「连不上」与「读得挺好、一写就废」是两种病，
     前者详情端点已经在报，后者只有写一次才知道。
 
-    直接 `create_engine` 而不走 `build_engine`：后者会按 URI 里的 `file:` 前缀去推算
-    目录（那是生产路径该管的事），这里只需要一条读得动、写不进的连接。
+    直接 `create_engine` 而不走 `build_engine`：这里只需要一条读得动、写不进的连接，
+    不必也不该继承生产的那套池装配与连接级配置。
     """
-    url = f"sqlite+pysqlite:///file:{db_file.as_posix()}?mode=ro&uri=true"
-    return create_engine(url, connect_args={"timeout": 10, "check_same_thread": False})
+    return create_engine(
+        url,
+        connect_args={"options": "-c default_transaction_read_only=on"},
+    )
 
 
 @contextlib.contextmanager
@@ -220,11 +224,12 @@ def _fake_read_only_database(monkeypatch):
     """把探针用的 Engine 换成只读库，退出时还原。
 
     替换的是**依赖本身**（库），不是探针逻辑：探针照常借连接、照常执行写语句，
-    失败来自 SQLite 真实的只读拒绝。
+    失败来自 Postgres 真实的只读拒绝。
     """
     from backend.api import health
+    from backend.core.database import database_url
 
-    engine = _read_only_engine(get_settings().db_file)
+    engine = _read_only_engine(database_url())
     monkeypatch.setattr(health, "get_engine", lambda: engine)
     try:
         yield engine

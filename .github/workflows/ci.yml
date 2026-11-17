@@ -6,13 +6,38 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
-    # 时长护栏：先给宽松上限防止挂起吞掉 runner，T04 提速完成后再下调。
-    # 现已下调到 5 分钟：全量默认按核数并行，本机 16 核 72 秒、CI 4 核约 2 分钟，
-    # 留一倍余量。超过 5 分钟基本只可能是挂起，不是"机器偶尔慢"。
-    timeout-minutes: 5
+    # 时长护栏：先给宽松上限防止挂起吞掉 runner。
+    # 5 分钟是 SQLite 基座时代定的（本机 16 核 72 秒、CI 4 核约 2 分钟，留一倍余量）。
+    # #77 之后**每个用例都在真 Postgres 上跑**（每用例建/删一个库，见
+    # backend/tests/conftest.py），同一台机器的全量从 72 秒涨到约 150 秒 ——
+    # Postgres 的建库与连接是真实开销，不能再按「SQLite 的 2 分钟」估。
+    # 所以上限放到 8 分钟：覆盖「4 核 runner + 服务容器抢 CPU」的余量，
+    # 同时仍然是一眼能看出挂起的量级（不是 30 分钟那种放弃诊断的上限）。
+    timeout-minutes: 8
     defaults:
       run:
         working-directory: backend
+    # 测试基座要连真实的 Postgres（票 #77）。官方镜像 + 健康检查：
+    # 少了健康检查，pytest 会在数据库还没起来时连上去失败（偶发红）。
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          # 映射到 5433，与本地集成库的默认端口一致（避免「CI 能跑、本地连错」）。
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # ⚠️ 约定：这个变量给的是**维护库地址、不带库名**——用例自己往后面拼
+      # `/<库名>` 去 CREATE / DROP DATABASE（见 backend/tests/dbsupport.py）。
+      # 把库名写进来会让所有用例连同一个库，隔离就没了。
+      PRDWRIGHT_TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5433
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
