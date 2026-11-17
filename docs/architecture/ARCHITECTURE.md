@@ -101,6 +101,8 @@
 - SSE 分帧唯一实现 `backend/src/backend/api/sse.py::make_sse_generator`（已带 `X-Accel-Buffering: no`）：事件 `status/chunk/part/stage/review/done/error` + 末尾 `data: [DONE]`；`: ping` 心跳只能走这个出口；服务层与路由层两层异常兜底；前端用原生 `fetch` + `ReadableStream`。
 - 重连先收快照再接实时流，恢复正文 = `finalized_text + live_buffer`；失败不覆写正文；**被取代**与**已取消**是两种不同终局；只有 `high` 严重度触发改写、改写后不重审。
 - 运行态以内存为权威：`_RUNTIMES` / `JobBus` / runtime 配置快照（5 秒 TTL）/ 固定连接池都在进程内；请求参数、配置/供应商快照与技能包身份在建任务那一刻一次写全，收尾不再另取供应商四格；进度按 300ms / 4KB 合并写 `draft_content / completed_sections / phase / pending_items`。
+- **终态以数据库那一行为唯一裁判**：改状态只有一个入口 `backend/src/backend/services/job_state.py::transition`——四种事件（成功收尾 / 失败收尾 / 取消 / 顶替）+ 期望条件（哪一条任务 / 哪个方案 / 哪个 owner，前置状态恒为 `running`）→ 一个结果。仓储的终态写一律是**条件更新**并返回影响行数，**改到 0 行就是「本次结果被丢弃」**：只留一条 `job.transition_discarded` 日志，不改内存、不重试、不重新排队。取消 / 顶替先把行落成 `failed + CANCELLED` / `SUPERSEDED`（用户按停止要立刻看得见），被取消的那条协程收尾时凭「同一个中止码、且用量仍为空」这一条件**补一次载荷**（半截正文与用量），补完第二次照样 0 行——所以「重复收尾」不会变成「重复记账」。`runtime.status` / `error_code` / `error_message` 的写入收口在状态机里，事件层与取消层只记「失败 / 取消 / 被顶替」的意图。
+- **收尾只做一次**：`_finalize` 进门先看内存状态，已是终态直接返回（不落库、不写稿、不广播）；内存闸之外还有上面那道数据库闸兜住跨进程 / 启动回收那种「别人已经收尾了」。状态集合仍只有 `running` / `completed` / `failed`，`CANCELLED` / `SUPERSEDED` 仍是 `error_code`——对外契约不变（七态与「取消中」是后续票的事）。
 - token 计量以 `ContextVar` 挂成环境值（`backend/src/backend/services/llm_meter.py`）：观测层挂在模型调用之外，**业务层调用方式不变**；没有任务上下文时计量自然无操作。预算检查在 `astream_text` 开头、记账在末尾，超顶复用 `INVALID_REQUEST`。
 - 排空顺序固定：就绪探针转 503 → 停止接收新任务 → 最多等 30 秒（等待上限、不是必须等满）→ 超时者标为已取消落终态并向订阅者发错误事件 → flush 日志退出。`stop_grace_period` 必须大于 30 秒。排空是**可直接调用的单元**（不起子进程、不发真信号），用例毫秒级验证。
 - 启动回收孤儿任务（`reap_orphans`），把 `running` 收成确定终态，重启不留「进行中」的尸体。

@@ -48,7 +48,7 @@ from backend.repositories.chat_session_repo import ChatSessionRepository
 from backend.repositories.chat_turn_repo import ChatTurnRepository, to_history_item
 from backend.repositories.generation_job_repo import STATUS_RUNNING, GenerationJobRepository
 from backend.repositories.solution_repo import SolutionRepository
-from backend.services import conversation_service, document_service
+from backend.services import conversation_service, document_service, job_state
 from backend.services.job_bus import job_bus
 from backend.services.llm_meter import use_meter
 from backend.services.skill_registry import describe_kind
@@ -76,7 +76,8 @@ logger = logging.getLogger(__name__)
 # 失败收尾里「不是错误」的两个终态判定：已取消（用户走开 / 删方案）与被取代（同一份
 # 文档已有更新的任务接手）。它们同样落 failed 状态，但不该作为红色错误弹给用户，
 # 因此补发 `error` 事件时要排除——否则「用户自己按了停止」会被渲染成「生成失败」。
-_ABORT_CODES = frozenset({"CANCELLED", "SUPERSEDED"})
+# 取值住在状态机（`job_state.ABORT_CODES`），这里只借用不另写一份。
+_ABORT_CODES = job_state.ABORT_CODES
 
 
 # ----------------------------------------------------------------------------
@@ -146,39 +147,22 @@ def cancel_job(owner_id: int, job_id: int, *, message: str = "用户停止了生
     `message` 是落进 `error_message` 的终止原因：用户点停止写「用户停止了生成」，
     管理员在后台清理卡死任务写「管理员手动停止」——两者都走 `CANCELLED`，
     但运维看这一行时要知道是谁动的手。
+
+    **改道经状态机（#79）**：这条路径不再自己拼 `failed + CANCELLED` 的规则，
+    只交一次「取消」转换给 `job_state`；改到 0 行（任务已经自然结束）时它如实回答
+    False——「你点的时候它刚好说完了」不是失败。
     """
     runtime = _RUNTIMES.get(job_id)
-    marked = False
-    if runtime is not None and runtime.owner_id == owner_id:
-        if runtime.status == STATUS_RUNNING:
-            runtime.cancelled = True
-            if runtime.kind == "chat":
-                runtime.chat_interrupted = True
-            marked = True
-    with session_scope() as session:
-        persisted = GenerationJobRepository(session).cancel_one(
-            owner_id, job_id, message=message
-        )
-    return marked or persisted
-
-
-def _mark_superseded(owner_id: int, *, solution_id: int | None, kind: str) -> int:
-    """把内存里同 owner + solution + kind 的旧运行时标记为「已被顶替」，返回条数。
-
-    判据与 `GenerationJobRepository.supersede_active` 逐字一致——两处若分叉，
-    就会出现「库里说被取代了、内存里还在跑」这种最难查的组合。
-    """
-    marked = 0
-    for runtime in _RUNTIMES.values():
-        if (
-            runtime.owner_id == owner_id
-            and runtime.solution_id == solution_id
-            and runtime.kind == kind
-            and not runtime.superseded
-        ):
-            runtime.superseded = True
-            marked += 1
-    return marked
+    if runtime is not None and runtime.owner_id != owner_id:
+        # 归属不符的运行时不能结算（否则等于替别人的任务置取消意图）。
+        runtime = None
+    result = job_state.transition(
+        job_state.JobEvent.CANCEL,
+        job_state.job_scope(owner_id, job_id),
+        runtime=runtime,
+        error_message=message,
+    )
+    return result.applied
 
 
 def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
@@ -210,13 +194,20 @@ def delete_solution_and_cancel_jobs(owner_id: int, solution_id: int) -> bool:
         deleted = SolutionRepository(session).delete(owner_id, solution_id)
         if not deleted:
             return False
-        GenerationJobRepository(session).cancel_running(owner_id, solution_id=solution_id)
+        # 改道经状态机（#79）：取消的规则（落 failed + CANCELLED、只动 running）只在
+        # `job_state` 写一份；这里传 session，是为了让取消与删方案同生共死。
+        cancelled = job_state.transition(
+            job_state.JobEvent.CANCEL,
+            job_state.solution_scope(owner_id, solution_id),
+            error_message="方案已删除，任务已取消",
+            session=session,
+        )
 
     # 落库之后才置内存标记：事务失败时不会留下「协程停了、库里还在跑」的错位。
     # 这一刻到协程下一个事件点之间的窗口由 `_finalize` 的「方案不存在就不写文档」兜住。
-    for runtime in _RUNTIMES.values():
-        if runtime.owner_id == owner_id and runtime.solution_id == solution_id:
-            runtime.cancelled = True
+    job_state.settle_after_commit(
+        cancelled, job_state.solution_scope(owner_id, solution_id)
+    )
     return True
 
 
@@ -236,13 +227,14 @@ def cancel_for_user(owner_id: int, *, message: str = "账号已删除，任务�
     过滤维度是 `owner_id`。
     """
     with session_scope() as session:
-        affected = GenerationJobRepository(session).cancel_running_for_owner(
-            owner_id, message=message
+        cancelled = job_state.transition(
+            job_state.JobEvent.CANCEL,
+            job_state.owner_scope(owner_id),
+            error_message=message,
+            session=session,
         )
-    for runtime in _RUNTIMES.values():
-        if runtime.owner_id == owner_id and runtime.status == STATUS_RUNNING:
-            runtime.cancelled = True
-    return affected
+    job_state.settle_after_commit(cancelled, job_state.owner_scope(owner_id))
+    return cancelled.rows
 
 
 def running_runtimes() -> list[JobRuntime]:
@@ -287,6 +279,10 @@ def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -
     先 `run_summary` 的话，前端会在收到「已结束」之后才收到原因。
     末端那条 `job_bus.close()` 是给订阅者的哨兵：超时者可能正卡在模型调用里，
     等它自己的 `finally` 放哨兵就是「再等一个 30 秒」。
+
+    **改道经状态机（#79）**：这里只置「取消意图」（`job_state.request_cancel`），
+    落库与内存终态都交给 `_finalize` 那一次转换——于是「排空收一次、协程醒来又收一次」
+    的第二次会被 `_finalize` 的内存闸挡掉，账与结束事件都只有一份。
     """
     targets = running_runtimes() if runtimes is None else list(runtimes)
     cancelled = 0
@@ -295,13 +291,7 @@ def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -
             # 快照之后已经自然收尾：它有自己更准确的结论，别再覆盖成「被取消」。
             continue
         cancelled += 1
-        runtime.cancelled = True
-        runtime.failed = True
-        runtime.error_code = "CANCELLED"
-        runtime.error_message = reason
-        if runtime.kind == "chat":
-            # 对话的「已取消」要保留已经说出口的话（`_write_chat_turn` 按这一位处理）
-            runtime.chat_interrupted = True
+        job_state.request_cancel(runtime)
 
         logger.warning(
             "取消在途任务",
@@ -310,14 +300,21 @@ def cancel_in_flight(reason: str, *, runtimes: list[JobRuntime] | None = None) -
                 "job_id": runtime.job_id,
                 "user_id": runtime.owner_id,
                 "kind": runtime.kind,
-                "error_code": runtime.error_code,
+                "error_code": job_state.CODE_CANCELLED,
                 "reason": reason,
             },
         )
         # 错误事件走 `_failure_event`（与异常兜底同一个构造）：订阅者只看有没有
         # `error` 事件判断失败，自造一个形状不同的错误事件等于让前端多一条解析分支。
-        job_bus.publish(runtime.job_id, _failure_event(runtime.error_code, runtime.error_message))
-        _finalize(runtime, "failed")
+        job_bus.publish(
+            runtime.job_id, _failure_event(job_state.CODE_CANCELLED, reason)
+        )
+        _finalize(
+            runtime,
+            "failed",
+            error_code=job_state.CODE_CANCELLED,
+            error_message=reason,
+        )
         # 收尾的哨兵由本任务自己的 `finally` 放；超时者可能卡在模型调用里，这里替它放。
         job_bus.close(runtime.job_id)
     return cancelled
@@ -388,17 +385,18 @@ async def run_job(
                 _maybe_flush(runtime)
         _finalize(runtime, "failed" if runtime.failed else "completed")
     except Exception as exc:  # noqa: BLE001 - 后台任务必须自兜异常，不能静默消失
-        runtime.failed = True
         # 管线可能已把错误转成 `error` 事件（运行时因此带着错误码），别重复发第二条。
         already_reported = bool(runtime.error_code)
         if isinstance(exc, AppError):
             # 异常自带的码更准：预算超顶是 INVALID_REQUEST（重试也没用），
             # 不该被笼统记成「上游故障」，否则前端会去做无意义的重试。
-            runtime.error_code = exc.code.value
-            runtime.error_message = exc.message
+            code = exc.code.value
+            message = exc.message
         else:
-            runtime.error_code = ErrorCode.LLM_UPSTREAM_ERROR.value
-            runtime.error_message = f"生成失败：{exc}"
+            code = ErrorCode.LLM_UPSTREAM_ERROR.value
+            message = f"生成失败：{exc}"
+        # 只记「失败意图」，终态由下面的收尾统一结算（#79：内存与库不各改一份）。
+        job_state.note_failure(runtime, error_code=code, error_message=message)
         # ⚠️ 兜底异常**必须广播**：前端只有收到 `error` 事件才判失败。只改运行时
         # 而不发事件，界面上就是「流结束、正文为空」——被当成生成成功（空内容）。
         # 无模型配置时 `get_llm()` 就在这一层抛出，正是这条路径。
@@ -530,9 +528,16 @@ def list_jobs(
 
 
 def reap_orphans() -> None:
-    """启动时回收上次残留的 running 任务（进程重启后运行时已丢失）。"""
-    with session_scope() as session:
-        GenerationJobRepository(session).reap_running()
+    """启动时回收上次残留的 running 任务（进程重启后运行时已丢失）。
+
+    改道经状态机（#79）：终态写的规则只写一份，这里只是「维护面」那一次失败收尾。
+    """
+    job_state.transition(
+        job_state.JobEvent.FAIL,
+        job_state.maintenance_scope(),
+        error_code="INTERNAL_ERROR",
+        error_message="服务重启，任务已中断",
+    )
 
 
 # ----------------------------------------------------------------------------

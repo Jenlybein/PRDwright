@@ -25,7 +25,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlmodel import Session
 
 from backend.core.clock import utc_now_text
@@ -235,8 +235,12 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-    ) -> None:
-        """标记任务完成，落最终正文与章节。清空错误字段。
+    ) -> int:
+        """标记任务完成，落最终正文与章节。清空错误字段。返回**改到的行数**。
+
+        **条件写**：`WHERE status='running'`（#79）。只有仍在执行的任务才允许收尾成功；
+        已经终态的行改到 0 行——调用方据此丢弃本次结果（而不是把第二次收尾又写一遍，
+        例如把 `failed` 覆回 `completed`）。
 
         `prompt_tokens` / `completion_tokens` 是 `usage` 那份 JSON 的派生副本：
         管理员后台统计消耗时用 SQL 直接求和，不必把每行 JSON 取回解析。
@@ -246,9 +250,13 @@ class GenerationJobRepository:
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
-        self.session.execute(
+        result = self.session.execute(
             update(GenerationJob)
-            .where(GenerationJob.id == job_id, GenerationJob.owner_id == owner_id)
+            .where(
+                GenerationJob.id == job_id,
+                GenerationJob.owner_id == owner_id,
+                GenerationJob.status == STATUS_RUNNING,
+            )
             .values(
                 status=STATUS_COMPLETED,
                 draft_content=draft_content,
@@ -262,6 +270,7 @@ class GenerationJobRepository:
                 updated_at=utc_now_text(),
             )
         )
+        return int(result.rowcount or 0)
 
     def fail(
         self,
@@ -276,8 +285,21 @@ class GenerationJobRepository:
         pending_items: list[dict[str, Any]] | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-    ) -> None:
-        """标记任务失败，保留已产出的半截正文、章节与已发生的用量。
+        abort_code: str = "",
+    ) -> int:
+        """标记任务失败，保留已产出的半截正文、章节与已发生的用量。返回**改到的行数**。
+
+        **条件写（#79）**，期望条件分两种：
+
+        - 普通失败 / 成功：`WHERE status='running'`——只允许从执行中收尾。
+        - `abort_code` 非空（`CANCELLED` / `SUPERSEDED`）：`status='running'` **或者**
+          「已经被同一个 abort 码落库、且 `usage` 还是空」。取消 / 顶替先把行落成终态
+          （用户按下停止要马上看得见），那一刻还没有用量；被取消的那条协程醒来收尾时
+          要补的正是半截正文与用量。这条「补一次」的条件**只能命中一次**（补完之后
+          `usage` 不再是空），所以重复收尾依然是 0 行——而不是「状态是 failed 就随便写」。
+
+        别把条件放宽成「`status='failed'` 一律可写」：那正是「晚到的失败把启动回收写的
+        `INTERNAL_ERROR` 覆写成别的东西」的入口。
 
         `usage` 在失败路径同样要落：失败的生成**照样消耗了 token**，
         只记成功那次等于把最贵的失败藏起来。两个 token 列同理一并写：
@@ -288,9 +310,24 @@ class GenerationJobRepository:
         """
         sections_text = _dump_sections(completed_sections)
         _ensure_progress_texts(draft_content, sections_text)
-        self.session.execute(
+        if abort_code:
+            expected = or_(
+                GenerationJob.status == STATUS_RUNNING,
+                and_(
+                    GenerationJob.status == STATUS_FAILED,
+                    GenerationJob.error_code == abort_code,
+                    GenerationJob.usage.is_(None),
+                ),
+            )
+        else:
+            expected = GenerationJob.status == STATUS_RUNNING
+        result = self.session.execute(
             update(GenerationJob)
-            .where(GenerationJob.id == job_id, GenerationJob.owner_id == owner_id)
+            .where(
+                GenerationJob.id == job_id,
+                GenerationJob.owner_id == owner_id,
+                expected,
+            )
             .values(
                 status=STATUS_FAILED,
                 error_code=error_code,
@@ -304,12 +341,21 @@ class GenerationJobRepository:
                 updated_at=utc_now_text(),
             )
         )
+        return int(result.rowcount or 0)
 
     # ------------------------------------------------------------------
     # 取消 / 顶替（条件更新，返回 rowcount）
     # ------------------------------------------------------------------
 
-    def supersede_active(self, owner_id: int, *, solution_id: int | None, kind: str) -> int:
+    def supersede_active(
+        self,
+        owner_id: int,
+        *,
+        solution_id: int | None,
+        kind: str,
+        error_code: str,
+        error_message: str,
+    ) -> int:
         """把同 owner + solution + kind 下旧的 running 置为 failed，返回被取代的条数。
 
         「同一 owner + solution + kind 至多一个 running」是一条业务不变量，在新建任务前
@@ -317,7 +363,8 @@ class GenerationJobRepository:
         `solution_id` 可能为 `None`，SQL 需用 `IS NULL` 而不是 `= NULL`。
 
         `error_code` 用 `SUPERSEDED` 而不是笼统的 `INTERNAL_ERROR`：这次失败有明确原因
-        （被别人接手了，不是出错），运维看这一行时不该去翻日志找异常。
+        （被别人接手了，不是出错），运维看这一行时不该去翻日志找异常。取值由
+        `job_state` 统一给出，本层不再各写一份字面量（#79）。
         """
         conditions = [
             GenerationJob.owner_id == owner_id,
@@ -334,15 +381,17 @@ class GenerationJobRepository:
             .where(*conditions)
             .values(
                 status=STATUS_FAILED,
-                error_code="SUPERSEDED",
-                error_message="被新任务取代",
+                error_code=error_code,
+                error_message=error_message,
                 updated_at=utc_now_text(),
             )
         )
         return int(result.rowcount or 0)
 
-    def cancel_one(self, owner_id: int, job_id: int, *, message: str) -> bool:
-        """把某一条 running 任务置为 failed + CANCELLED，返回是否确实改到了。
+    def cancel_one(
+        self, owner_id: int, job_id: int, *, error_code: str, error_message: str
+    ) -> bool:
+        """把某一条 running 任务置为 failed + 入参错误码，返回是否确实改到了。
 
         与 `cancel_running`（按方案批量）分开：用户按「停止生成」针对的是**这一次**
         任务，而同一方案下别的线程可能也在跑，批量取消会连带掐掉它们。
@@ -359,14 +408,16 @@ class GenerationJobRepository:
             )
             .values(
                 status=STATUS_FAILED,
-                error_code="CANCELLED",
-                error_message=message,
+                error_code=error_code,
+                error_message=error_message,
                 updated_at=utc_now_text(),
             )
         )
         return int(result.rowcount or 0) == 1
 
-    def cancel_running(self, owner_id: int, *, solution_id: int) -> int:
+    def cancel_running(
+        self, owner_id: int, *, solution_id: int, error_code: str, error_message: str
+    ) -> int:
         """把该 owner + 方案下所有 running 任务置为 failed，返回受影响条数。
 
         用在「方案被删除」：方案没了，挂在它上面的生成任务再跑完也没地方落正文，
@@ -376,7 +427,8 @@ class GenerationJobRepository:
         的契约（前端所有 status 分支都按 running / completed / failed 三态判），
         多一个取值意味着每一处分支都要多一条分支，而漏掉任何一处都会让界面停在
         「生成中」。语义上被取消确实「没有成功」，复用 `failed` 是代价最小的选择；
-        具体原因放在 `error_code='CANCELLED'` / `error_message` 里。
+        具体原因放在 `error_code` / `error_message` 里（取值由 `job_state` 统一给出，
+        本层不再各写一份字面量，#79）。
 
         `solution_id` 用 `= ?` 而不是 `IS NULL`：本方法只服务于「删掉一份具体方案」，
         没有方案的任务（快捷入口逃生口）不会被这个动作波及。
@@ -390,15 +442,17 @@ class GenerationJobRepository:
             )
             .values(
                 status=STATUS_FAILED,
-                error_code="CANCELLED",
-                error_message="方案已删除，任务已取消",
+                error_code=error_code,
+                error_message=error_message,
                 updated_at=utc_now_text(),
             )
         )
         return int(result.rowcount or 0)
 
-    def cancel_running_for_owner(self, owner_id: int, *, message: str) -> int:
-        """把该 owner 名下**所有** running 任务置为 failed + CANCELLED，返回条数。
+    def cancel_running_for_owner(
+        self, owner_id: int, *, error_code: str, error_message: str
+    ) -> int:
+        """把该 owner 名下**所有** running 任务置为 failed + 入参错误码，返回条数。
 
         用在「删除账号」：账号一旦消失，任务再跑完也没有地方落正文，继续跑只是白烧
         token——而且收尾那一刻还会去写一个已经不存在的归属。
@@ -415,14 +469,14 @@ class GenerationJobRepository:
             )
             .values(
                 status=STATUS_FAILED,
-                error_code="CANCELLED",
-                error_message=message,
+                error_code=error_code,
+                error_message=error_message,
                 updated_at=utc_now_text(),
             )
         )
         return int(result.rowcount or 0)
 
-    def reap_running(self) -> int:
+    def reap_running(self, *, error_code: str, error_message: str) -> int:
         """系统级维护：把所有残留的 running 任务置为 failed，返回条数。
 
         **这是本仓库唯一没有 `owner_id` 的用户面外方法**，属于启动运维（进程重启后，
@@ -435,8 +489,8 @@ class GenerationJobRepository:
             .where(GenerationJob.status == STATUS_RUNNING)
             .values(
                 status=STATUS_FAILED,
-                error_code="INTERNAL_ERROR",
-                error_message="服务重启，任务已中断",
+                error_code=error_code,
+                error_message=error_message,
                 updated_at=utc_now_text(),
             )
         )
