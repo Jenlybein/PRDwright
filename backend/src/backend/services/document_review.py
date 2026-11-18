@@ -77,6 +77,16 @@ MAX_REWRITE_SECTIONS = 3
 # 拼回后的正文如果比原文短这么多，说明分节改写把内容弄丢了，退回整篇重写
 _MIN_KEPT_RATIO = 0.6
 
+# 整篇改写稿如果比初稿短这么多，同样视为「改写把内容删掉了」——**直接不采用改稿**。
+# 线上实证（2026-11-19）：接口文档初稿 11439 字符，改写后只剩 6154（54%），
+# 被改写掉的不是「该删的冗余」，而是整节接口清单。改写只被允许修正被点名的问题，
+# 没有任何一类判据要求「写得更短」，所以缩水到这个比例就不可能是合规的改写。
+_MIN_REWRITE_RATIO = _MIN_KEPT_RATIO
+
+# 但「缩水」只在正文有一定体量时才判：夹具里的文档常常只有几十个字符，
+# 拿它算比例等于把「样例短」当成「内容丢了」。
+_MIN_REWRITE_GUARD_CHARS = 200
+
 # `detail` 的软截断长度。模型偶尔会把整段原文塞进 detail，截断只是兜底——
 # 真正的防线是提示词里那条「严禁摘录原文」。
 _MAX_DETAIL_CHARS = 60
@@ -704,6 +714,26 @@ async def _stream_whole_rewrite(
         rewritten_text = "".join(chunks).strip()
         if rewritten_text:
             final_reply, items = extract(rewritten_text)
+            if (
+                len(document) >= _MIN_REWRITE_GUARD_CHARS
+                and len(final_reply) < len(document) * _MIN_REWRITE_RATIO
+            ):
+                # 改写把正文删掉了一大半：不采用这一稿，保留初稿。改写只允许修正被点名
+                # 的问题，没有任何判据要求「写短」——缩水到这个比例只能是内容丢了
+                # （线上实证：接口文档 11439 → 6154 字符，整节接口清单被删）。
+                logger.warning(
+                    "%s 改写稿从 %d 字符缩到 %d，已保留初稿",
+                    label,
+                    len(document),
+                    len(final_reply),
+                    extra={"event": "doc.rewrite_shrunk"},
+                )
+                yield StreamEvent(
+                    type="stage",
+                    content="改写稿明显缩水，已保留初稿",
+                    data={"stage": "rewriting", "doc_type": doc_type, "note": "改写稿缩水"},
+                )
+                return
             outcome.final_reply = final_reply
             outcome.pending_items = items
             outcome.rewritten = True

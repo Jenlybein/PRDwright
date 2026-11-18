@@ -890,6 +890,15 @@ def test_api_docs_prompt_forbids_self_invented_codes_and_quotas():
     assert "不要写具体数字" in template
     assert "限流额度同理" in template
     assert "字段清单只写上游给出的" in template
+    # 字段名也只能来自上游：自造 fieldKey 一样会被判编造（第二轮实测 3 条 high）
+    assert "不要自行命名接口 / 模型字段" in template
+    assert "fieldKey" in template
+
+
+def test_rewrite_prompt_forbids_trimming_the_document():
+    """改写只允许修正被点名的问题，不许「顺手精简」——线上实测接口文档被删掉一半。"""
+    template = prompts.DOC_REWRITE_PROMPT
+    assert "不得删减篇幅" in template
 
 
 def test_prompts_prompt_references_upstream_by_title_not_by_number():

@@ -249,6 +249,34 @@ def test_rewrite_is_streamed_and_replaces_body_with_clean_text() -> None:
     assert review.data["rewritten"] is True
 
 
+def test_shrunken_rewrite_is_discarded_and_draft_kept() -> None:
+    """改写稿比初稿短太多时不采用（线上实测接口文档被删掉一半：11439 → 6154 字符）。
+
+    改写只被允许修正被点名的问题，没有任何判据要求「写短」；缩水到这个比例只能是
+    内容被删了。这时必须保初稿，否则用户拿到的是半篇文档，还以为是改写的结果。
+    """
+    draft = "# 接口文档\n\n" + ("接口定义若干。\n\n" * 40)  # 足够长，缩水比例才判得出来
+    llm = TwoStageLLM(
+        review_pieces=['{"verdict":"revise","issues":[{"severity":"high","detail":"编造了码值"}]}'],
+        rewrite_pieces=["# 接口文档\n", "（删掉了大半）\n"],
+    )
+
+    events, outcome = _drain(llm, document=draft)
+
+    parts = [event for event in events if event.type == "part"]
+    assert parts == [], "缩水稿不能整段覆盖初稿"
+
+    assert outcome.final_reply == draft, "必须保初稿"
+    assert outcome.rewritten is False
+
+    # 用户要能看到「为什么没采用」——静默保初稿会被读成「改写压根没跑」
+    notes = [
+        event for event in events if event.type == "stage" and event.data.get("note") == "改写稿缩水"
+    ]
+    assert len(notes) == 1
+    assert notes[0].content == "改写稿明显缩水，已保留初稿"
+
+
 def test_review_failure_is_reported_as_not_completed() -> None:
     """审核调用挂掉：正文照旧可用，但结论**不报成通过**。
 
