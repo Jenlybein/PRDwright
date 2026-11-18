@@ -321,7 +321,9 @@ def test_rereview_reports_missing_pending_with_where_and_the_missing_entry(
     assert issue["category"] == "missing_pending"
     # 服务端按类别定严重度：漏登记是 medium，模型自报的 high 不算数
     assert issue["severity"] == "medium"
-    assert issue["where"] == "## 一、概述"
+    # 定位是纯文本：模型常把 `## 一、概述` 连标题井号一起塞进 `where`，界面上会直接
+    # 露出 `##`（2026-11-18 反馈「已有 md 格式露出来」）。归一化时抹掉行内标记。
+    assert issue["where"] == "一、概述"
     assert "登录方式" in issue["detail"]
 
 
@@ -549,8 +551,9 @@ def test_prd_rereview_also_opens_the_sixth_category_with_an_empty_list(
     issue = conclusion["issues"][0]
     assert issue["category"] == "missing_pending"
     assert issue["severity"] == "medium"
-    # 整篇结论用 `where` 定位（`where` 取自提示词里的章节标题清单）
-    assert issue["where"] == heading
+    # 整篇结论用 `where` 定位；模型会给回标题原文（含 `##`），归一化后只留纯文本，
+    # 但**章节号要保留**（「1. 产品概述」里的 `1.` 是定位的一部分）。
+    assert issue["where"] == "1. 产品概述"
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +767,8 @@ def test_sixth_category_rule_demands_the_section_and_the_missing_class(client, m
     assert "40 字" in prompt, "detail 仍 ≤40 字，允许 where 承担定位"
 
     issue = _review_events(events)[0]["issues"][0]
-    assert issue["where"] == "## 一、概述"
+    # 定位一律是纯文本（`##` 这类标题标记在归一化时抹掉，见 `_strip_markdown_noise`）
+    assert issue["where"] == "一、概述"
     assert "登录方式" in issue["detail"]
 
 
@@ -909,7 +913,8 @@ def test_rewrite_prompt_gets_plain_severity_not_the_chinese_category_label(
 
     assert status == "succeeded"
     rewrite_prompt = llm.writer_prompts[1]
-    assert "[high] ## 一、概述：" in rewrite_prompt
+    # 改写提示词里的定位同样是纯文本：`##` 被归一化抹掉，章节名本身保留
+    assert "[high] 一、概述：" in rewrite_prompt
     assert "编造" not in rewrite_prompt, "中文类别标签不该进改写提示词"
     assert "high·" not in rewrite_prompt
 

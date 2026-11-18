@@ -70,7 +70,9 @@ def render_spec() -> str:
         "请按实际严重程度**分散取值**，不要把所有条目都堆在同一个等级上——"
         "等级是澄清时「先问哪一批」的依据，堆在一档就等于没分级。"
         "**缺了等级、或写了 `P0` ~ `P6` 之外的值，该项会被直接丢弃**，请务必逐项给出。\n"
-        "没有待确认项时附 `[]`。清单须与正文中的「待确认」一一对应；不要把这段标记写进章节里。"
+        "没有待确认项时附 `[]`。清单须与正文中的「待确认」一一对应；不要把这段标记写进章节里。\n"
+        "⚠️ **不要**写成人读形态（例如「## 附：待确认问题」+ 编号列表）：那种形态不算清单，"
+        "会被当作正文展示。清单**只能**放在上面这对 HTML 注释标记里，格式就是 JSON 数组。"
     )
 
 
@@ -159,6 +161,12 @@ def extract(
         （每项已被加上后端分配的 `id`）。
     """
     if BEGIN_SENTINEL not in text:
+        # 模型没按标记块写时（例如写成「## 附：待确认问题」的人读列表），
+        # 不再直接放行——那样清单会留在正文里，界面上既看不到「待确认问题」容器，
+        # 又会把一段本属于元数据的附录当正文展示（2026-11-18 线上反馈）。
+        legacy = _extract_legacy_appendix(text, id_prefix=id_prefix)
+        if legacy is not None:
+            return legacy
         return text, []
 
     # 先把所有块里的条目原样收集起来，统一排序后才分配 id。
@@ -241,6 +249,135 @@ def finalize_items(
         {**record, "id": f"{id_prefix}-{index}"}
         for index, record in enumerate(validated, start=1)
     ]
+
+
+# 人读附录的标题（模型偶尔不按标记块写）。只认「附 / 附录 / 待确认问题清单」这类标题，
+# 避免把正文里某个叫「待确认」的正经章节误当附录剥掉。
+_LEGACY_HEADING = re.compile(
+    r"^[\s>*#]*(?:附(?:录)?\s*[：:]?\s*)?待确认(?:问题|事项|清单)?[\s*#：:]*(?:（[^）]*）)?[\s*#：:]*$"
+)
+
+# 一条附录项的起始：「1. 」/「1、」/「- 」/「* 」/「• 」。
+_LEGACY_ITEM_START = re.compile(r"^\s*(?:[0-9]+[.、)）]|[-*•·])\s+(.*)$")
+
+# 附录项里的「影响章节：…」「拍板人：…」「需要 X 拍板」等尾注。
+_LEGACY_SECTIONS = re.compile(r"影响章节\s*[：:]\s*([^；;]+)")
+_LEGACY_DECIDER = re.compile(r"(?:拍板人\s*[：:]\s*|需要\s*)([^；;，,。]*?)(?:拍板|决定|确认)")
+
+# 旧格式没有重要性等级，统一按 **P3（中性档）** 参与澄清：
+# 不假装能细分优先级，也不把这些条目整批丢掉（丢掉等于用户彻底看不到它们）。
+_LEGACY_IMPORTANCE = "P3"
+
+
+def _extract_legacy_appendix(
+    text: str, *, id_prefix: str
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """兜底剥离**人读形态**的「附：待确认问题」附录。
+
+    背景：规范格式是 ``<!-- PENDING:BEGIN -->`` 里的 JSON（见 `render_spec()`）。
+    但模型有时不照办，直接写成文档末尾的人读列表：
+
+    ```
+    ## 附：待确认问题
+    1. 产品对外主名称统一为 PRDWright 还是 Vibe Coding 需求工作台 —— 影响章节：1.1、全文；需要产品负责人拍板
+    2. 账号体系的具体形态（注册方式、找回密码、会话有效期） —— 影响章节：2.1（F-01）、4；需要产品负责人拍板
+    ```
+
+    这种输出以前会**原样留在正文里**：界面上看不到「待确认问题」容器，正文尾部却挂
+    一段本该是元数据的附录。这里把附录识别出来 → 从正文剥离 → 解析成清单项。
+
+    判定是保守的，三条同时满足才动手（避免误伤正文）：
+
+    1. 存在一个**附录样式的标题行**（`附：待确认问题` / `待确认问题清单` / `附录：待确认`…）；
+    2. 该标题之后至少解析出 **1 条**编号/项目符号条目；
+    3. 该标题位于正文的**后半段**（附录按规范就在末尾；出现在开头多半是正经章节）。
+
+    Args:
+        text: 完整正文（不含标记块）。
+        id_prefix: 清单项 id 前缀。
+
+    Returns:
+        `(剥离后的正文, 清单项)`；没有可识别的附录时返回 `None`（交调用方按原文放行）。
+    """
+    lines = text.splitlines()
+    heading_index = None
+    for index, line in enumerate(lines):
+        if _LEGACY_HEADING.match(line.strip()):
+            # 只认后半段出现的标题：防止把开头某个「待确认问题」章节当附录
+            if index >= len(lines) // 2:
+                heading_index = index
+                break
+    if heading_index is None:
+        return None
+
+    # 逐条收集：新条目开启新项，续行并入上一条（模型常把长条折行）。
+    raw_items: list[str] = []
+    for line in lines[heading_index + 1:]:
+        match = _LEGACY_ITEM_START.match(line)
+        if match:
+            raw_items.append(match.group(1).strip())
+        elif raw_items and line.strip():
+            raw_items[-1] = f"{raw_items[-1]} {line.strip()}"
+    if not raw_items:
+        return None
+
+    records: list[dict[str, Any]] = []
+    for raw in raw_items:
+        question, sections, decider = _parse_legacy_item(raw)
+        if not question:
+            continue
+        records.append(
+            {
+                "question": question,
+                "sections": sections,
+                "decider": decider,
+                "importance": _LEGACY_IMPORTANCE,
+            }
+        )
+    if not records:
+        return None
+
+    items = finalize_items(records, id_prefix=id_prefix)
+    logger.warning(
+        "待确认清单是**人读附录**而不是标记块，已按旧格式兜底剥离（建议收紧提示词）",
+        extra={"event": "pending.legacy_appendix", "count": len(items)},
+    )
+
+    body = "\n".join(lines[:heading_index]).rstrip()
+    return collapse_blank_lines(body), items
+
+
+def _parse_legacy_item(raw: str) -> tuple[str, list[str], str]:
+    """把一条人读附录项拆成（问题, 影响章节, 拍板人）。
+
+    尾注可能用破折号引出（`—— 影响章节：…`），也可能被折行后直接以「影响章节：」开头
+    （线上那份附录两种都有）。因此先找破折号，找不到就退化为「在第一个尾注关键词处分界」。
+    """
+    head, separator, tail = raw.partition("——")
+    if not separator:
+        head, separator, tail = raw.partition("--")
+    if not separator:
+        # 没有破折号：以第一个尾注关键词为界，前面是问题、后面是元数据
+        marker = _LEGACY_SECTIONS.search(raw) or _LEGACY_DECIDER.search(raw)
+        if marker is not None:
+            head, tail = raw[: marker.start()], raw[marker.start():]
+        else:
+            head, tail = raw, ""
+
+    question = head.strip().strip("，,。；; —")
+    sections: list[str] = []
+    section_match = _LEGACY_SECTIONS.search(tail or "")
+    if section_match:
+        sections = [
+            part.strip()
+            for part in re.split(r"[、,，/]", section_match.group(1))
+            if part.strip()
+        ]
+    decider = ""
+    decider_match = _LEGACY_DECIDER.search(tail or "")
+    if decider_match:
+        decider = decider_match.group(1).strip()
+    return question, sections, decider
 
 
 def _parse_items(raw: str) -> list[dict[str, Any]] | None:
