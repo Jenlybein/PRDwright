@@ -854,6 +854,28 @@ def test_api_docs_generation_allows_necessary_complements():
     assert "不要新增 PRD 根本没提过的能力域" in prompts.API_DOCS_GENERATION_PROMPT
 
 
+def test_all_three_generation_prompts_carry_the_same_relaxation():
+    """三份产物同一口径：允许合理补充、结构不要求与模板逐字一致。
+
+    用户反馈（2026-11-18）：「prd、接口文档、提示词都差不多这样适当放宽」。只放宽评审
+    不放宽生成，模型仍然不敢写；只放宽生成不放宽评审，写了又被判「编造」（high 还会触发
+    一次自动改写）。因此两边都要有，且三份产物都要有。
+    """
+    for name, template in (
+        ("PRD（技能包版）", prompts.PRD_SKILL_GENERATION_PROMPT),
+        ("PRD（内置降级版）", prompts.PRD_GENERATION_PROMPT),
+        ("接口文档", prompts.API_DOCS_GENERATION_PROMPT),
+        ("提示词套件", prompts.PROMPTS_GENERATION_PROMPT),
+    ):
+        assert "允许" in template, f"{name} 缺少「合理补充」的允许说明"
+        assert "（建议）" in template, f"{name} 没有要求给补充内容标「（建议）」"
+
+    # 结构灵活：PRD 与提示词套件都要写明「骨架 / 节内可增减」
+    assert "模板是骨架" in prompts.PRD_SKILL_GENERATION_PROMPT
+    assert "骨架是这八节" in prompts.PRD_GENERATION_PROMPT
+    assert "骨架是「设计原则" in prompts.PROMPTS_GENERATION_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # 八、跨端标签对拍（后端为准）
 # ---------------------------------------------------------------------------
