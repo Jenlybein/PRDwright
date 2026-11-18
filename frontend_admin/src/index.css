@@ -559,14 +559,7 @@
     color: var(--ui-body);
   }
 
-  /* 页脚那块斜纹：粗野风里唯一允许出现的图案，用来收住长页面 */
-  .brut-hatch {
-    background-image: repeating-linear-gradient(
-      45deg,
-      var(--grid-line) 0 6px,
-      transparent 6px 12px
-    );
-  }
+  /* 页脚那块斜纹已随页脚一起删除：不放没有信息的装饰 */
 
   /* ------------------------------------------------------------------ 弹窗 */
 
@@ -730,19 +723,6 @@
   .brut-nav-row.is-branch {
     border-color: var(--ui-brut);
     background: var(--ui-sky-soft);
-  }
-  /* 右侧那列等宽小字（OVERVIEW / MODEL …）：装饰，不参与阅读动线 */
-  .brut-nav-code {
-    flex: none;
-    font-family: var(--font-mono);
-    font-size: 0.625rem;
-    letter-spacing: 0.1em;
-    color: var(--ui-ink);
-    opacity: 0.55;
-  }
-  .brut-nav-row.is-active .brut-nav-code {
-    color: var(--ui-sky);
-    opacity: 1;
   }
   /* 子菜单：缩进 + 竖线 + 字号小一档 */
   .brut-nav-sub {

@@ -234,7 +234,7 @@ onMounted(load)
 <template>
   <div class="space-y-5">
     <!-- 说明条：告诉人这个页面和「操作记录」不是一回事 -->
-    <PageHeader kicker="Logs / 排障" title="系统日志">
+    <PageHeader title="系统日志">
       <template #actions>
         <span class="brut-tag brut-tag-sky">共 {{ total }} 条</span>
       </template>
@@ -245,7 +245,7 @@ onMounted(load)
 
     <!-- 过滤条 -->
     <section class="brut-card">
-      <header class="flex items-center justify-between border-b-2 border-brut px-4 py-2">
+      <header class="flex items-center justify-between border-b border-line px-4 py-2">
         <h2 class="text-sm font-extrabold tracking-tight text-ink">筛选</h2>
         <span class="kicker">默认最近 24 小时</span>
       </header>
@@ -329,7 +329,7 @@ onMounted(load)
         </label>
       </div>
 
-      <div class="flex flex-wrap items-center gap-1.5 border-t-2 border-brut px-4 py-2.5">
+      <div class="flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-2.5">
         <button type="button" class="brut-btn brut-btn-primary brut-btn-xs" @click="applyFilters">
           查询
         </button>
@@ -417,7 +417,7 @@ onMounted(load)
         <!-- 分页 -->
         <div
           v-if="total > pageSize"
-          class="flex items-center justify-between border-t-2 border-brut px-4 py-2.5 text-sm"
+          class="flex items-center justify-between border-t border-line px-4 py-2.5 text-sm"
         >
           <span class="tnum text-xs text-muted">第 {{ page }} / {{ totalPages }} 页</span>
           <div class="flex gap-2">
@@ -446,7 +446,6 @@ onMounted(load)
          中间插一行十几行的详情会把「相邻几条日志」彻底打散。 -->
     <AdminModal
       :open="Boolean(openedLog)"
-      kicker="Log Detail"
       :title="openedLog?.msg ?? ''"
       size="md"
       @close="openedLog = null"

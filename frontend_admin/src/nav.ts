@@ -23,8 +23,6 @@ export interface NavChild {
   /** 路由名。子项与父项共用同一个路由名，靠 `sec` 区分 */
   name: string
   label: string
-  /** 右侧那列等宽小字（OVERVIEW / JOBS …），纯装饰，不参与逻辑 */
-  code: string
   /** 落在 URL 上的分区（`?sec=`）。没有就是「这一整页」 */
   sec?: string
 }
@@ -36,7 +34,6 @@ export interface NavItem extends NavChild {
 export interface NavGroup {
   key: string
   label: string
-  code: string
   items: NavItem[]
 }
 
@@ -45,7 +42,6 @@ export interface ConfigSection {
   /** URL 上的取值（`?sec=`） */
   key: string
   label: string
-  code: string
   /** 展示哪些配置分组（`admin_config_service._GROUPS` 的键） */
   groups: string[]
   /** 是否展示模型配置列表（供应商那一段） */
@@ -68,7 +64,6 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
   {
     key: 'model',
     label: '模型配置',
-    code: 'MODEL',
     groups: [],
     providers: true,
     help: '一条配置 = 一个接口 + 一套参数。密钥由后端加密入库，列表只显示「已配置 / 未配置」。',
@@ -76,7 +71,6 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
   {
     key: 'generation',
     label: '模型生成配置',
-    code: 'GEN',
     groups: ['prd', 'review'],
     providers: false,
     help: '控制 PRD 逐章撰写的节奏与审核强度。改完对下一次生成生效，正在跑的任务不受影响。',
@@ -84,7 +78,6 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
   {
     key: 'budget',
     label: '预算与额度',
-    code: 'QUOTA',
     groups: ['llm', 'quota'],
     providers: false,
     help: '单次调用的超时与重试、发出请求前的 token 预算检查，以及每个用户每天能生成多少。',
@@ -92,7 +85,6 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
   {
     key: 'security',
     label: '安全与登录',
-    code: 'AUTH',
     groups: ['auth'],
     providers: false,
     help: '登录失败限流与注册开关改完立刻生效；会话有效期只影响新登录——想立刻踢人用用户页的「强制下线」。',
@@ -114,20 +106,18 @@ export const NAV: NavGroup[] = [
   {
     key: 'ops',
     label: '运营',
-    code: 'OPS',
     items: [
-      { name: 'dashboard', label: '概览', code: 'OVERVIEW' },
-      { name: 'jobs', label: '任务监控', code: 'JOBS' },
-      { name: 'users', label: '用户', code: 'USERS' },
-      { name: 'invites', label: '邀请码', code: 'INVITES' },
+      { name: 'dashboard', label: '概览' },
+      { name: 'jobs', label: '任务监控' },
+      { name: 'users', label: '用户' },
+      { name: 'invites', label: '邀请码' },
     ],
   },
   {
     key: 'sys',
     label: '系统',
-    code: 'SYS',
     items: [
-      { name: 'logs', label: '系统日志', code: 'LOGS' },
+      { name: 'logs', label: '系统日志' },
       /**
        * 接口文档。
        *
@@ -135,24 +125,22 @@ export const NAV: NavGroup[] = [
        * 后端渲染的 Swagger UI / ReDoc。直接塞两个外链会让侧栏看起来像跳出了
        * `/admin/` 前缀，而「为什么跳出、谁能看」正是需要解释的事。
        */
-      { name: 'api-docs', label: '接口文档', code: 'API' },
+      { name: 'api-docs', label: '接口文档' },
       {
         // ⚠️ 这一项**没有去处**：点它只是展开/收起子菜单。
         // 配页被切成了四个分区，「配置」本身不再是一屏——
         // 给它一个去处就等于造出第五个（和四个加起来一样多的）入口。
         name: 'config',
         label: '配置',
-        code: 'CONFIG',
         // 子项与「配置页的分区」是同一份数据，不再手抄一遍标签——
         // 抄一遍的结果必然是某天改了一边，两边叫法不一致。
         children: CONFIG_SECTIONS.map((s) => ({
           name: 'config',
           label: s.label,
-          code: s.code,
           sec: s.key,
         })),
       },
-      { name: 'audit', label: '操作记录', code: 'AUDIT' },
+      { name: 'audit', label: '操作记录' },
     ],
   },
 ]

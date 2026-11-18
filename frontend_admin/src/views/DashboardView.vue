@@ -256,7 +256,7 @@ onMounted(load)
 <template>
   <div class="space-y-5">
     <!-- 页头 -->
-    <PageHeader kicker="Overview / 平台" title="平台概览">
+    <PageHeader title="平台概览">
       <template #actions>
         <span class="brut-tag brut-tag-sky">累计口径</span>
         <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
@@ -304,10 +304,9 @@ onMounted(load)
       -->
       <section v-if="stats" class="brut-card-lg">
         <header
-          class="flex flex-wrap items-end justify-between gap-2 border-b-2 border-brut px-4 py-3"
+          class="flex flex-wrap items-end justify-between gap-2 border-b border-line px-4 py-3"
         >
           <div>
-            <p class="kicker">Health</p>
             <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">四个数字</h2>
           </div>
           <p class="max-w-lg text-xs text-subtle">
@@ -374,10 +373,9 @@ onMounted(load)
       <!-- 趋势 -->
       <section class="brut-card-lg">
         <header
-          class="flex flex-wrap items-center justify-between gap-3 border-b-2 border-brut px-4 py-3"
+          class="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3"
         >
           <div>
-            <p class="kicker">Trend</p>
             <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">按日趋势</h2>
           </div>
 
@@ -460,7 +458,7 @@ onMounted(load)
           <!-- 柱状图：纯 CSS 高度百分比，天然自适应，不必算坐标 -->
           <div class="px-4 pt-5">
             <div
-              class="flex h-48 items-end border-b-2 border-brut"
+              class="flex h-48 items-end border-b border-line"
               :class="days > 14 ? 'gap-px' : 'gap-1.5'"
             >
               <div
@@ -522,9 +520,8 @@ onMounted(load)
 
       <!-- 用户排行 -->
       <section class="brut-card-lg">
-        <header class="flex flex-wrap items-end justify-between gap-2 border-b-2 border-brut px-4 py-3">
+        <header class="flex flex-wrap items-end justify-between gap-2 border-b border-line px-4 py-3">
           <div>
-            <p class="kicker">Ranking</p>
             <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">用户用量排行</h2>
           </div>
           <p class="max-w-md text-xs text-subtle">

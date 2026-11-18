@@ -297,7 +297,7 @@ function totalTokens(job: AdminJob): string {
 <template>
   <div class="space-y-5">
     <!-- 页头 + 全局动作 -->
-    <PageHeader kicker="Jobs / 现场" title="任务监控">
+    <PageHeader title="任务监控">
       <template #actions>
         <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
         <label
@@ -355,7 +355,7 @@ function totalTokens(job: AdminJob): string {
         <span class="ml-auto self-center font-mono text-xs text-subtle">共 {{ total }} 条</span>
       </form>
 
-      <div class="flex flex-wrap items-center gap-2 border-t-2 border-brut px-4 py-2.5">
+      <div class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2.5">
         <div class="brut-seg">
           <button
             v-for="item in TABS"
@@ -449,7 +449,6 @@ function totalTokens(job: AdminJob): string {
     <!-- 详情：错误原因 / 时间线 / Token 明细 -->
     <AdminModal
       :open="Boolean(openedJob)"
-      kicker="Job Detail"
       :title="`任务 #${openedJob?.id ?? ''}`"
       size="md"
       @close="openedJob = null"
@@ -505,7 +504,6 @@ function totalTokens(job: AdminJob): string {
     <!-- 取消确认。用弹窗而不是 confirm()：要说明「文档任务不保留半截正文」这个后果 -->
     <AdminModal
       :open="Boolean(pendingCancel)"
-      kicker="Cancel Job"
       :title="`取消任务 #${pendingCancel?.id ?? ''}`"
       size="sm"
       tone="danger"

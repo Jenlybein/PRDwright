@@ -60,10 +60,7 @@ function open(href: string): void {
 
 <template>
   <div class="space-y-5">
-    <PageHeader kicker="API / 开发者" title="接口文档">
-      <template #actions>
-        <span class="brut-tag brut-tag-sky">仅管理员</span>
-      </template>
+    <PageHeader title="接口文档">
       <template #desc>
         <p>使用当前管理员会话打开；未登录或非管理员无法访问。</p>
       </template>
@@ -71,9 +68,8 @@ function open(href: string): void {
 
     <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <section v-for="page in DOC_PAGES" :key="page.key" class="brut-card flex flex-col">
-        <header class="flex items-center justify-between border-b-2 border-brut px-4 py-2">
+        <header class="flex items-center justify-between border-b border-line px-4 py-2">
           <h2 class="text-sm font-extrabold tracking-tight text-ink">{{ page.name }}</h2>
-          <span class="kicker">{{ page.code }}</span>
         </header>
 
         <div class="flex flex-1 flex-col gap-3 px-4 py-3">
@@ -94,9 +90,8 @@ function open(href: string): void {
     </div>
 
     <section class="brut-card">
-      <header class="flex items-center justify-between border-b-2 border-brut px-4 py-2">
+      <header class="flex items-center justify-between border-b border-line px-4 py-2">
         <h2 class="text-sm font-extrabold tracking-tight text-ink">原始定义（JSON）</h2>
-        <span class="kicker">OPENAPI 3</span>
       </header>
       <div class="space-y-2 px-4 py-3">
         <p class="text-sm leading-relaxed text-body">

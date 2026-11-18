@@ -68,16 +68,14 @@ async function submit() {
            `normal-case`：kicker 默认会把字母转大写，品牌名得保持原样 -->
       <p class="mb-4 flex items-center justify-center gap-2 lg:hidden">
         <span class="h-2 w-2 bg-sky"></span>
-        <span class="kicker normal-case">PRDwright</span>
+        <span class="text-sm font-extrabold text-ink">PRDwright</span>
       </p>
 
       <div class="grid gap-4 lg:grid-cols-[1fr_1.02fr] lg:gap-6">
         <!-- 左：整块天蓝海报。只留品牌，别的一概不放 -->
         <div
-          class="brut-slab-sky relative hidden flex-col justify-between overflow-hidden p-8 lg:flex"
+          class="brut-slab-sky relative hidden flex-col justify-end overflow-hidden p-8 lg:flex"
         >
-          <p class="kicker relative text-on-sky/70">Admin Console</p>
-
           <div class="relative">
             <!-- 0.95 行高是这套视觉的下限；再紧就会让字的重心压到下一行 -->
             <h1 class="text-[4.2rem] leading-[0.95] font-black tracking-tight">
@@ -93,8 +91,7 @@ async function submit() {
 
         <!-- 右：表单。标题之后直接是输入框 -->
         <div class="brut-card-lg flex flex-col justify-center p-7 sm:p-9">
-          <p class="kicker">Sign in</p>
-          <h1 class="mt-2 text-2xl font-black tracking-tight text-ink">管理员登录</h1>
+          <h1 class="text-2xl font-black tracking-tight text-ink">管理员登录</h1>
 
           <p v-if="notice" class="brut-note brut-note-fail mt-4" role="alert">
             {{ notice }}

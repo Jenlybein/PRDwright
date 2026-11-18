@@ -377,7 +377,7 @@ function totalTokens(user: AdminUser): number {
 <template>
   <div class="space-y-5">
     <!-- 页头 -->
-    <PageHeader kicker="Users / 账号" title="用户管理">
+    <PageHeader title="用户管理">
       <template #actions>
         <span class="brut-tag brut-tag-sky">{{ users.length }} 个账号</span>
         <button type="button" class="brut-btn brut-btn-xs brut-btn-primary" @click="openCreate">
@@ -464,7 +464,6 @@ function totalTokens(user: AdminUser): number {
     <!-- 新建账号 -->
     <AdminModal
       :open="panel === 'create'"
-      kicker="Create"
       title="新建账号"
       size="sm"
       @close="closePanel"
@@ -512,7 +511,6 @@ function totalTokens(user: AdminUser): number {
     <!-- 操作清单：竖排可选列表，危险动作也在这里（染色，但不抢主位） -->
     <AdminModal
       :open="panel === 'actions'"
-      kicker="Actions"
       :title="`操作 · ${activeUser?.username ?? ''}`"
       size="sm"
       @close="closePanel"
@@ -574,7 +572,6 @@ function totalTokens(user: AdminUser): number {
     <!-- 额度：三个输入都是三态（-1 跟全局 / 0 不限 / 正数上限） -->
     <AdminModal
       :open="panel === 'quota'"
-      kicker="Quota"
       :title="`编辑额度 · ${activeUser?.username ?? ''}`"
       size="sm"
       @close="closePanel"
@@ -631,7 +628,6 @@ function totalTokens(user: AdminUser): number {
     <!-- 重置密码 -->
     <AdminModal
       :open="panel === 'password'"
-      kicker="Password"
       :title="`重置密码 · ${activeUser?.username ?? ''}`"
       size="sm"
       @close="closePanel"
@@ -663,7 +659,6 @@ function totalTokens(user: AdminUser): number {
     <!-- 强制下线确认。说清「只是踢下线、不改密码、不禁登录」——三者的区别是后台最常见的误解 -->
     <AdminModal
       :open="panel === 'revoke'"
-      kicker="Revoke"
       :title="`让「${pendingRevoke?.username ?? ''}」立刻下线？`"
       size="sm"
       @close="closePanel"
@@ -688,7 +683,6 @@ function totalTokens(user: AdminUser): number {
     <!-- 删除确认。用弹窗而不是 confirm()：后者在部分环境被禁用，且没法摆出明细 -->
     <AdminModal
       :open="panel === 'delete'"
-      kicker="Delete"
       :title="`删除「${pendingDelete?.username ?? ''}」`"
       size="md"
       tone="danger"

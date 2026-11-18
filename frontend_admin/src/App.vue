@@ -85,14 +85,6 @@ const heading = computed(() => {
   return branch.value && branch.value !== item ? `${branch.value.label} · ${item.label}` : item.label
 })
 
-/** 顶栏日期。用本地时区，和日志页的显示口径一致 */
-const today = computed(() => {
-  const d = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const week = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()]
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} 周${week}`
-})
-
 async function onLogout() {
   await session.logout()
   await router.replace({ name: 'login' })
@@ -121,7 +113,6 @@ async function onLogout() {
             <span class="block text-sm leading-tight font-extrabold tracking-tight text-ink">
               PRDwright
             </span>
-            <span class="kicker mt-0.5 block">Admin Console</span>
           </span>
         </div>
 
@@ -129,7 +120,7 @@ async function onLogout() {
              层次只靠缩进 + 竖线表达，不靠颜色深浅——暗色下深浅差不可靠。 -->
         <nav class="brut-nav" aria-label="后台导航">
           <template v-for="group in NAV" :key="group.key">
-            <p class="kicker mt-2 mb-1 px-1">{{ group.label }} / {{ group.code }}</p>
+            <p class="mt-2 mb-1 px-1 text-xs font-semibold text-muted">{{ group.label }}</p>
 
             <template v-for="item in group.items" :key="item.name">
               <!-- 有子项：整行就是一个「展开/收起」按钮，点了**不跳转**。
@@ -156,7 +147,6 @@ async function onLogout() {
                     :class="isActive(child) ? 'is-active' : ''"
                   >
                     <span class="truncate">{{ child.label }}</span>
-                    <span class="brut-nav-code">{{ child.code }}</span>
                   </RouterLink>
                 </div>
               </template>
@@ -169,7 +159,6 @@ async function onLogout() {
                 :class="isActive(item) ? 'is-active' : ''"
               >
                 <span class="truncate">{{ item.label }}</span>
-                <span class="brut-nav-code">{{ item.code }}</span>
               </RouterLink>
             </template>
           </template>
@@ -177,9 +166,8 @@ async function onLogout() {
 
         <!-- 账号块：桌面端固定在侧栏底部 -->
         <div class="mt-auto hidden lg:block">
-          <div class="border-2 border-brut bg-card/70 px-3 py-2.5">
-            <p class="kicker">Signed in</p>
-            <p class="mt-1 truncate text-sm font-extrabold text-ink">
+          <div class="border border-brut bg-card/70 px-3 py-2.5">
+            <p class="truncate text-sm font-extrabold text-ink">
               {{ session.username || '—' }}
             </p>
           </div>
@@ -199,30 +187,16 @@ async function onLogout() {
               <!-- 窄屏没有侧栏，牌子挪到顶栏来，否则第一屏看不出这是哪个后台 -->
               <span class="flex items-center gap-1.5 lg:hidden">
                 <span
-                  class="flex h-6 w-6 items-center justify-center border-2 border-brut bg-sky text-[11px] font-black text-on-sky"
+                  class="flex h-6 w-6 items-center justify-center border border-brut bg-sky text-[11px] font-black text-on-sky"
                 >
                   P
                 </span>
-                <span class="text-sm font-extrabold tracking-tight text-ink">PRDwright</span>
                 <span class="text-brut/40">/</span>
               </span>
-              <span class="kicker hidden lg:inline">PRDwright Admin</span>
-              <span class="hidden text-brut/40 lg:inline">/</span>
               <span class="truncate text-sm font-extrabold text-ink">{{ heading }}</span>
-              <span
-                v-if="current"
-                class="brut-tag brut-tag-slab hidden md:inline-flex"
-              >
-                {{ current.code }}
-              </span>
             </div>
 
             <div class="flex items-center gap-2.5">
-              <span class="kicker hidden md:inline">{{ today }}</span>
-              <span class="hidden items-center gap-1.5 sm:flex">
-                <span class="h-2 w-2 border border-brut bg-[var(--ui-sky)]"></span>
-                <span class="kicker">Online</span>
-              </span>
               <!-- 主题切换放在顶栏而不是某个设置页：它要随手可及，且切换立即生效 -->
               <ThemeSwitch />
               <button
@@ -257,19 +231,6 @@ async function onLogout() {
             <RouterView />
           </div>
         </main>
-
-        <footer
-          class="brut-hatch mt-4 border-t-2 border-brut px-4 py-3 sm:px-6"
-        >
-          <div
-            class="mx-auto flex w-full max-w-[1180px] flex-wrap items-center justify-between gap-2"
-          >
-            <span class="kicker">PRDwright · 管理后台</span>
-            <span class="kicker">
-              权限由服务端 require_admin 判定，本页面只是入口
-            </span>
-          </div>
-        </footer>
       </div>
     </div>
 

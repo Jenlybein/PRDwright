@@ -17,7 +17,7 @@ import AdminModal from '@/components/AdminModal.vue'
 
 function mountModal(open = true) {
   return mount(AdminModal, {
-    props: { open, title: '删除账号', kicker: 'Delete' },
+    props: { open, title: '删除账号' },
     slots: { default: '<p class="probe">正文</p>' },
   })
 }
@@ -36,7 +36,6 @@ describe('AdminModal', () => {
     expect(dialog.exists()).toBe(true)
     expect(dialog.attributes('aria-modal')).toBe('true')
     expect(wrapper.text()).toContain('删除账号')
-    expect(wrapper.text()).toContain('Delete')
   })
 
   it('按 Esc 关闭', async () => {

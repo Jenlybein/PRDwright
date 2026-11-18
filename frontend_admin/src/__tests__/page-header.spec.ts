@@ -16,21 +16,21 @@ import { mount } from '@vue/test-utils'
 import PageHeader from '@/components/PageHeader.vue'
 
 describe('PageHeader', () => {
-  it('标题渲染成唯一的 h1，栏目名与标题各就各位', () => {
+  it('标题渲染成唯一的 h1，且页头里没有多余的栏目名小字', () => {
     const wrapper = mount(PageHeader, {
-      props: { kicker: 'Jobs / 现场', title: '任务监控' },
+      props: { title: '任务监控' },
     })
 
     const h1 = wrapper.findAll('h1')
     expect(h1).toHaveLength(1)
     expect(h1[0]!.text()).toBe('任务监控')
-    expect(wrapper.text()).toContain('Jobs / 现场')
+    expect(wrapper.find('.page-head-kicker').exists()).toBe(false)
     expect(wrapper.find('.page-head').exists()).toBe(true)
   })
 
   it('不传说明与动作时也能渲染，且不留下空容器', () => {
     const wrapper = mount(PageHeader, {
-      props: { kicker: 'K', title: 'T' },
+      props: { title: 'T' },
     })
 
     expect(wrapper.find('.page-head-desc').exists()).toBe(false)
@@ -38,7 +38,7 @@ describe('PageHeader', () => {
 
   it('动作与说明分别落在各自的槽里，不混进标题区', () => {
     const wrapper = mount(PageHeader, {
-      props: { kicker: 'K', title: 'T' },
+      props: { title: 'T' },
       slots: {
         actions: '<button class="probe-action">刷新</button>',
         desc: '<p class="probe-desc">口径说明</p>',

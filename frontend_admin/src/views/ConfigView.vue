@@ -571,7 +571,7 @@ onMounted(load)
 <template>
   <div class="space-y-5">
     <!-- 页头。标题跟着分区走：从侧栏子菜单进来时，这是「我进了哪一摊」的第二处确认 -->
-    <PageHeader kicker="Config / 运行时" :title="section.label">
+    <PageHeader :title="section.label">
       <template #actions>
         <span v-if="config" class="brut-tag brut-tag-slab">REV {{ config.revision }}</span>
       </template>
@@ -609,9 +609,8 @@ onMounted(load)
 
       <!-- 模型配置：一条 = 一个接口 + 一套参数，用列表而不是「一家一张卡」 -->
       <section v-if="showProviders" class="brut-card-lg">
-        <header class="flex flex-wrap items-center justify-between gap-2 border-b-2 border-brut px-4 py-3">
+        <header class="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
           <div>
-            <p class="kicker">Providers</p>
             <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">模型配置</h2>
           </div>
           <div class="flex flex-wrap items-center justify-end gap-2">
@@ -732,7 +731,6 @@ onMounted(load)
          这些行为不该每个弹窗各写一遍。 -->
     <AdminModal
       :open="Boolean(editing)"
-      kicker="Edit provider"
       :title="`编辑「${editing?.name ?? ''}」`"
       size="lg"
       @close="cancelEdit"
@@ -819,7 +817,6 @@ onMounted(load)
     <!-- 新增配置弹窗 -->
     <AdminModal
       :open="showCreate"
-      kicker="New provider"
       title="新增配置"
       size="lg"
       @close="closeCreate"
@@ -913,7 +910,7 @@ onMounted(load)
       <!-- 配置分组 -->
       <section v-for="group in shownGroups" :key="group.key" class="brut-card-lg">
         <header
-          class="flex flex-wrap items-start justify-between gap-3 border-b-2 border-brut px-4 py-3"
+          class="flex flex-wrap items-start justify-between gap-3 border-b border-line px-4 py-3"
         >
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">

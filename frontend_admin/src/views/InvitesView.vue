@@ -108,7 +108,7 @@ function formatDate(value: string | null): string {
 
 <template>
   <div class="space-y-5">
-    <PageHeader kicker="Invites / 准入门票" title="邀请码管理">
+    <PageHeader title="邀请码管理">
       <template #actions>
         <span class="brut-tag brut-tag-sky">{{ invites.length }} 个码</span>
         <button type="button" class="brut-btn brut-btn-xs brut-btn-primary" @click="openCreate">
@@ -127,7 +127,6 @@ function formatDate(value: string | null): string {
          常驻表单会一直占着垂直空间，而建码是低频动作——多数时候它只是把列表往下推。 -->
     <AdminModal
       :open="formOpen"
-      kicker="Create"
       title="新建邀请码"
       size="sm"
       @close="formOpen = false"
@@ -233,7 +232,6 @@ function formatDate(value: string | null): string {
     <!-- 删除确认：弹窗。之前是页面底部一块内联提示，展开会把列表往下顶 -->
     <AdminModal
       :open="Boolean(pendingDelete)"
-      kicker="Delete"
       :title="`删除邀请码「${pendingDelete?.code ?? ''}」`"
       size="sm"
       tone="danger"

@@ -51,6 +51,6 @@ describe('接口文档页', () => {
 
   it('明确说明只有管理员能打开', () => {
     const wrapper = mount(ApiDocsView)
-    expect(wrapper.text()).toContain('仅管理员')
+    expect(wrapper.text()).toContain('非管理员无法访问')
   })
 })

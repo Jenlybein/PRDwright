@@ -63,7 +63,7 @@ onMounted(load)
 
 <template>
   <div class="space-y-5">
-    <PageHeader kicker="Audit / 留痕" title="操作记录">
+    <PageHeader title="操作记录">
       <template #actions>
         <span class="brut-tag brut-tag-slab">{{ items.length }} 条</span>
       </template>

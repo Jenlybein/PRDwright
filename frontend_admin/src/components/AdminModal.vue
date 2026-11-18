@@ -24,14 +24,13 @@ const props = withDefaults(
     open: boolean
     /** 弹窗标题（也用作无障碍名称） */
     title: string
-    /** 标题上方的小字，例如「Delete」「Quota」 */
-    kicker?: string
+
     /** 宽度档位：sm 用于确认框，md 用于表单，lg 用于长内容 */
     size?: 'sm' | 'md' | 'lg'
     /** danger 会把标题与顶线染成危险色，用于删除这类不可逆操作 */
     tone?: 'default' | 'danger'
   }>(),
-  { kicker: '', size: 'md', tone: 'default' },
+  { size: 'md', tone: 'default' },
 )
 
 const emit = defineEmits<{ close: [] }>()
@@ -86,7 +85,6 @@ onBeforeUnmount(() => {
     >
       <header class="admin-modal-head">
         <div class="min-w-0">
-          <p v-if="kicker" class="kicker">{{ kicker }}</p>
           <h2 class="admin-modal-title">{{ title }}</h2>
           <!-- 副标题放标识信息（用户名 / 任务号 / 时间），不占正文重量 -->
           <slot name="subtitle" />

@@ -61,10 +61,10 @@ describe('后台外壳 · 侧栏子菜单', () => {
   it('配置下面挂着四个分区', async () => {
     const { wrapper } = await shellAt('/config?sec=model')
     expect(subLinks(wrapper).map((a) => a.text().replace(/\s+/g, ' ').trim())).toEqual([
-      '模型配置MODEL',
-      '模型生成配置GEN',
-      '预算与额度QUOTA',
-      '安全与登录AUTH',
+      '模型配置',
+      '模型生成配置',
+      '预算与额度',
+      '安全与登录',
     ])
   })
 
