@@ -827,6 +827,33 @@ def test_both_review_prompts_share_one_generated_category_table():
         )
 
 
+def test_criteria_allow_necessary_complements_and_flexible_structure():
+    """两条判据的**放宽**必须写进提示词，否则模型只会按最严的读法报。
+
+    线上两次误报（2026-11-18）：
+    - 接口文档补了「注册 / 退出登录」两个接口，上游没有任何出处 → 被判「编造」（high，
+      还会触发一次自动改写）；
+    - 数据模型章「仅引用 3.2.1 的字段表」→ 被判「结构不符」（"与模板列不一致"）。
+    两条都不是缺陷：前者是已声明能力的必然展开，后者是模板允许的引用写法。
+    """
+    table = review_defects.render_category_rules()
+
+    # 编造：必须写明「合理补充不算编造」，并给出可操作的边界
+    assert "合理补充不算编造" in table
+    assert "注册" in table and "退出登录" in table
+    assert "不得新增上游根本没提过的能力域" in table
+
+    # 结构不符：必须写明不按「与模板逐字一致」判，引用写法不算缺陷
+    assert "不判「与模板逐字一致」" in table
+    assert "详见第 X 节" in table
+
+
+def test_api_docs_generation_allows_necessary_complements():
+    """生成侧与评审侧要一起放宽：只改一处会「写不让写、审又照审」。"""
+    assert "必要配套接口允许补充" in prompts.API_DOCS_GENERATION_PROMPT
+    assert "不要新增 PRD 根本没提过的能力域" in prompts.API_DOCS_GENERATION_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # 八、跨端标签对拍（后端为准）
 # ---------------------------------------------------------------------------
