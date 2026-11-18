@@ -362,6 +362,7 @@
 **范围**：用户端弹窗 / 抽屉 / 侧栏 / 菜单 / 提示浮层的过渡；按压反馈与排版细则；reduced-motion 与无障碍（焦点、aria）；触屏门控与安全区；入口、进度、主题、流式的增补动效。**本期不做**：引入动效库、视觉重设计、完整 WCAG 审计、iPad / Android 全量适配、管理端体系改造（只加弹窗面板 120ms 与 hover 门控）。
 
 **设计**：令牌先行——`--ease-smooth`（进场 / 按压）、`--ease-drawer`（抽屉 / 侧栏）；时长表为按压 120ms / 菜单 160ms / 遮罩 180ms / 弹窗面板 220ms / 抽屉 260ms / 提示进 200ms 出 150ms。弹层统一为「遮罩动透明度、面板动缩放」，弹窗是 transform-origin 的例外（不挂在触发按钮上，保持中心）；抽屉只动 `transform`，预览加宽等宽度变化瞬变。reduced-motion 改成分类策略：关位移动画、保留透明度与颜色，`.app-spinner` 是唯一保留旋转的例外（它是状态指示，不是致晕运动）。无障碍与动效同批交付：`aria-labelledby`、焦点陷阱与关闭归还、`aria-live`、`overscroll-behavior: contain`。
+**布局**：进度条（`frontend/src/components/stages/ProgressSteps.vue`）是**吸顶顶栏**——`sticky top-0` + 不透明底色 `bg-bg` + 下沿 1px `border-line`，`-mx-4 px-4` 铺到 `<main>` 左右边（正文是 `px-4`，不铺出去则栏底只盖正文宽、两侧露出滚动内容），`z-20` 低于侧栏抽屉（30/40）与弹窗（50）。它是导航不是内容面板，因此与页面同色、不另起一块浮层。
 
 **契约**：所有过渡必须列出具体属性，禁止 `transition: all`；新增过渡不得用裸 `transition` 工具类；只用语义令牌，未定义令牌类会回落 `currentColor`；`dark:` 只留给结构性判断与遮罩；管理端手写 `:hover` 一律包在 `(hover: hover) and (pointer: fine)` 内。配色同批收口：两端各用一套暖色令牌（纸面米白 + 暖灰文字 + 陶土强调），模板里不出现 `slate/sky/emerald/amber/rose` 原生色阶，语义色只走 `success/warning/danger` 令牌。
 

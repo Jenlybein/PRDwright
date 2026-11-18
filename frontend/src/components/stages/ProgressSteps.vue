@@ -112,7 +112,19 @@ const CHAT_ICON =
 </script>
 
 <template>
-  <nav v-if="displaySteps.length > 1" class="mb-8" aria-label="生成进度">
+  <!--
+    **吸顶顶栏**：`sticky top-0` + 不透明底色，滚过之后仍能随时看到「走到第几格」，
+    不必回滚到页顶。`-mx-4 px-4` 把这条栏铺到 `<main>` 的左右边（正文是 `px-4`），
+    否则栏底色只覆盖正文宽度、两侧会露出滚动中的内容。
+    底色与页面同色（`bg-bg`）而不是另起一块面板：它是导航不是内容，不该抢正文的注意力；
+    下沿 `border-b` 是滚动时内容从它下面穿过的唯一分隔线索，省掉会显得文字被栏吃掉。
+    `z-20` 低于侧栏抽屉（30/40）与弹窗（50）——它们浮在上面，栏只压正文。
+  -->
+  <nav
+    v-if="displaySteps.length > 1"
+    class="sticky top-0 z-20 -mx-4 mb-6 border-b border-line bg-bg px-4 pb-3 pt-3"
+    aria-label="生成进度"
+  >
     <ol class="flex items-start">
       <li
         v-for="item in displaySteps"
