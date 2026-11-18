@@ -161,7 +161,7 @@ watch(
     <Transition name="auth-dialog">
       <div
         v-if="auth.dialogOpen"
-        class="auth-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overscroll-contain bg-slate-950/50 p-4 pt-24 backdrop-blur-sm"
+        class="auth-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overscroll-contain bg-stone-950/50 p-4 pt-24 backdrop-blur-sm"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"

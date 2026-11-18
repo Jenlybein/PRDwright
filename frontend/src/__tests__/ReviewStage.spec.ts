@@ -690,7 +690,7 @@ describe('ReviewStage 的版本入口', () => {
 // ---------------------------------------------------------------------------
 
 describe('ReviewStage 的部分完成提示', () => {
-  it('部分完成时页首给提示：这份正文不完整，已生成的部分可以先用', () => {
+  it('部分完成时页首给提示：正文不完整，已生成的部分可以先用', () => {
     const wrapper = mount(ReviewStage, {
       props: {
         title: '产品需求文档',
@@ -704,13 +704,13 @@ describe('ReviewStage 的部分完成提示', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('这份正文不完整，已生成的部分可以先用')
+    expect(wrapper.text()).toContain('正文不完整，已生成的部分可以先用')
     // 失败原因照实显示：提示不是把失败粉饰成成功
     expect(wrapper.text()).toContain('生成失败：上游连接中断')
   })
 
   it('完整版本不显示这条提示', () => {
-    expect(mountReview().text()).not.toContain('这份正文不完整')
+    expect(mountReview().text()).not.toContain('正文不完整')
   })
 
   it('部分完成版本照旧可下载：下载不禁用，载荷是眼前这半截正文', async () => {

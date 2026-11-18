@@ -28,24 +28,30 @@
  * ============================================================================
  */
 
-/* L1：原始色阶与视觉常量（与主题无关） */
+/* L1：原始色阶与视觉常量（与主题无关）
+ *
+ * 色阶是**陶土赭**（clay），不是天蓝：蓝配冷灰是「模型默认出图」的样子，
+ * 换成暖陶土之后整站有了被选过的判断。白色文字在 primary-500 及更深档都 >= 4.5:1
+ * （500 档 4.98、600 档 5.94、700 档 7.31），因此 `bg-primary-* text-white` 可以放心用。
+ *
+ * 阴影一律用暖黑 rgb(28 25 23) 带色，不用中性灰：纯灰阴影落在米白纸面上会发脏。 */
 @theme {
-  --color-primary: #0ea5e9;
-  --color-primary-50: #f0f9ff;
-  --color-primary-100: #e0f2fe;
-  --color-primary-200: #bae6fd;
-  --color-primary-300: #7dd3fc;
-  --color-primary-400: #38bdf8;
-  --color-primary-500: #0ea5e9;
-  --color-primary-600: #0284c7;
-  --color-primary-700: #0369a1;
-  --color-primary-800: #075985;
-  --color-primary-900: #0c4a6e;
-  --color-primary-950: #082f49;
-  --radius-card: 1rem;
-  --radius-control: 0.75rem;
-  --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 4px 12px -2px rgb(15 23 42 / 0.06);
-  --shadow-pop: 0 10px 30px -6px rgb(15 23 42 / 0.18);
+  --color-primary: #b8502b;
+  --color-primary-50: #fdf6f3;
+  --color-primary-100: #fbede6;
+  --color-primary-200: #f5d5c8;
+  --color-primary-300: #ebb49f;
+  --color-primary-400: #de8b6c;
+  --color-primary-500: #b8502b;
+  --color-primary-600: #a8451f;
+  --color-primary-700: #9a3412;
+  --color-primary-800: #7c2d12;
+  --color-primary-900: #63240f;
+  --color-primary-950: #38140a;
+  --radius-card: 0.875rem;
+  --radius-control: 0.5rem;
+  --shadow-card: 0 1px 2px 0 rgb(28 25 23 / 0.04), 0 4px 12px -2px rgb(28 25 23 / 0.07);
+  --shadow-pop: 0 10px 30px -6px rgb(28 25 23 / 0.2);
   --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
 }
@@ -90,63 +96,72 @@
 }
 
 /* 亮色主题取值（默认）。同一组变量在 .dark 下被整体覆盖，故 .dark 段必须写在后面
- * —— 两者选择器权重相同（:root 与 .dark 同为 0,1,0），靠书写顺序决定胜负。 */
+ * —— 两者选择器权重相同（:root 与 .dark 同为 0,1,0），靠书写顺序决定胜负。
+ *
+ * 中性色走**暖灰**（stone：偏黄、带一点土色），不用 slate 冷灰。
+ * 纸面米白 + 暖灰文字 + 陶土强调，是「文档工具」的气质，而不是「又一个 AI 后台」。 */
 :root {
-  --ui-bg: #f8fafc;
+  --ui-bg: #faf8f5;
   --ui-surface: #ffffff;
-  --ui-surface-2: #f1f5f9;
+  --ui-surface-2: #f2eee8;
   --ui-field: #ffffff;
-  --ui-line: #e2e8f0;
-  --ui-line-strong: #94a3b8;
-  --ui-fg: #0f172a;
-  --ui-body: #334155;
-  --ui-muted: #475569;
-  --ui-subtle: #64748b;
+  --ui-line: #e5dfd5;
+  --ui-line-strong: #857c73;
+  --ui-fg: #1c1917;
+  --ui-body: #44403c;
+  --ui-muted: #57534e;
+  --ui-subtle: #6b6360;
   --ui-on-accent: #ffffff;
-  --ui-accent: #0369a1;
-  --ui-accent-soft: #e0f2fe;
-  --ui-accent-soft-line: #7dd3fc;
-  --ui-danger: #dc2626;
-  --ui-danger-surface: #fef2f2;
-  --ui-danger-line: #fecaca;
-  --ui-danger-fg: #b91c1c;
-  --ui-warning-surface: #fffbeb;
-  --ui-warning-line: #fde68a;
-  --ui-warning-fg: #92400e;
-  --ui-success-surface: #ecfdf5;
-  --ui-success-line: #a7f3d0;
-  --ui-success-fg: #047857;
+  --ui-accent: #9a3412;
+  --ui-accent-soft: #fbede6;
+  --ui-accent-soft-line: #e3bfa9;
+  --ui-danger: #b3261e;
+  --ui-danger-surface: #fdecea;
+  --ui-danger-line: #f0c4bd;
+  --ui-danger-fg: #9b1c12;
+  --ui-warning-surface: #fdf3e2;
+  --ui-warning-line: #ecd0a4;
+  --ui-warning-fg: #8a5300;
+  --ui-success-surface: #edf4e8;
+  --ui-success-line: #c3d8b4;
+  --ui-success-fg: #3f6212;
   color-scheme: light;
 }
 
-/* 暗色主题取值。由 <html class="dark"> 触发（用户显式选择，或跟随系统偏好）。 */
+/* 暗色主题取值。由 <html class="dark"> 触发（用户显式选择，或跟随系统偏好）。
+ *
+ * 暗色的难点不是「够黑」，而是**分层看得见**：上一版卡片与背景只差 1.07:1、
+ * 边框只有 1.26:1，整屏糊成一块，眼睛要一直找边界。这一版把背景压暗、把卡片提亮，
+ * 卡片对背景 1.18:1、边框对卡片 1.65:1；同时正文字号那档对比从 17:1 降到 12.6:1，
+ * 减少米白字在深底上的晕光。强调色随之压深一档（#e89667），深陶土在暖褐黑上会糊。 */
 .dark {
-  --ui-bg: #020617;
-  --ui-surface: #0f172a;
-  --ui-surface-2: #1e293b;
-  --ui-field: #1e293b;
-  --ui-line: #1e293b;
-  --ui-line-strong: #475569;
-  --ui-fg: #f8fafc;
-  --ui-body: #e2e8f0;
-  --ui-muted: #cbd5e1;
-  --ui-subtle: #94a3b8;
-  --ui-on-accent: #ffffff;
-  --ui-accent: #7dd3fc;
-  --ui-accent-soft: rgb(56 189 248 / 0.16);
-  --ui-accent-soft-line: #0284c7;
-  --ui-danger: #dc2626;
+  --ui-bg: #0d0c0b;
+  --ui-surface: #221e1a;
+  --ui-surface-2: #2d2824;
+  --ui-field: #26221f;
+  --ui-line: #494138;
+  --ui-line-strong: #8a7e72;
+  --ui-fg: #e6e0d6;
+  --ui-body: #d5cec3;
+  --ui-muted: #b4ada1;
+  --ui-subtle: #9d9488;
+  --ui-on-accent: #2b1508;
+  --ui-accent: #e89667;
+  --ui-accent-soft: rgb(232 150 103 / 0.16);
+  --ui-accent-soft-line: #8a3a1c;
+  --ui-danger: #f87171;
   --ui-danger-surface: rgb(127 29 29 / 0.3);
   --ui-danger-line: #7f1d1d;
   --ui-danger-fg: #fca5a5;
   --ui-warning-surface: rgb(120 53 15 / 0.3);
   --ui-warning-line: #92400e;
   --ui-warning-fg: #fcd34d;
-  --ui-success-surface: rgb(6 78 59 / 0.3);
-  --ui-success-line: #065f46;
-  --ui-success-fg: #6ee7b7;
+  --ui-success-surface: rgb(63 98 18 / 0.3);
+  --ui-success-line: #4d7c0f;
+  --ui-success-fg: #bef264;
   color-scheme: dark;
 }
+
 
 /* 暗色变体：仅当确需按主题给「同一个元素」写两套样式时才用；能用 L2 令牌表达的不要走这里 */
 @custom-variant dark (&:where(.dark, .dark *));

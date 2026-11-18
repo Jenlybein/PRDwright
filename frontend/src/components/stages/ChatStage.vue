@@ -190,14 +190,14 @@ watch(
            只提醒、不阻断：用户可以直接生成 / 改写。 -->
       <p
         v-if="unansweredAsk"
-        class="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-relaxed text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-300 sm:px-6"
+        class="border-b border-warning-line bg-warning-surface px-4 py-2 text-xs leading-relaxed text-warning-fg  sm:px-6"
         role="status"
       >
         AI 还有信息没确认。答完再生成会更准，也可以直接生成。
       </p>
       <p
         v-else-if="pendingCount > 0"
-        class="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs leading-relaxed text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-300 sm:px-6"
+        class="border-b border-warning-line bg-warning-surface px-4 py-2 text-xs leading-relaxed text-warning-fg  sm:px-6"
         role="status"
       >
         还剩 {{ pendingCount }} 条待确认。答完再改写会更准，也可以直接改写。

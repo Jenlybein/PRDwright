@@ -116,7 +116,7 @@ function formatDate(value: string | null): string {
         </button>
       </template>
       <template #desc>
-        <p>注册需要邀请码。删除一个码只影响之后的注册，已经注册的用户不受影响。</p>
+        <p>注册需要邀请码。删除只影响之后的注册，已注册用户不受影响。</p>
       </template>
     </PageHeader>
 

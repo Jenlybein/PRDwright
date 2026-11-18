@@ -383,7 +383,7 @@ function submitOptimize(): void {
     -->
     <p
       v-if="partial"
-      class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+      class="flex items-start gap-2 rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-sm text-warning-fg "
       role="status"
     >
       <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -394,15 +394,14 @@ function submitOptimize(): void {
         />
       </svg>
       <span>
-        这份正文不完整，已生成的部分可以先用（可下载、可修复，或重新生成补齐）。
-        它的审核区显示「未审核」——没有结论不等于通过，旧结论也不属于这份正文。
+        正文不完整，已生成的部分可以先用。审核区显示「未审核」，不等于通过。
       </span>
     </p>
 
     <!-- 优化失败等非正常结尾时展示原因（原文档内容保留不变） -->
     <p
       v-if="error"
-      class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+      class="flex items-start gap-2 rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-sm text-warning-fg "
       role="alert"
     >
       <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -482,16 +481,16 @@ function submitOptimize(): void {
          这条必须显式——以往它只是在后端留一行没人看的日志（债务 D8）。 -->
     <p
       v-if="skillFallback"
-      class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+      class="rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-xs text-warning-fg "
     >
-      未加载技能包，本次使用的是内置兜底提示词（章节结构与写作规范可能与技能包版本不同）。
+      未加载技能包，本次用的是内置兜底提示词。
     </p>
 
     <!-- 事前预算的告警：某一步的输入逼近了预算上限（未超顶，所以生成照常完成了）。
          只提示、不拦截、不给按钮——用户据此知道「下次该精简点」，不需要现在做什么。 -->
     <ul
       v-if="runSummary?.warnings.length"
-      class="space-y-1 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+      class="space-y-1 rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-xs text-warning-fg "
     >
       <li v-for="warning in runSummary.warnings" :key="warning">{{ warning }}</li>
     </ul>

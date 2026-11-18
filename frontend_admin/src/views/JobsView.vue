@@ -301,7 +301,7 @@ function totalTokens(job: AdminJob): string {
       <template #actions>
         <button type="button" class="brut-btn brut-btn-xs" @click="load()">刷新</button>
         <label
-          class="flex items-center gap-1.5 border-2 border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
+          class="flex items-center gap-1.5 border border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
         >
           <input
             type="checkbox"
@@ -327,10 +327,7 @@ function totalTokens(job: AdminJob): string {
       </template>
 
       <template #desc>
-        <p>
-          卡死 = <b>执行中</b>且（<b>租约已过期</b> 或 <b>进度长时间未更新</b>）——
-          判据只在服务端，与概览页的卡死数同源。取消是协作式的：任务在下一个可中断点停下。
-        </p>
+        <p>卡死 = 执行中，且租约已过期或进度长时间未更新。取消在下一个可中断点生效。</p>
       </template>
     </PageHeader>
 

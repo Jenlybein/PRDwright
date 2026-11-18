@@ -264,14 +264,8 @@ onMounted(load)
 
       <template #desc>
         <div class="page-head-desc-grid">
-          <p>
-            Token 统计<b>包含失败的任务</b>——重试恰恰是最烧钱的部分，
-            剔掉它们会让成本看起来偏低。
-          </p>
-          <p>
-            失败率<b>不含主动取消与被新任务顶替</b>的那些：它们在库里同样是
-            failed，但成因不是模型坏了。
-          </p>
+          <p>Token 统计包含失败任务——重试才是最烧钱的部分。</p>
+          <p>失败率不含主动取消与被新任务顶替的那些。</p>
         </div>
       </template>
     </PageHeader>
@@ -479,7 +473,7 @@ onMounted(load)
               >
                 <div
                   v-if="!bar.empty"
-                  class="flex w-full flex-col justify-end border-2 border-b-0 border-brut"
+                  class="flex w-full flex-col justify-end border border-b-0 border-brut"
                   :style="{ height: Math.max(bar.height, 1.5) + '%' }"
                 >
                   <!-- 分段自上而下（见 `bars` 里的顺序说明）：失败在顶、成功垫底 -->

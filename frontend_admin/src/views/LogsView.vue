@@ -239,10 +239,7 @@ onMounted(load)
         <span class="brut-tag brut-tag-sky">共 {{ total }} 条</span>
       </template>
       <template #desc>
-        <p>
-          系统在说什么（排障用）。人为操作留下的痕迹在「操作记录」页，两者刻意分开——
-          混在一起时，排查故障会被大量人为操作淹没。
-        </p>
+        <p>排障日志；人为操作记录见「操作记录」页。</p>
       </template>
     </PageHeader>
 
@@ -339,7 +336,7 @@ onMounted(load)
         <button type="button" class="brut-btn brut-btn-xs" @click="resetFilters">重置</button>
         <!-- 默认开：访问日志每个请求一条，不排掉的话一屏全是「请求完成」 -->
         <label
-          class="ml-1 flex items-center gap-1.5 border-2 border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
+          class="ml-1 flex items-center gap-1.5 border border-brut bg-field px-2 py-1 text-xs font-bold text-ink"
         >
           <input
             v-model="filters.businessOnly"
@@ -486,7 +483,7 @@ onMounted(load)
           <dt class="kicker">业务字段</dt>
           <dd>
             <pre
-              class="mt-1 overflow-x-auto border-2 border-brut bg-field p-2 font-mono text-xs text-body"
+              class="mt-1 overflow-x-auto border border-brut bg-field p-2 font-mono text-xs text-body"
             >{{ extraText(openedLog.extra) }}</pre>
           </dd>
         </div>
@@ -494,7 +491,7 @@ onMounted(load)
           <dt class="kicker">异常堆栈</dt>
           <dd>
             <pre
-              class="mt-1 max-h-72 overflow-auto border-2 border-danger-line bg-field p-2 font-mono text-xs text-danger-fg"
+              class="mt-1 max-h-72 overflow-auto border border-danger-line bg-field p-2 font-mono text-xs text-danger-fg"
             >{{ openedLog.exc }}</pre>
           </dd>
         </div>

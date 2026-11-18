@@ -75,13 +75,15 @@ describe('SummaryDiffPanel', () => {
     expect(removedRow?.text()).not.toContain('变更后')
   })
 
-  it('三种变更类型用不同颜色标识（新增绿 / 修改蓝 / 删除红）', () => {
+  it('三种变更类型用不同语义色标识（新增 / 修改 / 删除互不相同）', () => {
     const wrapper = mount(SummaryDiffPanel, { props: { changes: CHANGES } })
     const rows = wrapper.findAll('li')
 
-    expect(rows[0]?.html()).toContain('emerald')
-    expect(rows[1]?.html()).toContain('primary')
-    expect(rows[2]?.html()).toContain('rose')
+    // 断言的是「三者各自落在不同的语义色族」，而不是某个具体色阶名：
+    // 配色换过一轮（emerald/primary/rose → success/accent/danger），行为没变。
+    expect(rows[0]?.html()).toContain('success')
+    expect(rows[1]?.html()).toContain('accent')
+    expect(rows[2]?.html()).toContain('danger')
   })
 
   it('回填中：展示进度提示并禁用两个按钮', () => {

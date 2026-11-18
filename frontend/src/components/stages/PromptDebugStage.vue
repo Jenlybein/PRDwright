@@ -92,10 +92,10 @@ const previewLine = computed(() => {
         ></textarea>
 
         <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
-          <p v-if="prdMissing" class="text-xs text-amber-600 dark:text-amber-400" role="status">
+          <p v-if="prdMissing" class="text-xs text-warning-fg" role="status">
             请先贴入 PRD 正文，否则没有可依据的内容。
           </p>
-          <p v-else-if="!looksLikeMarkdown" class="text-xs text-amber-600 dark:text-amber-400">
+          <p v-else-if="!looksLikeMarkdown" class="text-xs text-warning-fg">
             没检测到 Markdown 标题（`#`）。纯文本也能生成，只是章节结构可能不如原文清晰。
           </p>
           <p v-else class="text-xs text-subtle">支持任意 Markdown 文本，不做格式校验。</p>

@@ -73,8 +73,7 @@ function clearAll(): void {
     <header>
       <h1 class="text-lg font-bold text-fg ">直接生成 PRD</h1>
       <p class="mt-1 text-sm text-subtle">
-        用一段话把想法说清楚就行，不需要按字段填、也不会再追问一轮。
-        提交后直接逐章撰写，没提到的信息会标注「待确认」而不是替你编。
+        一段话把想法说清楚就行，不会追问；没提到的会标「待确认」。
       </p>
     </header>
 
@@ -116,7 +115,7 @@ function clearAll(): void {
           @input="emit('update:requirements', ($event.target as HTMLTextAreaElement).value)"
         ></textarea>
         <div class="mt-1.5 flex items-start justify-between gap-3">
-          <p v-if="requirementMissing" class="text-xs text-amber-600 dark:text-amber-400" role="status">
+          <p v-if="requirementMissing" class="text-xs text-warning-fg" role="status">
             请至少写一句需求描述，否则没有可依据的内容。
           </p>
           <p v-else class="text-xs text-subtle">

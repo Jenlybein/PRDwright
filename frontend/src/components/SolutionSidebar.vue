@@ -83,7 +83,7 @@ function open(item: SolutionSummary): void {
   -->
   <button
     type="button"
-    class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-on-accent shadow-lg shadow-primary-500/30 lg:hidden"
+    class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-white shadow-lg lg:hidden"
     aria-label="打开方案列表"
     @click="drawerOpen = true"
   >
@@ -100,7 +100,7 @@ function open(item: SolutionSummary): void {
   <Transition name="sidebar-backdrop">
     <div
       v-if="drawerOpen"
-      class="sidebar-backdrop fixed inset-0 z-30 overscroll-contain bg-slate-950/40 lg:hidden"
+      class="sidebar-backdrop fixed inset-0 z-30 overscroll-contain bg-stone-950/45 lg:hidden"
       @click="drawerOpen = false"
     />
   </Transition>
@@ -119,7 +119,7 @@ function open(item: SolutionSummary): void {
     <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
       <div class="flex min-w-0 items-center gap-2.5">
         <div
-          class="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 text-sm font-bold text-white shadow-md shadow-primary-500/30"
+          class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary-700 text-sm font-bold text-white"
         >
           H
         </div>

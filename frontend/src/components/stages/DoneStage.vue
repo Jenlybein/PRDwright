@@ -85,8 +85,8 @@ const ALL_CARDS = computed<DoneCard[]>(() => [
     docType: 'prompts',
     title: '提示词套件',
     state: 'review-prompts',
-    iconWrap: 'bg-emerald-50 dark:bg-emerald-950/40',
-    iconColor: 'text-emerald-600',
+    iconWrap: 'bg-success-surface',
+    iconColor: 'text-success-fg',
     iconPath:
  'M9.25 2.5a.75.75 0 0 1 .75.75v6.94l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 1 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75Zm-6.5 10a.75.75 0 0 1 .75.75v1h13v-1a.75.75 0 0 1 1.5 0v1.75a.75.75 0 0 1-.75.75h-14.5a.75.75 0 0 1-.75-.75v-1.75a.75.75 0 0 1 .75-.75Z',
     length: props.promptsContent.length,
@@ -117,7 +117,7 @@ const headline = computed(() =>
       </div>
       <h2 class="mt-3 text-base font-semibold text-fg ">{{ headline }}</h2>
       <p class="mx-auto mt-1 max-w-md text-sm text-subtle">
-        以下文档已生成完毕，可分别下载为 Markdown 文件，或返回查看与修改。
+        可分别下载为 Markdown，或返回查看与修改。
       </p>
     </div>
 

@@ -95,7 +95,7 @@ onBeforeUnmount(() => {
         class="dialog-root fixed inset-0 z-50 flex items-center justify-center overscroll-contain p-4"
       >
         <div
-          class="dialog-backdrop absolute inset-0 overscroll-contain bg-slate-950/50 backdrop-blur-sm"
+          class="dialog-backdrop absolute inset-0 overscroll-contain bg-stone-950/50 backdrop-blur-sm"
           @click="closeOnBackdrop && close()"
         />
         <div

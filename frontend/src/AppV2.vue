@@ -1192,7 +1192,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
 </script>
 
 <template>
-  <div class="flex min-h-screen bg-gradient-to-b from-accent-soft via-bg to-bg text-body">
+  <div class="flex min-h-screen bg-bg text-body">
     <!-- 左侧：方案侧边栏（窄屏为抽屉；lg 以上常驻，含品牌 / 主题 / 列表 / 登录） -->
     <SolutionSidebar />
 

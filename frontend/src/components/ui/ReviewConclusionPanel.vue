@@ -116,8 +116,8 @@ const STATE_LABELS: Record<ReviewState, string> = {
 }
 
 const STATE_CLASSES: Record<ReviewState, string> = {
-  pass: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300',
-  revise: 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300',
+  pass: 'bg-success-surface text-success-fg',
+  revise: 'bg-warning-surface text-warning-fg',
   failed: 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300',
   unreviewed: 'bg-surface-2 text-muted',
 }
@@ -380,11 +380,10 @@ const fixHint = computed(() => {
     <div v-if="expanded" :id="bodyId" class="px-4 pb-4">
       <!-- 没审成：把「为什么没有结论」说清楚，别让空白被读成「没问题」 -->
       <p v-if="state === 'failed'" class="text-xs leading-relaxed text-red-700 dark:text-red-300">
-        这次审核没有跑成，因此<strong class="font-semibold">没有结论</strong>——它不算通过。
-        可以直接点「重新审核」再试一次。
+        这次审核没有跑成，<strong class="font-semibold">没有结论</strong>不等于通过。可以点「重新审核」再试一次。
       </p>
       <p v-else-if="state === 'unreviewed'" class="text-xs leading-relaxed text-subtle">
-        这一版还没有审核过。点「重新审核」可以补一次（只审不改，正文与版本都不会变）。
+        这一版还没审核过。点「重新审核」补一次，只审不改。
       </p>
 
       <p v-if="summary" class="text-xs leading-relaxed text-subtle">{{ summary }}</p>
@@ -408,7 +407,7 @@ const fixHint = computed(() => {
                   issue.severity === 'high'
                     ? 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300'
                     : issue.severity === 'medium'
-                      ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
+                      ? 'bg-warning-surface text-warning-fg'
                       : 'bg-surface-2 text-subtle'
                 "
               >
@@ -426,10 +425,9 @@ const fixHint = computed(() => {
       <!-- 「有问题」时把两个动作的分工写在面板里：只靠 title 太隐蔽 -->
       <p
         v-if="state === 'revise'"
-        class="mt-3 text-xs leading-relaxed text-amber-700 dark:text-amber-300"
+        class="mt-3 text-xs leading-relaxed text-warning-fg"
       >
-        还有 {{ issueCount }} 个未处理的问题。点「修复」会按这条结论重写整篇并追加一个新版本；
-        把它们修好之后再来重新审核——现在就审，只会得到同一条结论。
+        还有 {{ issueCount }} 个未处理的问题。点「修复」会按结论重写整篇、追加新版本；改完再重新审核。
       </p>
     </div>
   </section>

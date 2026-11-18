@@ -577,10 +577,7 @@ onMounted(load)
       </template>
       <template #desc>
         <p>
-          {{ section.help || '改完保存后立即作用于下一次生成；正在跑的任务不受影响。' }}
-          可调项<b>全在这一页</b>——<code class="font-mono">.env</code>
-          里只剩启动项，没有第二份。
-          日志级别、落库开关这类「改了必须重启」的配置不在此页——它们改了不重启只会造成错觉。
+          {{ section.help || '改完保存后，下一次生成生效；正在跑的任务不受影响。' }}
         </p>
       </template>
     </PageHeader>
@@ -635,12 +632,10 @@ onMounted(load)
           <p class="text-sm font-extrabold tracking-tight text-ink">还没有任何模型配置</p>
           <p class="mt-1 max-w-xl text-xs text-subtle">
             点右上角<b class="text-muted">「+ 新增配置」</b>建第一条：选供应商、写个配置名就够。
-            在此之前生成无法进行——地址、模型、密钥全部由这里的配置决定，
-            .env 里不再有第二份。
           </p>
         </div>
 
-        <ul v-else class="divide-y-2 divide-brut">
+        <ul v-else class="divide-y divide-brut">
           <li
             v-for="p in providers"
             :key="p.id"
@@ -650,7 +645,7 @@ onMounted(load)
                  形状与颜色同时变化，不依赖单一通道（色弱也能分清）。 -->
             <div class="flex items-center gap-1.5">
               <span
-                class="inline-block h-2.5 w-2.5 shrink-0 rounded-full border-2 border-brut"
+                class="inline-block h-2.5 w-2.5 shrink-0 rounded-full border border-brut"
                 :class="p.active ? 'bg-sky' : 'bg-card'"
               />
               <span class="brut-tag" :class="providerState(p).cls">
@@ -985,7 +980,7 @@ onMounted(load)
                 <!-- 布尔 -->
                 <label
                   v-if="item.type === 'bool'"
-                  class="flex items-center gap-2 border-2 border-brut bg-field px-2.5 py-1.5 text-sm font-bold text-ink"
+                  class="flex items-center gap-2 border border-brut bg-field px-2.5 py-1.5 text-sm font-bold text-ink"
                 >
                   <input
                     type="checkbox"

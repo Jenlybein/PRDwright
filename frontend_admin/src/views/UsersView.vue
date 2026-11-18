@@ -385,10 +385,7 @@ function totalTokens(user: AdminUser): number {
         </button>
       </template>
       <template #desc>
-        <p>
-          停用只是禁止登录（可恢复）；删除会连同方案、文档与任务一并清除，不可恢复。
-          操作被后端拒绝时，这里会原样显示它给出的理由——规则只在服务端写一份。
-        </p>
+        <p>停用只禁止登录，可恢复；删除会连同方案、文档与任务一并清除，不可恢复。</p>
       </template>
     </PageHeader>
 
@@ -497,7 +494,7 @@ function totalTokens(user: AdminUser): number {
           />
         </label>
         <label
-          class="flex items-center gap-2 border-2 border-brut bg-field px-3 py-2 text-sm font-bold text-ink"
+          class="flex items-center gap-2 border border-brut bg-field px-3 py-2 text-sm font-bold text-ink"
         >
           <input v-model="form.is_admin" type="checkbox" class="brut-check" />
           设为管理员

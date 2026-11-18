@@ -65,10 +65,7 @@ function open(href: string): void {
         <span class="brut-tag brut-tag-sky">仅管理员</span>
       </template>
       <template #desc>
-        <p>
-          这两个页面由后端直接渲染，用<b>当前管理员会话</b>打开。公网上没有公开的接口文档：
-          未登录会得到 401，已登录但不是管理员会得到 403（文案是「账号不存在」）。
-        </p>
+        <p>使用当前管理员会话打开；未登录或非管理员无法访问。</p>
       </template>
     </PageHeader>
 
@@ -83,7 +80,7 @@ function open(href: string): void {
           <p class="text-sm leading-relaxed text-body">{{ page.summary }}</p>
           <p class="text-xs leading-relaxed text-muted">{{ page.note }}</p>
 
-          <code class="block truncate border-2 border-line bg-field px-2 py-1 font-mono text-xs text-muted">
+          <code class="block truncate border border-line bg-field px-2 py-1 font-mono text-xs text-muted">
             {{ page.href }}
           </code>
 
@@ -105,12 +102,11 @@ function open(href: string): void {
         <p class="text-sm leading-relaxed text-body">
           两个页面读的是同一份 schema。需要拿去做代码生成或接第三方工具时，直接取这份 JSON。
         </p>
-        <code class="block truncate border-2 border-line bg-field px-2 py-1 font-mono text-xs text-muted">
+        <code class="block truncate border border-line bg-field px-2 py-1 font-mono text-xs text-muted">
           GET /api/admin/openapi.json
         </code>
         <p class="text-xs leading-relaxed text-muted">
-          这一条同样要管理员身份。它不在公开的 <code class="font-mono">/openapi.json</code> 上——
-          那个地址已经随公开文档一起关掉了。
+          同样需要管理员身份；公开的 <code class="font-mono">/openapi.json</code> 已关闭。
         </p>
       </div>
     </section>

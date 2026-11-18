@@ -32,7 +32,7 @@ const emit = defineEmits<{
 
 <template>
   <div
-    class="flex flex-wrap items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+    class="flex flex-wrap items-center gap-2 rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-sm text-warning-fg "
     role="status"
   >
     <svg class="h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">

@@ -460,7 +460,7 @@ describe('RequirementsForm 结构化录入表单', () => {
       scope: { in_scope: ['基础录入'], out_of_scope: [] },
     }
     const wrapper = mount(RequirementsForm, { props: { initial } })
-    expect(wrapper.text()).toContain('已为你恢复上次填写的内容')
+    expect(wrapper.text()).toContain('已恢复上次填写的内容')
     expect(inputValue(wrapper, 'field-product_name')).toBe('恢复的产品')
     expect(inputValue(wrapper, 'field-target_users.0')).toBe('独立开发者')
     expect(inputValue(wrapper, 'field-mvp_features.0.name')).toBe('一键初始化')

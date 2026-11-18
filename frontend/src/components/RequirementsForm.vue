@@ -775,12 +775,9 @@ defineExpose({ getSummary: () => currentSummary.value })
         告诉我们你的产品想法
       </h1>
       <p class="mt-2 max-w-xl text-sm leading-relaxed text-muted">
-        按字段逐项填写下面的表单，列表类内容逐条添加即可，<span
-          class="font-medium text-muted "
-          >不需要自己拼格式或写分隔符</span
-        >，前端会实时转换成后端 Skill 可直接使用的结构化 JSON。带
-        <span class="text-red-500">*</span> 的字段为必填。
-        <template v-if="restored">已为你恢复上次填写的内容，可以继续编辑。</template>
+        列表类内容逐条添加即可，<span class="font-medium text-muted ">不需要自己拼格式</span>。
+        带 <span class="text-red-500">*</span> 的字段为必填。
+        <template v-if="restored">已恢复上次填写的内容。</template>
       </p>
     </div>
 
@@ -807,7 +804,7 @@ defineExpose({ getSummary: () => currentSummary.value })
       >
         <span
           v-if="successTip"
-          class="ml-auto flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:ring-emerald-800/60"
+          class="ml-auto flex items-center gap-1 rounded-full bg-success-surface px-3 py-1 text-xs font-medium text-success-fg ring-1 ring-success-line"
         >
           <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path
@@ -857,7 +854,7 @@ defineExpose({ getSummary: () => currentSummary.value })
       <section
         v-for="section in SECTIONS"
         :key="section.key"
-        class="rounded-2xl border border-line bg-surface shadow-sm shadow-slate-200/50   dark:shadow-none"
+        class="rounded-2xl border border-line bg-surface shadow-sm shadow-stone-200/50   dark:shadow-none"
       >
         <!-- 区块标题：点击折叠 / 展开 -->
         <button

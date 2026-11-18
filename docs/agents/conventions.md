@@ -185,7 +185,7 @@
 - 门禁只是体验，真边界是后端 `require_admin`；判管理员 = `/api/admin/me` 状态码（200 / 403 / 401）；会话阶段 `unknown|anonymous|admin`，unknown 不能猜；管理面查询跨 owner（JOIN users），边界只在路由 `require_admin`。
 - 后台登录 `POST /api/admin/login`；规则只在服务层写一份；「撤销自己」不算违规（删号 / 停用自己仍 403）；前端不硬编码规则，原样显示 `detail`。
 - 审计表 `admin_audit_log` 不加外键、不写密码。
-- 视觉 Sky Brutalism：令牌与 `.brut-*` 全在 `index.css`；天蓝只表「强调」不表「结构」；页头统一 `PageHeader.vue`（`.page-head` 实色带 + 3px 下沿线，无投影），说明文字进 `#desc`。
+- 视觉「纸与墨」：两端各自 `index.css` 里是同一套暖色令牌（纸面米白 + 暖灰文字 + 陶土强调 `#9a3412` / 暗色 `#f0a47b`），不再用天蓝或 slate 冷灰；两处的 `primary-*` 色阶都是陶土，白字在 `primary-500` 及更深档均 ≥4.5:1。语义色只走 `success/warning/danger` 令牌，模板里不写 `emerald/amber/rose` 原生色阶。管理端保留 `.brut-*` 命名但已收轻（1px 描边 + 柔投影，不再是实心偏移投影与 2px 硬边）；页头统一 `PageHeader.vue`（`.page-head` 纸面 + 1px 下沿线，无实色带），`#desc` 只写事实（这是什么 / 有什么区别），不写设计理据。
 - 需额外空间的交互一律走 `AdminModal.vue`；弹窗开关与「提交中」是两个变量；行内动作 >3 个收进「操作 ▾」。
 - 主题切换 = 单按钮循环，权威在 `useTheme.ts::cycle()`；`localStorage.theme` 与 `index.html` 内联脚本共用键、解析规则一起改。
 - 视图用例靠文本与结构定位——新增控件别排在被断言的那个前面。

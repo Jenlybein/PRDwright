@@ -226,7 +226,7 @@ onBeforeUnmount(stopTicker)
          （换成确定性的倒计时）、退避期间取消仍然可用（这里保留「停止生成」）。 -->
     <div
       v-if="waiting"
-      class="flex flex-col gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+      class="flex flex-col gap-2 rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-sm text-warning-fg"
       role="status"
     >
       <p class="flex items-center gap-2 font-medium tabular-nums">
@@ -239,7 +239,7 @@ onBeforeUnmount(stopTicker)
         </svg>
         <span>{{ retryText }}</span>
       </p>
-      <p class="text-xs text-amber-700/80">
+      <p class="text-xs text-warning-fg/80">
         上次失败后按退避等待，不会立刻重试；等待期间仍然可以停止这次任务。
       </p>
       <AppButton
@@ -277,7 +277,7 @@ onBeforeUnmount(stopTicker)
     <!-- 生成 / 优化出错提示：非正常结尾（如被截断）时展示原因 -->
     <p
       v-if="error"
-      class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+      class="flex items-start gap-2 rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-sm text-warning-fg"
       role="alert"
     >
       <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">

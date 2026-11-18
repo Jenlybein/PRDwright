@@ -75,8 +75,7 @@ function previewLine(text: string): string {
     <header>
       <h1 class="text-lg font-bold text-fg">从现有 PRD 与接口文档生成提示词套件</h1>
       <p class="mt-1 text-sm text-subtle">
-        两份材料都贴进来，提示词会同时参考它们——涉及的接口路径与字段名因而与真实契约对齐。
-        只有 PRD 是必填；接口文档没有也可以生成，只是提示词只能依据 PRD。
+        两份都贴进来，提示词同时参考它们；只填 PRD 也能生成。
       </p>
     </header>
 
@@ -104,10 +103,10 @@ function previewLine(text: string): string {
           ></textarea>
 
           <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
-            <p v-if="prdMissing" class="text-xs text-amber-600 dark:text-amber-400" role="status">
+            <p v-if="prdMissing" class="text-xs text-warning-fg" role="status">
               请先贴入 PRD 正文，否则没有可依据的内容。
             </p>
-            <p v-else-if="!looksLikeMarkdown" class="text-xs text-amber-600 dark:text-amber-400">
+            <p v-else-if="!looksLikeMarkdown" class="text-xs text-warning-fg">
               没检测到 Markdown 标题（`#`）。纯文本也能生成，只是章节结构可能不如原文清晰。
             </p>
             <p v-else class="text-xs text-subtle">支持任意 Markdown 文本，不做格式校验。</p>
@@ -135,7 +134,7 @@ function previewLine(text: string): string {
               提示词里涉及的接口路径与字段名会与它保持一致。
             </p>
             <p v-else class="text-xs text-subtle">
-              留空即按「只有 PRD」生成——和上一条入口（我有 PRD）效果一致。
+              留空即按「只有 PRD」生成。
             </p>
             <span class="shrink-0 text-xs text-subtle">{{ apiDocsText.length }} 字</span>
           </div>

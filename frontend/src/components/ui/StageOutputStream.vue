@@ -41,8 +41,8 @@ const outlineTitle = computed(() =>
 
 const outlineHint = computed(() =>
   props.phase === 'outlining'
-    ? '正从上游材料抽取结构，抽不到的会标「待确认」，不会编造'
-    : '正文正在写，上面是本次已定的结构；标「待确认」的是上游材料没给的部分',
+    ? '从上游材料抽取结构；抽不到的标「待确认」'
+    : '正文正在写；标「待确认」的是材料里没给的部分',
 )
 
 const title = computed(() => (props.phase === 'rewriting' ? '改写稿' : '审核意见'))

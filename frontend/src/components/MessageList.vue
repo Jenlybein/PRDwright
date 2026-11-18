@@ -178,14 +178,14 @@ defineExpose({ scrollToBottom })
         class="flex gap-3"
         :class="message.role === 'user' ? 'flex-row-reverse' : 'flex-row'"
       >
-        <!-- 头像 -->
+        <!-- 头像：实色，不用渐变——两个纯装饰色块会让整屏显得像模板生成 -->
         <div
-          class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white"
+          class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold"
           :class="
             message.role === 'user'
-              ? 'bg-gradient-to-br from-primary-400 to-primary-600'
-              : 'bg-gradient-to-br from-slate-600 to-slate-800'
- "
+              ? 'bg-primary-800 text-white'
+              : 'bg-surface-2 text-muted ring-1 ring-line'
+          "
         >
           {{ message.role === 'user' ? '我' : 'AI' }}
         </div>
@@ -274,7 +274,7 @@ defineExpose({ scrollToBottom })
             <!-- 已有内容：Markdown 渲染 + 流式光标 -->
             <div
               v-else
-              class="prose prose-sm prose-slate doc-reveal max-w-none rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm ring-1 ring-line dark:prose-invert"
+              class="prose prose-sm prose-stone doc-reveal max-w-none rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm ring-1 ring-line dark:prose-invert"
             >
               <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
               <div v-html="renderMarkdown(message.content)" />

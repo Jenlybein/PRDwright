@@ -262,7 +262,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <!-- 只读正文：与审阅页的预览同一套排版（同一份 Markdown 渲染器） -->
         <div
           v-else-if="preview"
-          class="prose prose-sm prose-slate max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
+          class="prose prose-sm prose-stone max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
           <div v-html="previewHtml" />

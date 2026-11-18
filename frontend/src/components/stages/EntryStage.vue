@@ -84,31 +84,27 @@ interface EntryGroup {
  */
 const ICONS: Record<EntryMode, Pick<EntryOption, 'iconWrap' | 'iconColor' | 'iconPath'>> = {
   structured: {
-    iconWrap:
-      'bg-primary-50 group-hover:bg-primary-100 dark:bg-primary-950/40 dark:group-hover:bg-primary-900/60',
-    iconColor: 'text-primary-600 dark:text-primary-300',
+    iconWrap: 'bg-surface-2 group-hover:bg-primary-100',
+    iconColor: 'text-primary-700',
     iconPath:
       'M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z',
   },
   'prd-quick': {
-    iconWrap:
-      'bg-amber-50 group-hover:bg-amber-100 dark:bg-amber-950/40 dark:group-hover:bg-amber-900/60',
-    iconColor: 'text-amber-600 dark:text-amber-300',
+    iconWrap: 'bg-surface-2 group-hover:bg-primary-100',
+    iconColor: 'text-primary-700',
     iconPath:
       'M11.3 1.046A1 1 0 0 1 12 2v5h4a1 1 0 0 1 .82 1.573l-7 10A1 1 0 0 1 8 18v-5H4a1 1 0 0 1-.82-1.573l7-10a1 1 0 0 1 1.12-.381Z',
   },
   'prompt-debug': {
-    iconWrap:
-      'bg-emerald-50 group-hover:bg-emerald-100 dark:bg-emerald-950/40 dark:group-hover:bg-emerald-900/60',
-    iconColor: 'text-emerald-600 dark:text-emerald-300',
+    iconWrap: 'bg-surface-2 group-hover:bg-primary-100',
+    iconColor: 'text-primary-700',
     // 尖括号：提示词套件本质上是给模型看的「代码」
     iconPath:
       'M6.28 5.22a.75.75 0 0 1 0 1.06L2.56 10l3.72 3.72a.75.75 0 0 1-1.06 1.06L.97 10.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Zm7.44 0a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L17.44 10l-3.72-3.72a.75.75 0 0 1 0-1.06Z',
   },
   'prd-and-api-paste': {
-    iconWrap:
-      'bg-violet-50 group-hover:bg-violet-100 dark:bg-violet-950/40 dark:group-hover:bg-violet-900/60',
-    iconColor: 'text-violet-600 dark:text-violet-300',
+    iconWrap: 'bg-surface-2 group-hover:bg-primary-100',
+    iconColor: 'text-primary-700',
     // 两条叠起来的块：这份入口比上一个多带一份材料
     iconPath:
       'M4 3h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm0 9h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z',
@@ -159,8 +155,7 @@ const ARROW_ICON =
     <header class="text-center">
       <h1 class="text-2xl font-bold tracking-tight text-fg">新建 PRD 方案</h1>
       <p class="mx-auto mt-2.5 max-w-lg text-sm leading-relaxed text-subtle">
-        选择本次工作的起点。四条路最终都通向同一套写作规范与生成链路，只是起点不同；
-        选错了也没关系，随时可以重新开始。
+        选择起点。四条路最终都通向同一套写作规范，选错了随时可以重新开始。
       </p>
     </header>
 

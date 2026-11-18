@@ -49,21 +49,21 @@ const CHANGE_META: Record<
 > = {
   added: {
     text: '新增',
-    badge: 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-800',
-    card: 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/30',
-    label: 'text-emerald-700 dark:text-emerald-300',
+    badge: 'bg-success-surface text-success-fg ring-success-line',
+    card: 'border-success-line bg-success-surface',
+    label: 'text-success-fg',
   },
   modified: {
     text: '修改',
-    badge: 'bg-primary-50 text-primary-700 ring-primary-200 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800',
-    card: 'border-accent-soft-line bg-primary-50/50 dark:border-primary-800 dark:bg-primary-950/30',
-    label: 'text-primary-700 dark:text-primary-300',
+    badge: 'bg-accent-soft text-accent ring-accent-soft-line',
+    card: 'border-accent-soft-line bg-accent-soft',
+    label: 'text-accent',
   },
   removed: {
     text: '删除',
-    badge: 'bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-800',
-    card: 'border-rose-200 bg-rose-50/50 dark:border-rose-800 dark:bg-rose-950/30',
-    label: 'text-rose-700 dark:text-rose-300',
+    badge: 'bg-danger-surface text-danger-fg ring-danger-line',
+    card: 'border-danger-line bg-danger-surface',
+    label: 'text-danger-fg',
   },
 }
 
@@ -110,7 +110,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
         <div class="min-w-0 flex-1">
           <h2 class="text-sm font-semibold text-fg ">需求摘要更新确认</h2>
           <p class="mt-0.5 text-xs text-subtle">
-            AI 只把你在对话里「明确补充或修正」的内容回填到摘要；确认后才会据此生成 PRD。
+            只回填你在对话里明确补充或修正的内容。
           </p>
         </div>
       </div>
@@ -120,7 +120,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
         <span class="font-medium text-muted ">共 {{ changes.length }} 处变更</span>
         <span
           v-if="counts.added"
-          class="rounded-full bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700 ring-1 ring-emerald-200"
+          class="rounded-full bg-success-surface px-2 py-0.5 font-medium text-success-fg ring-1 ring-success-line"
         >
           新增 {{ counts.added }}
         </span>
@@ -148,7 +148,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     <!-- 回填失败 -->
     <div v-else-if="error" class="bg-surface-2 px-4 py-6  sm:px-6">
       <p
-        class="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+        class="flex items-start gap-2 rounded-xl border border-warning-line bg-warning-surface px-4 py-3 text-sm text-warning-fg "
         role="alert"
       >
         <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -191,7 +191,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
         <div class="mt-2 space-y-1 text-xs leading-relaxed">
           <p v-if="change.changeType !== 'added'" class="flex gap-1.5">
             <span class="shrink-0 text-subtle">变更前</span>
-            <span class="min-w-0 whitespace-pre-wrap break-words text-subtle line-through decoration-slate-400 ">
+            <span class="min-w-0 whitespace-pre-wrap break-words text-subtle line-through decoration-line-strong ">
               {{ formatSummaryValue(change.before) }}
             </span>
           </p>
@@ -218,7 +218,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
       </template>
       <template #hint>
         <p class="text-xs text-subtle">
-          拒绝后不会修改摘要，也不会进入生成流程，你可以回到对话继续补充。
+          拒绝后摘要不变，可回到对话继续补充。
         </p>
       </template>
 

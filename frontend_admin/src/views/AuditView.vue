@@ -68,9 +68,7 @@ onMounted(load)
         <span class="brut-tag brut-tag-slab">{{ items.length }} 条</span>
       </template>
       <template #desc>
-        <p>
-          管理员的每一次写操作都会留痕。账号被删之后，记录仍在，操作者名字也保留。
-        </p>
+        <p>管理员写操作全部留痕；账号删除后记录与操作者名字仍保留。</p>
       </template>
     </PageHeader>
 
