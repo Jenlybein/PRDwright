@@ -345,7 +345,7 @@ const metaText = computed(() => {
   if (versionLabel.value) parts.push(versionLabel.value)
   if (reviewedLabel.value) parts.push(`审于 ${reviewedLabel.value}`)
   if (failedLabel.value) parts.push(`失败于 ${failedLabel.value}`)
-  if (rewritten.value) parts.push('已改写一次')
+  if (rewritten.value) parts.push('已改写一次（下列为改写前判定）')
   return parts.join(' · ')
 })
 
@@ -466,6 +466,14 @@ const fixHint = computed(() => {
       </p>
       <p v-else-if="state === 'unreviewed'" class="text-xs leading-relaxed text-subtle">
         这一版还没审核过。点「重新审核」补一次，只审不改。
+      </p>
+      <!-- 改写过：说清下面这份清单是**改写前**的判定，别让用户读成「改完还这么多」 -->
+      <p
+        v-if="rewritten && issues.length"
+        class="text-xs leading-relaxed text-subtle"
+      >
+        这次审核之后自动改写过一次，下面列的是<strong class="font-semibold">触发改写的那次判定</strong>，
+        不代表改写后的结果。想知道改写后是否还成立，点「重新审核」再判一次（只审不改）。
       </p>
 
       <!-- 展开：按类分组，类内 high 在前（严重度由类别固定，见 ADR 0003）。未分类组在最后。 -->

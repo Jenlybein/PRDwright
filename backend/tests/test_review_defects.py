@@ -880,6 +880,25 @@ def test_api_docs_prompt_forces_the_machine_readable_pending_block():
     assert "不要" in template and "topic" in template
 
 
+def test_api_docs_prompt_forbids_self_invented_codes_and_quotas():
+    """接口文档不能自拟错误码与限流额度（2026-11-19 走查：50010–50012、41003、10 次/分钟 被写成既定事实）。
+
+    判据能抓到（4 条 high），但**生成侧不该先写死**——写死之后改写也未必收得干净。
+    """
+    template = prompts.API_DOCS_GENERATION_PROMPT
+    assert "错误码只写两类" in template
+    assert "不要写具体数字" in template
+    assert "限流额度同理" in template
+    assert "字段清单只写上游给出的" in template
+
+
+def test_prompts_prompt_references_upstream_by_title_not_by_number():
+    """提示词套件引用上游必须用标题：编号会随上游改写而错位（一次审核 6 条 high 全是这个）。"""
+    template = prompts.PROMPTS_GENERATION_PROMPT
+    assert "引用上游用标题、不用编号" in template
+    assert "不要" in template and "3.2" in template
+
+
 def test_rewrite_prompt_demands_elimination_not_rephrasing():
     """单轮改写（用户已确认不加复审）唯一能靠的就是这条要求。"""
     template = prompts.DOC_REWRITE_PROMPT

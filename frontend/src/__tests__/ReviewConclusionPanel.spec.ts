@@ -207,13 +207,19 @@ describe('ReviewConclusionPanel', () => {
     expect(wrapper.find('ul').exists()).toBe(false)
   })
 
-  it('改写过的会在标题下方元信息行标注「已改写一次」', () => {
+  it('改写过的会在标题下方元信息行标注「已改写一次」，并说清清单是改写前判定', async () => {
     const wrapper = mount(
       ReviewConclusionPanel,
       { props: { review: review({ rewritten: true }) } },
     )
 
+    // 收起状态也要能看出来：元信息行直接写明「下列为改写前判定」
     expect(wrapper.text()).toContain('已改写一次')
+    expect(wrapper.text()).toContain('下列为改写前判定')
+
+    // 展开真正读清单时，再接一句显式说明，避免「改完还这么多」的误读
+    await toggle(wrapper).trigger('click')
+    expect(body(wrapper).text()).toContain('触发改写的那次判定')
   })
 
   it('审核失败时不渲染上一次结论的内容：失败下面是「这次没有结论」', async () => {
