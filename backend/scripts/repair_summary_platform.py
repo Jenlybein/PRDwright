@@ -55,13 +55,16 @@ def _classify(segment: str) -> str:
 
 
 def _append(existing: str, value: str) -> str:
-    """把一条事实并入已有的约束文本（已有同文时原样返回）。"""
-    existing = (existing or "").strip().rstrip("；;。")
-    if not existing:
-        return value
-    if value in existing:
-        return existing
-    return f"{existing}；{value}"
+    """把若干条事实并入已有的约束文本——**按条去重**，别拼出重复片段。
+
+    `existing` 与 `value` 都是「；」分隔的清单；逐条比对后再拼，否则会出现
+    「浏览器本地存储；浏览器本地存储；自动保存草稿」这种复制痕（干跑时真见过）。
+    """
+    segments = [seg.strip() for seg in (existing or "").split("；") if seg.strip()]
+    for candidate in (seg.strip() for seg in (value or "").split("；")):
+        if candidate and candidate not in segments:
+            segments.append(candidate)
+    return "；".join(segments)
 
 
 def repair(summary: dict) -> tuple[dict, bool]:

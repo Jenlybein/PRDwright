@@ -165,6 +165,9 @@ function confirmGeneratePrd(): void {
 /** 输入框实例，用于在一轮回复结束后把焦点交还给用户 */
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null)
 
+/** 消息列表实例：一轮回复结束时若出现选择题，用它把滚动条带到底部（见下方 watch） */
+const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
+
 /** 「还有未答问题，仍要生成 PRD？」的确认弹窗（见 `onGeneratePrd`） */
 const generateConfirmOpen = ref(false)
 
@@ -174,7 +177,12 @@ watch(
   () => props.loading,
   (now, before) => {
     if (!before || now) return
-    void nextTick(() => inputRef.value?.focus())
+    // 一轮回复结束时，若末尾挂着待回答的选择题，把滚动条带到最底部：
+    // 题目一多，「提交回答」会沉到卡片可视区外面，用户得先滚动才找得到（线上实见）。
+    void nextTick(() => {
+      if (unansweredAsk.value) messageListRef.value?.scrollToBottom()
+      inputRef.value?.focus()
+    })
   },
 )
 </script>
@@ -228,7 +236,7 @@ watch(
 
       <!-- 消息区：内部滚动。输入框移出后，这里就是一个纯粹的滚动容器 -->
       <div class="flex h-[min(60vh,560px)] flex-col bg-surface-2">
-        <MessageList :messages="messages" @answer="emit('answer', $event)" />
+        <MessageList ref="messageListRef" :messages="messages" @answer="emit('answer', $event)" />
       </div>
     </div>
 
@@ -289,10 +297,8 @@ watch(
     <AppDialog v-model="generateConfirmOpen" title="仍有问题未确认，仍要生成 PRD？">
       <div class="space-y-3 text-sm leading-relaxed">
         <p class="text-body">
-          还有
-          <strong class="font-semibold text-fg">{{ unansweredAsk }}</strong>
-          道题没有作答。现在生成的话，这些没确认的点会写进 PRD 的「待确认问题」里，
-          由你或拍板人后续补齐。
+          AI 提出的问题里<strong class="font-semibold text-fg">还有没作答的</strong>。现在生成的话，
+          这些没确认的点会写进 PRD 的「待确认问题」里，由你或拍板人后续补齐。
         </p>
         <p class="text-muted">
           答完再生成会更准；也可以先生成一版看看成色，之后再回来补答。
