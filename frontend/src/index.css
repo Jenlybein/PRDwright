@@ -34,8 +34,14 @@
  * 换成暖陶土之后整站有了被选过的判断。白色文字在 primary-500 及更深档都 >= 4.5:1
  * （500 档 4.98、600 档 5.94、700 档 7.31），因此 `bg-primary-* text-white` 可以放心用。
  *
- * 阴影一律用暖黑 rgb(28 25 23) 带色，不用中性灰：纯灰阴影落在米白纸面上会发脏。 */
+ * 阴影一律用暖黑 rgb(28 25 23) 带色，不用中性灰：纯灰阴影落在米白纸面上会发脏。
+ *
+ * 字体栈与管理端共用：全站无衬线。此前用户端没有 font 声明，走浏览器默认
+ * （多数环境是衬线），与纸墨配色完全不搭；这里显式钉住无衬线栈，中文回落到
+ * 系统黑体（PingFang / 微软雅黑）。 */
 @theme {
+  --font-sans: "Inter", "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
   --color-primary: #b8502b;
   --color-primary-50: #fdf6f3;
   --color-primary-100: #fbede6;
@@ -172,8 +178,11 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
+  html {
+    font-family: var(--font-sans);
+  }
   body {
-    @apply bg-bg text-body;
+    @apply bg-bg font-sans text-body;
     /* 明暗主题切换的低频过渡：只让底色与文字自身过渡，不给每个元素加 transition */
     transition:
       background-color 150ms ease,
@@ -280,4 +289,16 @@
 }
 .doc-reveal {
   animation: doc-reveal 80ms var(--ease-smooth) backwards;
+}
+
+/*
+ * Markdown 渲染：typography 插件默认给正文用 Georgia 衬线。放在所有 @layer 之外
+ * —— 未分层样式的优先级高于分层样式，无需 !important 就能盖过 .prose 的类。
+ * 代码仍走等宽（功能需要，不是衬线），这里只管正文与标题。
+ */
+.prose {
+  font-family: var(--font-sans);
+}
+.prose :where(h1, h2, h3, h4, h5, h6, p, li, blockquote, strong) {
+  font-family: var(--font-sans);
 }
