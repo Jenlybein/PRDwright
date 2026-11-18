@@ -5,7 +5,11 @@
 #
 # 所有命令都在 deploy/ 目录下执行；compose 会读同目录的 .env。
 
-COMPOSE ?= docker compose
+# 要同时带上 nginx-proxy 覆盖文件时用：
+#   make up COMPOSE_FILES="compose.yaml compose.proxy.yaml"
+# 只带 compose.yaml 重建容器会丢掉 VIRTUAL_HOST 与 web-proxy 网络，域名会直接 SSL/502 报错。
+COMPOSE_FILES ?= compose.yaml
+COMPOSE ?= docker compose $(addprefix -f ,$(COMPOSE_FILES))
 API_IMAGE ?= prdwright-api:local
 
 .PHONY: help build up down logs ps restart shell volumes config keygen backup drill

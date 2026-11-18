@@ -1,0 +1,34 @@
+# 可选覆盖：把本栈挂到 nginx-proxy / acme-companion 后面（HTTPS 由代理层终止）
+#
+# 用法：把本文件复制成 `compose.proxy.yaml`（**它不进版本控制**，域名与邮箱是部署方私有配置），
+# 填好域名与邮箱，然后用**两个文件**一起操作：
+#
+#   docker compose -f compose.yaml -f compose.proxy.yaml up -d
+#   docker compose -f compose.yaml -f compose.proxy.yaml build
+#   docker compose -f compose.yaml -f compose.proxy.yaml logs api
+#   make up COMPOSE_FILES="compose.yaml compose.proxy.yaml"
+#
+# ⚠️ 只带 `compose.yaml` 重建容器会**丢掉下面这些环境变量与网络**，后果不是「页面报错」
+# 而是：nginx-proxy 不再为这个域名生成站点，浏览器直接
+# `ERR_SSL_UNRECOGNIZED_NAME_ALERT`（按域名连不上）或 `502`（能连上但没站点）。
+# 2026-11-18 生产上就是这么断过一次：一次 `docker compose up -d` 重建了 web 容器。
+#
+# 前提：宿主机上已有 `web-proxy` 这个外部网络（通常由 nginx-proxy 的上游 compose 创建）：
+#   docker network ls | grep web-proxy
+# 没有的话先起那套代理（见 deploy/README.md 的「挂在 nginx-proxy 后面」一节）。
+
+services:
+  web:
+    networks:
+      - default
+      - web-proxy
+    environment:
+      VIRTUAL_HOST: prdwright.example.com
+      VIRTUAL_PORT: "80"
+      VIRTUAL_PROTO: http
+      LETSENCRYPT_HOST: prdwright.example.com
+      LETSENCRYPT_EMAIL: ops@example.com
+
+networks:
+  web-proxy:
+    external: true

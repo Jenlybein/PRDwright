@@ -471,6 +471,44 @@ make up
   已录入的模型密钥作废（§5）。
 
 
+### 7.2.1 挂在 nginx-proxy 后面时（HTTPS 由代理层终止）
+
+若这台机器的 HTTPS 由上游的 `nginx-proxy` + `acme-companion` 提供，本栈的 `web` 需要**额外的
+覆盖文件**声明域名并加入 `web-proxy` 外部网络：
+
+```bash
+# 1) 一次性：从模板复制成自己的覆盖文件（**不进版本控制**，域名与邮箱是部署方私有配置）
+cp compose.proxy.example.yaml compose.proxy.yaml
+#    填好 VIRTUAL_HOST / LETSENCRYPT_HOST / LETSENCRYPT_EMAIL
+
+# 2) 之后**每次**操作都带两个文件
+docker compose -f compose.yaml -f compose.proxy.yaml up -d
+docker compose -f compose.yaml -f compose.proxy.yaml build
+make up COMPOSE_FILES="compose.yaml compose.proxy.yaml"      # 用 make 的等价写法
+```
+
+**这一步漏了不会报错，只会断站**：只带 `compose.yaml` 重建容器，会丢掉 `VIRTUAL_HOST` 与
+`web-proxy` 网络，`nginx-proxy` 就不再为这个域名生成站点，浏览器表现为：
+
+| 现象 | 真实原因 |
+| --- | --- |
+| `ERR_SSL_UNRECOGNIZED_NAME_ALERT` | 代理按 SNI 找不到站点，只好拿默认证书回应（SNI 与证书域名不匹配） |
+| `502 Bad Gateway` | 域名站点还在，但后端容器没就绪或没被代理发现 |
+| 页面能开但接口 404 | 容器重建后换了网络，代理里的 upstream 失效 |
+
+自查两条命令：
+
+```bash
+docker inspect prdwright-web-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep VIRTUAL_HOST
+docker inspect prdwright-web-1 --format '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+```
+
+第一条必须有输出，第二条必须同时有 `prdwright_net` 与 `web-proxy`。缺了就用上面第 2 步的命令重新拉起。
+
+> **按 IP 访问 `https://<公网IP>/` 永远会报证书错**——证书只签了域名，IP 不在 SAN 里。
+> 这不是故障，直接改用 `https://<你的域名>/` 即可。
+
+
 ### 7.3 回滚
 
 回滚有独立的一节：[`§6.7`](#67-回滚预案切换当天照这个做) 与完整手册 [`ROLLBACK.md`](./ROLLBACK.md)。
