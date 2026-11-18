@@ -63,3 +63,40 @@ def ensure_not_truncated(chunk: AIMessageChunk) -> None:
     reason = extract_finish_reason(chunk)
     if is_truncated(reason):
         raise OutputTruncatedError(reason)
+
+
+# 复述判据只看正文开头这么多字符就够：真出问题时，模型是整段照搬对话，开头一定重合。
+_ECHO_PROBE_CHARS = 80
+
+# 少于这么多字符的开头不作为证据（「1.」「好的」这类短串在任何文本里都可能出现），
+# 判据必须能证伪，不能靠一个大词表去猜。
+_ECHO_MIN_CHARS = 24
+
+
+def echoes_reference(text: str, reference: str) -> bool:
+    """判断模型输出是不是**照着喂进去的参考材料原样复述**。
+
+    线上真出现过一次：PRD 的撰写调用把上一轮澄清回复整段当正文吐了出来（开头是
+    「已经拿到你这份结构化需求……」），随后审核还在按 PRD 的标准给这段对话挑毛病、
+    改写再改一遍，最后当成一版 PRD 落库。提示词里写「不要复述对话」只是软约束。
+
+    判据刻意只认**开头与参考材料逐字重合**，不要求「必须是 `# ` 开头的文档」：
+    - 后者会把任何短正文都判成假的（夹具与真正的短文档都可能只有一层标题），
+      误杀代价远高于漏判；
+    - 而「照抄参考材料」是一个能证伪的强信号：正文开头几十个字原样出现在
+      对话记录里，说明模型在续写对话，不是在写文档。
+
+    Args:
+        text: 模型输出的完整正文。
+        reference: 本次喂给模型的参考材料（PRD 是补充对话记录；没有就传空串）。
+
+    Returns:
+        `True` 表示疑似复述（应当作废重试）。
+    """
+    head = " ".join((text or "").split())[:_ECHO_PROBE_CHARS]
+    if len(head) < _ECHO_MIN_CHARS:
+        return False
+    haystack = " ".join((reference or "").split())
+    if not haystack:
+        return False
+    return head in haystack

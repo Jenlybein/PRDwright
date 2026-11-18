@@ -67,6 +67,10 @@ class ErrorCode(str, Enum):
     # 与 `REVIEW_TARGET_MISSING` 分开的理由和第二组两个 4xx 一样：前端要能分辨
     # 「重审一次就好」与「这份文档没了」，合成一个码就只能给同一句话。
     CONTENT_CHANGED = "CONTENT_CHANGED"
+    # 撰写调用的输出不是文档正文（形如「顺着对话记录往下写」，没有一级标题起头）。
+    # 重试一次仍不是，就按这个码失败收尾：一个字都不落库（否则对话文本会被当成
+    # 一版 PRD 写进版本链）。只出现在任务终态与 SSE error 事件里。
+    MODEL_OUTPUT_NOT_DOCUMENT = "MODEL_OUTPUT_NOT_DOCUMENT"
 
 
 # ============================================================================

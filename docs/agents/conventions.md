@@ -100,6 +100,7 @@
 - 澄清提问上限 1-2 个，两处落点必须同步改：后端 `conversation_service.REQUIREMENTS_WRAPPER`（首轮开场白，是最后一条 user 消息）+ 前端 `useClarificationChat.ts::CLARIFICATION_SYSTEM_PROMPT`（开场白更靠后更具体、会盖过系统提示词）；口径由 `test_conversation_prompt.py` 锁死。
 - MVP 留空时按 `ui_pages` 推断候选功能清单，逐条在功能点名称后加「（建议）」，优先级 / 验收写「待确认」，`ui_pages` 也为空才退回「待确认」；改这条要同时改 4 处（`writing-rules.md §4`、`prd-template.md 2.1/6.1`、`SKILL.md` 阶段一/四、`field-schema.json` 的 `mvp_features.description`）。
 - 未填的题由 `format_form_data` 在已答项后汇总一行「以下题目用户未填写：…」，空串与「键不存在」同等看待；配置读不出来记 warning（降级要看得见）。
+- **撰写输出要防「复述参考材料」**：三个整篇生成共用 `document_service._stream_whole_document`，它在**审核之前**调 `stream_guard.echoes_reference`——正文开头（前 80 字、去空白后逐字）若原样出现在本次参考材料里（PRD 是补充对话记录，另两份为空串），判定为复述：先 `part{replace}` 清空缓冲与预览（不清的话失败收尾会把它当「部分完成」落库），再追加硬提示重试一次，两次都复述则 `MODEL_OUTPUT_NOT_DOCUMENT` 失败、一条 `done` 都不发。判据只认「逐字重合」，**别改成「必须以 `# ` 开头」**——那会把短正文全部误杀。新增的生成类硬判据若要求正文形如文档，夹具里的正文也要写成真文档，否则用例会被自己的判据拦下。
 
 ## 6. 前端与状态机
 

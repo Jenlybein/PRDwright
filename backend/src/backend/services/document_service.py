@@ -87,6 +87,7 @@ from backend.services.prompts import (
     SYSTEM_PROMPT,
 )
 from backend.services.skill_registry import load_skill_artifacts
+from backend.services.stream_guard import echoes_reference
 from backend.services.stream_reply import (
     astream_text,
     collect_reply,
@@ -360,6 +361,38 @@ def format_rewrite_reference(kind: str) -> str:
         )
         return "（本次未加载产出规范，请严格保持原文的术语、结构与风格。）"
     return "\n\n".join(blocks)
+
+
+_MAX_SHAPE_ATTEMPTS = 2
+
+"""撰写调用最多试几次「产出文档正文」（不是「重跑整条任务」）。
+
+两次就够：一次原样、一次带硬提示。再多试只会把「模型这条链路不适合写文档」这件事
+拖成几分钟的重试风暴，而那种情况用户自己再点一次生成比自动重试更清楚。
+"""
+
+# 第二次撰写时追加的硬提示：点明上一次错在哪，并把输出格式讲成「唯一出路」。
+# 只追加、不改写原提示词——写作规范、上游材料、模板都还在里面，换掉反而丢信息。
+_SHAPE_RETRY_INSTRUCTION = (
+    "你上一次的输出被判定为**复述了参考材料**：它把对话记录里的内容当成正文原样写了回来。\n"
+    "现在请重新输出这份文档，并严格满足：\n"
+    "1. 第一个非空行必须是以 `# ` 开头的一级标题（例如 `# 产品名 产品需求文档（PRD）`）；\n"
+    "2. 随后按模板输出全部章节，章节标题用 `## `；\n"
+    "3. 不要复述任何对话内容、不要回答对话里的问题、不要写开场白。\n"
+    "直接从一级标题开始输出。"
+)
+
+
+def _shape_retry_messages(base: list[BaseMessage]) -> list[BaseMessage]:
+    """在首批提示词之后追加一条硬提示，用于「上一次不是文档」的重试。
+
+    Args:
+        base: 首批的完整消息（`[SystemMessage, HumanMessage]`）。
+
+    Returns:
+        追加一条 `HumanMessage` 后的消息列表；`base` 本身不改。
+    """
+    return [*base, HumanMessage(content=_SHAPE_RETRY_INSTRUCTION)]
 
 
 def _continuation_messages(base: list[BaseMessage]) -> Callable[[str], list[BaseMessage]]:
@@ -738,6 +771,9 @@ class DocumentService:
                 writing_rules=prompt.writing_rules,
                 upstream=_prd_review_upstream(requirements_text, conversation),
             ),
+            # 复述判据的参考材料就是这份对话记录：正文开头若与它逐字重合，说明模型
+            # 在续写对话而不是写文档（见 `echoes_reference`）。
+            echo_reference=conversation,
         ):
             yield event
 
@@ -749,6 +785,7 @@ class DocumentService:
         doc_type: str,
         review_enabled: bool | None,
         review_context: Callable[[str], ProductContext],
+        echo_reference: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """三份产物**唯一**的整篇生成循环：撰写 →（可选）审核 + 改写一次 → `done`。
 
@@ -768,70 +805,111 @@ class DocumentService:
             doc_type: 事件里的产物标识（`prd` / `api_doc` / `prompts`）。
             review_enabled: 本次是否跑「整篇审一次 → 有问题改写一次」。
             review_context: 由干净正文造出审核上下文（`ProductContext`）。
+            echo_reference: 本次喂给模型的参考材料（PRD 传补充对话记录，其余传空串）。
+                只用于判「模型是不是把参考材料复述成了正文」（见 `echoes_reference`），
+                不参与生成。
         """
         # 标记块可能被切在 chunk 边界：先用抑制器保证实时 chunk 不含哨兵；
         # `done` 时对完整 reply 再 `extract` 一次，得到干净正文与待确认清单。
         # 撞上输出上限时**接着写**（不把整篇判成失败）：续写请求由 `_continuation_messages`
         # 从「已写正文的尾部」构造，三份产物同一份口径。
-        suppressor = PendingBlockSuppressor()
-        async for event in iter_continuation_events(
-            self.llm,
-            messages,
-            continuation_messages=_continuation_messages(messages),
-            status_text=status_text,
-            extra_data={"doc_type": doc_type},
-        ):
-            if event.type == "chunk":
-                clean = suppressor.feed(event.content)
-                if clean:
-                    yield StreamEvent(type="chunk", content=clean, data=event.data)
-            elif event.type == "done":
-                trailing = suppressor.flush()
-                if trailing:
-                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
-                reply = str(event.data.get("reply", ""))
-                clean_reply, items = extract(reply)
-                outcome = ReviewOutcome(final_reply=clean_reply, pending_items=items)
+        #
+        # 铲掉「写着写着变成对话」这种输出：判据在**审核之前**，见下方注释。
+        attempt = 0
+        body = ""
+        items: list[dict[str, Any]] = []
+        done_data: dict[str, Any] = {}
+        while True:
+            attempt += 1
+            attempt_messages = (
+                messages if attempt == 1 else _shape_retry_messages(messages)
+            )
+            suppressor = PendingBlockSuppressor()
+            captured: dict[str, Any] = {}
+            async for event in iter_continuation_events(
+                self.llm,
+                attempt_messages,
+                continuation_messages=_continuation_messages(attempt_messages),
+                status_text=status_text,
+                extra_data={"doc_type": doc_type},
+            ):
+                if event.type == "chunk":
+                    clean = suppressor.feed(event.content)
+                    if clean:
+                        yield StreamEvent(type="chunk", content=clean, data=event.data)
+                elif event.type == "done":
+                    trailing = suppressor.flush()
+                    if trailing:
+                        yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                    reply = str(event.data.get("reply", ""))
+                    captured["body"], captured["items"] = extract(reply)
+                    captured["done_data"] = dict(event.data or {})
+                elif event.type == "error":
+                    # 失败也要把抑制器里扣住的尾巴吐出去：它只是「可能被切断的哨兵前缀」，
+                    # 不吐会让短正文整段滞留在缓冲里——失败收尾按「已产出内容」落的那一版
+                    # 部分完成（#85）会因此丢掉最后十几字，甚至一个字都留不下。
+                    trailing = suppressor.flush()
+                    if trailing:
+                        yield StreamEvent(type="chunk", content=trailing, data=event.data)
+                    yield event
+                    return
+                else:
+                    yield event
 
-                # 整篇生成后审一次；有问题则**改写一次**，不再重审。
-                # 审核与改写都是整篇量级的调用，静默期很长，因此两步的原始输出
-                # 都通过 `stage_chunk` 实时推给前端（见 `stream_review_and_rewrite`）。
-                # 初稿已经以 chunk 流出去过，改写稿用 `part{replace}` 整段覆盖，
-                # 避免「初稿 + 改稿」在同一份预览里叠字。
-                #
-                # 快捷流程（`review_enabled=False`）**整段跳过**：连 `review` 结论事件
-                # 一起不发。只跳调用、照样发一条「通过」的结论，会被读成「审过了、没问题」，
-                # 那是假信号（三份产物同口径）。
-                if review_enabled_for_whole_document(review_enabled):
-                    async for review_event_or_chunk in stream_review_and_rewrite(
-                        self.llm,
-                        document=clean_reply,
-                        context=review_context(clean_reply),
-                        outcome=outcome,
-                        review_llm=self.review_llm,
-                        section_titles="\n".join(extract_headings(clean_reply)),
-                    ):
-                        yield review_event_or_chunk
+            body = str(captured.get("body", ""))
+            items = list(captured.get("items", []))
+            done_data = dict(captured.get("done_data", {}))
 
+            # **复述判据**：模型偶尔会顺着「补充对话记录」把上一轮澄清回复整段当正文
+            # 吐出来（线上真出现过：开头「已经拿到你这份结构化需求……」，随后审核还按
+            # PRD 的标准挑这段对话的毛病、改写一遍，最后当成一版 PRD 落库）。
+            # 提示词是软约束，这条是硬的：疑似复述就不审、不改、不落库。
+            if not echoes_reference(body, echo_reference):
+                break
+            # 这次的内容整段作废：先以 `part{replace}` 清空运行时缓冲与预览，
+            # 否则失败收尾会把这段对话文本当成「部分完成」写进版本链（#85 的落字路径）。
+            yield StreamEvent(type="part", content="", data={"text": "", "replace": True})
+            if attempt >= _MAX_SHAPE_ATTEMPTS:
                 yield StreamEvent(
-                    type="done",
-                    content="",
-                    data={
-                        **(event.data or {}),
-                        "reply": outcome.final_reply,
-                        "pending_items": outcome.pending_items,
-                    },
+                    type="error",
+                    content="生成失败：模型把对话记录当成了正文（整段复述），"
+                    "重试一次仍如此。本次结果不写入版本，请再点一次生成。",
+                    data={"error_type": "EchoedReference", "doc_type": doc_type},
+                    code=ErrorCode.MODEL_OUTPUT_NOT_DOCUMENT.value,
                 )
-            elif event.type == "error":
-                # 失败也要把抑制器里扣住的尾巴吐出去：它只是「可能被切断的哨兵前缀」，
-                # 不吐会让短正文整段滞留在缓冲里——失败收尾按「已产出内容」落的那一版
-                # 部分完成（#85）会因此丢掉最后十几字，甚至一个字都留不下。
-                trailing = suppressor.flush()
-                if trailing:
-                    yield StreamEvent(type="chunk", content=trailing, data=event.data)
-                yield event
-            else:
-                yield event
+                return
+
+        outcome = ReviewOutcome(final_reply=body, pending_items=items)
+
+        # 整篇生成后审一次；有问题则**改写一次**，不再重审。
+        # 审核与改写都是整篇量级的调用，静默期很长，因此两步的原始输出
+        # 都通过 `stage_chunk` 实时推给前端（见 `stream_review_and_rewrite`）。
+        # 初稿已经以 chunk 流出去过，改写稿用 `part{replace}` 整段覆盖，
+        # 避免「初稿 + 改稿」在同一份预览里叠字。
+        #
+        # 快捷流程（`review_enabled=False`）**整段跳过**：连 `review` 结论事件
+        # 一起不发。只跳调用、照样发一条「通过」的结论，会被读成「审过了、没问题」，
+        # 那是假信号（三份产物同口径）。
+        if review_enabled_for_whole_document(review_enabled):
+            async for review_event_or_chunk in stream_review_and_rewrite(
+                self.llm,
+                document=body,
+                context=review_context(body),
+                outcome=outcome,
+                review_llm=self.review_llm,
+                section_titles="\n".join(extract_headings(body)),
+            ):
+                yield review_event_or_chunk
+
+        yield StreamEvent(
+            type="done",
+            content="",
+            data={
+                **done_data,
+                "reply": outcome.final_reply,
+                "pending_items": outcome.pending_items,
+            },
+        )
 
     async def generate_api_docs_stream(
         self,

@@ -148,6 +148,9 @@ const state = computed<ReviewState>(() => {
 const stateLabel = computed(() => STATE_LABELS[state.value])
 const stateClass = computed(() => STATE_CLASSES[state.value])
 
+/** 「有问题」态：标题行不再挂状态徽标，改由严重度统计表达（见模板注释）。 */
+const isRevise = computed(() => state.value === 'revise')
+
 const expanded = ref(false)
 
 /** 折叠体的 id：`aria-controls` 要指向它，用 `useId()` 避免同页多份时撞号 */
@@ -386,9 +389,10 @@ const fixHint = computed(() => {
     <div class="rounded-2xl px-4 py-3">
       <div class="flex flex-wrap items-center gap-2">
         <h3 class="shrink-0 text-sm font-semibold text-fg">文档缺陷</h3>
-        <!-- 状态徽标：只显示「有问题」以外的状态（「有问题」由严重度统计代替） -->
+        <!-- 状态徽标：只显示「有问题」以外的状态（「有问题」由严重度统计代替）。
+             判据用状态键 `isRevise`，不拿中文标签做比较——文案会改，键不会。 -->
         <span
-          v-if="stateLabel !== '有问题'"
+          v-if="!isRevise"
           class="rounded-full px-2 py-0.5 text-[11px] font-medium"
           :class="stateClass"
         >
