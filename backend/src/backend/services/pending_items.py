@@ -180,7 +180,14 @@ def _extract_table_pending(text: str, *, id_prefix: str) -> list[dict[str, Any]]
         marked = next((cell for cell in cells[1:] if _TABLE_PENDING_MARK.search(cell)), "")
         if not marked:
             continue
-        question = cells[0] if marked == cells[0] else f"{cells[0]}：{marked}"
+        # 题干要像「一句待确认的问题」而不是表格原样拼接。线上实测：取舍表的行
+        # （「`basic`：基础组录入内容…组内字段清单待确认」）被原样搬进清单后，
+        # 用户看到的是一条字段说明，不是要他回答的问题。
+        topic = cells[0].strip(" ：:;；")
+        if len(cells) >= 3:
+            question = f"「{topic}」的取舍需要确认：{marked}"
+        else:
+            question = f"「{topic}」需要确认：{marked}"
         question = question.strip(" ：:;；")
         if not question or question in seen:
             continue

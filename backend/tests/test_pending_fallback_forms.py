@@ -83,6 +83,8 @@ def test_trade_off_table_rows_become_pending_items() -> None:
     assert len(items) == 1, "只有那一行带「待团队确认」，其余行不该被收进来"
     assert "布尔字段" in items[0]["question"]
     assert "待团队确认" in items[0]["question"]
+    # 题干必须像「要用户回答的问题」，不能把表格原样拼过来（线上实见：一条字段说明）
+    assert "的取舍需要确认：" in items[0]["question"]
     assert items[0]["importance"] == "P3"
     # 表格是正文，不能剥
     assert clean == doc

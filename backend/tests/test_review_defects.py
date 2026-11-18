@@ -908,6 +908,44 @@ def test_prompts_prompt_references_upstream_by_title_not_by_number():
     assert "不要" in template and "3.2" in template
 
 
+def test_api_docs_prompt_keeps_naming_consistent_and_paths_verbless():
+    """同一份文档里声明 snake_case、示例写驼峰 = 自相矛盾（线上实测 2 条 high）。
+
+    路径里塞动词（`/prd/generate-stream`）违反「资源名不用动词」。两条都写进生成要求，
+    而不是等审核抓——改写一轮未必收得干净。
+    """
+    template = prompts.API_DOCS_GENERATION_PROMPT
+    assert "命名口径必须前后一致" in template
+    assert "资源名不用动词" in template
+    assert "generate-stream" in template
+    # 清单块要求必须压在最后一句：模型对「最后一步」最敏感
+    tail = template.split("{pending_spec}")[0][-400:]
+    assert "追加清单块" in tail
+    assert "{pending_spec}" in template
+
+
+def test_prompts_prompt_requires_double_brace_placeholders():
+    """占位符写法连续两轮被判「口径不含」：`{变量名}` 与 `{{变量名}}` 混写。
+
+    注意断言要看**渲染后**的文本：模板本身经过 `.format()`，`{{变量名}}` 会塌成一个花括号，
+    所以提示词里的示例必须写成四个花括号，模型看到的才是双花括号。这条曾经就是根因。
+    """
+    template = prompts.PROMPTS_GENERATION_PROMPT
+    assert "双花括号" in template
+    rendered = template.format(prd_content="P", api_docs_content="A", pending_spec="S")
+    assert "`{{变量名}}`" in rendered, "模型看到的示例必须是双花括号"
+
+
+def test_prompts_guide_placeholder_example_survives_formatting():
+    """技能包那份模板同样会过 `.format()`，示例也必须写成四个花括号。"""
+    from backend.services.skill_registry import load_skill_artifacts
+
+    guide = (load_skill_artifacts("prompts") or {}).get("prompts_guide", "")
+    assert guide
+    rendered = guide.format(prd_content="P", api_docs_content="A", pending_spec="S")
+    assert "`{{变量名}}`" in rendered
+
+
 def test_rewrite_prompt_demands_elimination_not_rephrasing():
     """单轮改写（用户已确认不加复审）唯一能靠的就是这条要求。"""
     template = prompts.DOC_REWRITE_PROMPT
