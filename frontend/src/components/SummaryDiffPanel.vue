@@ -163,8 +163,17 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
     </div>
 
     <!-- 无变更 -->
-    <div v-else-if="!hasChanges" class="bg-surface-2 px-4 py-10 text-center  sm:px-6">
+    <div v-else-if="!hasChanges" class="space-y-2 bg-surface-2 px-4 py-10 text-center  sm:px-6">
       <p class="text-sm text-subtle">对话里没有检测到需要回填的补充信息，摘要保持不变。</p>
+      <!--
+        为什么要有这一句：回填**故意保守**（只把「对摘要里已有字段的明确补充/修正」写回表单，
+        不从对话里凭空造内容），所以「无变更」是正常结果，不是没读到对话。
+        但只说上一句，用户会以为系统没看对话——而真正的事实是：对话全文仍会随 PRD 生成
+        一起交给模型，这里的回填只是让它同时落进表单。
+      -->
+      <p class="text-xs text-subtle">
+        对话内容仍会随 PRD 生成一起交给模型；这里只负责把能写进表单的明确补充回填进去，不会凭空补全。
+      </p>
     </div>
 
     <!-- 变更列表 -->

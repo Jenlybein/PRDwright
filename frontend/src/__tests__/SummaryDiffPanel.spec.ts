@@ -108,6 +108,8 @@ describe('SummaryDiffPanel', () => {
     const wrapper = mount(SummaryDiffPanel, { props: { changes: [] } })
 
     expect(wrapper.text()).toContain('没有检测到需要回填的补充信息')
+    // 「无变更」是正常结果，不是「没读对话」：必须同时说明对话仍会进生成链路
+    expect(wrapper.text()).toContain('对话内容仍会随 PRD 生成一起交给模型')
     expect(wrapper.text()).toContain('直接生成 PRD')
     expect(wrapper.findAll('li')).toHaveLength(0)
   })
