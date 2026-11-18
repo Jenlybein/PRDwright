@@ -183,14 +183,41 @@ def normalize_issue(
     # 定位与描述是**数据**，不是文档：模型常把 `### 1. 产品概述:` 这种标题原文塞进
     # `where` / `detail`，界面上直接露出 `###` 与 `**`（2026-11-18 线上反馈「看着很累」）。
     # 在这里统一抹掉行内 Markdown 标记，前端就能按纯文本排版。
+    issue = clean_issue_text(issue)
+    return issue
+
+
+def clean_issue_text(issue: dict[str, Any]) -> dict[str, Any]:
+    """把一条缺陷里的**文本字段**洗成纯文本（幂等）。
+
+    两处调用：新结论入库前（`normalize_issue`），以及**旧结论读出来时**
+    （`clean_conclusion`）。后者是必须的——2026-11-18 之前落库的结论里 `where` 就是
+    `## 1. 产品概述`，读时不洗的话，历史版本界面上永远露着 `##`。
+    """
+    cleaned = dict(issue)
     for field in ("where", "detail", "section_title"):
-        if field in issue:
+        if field in cleaned:
             # `where` / `section_title` 是定位，保留章节号（「1. 产品概述」里的 `1.`）；
             # `detail` 是散文，行首编号属于噪声。
-            issue[field] = _strip_markdown_noise(
-                issue[field], keep_section_number=field != "detail"
+            cleaned[field] = _strip_markdown_noise(
+                cleaned[field], keep_section_number=field != "detail"
             )
-    return issue
+    return cleaned
+
+
+def clean_conclusion(conclusion: dict[str, Any] | None) -> dict[str, Any] | None:
+    """把整份结论里的缺陷文案洗成纯文本；非结论形状原样返回（幂等）。"""
+    if not isinstance(conclusion, dict):
+        return conclusion
+    issues = conclusion.get("issues")
+    if not isinstance(issues, list):
+        return conclusion
+    return {
+        **conclusion,
+        "issues": [
+            clean_issue_text(item) if isinstance(item, dict) else item for item in issues
+        ],
+    }
 
 
 def normalize_issues(

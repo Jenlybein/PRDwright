@@ -54,6 +54,7 @@ from backend.repositories.document_repo import (
     VersionDetail,
     VersionSummary,
 )
+from backend.services.review_defects import clean_conclusion
 
 logger = logging.getLogger(__name__)
 
@@ -707,7 +708,7 @@ def _to_item(row: DocumentRow, sha_by_kind: dict[str, str] | None = None) -> dic
         "content": row.content or "",
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
-        "review": _load_json(row.review, dict, None),
+        "review": _load_review(row.review),
         # 「这一版上一次审核试过但没跑成」的时间；`None` = 没有失败记录（不是「没审过」）
         "review_failed_at": row.review_failed_at,
         # 当前版本序号：结论面板据此说清「这条结论是哪一版的」（后端已有这一列，
@@ -761,7 +762,7 @@ def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
         "content": row.content or "",
         "pending_items": _load_json(row.pending_items, list, []),
         "last_run_summary": _load_json(row.last_run_summary, dict, None),
-        "review": _load_json(row.review, dict, None),
+        "review": _load_review(row.review),
         "review_failed_at": row.review_failed_at,
         "source": row.source,
         "note": row.note or "",
@@ -771,6 +772,17 @@ def _to_version_detail(row: VersionDetail) -> dict[str, Any]:
         "updated_at": row.updated_at,
         "is_current": bool(row.is_current),
     }
+
+
+def _load_review(raw: Any) -> dict[str, Any] | None:
+    """把落库的审核结论解出来并**洗掉行内 Markdown**（幂等，读时统一处理）。
+
+    为什么读时也要洗：`normalize_issue` 只作用于**新产生**的结论。2026-11-18 之前落库的
+    结论里 `where` 就是 `## 1. 产品概述`，不在这里洗的话，历史版本界面上会一直露着 `##`
+    与 `**`——前端不做清洗（那会变成第二个真源），只负责排版。
+    """
+    conclusion = _load_json(raw, dict, None)
+    return clean_conclusion(conclusion)
 
 
 def _load_json(raw: Any, expected: type, fallback: Any) -> Any:
