@@ -179,8 +179,14 @@ watch(
     if (!before || now) return
     // 一轮回复结束时，若末尾挂着待回答的选择题，把滚动条带到最底部：
     // 题目一多，「提交回答」会沉到卡片可视区外面，用户得先滚动才找得到（线上实见）。
+    // 滚动要**滚两次**：`nextTick` 时 Markdown 刚替换完、高度还没稳定，单次滚动会停在
+    // 半途（实测落到列表中部）；下一帧再滚一次才真正到底。
     void nextTick(() => {
-      if (unansweredAsk.value) messageListRef.value?.scrollToBottom()
+      const toBottom = (): void => {
+        if (unansweredAsk.value) messageListRef.value?.scrollToBottom()
+      }
+      toBottom()
+      requestAnimationFrame(toBottom)
       inputRef.value?.focus()
     })
   },
