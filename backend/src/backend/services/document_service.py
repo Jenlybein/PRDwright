@@ -515,6 +515,55 @@ class DocumentService:
         ]
 
     # ------------------------------------------------------------------
+    # 结构化摘要回填（非流式，一次性 JSON）
+    # ------------------------------------------------------------------
+
+    async def sync_summary_from_conversation(
+        self,
+        summary: dict[str, Any],
+        history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """读一遍对话历史，把用户**明确补充或修正**的字段回填进结构化摘要。
+
+        规则（提示词与本地合并双重保证，见 `_merge_summary`）：
+        仅当用户明确补充/修正时才更新；不确定的内容保持原值；不凭空新增字段；
+        返回**完整**摘要，便于前端做 Diff。
+
+        模型输出非法 JSON 时返回原摘要的深拷贝——回填是「锦上添花」的一步，
+        不能因为它把用户已填好的需求弄丢。
+
+        ⚠️ 这个方法在 #92 的大规模删除里被连带删过一次，只留下模块级包装，
+        于是每次调用都是 `AttributeError`、被路由层转成 502（4 毫秒返回、日志
+        里一个字都不留）。用例 `tests/test_conversation_summary_sync.py` 钉住了它。
+
+        Args:
+            summary: 当前结构化需求摘要。
+            history: 对话历史（`{role, content}` 列表）。
+
+        Returns:
+            更新后的完整结构化摘要；无法回填时等价于原摘要。
+
+        Raises:
+            Exception: 模型调用失败时向上抛出，由路由层转成 HTTP 错误。
+        """
+        if not summary:
+            return {}
+
+        user_content = SUMMARY_SYNC_PROMPT_TEMPLATE.format(
+            summary=json.dumps(summary, ensure_ascii=False, indent=2),
+            conversation=format_conversation(history or []),
+        )
+        messages = self._build_messages(SUMMARY_SYNC_SYSTEM_PROMPT, user_content)
+        raw = await collect_reply(self.llm, messages)
+
+        candidate = extract_json_object(raw)
+        if candidate is None:
+            logger.warning("摘要回填未返回合法 JSON，保持原摘要不变。原始输出：%s", raw[:500])
+            return copy.deepcopy(summary)
+
+        return _merge_summary(summary, candidate)
+
+    # ------------------------------------------------------------------
     # PRD 生成（整篇，与接口文档 / 提示词套件同一条路径）
     # ------------------------------------------------------------------
 

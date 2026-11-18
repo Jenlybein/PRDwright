@@ -618,7 +618,13 @@ def _write_chat_turn(runtime: JobRuntime) -> None:
         return
     # 优先用定稿正文；没有 `done`（出错 / 被停止）时退回「已定稿 + 实时缓冲」的尽力还原
     content = (runtime.final_reply or "").strip() or _draft(runtime).strip()
-    if not content:
+    asks = runtime.chat_asks or None
+    tool_calls = runtime.chat_tool_calls or None
+    # 跳过的判据是「这一轮没有任何用户可见内容」，**不是**「正文是空串」：
+    # AI 追问时常常只发一个 `ask_clarification_questions` 工具调用、正文一个字都没有，
+    # 但用户当场看到的是题目卡片。按正文判空会把这一轮整条丢掉，表现为
+    # 「最新的 AI 消息刷新一下就没了」（2026-11-18 线上事故）。
+    if not content and not asks and not tool_calls:
         return
     try:
         # 轮次与会话 id 必须在**同一个事务**里写：只落轮次而没落会话 id，
@@ -632,8 +638,8 @@ def _write_chat_turn(runtime: JobRuntime) -> None:
                 role="assistant",
                 content=content,
                 job_id=runtime.job_id,
-                asks=runtime.chat_asks or None,
-                tool_calls=runtime.chat_tool_calls or None,
+                asks=asks,
+                tool_calls=tool_calls,
                 interrupted=bool(runtime.chat_interrupted),
             )
             # 会话 id 随收尾落库：下一轮续聊直接命中内存记录，省一次历史重放。

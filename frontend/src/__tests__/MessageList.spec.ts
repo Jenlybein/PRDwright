@@ -181,4 +181,17 @@ describe('MessageList 的用户消息形态', () => {
     expect(wrapper.findAll('[role="radiogroup"]')).toHaveLength(0)
     expect(wrapper.text()).not.toContain('提交回答')
   })
+
+  it('只提问的一轮（正文为空）画题目卡片，但不留空气泡', () => {
+    // 2026-11-18 线上事故的回归锚点：AI 追问时正文可以是空的，
+    // 这一轮的用户可见内容就是题目本身。气泡必须让位，否则题目上方挂一个空壳。
+    const wrapper = mountList([
+      { role: 'assistant', content: '', stage: 'requirement', asks: [ASK] },
+    ])
+
+    expect(wrapper.findAll('[role="radiogroup"]')).toHaveLength(1)
+    expect(wrapper.text()).toContain('第一版要不要做离线同步？')
+    // 空正文不渲染气泡：既没有 Markdown 容器，也没有「思考中」的占位
+    expect(wrapper.find('.prose').exists()).toBe(false)
+  })
 })

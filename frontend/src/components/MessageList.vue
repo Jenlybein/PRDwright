@@ -271,9 +271,11 @@ defineExpose({ scrollToBottom })
               <span class="text-sm text-subtle">{{ thinkingPhrase }}</span>
             </div>
 
-            <!-- 已有内容：Markdown 渲染 + 流式光标 -->
+            <!-- 已有内容：Markdown 渲染 + 流式光标。
+                 只提问的一轮（正文为空、只有结构化选择题）不画气泡，否则题目上方
+                 会挂一个空气泡——服务端现在会如实落这一轮，前端必须跟得上。 -->
             <div
-              v-else
+              v-else-if="message.content.trim()"
               class="prose prose-sm prose-stone doc-reveal max-w-none rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm ring-1 ring-line dark:prose-invert"
             >
               <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
