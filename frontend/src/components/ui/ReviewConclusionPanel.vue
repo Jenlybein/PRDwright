@@ -26,6 +26,19 @@ import {
  * 展开按类分组、类内 `high` 在前——严重度决定「先修哪一条」，它由类别固定，不由模型升降。
  * **旧结论没有类别** → 归「未分类」，不推断、不重分类（不追溯历史）。
  *
+ * ## 排版：三层信息，从上到下
+ *
+ * 收起时三行：标题 + 状态徽标（**总体结论**）→ 元信息小字（第几版 / 何时审 / 是否已改写）
+ * → 类别计数一行弱文本（`共 N 条 · 各类几条`）。展开后每组一行标题（严重度图标 + 类别名
+ * + 条数），每条缺陷两行：小字等宽定位在上、描述主体在下。
+ *
+ * **单条上不挂严重度徽标**：单字（高 / 中 / 低）既表达不了「先修哪一类」，窄容器里还会被
+ * 截成一个怪字符；严重度已由分组顺序与标题图标表达。
+ *
+ * **前端不洗 Markdown**：`where` / `detail` 的行内标记由后端
+ * `review_defects.normalize_issue` 统一抹成纯文本；前端再写一遍正则就是第二个真源，
+ * 两边迟早对不上。面板按纯文本渲染（`font-mono` 只改变字体，不解析标记）。
+ *
  * ## 三份产物共用同一个面板（票 #94 收口）
  *
  * PRD / 接口文档 / 提示词套件都走「整篇审一次、问题按类报」，结论都是**一版一条**：
@@ -134,16 +147,6 @@ const state = computed<ReviewState>(() => {
 const stateLabel = computed(() => STATE_LABELS[state.value])
 const stateClass = computed(() => STATE_CLASSES[state.value])
 
-const SEVERITY_LABELS: Record<string, string> = {
-  high: '高',
-  medium: '中',
-  low: '低',
-}
-
-function severityLabel(value: string): string {
-  return SEVERITY_LABELS[value] ?? value
-}
-
 const expanded = ref(false)
 
 /** 折叠体的 id：`aria-controls` 要指向它，用 `useId()` 避免同页多份时撞号 */
@@ -172,12 +175,28 @@ function highFirst(a: ReviewIssue, b: ReviewIssue): number {
   return (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9)
 }
 
+/**
+ * 分组标题上的那枚图标：它表达的是**严重度**，不是「这一类的图案」。
+ *
+ * 两个理由：类别名已经写在标题里，再画六种各不相同的图形只是装饰；而严重度才是
+ * 「先看哪一组」的依据——high 两组用告警三角（`danger-fg`），medium 用信息圆
+ * （`subtle`），一眼就能把「必须改」和「只报不改」分开。两者都是仓库既有的图标口径，
+ * 不另起一套画风。
+ */
+const WARNING_ICON =
+  'M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495ZM10 6a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 6Zm0 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'
+
+const INFO_ICON =
+  'M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-8-5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0v-4.5A.75.75 0 0 1 10 5Zm0 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'
+
 /** 一组同类缺陷（`category` 为空的是「未分类」组，排在最后） */
 interface IssueGroup {
   /** 类别标识；未分类组的 key 是空串（模板里 `key` 需要非空时用 `||` 兜底） */
   key: string
   label: string
   issues: ReviewIssue[]
+  /** 组内是否以 high 打头（决定标题图标与条目左侧的强调线，见 `WARNING_ICON`） */
+  high: boolean
 }
 
 /**
@@ -201,18 +220,24 @@ const issueGroups = computed<IssueGroup[]>(() => {
   for (const category of DEFECT_CATEGORIES) {
     const bucket = buckets.get(category)
     if (!bucket?.length) continue
+    const sorted = [...bucket].sort(highFirst)
     groups.push({
       key: category,
       label: DEFECT_CATEGORY_LABELS[category] ?? category,
-      issues: [...bucket].sort(highFirst),
+      issues: sorted,
+      // 六类里前两类固定 high（后端 `CATEGORY_SEVERITY` 覆写），其余固定 medium；
+      // 这里按组内首条的实际严重度取（未分类组混有旧口径条目时也能正确亮红灯）。
+      high: sorted[0]?.severity === 'high',
     })
   }
   const uncategorized = buckets.get('')
   if (uncategorized?.length) {
+    const sorted = [...uncategorized].sort(highFirst)
     groups.push({
       key: '',
       label: UNCATEGORIZED_LABEL,
-      issues: [...uncategorized].sort(highFirst),
+      issues: sorted,
+      high: sorted[0]?.severity === 'high',
     })
   }
   return groups
@@ -221,11 +246,17 @@ const issueGroups = computed<IssueGroup[]>(() => {
 /**
  * 折叠头的分类计数：`编造 1 · 结构 2 · 未分类 3`。
  *
- * 各项之和就是问题总数，因此不必再单独写一个「N 个待处理问题」——两个数字摆在一起
- * 只会让人核对一遍它们对不对。
+ * 各项之和就是问题总数，因此布局上不再单独摆一枚「N 个待处理问题」的芯片——总数与
+ * 分类写在**同一行弱文本**里（`共 2 条 · 编造 1 · 结构不符 1`），收起时读一行就知道
+ * 「有几条、分在哪几类」。等权重的彩色 chip 会一起抢注意力，这一行不承担那个作用。
  */
 const categoryCounts = computed(() =>
   issueGroups.value.map((group) => `${group.label} ${group.issues.length}`).join(' · '),
+)
+
+/** 取总数 + 分类计数的整行文本；没有问题时为空串（收起态不显示这一行） */
+const countsText = computed(() =>
+  issueCount.value ? `共 ${issueCount.value} 条 · ${categoryCounts.value}` : '',
 )
 
 /** 结论的一句话总结；「审核失败 / 未审核」时没有可展示的东西 */
@@ -260,6 +291,22 @@ const failedLabel = computed(() =>
   state.value === 'failed' && props.reviewFailedAt ? relativeTime(props.reviewFailedAt) : '',
 )
 
+/**
+ * 元信息行：`第 2 版 · 审于 5 分钟前 · 已改写一次`。
+ *
+ * 这三样都是**追溯与噪声级**信息，收进标题下方同一行小字：不与类别计数同排，
+ * 也不各占一枚 chip——否则「哪一版、什么时候审的、改没改过」会和「哪一类几条」
+ * 一起抢第一眼的注意力。空的那一项直接不出现，不留分隔符。
+ */
+const metaText = computed(() => {
+  const parts: string[] = []
+  if (versionLabel.value) parts.push(versionLabel.value)
+  if (reviewedLabel.value) parts.push(`审于 ${reviewedLabel.value}`)
+  if (failedLabel.value) parts.push(`失败于 ${failedLabel.value}`)
+  if (rewritten.value) parts.push('已改写一次')
+  return parts.join(' · ')
+})
+
 /** 「有问题」时不可点：先按结论修复，再回来确认（修复在途时同样不可点，见 `canFix`） */
 const canRereview = computed(() => state.value !== 'revise' && !props.fixInFlight)
 
@@ -293,82 +340,76 @@ const fixHint = computed(() => {
 <template>
   <section class="rounded-2xl border border-line bg-surface shadow-sm">
     <!--
-      折叠头一行装两件事：左边整块是「展开 / 收起」开关（原生可 Tab、可回车/空格），
-      右边是这份结论上唯一的动作。
+      折叠头**三层结构**，从上到下就是阅读顺序：
 
-      ⚠️ 两个 button **不能嵌套**（HTML 不允许、读屏也读不清）：因此外层是 div，
-      开关占满剩余宽度，动作按钮独立一枚。开关仍是这一行里的**第一个** button。
+      1. 标题 + 状态徽标：这一条结论的总体判定（通过 / 有问题 / 审核失败 / 未审核）；
+      2. 元信息小字：第几版、什么时候审的、是否已改写——追溯用的噪声级信息，收成一行；
+      3. 类别计数：`共 N 条 · 编造 1 · 结构不符 1`，收起时也能看出「几条、分在哪几类」。
+
+      右侧是这份结论上的两个动作（修复 / 重新审核），与「展开 / 收起」分开：
+      两个 button **不能嵌套**（HTML 不允许、读屏也读不清），因此外层是 div，
+      开关占满剩余宽度，动作按钮独立成组；开关仍是这一行里的**第一个** button。
     -->
-    <div class="flex flex-wrap items-center gap-2 rounded-2xl px-4 py-3">
+    <div class="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-2xl px-4 py-3">
       <button
         type="button"
-        class="flex min-w-0 flex-1 flex-wrap items-center gap-2 rounded-control text-left transition-colors hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
+        class="flex min-w-0 flex-1 flex-col items-stretch gap-1 rounded-control py-0.5 text-left transition-colors hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
         :aria-expanded="expanded"
         :aria-controls="bodyId"
         @click="expanded = !expanded"
       >
-        <h3 class="text-sm font-semibold text-fg">文档缺陷</h3>
-        <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="stateClass">
-          {{ stateLabel }}
+        <span class="flex min-w-0 flex-wrap items-center gap-2">
+          <h3 class="text-sm font-semibold text-fg">文档缺陷</h3>
+          <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="stateClass">
+            {{ stateLabel }}
+          </span>
+          <svg
+            class="ml-auto h-4 w-4 shrink-0 text-subtle transition-transform"
+            :class="expanded ? 'rotate-180' : ''"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              fill-rule="evenodd"
+              d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
+              clip-rule="evenodd"
+            />
+          </svg>
         </span>
-        <span
-          v-if="issueCount"
-          class="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium text-muted"
-          :title="`按类别统计：${categoryCounts}`"
-        >
-          {{ categoryCounts }}
-        </span>
-        <span
-          v-if="rewritten"
-          class="rounded-full bg-primary-50 px-2 py-0.5 text-[11px] font-medium text-primary-700 dark:bg-primary-950/40 dark:text-primary-300"
-        >
-          已改写一次
-        </span>
-        <!-- 追溯：这条结论属于哪一版、什么时候审的（收起时也看得到） -->
-        <span v-if="versionLabel" class="text-[11px] text-subtle">{{ versionLabel }}</span>
-        <span v-if="reviewedLabel" class="text-[11px] text-subtle">· 审于 {{ reviewedLabel }}</span>
-        <!-- 失败也有时间：它落在版本行上（`review_failed_at`），刷新后照旧 -->
-        <span v-if="failedLabel" class="text-[11px] text-subtle">· 失败于 {{ failedLabel }}</span>
-        <svg
-          class="h-4 w-4 shrink-0 text-subtle transition-transform"
-          :class="expanded ? 'rotate-180' : ''"
-          viewBox="0 0 20 20"
-          fill="currentColor"
-          aria-hidden="true"
-        >
-          <path
-            fill-rule="evenodd"
-            d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
-            clip-rule="evenodd"
-          />
-        </svg>
+        <!-- 追溯信息：不与类别计数同排（见脚本里的 `metaText` 说明） -->
+        <span v-if="metaText" class="text-[11px] leading-snug text-subtle">{{ metaText }}</span>
+        <!-- 类别计数：一行弱文本，不是一排等权重 chip -->
+        <span v-if="countsText" class="text-xs leading-snug text-muted">{{ countsText }}</span>
       </button>
 
-      <!-- 修复：按这一版的问题重写整篇并**追加新版本**。它排在重审之前——「有问题」时
-           它才是可点的那个，两个按钮的可用条件互斥，不会让用户猜该按哪个。 -->
-      <AppButton
-        variant="secondary"
-        size="sm"
-        class="shrink-0"
-        :disabled="!canFix"
-        :title="fixHint"
-        @click="emit('fix')"
-      >
-        修复
-      </AppButton>
+      <div class="flex shrink-0 flex-wrap items-center gap-2">
+        <!-- 修复：按这一版的问题重写整篇并**追加新版本**。它排在重审之前——「有问题」时
+             它才是可点的那个，两个按钮的可用条件互斥，不会让用户猜该按哪个。 -->
+        <AppButton
+          variant="secondary"
+          size="sm"
+          class="shrink-0"
+          :disabled="!canFix"
+          :title="fixHint"
+          @click="emit('fix')"
+        >
+          修复
+        </AppButton>
 
-      <!-- 只审不改：正文与版本都不变，因此这个动作随时可以再来一次（「有问题」除外）。
-           样式走统一按钮件 `AppButton`：这里不手写一套描边样式，否则暗色主题又多一处。 -->
-      <AppButton
-        variant="secondary"
-        size="sm"
-        class="shrink-0"
-        :disabled="!canRereview"
-        :title="rereviewHint"
-        @click="emit('rereview')"
-      >
-        重新审核
-      </AppButton>
+        <!-- 只审不改：正文与版本都不变，因此这个动作随时可以再来一次（「有问题」除外）。
+             样式走统一按钮件 `AppButton`：这里不手写一套描边样式，否则暗色主题又多一处。 -->
+        <AppButton
+          variant="secondary"
+          size="sm"
+          class="shrink-0"
+          :disabled="!canRereview"
+          :title="rereviewHint"
+          @click="emit('rereview')"
+        >
+          重新审核
+        </AppButton>
+      </div>
     </div>
 
     <!--
@@ -386,48 +427,59 @@ const fixHint = computed(() => {
         这一版还没审核过。点「重新审核」补一次，只审不改。
       </p>
 
-      <p v-if="summary" class="text-xs leading-relaxed text-subtle">{{ summary }}</p>
+      <!-- 总体结论的一句话总结：在分组之前先给结论，再往下才是逐条证据 -->
+      <p v-if="summary" class="mt-1 text-xs leading-relaxed text-muted">{{ summary }}</p>
 
       <!-- 展开：按类分组，类内 high 在前（严重度由类别固定，见 ADR 0003）。未分类组在最后。 -->
-      <div v-if="issueGroups.length" class="mt-3 space-y-3">
+      <div v-if="issueGroups.length" class="mt-3 space-y-4">
         <section v-for="group in issueGroups" :key="group.key || 'uncategorized'">
-          <h4 class="flex items-baseline gap-1.5 text-xs font-semibold text-fg">
-            {{ group.label }}
-            <span class="text-[11px] font-normal text-subtle">{{ group.issues.length }}</span>
+          <h4 class="flex items-center gap-1.5">
+            <svg
+              class="h-3.5 w-3.5 shrink-0"
+              :class="group.high ? 'text-danger-fg' : 'text-subtle'"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                :d="group.high ? WARNING_ICON : INFO_ICON"
+                clip-rule="evenodd"
+              />
+            </svg>
+            <span class="text-xs font-semibold text-fg">{{ group.label }}</span>
+            <span class="text-[11px] font-normal text-subtle">{{ group.issues.length }} 条</span>
           </h4>
-          <ul class="mt-1.5 space-y-1.5">
+          <ul
+            class="mt-1.5 space-y-2 border-l pl-3"
+            :class="group.high ? 'border-danger-line' : 'border-line'"
+          >
+            <!--
+              一条缺陷两行：上面一行小字等宽定位（章节），下面一行是描述主体。
+              严重度不在这条上重复标注——类别顺序与分组图标已经表达了它；单字徽标
+              （「高 / 中」）之前会被截成一个怪字符，直接删掉。
+            -->
             <li
               v-for="(issue, index) in group.issues"
               :key="index"
-              class="flex items-start gap-2 text-xs leading-relaxed text-muted"
+              class="flex flex-col gap-0.5"
             >
-              <span
-                class="mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium"
-                :class="
-                  issue.severity === 'high'
-                    ? 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300'
-                    : issue.severity === 'medium'
-                      ? 'bg-warning-surface text-warning-fg'
-                      : 'bg-surface-2 text-subtle'
-                "
+              <p
+                v-if="issue.where"
+                class="break-words font-mono text-[11px] leading-snug text-subtle"
               >
-                {{ severityLabel(issue.severity) }}
-              </span>
-              <span>
-                <template v-if="issue.where">{{ issue.where }}：</template>
-                {{ issue.detail }}
-              </span>
+                {{ issue.where }}
+              </p>
+              <p class="break-words text-sm leading-relaxed text-body">{{ issue.detail }}</p>
             </li>
           </ul>
         </section>
       </div>
 
-      <!-- 「有问题」时把两个动作的分工写在面板里：只靠 title 太隐蔽 -->
-      <p
-        v-if="state === 'revise'"
-        class="mt-3 text-xs leading-relaxed text-warning-fg"
-      >
-        还有 {{ issueCount }} 个未处理的问题。点「修复」会按结论重写整篇、追加新版本；改完再重新审核。
+      <!-- 「有问题」时把两个动作的分工写在面板里：只靠 title 太隐蔽。
+           收成一行弱文案，不抢缺陷列表的注意力。 -->
+      <p v-if="state === 'revise'" class="mt-3 text-[11px] leading-relaxed text-subtle">
+        还有 {{ issueCount }} 个未处理的问题，点「修复」会按结论重写整篇、追加新版本；改完再重新审核。
       </p>
     </div>
   </section>
