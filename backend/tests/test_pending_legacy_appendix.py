@@ -52,6 +52,46 @@ def test_legacy_appendix_is_stripped_and_parsed() -> None:
     assert "PRDWright 还是 Vibe Coding" not in clean
 
 
+def test_api_docs_heading_variant_is_also_recognised() -> None:
+    """接口文档写的是「### 待确认项」而不是「附：待确认问题」（线上那次就是它漏掉的）。
+
+    2026-11-18 第二次线上反馈：接口文档生成完成后「待确认问题」容器是空的。
+    查库：`document_versions.pending_items = "[]"`，正文尾部却挂着 `### 待确认项` 的
+    编号列表。判据只认「问题 / 事项 / 清单」三个后缀，**「项」不在其中**，于是整段被
+    当成正文放行。三种后缀必须能组合（`待确认问题清单`）也要能单用（`待确认项`）。
+    """
+    clean, items = extract(
+        _BODY
+        + """
+### 待确认项
+
+1. 登录态 7 天与 refresh_token 30 天的关系，需产品拍板。
+2. 注册后是否免登录，需产品在 PRD F-01 补充验收后再调整。
+"""
+    )
+
+    assert len(items) == 2, "「待确认项」标题下的两条都要转成待确认项"
+    assert items[0]["question"].startswith("登录态 7 天")
+    # 附录不能留在正文里：界面上有容器、正文里就不该再挂一份
+    assert "待确认项" not in clean
+    assert clean.rstrip().endswith("AI 与用户对话，逐步问清需求。")
+
+
+def test_heading_variants_do_not_swallow_prose() -> None:
+    """放宽后缀不等于乱抓：正常章节标题里带「待确认」半句不算附录。"""
+    clean, items = extract(
+        _BODY
+        + """
+## 待确认的处理方式
+
+这一节讲的是我们怎么处理待确认项，属于正文。
+"""
+    )
+
+    assert items == []
+    assert "待确认的处理方式" in clean
+
+
 def test_legacy_appendix_folded_lines_join_one_item() -> None:
     """长条目被折行时不能拆成两条（线上那份附录就有折行）。"""
     doc = _BODY + """

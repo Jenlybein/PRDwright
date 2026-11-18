@@ -45,6 +45,7 @@ import {
   navigatesToRunView,
   normalizeChatStage,
   reviewStateFor,
+  stepIndexOf,
 } from '@/utils/workflow'
 import {
   CHAT_STAGES,
@@ -692,6 +693,24 @@ const inFlightDocKind = computed<DocumentKind | null>(() => {
 })
 
 /**
+ * 进度条的**可点击范围**：`reachedStepIndex` 之外，再放开「正在生成的那一份」所在的那一格。
+ *
+ * 不加这一条会出现死胡同：接口文档正在生成、但它的第一版还没落库，`hasApiDocs` 仍为假，
+ * 于是「接口文档」这一格在进度条上是灰的。用户只要点一下 PRD 换个页看，就再也点不回
+ * 那张正在跑的页了——运行视图只能靠**当前所处的步骤**触发，而那一格偏偏不可点。
+ * 「有一支任务正在为这份产物生成」本身就是「这一步已经到过」的证据，放开它是如实的。
+ *
+ * 只放宽**可点击范围**，不改 `farthestContentStepIndex`：方案列表里的「这份做到哪了」
+ * 只该看产物，不能因为「刚开始生成」就自称「已经出了接口文档」。
+ */
+const stepReachableIndex = computed(() => {
+  const kind = inFlightDocKind.value
+  if (kind === null) return reachedStepIndex.value
+  // `stepIndexOf` 找不到那一步时返回 0，`max` 之后等于没放宽——对不含这一格的入口模式是安全的
+  return Math.max(reachedStepIndex.value, stepIndexOf(reviewStateFor(kind), store.entryMode))
+})
+
+/**
  * 用户点了「查看当前版本」时立下的**压制位**（票 #68）。
  *
  * 运行视图现在由在途任务兜底渲染，因此「我不要看过程，先读旧版」这个意图必须被记住：
@@ -1287,7 +1306,7 @@ function handleClarificationAnswer(payload: AnswerPayload): void {
         v-if="!isChoosingEntry"
         :steps="steps"
         :current-index="currentStepIndex"
-        :reached-index="reachedStepIndex"
+        :reached-index="stepReachableIndex"
         :generating="isGeneratingPhase"
         @select="handleStepClick"
       />

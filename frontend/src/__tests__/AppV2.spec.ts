@@ -1453,6 +1453,45 @@ describe('AppV2 完整流程编排', () => {
     expect(documentsOf(wrapper).contents.prd).toContain('项目背景')
   })
 
+  /**
+   * 死胡同回归（线上反馈）：接口文档**第一次**生成期间，它的那一格进度条会被判成「没到达」
+   * （`hasApiDocs` 要等收尾才为真）。用户点一下 PRD 换个页看，就再也点不回那张正在跑的页——
+   * 运行视图只能靠当前所处的步骤触发，而那一格偏偏是灰的。
+   *
+   * 判据：**「有任务正在为这份产物生成」也算「到过这一步」**，那一格必须可点；点回来要
+   * 重新落到运行视图（而不是空白的审阅页）。
+   */
+  it('接口文档首次生成期间：点走之后仍能从进度条回到那张正在跑的页', async () => {
+    mockJobStream({
+      // 卡住不返回：断言就在「还在生成」这个窗口里做
+      'api-docs': () => new Promise<api.StreamResult>(() => {}),
+    })
+
+    const wrapper = await mountExistingSolution(reviewSnapshot('review-prd'), 1, [
+      makeDocumentRecord('prd', '# 产品需求文档\n\n## 1. 项目背景\n内容'),
+    ])
+    await flushPromises()
+
+    // 从 PRD 审阅页发起接口文档生成：这时接口文档还没有任何版本
+    await clickButton(wrapper, '生成接口文档')
+    await flushPromises()
+    const store = storeOf(wrapper)
+    expect(store.viewState).toBe('generating-api-docs')
+    expect(documentsOf(wrapper).hasApiDocs).toBe(false)
+
+    // 换个页看（线上就是这么丢的）
+    await clickStep(wrapper, 'PRD')
+    await flushPromises()
+    expect(store.viewState).toBe('review-prd')
+
+    // 点回「接口文档」：这一格必须可点，且落回运行视图
+    await clickStep(wrapper, '接口文档')
+    await flushPromises()
+    expect(store.viewState).toBe('review-api-docs')
+    // 运行视图的特征：正文还没出来、没有「文档缺陷」面板（那是审阅页才有的）
+    expect(wrapper.text()).not.toContain('文档缺陷')
+  })
+
   it('恢复路径 2：无指针但快照落在生成中时兜底查到活跃任务，撤销降级并重连', async () => {
     vi.mocked(api.fetchActiveJobs).mockResolvedValue([
       {

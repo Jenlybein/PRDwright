@@ -82,7 +82,7 @@
 - 骨架化 `doc_skeleton.py`（纯字符串、零 LLM 调用）只用在审核侧：标题整行 / 表格整行（只留首列会丢接口路径）/ 条目整行 / 含数字行 / 代码块只留围栏首行；撰写侧的需求输入不动（唯一事实来源），撰写侧要带 `format_field_contract`（枚举递归扫）；`skeletonize` 喂 fenced JSON 会静默吐空。
 - 大纲 `doc_outline.py`（票 #91，纯字符串、零 LLM 调用）：三份产物的阶段顺序统一为「大纲 → 撰写 → 审核 → 改写」；大纲只**抽取**上游已有结构，锚点是上游原文的整行（显示才截断），`verify_outline` 后校验查不到出处即降级「待确认」；骨架不许另立一套（接口文档五节、提示词四节必须能在对应生成提示词 / 技能包里找到，用例守着）；抽不出结构时返回 `None` → 只发一条说明性的 `stage(outlining)` 后直接 `stage(writing)`，**不发 `error`**。不要改成「让模型写大纲」——那会把「不编造」重新压在一句提示词上。
 - PRD 的整篇改写走 `fix_document_stream`（整篇重写一次，注入当前结论、上游全文与当前待确认清单）；按章改写的提示词与占位符机制已随票 #92 退役。
-- 待确认清单唯一实现 `services/pending_items.py`：`extract()` 剥离全部块并按 `{prefix}-{n}` 重分配 id、坏 JSON 与未闭合块跳过；`id` 由后端分配、不信任模型的 id；抑制器流结束仍在块内则什么都不输出。
+- 待确认清单唯一实现 `services/pending_items.py`：`extract()` 剥离全部块并按 `{prefix}-{n}` 重分配 id、坏 JSON 与未闭合块跳过；`id` 由后端分配、不信任模型的 id；抑制器流结束仍在块内则什么都不输出。**人读附录兜底**（`_extract_legacy_appendix`）：模型没写标记块而写了文档末尾的编号列表时，按标题 + 至少一条编号项 + 标题在后半段三条一起判，剥离并转成清单。标题后缀是**组合**（`问题 / 事项 / 清单 / 项 / 点 / 条目` 可叠加），别退回三选一——线上接口文档写的是「### 待确认项」，PRD 写的是「## 待确认问题清单」，各漏一个词就整段留在正文、容器却是空的（2026-11-18 两次线上反馈）。已落库的正文用 `backend/scripts/repair_pending_appendix.py` 修（`--dry-run` 先看，幂等）。
 - 清单三路可达前端：`done.data.pending_items` → `snapshot`（`generation_jobs.pending_items` 列，`_snapshot_event` 与 `_db_snapshot_event` 两条路都要带）→ `GET .../documents`。
 - 澄清档案 `doc-clarification` 的 `opening_fields` 必须与模板占位符一一对应（多一个 KeyError、少一个静默填空）；`continue-stream` 也要带 `profile_key`，且 `profile_key` 校验必须在构造 SSE 之前。
 - 澄清改写走 `clarify` 任务（复用 job 框架，不是裸 SSE）→ `apply_clarification_stream`；「只动涉及章节」只能靠提示词约束（代码保证不了），提示词里写「逐字保留」。
