@@ -32,8 +32,9 @@ import {
  * → 类别计数一行弱文本（`共 N 条 · 各类几条`）。展开后每组一行标题（严重度图标 + 类别名
  * + 条数），每条缺陷两行：小字等宽定位在上、描述主体在下。
  *
- * **单条上不挂严重度徽标**：单字（高 / 中 / 低）既表达不了「先修哪一类」，窄容器里还会被
- * 截成一个怪字符；严重度已由分组顺序与标题图标表达。
+ * **严重度显式标注（高 / 中 / 低）**：收起态给「高 N · 中 N · 低 N」统计，展开后每组标题
+ * 与每条缺陷都带严重度徽标（文字 + 颜色双通道）。此前只在分组图标颜色里隐含严重度，
+ * 用户反馈看不出来——严重度是「先修哪条」的直接依据，必须一眼可读、读屏可读。
  *
  * **前端不洗 Markdown**：`where` / `detail` 的行内标记由后端
  * `review_defects.normalize_issue` 统一抹成纯文本；前端再写一遍正则就是第二个真源，
@@ -189,6 +190,56 @@ const WARNING_ICON =
 const INFO_ICON =
   'M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-8-5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0v-4.5A.75.75 0 0 1 10 5Zm0 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'
 
+/**
+ * 严重度 → 中文标签与徽标样式（高 / 中 / 低）。
+ *
+ * 文字 + 颜色双通道：颜色让人一眼分档，文字保证色弱与读屏也能读出来。
+ * 高=危险红、中=警示暖、低=中性灰；都不依赖单一颜色通道。
+ */
+type Severity = 'high' | 'medium' | 'low'
+const SEVERITY_META: Record<Severity, { label: string; badge: string; dot: string }> = {
+  high: {
+    label: '高',
+    badge: 'bg-danger-surface text-danger-fg ring-danger-line',
+    dot: 'text-danger-fg',
+  },
+  medium: {
+    label: '中',
+    badge: 'bg-warning-surface text-warning-fg ring-warning-line',
+    dot: 'text-warning-fg',
+  },
+  low: {
+    label: '低',
+    badge: 'bg-surface-2 text-muted ring-line',
+    dot: 'text-muted',
+  },
+}
+
+/** 把后端给的严重度字符串归一到三档；认不出的按「低」处理，不猜一个更重的档。 */
+function severityOf(raw: string): Severity {
+  if (raw === 'high') return 'high'
+  if (raw === 'medium') return 'medium'
+  return 'low'
+}
+
+/** 一组缺陷里最重的那档（用于分组标题的严重度徽标） */
+function groupSeverity(group: { high: boolean; issues: ReviewIssue[] }): Severity {
+  if (group.high) return 'high'
+  const levels = group.issues.map((issue) => severityOf(issue.severity))
+  if (levels.includes('medium')) return 'medium'
+  return 'low'
+}
+
+/** 收起态的严重度统计：`高 2 · 中 1`（只列实际存在的档，从重到轻） */
+const severityCountsText = computed(() => {
+  const counts: Record<Severity, number> = { high: 0, medium: 0, low: 0 }
+  for (const issue of issues.value) counts[severityOf(issue.severity)] += 1
+  return (['high', 'medium', 'low'] as const)
+    .filter((level) => counts[level] > 0)
+    .map((level) => `${SEVERITY_META[level].label} ${counts[level]}`)
+    .join(' · ')
+})
+
 /** 一组同类缺陷（`category` 为空的是「未分类」组，排在最后） */
 interface IssueGroup {
   /** 类别标识；未分类组的 key 是空串（模板里 `key` 需要非空时用 `||` 兜底） */
@@ -246,9 +297,8 @@ const issueGroups = computed<IssueGroup[]>(() => {
 /**
  * 折叠头的分类计数：`编造 1 · 结构 2 · 未分类 3`。
  *
- * 各项之和就是问题总数，因此布局上不再单独摆一枚「N 个待处理问题」的芯片——总数与
- * 分类写在**同一行弱文本**里（`共 2 条 · 编造 1 · 结构不符 1`），收起时读一行就知道
- * 「有几条、分在哪几类」。等权重的彩色 chip 会一起抢注意力，这一行不承担那个作用。
+ * 现在收起态首选显示严重度统计（severityCountsText），类别计数退为展开后的信息——
+ * 用户更关心「几条重的」。两者都从同一份 issues 算出，没有第二套真源。
  */
 const categoryCounts = computed(() =>
   issueGroups.value.map((group) => `${group.label} ${group.issues.length}`).join(' · '),
@@ -377,9 +427,23 @@ const fixHint = computed(() => {
             />
           </svg>
         </span>
-        <!-- 追溯信息：不与类别计数同排（见脚本里的 `metaText` 说明） -->
+        <!-- 严重度统计：收起态就能看出「几条重的、几条轻的」，比类别分布更该先看到 -->
+        <span v-if="severityCountsText" class="flex flex-wrap items-center gap-1.5 text-xs leading-snug text-muted">
+          <span class="sr-only">按严重程度：</span>
+          <span
+            v-for="level in (['high', 'medium', 'low'] as const)"
+            :key="level"
+            v-show="issues.some((i) => severityOf(i.severity) === level)"
+            class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium ring-1"
+            :class="SEVERITY_META[level].badge"
+          >
+            {{ SEVERITY_META[level].label }}
+            <span class="font-normal opacity-75">{{ issues.filter((i) => severityOf(i.severity) === level).length }}</span>
+          </span>
+        </span>
+        <!-- 追溯信息：版本 / 时间 / 改写，噪声级 -->
         <span v-if="metaText" class="text-[11px] leading-snug text-subtle">{{ metaText }}</span>
-        <!-- 类别计数：一行弱文本，不是一排等权重 chip -->
+        <!-- 类别计数：一行弱文本（各档严重度已在上一行给出，这里补上「哪一类几条」） -->
         <span v-if="countsText" class="text-xs leading-snug text-muted">{{ countsText }}</span>
       </button>
 
@@ -448,6 +512,12 @@ const fixHint = computed(() => {
               />
             </svg>
             <span class="text-xs font-semibold text-fg">{{ group.label }}</span>
+            <span
+              class="rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1"
+              :class="SEVERITY_META[groupSeverity(group)].badge"
+            >
+              {{ SEVERITY_META[groupSeverity(group)].label }}
+            </span>
             <span class="text-[11px] font-normal text-subtle">{{ group.issues.length }} 条</span>
           </h4>
           <ul
@@ -455,20 +525,28 @@ const fixHint = computed(() => {
             :class="group.high ? 'border-danger-line' : 'border-line'"
           >
             <!--
-              一条缺陷两行：上面一行小字等宽定位（章节），下面一行是描述主体。
-              严重度不在这条上重复标注——类别顺序与分组图标已经表达了它；单字徽标
-              （「高 / 中」）之前会被截成一个怪字符，直接删掉。
+              一条缺陷：定位（小字等宽）+ 严重度徽标一行，描述主体一行。
+              严重度按每条自身标注——同组里也可能轻重不一，逐条标才不会让人猜；
+              文字 + 颜色双通道，色弱与读屏都能读出来。
             -->
             <li
               v-for="(issue, index) in group.issues"
               :key="index"
               class="flex flex-col gap-0.5"
             >
-              <p
-                v-if="issue.where"
-                class="break-words font-mono text-[11px] leading-snug text-subtle"
-              >
-                {{ issue.where }}
+              <p class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span
+                  class="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1"
+                  :class="SEVERITY_META[severityOf(issue.severity)].badge"
+                >
+                  <span class="font-normal">严重度</span>{{ SEVERITY_META[severityOf(issue.severity)].label }}
+                </span>
+                <span
+                  v-if="issue.where"
+                  class="break-words font-mono text-[11px] leading-snug text-subtle"
+                >
+                  {{ issue.where }}
+                </span>
               </p>
               <p class="break-words text-sm leading-relaxed text-body">{{ issue.detail }}</p>
             </li>

@@ -467,15 +467,20 @@ describe('ReviewStage 的澄清入口', () => {
     }
   })
 
-  it('剩余条数不进按钮文案，而是单独的计数芯片（按钮宽度不随条数抖动）', () => {
+  it('澄清按钮在待确认问题容器里，总数由面板标题给出（按钮文案不带数字）', () => {
     const wrapper = mountEntry()
-    const bar = wrapper.find('.shell-action-bar')
 
-    expect(wrapper.text()).toContain('还剩 1 个问题')
+    // 总数现在由「待确认问题（N）」面板标题显示
+    expect(wrapper.text()).toContain('待确认问题（1）')
     // 按钮名是**动作**，不该带数字
-    const buttonTexts = bar.findAll('button').map((item) => item.text())
+    const buttonTexts = wrapper.findAll('button').map((item) => item.text())
     expect(buttonTexts).toContain('前往澄清问题')
     expect(buttonTexts.some((text) => text.includes('1 个问题'))).toBe(false)
+    // 两个按钮都在待确认面板容器内，不在底栏
+    const panel = wrapper.find('[aria-label="待确认问题"]')
+    const bar = wrapper.find('.shell-action-bar')
+    expect(panel.text()).toContain('前往澄清问题')
+    expect(bar.text()).not.toContain('前往澄清问题')
   })
 
   it('点「前往澄清问题」发出 returnToChat 事件（去哪条线程由上层决定）', async () => {
@@ -557,37 +562,37 @@ describe('ReviewStage 的澄清入口', () => {
     const bar = wrapper.find('.shell-action-bar')
 
     expect(bar.text()).not.toContain('返回描述')
-    // 澄清入口照旧在
-    expect(bar.text()).toContain('前往澄清问题')
+    // 澄清入口在待确认面板里，照旧在（不再依赖底栏）
+    expect(wrapper.text()).toContain('前往澄清问题')
 
     // 没有待确认项时也一样（否则会出现一个纯重复的「返回」）
     const noItems = mountEntry({ hideBack: true, pendingItems: [] })
     expect(noItems.find('.shell-action-bar').text()).not.toContain('返回对话')
   })
 
-  it('入口落在底栏次操作组，并顶替「返回」（不并排两个都通向对话页的按钮）', () => {
+  it('澄清入口在待确认面板里、不在底栏，且顶替「返回」（不并排两个都通向对话页的按钮）', () => {
     const wrapper = mountEntry()
     const bar = wrapper.find('.shell-action-bar')
+    const panel = wrapper.find('[aria-label="待确认问题"]')
 
-    expect(bar.text()).toContain('前往澄清问题')
+    expect(panel.text()).toContain('前往澄清问题')
+    expect(bar.text()).not.toContain('前往澄清问题')
+    // 落点相同：底栏不另放「返回对话」
     expect(bar.text()).not.toContain('返回对话')
-    // 全页只有底栏这一处入口
+    // 全页只有这一处入口
     const entries = wrapper.findAll('button').filter((item) => item.text() === '前往澄清问题')
     expect(entries).toHaveLength(1)
   })
 
-  it('keepBackButton 时与「返回」并存，且「返回」在前（先退后进）', () => {
+  it('keepBackButton 时「返回」在底栏、澄清在面板，两者并存（落点不同）', () => {
     const wrapper = mountEntry({ keepBackButton: true, backLabel: '返回描述' })
     const bar = wrapper.find('.shell-action-bar')
-    const texts = bar.findAll('button').map((item) => item.text())
+    const panel = wrapper.find('[aria-label="待确认问题"]')
 
-    // 落点不同，所以都要在
-    expect(texts).toContain('返回描述')
-    expect(texts).toContain('前往澄清问题')
-    expect(texts).toContain('AI 自行澄清')
-    // 顺序：返回在最前，两个澄清按钮紧随其后
-    expect(texts.indexOf('返回描述')).toBeLessThan(texts.indexOf('前往澄清问题'))
-    expect(texts.indexOf('前往澄清问题')).toBeLessThan(texts.indexOf('AI 自行澄清'))
+    // 落点不同，所以都要在：返回在底栏，两个澄清按钮在面板
+    expect(bar.findAll('button').map((item) => item.text())).toContain('返回描述')
+    expect(panel.text()).toContain('前往澄清问题')
+    expect(panel.text()).toContain('AI 自行澄清')
   })
 
   it('没有该入口时底栏保留「返回」按钮（开关为 false，或压根没有待确认项）', () => {

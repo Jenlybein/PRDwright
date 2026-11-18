@@ -144,6 +144,12 @@ function metaOf(level: PendingImportance) {
       按重要性从高到低排列，越靠前的问题越先问到你。
     </p>
 
+    <!-- 处理这批清单的动作（由调用方注入）：和清单同处一个容器，
+         用户看到「还差什么」的同时就能决定「自己去答还是让 AI 拍板」。 -->
+    <div v-if="$slots.actions" class="mt-3 flex flex-wrap items-center gap-2">
+      <slot name="actions" />
+    </div>
+
     <ul class="mt-2 divide-y divide-line">
       <li
         v-for="(item, index) in visibleItems"

@@ -497,8 +497,59 @@ function submitOptimize(): void {
 
     <!-- 待确认清单：本次生成产出的元数据，读后端随正文落库的那一份。
          放在**正文之上**——它是「这份文档还差哪些问题没敲定」，先看到还差什么、再看正文本身。
-         归「内容本身」而不是「对文档做的事」，所以不进底栏；面板自身默认只铺开前 3 条。 -->
-    <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems" />
+         处理这批清单的两个动作（自己去答 / AI 拍板）就放在清单容器里：看到问题、当场决定怎么办，
+         不再塞进底栏。面板自身默认只铺开前 3 条。 -->
+    <PendingItemsPanel v-if="pendingItems && pendingItems.length" :items="pendingItems">
+      <template v-if="showReturnToChat" #actions>
+        <div class="flex h-[38px] flex-col divide-y divide-line overflow-hidden rounded-control border border-line-strong bg-surface">
+          <button
+            type="button"
+            class="flex flex-1 items-center justify-center gap-1.5 px-3 text-xs font-medium leading-none text-body transition hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+            @click="emit('returnToChat')"
+          >
+            <svg
+              class="h-3 w-3"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M17 9.4c0 3.3-3.13 6-7 6-.73 0-1.43-.09-2.08-.26L4 17l.92-2.66A5.6 5.6 0 0 1 3 9.4c0-3.32 3.13-6 7-6s7 2.68 7 6Z"
+              />
+              <path d="M7.4 9.4h.01M10 9.4h.01M12.6 9.4h.01" />
+            </svg>
+            前往澄清问题
+          </button>
+          <button
+            type="button"
+            class="flex flex-1 items-center justify-center gap-1.5 px-3 text-xs font-medium leading-none text-body transition hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+            title="按最保守的默认值逐条拍板并改写本文档"
+            @click="askAutoClarify"
+          >
+            <svg
+              class="h-3 w-3"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="M9 2.8l1.15 3.3a3.6 3.6 0 0 0 2.2 2.2l3.3 1.15-3.3 1.15a3.6 3.6 0 0 0-2.2 2.2L9 16.1l-1.15-3.3a3.6 3.6 0 0 0-2.2-2.2L2.35 9.45l3.3-1.15a3.6 3.6 0 0 0 2.2-2.2L9 2.8Z"
+              />
+              <path d="M15.4 13.6l.5 1.4 1.4.5-1.4.5-.5 1.4-.5-1.4-1.4-.5 1.4-.5.5-1.4Z" />
+            </svg>
+            AI 自行澄清
+          </button>
+        </div>
+      </template>
+    </PendingItemsPanel>
 
     <!-- 审核结论：待确认清单之下、正文之上——先看“还差什么”，再看“审出了什么”。
          没有结论也渲染（四态之一「未审核」），否则「没有面板」会被读成「没有问题」。 -->
@@ -521,11 +572,8 @@ function submitOptimize(): void {
     />
 
     <!--
-      「去对话页澄清这些待确认项」的入口已下沉到下面的底栏（次操作组 `#secondary`）。
-
-      它曾经是接口文档 / 提示词专用的**普通区块**——那时它们的澄清落在一个独立页面上，
-      整块入口足以承担；PRD 那条的落点就是对话页，所以先一步进了底栏。三条线程合并到同一个
-      对话页之后，三者落点完全一致，于是统一收进底栏，三种审阅页共用一套。
+      处理待确认项的两个动作（自己去答 / AI 拍板）就放在上方「待确认问题」容器里，
+      和清单同处一块——看到还差什么，当场决定怎么办，不再放进底栏。
     -->
 
     <AppActionBar>
@@ -654,75 +702,6 @@ function submitOptimize(): void {
         <AppButton v-if="showBack" variant="secondary" size="md" @click="emit('back')">
           {{ backLabel ?? '返回对话' }}
         </AppButton>
-
-        <!-- 澄清组的两个按钮**上下叠成一列**，合起来仍然只占一个按钮的高度：
-             它们回答的是同一个问题「这批待确认项怎么办」，只是出面的人不同
-             （我去答 / 让 AI 拍板）。做成一个带分隔线的双行块，而不是两个按钮竖着摞——
-             后者会把底栏撑高一倍。`h-[38px]` 是 `AppButton` 的 `md` 尺寸实测高度
-             （20px 行高 + 上下各 8px 内边距 + 2px 边框），两边对齐才不会让底栏忽高忽低。 -->
-        <div
-          v-if="showReturnToChat"
-          class="flex h-[38px] flex-col divide-y divide-line overflow-hidden rounded-control border border-line-strong bg-surface"
-        >
-          <button
-            type="button"
-            class="flex flex-1 items-center justify-center gap-1.5 px-3 text-xs font-medium leading-none text-body transition hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
-            @click="emit('returnToChat')"
-          >
-            <svg
-              class="h-3 w-3"
-              viewBox="0 0 20 20"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path
-                d="M17 9.4c0 3.3-3.13 6-7 6-.73 0-1.43-.09-2.08-.26L4 17l.92-2.66A5.6 5.6 0 0 1 3 9.4c0-3.32 3.13-6 7-6s7 2.68 7 6Z"
-              />
-              <path d="M7.4 9.4h.01M10 9.4h.01M12.6 9.4h.01" />
-            </svg>
-            前往澄清问题
-          </button>
-          <button
-            type="button"
-            class="flex flex-1 items-center justify-center gap-1.5 px-3 text-xs font-medium leading-none text-body transition hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
-            title="按最保守的默认值逐条拍板并改写本文档"
-            @click="askAutoClarify"
-          >
-            <svg
-              class="h-3 w-3"
-              viewBox="0 0 20 20"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path
-                d="M9 2.8l1.15 3.3a3.6 3.6 0 0 0 2.2 2.2l3.3 1.15-3.3 1.15a3.6 3.6 0 0 0-2.2 2.2L9 16.1l-1.15-3.3a3.6 3.6 0 0 0-2.2-2.2L2.35 9.45l3.3-1.15a3.6 3.6 0 0 0 2.2-2.2L9 2.8Z"
-              />
-              <path d="M15.4 13.6l.5 1.4 1.4.5-1.4.5-.5 1.4-.5-1.4-1.4-.5 1.4-.5.5-1.4Z" />
-            </svg>
-            AI 自行澄清
-          </button>
-        </div>
-      </template>
-
-      <!-- 计数芯片：贴着澄清组，说明「还剩几件事没敲定」。
-           放次操作组尾（`#hint` 槽）而不是塞进按钮文案——按钮名一旦带数字，宽度会随条数抖动，
-           而按钮本身该是**动作**，数字是**状态**，两者分开才读得清。 -->
-      <template #hint>
-        <span
-          v-if="showReturnToChat"
-          class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60"
-        >
-          <span class="h-1.5 w-1.5 rounded-full bg-primary-500 dark:bg-primary-300" aria-hidden="true" />
-          还剩 {{ pendingCount }} 个问题
-        </span>
       </template>
 
       <!-- 各阶段按顺序推进：PRD 完成 → 生成接口文档；接口文档完成 → 生成提示词套件 -->

@@ -84,6 +84,33 @@ describe('ReviewConclusionPanel', () => {
     expect(wrapper.text()).toContain('编造 1 · 结构不符 1')
   })
 
+  it('严重程度高/中/低显式可读：收起态给统计，展开后每条带徽标', async () => {
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: {
+        review: review({
+          issues: [
+            { severity: 'high', category: 'fabrication', detail: '编造了鉴权方式' },
+            { severity: 'medium', category: 'structure', detail: '缺少异常流程' },
+            { severity: 'low', category: 'vague', detail: '描述稍显空泛' },
+          ],
+        }),
+      },
+    })
+
+    // 收起态：按严重程度统计，三档都显示（文字 + 颜色双通道）
+    const collapsed = wrapper.text()
+    expect(collapsed).toContain('高')
+    expect(collapsed).toContain('中')
+    expect(collapsed).toContain('低')
+
+    await wrapper.find('button').trigger('click')
+    const expanded = body(wrapper).text()
+    // 展开后每条都带「严重度 X」文字标签
+    expect(expanded).toContain('严重度高')
+    expect(expanded).toContain('严重度中')
+    expect(expanded).toContain('严重度低')
+  })
+
   it('展开按类分组、类内 high 在前；没有类别的归「未分类」并排在最后', async () => {
     const wrapper = mount(ReviewConclusionPanel, {
       props: {
@@ -281,26 +308,27 @@ describe('ReviewConclusionPanel', () => {
     }
   })
 
-  it('单条缺陷两行：定位是小字等宽、描述是主体（不再有截断的单字严重度标签）', async () => {
+  it('单条缺陷：定位行带严重度徽标，描述是独立主体行', async () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
     await wrapper.find('button').trigger('click')
 
     const items = body(wrapper).findAll('li')
     expect(items).toHaveLength(2)
 
-    // 第一类（编造，high）带定位：定位与描述是**两个**段落，不是拼在一行
+    // 第一类（编造，high）：第一段是「严重度徽标 + 定位」，第二段是描述
     const located = items[0]!.findAll('p')
     expect(located).toHaveLength(2)
-    expect(located[0]!.text()).toBe('产品概述')
-    expect(located[0]!.classes()).toContain('font-mono')
-    expect(located[0]!.classes()).toContain('text-[11px]')
+    expect(located[0]!.text()).toContain('产品概述')
+    expect(located[0]!.text()).toContain('严重度高')
+    expect(located[0]!.find('.font-mono').exists()).toBe(true)
     expect(located[1]!.text()).toBe('出现了输入中没有的性能指标')
     expect(located[1]!.classes()).toContain('text-sm')
 
-    // 没有定位的条目只渲染描述这一行（不留空的定位行）
+    // 没有定位的条目：第一段只有严重度徽标，描述仍在独立行
     const unlocated = items[1]!.findAll('p')
-    expect(unlocated).toHaveLength(1)
-    expect(unlocated[0]!.text()).toBe('缺少异常流程')
+    expect(unlocated).toHaveLength(2)
+    expect(unlocated[0]!.text()).toContain('严重度中')
+    expect(unlocated[1]!.text()).toBe('缺少异常流程')
   })
 
   it('后端已抹平行内 Markdown：面板里不再出现 `##` / `###` 标记', async () => {
