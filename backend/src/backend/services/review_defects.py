@@ -83,6 +83,39 @@ def _canonical_spelling(raw: str) -> str:
     return re.sub(r"_+", "_", re.sub(r"[\s\-]+", "_", lowered)).strip("_")
 
 
+# 缺陷的「定位 / 描述」里不该出现的行内 Markdown：标题井号、粗体/斜体标记、行首列表符号。
+# 这些是**文档格式**，混进缺陷字段只会在界面上露出 `###`、`**`（2026-11-18 线上反馈）。
+_MD_HEADING = re.compile(r"^\s*#{1,6}\s*")
+_MD_EMPHASIS = re.compile(r"(\*\*|__|\*|`)")
+_MD_LIST_MARKER = re.compile(r"^\s*(?:[-*•·]|[0-9]+[.、)）])\s+")
+_MD_STATUS_MARKER = re.compile(r"^\s*[-*•·]\s+")
+_MD_DECORATION = re.compile(r"[—\-–]{2,}")
+
+
+def _strip_markdown_noise(raw: Any, *, keep_section_number: bool = False) -> str:
+    """把一段缺陷文本抹成**纯文本**：去掉标题井号、强调符，按需去掉列表符号。
+
+    只动格式标记，不动内容——缺陷的可核对性靠文字本身，不靠 Markdown 排版。
+
+    Args:
+        raw: 原始文本。
+        keep_section_number: `where` 要保留「1. 产品概述」里的章节号（它是定位的一部分），
+            此时不剥行首编号；`detail` 是散文，行首编号属于噪声，照常剥掉。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = _MD_HEADING.sub("", text)
+    if keep_section_number:
+        text = _MD_STATUS_MARKER.sub("", text)  # 只剥 `-` / `*` 项目符号，保留「1.」
+    else:
+        text = _MD_LIST_MARKER.sub("", text)
+    text = _MD_EMPHASIS.sub("", text)
+    text = _MD_DECORATION.sub("—", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.rstrip("：:").strip() if text.endswith(("：", ":")) else text
+
+
 def normalize_category(raw: Any) -> str | None:
     """把模型给的类别规范成六类之一；缺失或不认识的值返回 `None`。
 
@@ -147,6 +180,16 @@ def normalize_issue(
         # 新输出认不出的类别按最低可改写档处理，宁可只报不改
         issue["severity"] = "medium"
     issue["category"] = category
+    # 定位与描述是**数据**，不是文档：模型常把 `### 1. 产品概述:` 这种标题原文塞进
+    # `where` / `detail`，界面上直接露出 `###` 与 `**`（2026-11-18 线上反馈「看着很累」）。
+    # 在这里统一抹掉行内 Markdown 标记，前端就能按纯文本排版。
+    for field in ("where", "detail", "section_title"):
+        if field in issue:
+            # `where` / `section_title` 是定位，保留章节号（「1. 产品概述」里的 `1.`）；
+            # `detail` 是散文，行首编号属于噪声。
+            issue[field] = _strip_markdown_noise(
+                issue[field], keep_section_number=field != "detail"
+            )
     return issue
 
 
