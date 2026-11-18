@@ -171,7 +171,7 @@ describe('ReviewConclusionPanel', () => {
     expect(wrapper.find('ul').exists()).toBe(false)
   })
 
-  it('改写过的会在标题行标注「已改写一次」', () => {
+  it('改写过的会在标题下方元信息行标注「已改写一次」', () => {
     const wrapper = mount(
       ReviewConclusionPanel,
       { props: { review: review({ rewritten: true }) } },
@@ -221,5 +221,133 @@ describe('ReviewConclusionPanel', () => {
 
     expect(wrapper.text()).toContain('第 2 版')
     expect(wrapper.text()).not.toContain('审于')
+  })
+
+  /* ---------------------------------------------------------------------------
+   * 排版重做后的新增口径（用户反馈「信息杂乱、Markdown 标记露出来」）。
+   * 这些用例守的是**层次**：总体结论 → 四类各几条 → 每条在哪、是什么。
+   * ------------------------------------------------------------------------- */
+
+  it('展开后每组一个标题行：图标 + 类别名 + 条数，顺序按严重度', async () => {
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: {
+        review: review({
+          issues: [
+            { severity: 'medium', category: 'vague', detail: '只给了名词', where: '功能范围' },
+            { severity: 'medium', category: 'structure', detail: '编号与模板不一致', where: '接口列表' },
+            { severity: 'high', category: 'contradiction', detail: '与上游口径冲突', where: '产品概述' },
+            { severity: 'high', category: 'fabrication', detail: '编造了鉴权方式', where: '产品概述' },
+          ],
+        }),
+      },
+    })
+    await wrapper.find('button').trigger('click')
+
+    const headings = wrapper.findAll('h4')
+    expect(headings).toHaveLength(4)
+    // 顺序照后端的严重度：编造 / 矛盾（high）在前，结构不符 / 空泛（medium）在后
+    expect(headings[0]!.text()).toContain('编造')
+    expect(headings[1]!.text()).toContain('矛盾')
+    expect(headings[2]!.text()).toContain('结构不符')
+    expect(headings[3]!.text()).toContain('空泛')
+    // 每组标题都带条数，且条数紧跟在类别名后面（组内 1 条）
+    for (const heading of headings) {
+      expect(heading.text()).toContain('1 条')
+      // 图标是标题行的第一个子元素（装饰性，读屏靠 aria-hidden 跳过）
+      expect(heading.find('svg').exists()).toBe(true)
+    }
+    // 图标表达严重度：high 组用 danger 色，medium 组用弱化色（不再挂单字徽标）
+    expect(headings[0]!.find('svg').classes()).toContain('text-danger-fg')
+    expect(headings[2]!.find('svg').classes()).toContain('text-subtle')
+  })
+
+  it('没有内容的类别不渲染：0 条不出标题、也不进计数', async () => {
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: {
+        review: review({
+          issues: [
+            { severity: 'high', category: 'fabrication', detail: '编造了鉴权方式', where: '产品概述' },
+          ],
+        }),
+      },
+    })
+    await wrapper.find('button').trigger('click')
+
+    expect(wrapper.findAll('h4')).toHaveLength(1)
+    // 计数行与展开体都只说实际存在的这一类
+    expect(wrapper.text()).toContain('编造 1')
+    for (const absent of ['矛盾', '结构不符', '空泛', '推断未标注', '清单漏登记', '未分类']) {
+      expect(wrapper.text()).not.toContain(absent)
+    }
+  })
+
+  it('单条缺陷两行：定位是小字等宽、描述是主体（不再有截断的单字严重度标签）', async () => {
+    const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
+    await wrapper.find('button').trigger('click')
+
+    const items = body(wrapper).findAll('li')
+    expect(items).toHaveLength(2)
+
+    // 第一类（编造，high）带定位：定位与描述是**两个**段落，不是拼在一行
+    const located = items[0]!.findAll('p')
+    expect(located).toHaveLength(2)
+    expect(located[0]!.text()).toBe('产品概述')
+    expect(located[0]!.classes()).toContain('font-mono')
+    expect(located[0]!.classes()).toContain('text-[11px]')
+    expect(located[1]!.text()).toBe('出现了输入中没有的性能指标')
+    expect(located[1]!.classes()).toContain('text-sm')
+
+    // 没有定位的条目只渲染描述这一行（不留空的定位行）
+    const unlocated = items[1]!.findAll('p')
+    expect(unlocated).toHaveLength(1)
+    expect(unlocated[0]!.text()).toBe('缺少异常流程')
+  })
+
+  it('后端已抹平行内 Markdown：面板里不再出现 `##` / `###` 标记', async () => {
+    // 归一化在 `review_defects.normalize_issue` 里做（`where` / `detail` 抹成纯文本）。
+    // 前端**不**再拿正则洗一遍（否则就是第二个真源），这里守的是「面板照纯文本渲染」。
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: {
+        review: review({
+          issues: [
+            { severity: 'high', category: 'fabrication', detail: '性能指标没有出处', where: '产品概述' },
+            { severity: 'medium', category: 'structure', detail: '标题层级与模板不一致', where: '接口列表' },
+          ],
+        }),
+      },
+    })
+    await wrapper.find('button').trigger('click')
+
+    expect(wrapper.text()).not.toContain('##')
+    expect(wrapper.text()).not.toContain('###')
+    // 章节标题只作为定位文本出现，没有被当成 Markdown 标题渲染成新的大纲节点
+    expect(body(wrapper).find('h1').exists()).toBe(false)
+    expect(body(wrapper).find('h2').exists()).toBe(false)
+    expect(body(wrapper).text()).toContain('产品概述')
+  })
+
+  it('元信息收成标题下方一行小字：第几版 / 何时审 / 已改写，且不与类别计数同排', () => {
+    const reviewedAt = new Date(Date.now() - 5 * 60_000).toISOString()
+    const wrapper = mount(ReviewConclusionPanel, {
+      props: {
+        review: review({ reviewedAt, rewritten: true }),
+        versionNo: 2,
+      },
+    })
+
+    const spans = wrapper.findAll('span')
+    const meta = spans.find((span) => span.text().startsWith('第 2 版'))
+    expect(meta).toBeDefined()
+    expect(meta?.text()).toContain('第 2 版')
+    expect(meta?.text()).toContain('审于 5 分钟前')
+    expect(meta?.text()).toContain('已改写一次')
+    expect(meta?.classes()).toContain('text-subtle')
+
+    // 计数行是另一行：它只讲条数、不带版本/时间/改写标记
+    const counts = spans.find((span) => span.text().startsWith('共 '))
+    expect(counts).toBeDefined()
+    expect(counts?.text()).toContain('编造 1')
+    expect(counts?.text()).not.toContain('第 2 版')
+    expect(counts?.text()).not.toContain('审于')
   })
 })
