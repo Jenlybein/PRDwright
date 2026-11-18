@@ -848,6 +848,30 @@ def test_criteria_allow_necessary_complements_and_flexible_structure():
     assert "详见第 X 节" in table
 
 
+def test_only_prompts_carries_the_example_carve_out():
+    """提示词套件天生含示例：示例里的虚构内容不能判成编造 / 矛盾。
+
+    线上那次审核把 5 条「预期输出示例」记成编造（每条 high，各自还会触发一次自动改写）。
+    示例是产出要求里点名要的一节，把它当上游事实判是**判据没按产物区分**。
+    """
+    rules = review_defects.render_product_rules("prompts")
+    assert "示例" in rules
+    assert "不记编造" in rules and "不记矛盾" in rules
+    # 「示例」不能成为事实断言的挡箭牌：页面数 / 字段清单仍要与上游一致
+    assert "事实性断言" in rules
+
+    # 另两份产物没有专属口径：空串就是「本产物没有额外口径」，交回通用六类
+    assert review_defects.render_product_rules("prd") == ""
+    assert review_defects.render_product_rules("api_docs") == ""
+
+
+def test_contradiction_does_not_treat_unreadable_upstream_as_conflict():
+    """「上游读不到」不是矛盾：只有与上游明确写出的内容冲突才记。"""
+    table = review_defects.render_category_rules()
+    assert "不等于冲突" in table
+    assert "明确写出" in table
+
+
 def test_api_docs_generation_allows_necessary_complements():
     """生成侧与评审侧要一起放宽：只改一处会「写不让写、审又照审」。"""
     assert "必要配套接口允许补充" in prompts.API_DOCS_GENERATION_PROMPT

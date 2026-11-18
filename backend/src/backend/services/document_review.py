@@ -57,6 +57,7 @@ from backend.services.review_defects import (
     issues_text as defects_text,
     normalize_issues,
     render_category_rules,
+    render_product_rules,
     render_pending_list,
     render_pending_section,
 )
@@ -212,6 +213,7 @@ def review_messages(
     requirements: str,
     section_titles: str = "",
     pending_section: str = "",
+    doc_kind: str = "",
 ) -> list[BaseMessage] | None:
     """组装整篇审核的消息；正文为空时返回 `None`（无可审核的内容）。
 
@@ -226,6 +228,8 @@ def review_messages(
             「清单漏登记」，也没有清单——那时清单还没抽出来）；重审与修复后的重审填
             `render_pending_section(当前版本清单)`，六类全开。同一套解析，提示词只有一份，
             见 `review_defects` 的模块说明。
+        doc_kind: 产物种类，用于取**按产物补充的判定口径**（见 `render_product_rules`）。
+            留空等于「本产物没有额外口径」——三份产物共用的六类是底线，专属例外只在该产物上生效。
     """
     text = (document or "").strip()
     if not text:
@@ -239,6 +243,7 @@ def review_messages(
             document=text,
             # 五类判据与 PRD 单章审核同一份生成点（见 `review_defects.render_category_rules`）
             category_rules=render_category_rules(),
+            product_rules=render_product_rules(doc_kind),
             pending_section=pending_section,
         ),
     )
@@ -890,6 +895,7 @@ async def stream_review_and_rewrite(
         writing_rules=context.writing_rules,
         requirements=context.upstream,
         section_titles=section_titles,
+        doc_kind=context.doc_kind,
     )
     if messages is None:
         # 正文为空：没什么可审的。给一条「没审成」的结论收场（不写一条「通过」——
@@ -1008,6 +1014,7 @@ async def stream_review_only(
         requirements=context.upstream,
         section_titles=section_titles,
         pending_section=render_pending_section(pending_items),
+        doc_kind=context.doc_kind,
     )
     if messages is None:
         raise AppError(ErrorCode.INVALID_REQUEST, "这份文档还没有正文，无法重新审核")

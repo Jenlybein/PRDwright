@@ -1036,15 +1036,19 @@ class DocumentService:
         )
 
         def _prompts_review_context(_clean: str) -> ProductContext:
-            """提示词套件的审核上下文：上游 = PRD +（可选的）接口文档，都骨架化。
+            """提示词套件的审核上下文：上游 = PRD +（可选的）接口文档，**都用全文**。
 
-            惰性构造：快捷流程不审，就不必先跑两次 `skeletonize`。
+            为什么这里不骨架化（与另两份不同）：接口文档的主体是请求 / 响应示例的
+            **代码块**，而 `skeletonize` 按设计只留围栏首行、块体整块丢。骨架化之后
+            审核看到的是「一节标题、没有内容」，于是把「上游读不到」记成「矛盾」——
+            线上真出现过一条：「1.2 称流式接口含 5.3 哨兵规范，上游接口文档被截断，
+            无法核实该节存在」。事实是上游根本没被截断，是被这里压掉了。
+            代价是一次更长的 prefill：提示词正文只有一两万字符，与「判错」相比这个代价
+            更小；惰性构造也保持不变（快捷流程不审就不跑）。
             """
-            upstream = skeletonize(prd_content)
+            upstream = prd_content
             if api_docs_content.strip():
-                upstream = (
-                    f"{upstream}\n\n## 接口文档\n\n{skeletonize(api_docs_content)}"
-                )
+                upstream = f"{upstream}\n\n## 接口文档\n\n{api_docs_content}"
             return ProductContext(
                 doc_kind="prompts",
                 doc_type=doc_type,
