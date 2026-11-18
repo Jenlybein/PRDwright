@@ -142,11 +142,8 @@ function metaOf(level: PendingImportance) {
         <slot name="actions" />
       </div>
     </div>
-    <p class="mt-0.5 text-xs text-subtle">
-      按重要性从高到低排列，越靠前的问题越先问到你。
-    </p>
-
-    <ul class="mt-2 divide-y divide-line">
+    <div class="mt-2 max-h-[min(50vh,24rem)] overflow-y-auto overscroll-contain">
+    <ul class="divide-y divide-line">
       <li
         v-for="(item, index) in visibleItems"
         :key="item.id"
@@ -184,6 +181,7 @@ function metaOf(level: PendingImportance) {
         </div>
       </li>
     </ul>
+    </div>
 
     <!-- 展开 / 收起：只在真的被折叠过时才出现。文案带上总数，用户知道展开后能拿到多少 -->
     <button

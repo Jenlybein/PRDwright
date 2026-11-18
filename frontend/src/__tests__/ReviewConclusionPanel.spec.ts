@@ -39,9 +39,14 @@ function legacyReview(overrides: Partial<ReviewConclusion> = {}): ReviewConclusi
   })
 }
 
+/** 展开/收起按钮：标题已不可点，展开由专门的「展开全部」按钮承担 */
+function toggle(wrapper: ReturnType<typeof mount>) {
+  return wrapper.find('.review-expand-toggle')
+}
+
 /** 折叠体：`aria-controls` 指向的那个元素（收起时**不存在**，用 `v-if`） */
 function body(wrapper: ReturnType<typeof mount>) {
-  const id = wrapper.find('button').attributes('aria-controls')
+  const id = toggle(wrapper).attributes('aria-controls')
   return wrapper.find(`#${id}`)
 }
 
@@ -84,7 +89,7 @@ describe('ReviewConclusionPanel', () => {
   it('严重度统计与标题同一行：高/中各几条一眼可见（类别计数行已删）', () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
-    const heading = wrapper.find('button').find('h3').element.parentElement
+    const heading = wrapper.find('h3').element.parentElement
     expect(heading?.textContent).toContain('文档缺陷')
     expect(heading?.textContent).toContain('高')
     expect(heading?.textContent).toContain('中')
@@ -111,7 +116,7 @@ describe('ReviewConclusionPanel', () => {
     expect(collapsed).toContain('中')
     expect(collapsed).toContain('低')
 
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
     const expanded = body(wrapper).text()
     // 展开后每条都带「严重度 X」文字标签
     expect(expanded).toContain('高')
@@ -132,7 +137,7 @@ describe('ReviewConclusionPanel', () => {
         }),
       },
     })
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
     const text = body(wrapper).text()
     // 分组顺序固定（编造 → 结构 → 未分类）：未分类是历史，不该挡在新口径的缺陷前面
     expect(text.indexOf('编造')).toBeLessThan(text.indexOf('结构'))
@@ -145,7 +150,7 @@ describe('ReviewConclusionPanel', () => {
     // 不追溯是 ADR 0003 决策 7：照旧标签等于假装历史是按新口径判的
     const wrapper = mount(ReviewConclusionPanel, { props: { review: legacyReview() } })
 
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
     const text = body(wrapper).text()
     expect(text).toContain('未分类')
     // detail 读起来像「编造」，但旧结论没有类别——不替它猜
@@ -155,7 +160,7 @@ describe('ReviewConclusionPanel', () => {
   it('点一下展开，问题逐条可见', async () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
 
     expect(isCollapsed(wrapper)).toBe(false)
     const text = body(wrapper).text()
@@ -169,25 +174,25 @@ describe('ReviewConclusionPanel', () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
     // 每次都重新取按钮：展开会触发重渲染，旧句柄可能指向已被替换的节点
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
     expect(isCollapsed(wrapper)).toBe(false)
 
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
     expect(isCollapsed(wrapper)).toBe(true)
   })
 
   it('aria-expanded 跟着状态走，且指向自己的折叠体', async () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
-    const toggle = wrapper.find('button')
+    const expandBtn = toggle(wrapper)
 
     // 无障碍：读屏软件靠这两个属性知道「这是个可展开的区域，现在是收起还是展开」
-    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(expandBtn.attributes('aria-expanded')).toBe('false')
     // 收起时折叠体不渲染，`aria-controls` 指向的 id 只在展开后存在——
     // 两个属性本身仍要在（读屏靠它判断「这里能展开」）
-    expect(toggle.attributes('aria-controls')).toBeTruthy()
+    expect(expandBtn.attributes('aria-controls')).toBeTruthy()
 
-    await toggle.trigger('click')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
+    await expandBtn.trigger('click')
+    expect(expandBtn.attributes('aria-expanded')).toBe('true')
   })
 
   it('审核通过时徽标是「通过」，且没有问题计数', () => {
@@ -227,7 +232,7 @@ describe('ReviewConclusionPanel', () => {
     // 收起态：严重度统计也不该来自上一次那条结论
     expect(wrapper.text()).not.toContain('高 1')
 
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
     expect(wrapper.text()).not.toContain('出现了输入中没有的性能指标')
     expect(wrapper.text()).not.toContain('缺少异常流程')
     expect(wrapper.text()).not.toContain('2 章完成，2 个待处理问题')
@@ -259,7 +264,7 @@ describe('ReviewConclusionPanel', () => {
    * 这些用例守的是**层次**：总体结论 → 四类各几条 → 每条在哪、是什么。
    * ------------------------------------------------------------------------- */
 
-  it('展开后每组一个标题行：图标 + 类别名 + 条数，顺序按严重度', async () => {
+  it('展开后每组一个标题行：图标 + 类别名，顺序按严重度', async () => {
     const wrapper = mount(ReviewConclusionPanel, {
       props: {
         review: review({
@@ -272,7 +277,7 @@ describe('ReviewConclusionPanel', () => {
         }),
       },
     })
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
 
     const headings = wrapper.findAll('h4')
     expect(headings).toHaveLength(4)
@@ -281,9 +286,9 @@ describe('ReviewConclusionPanel', () => {
     expect(headings[1]!.text()).toContain('矛盾')
     expect(headings[2]!.text()).toContain('结构不符')
     expect(headings[3]!.text()).toContain('空泛')
-    // 每组标题都带条数，且条数紧跟在类别名后面（组内 1 条）
+    // 组标题只留图标 + 类别名（「N 条」已按用户要求去掉）
     for (const heading of headings) {
-      expect(heading.text()).toContain('1 条')
+      expect(heading.text()).not.toContain('条')
       // 图标是标题行的第一个子元素（装饰性，读屏靠 aria-hidden 跳过）
       expect(heading.find('svg').exists()).toBe(true)
     }
@@ -302,7 +307,7 @@ describe('ReviewConclusionPanel', () => {
         }),
       },
     })
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
 
     expect(wrapper.findAll('h4')).toHaveLength(1)
     // 展开体只渲染实际存在的那一类（类别计数行已删，不再有「编造 1」）
@@ -314,7 +319,7 @@ describe('ReviewConclusionPanel', () => {
 
   it('单条缺陷：定位行带严重度徽标，描述是独立主体行', async () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
 
     const items = body(wrapper).findAll('li')
     expect(items).toHaveLength(2)
@@ -348,7 +353,7 @@ describe('ReviewConclusionPanel', () => {
         }),
       },
     })
-    await wrapper.find('button').trigger('click')
+    await toggle(wrapper).trigger('click')
 
     expect(wrapper.text()).not.toContain('##')
     expect(wrapper.text()).not.toContain('###')
@@ -367,7 +372,7 @@ describe('ReviewConclusionPanel', () => {
       },
     })
 
-    const heading = wrapper.find('button').find('h3').element.parentElement
+    const heading = wrapper.find('h3').element.parentElement
     expect(heading?.textContent).toContain('第 2 版')
     expect(heading?.textContent).toContain('审于 5 分钟前')
     expect(heading?.textContent).toContain('已改写一次')

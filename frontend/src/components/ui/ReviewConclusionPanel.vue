@@ -222,6 +222,19 @@ function severityOf(raw: string): Severity {
   return 'low'
 }
 
+/**
+ * 定位文本去掉开头的章节序号（`1. 产品概述` → `产品概述`、`## 2. 接口列表` → `接口列表`）。
+ * 序号是正文里的结构标记，作为定位小字重复出现只会占地方；这里只做展示层的裁剪，
+ * 不改 `where` 数据本身（后端归一化的口径不动）。
+ */
+function cleanWhere(raw: string): string {
+  return raw
+    .replace(/^\s*#{1,6}\s*/, '') // Markdown 标题的 # 前缀
+    .replace(/^\s*\d+[\.、]\s*/, '') // 「1. 」「2、」这类序号
+    .replace(/^\s*第\s*\d+\s*章\s*/, '') // 「第 2 章」
+    .trim()
+}
+
 
 /** 收起态的严重度统计：`高 2 · 中 1`（只列实际存在的档，从重到轻） */
 const severityCountsText = computed(() => {
@@ -366,28 +379,14 @@ const fixHint = computed(() => {
 <template>
   <section class="rounded-2xl border border-line bg-surface shadow-sm">
     <!--
-      折叠头**三层结构**，从上到下就是阅读顺序：
-
-      1. 标题 + 状态徽标：这一条结论的总体判定（通过 / 有问题 / 审核失败 / 未审核）；
-      2. 元信息小字：第几版、什么时候审的、是否已改写——追溯用的噪声级信息，收成一行；
-      3. 类别计数：`共 N 条 · 编造 1 · 结构不符 1`，收起时也能看出「几条、分在哪几类」。
-
-      右侧是这份结论上的两个动作（修复 / 重新审核），与「展开 / 收起」分开：
-      两个 button **不能嵌套**（HTML 不允许、读屏也读不清），因此外层是 div，
-      开关占满剩余宽度，动作按钮独立成组；开关仍是这一行里的**第一个** button。
+      折叠头：标题行（文档缺陷 + 状态/严重度 + 右侧元信息）+ 动作行。
+      标题本身不可点，展开/收起由动作行里的「展开全部」按钮承担——
+      这样标题是稳定的信息，不会因为点它而误触展开。
     -->
     <div class="rounded-2xl px-4 py-3">
-      <!-- 标题行：文档缺陷 | 严重度统计（原状态徽标位置）| 右侧追溯信息 | 展开箭头 -->
-      <button
-        type="button"
-        class="flex w-full min-w-0 flex-wrap items-center gap-2 rounded-control py-0.5 text-left transition-colors hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
-        :aria-expanded="expanded"
-        :aria-controls="bodyId"
-        @click="expanded = !expanded"
-      >
+      <div class="flex flex-wrap items-center gap-2">
         <h3 class="shrink-0 text-sm font-semibold text-fg">文档缺陷</h3>
-        <!-- 状态徽标：只显示「有问题」以外的状态；「有问题」由右侧严重度统计代替，
-             不再单独挂一枚「有问题」（与统计重复）。通过 / 审核失败 / 未审核仍要显示。 -->
+        <!-- 状态徽标：只显示「有问题」以外的状态（「有问题」由严重度统计代替） -->
         <span
           v-if="stateLabel !== '有问题'"
           class="rounded-full px-2 py-0.5 text-[11px] font-medium"
@@ -395,7 +394,7 @@ const fixHint = computed(() => {
         >
           {{ stateLabel }}
         </span>
-        <!-- 严重度统计：放在原「有问题」徽标的位置，一眼看出几条高几条中 -->
+        <!-- 严重度统计：一眼看出几条高、几条中、几条低 -->
         <span v-if="severityCountsText" class="flex flex-wrap items-center gap-1.5">
           <span
             v-for="level in (['high', 'medium', 'low'] as const)"
@@ -408,27 +407,12 @@ const fixHint = computed(() => {
             <span class="font-normal opacity-75">{{ issues.filter((i) => severityOf(i.severity) === level).length }}</span>
           </span>
         </span>
-        <!-- 追溯信息放到标题行右侧 -->
+        <!-- 追溯信息靠右 -->
         <span v-if="metaText" class="ml-auto text-[11px] leading-snug text-subtle">{{ metaText }}</span>
-        <svg
-          class="h-4 w-4 shrink-0 text-subtle transition-transform"
-          :class="[expanded ? 'rotate-180' : '', metaText ? '' : 'ml-auto']"
-          viewBox="0 0 20 20"
-          fill="currentColor"
-          aria-hidden="true"
-        >
-          <path
-            fill-rule="evenodd"
-            d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
-            clip-rule="evenodd"
-          />
-        </svg>
-      </button>
+      </div>
 
-      <!-- 动作行：修复 / 重新审核 -->
-      <div class="mt-2 flex shrink-0 flex-wrap items-center gap-2">
-        <!-- 修复：按这一版的问题重写整篇并**追加新版本**。它排在重审之前——「有问题」时
-             它才是可点的那个，两个按钮的可用条件互斥，不会让用户猜该按哪个。 -->
+      <!-- 动作行靠右：修复 / 重新审核（不可用时不显示）/ 展开全部 -->
+      <div class="mt-2 flex flex-wrap items-center justify-end gap-2">
         <AppButton
           variant="secondary"
           size="sm"
@@ -439,29 +423,39 @@ const fixHint = computed(() => {
         >
           修复
         </AppButton>
-
-        <!-- 只审不改：正文与版本都不变，因此这个动作随时可以再来一次（「有问题」除外）。
-             样式走统一按钮件 `AppButton`：这里不手写一套描边样式，否则暗色主题又多一处。 -->
         <AppButton
+          v-if="canRereview"
           variant="secondary"
           size="sm"
           class="shrink-0"
-          :disabled="!canRereview"
           :title="rereviewHint"
           @click="emit('rereview')"
         >
           重新审核
         </AppButton>
+        <button
+          v-if="issueCount || state !== 'pass'"
+          type="button"
+          class="review-expand-toggle rounded-lg px-3 py-1 text-xs font-medium text-accent transition-colors hover:bg-accent-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
+          :aria-expanded="expanded"
+          :aria-controls="bodyId"
+          @click="expanded = !expanded"
+        >
+          {{ expanded ? '收起' : '展开全部' }}
+        </button>
       </div>
     </div>
-
     <!--
       用 `v-if` 而不是 `v-show`：收起时干脆不渲染。
       理由是测试与读屏都更干净——`v-show` 只改 display，隐藏文本仍会被 `textContent`
       读到（「到底收起了没有」只能靠 `isVisible()` 判，而它在 jsdom 下对这个元素并不可靠）。
       这里的内容就几条 `<li>`，重建成本可以忽略。
     -->
-    <div v-if="expanded" :id="bodyId" class="px-4 pb-4">
+    <div
+      v-if="expanded"
+      :id="bodyId"
+      class="max-h-[min(60vh,32rem)] overflow-y-auto overscroll-contain px-4 pb-4"
+    >
       <!-- 没审成：把「为什么没有结论」说清楚，别让空白被读成「没问题」 -->
       <p v-if="state === 'failed'" class="text-xs leading-relaxed text-red-700 dark:text-red-300">
         这次审核没有跑成，<strong class="font-semibold">没有结论</strong>不等于通过。可以点「重新审核」再试一次。
@@ -488,7 +482,6 @@ const fixHint = computed(() => {
               />
             </svg>
             <span class="text-xs font-semibold text-fg">{{ group.label }}</span>
-            <span class="text-[11px] font-normal text-subtle">{{ group.issues.length }} 条</span>
           </h4>
           <ul
             class="mt-1.5 space-y-2 border-l pl-3"
@@ -515,7 +508,7 @@ const fixHint = computed(() => {
                   v-if="issue.where"
                   class="break-words font-mono text-[11px] leading-snug text-subtle"
                 >
-                  {{ issue.where }}
+                  {{ cleanWhere(issue.where) }}
                 </span>
               </p>
               <p class="break-words text-sm leading-relaxed text-body">{{ issue.detail }}</p>
