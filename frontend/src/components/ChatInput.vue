@@ -99,7 +99,7 @@ defineExpose({ focus })
         rows="1"
         :placeholder="props.placeholder"
         :disabled="props.loading"
-        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-fg outline-none placeholder:text-subtle disabled:cursor-not-allowed disabled:opacity-60"
+        class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-fg outline-none focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-subtle disabled:cursor-not-allowed disabled:opacity-60"
         @keydown="handleKeydown"
       />
 
