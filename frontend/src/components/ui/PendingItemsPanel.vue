@@ -123,9 +123,7 @@ function metaOf(level: PendingImportance) {
     aria-label="待确认问题"
   >
     <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <h3 class="text-sm font-medium text-fg">
-        待确认问题（{{ sortedItems.length }}）
-      </h3>
+      <h3 class="text-sm font-medium text-fg">待确认问题</h3>
       <!-- 按等级统计：彩色计数芯片，与条目标上的等级徽标同款配色，一眼看出各档几条 -->
       <p v-if="presentLevels.length" class="flex flex-wrap items-center gap-1">
         <span
@@ -139,16 +137,14 @@ function metaOf(level: PendingImportance) {
           <span class="font-normal opacity-75">×{{ counts[level] }}</span>
         </span>
       </p>
+      <!-- 处理这批清单的动作由调用方注入，与标题同一行、靠右 -->
+      <div v-if="$slots.actions" class="ml-auto flex flex-wrap items-center gap-2">
+        <slot name="actions" />
+      </div>
     </div>
     <p class="mt-0.5 text-xs text-subtle">
       按重要性从高到低排列，越靠前的问题越先问到你。
     </p>
-
-    <!-- 处理这批清单的动作（由调用方注入）：和清单同处一个容器，
-         用户看到「还差什么」的同时就能决定「自己去答还是让 AI 拍板」。 -->
-    <div v-if="$slots.actions" class="mt-3 flex flex-wrap items-center gap-2">
-      <slot name="actions" />
-    </div>
 
     <ul class="mt-2 divide-y divide-line">
       <li

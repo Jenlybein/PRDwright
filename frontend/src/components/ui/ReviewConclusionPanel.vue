@@ -222,13 +222,6 @@ function severityOf(raw: string): Severity {
   return 'low'
 }
 
-/** 一组缺陷里最重的那档（用于分组标题的严重度徽标） */
-function groupSeverity(group: { high: boolean; issues: ReviewIssue[] }): Severity {
-  if (group.high) return 'high'
-  const levels = group.issues.map((issue) => severityOf(issue.severity))
-  if (levels.includes('medium')) return 'medium'
-  return 'low'
-}
 
 /** 收起态的严重度统计：`高 2 · 中 1`（只列实际存在的档，从重到轻） */
 const severityCountsText = computed(() => {
@@ -294,23 +287,6 @@ const issueGroups = computed<IssueGroup[]>(() => {
   return groups
 })
 
-/**
- * 折叠头的分类计数：`编造 1 · 结构 2 · 未分类 3`。
- *
- * 现在收起态首选显示严重度统计（severityCountsText），类别计数退为展开后的信息——
- * 用户更关心「几条重的」。两者都从同一份 issues 算出，没有第二套真源。
- */
-const categoryCounts = computed(() =>
-  issueGroups.value.map((group) => `${group.label} ${group.issues.length}`).join(' · '),
-)
-
-/** 取总数 + 分类计数的整行文本；没有问题时为空串（收起态不显示这一行） */
-const countsText = computed(() =>
-  issueCount.value ? `共 ${issueCount.value} 条 · ${categoryCounts.value}` : '',
-)
-
-/** 结论的一句话总结；「审核失败 / 未审核」时没有可展示的东西 */
-const summary = computed(() => (showsReview.value ? props.review?.summary ?? '' : ''))
 
 /** 本次是否真的改写过（重审恒为 false——只审不改） */
 const rewritten = computed(() => showsReview.value && props.review?.rewritten === true)
@@ -400,36 +376,27 @@ const fixHint = computed(() => {
       两个 button **不能嵌套**（HTML 不允许、读屏也读不清），因此外层是 div，
       开关占满剩余宽度，动作按钮独立成组；开关仍是这一行里的**第一个** button。
     -->
-    <div class="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-2xl px-4 py-3">
+    <div class="rounded-2xl px-4 py-3">
+      <!-- 标题行：文档缺陷 | 严重度统计（原状态徽标位置）| 右侧追溯信息 | 展开箭头 -->
       <button
         type="button"
-        class="flex min-w-0 flex-1 flex-col items-stretch gap-1 rounded-control py-0.5 text-left transition-colors hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
+        class="flex w-full min-w-0 flex-wrap items-center gap-2 rounded-control py-0.5 text-left transition-colors hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft-line"
         :aria-expanded="expanded"
         :aria-controls="bodyId"
         @click="expanded = !expanded"
       >
-        <span class="flex min-w-0 flex-wrap items-center gap-2">
-          <h3 class="text-sm font-semibold text-fg">文档缺陷</h3>
-          <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="stateClass">
-            {{ stateLabel }}
-          </span>
-          <svg
-            class="ml-auto h-4 w-4 shrink-0 text-subtle transition-transform"
-            :class="expanded ? 'rotate-180' : ''"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            aria-hidden="true"
-          >
-            <path
-              fill-rule="evenodd"
-              d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
-              clip-rule="evenodd"
-            />
-          </svg>
+        <h3 class="shrink-0 text-sm font-semibold text-fg">文档缺陷</h3>
+        <!-- 状态徽标：只显示「有问题」以外的状态；「有问题」由右侧严重度统计代替，
+             不再单独挂一枚「有问题」（与统计重复）。通过 / 审核失败 / 未审核仍要显示。 -->
+        <span
+          v-if="stateLabel !== '有问题'"
+          class="rounded-full px-2 py-0.5 text-[11px] font-medium"
+          :class="stateClass"
+        >
+          {{ stateLabel }}
         </span>
-        <!-- 严重度统计：收起态就能看出「几条重的、几条轻的」，比类别分布更该先看到 -->
-        <span v-if="severityCountsText" class="flex flex-wrap items-center gap-1.5 text-xs leading-snug text-muted">
-          <span class="sr-only">按严重程度：</span>
+        <!-- 严重度统计：放在原「有问题」徽标的位置，一眼看出几条高几条中 -->
+        <span v-if="severityCountsText" class="flex flex-wrap items-center gap-1.5">
           <span
             v-for="level in (['high', 'medium', 'low'] as const)"
             :key="level"
@@ -441,13 +408,25 @@ const fixHint = computed(() => {
             <span class="font-normal opacity-75">{{ issues.filter((i) => severityOf(i.severity) === level).length }}</span>
           </span>
         </span>
-        <!-- 追溯信息：版本 / 时间 / 改写，噪声级 -->
-        <span v-if="metaText" class="text-[11px] leading-snug text-subtle">{{ metaText }}</span>
-        <!-- 类别计数：一行弱文本（各档严重度已在上一行给出，这里补上「哪一类几条」） -->
-        <span v-if="countsText" class="text-xs leading-snug text-muted">{{ countsText }}</span>
+        <!-- 追溯信息放到标题行右侧 -->
+        <span v-if="metaText" class="ml-auto text-[11px] leading-snug text-subtle">{{ metaText }}</span>
+        <svg
+          class="h-4 w-4 shrink-0 text-subtle transition-transform"
+          :class="[expanded ? 'rotate-180' : '', metaText ? '' : 'ml-auto']"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            fill-rule="evenodd"
+            d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
       </button>
 
-      <div class="flex shrink-0 flex-wrap items-center gap-2">
+      <!-- 动作行：修复 / 重新审核 -->
+      <div class="mt-2 flex shrink-0 flex-wrap items-center gap-2">
         <!-- 修复：按这一版的问题重写整篇并**追加新版本**。它排在重审之前——「有问题」时
              它才是可点的那个，两个按钮的可用条件互斥，不会让用户猜该按哪个。 -->
         <AppButton
@@ -491,9 +470,6 @@ const fixHint = computed(() => {
         这一版还没审核过。点「重新审核」补一次，只审不改。
       </p>
 
-      <!-- 总体结论的一句话总结：在分组之前先给结论，再往下才是逐条证据 -->
-      <p v-if="summary" class="mt-1 text-xs leading-relaxed text-muted">{{ summary }}</p>
-
       <!-- 展开：按类分组，类内 high 在前（严重度由类别固定，见 ADR 0003）。未分类组在最后。 -->
       <div v-if="issueGroups.length" class="mt-3 space-y-4">
         <section v-for="group in issueGroups" :key="group.key || 'uncategorized'">
@@ -512,12 +488,6 @@ const fixHint = computed(() => {
               />
             </svg>
             <span class="text-xs font-semibold text-fg">{{ group.label }}</span>
-            <span
-              class="rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1"
-              :class="SEVERITY_META[groupSeverity(group)].badge"
-            >
-              {{ SEVERITY_META[groupSeverity(group)].label }}
-            </span>
             <span class="text-[11px] font-normal text-subtle">{{ group.issues.length }} 条</span>
           </h4>
           <ul
@@ -539,7 +509,7 @@ const fixHint = computed(() => {
                   class="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1"
                   :class="SEVERITY_META[severityOf(issue.severity)].badge"
                 >
-                  <span class="font-normal">严重度</span>{{ SEVERITY_META[severityOf(issue.severity)].label }}
+                  {{ SEVERITY_META[severityOf(issue.severity)].label }}
                 </span>
                 <span
                   v-if="issue.where"
@@ -554,11 +524,6 @@ const fixHint = computed(() => {
         </section>
       </div>
 
-      <!-- 「有问题」时把两个动作的分工写在面板里：只靠 title 太隐蔽。
-           收成一行弱文案，不抢缺陷列表的注意力。 -->
-      <p v-if="state === 'revise'" class="mt-3 text-[11px] leading-relaxed text-subtle">
-        还有 {{ issueCount }} 个未处理的问题，点「修复」会按结论重写整篇、追加新版本；改完再重新审核。
-      </p>
     </div>
   </section>
 </template>

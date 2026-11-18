@@ -389,16 +389,16 @@ describe('ReviewStage 的待确认清单', () => {
       },
     ])
 
-    expect(wrapper.text()).toContain('待确认问题（1）')
+    expect(wrapper.text()).toContain('待确认问题')
     expect(wrapper.text()).toContain('指标口径谁拍板？')
     expect(wrapper.text()).toContain('拍板人：数据团队')
 
     // 顺序断言：清单面板在文档卡片之前（卡片标题由 DocumentReview 的 h2 渲染，拿它当锚点）
     const html = wrapper.html()
-    expect(html.indexOf('待确认问题（1）')).toBeLessThan(html.indexOf('产品需求文档'))
+    expect(html.indexOf('待确认问题')).toBeLessThan(html.indexOf('产品需求文档'))
   })
 
-  it('没有待确认项时整块不渲染（不留一个空的「待确认问题（0）」）', () => {
+  it('没有待确认项时整块不渲染（不留一个空的「待确认问题」容器）', () => {
     const wrapper = mountWithItems([])
     expect(wrapper.text()).not.toContain('待确认')
   })
@@ -467,11 +467,13 @@ describe('ReviewStage 的澄清入口', () => {
     }
   })
 
-  it('澄清按钮在待确认问题容器里，总数由面板标题给出（按钮文案不带数字）', () => {
+  it('澄清按钮在待确认问题容器标题行右侧，按钮文案不带数字', () => {
     const wrapper = mountEntry()
 
-    // 总数现在由「待确认问题（N）」面板标题显示
-    expect(wrapper.text()).toContain('待确认问题（1）')
+    expect(wrapper.text()).toContain('待确认问题')
+    // 按钮就在标题同一行
+    const title = wrapper.find('[aria-label="待确认问题"] h3')
+    expect(title.exists()).toBe(true)
     // 按钮名是**动作**，不该带数字
     const buttonTexts = wrapper.findAll('button').map((item) => item.text())
     expect(buttonTexts).toContain('前往澄清问题')

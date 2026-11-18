@@ -63,7 +63,7 @@ describe('PendingItemsPanel', () => {
   it('默认只铺开前 2 条，但标题给的是总数', () => {
     const wrapper = mount(PendingItemsPanel, { props: { items: ITEMS } })
 
-    expect(wrapper.text()).toContain('待确认问题（3）')
+    expect(wrapper.text()).toContain('待确认问题')
     expect(wrapper.findAll('li')).toHaveLength(2)
   })
 
@@ -71,7 +71,7 @@ describe('PendingItemsPanel', () => {
     const wrapper = await mountExpanded(ITEMS)
     const text = wrapper.text()
 
-    expect(text).toContain('待确认问题（3）')
+    expect(text).toContain('待确认问题')
     expect(text).toContain('分页上限取多少？')
     expect(text).toContain('指标口径谁拍板？')
     expect(text).toContain('这个功能要不要上？')
@@ -175,7 +175,7 @@ describe('PendingItemsPanel 的折叠', () => {
 
     expect(wrapper.findAll('li')).toHaveLength(2)
     // 折叠不改总数：标题里始终是这份清单的全部条数
-    expect(wrapper.text()).toContain('待确认问题（5）')
+    expect(wrapper.text()).toContain('待确认问题')
     expect(wrapper.text()).toContain('展开全部 5 条')
 
     await wrapper.find('button').trigger('click')

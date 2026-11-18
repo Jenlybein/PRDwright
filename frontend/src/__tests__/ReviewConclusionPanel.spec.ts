@@ -59,12 +59,15 @@ function isCollapsed(wrapper: ReturnType<typeof mount>): boolean {
  * 也测不到「状态从哪来」。
  */
 describe('ReviewConclusionPanel', () => {
-  it('默认收起：结论可见，明细不占地方', () => {
+  it('默认收起：标题与严重度统计可见，明细不占地方', () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
-    // 标题与结论徽标常驻：收起不等于「把问题藏了」
+    // 标题与严重度统计常驻：收起不等于「把问题藏了」
     expect(wrapper.text()).toContain('文档缺陷')
-    expect(wrapper.text()).toContain('有问题')
+    expect(wrapper.text()).toContain('高')
+    expect(wrapper.text()).toContain('中')
+    // 「有问题」徽标已去掉（由严重度统计代替）
+    expect(wrapper.text()).not.toContain('有问题')
     // 明细压根没渲染（`v-if`）：既不占视觉空间，也不会被 `text()` 读到
     expect(isCollapsed(wrapper)).toBe(true)
     expect(wrapper.text()).not.toContain('出现了输入中没有的性能指标')
@@ -78,10 +81,15 @@ describe('ReviewConclusionPanel', () => {
     expect(wrapper.text()).not.toContain('审核结论')
   })
 
-  it('收起时给出分类计数：用户知道「有几条、哪一类等着处理」', () => {
+  it('严重度统计与标题同一行：高/中各几条一眼可见（类别计数行已删）', () => {
     const wrapper = mount(ReviewConclusionPanel, { props: { review: review() } })
 
-    expect(wrapper.text()).toContain('编造 1 · 结构不符 1')
+    const heading = wrapper.find('button').find('h3').element.parentElement
+    expect(heading?.textContent).toContain('文档缺陷')
+    expect(heading?.textContent).toContain('高')
+    expect(heading?.textContent).toContain('中')
+    // 类别计数那行已删除，不再有「编造 1 · 结构不符 1」
+    expect(wrapper.text()).not.toContain('编造 1 · 结构不符 1')
   })
 
   it('严重程度高/中/低显式可读：收起态给统计，展开后每条带徽标', async () => {
@@ -106,9 +114,9 @@ describe('ReviewConclusionPanel', () => {
     await wrapper.find('button').trigger('click')
     const expanded = body(wrapper).text()
     // 展开后每条都带「严重度 X」文字标签
-    expect(expanded).toContain('严重度高')
-    expect(expanded).toContain('严重度中')
-    expect(expanded).toContain('严重度低')
+    expect(expanded).toContain('高')
+    expect(expanded).toContain('中')
+    expect(expanded).toContain('低')
   })
 
   it('展开按类分组、类内 high 在前；没有类别的归「未分类」并排在最后', async () => {
@@ -124,8 +132,6 @@ describe('ReviewConclusionPanel', () => {
         }),
       },
     })
-    expect(wrapper.text()).toContain('编造 2 · 结构不符 1 · 未分类 1')
-
     await wrapper.find('button').trigger('click')
     const text = body(wrapper).text()
     // 分组顺序固定（编造 → 结构 → 未分类）：未分类是历史，不该挡在新口径的缺陷前面
@@ -139,7 +145,6 @@ describe('ReviewConclusionPanel', () => {
     // 不追溯是 ADR 0003 决策 7：照旧标签等于假装历史是按新口径判的
     const wrapper = mount(ReviewConclusionPanel, { props: { review: legacyReview() } })
 
-    expect(wrapper.text()).toContain('未分类 2')
     await wrapper.find('button').trigger('click')
     const text = body(wrapper).text()
     expect(text).toContain('未分类')
@@ -157,8 +162,7 @@ describe('ReviewConclusionPanel', () => {
     expect(text).toContain('出现了输入中没有的性能指标')
     expect(text).toContain('产品概述')
     expect(text).toContain('缺少异常流程')
-    // 摘要也在折叠体里（它比一行标题长，属于「想看细节才展开」的部分）
-    expect(text).toContain('整篇审出 2 个待处理问题')
+    // 重复的摘要行已删除（它的内容与第一条缺陷重复）
   })
 
   it('再点一下收起（同一个按钮切两态）', async () => {
@@ -220,8 +224,8 @@ describe('ReviewConclusionPanel', () => {
     expect(wrapper.text()).toContain('审核失败')
     // 失败时间来自落库的 `reviewFailedAt`（US3）：刷新后仍然有
     expect(wrapper.text()).toContain('失败于')
-    // 收起态：连分类计数都不该来自上一次那条结论
-    expect(wrapper.text()).not.toContain('编造 1')
+    // 收起态：严重度统计也不该来自上一次那条结论
+    expect(wrapper.text()).not.toContain('高 1')
 
     await wrapper.find('button').trigger('click')
     expect(wrapper.text()).not.toContain('出现了输入中没有的性能指标')
@@ -301,8 +305,8 @@ describe('ReviewConclusionPanel', () => {
     await wrapper.find('button').trigger('click')
 
     expect(wrapper.findAll('h4')).toHaveLength(1)
-    // 计数行与展开体都只说实际存在的这一类
-    expect(wrapper.text()).toContain('编造 1')
+    // 展开体只渲染实际存在的那一类（类别计数行已删，不再有「编造 1」）
+    expect(wrapper.find('h4')?.text()).toContain('编造')
     for (const absent of ['矛盾', '结构不符', '空泛', '推断未标注', '清单漏登记', '未分类']) {
       expect(wrapper.text()).not.toContain(absent)
     }
@@ -319,7 +323,7 @@ describe('ReviewConclusionPanel', () => {
     const located = items[0]!.findAll('p')
     expect(located).toHaveLength(2)
     expect(located[0]!.text()).toContain('产品概述')
-    expect(located[0]!.text()).toContain('严重度高')
+    expect(located[0]!.text()).toContain('高')
     expect(located[0]!.find('.font-mono').exists()).toBe(true)
     expect(located[1]!.text()).toBe('出现了输入中没有的性能指标')
     expect(located[1]!.classes()).toContain('text-sm')
@@ -327,7 +331,7 @@ describe('ReviewConclusionPanel', () => {
     // 没有定位的条目：第一段只有严重度徽标，描述仍在独立行
     const unlocated = items[1]!.findAll('p')
     expect(unlocated).toHaveLength(2)
-    expect(unlocated[0]!.text()).toContain('严重度中')
+    expect(unlocated[0]!.text()).toContain('中')
     expect(unlocated[1]!.text()).toBe('缺少异常流程')
   })
 
@@ -354,7 +358,7 @@ describe('ReviewConclusionPanel', () => {
     expect(body(wrapper).text()).toContain('产品概述')
   })
 
-  it('元信息收成标题下方一行小字：第几版 / 何时审 / 已改写，且不与类别计数同排', () => {
+  it('元信息放在标题行右侧：第几版 / 何时审 / 已改写，类别计数行已删', () => {
     const reviewedAt = new Date(Date.now() - 5 * 60_000).toISOString()
     const wrapper = mount(ReviewConclusionPanel, {
       props: {
@@ -363,19 +367,11 @@ describe('ReviewConclusionPanel', () => {
       },
     })
 
-    const spans = wrapper.findAll('span')
-    const meta = spans.find((span) => span.text().startsWith('第 2 版'))
-    expect(meta).toBeDefined()
-    expect(meta?.text()).toContain('第 2 版')
-    expect(meta?.text()).toContain('审于 5 分钟前')
-    expect(meta?.text()).toContain('已改写一次')
-    expect(meta?.classes()).toContain('text-subtle')
-
-    // 计数行是另一行：它只讲条数、不带版本/时间/改写标记
-    const counts = spans.find((span) => span.text().startsWith('共 '))
-    expect(counts).toBeDefined()
-    expect(counts?.text()).toContain('编造 1')
-    expect(counts?.text()).not.toContain('第 2 版')
-    expect(counts?.text()).not.toContain('审于')
+    const heading = wrapper.find('button').find('h3').element.parentElement
+    expect(heading?.textContent).toContain('第 2 版')
+    expect(heading?.textContent).toContain('审于 5 分钟前')
+    expect(heading?.textContent).toContain('已改写一次')
+    // 类别计数那行已删除
+    expect(wrapper.text()).not.toContain('共 2 条 ·')
   })
 })
