@@ -245,7 +245,7 @@ describe('用户管理页', () => {
     expect(text).toContain('任务 5 个')
     // 说明「删了但没删干净」的两类数据，免得事后以为没删掉
     expect(text).toContain('会保留：操作审计 7 条')
-    expect(text).toMatch(/历史图表都会随之减少/)
+    expect(text).toMatch(/历史图表会随之减少/)
   })
 
   it('在飞任务要在预览里点名「会先被取消」', async () => {

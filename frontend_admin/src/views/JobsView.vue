@@ -518,7 +518,7 @@ function totalTokens(job: AdminJob): string {
       </template>
 
       <p class="text-sm text-body">
-        任务会在下一个可中断点停下；文档任务不会保留半截正文，对话会保留已说出口的部分。
+        任务在下一个可中断点停下；文档不会保留半截正文。
       </p>
 
       <template #footer>

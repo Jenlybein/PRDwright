@@ -324,7 +324,7 @@ onMounted(load)
               {{ stats.queue_count.toLocaleString() }}
             </p>
             <p class="mt-1 text-[11px] text-subtle">
-              当前排队中，<b>含等待退避到期</b>、还没被领走的任务。一直堆着说明重试或上游在变慢。
+              排队中，含等待退避到期。
             </p>
           </div>
 
@@ -333,8 +333,7 @@ onMounted(load)
             <p class="kicker">成功率</p>
             <p class="tnum mt-1 text-xl font-black text-ink">{{ successRateText }}</p>
             <p class="mt-1 text-[11px] text-subtle">
-              已定稿 /（已定稿 + 真失败）：<b>排除被取代与已取消</b>，
-              它们没有结果、也不代表模型坏了，算进分母会把系统读得很脆弱。
+              已定稿 /（已定稿 + 真失败），排除被取代与已取消。
             </p>
           </div>
 
@@ -343,8 +342,7 @@ onMounted(load)
             <p class="kicker">平均耗时</p>
             <p class="tnum mt-1 text-xl font-black text-ink">{{ avgDurationText }}</p>
             <p class="mt-1 text-[11px] text-subtle">
-              已收尾（已定稿 + 真失败）从创建到收尾的平均时长；重试与退避都会算进去，
-              所以它变长往往先于成功率下滑出现。
+              已收尾任务从创建到收尾的平均时长，含重试与退避。
             </p>
           </div>
 
@@ -530,7 +528,7 @@ onMounted(load)
             <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">用户用量排行</h2>
           </div>
           <p class="max-w-md text-xs text-subtle">
-            只列生成过任务的账号。口径与「用户」页同源——两处各算一遍，迟早会给出两个数。
+            只列生成过任务的账号。
           </p>
         </header>
 

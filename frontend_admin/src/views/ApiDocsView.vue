@@ -39,16 +39,16 @@ const DOC_PAGES: DocPage[] = [
     name: 'Swagger UI',
     code: 'SWAGGER',
     href: '/api/admin/docs',
-    summary: '可展开每个接口的参数与响应，并直接发请求。适合「这个字段到底叫什么」这种当场要答案的场合。',
-    note: '在线试调会真的调用接口，包括写操作：取消任务、改配置、删用户、停用账号。别拿生产数据练手。',
+    summary: '可展开接口参数与响应，并能直接发请求。',
+    note: '试调会真的调用接口，包括写操作，别拿生产数据练手。',
   },
   {
     key: 'redoc',
     name: 'ReDoc',
     code: 'REDOC',
     href: '/api/admin/redoc',
-    summary: '只读的三栏文档，按标签分组，适合从头通读一遍接口全貌。没有试调按钮。',
-    note: '纯静态渲染，不会发出任何业务请求。查完即走、只想看一眼结构时用它。',
+    summary: '只读文档，按标签分组，没有试调按钮。',
+    note: '静态渲染，不发业务请求。',
   },
 ]
 
@@ -100,7 +100,7 @@ function open(href: string): void {
       </header>
       <div class="space-y-2 px-4 py-3">
         <p class="text-sm leading-relaxed text-body">
-          两个页面读的是同一份 schema。需要拿去做代码生成或接第三方工具时，直接取这份 JSON。
+          两个页面读同一份 schema；要接第三方工具，直接取这份 JSON。
         </p>
         <code class="block truncate border border-line bg-field px-2 py-1 font-mono text-xs text-muted">
           GET /api/admin/openapi.json

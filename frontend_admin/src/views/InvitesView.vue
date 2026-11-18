@@ -240,7 +240,7 @@ function formatDate(value: string | null): string {
       @close="pendingDelete = null"
     >
       <p class="text-sm text-body">
-        之后将无法用它注册。已经用它注册的用户不受影响——他们与码之间没有关联。
+        之后无法用它注册；已注册用户不受影响。
       </p>
 
       <template #footer>

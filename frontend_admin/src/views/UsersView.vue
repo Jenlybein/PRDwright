@@ -646,9 +646,6 @@ function totalTokens(user: AdminUser): number {
           class="brut-field"
         />
       </label>
-      <p class="mt-2 text-xs text-subtle">
-        密码只在提交时经过一次内存，后端只记「已重置」，不记明文。
-      </p>
 
       <template #footer>
         <button
@@ -672,9 +669,7 @@ function totalTokens(user: AdminUser): number {
       @close="closePanel"
     >
       <p class="text-sm text-body">
-        只吊销他当前的登录会话，<strong class="text-ink">不改密码、不禁登录</strong>——
-        他下次请求会被要求重新登录，但用原密码立刻就能登回来。
-        正在跑的任务不受影响（要停任务请去任务监控页）。
+        只吊销登录会话：<strong class="text-ink">不改密码、不禁登录</strong>，任务照常跑。
       </p>
 
       <template #footer>
@@ -716,11 +711,10 @@ function totalTokens(user: AdminUser): number {
         </p>
         <p v-if="preview.sessions > 0">将同时吊销他当前的 {{ preview.sessions }} 条登录会话。</p>
         <p>
-          会保留：操作审计 {{ preview.retained_audit }} 条、平台日志
-          {{ preview.retained_logs }} 条 —— 这两类按设计不随账号删除。
+          会保留：操作审计 {{ preview.retained_audit }} 条、平台日志 {{ preview.retained_logs }} 条。
         </p>
         <p class="font-bold">
-          注意：任务记录会被一并删除，因此平台的总任务数与总 Token、以及历史图表都会随之减少。
+          任务记录一并删除，平台统计与历史图表会随之减少。
         </p>
       </div>
       <p v-else class="mt-2 text-xs text-danger-fg">

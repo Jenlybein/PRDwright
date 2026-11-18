@@ -457,7 +457,7 @@ function submitOptimize(): void {
           请求号
           <code
             class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px] text-muted"
-            title="选中即可复制；报障时提供它可快速定位这次生成"
+            title="选中即可复制"
             >{{ runSummary.requestId }}</code
           >
         </span>
@@ -470,7 +470,7 @@ function submitOptimize(): void {
           技能包 {{ skill.name }} v{{ skill.version }}
           <code
             class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px] text-muted"
-            title="三份技能资源合成的内容指纹；改了模板它就会变"
+            title="三份技能资源的内容指纹"
             >{{ skill.fingerprint }}</code
           >
         </span>
@@ -689,7 +689,7 @@ function submitOptimize(): void {
           <button
             type="button"
             class="flex flex-1 items-center justify-center gap-1.5 px-3 text-xs font-medium leading-none text-body transition hover:bg-surface-2 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
-            title="AI 会按最保守的行业默认值逐条拍板，并直接改写这份文档（拿不准的仍会留在清单里）"
+            title="按最保守的默认值逐条拍板并改写本文档"
             @click="askAutoClarify"
           >
             <svg

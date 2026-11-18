@@ -240,7 +240,7 @@ onBeforeUnmount(stopTicker)
         <span>{{ retryText }}</span>
       </p>
       <p class="text-xs text-warning-fg/80">
-        上次失败后按退避等待，不会立刻重试；等待期间仍然可以停止这次任务。
+        按退避等待重试，等待期间仍可停止。
       </p>
       <AppButton
         variant="secondary"

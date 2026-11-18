@@ -134,13 +134,13 @@ const SECTIONS: SectionConfig[] = [
     key: 'features-pages',
     no: 2,
     title: '功能与页面',
-    hint: '选填；逐项录入即可，前端自动组装成结构化数据，不需要手写任何分隔符',
+    hint: '选填；逐条录入即可',
     fields: [
       {
         key: 'mvp_features',
         label: 'MVP 功能',
         type: 'mvp',
-        hint: '选填；按字段填写，无需拼格式。留空则由 AI 依据「页面结构」推断候选功能并标注（建议）',
+        hint: '选填；留空则由 AI 依据页面结构推断（建议）',
       },
       {
         key: 'v2_features',
@@ -172,7 +172,7 @@ const SECTIONS: SectionConfig[] = [
     key: 'technical',
     no: 3,
     title: '技术约束',
-    hint: '选填；未填写的项按缺失信息处理，AI 不会擅自推断',
+    hint: '选填；未填的按缺失处理，AI 不推断',
     fields: [
       {
         key: 'tech_auth',
@@ -827,7 +827,7 @@ defineExpose({ getSummary: () => currentSummary.value })
         <div class="min-w-0">
           <h2 class="text-sm font-semibold text-fg ">结构化 JSON 预览</h2>
           <p class="mt-0.5 text-xs text-subtle">
-            实时反映表单内容 · 与后端 Skill 字段结构一致 · {{ jsonSize }}
+            与后端 Skill 字段结构一致 · {{ jsonSize }}
           </p>
         </div>
         <AppButton variant="secondary" size="sm" @click="copyJson">
@@ -983,7 +983,7 @@ defineExpose({ getSummary: () => currentSummary.value })
       </section>
 
       <p class="text-xs text-subtle">
-        提交前自动校验必填项、字段完整性与范围冲突 · 可随时打开 JSON 预览核对
+        提交前自动校验必填项
       </p>
 
       <!--

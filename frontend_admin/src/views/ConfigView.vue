@@ -615,10 +615,6 @@ onMounted(load)
             <h2 class="mt-1 text-base font-extrabold tracking-tight text-ink">模型配置</h2>
           </div>
           <div class="flex flex-wrap items-center justify-end gap-2">
-            <p class="hidden max-w-sm text-xs text-subtle sm:block">
-              密钥由后端加密入库，列表只显示<b class="text-muted">已配置 / 未配置</b>。
-              同一家可以有多条配置（生产/测试各一条）。
-            </p>
             <button type="button" class="brut-btn brut-btn-xs brut-btn-primary" @click="openCreate">
               + 新增配置
             </button>
@@ -630,9 +626,6 @@ onMounted(load)
              两个入口做同一件事只会让人先愣一下「这两个是不是不一样」。 -->
         <div v-if="!providers.length" class="px-4 py-6">
           <p class="text-sm font-extrabold tracking-tight text-ink">还没有任何模型配置</p>
-          <p class="mt-1 max-w-xl text-xs text-subtle">
-            点右上角<b class="text-muted">「+ 新增配置」</b>建第一条：选供应商、写个配置名就够。
-          </p>
         </div>
 
         <ul v-else class="divide-y divide-brut">
@@ -807,8 +800,7 @@ onMounted(load)
       </div>
 
       <p class="mt-2 text-xs text-subtle">
-        换供应商请<b class="text-muted">新建一条配置</b>：协议一变，
-        输出上限与思考模式的语义全都不同，就地改会留下半新半旧的字段。
+        换供应商请新建一条配置。
       </p>
 
       <template #footer>
@@ -833,8 +825,7 @@ onMounted(load)
       @close="closeCreate"
     >
       <p class="text-xs text-subtle">
-        选好<b class="text-muted">供应商</b>，协议与地址就定了，剩下只要写配置名和模型。
-        要接自建网关，选「本地 vLLM / Ollama」或「自建网关」再把地址改成你的端点。
+        选好供应商后，协议与地址随之确定。
       </p>
 
       <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -902,7 +893,7 @@ onMounted(load)
       </div>
 
       <p class="mt-2 text-xs text-subtle">
-        自定义模型建议填「上下文窗口」：不填会按 32k 保守估算，长文可能被误判为超出预算。
+        上下文窗口不填按 32k 估算。
       </p>
 
       <template #footer>
@@ -1055,7 +1046,7 @@ onMounted(load)
         确定把「{{ pendingChange.label }}」改成 <b>{{ String(pendingChange.value) }}</b>？
       </p>
       <p class="mt-1 text-xs">
-        这项属于「改错了不明显、但影响很大」的一类。保存后下一次生成即生效。
+        保存后下一次生成生效。
       </p>
       <div class="mt-3 flex items-center gap-2">
         <button type="button" class="brut-btn brut-btn-primary" @click="confirmPendingChange">
