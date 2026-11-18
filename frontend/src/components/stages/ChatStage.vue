@@ -6,6 +6,7 @@ import MessageList from '@/components/MessageList.vue'
 import type { AnswerPayload } from '@/components/ClarificationAskList.vue'
 import AppActionBar from '@/components/ui/AppActionBar.vue'
 import AppButton from '@/components/ui/AppButton.vue'
+import AppDialog from '@/components/ui/AppDialog.vue'
 import ChatThreadTabs from '@/components/ui/ChatThreadTabs.vue'
 import type { ChatMessage, ChatStage, PendingItem } from '@/types'
 
@@ -142,17 +143,30 @@ const pendingCount = computed(() =>
  * 「生成 PRD」前的提醒：还有未答问题时先确认一次。
  *
  * 只提醒、不硬拦——用户可能就是想先出一版看看。确认框的文案不复述提示词里的数值。
+ *
+ * 用 `AppDialog` 而不是 `window.confirm`：原生弹窗会冻结页面、样式由浏览器决定，
+ * 与产品里另外两道闸门（「让 AI 自行澄清？」「重新生成 X？」）长得完全不一样。
+ * 2026-11-19 端到端走查时用户点到的就是这个原生弹窗。
  */
 function onGeneratePrd(): void {
   if (unansweredAsk.value) {
-    const ok = window.confirm('AI 还有信息没确认，仍要生成 PRD 吗？')
-    if (!ok) return
+    generateConfirmOpen.value = true
+    return
   }
+  emit('generatePrd')
+}
+
+/** 弹窗里点了「仍要生成」：关窗，再把动作交给上层 */
+function confirmGeneratePrd(): void {
+  generateConfirmOpen.value = false
   emit('generatePrd')
 }
 
 /** 输入框实例，用于在一轮回复结束后把焦点交还给用户 */
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null)
+
+/** 「还有未答问题，仍要生成 PRD？」的确认弹窗（见 `onGeneratePrd`） */
+const generateConfirmOpen = ref(false)
 
 // 回复结束（流式状态由 true 落回 false）时聚焦输入框，用户可以直接接着追问。
 // 放在这里而不是父组件：焦点归还纯属视图行为，没必要为它向外暴露组件句柄。
@@ -270,5 +284,30 @@ watch(
         {{ rewriting ? '正在改写…' : '按澄清结果改写' }}
       </AppButton>
     </AppActionBar>
+
+    <!-- 「还有未答问题，仍要生成 PRD？」的确认弹窗：与产品里另外两道闸门同一底座 -->
+    <AppDialog v-model="generateConfirmOpen" title="仍有问题未确认，仍要生成 PRD？">
+      <div class="space-y-3 text-sm leading-relaxed">
+        <p class="text-body">
+          还有
+          <strong class="font-semibold text-fg">{{ unansweredAsk }}</strong>
+          道题没有作答。现在生成的话，这些没确认的点会写进 PRD 的「待确认问题」里，
+          由你或拍板人后续补齐。
+        </p>
+        <p class="text-muted">
+          答完再生成会更准；也可以先生成一版看看成色，之后再回来补答。
+        </p>
+      </div>
+      <template #footer>
+        <div class="flex items-center justify-end gap-2">
+          <AppButton variant="secondary" size="md" @click="generateConfirmOpen = false">
+            回去答题
+          </AppButton>
+          <AppButton variant="primary" size="md" @click="confirmGeneratePrd">
+            仍要生成
+          </AppButton>
+        </div>
+      </template>
+    </AppDialog>
   </section>
 </template>

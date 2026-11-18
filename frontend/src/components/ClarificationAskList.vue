@@ -263,8 +263,15 @@ function submit(): void {
     <!--
       提交按钮与它右侧的提示：常驻那句指路「若不满意选项，可以自行在输入框输入想法」，
       未答题数那句是动态信息。两者都要能读断句，所以让这一行允许折行。
+
+      这一行**吸在滚动区底部**（`sticky bottom-0`）：题目一多、卡片高度不够时按钮会沉到
+      可视区外面，用户得先滚动才找得到（线上实见）。吸底后它始终在手边，又不会盖住最后
+      一道题的选项——底色不透明，滚动的内容从它下面穿过去。
     -->
-    <div v-if="interactive" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+    <div
+      v-if="interactive"
+      class="sticky bottom-0 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line/60 bg-surface-2 px-3 py-2"
+    >
       <button
         type="button"
         class="rounded-lg bg-primary-500 px-3.5 py-1.5 text-xs font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-40"

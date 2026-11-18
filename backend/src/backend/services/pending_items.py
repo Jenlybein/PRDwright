@@ -70,9 +70,15 @@ def render_spec() -> str:
         "请按实际严重程度**分散取值**，不要把所有条目都堆在同一个等级上——"
         "等级是澄清时「先问哪一批」的依据，堆在一档就等于没分级。"
         "**缺了等级、或写了 `P0` ~ `P6` 之外的值，该项会被直接丢弃**，请务必逐项给出。\n"
+        "`question` **必须写成一句面向用户的人话问题**（用户要能直接读出来并回答），例如"
+        "「登录态 7 天与 refresh_token 30 天是什么关系？」。**不要**把 `id` / `topic` / "
+        "`context` / `owner` 之类的键值对拼成一行塞进 `question`——那是模型的内部记号，"
+        "不是用户能回答的问题；受影响章节填 `sections`、拍板人填 `decider`，不要写进题干。\n"
         "没有待确认项时附 `[]`。清单须与正文中的「待确认」一一对应；不要把这段标记写进章节里。\n"
         "⚠️ **不要**写成人读形态（例如「## 附：待确认问题」+ 编号列表）：那种形态不算清单，"
-        "会被当作正文展示。清单**只能**放在上面这对 HTML 注释标记里，格式就是 JSON 数组。"
+        "会被当作正文展示。清单**只能**放在上面这对 HTML 注释标记里，格式就是 JSON 数组。\n"
+        "⚠️ 标记块**不要**放进代码围栏（不要写成 ```json…```）：它必须直接落在正文末尾，"
+        "围栏会把它变成示例代码，抽取时还会留下多余的反引号。"
     )
 
 
@@ -137,6 +143,65 @@ def _importance_rank(item: dict[str, Any]) -> int:
     return IMPORTANCE_ORDER.get(str(item.get("importance", "")), len(IMPORTANCE_ORDER))
 
 
+# 第三种形态：正文里的**规范取舍表**。模型不写清单块，而是用一张「规范 vs PRD」的对照表
+# 交代取舍，把该定的事写在「处理」列（例如「采用 needLogin，待团队确认」）。
+# 这张表是**正文**，不能剥；但行里既然标了「待确认」，就必须同时登记进清单——
+# 否则界面上「待确认问题」容器是空的，而正文里明明挂着待确认（2026-11-19 实测）。
+_TABLE_PENDING_MARK = re.compile(r"待确认|待定|待团队确认|待评审确认|待产品确认|需确认")
+_TABLE_CELL_SEPARATOR = re.compile(r"^:?-{2,}:?$")
+
+
+def _extract_table_pending(text: str, *, id_prefix: str) -> list[dict[str, Any]]:
+    """从正文末尾的表格里收集「标了待确认」的行，转成清单项（不修改正文）。
+
+    判定保守：只看**后三分之一**（取舍表按惯例在末尾），只看真正的 Markdown 表格行，
+    只看含「待确认 / 待定 / 待团队确认…」的格子。一条都认不出就返回空列表。
+
+    Args:
+        text: 完整正文。
+        id_prefix: 清单项 id 前缀（与 `finalize_items` 一致）。
+
+    Returns:
+        已排序、已分配 id 的清单项（可能为空）。
+    """
+    lines = text.splitlines()
+    start_at = len(lines) * 2 // 3
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index in range(start_at, len(lines)):
+        line = lines[index].strip()
+        if not (line.startswith("|") and line.endswith("|")):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if all(_TABLE_CELL_SEPARATOR.match(cell.replace(" ", "")) for cell in cells if cell):
+            continue  # 表头分隔行
+        marked = next((cell for cell in cells[1:] if _TABLE_PENDING_MARK.search(cell)), "")
+        if not marked:
+            continue
+        question = cells[0] if marked == cells[0] else f"{cells[0]}：{marked}"
+        question = question.strip(" ：:;；")
+        if not question or question in seen:
+            continue
+        seen.add(question)
+        records.append(
+            {
+                "question": question[:160],
+                "sections": [],
+                "decider": "",
+                "importance": _LEGACY_IMPORTANCE,
+            }
+        )
+    if not records:
+        return []
+    logger.warning(
+        "正文里用的是**规范取舍表**而不是标记块，已从表格行兜底登记待确认项",
+        extra={"event": "pending.table_fallback", "count": len(records)},
+    )
+    return finalize_items(records, id_prefix=id_prefix)
+
+
 def extract(
     text: str, *, id_prefix: str = "p"
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -167,7 +232,9 @@ def extract(
         legacy = _extract_legacy_appendix(text, id_prefix=id_prefix)
         if legacy is not None:
             return legacy
-        return text, []
+        # 第三种形态：正文末尾的「规范取舍表」（2026-11-19 实测）——表格本身是正文，
+        # 不剥，只把「标了待确认」的行登记成清单，否则容器永远是空的。
+        return text, _extract_table_pending(text, id_prefix=id_prefix)
 
     # 先把所有块里的条目原样收集起来，统一排序后才分配 id。
     collected: list[dict[str, Any]] = []
@@ -196,6 +263,10 @@ def extract(
         out.append(tail)
 
     items = finalize_items(collected, id_prefix=id_prefix)
+    if not items:
+        # 标记块里是空数组（或者块坏掉被跳过）：正文里的取舍表可能还留着待确认行，
+        # 一并兜底，避免「文档写了待确认、容器却是空的」。
+        items = _extract_table_pending(text, id_prefix=id_prefix)
 
     clean = "".join(out)
     # 移除块体后可能留下成片空行：压缩到连续两个换行以内并裁掉首尾空白，
@@ -203,6 +274,66 @@ def extract(
     clean = "\n".join(line for line in re.split(r"\n{3,}", clean.strip()) if line.strip() or True)
     clean = collapse_blank_lines(clean)
     return clean, items
+
+
+# 清单项的**文案清洗**：模型偶尔不按 `render_spec` 写「一句人话问题」，而是把自己内部的
+# 记账字段拼成一行塞进 `question`——线上实见（2026-11-19）：
+#   "id: P-01 topic: F-03 格式校验验收标准 context: PRD 中 F-03 标记「待确认」… owner: 产品经理"
+# 用户看到的不是问题，是一条开发日志；末尾还残留 ``` （清单块被写进了代码围栏）。
+# 这里做**确定性**的还原，不猜语义：剥围栏 → 拆键值段 → 用 `topic` 当题干、`context` 变背景、
+# `owner` 落到拍板人。都不成立时原样返回，绝不让清洗把正常题干改坏。
+_FENCE_TOKEN = re.compile(r"```(?:json|JSON)?|~~~(?:json|JSON)?")
+_KEYED_SEGMENT = re.compile(
+    r"(?<![\w-])(id|topic|context|owner|decider|sections|importance)\s*[:：]\s*", re.I
+)
+
+
+def _strip_fences(text: str) -> str:
+    """去掉残留的代码围栏记号（清单块被模型写进 ```json 围栏时留下的尾巴）。"""
+    return _FENCE_TOKEN.sub("", text).strip()
+
+
+def _split_keyed(text: str) -> tuple[str, dict[str, str]]:
+    """把「id: … topic: … context: … owner: …」拆成（前缀, {键: 值})。
+
+    没有任何键值段时返回 `(原文, {})`——正常题干不受影响。
+    """
+    matches = list(_KEYED_SEGMENT.finditer(text))
+    if not matches:
+        return text.strip(), {}
+    head = text[: matches[0].start()].strip()
+    segments: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        segments[match.group(1).lower()] = text[match.end() : end].strip(" \t;；,，、\n")
+    return head, segments
+
+
+def clean_question_fields(record: dict[str, Any]) -> dict[str, Any]:
+    """把清单项的题干还原成**面向用户的一句话**（见上面 `_KEYED_SEGMENT` 的说明）。
+
+    Args:
+        record: 原始清单项（`question` 可能是机器拼接串）。
+
+    Returns:
+        清洗后的新字典（不改动入参）；题干为空时退回原文。
+    """
+    raw = _strip_fences(str(record.get("question") or ""))
+    head, segments = _split_keyed(raw)
+    cleaned = dict(record)
+
+    topic = segments.get("topic") or segments.get("question") or ""
+    context = segments.get("context") or ""
+    if topic:
+        question = f"{topic}（背景：{context}）" if context else topic
+    else:
+        question = head or raw
+    cleaned["question"] = _strip_fences(question).strip(" \t\n;；")
+
+    owner = segments.get("owner") or segments.get("decider") or ""
+    if owner and not str(cleaned.get("decider") or "").strip():
+        cleaned["decider"] = owner
+    return cleaned
 
 
 def finalize_items(
@@ -242,7 +373,7 @@ def finalize_items(
                 },
             )
             continue
-        validated.append({**record, "importance": level})
+        validated.append({**clean_question_fields(record), "importance": level})
 
     validated.sort(key=_importance_rank)
     return [

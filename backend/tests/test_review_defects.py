@@ -859,10 +859,33 @@ def test_only_prompts_carries_the_example_carve_out():
     assert "不记编造" in rules and "不记矛盾" in rules
     # 「示例」不能成为事实断言的挡箭牌：页面数 / 字段清单仍要与上游一致
     assert "事实性断言" in rules
+    # 提示词条目本身不是推断（2026-11-19 走查：6 条 medium 全是这类误报）
+    assert "不判提示词条目本身" in rules
 
-    # 另两份产物没有专属口径：空串就是「本产物没有额外口径」，交回通用六类
+    # PRD 没有专属口径：空串就是「本产物没有额外口径」，交回通用六类
     assert review_defects.render_product_rules("prd") == ""
-    assert review_defects.render_product_rules("api_docs") == ""
+
+    # 接口文档：历史示例只对齐风格、合理端口不算编造（同一次走查的两条误报）
+    api_rules = review_defects.render_product_rules("api_docs")
+    assert "历史接口示例只用于对齐风格与结构" in api_rules
+    assert "与已声明能力直接对应的接口算合理补充" in api_rules
+
+
+def test_api_docs_prompt_forces_the_machine_readable_pending_block():
+    """接口文档必须写标记块清单：只写取舍表时容器是空的（2026-11-19 实测 `pending_items = []`）。"""
+    template = prompts.API_DOCS_GENERATION_PROMPT
+    assert "<!-- PENDING:BEGIN -->" in template
+    assert "取舍表" in template
+    # 题干必须是人话，不是 id/topic/context 拼接
+    assert "不要" in template and "topic" in template
+
+
+def test_rewrite_prompt_demands_elimination_not_rephrasing():
+    """单轮改写（用户已确认不加复审）唯一能靠的就是这条要求。"""
+    template = prompts.DOC_REWRITE_PROMPT
+    assert "改写是「消除」" in template
+    assert "自检" in template
+    assert "不会再有第二次改写" in template
 
 
 def test_contradiction_does_not_treat_unreadable_upstream_as_conflict():
