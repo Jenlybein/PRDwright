@@ -129,7 +129,7 @@ function metaOf(level: PendingImportance) {
         <span
           v-for="level in presentLevels"
           :key="level"
-          class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-semibold ring-1"
+          class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-semibold ring-1"
           :class="metaOf(level).badge"
           :title="`${level}：${metaOf(level).hint}`"
         >
@@ -151,7 +151,7 @@ function metaOf(level: PendingImportance) {
       >
         <!-- 序号徽标：位置下标，纯展示 -->
         <span
-          class="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] font-medium text-accent"
+          class="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-medium text-accent"
           aria-hidden="true"
         >
           {{ index + 1 }}
@@ -161,7 +161,7 @@ function metaOf(level: PendingImportance) {
           <div class="flex flex-wrap items-center gap-2">
             <!-- 重要性等级徽标 -->
             <span
-              class="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-semibold ring-1"
+              class="shrink-0 rounded-full px-1.5 py-0.5 text-xs font-semibold ring-1"
               :class="metaOf(item.importance).badge"
               :title="`${item.importance}：${metaOf(item.importance).hint}`"
             >

@@ -186,7 +186,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
       >
         <div class="flex flex-wrap items-center gap-2">
           <span
-            class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1"
+            class="shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ring-1"
             :class="metaOf(change.changeType).badge"
           >
             {{ metaOf(change.changeType).text }}
@@ -194,7 +194,7 @@ function metaOf(type: SummaryChangeType): (typeof CHANGE_META)[SummaryChangeType
           <span class="text-sm font-medium" :class="metaOf(change.changeType).label">
             {{ change.label || change.path }}
           </span>
-          <code class="truncate font-mono text-[11px] text-subtle">{{ change.path }}</code>
+          <code class="truncate font-mono text-xs text-subtle">{{ change.path }}</code>
         </div>
 
         <div class="mt-2 space-y-1 text-xs leading-relaxed">

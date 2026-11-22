@@ -141,14 +141,14 @@ describe('ClarificationAskList', () => {
     expect(buttonOf(wrapper, '提交回答').attributes('disabled')).toBeDefined()
   })
 
-  it('提交按钮旁常驻一行指路文案，逐字为「若不满意选项，可以自行在输入框输入想法」', () => {
+  it('不再写「若不满意选项，可以自行在输入框输入想法」这句指路，也不另立输入框', () => {
     const wrapper = mountAsks()
 
-    // 本次需求的核心：自己写的入口指向底部聊天输入框，这里只给一句常驻指路
+    // 输入框就在同一屏的底栏里，不必再用一句话教用户去哪儿写
     const spanTexts = wrapper.findAll('span').map((item) => item.text())
-    expect(spanTexts).toContain('若不满意选项，可以自行在输入框输入想法')
+    expect(spanTexts).not.toContain('若不满意选项，可以自行在输入框输入想法')
 
-    // 且组件里不再有任何输入框——想自己写去底部的那个，不在这儿另立一个
+    // 组件里仍然没有任何输入框——想自己写去底部的那个
     expect(wrapper.find('textarea').exists()).toBe(false)
   })
 

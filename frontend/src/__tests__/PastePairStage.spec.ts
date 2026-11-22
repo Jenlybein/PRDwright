@@ -78,16 +78,17 @@ describe('PastePairStage 的录入与校验', () => {
     expect(wrapper.text()).not.toContain('请先贴入 PRD 正文')
   })
 
-  it('两份都填时提示词与接口文档的关系讲清楚了', async () => {
+  it('两份都填时不再写「接口路径会与它保持一致」这类解释（标题已说明产出）', async () => {
     const wrapper = mountStage({ prdText: PRD, apiDocsText: API_DOCS })
 
-    expect(wrapper.text()).toContain('接口路径与字段名会与它保持一致')
+    expect(wrapper.text()).not.toContain('接口路径与字段名会与它保持一致')
   })
 
-  it('接口文档留空时说明「按只有 PRD 生成」，并点出与另一条入口等价', () => {
+  it('接口文档留空时不写解释句，字数控件照常显示', () => {
     const wrapper = mountStage({ prdText: PRD })
 
-    expect(wrapper.text()).toContain('留空即按「只有 PRD」生成')
+    expect(wrapper.text()).not.toContain('留空即按「只有 PRD」生成')
+    expect(wrapper.text()).toContain(`${PRD.length} 字`)
   })
 
   it('两份材料的字数各自独立统计', async () => {

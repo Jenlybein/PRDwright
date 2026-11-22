@@ -1,0 +1,1497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="dsh-design" content="web" />
+    <title>需求描述 · PRDwright</title>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="tokens.css" />
+    <style>
+      :root {
+        --shell-action-bar-h: 63px;
+      }
+    </style>
+  </head>
+  <body class="bg-bg text-body">
+    <div class="flex min-h-screen bg-bg text-body">
+      <!-- 左侧方案侧边栏：逐字取自 frontend/src/components/SolutionSidebar.vue（登录态 / 抽屉收起态） -->
+<button
+  type="button"
+  class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-white shadow-lg lg:hidden"
+  aria-label="打开方案列表"
+>
+  <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path
+      fill-rule="evenodd"
+      d="M2 5.75A.75.75 0 0 1 2.75 5h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 5.75Zm0 4.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm.75 3.5a.75.75 0 0 0 0 1.5h14.5a.75.75 0 0 0 0-1.5H2.75Z"
+      clip-rule="evenodd"
+    />
+  </svg>
+</button>
+
+<aside
+  class="sidebar-surface flex flex-col border-line bg-surface/80 backdrop-blur fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform duration-[260ms] ease-[var(--ease-drawer)] overscroll-contain lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0 -translate-x-full"
+  aria-label="方案列表"
+>
+  <!-- 顶端：品牌 + 主题切换 -->
+  <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+    <div class="flex min-w-0 items-center gap-2.5">
+      <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary-700 text-sm font-bold text-white">
+        H
+      </div>
+      <div class="min-w-0 leading-tight">
+        <div class="truncate text-sm font-bold text-fg">PRDwright</div>
+      </div>
+    </div>
+
+    <!-- 主题切换（AppButton variant=ghost size=sm + 《!px-2》；这里只画按钮，不画下拉） -->
+    <div class="relative">
+      <button
+        type="button"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed text-body hover:bg-surface-2 hover:text-accent disabled:opacity-40 px-3 py-1.5 text-xs !px-2"
+        aria-label="主题：跟随系统，点击切换"
+        title="主题：跟随系统"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M3.5 3A1.5 1.5 0 0 0 2 4.5v7A1.5 1.5 0 0 0 3.5 13h4v1.5H6a.75.75 0 0 0 0 1.5h8a.75.75 0 0 0 0-1.5h-1.5V13h4A1.5 1.5 0 0 0 18 11.5v-7A1.5 1.5 0 0 0 16.5 3h-13Zm.5 1.5h12v6H4v-6ZM8.75 13h2.5v1.5h-2.5V13Z"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 新建任务 -->
+  <div class="px-3 pt-4">
+    <a
+      href="entry.html"
+      class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm w-full"
+    >
+      <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path
+          d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
+        />
+      </svg>
+      新建任务
+    </a>
+  </div>
+
+  <!-- 方案列表 -->
+  <div class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+    <div class="mb-2 flex items-center justify-between px-2">
+      <span class="text-xs font-medium text-muted">我的方案</span>
+    </div>
+
+    <ul class="space-y-1">
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-primary-500 bg-accent-soft ring-1 ring-accent-soft-line">
+          <a href="review.html" class="block w-full text-left" aria-current="true">
+            <span class="block truncate text-sm font-medium text-fg">社区二手交易 App</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已出提示词</span>
+              <span aria-hidden="true">·</span>
+              <span>2 小时前</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 社区二手交易 App"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="review.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">企业差旅报销流程</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已出 PRD</span>
+              <span aria-hidden="true">·</span>
+              <span>3 小时前</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 企业差旅报销流程"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="chat.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">校园活动报名小程序</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>AI 对话</span>
+              <span aria-hidden="true">·</span>
+              <span>11-20 14:05</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 校园活动报名小程序"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="done.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">咖啡店会员积分系统</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已完成</span>
+              <span aria-hidden="true">·</span>
+              <span>11-18 09:30</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 咖啡店会员积分系统"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <!-- 底端：登录入口（已登录显示昵称） -->
+  <div class="border-t border-line px-3 py-3">
+    <div class="relative">
+      <button
+        type="button"
+        class="flex w-full items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-body shadow-sm transition hover:border-accent hover:text-fg"
+        aria-label="已登录：林间"
+      >
+        <svg class="h-4 w-4 text-subtle" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M10 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM3.465 14.493a1.23 1.23 0 0 0 .41 1.412A9.957 9.957 0 0 0 10 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 0 0-13.074.003Z"
+          />
+        </svg>
+        <span class="min-w-0 flex-1 truncate text-left">林间</span>
+        <svg class="h-3 w-3 text-subtle transition" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            fill-rule="evenodd"
+            d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+</aside>
+
+      <div class="flex min-w-0 flex-1 flex-col">
+        <main class="mx-auto w-full max-w-3xl px-4 pt-10 pb-[calc(var(--shell-action-bar-h)+2.5rem)]">
+          <nav class="sticky top-0 z-20 -mx-4 mb-6 border-b border-line bg-bg px-4 pb-3 pt-3" style="overflow-x: auto" aria-label="生成进度">
+      <ol class="flex items-start">
+      <li class="mr-4 flex items-center border-r border-line-strong pr-4">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M6 1.5h8a2.5 2.5 0 0 1 2.5 2.5v6a2.5 2.5 0 0 1-2.5 2.5H9l-5.5 2.6V4A2.5 2.5 0 0 1 6 1.5Z" clip-rule="evenodd" /></svg></span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">AI 对话</span>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5 cursor-pointer group">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-primary-500 text-on-accent ring-4 ring-accent-soft group-hover:ring-4 group-hover:ring-accent-soft-line">1</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-accent group-hover:text-accent">描述产品</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 100% 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle">2</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">PRD</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 100% 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle">3</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">接口文档</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 100% 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle">4</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">提示词</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 100% 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle">5</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">交付</span>
+        </div>
+      </li>
+      </ol>
+    </nav>
+          <!--
+  需求表单页：逐字取自 frontend/src/components/RequirementsForm.vue 的 <template>，
+  并把 FormFieldRenderer / MvpFeatureEditor / UiPageEditor / AppButton / AppActionBar
+  按各自的真实模板展开。
+
+  静态状态（本稿选了这样一帧）：
+  · 数据：社区二手交易 App，已填满「产品与用户」「功能与页面」，技术约束 / 非功能与范围也已填
+    （所以折叠头的「已填 x/y」是满的），据此顶部说明带「已恢复上次填写的内容。」
+  · 折叠：区块 1「产品与用户」+ 区块 2「功能与页面」展开，区块 3 / 4 收起（与真实产品的默认
+    「只展开必填区块」相比，这里多展开了第 2 块，用来看见列表 / MVP / 页面卡片三种编辑器）
+  · JSON 预览关闭、无成功提示（即 showJsonPreview = false、successTip = ''）
+  · 吸底操作栏只有流程行 → form.body.json 的 barHeight = 60
+-->
+<div>
+  <!-- 页面标题与说明 -->
+  <div class="mb-6">
+    <h1 class="text-2xl font-bold tracking-tight text-fg  sm:text-3xl">
+      告诉我们你的产品想法
+    </h1>
+    <p class="mt-2 text-xs text-subtle">已恢复上次填写的内容。</p>
+  </div>
+
+  <!-- 工具条：JSON 预览开关 / 填充示例（流程操作已下沉到底部吸底操作栏） -->
+  <div class="mb-6 flex flex-wrap items-center gap-2">
+    <button
+      type="button"
+      class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 border border-line-strong bg-surface text-body hover:border-accent hover:text-accent disabled:opacity-50 px-3 py-1.5 text-xs"
+    >
+      <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path
+          fill-rule="evenodd"
+          d="M6.28 3.22a.75.75 0 0 1 0 1.06L2.56 8l3.72 3.72a.75.75 0 0 1-1.06 1.06L.97 8.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Zm7.44 0a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L17.44 8l-3.72-3.72a.75.75 0 0 1 0-1.06Z"
+          clip-rule="evenodd"
+        />
+      </svg>
+      查看 JSON 预览
+    </button>
+    <button
+      type="button"
+      class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 border border-line-strong bg-surface text-body hover:border-accent hover:text-accent disabled:opacity-50 px-3 py-1.5 text-xs"
+    >
+      填充示例
+    </button>
+  </div>
+
+  <!-- 结构化录入表单 -->
+  <form class="space-y-4" novalidate>
+    <!-- ========== 区块 1：产品与用户（展开） ========== -->
+    <section class="rounded-2xl border border-line bg-surface shadow-sm shadow-stone-200/50   dark:shadow-none">
+      <!-- 区块标题：点击折叠 / 展开 -->
+      <button
+        type="button"
+        class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-surface-2 sm:px-6"
+        aria-expanded="true"
+      >
+        <span class="flex items-center gap-3">
+          <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-100 text-sm font-bold text-primary-700 dark:bg-primary-950/50 dark:text-primary-300">
+            1
+          </span>
+          <span class="min-w-0">
+            <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-fg ">
+              产品与用户
+              <span class="rounded-full bg-danger-surface px-2 py-0.5 text-xs font-medium text-danger-fg ring-1 ring-danger-line">必填</span>
+            </span>
+          </span>
+        </span>
+        <svg
+          class="h-4 w-4 shrink-0 text-subtle transition-transform rotate-180"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            fill-rule="evenodd"
+            d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </button>
+
+      <!-- 区块字段 -->
+      <div class="space-y-5 border-t border-line px-5 pb-6 pt-5  sm:px-6">
+        <!-- 产品名称 -->
+        <div>
+          <label for="field-product_name" class="mb-2 block text-sm font-medium text-fg ">
+            产品名称
+            <span class="ml-0.5 text-danger-fg" aria-hidden="true">*</span>
+          </label>
+          <div>
+            <input
+              id="field-product_name"
+              value="社区二手交易 App"
+              type="text"
+              class="w-full rounded-xl border bg-surface-2 px-3.5 py-2.5 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+              placeholder="例如：PRDwright、团队周报助手"
+            />
+          </div>
+        </div>
+
+        <!-- 平台 -->
+        <div>
+          <label for="field-platform" class="mb-2 block text-sm font-medium text-fg ">
+            平台
+            <span class="ml-0.5 text-danger-fg" aria-hidden="true">*</span>
+          </label>
+          <div class="relative">
+            <select
+              id="field-platform"
+              class="w-full rounded-xl border bg-surface-2 px-3.5 py-2.5 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line appearance-none pr-10"
+            >
+              <option value="">请选择运行平台</option>
+              <option value="网页应用">网页应用</option>
+              <option value="微信小程序">微信小程序</option>
+              <option value="App" selected>App</option>
+              <option value="CLI">CLI</option>
+            </select>
+            <svg
+              class="pointer-events-none absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-subtle"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </div>
+        </div>
+
+        <!-- 核心目标 -->
+        <div>
+          <label for="field-product_goal" class="mb-2 block text-sm font-medium text-fg ">
+            核心目标
+            <span class="ml-0.5 text-danger-fg" aria-hidden="true">*</span>
+          </label>
+          <div>
+            <textarea
+              id="field-product_goal"
+              rows="3"
+              class="w-full rounded-xl border bg-surface-2 px-3.5 py-2.5 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+              placeholder="要说清「解决谁的问题」与「解决成什么样」，例如：帮独立开发者在 30 分钟内把模糊想法整理成可开工的 PRD，替代口头对齐与反复返工。"
+>让同一小区的邻居之间安全、快速地完成闲置物品的转让</textarea>
+          </div>
+        </div>
+
+        <!-- 目标用户（列表编辑器） -->
+        <div>
+          <label for="field-target_users" class="mb-2 block text-sm font-medium text-fg ">
+            目标用户
+            <span class="ml-0.5 text-danger-fg" aria-hidden="true">*</span>
+          </label>
+          <div id="field-target_users" class="space-y-2" role="group" aria-label="目标用户">
+            <div class="flex items-center gap-2">
+              <span class="w-5 shrink-0 text-center text-xs font-medium text-subtle">1</span>
+              <input
+                id="field-target_users.0"
+                value="25–40 岁城市社区住户，家里有闲置但懒得拍照挂平台"
+                type="text"
+                class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                placeholder="例如：独立开发者"
+              />
+              <button
+                type="button"
+                title="删除该条"
+                class="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+              >
+                删除
+              </button>
+            </div>
+
+            <button
+              type="button"
+              class="w-full rounded-xl border border-dashed border-line-strong px-4 py-2.5 text-xs font-medium text-subtle transition hover:border-primary-400 hover:text-primary-600   dark:hover:border-primary-500 dark:hover:text-primary-400"
+            >
+              ＋ 添加用户角色
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 区块 2：功能与页面（展开） ========== -->
+    <section class="rounded-2xl border border-line bg-surface shadow-sm shadow-stone-200/50   dark:shadow-none">
+      <button
+        type="button"
+        class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-surface-2 sm:px-6"
+        aria-expanded="true"
+      >
+        <span class="flex items-center gap-3">
+          <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-100 text-sm font-bold text-primary-700 dark:bg-primary-950/50 dark:text-primary-300">
+            2
+          </span>
+          <span class="min-w-0">
+            <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-fg ">
+              功能与页面
+            </span>
+            <span class="block text-xs text-subtle">
+              选填；逐条录入即可
+            </span>
+          </span>
+        </span>
+        <svg
+          class="h-4 w-4 shrink-0 text-subtle transition-transform rotate-180"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            fill-rule="evenodd"
+            d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </button>
+
+      <div class="space-y-5 border-t border-line px-5 pb-6 pt-5  sm:px-6">
+        <!-- MVP 功能（结构化行编辑器） -->
+        <div>
+          <div class="mb-2 flex flex-wrap items-baseline gap-x-2">
+            <span class="text-sm font-medium text-fg ">
+              MVP 功能
+            </span>
+            <span class="text-xs text-subtle">选填；留空则由 AI 依据页面结构推断（建议）</span>
+          </div>
+
+          <div id="field-mvp_features" class="space-y-2.5" role="group" aria-label="MVP 功能">
+            <!-- 功能 1 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">功能 1</span>
+                <button
+                  type="button"
+                  title="删除该功能"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-mvp_features.0.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.0.name"
+                    value="发布闲置"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：问卷填写"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.0.description" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能描述
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.0.description"
+                    value="拍照上传，自动识别分类并给出定价建议"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：分基础与进阶两组收集产品信息"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.0.value" class="mb-1.5 block text-xs font-medium text-muted ">
+                    价值（选填）
+                  </label>
+                  <input
+                    id="field-mvp_features.0.value"
+                    value="让邻居三分钟挂出一件闲置"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：降低填写门槛"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 功能 2 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">功能 2</span>
+                <button
+                  type="button"
+                  title="删除该功能"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-mvp_features.1.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.1.name"
+                    value="附近在售列表"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：问卷填写"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.1.description" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能描述
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.1.description"
+                    value="只展示同小区可见的商品，按距离排序，每页 20 条"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：分基础与进阶两组收集产品信息"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.1.value" class="mb-1.5 block text-xs font-medium text-muted ">
+                    价值（选填）
+                  </label>
+                  <input
+                    id="field-mvp_features.1.value"
+                    value="先看到自己楼里的东西"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：降低填写门槛"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 功能 3 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">功能 3</span>
+                <button
+                  type="button"
+                  title="删除该功能"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-mvp_features.2.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.2.name"
+                    value="站内私信"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：问卷填写"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.2.description" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能描述
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.2.description"
+                    value="实名认证后的买卖双方一对一沟通，约见面时间"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：分基础与进阶两组收集产品信息"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.2.value" class="mb-1.5 block text-xs font-medium text-muted ">
+                    价值（选填）
+                  </label>
+                  <input
+                    id="field-mvp_features.2.value"
+                    value="不暴露手机号也能把交易谈成"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：降低填写门槛"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 功能 4 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">功能 4</span>
+                <button
+                  type="button"
+                  title="删除该功能"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-mvp_features.3.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.3.name"
+                    value="交易评价"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：问卷填写"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.3.description" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能描述
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.3.description"
+                    value="成交后买卖双方互评，累计到邻居信用"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：分基础与进阶两组收集产品信息"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.3.value" class="mb-1.5 block text-xs font-medium text-muted ">
+                    价值（选填）
+                  </label>
+                  <input
+                    id="field-mvp_features.3.value"
+                    value="让靠谱的邻居更好卖"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：降低填写门槛"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 功能 5 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">功能 5</span>
+                <button
+                  type="button"
+                  title="删除该功能"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-mvp_features.4.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.4.name"
+                    value="举报与拉黑"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：问卷填写"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.4.description" class="mb-1.5 block text-xs font-medium text-muted ">
+                    功能描述
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-mvp_features.4.description"
+                    value="一键举报与拉黑，敏感词过滤，举报 24 小时内处理"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：分基础与进阶两组收集产品信息"
+                  />
+                </div>
+                <div>
+                  <label for="field-mvp_features.4.value" class="mb-1.5 block text-xs font-medium text-muted ">
+                    价值（选填）
+                  </label>
+                  <input
+                    id="field-mvp_features.4.value"
+                    value="守住小区里的安全感"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：降低填写门槛"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 添加功能行 -->
+            <button
+              type="button"
+              class="w-full rounded-xl border border-dashed border-line-strong px-4 py-2.5 text-xs font-medium text-subtle transition hover:border-primary-400 hover:text-primary-600   dark:hover:border-primary-500 dark:hover:text-primary-400"
+            >
+              ＋ 添加功能
+            </button>
+
+            <!-- 批量粘贴导入（收起态） -->
+            <div class="pt-0.5">
+              <button
+                type="button"
+                class="px-1 py-1 text-xs text-subtle underline-offset-2 transition hover:text-accent hover:underline"
+              >
+                批量粘贴导入（可选）
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 未来规划（列表编辑器） -->
+        <div>
+          <label for="field-v2_features" class="mb-2 block text-sm font-medium text-fg ">
+            未来规划
+          </label>
+          <div id="field-v2_features" class="space-y-2" role="group" aria-label="未来规划">
+            <div class="flex items-center gap-2">
+              <span class="w-5 shrink-0 text-center text-xs font-medium text-subtle">1</span>
+              <input
+                id="field-v2_features.0"
+                value="邻里互助（借用 / 赠送）"
+                type="text"
+                class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                placeholder="例如：历史版本对比"
+              />
+              <button
+                type="button"
+                title="删除该条"
+                class="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+              >
+                删除
+              </button>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <span class="w-5 shrink-0 text-center text-xs font-medium text-subtle">2</span>
+              <input
+                id="field-v2_features.1"
+                value="按小区分组的公告板"
+                type="text"
+                class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                placeholder="例如：历史版本对比"
+              />
+              <button
+                type="button"
+                title="删除该条"
+                class="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+              >
+                删除
+              </button>
+            </div>
+
+            <button
+              type="button"
+              class="w-full rounded-xl border border-dashed border-line-strong px-4 py-2.5 text-xs font-medium text-subtle transition hover:border-primary-400 hover:text-primary-600   dark:hover:border-primary-500 dark:hover:text-primary-400"
+            >
+              ＋ 添加规划项
+            </button>
+          </div>
+        </div>
+
+        <!-- 页面结构（卡片编辑器） -->
+        <div>
+          <div class="mb-2 flex flex-wrap items-baseline gap-x-2">
+            <span class="text-sm font-medium text-fg ">
+              页面结构
+            </span>
+            <span class="text-xs text-subtle">页面名称 + 模块（回车或逗号确认）+ 备注</span>
+          </div>
+
+          <div id="field-ui_pages" class="space-y-3" role="group" aria-label="页面结构">
+            <!-- 页面 1 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">页面 1</span>
+                <button
+                  type="button"
+                  title="删除该页面"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-ui_pages.0.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    页面名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-ui_pages.0.name"
+                    value="首页"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：首页"
+                  />
+                </div>
+                <div>
+                  <label for="field-ui_pages.0.modules" class="mb-1.5 block text-xs font-medium text-muted ">
+                    模块 / 区块
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                    <span class="ml-1 font-normal text-subtle">回车或逗号确认一个模块</span>
+                  </label>
+                  <div class="mb-2 flex flex-wrap gap-1.5">
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      附近在售
+                      <button
+                        type="button"
+                        title="移除模块：附近在售"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      搜索
+                      <button
+                        type="button"
+                        title="移除模块：搜索"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      我的
+                      <button
+                        type="button"
+                        title="移除模块：我的"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input
+                      id="field-ui_pages.0.modules"
+                      value=""
+                      type="text"
+                      class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                      placeholder="例如：产品介绍（可连续输入，用逗号分隔）"
+                    />
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-2 text-xs font-medium text-muted transition hover:border-primary-400 hover:text-accent     "
+                    >
+                      添加模块
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label for="field-ui_pages.0.notes" class="mb-1.5 block text-xs font-medium text-muted ">
+                    备注（选填）
+                  </label>
+                  <input
+                    id="field-ui_pages.0.notes"
+                    value="默认进入，只显示同小区"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：面向新用户"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 页面 2 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">页面 2</span>
+                <button
+                  type="button"
+                  title="删除该页面"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-ui_pages.1.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    页面名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-ui_pages.1.name"
+                    value="发布页"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：首页"
+                  />
+                </div>
+                <div>
+                  <label for="field-ui_pages.1.modules" class="mb-1.5 block text-xs font-medium text-muted ">
+                    模块 / 区块
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                    <span class="ml-1 font-normal text-subtle">回车或逗号确认一个模块</span>
+                  </label>
+                  <div class="mb-2 flex flex-wrap gap-1.5">
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      拍照
+                      <button
+                        type="button"
+                        title="移除模块：拍照"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      分类识别
+                      <button
+                        type="button"
+                        title="移除模块：分类识别"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      定价建议
+                      <button
+                        type="button"
+                        title="移除模块：定价建议"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input
+                      id="field-ui_pages.1.modules"
+                      value=""
+                      type="text"
+                      class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                      placeholder="例如：产品介绍（可连续输入，用逗号分隔）"
+                    />
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-2 text-xs font-medium text-muted transition hover:border-primary-400 hover:text-accent     "
+                    >
+                      添加模块
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label for="field-ui_pages.1.notes" class="mb-1.5 block text-xs font-medium text-muted ">
+                    备注（选填）
+                  </label>
+                  <input
+                    id="field-ui_pages.1.notes"
+                    value="发布失败可断点续传"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：面向新用户"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 页面 3 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">页面 3</span>
+                <button
+                  type="button"
+                  title="删除该页面"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-ui_pages.2.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    页面名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-ui_pages.2.name"
+                    value="商品详情"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：首页"
+                  />
+                </div>
+                <div>
+                  <label for="field-ui_pages.2.modules" class="mb-1.5 block text-xs font-medium text-muted ">
+                    模块 / 区块
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                    <span class="ml-1 font-normal text-subtle">回车或逗号确认一个模块</span>
+                  </label>
+                  <div class="mb-2 flex flex-wrap gap-1.5">
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      图片轮播
+                      <button
+                        type="button"
+                        title="移除模块：图片轮播"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      卖家信息
+                      <button
+                        type="button"
+                        title="移除模块：卖家信息"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      私信入口
+                      <button
+                        type="button"
+                        title="移除模块：私信入口"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input
+                      id="field-ui_pages.2.modules"
+                      value=""
+                      type="text"
+                      class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                      placeholder="例如：产品介绍（可连续输入，用逗号分隔）"
+                    />
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-2 text-xs font-medium text-muted transition hover:border-primary-400 hover:text-accent     "
+                    >
+                      添加模块
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label for="field-ui_pages.2.notes" class="mb-1.5 block text-xs font-medium text-muted ">
+                    备注（选填）
+                  </label>
+                  <input
+                    id="field-ui_pages.2.notes"
+                    value="仅同小区可见"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：面向新用户"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 页面 4 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">页面 4</span>
+                <button
+                  type="button"
+                  title="删除该页面"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-ui_pages.3.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    页面名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-ui_pages.3.name"
+                    value="私信会话"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：首页"
+                  />
+                </div>
+                <div>
+                  <label for="field-ui_pages.3.modules" class="mb-1.5 block text-xs font-medium text-muted ">
+                    模块 / 区块
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                    <span class="ml-1 font-normal text-subtle">回车或逗号确认一个模块</span>
+                  </label>
+                  <div class="mb-2 flex flex-wrap gap-1.5">
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      会话列表
+                      <button
+                        type="button"
+                        title="移除模块：会话列表"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      消息气泡
+                      <button
+                        type="button"
+                        title="移除模块：消息气泡"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      图片发送
+                      <button
+                        type="button"
+                        title="移除模块：图片发送"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input
+                      id="field-ui_pages.3.modules"
+                      value=""
+                      type="text"
+                      class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                      placeholder="例如：产品介绍（可连续输入，用逗号分隔）"
+                    />
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-2 text-xs font-medium text-muted transition hover:border-primary-400 hover:text-accent     "
+                    >
+                      添加模块
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label for="field-ui_pages.3.notes" class="mb-1.5 block text-xs font-medium text-muted ">
+                    备注（选填）
+                  </label>
+                  <input
+                    id="field-ui_pages.3.notes"
+                    value="实名认证后才可发私信"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：面向新用户"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 页面 5 -->
+            <div class="rounded-xl border border-line bg-surface-2/40 p-3.5">
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-semibold text-subtle">页面 5</span>
+                <button
+                  type="button"
+                  title="删除该页面"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="space-y-2.5">
+                <div>
+                  <label for="field-ui_pages.4.name" class="mb-1.5 block text-xs font-medium text-muted ">
+                    页面名称
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    id="field-ui_pages.4.name"
+                    value="我的"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：首页"
+                  />
+                </div>
+                <div>
+                  <label for="field-ui_pages.4.modules" class="mb-1.5 block text-xs font-medium text-muted ">
+                    模块 / 区块
+                    <span class="text-danger-fg" aria-hidden="true">*</span>
+                    <span class="ml-1 font-normal text-subtle">回车或逗号确认一个模块</span>
+                  </label>
+                  <div class="mb-2 flex flex-wrap gap-1.5">
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      我的发布
+                      <button
+                        type="button"
+                        title="移除模块：我的发布"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      交易记录
+                      <button
+                        type="button"
+                        title="移除模块：交易记录"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span class="inline-flex items-center gap-1 rounded-lg bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700 ring-1 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-800/60">
+                      设置
+                      <button
+                        type="button"
+                        title="移除模块：设置"
+                        class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input
+                      id="field-ui_pages.4.modules"
+                      value=""
+                      type="text"
+                      class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                      placeholder="例如：产品介绍（可连续输入，用逗号分隔）"
+                    />
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-2 text-xs font-medium text-muted transition hover:border-primary-400 hover:text-accent     "
+                    >
+                      添加模块
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label for="field-ui_pages.4.notes" class="mb-1.5 block text-xs font-medium text-muted ">
+                    备注（选填）
+                  </label>
+                  <input
+                    id="field-ui_pages.4.notes"
+                    value="含举报与拉黑管理"
+                    type="text"
+                    class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                    placeholder="例如：面向新用户"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 添加页面卡片 -->
+            <button
+              type="button"
+              class="w-full rounded-xl border border-dashed border-line-strong px-4 py-2.5 text-xs font-medium text-subtle transition hover:border-primary-400 hover:text-primary-600   dark:hover:border-primary-500 dark:hover:text-primary-400"
+            >
+              ＋ 添加页面
+            </button>
+
+            <!-- 批量粘贴导入（收起态） -->
+            <div class="pt-0.5">
+              <button
+                type="button"
+                class="px-1 py-1 text-xs text-subtle underline-offset-2 transition hover:text-accent hover:underline"
+              >
+                批量粘贴导入（可选）
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 关键交互（列表编辑器） -->
+        <div>
+          <label for="field-key_interactions" class="mb-2 block text-sm font-medium text-fg ">
+            关键交互
+          </label>
+          <div id="field-key_interactions" class="space-y-2" role="group" aria-label="关键交互">
+            <div class="flex items-center gap-2">
+              <span class="w-5 shrink-0 text-center text-xs font-medium text-subtle">1</span>
+              <input
+                id="field-key_interactions.0"
+                value="拍照发布 → 自动识别分类 → 定价建议 → 同小区可见"
+                type="text"
+                class="w-full rounded-xl border bg-surface-2 px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle hover:border-line-strong focus:bg-surface focus:ring-4 border-line focus:border-accent focus:ring-accent-soft-line"
+                placeholder="例如：填写表单时实时生成 JSON 预览"
+              />
+              <button
+                type="button"
+                title="删除该条"
+                class="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-subtle transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+              >
+                删除
+              </button>
+            </div>
+
+            <button
+              type="button"
+              class="w-full rounded-xl border border-dashed border-line-strong px-4 py-2.5 text-xs font-medium text-subtle transition hover:border-primary-400 hover:text-primary-600   dark:hover:border-primary-500 dark:hover:text-primary-400"
+            >
+              ＋ 添加交互
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 区块 3：技术约束（收起） ========== -->
+    <section class="rounded-2xl border border-line bg-surface shadow-sm shadow-stone-200/50   dark:shadow-none">
+      <button
+        type="button"
+        class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-surface-2 sm:px-6"
+        aria-expanded="false"
+      >
+        <span class="flex items-center gap-3">
+          <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-100 text-sm font-bold text-primary-700 dark:bg-primary-950/50 dark:text-primary-300">
+            3
+          </span>
+          <span class="min-w-0">
+            <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-fg ">
+              技术约束
+            </span>
+            <span class="block text-xs text-subtle">
+              选填；未填的按缺失处理，AI 不推断 · 已填 6/6
+            </span>
+          </span>
+        </span>
+        <svg
+          class="h-4 w-4 shrink-0 text-subtle transition-transform"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            fill-rule="evenodd"
+            d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </button>
+    </section>
+
+    <!-- ========== 区块 4：非功能与范围（收起） ========== -->
+    <section class="rounded-2xl border border-line bg-surface shadow-sm shadow-stone-200/50   dark:shadow-none">
+      <button
+        type="button"
+        class="flex w-full items-center justify-between gap-4 rounded-2xl px-5 py-4 text-left transition hover:bg-surface-2 sm:px-6"
+        aria-expanded="false"
+      >
+        <span class="flex items-center gap-3">
+          <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-100 text-sm font-bold text-primary-700 dark:bg-primary-950/50 dark:text-primary-300">
+            4
+          </span>
+          <span class="min-w-0">
+            <span class="flex flex-wrap items-center gap-2 text-base font-semibold text-fg ">
+              非功能与范围
+            </span>
+            <span class="block text-xs text-subtle">
+              选填，用于补充质量要求与项目边界 · 已填 5/5
+            </span>
+          </span>
+        </span>
+        <svg
+          class="h-4 w-4 shrink-0 text-subtle transition-transform"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            fill-rule="evenodd"
+            d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.17l3.71-3.94a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </button>
+    </section>
+
+    <p class="text-xs text-subtle">
+      提交前自动校验必填项
+    </p>
+
+    <!--
+      页面级操作栏（全站唯一的流程操作落点）：
+      左「清空（重置类，最左）」│「返回入口」，右「提交」——主操作永远最右且唯一。
+      吸底常驻，长表单不必先滚到底才能提交。
+    -->
+    <div class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]">
+      <!-- 流程行：左「破坏性操作 │ 次操作 · 说明」，右「主操作」 -->
+      <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3">
+        <div class="flex min-w-0 flex-wrap items-center gap-2">
+          <button
+            type="button"
+            class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 text-danger-fg hover:bg-danger-surface disabled:opacity-50 px-4 py-2 text-sm"
+          >
+            清空
+          </button>
+          <span class="h-5 w-px shrink-0 bg-line-strong" aria-hidden="true"></span>
+          <a
+            href="entry.html"
+            class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 border border-line-strong bg-surface text-body hover:border-accent hover:text-accent disabled:opacity-50 px-4 py-2 text-sm"
+          >
+            返回入口
+          </a>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <a
+            href="chat.html"
+            class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 disabled:bg-surface-2 disabled:text-subtle disabled:shadow-none px-4 py-2 text-sm"
+          >
+            提交需求，开始 AI 澄清
+          </a>
+        </div>
+      </div>
+    </div>
+  </form>
+</div>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

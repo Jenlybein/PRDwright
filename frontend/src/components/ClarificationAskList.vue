@@ -46,7 +46,7 @@ import type { ClarificationAsk } from '@/types'
  *
  * **想自己写不受这里限制**：直接在页面底部的聊天输入框打字发送即可，那条路一直都在，
  * 本组件刻意不再画一个输入框——卡片里再摆一个，反倒让人以为「必须在这儿写才算数」。
- * 提交按钮旁那行「若不满意选项，可以自行在输入框输入想法」就是给它的指路。
+ * 提交按钮旁那行指路文案已去掉：输入框就在同一屏的底栏里，不必再用一句话教用户去哪写。
  *
  * **选择是组件内的临时状态，不进快照**：只有当前线程的最后一条消息会被渲染成
  * 可交互的（见 `MessageList`），用户一作答它就不再是最后一条，组件随之失效——刷新、
@@ -233,7 +233,7 @@ function submit(): void {
           @click="toggle(ask, option.label)"
         >
           <span
-            class="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold"
+            class="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-xs font-semibold"
             :class="
               isSelected(ask, option.label)
                 ? 'bg-primary-500 text-white'
@@ -280,7 +280,6 @@ function submit(): void {
       >
         提交回答
       </button>
-      <span class="text-xs text-subtle">若不满意选项，可以自行在输入框输入想法</span>
       <span v-if="asks.length > 1 && answeredCount < asks.length" class="text-xs text-subtle">
         还有 {{ asks.length - answeredCount }} 题未作答，也可以先提交
       </span>

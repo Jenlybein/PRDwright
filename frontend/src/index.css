@@ -150,8 +150,10 @@
   --ui-fg: #e6e0d6;
   --ui-body: #d5cec3;
   --ui-muted: #b4ada1;
-  --ui-subtle: #9d9488;
-  --ui-on-accent: #2b1508;
+  /* 可读性修正（与设计稿同步）：--ui-subtle 从 #9d9488 抬到 #a8a29a（暗色下 4.3 → 5.2:1）；
+     --ui-on-accent 从 #2b1508 换成 #ffffff（深棕压在 primary-600 陶土上只有 2.9:1，白字 5.9:1）。 */
+  --ui-subtle: #a8a29a;
+  --ui-on-accent: #ffffff;
   --ui-accent: #e89667;
   --ui-accent-soft: rgb(232 150 103 / 0.16);
   --ui-accent-soft-line: #8a3a1c;

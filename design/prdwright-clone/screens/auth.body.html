@@ -1,0 +1,71 @@
+<!-- 登录 / 注册弹窗：逐字取自 frontend/src/components/AuthDialog.vue（登录态，带「为什么弹出来」提示） -->
+<div
+  class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overscroll-contain bg-stone-950/50 p-4 pt-24 backdrop-blur-sm"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="auth-title"
+  tabindex="-1"
+>
+  <div class="auth-panel w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-pop outline-none" tabindex="-1">
+    <div class="flex items-start justify-between">
+      <div>
+        <h2 id="auth-title" class="text-base font-bold text-fg">登录</h2>
+      </div>
+      <button
+        type="button"
+        class="-mr-1 -mt-1 inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg text-body hover:bg-surface-2 hover:text-accent px-3 py-1.5 text-xs !px-1.5 !py-1.5"
+        aria-label="关闭"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
+          />
+        </svg>
+      </button>
+    </div>
+
+    <p class="mt-4 rounded-xl border border-warning-line bg-warning-surface px-3 py-2 text-xs text-warning-fg">
+      创建任务需要先登录
+    </p>
+
+    <div class="mt-4 flex gap-1 rounded-xl bg-surface-2 p-1 text-sm">
+      <button type="button" class="flex-1 rounded-lg py-1.5 font-medium transition bg-surface text-fg shadow-sm ring-1 ring-line-strong">
+        登录
+      </button>
+      <button type="button" class="flex-1 rounded-lg py-1.5 font-medium transition text-muted hover:text-fg">
+        注册
+      </button>
+    </div>
+
+    <form class="mt-4 space-y-3">
+      <label class="block">
+        <span class="text-xs font-medium text-muted">用户名</span>
+        <input
+          type="text"
+          autocomplete="username"
+          value="linjian"
+          class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="3-32 个字符"
+        />
+      </label>
+
+      <label class="block">
+        <span class="text-xs font-medium text-muted">密码</span>
+        <input
+          type="password"
+          autocomplete="current-password"
+          value="prdwright2026"
+          class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="请输入密码"
+        />
+      </label>
+
+      <button
+        type="submit"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm w-full"
+      >
+        登录
+      </button>
+    </form>
+  </div>
+</div>

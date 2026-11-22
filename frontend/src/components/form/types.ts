@@ -101,7 +101,8 @@ export interface SectionConfig {
   /** 标题徽章编号 */
   no: number
   title: string
-  hint: string
+  /** 标题下的一行说明；必填区块已有「必填」徽标，不必再写一句解释，所以是可选的 */
+  hint?: string
   /** 区块内是否包含必填字段 */
   required?: boolean
   fields: FieldConfig[]

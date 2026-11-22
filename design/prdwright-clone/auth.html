@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="dsh-design" content="web" />
+    <title>登录 · PRDwright</title>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="tokens.css" />
+    <style>
+      :root {
+        --shell-action-bar-h: 0px;
+      }
+    </style>
+  </head>
+  <body class="bg-bg text-body">
+    <div class="flex min-h-screen bg-bg text-body">
+      <!-- 左侧方案侧边栏 · 未登录态：取自 SolutionSidebar.vue 的 v-else 分支（「登录后查看你的方案列表」+ 登录按钮） -->
+<button
+  type="button"
+  class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-white shadow-lg lg:hidden"
+  aria-label="打开方案列表"
+>
+  <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path
+      fill-rule="evenodd"
+      d="M2 5.75A.75.75 0 0 1 2.75 5h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 5.75Zm0 4.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm.75 3.5a.75.75 0 0 0 0 1.5h14.5a.75.75 0 0 0 0-1.5H2.75Z"
+      clip-rule="evenodd"
+    />
+  </svg>
+</button>
+
+<aside
+  class="sidebar-surface flex flex-col border-line bg-surface/80 backdrop-blur fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform duration-[260ms] ease-[var(--ease-drawer)] overscroll-contain lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0 -translate-x-full"
+  aria-label="方案列表"
+>
+  <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+    <div class="flex min-w-0 items-center gap-2.5">
+      <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary-700 text-sm font-bold text-white">
+        H
+      </div>
+      <div class="min-w-0 leading-tight">
+        <div class="truncate text-sm font-bold text-fg">PRDwright</div>
+      </div>
+    </div>
+
+    <div class="relative">
+      <button
+        type="button"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed text-body hover:bg-surface-2 hover:text-accent disabled:opacity-40 px-3 py-1.5 text-xs !px-2"
+        aria-label="主题：跟随系统，点击切换"
+        title="主题：跟随系统"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M3.5 3A1.5 1.5 0 0 0 2 4.5v7A1.5 1.5 0 0 0 3.5 13h4v1.5H6a.75.75 0 0 0 0 1.5h8a.75.75 0 0 0 0-1.5h-1.5V13h4A1.5 1.5 0 0 0 18 11.5v-7A1.5 1.5 0 0 0 16.5 3h-13Zm.5 1.5h12v6H4v-6ZM8.75 13h2.5v1.5h-2.5V13Z"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 未登录占位 -->
+  <div class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+    <p class="px-2 py-6 text-center text-xs leading-relaxed text-subtle">
+      登录后查看<br />你的方案列表
+    </p>
+  </div>
+
+  <!-- 底端：登录入口 -->
+  <div class="border-t border-line px-3 py-3">
+    <div class="relative">
+      <button
+        type="button"
+        class="flex w-full items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-body shadow-sm transition hover:border-accent hover:text-fg"
+        aria-label="登录"
+      >
+        <svg class="h-4 w-4 text-subtle" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M10 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM3.465 14.493a1.23 1.23 0 0 0 .41 1.412A9.957 9.957 0 0 0 10 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 0 0-13.074.003Z"
+          />
+        </svg>
+        <span class="min-w-0 flex-1 truncate text-left">登录</span>
+      </button>
+    </div>
+  </div>
+</aside>
+
+      <div class="flex min-w-0 flex-1 flex-col">
+        <main class="mx-auto w-full max-w-3xl px-4 pt-10 pb-[calc(var(--shell-action-bar-h)+2.5rem)]">
+          
+          <!-- 入口选择页：逐字取自 frontend/src/components/stages/EntryStage.vue + utils/workflow.ts 的 ENTRY_REGISTRY 文案 -->
+<section class="flex min-h-[calc(100vh_-_var(--shell-action-bar-h)_-_5rem)] flex-col justify-center space-y-9">
+  <header class="text-center">
+    <h1 class="text-2xl font-bold tracking-tight text-fg">新建 PRD 方案</h1>
+  </header>
+
+  <div class="grid gap-x-6 gap-y-9 sm:grid-cols-2">
+    <section class="flex flex-col" aria-label="从零创建 PRD">
+      <header class="mb-3.5">
+        <div class="flex items-center gap-2">
+          <span class="h-4 w-1 rounded-full bg-accent" aria-hidden="true"></span>
+          <h2 class="text-sm font-semibold text-fg">从零创建 PRD</h2>
+        </div>
+      </header>
+
+      <div class="flex flex-1 flex-col gap-3">
+        <a
+          href="form.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">完整流程</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。
+          </span>
+        </a>
+
+        <a
+          href="quick.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M11.3 1.046A1 1 0 0 1 12 2v5h4a1 1 0 0 1 .82 1.573l-7 10A1 1 0 0 1 8 18v-5H4a1 1 0 0 1-.82-1.573l7-10a1 1 0 0 1 1.12-.381Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">快捷流程</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            一段话说清想法，跳过表单与对话，直接逐章生成 PRD。
+          </span>
+        </a>
+      </div>
+    </section>
+
+    <section class="flex flex-col" aria-label="导入已有素材">
+      <header class="mb-3.5">
+        <div class="flex items-center gap-2">
+          <span class="h-4 w-1 rounded-full bg-accent" aria-hidden="true"></span>
+          <h2 class="text-sm font-semibold text-fg">导入已有素材</h2>
+        </div>
+      </header>
+
+      <div class="flex flex-1 flex-col gap-3">
+        <a
+          href="import.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M6.28 5.22a.75.75 0 0 1 0 1.06L2.56 10l3.72 3.72a.75.75 0 0 1-1.06 1.06L.97 10.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Zm7.44 0a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L17.44 10l-3.72-3.72a.75.75 0 0 1 0-1.06Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">我有 PRD</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。
+          </span>
+        </a>
+
+        <a
+          href="import.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M4 3h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm0 9h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">我有 PRD + 接口文档</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            两份都贴进来，提示词因此能对齐真实的接口路径与字段名。
+          </span>
+        </a>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- 登录 / 注册弹窗：逐字取自 frontend/src/components/AuthDialog.vue（登录态，带「为什么弹出来」提示） -->
+<div
+  class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overscroll-contain bg-stone-950/50 p-4 pt-24 backdrop-blur-sm"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="auth-title"
+  tabindex="-1"
+>
+  <div class="auth-panel w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-pop outline-none" tabindex="-1">
+    <div class="flex items-start justify-between">
+      <div>
+        <h2 id="auth-title" class="text-base font-bold text-fg">登录</h2>
+      </div>
+      <button
+        type="button"
+        class="-mr-1 -mt-1 inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg text-body hover:bg-surface-2 hover:text-accent px-3 py-1.5 text-xs !px-1.5 !py-1.5"
+        aria-label="关闭"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"
+          />
+        </svg>
+      </button>
+    </div>
+
+    <p class="mt-4 rounded-xl border border-warning-line bg-warning-surface px-3 py-2 text-xs text-warning-fg">
+      创建任务需要先登录
+    </p>
+
+    <div class="mt-4 flex gap-1 rounded-xl bg-surface-2 p-1 text-sm">
+      <button type="button" class="flex-1 rounded-lg py-1.5 font-medium transition bg-surface text-fg shadow-sm ring-1 ring-line-strong">
+        登录
+      </button>
+      <button type="button" class="flex-1 rounded-lg py-1.5 font-medium transition text-muted hover:text-fg">
+        注册
+      </button>
+    </div>
+
+    <form class="mt-4 space-y-3">
+      <label class="block">
+        <span class="text-xs font-medium text-muted">用户名</span>
+        <input
+          type="text"
+          autocomplete="username"
+          value="linjian"
+          class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="3-32 个字符"
+        />
+      </label>
+
+      <label class="block">
+        <span class="text-xs font-medium text-muted">密码</span>
+        <input
+          type="password"
+          autocomplete="current-password"
+          value="prdwright2026"
+          class="mt-1 w-full rounded-xl border border-line-strong bg-field px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="请输入密码"
+        />
+      </label>
+
+      <button
+        type="submit"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm w-full"
+      >
+        登录
+      </button>
+    </form>
+  </div>
+</div>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

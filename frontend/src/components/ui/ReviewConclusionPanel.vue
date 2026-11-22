@@ -393,7 +393,7 @@ const fixHint = computed(() => {
              判据用状态键 `isRevise`，不拿中文标签做比较——文案会改，键不会。 -->
         <span
           v-if="!isRevise"
-          class="rounded-full px-2 py-0.5 text-[11px] font-medium"
+          class="rounded-full px-2 py-0.5 text-xs font-medium"
           :class="stateClass"
         >
           {{ stateLabel }}
@@ -404,15 +404,15 @@ const fixHint = computed(() => {
             v-for="level in (['high', 'medium', 'low'] as const)"
             :key="level"
             v-show="issues.some((i) => severityOf(i.severity) === level)"
-            class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium ring-1"
+            class="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-medium ring-1"
             :class="SEVERITY_META[level].badge"
           >
             {{ SEVERITY_META[level].label }}
-            <span class="font-normal opacity-75">{{ issues.filter((i) => severityOf(i.severity) === level).length }}</span>
+            <span class="font-normal">{{ issues.filter((i) => severityOf(i.severity) === level).length }}</span>
           </span>
         </span>
         <!-- 追溯信息靠右 -->
-        <span v-if="metaText" class="ml-auto text-[11px] leading-snug text-subtle">{{ metaText }}</span>
+        <span v-if="metaText" class="ml-auto text-xs leading-snug text-subtle">{{ metaText }}</span>
       </div>
 
       <!-- 动作行靠右：修复 / 重新审核（不可用时不显示）/ 展开全部 -->
@@ -511,19 +511,19 @@ const fixHint = computed(() => {
             >
               <p class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 <span
-                  class="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1"
+                  class="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs font-semibold ring-1"
                   :class="SEVERITY_META[severityOf(issue.severity)].badge"
                 >
                   {{ SEVERITY_META[severityOf(issue.severity)].label }}
                 </span>
                 <span
                   v-if="issue.where"
-                  class="break-words font-mono text-[11px] leading-snug text-subtle"
+                  class="break-words font-mono text-xs leading-snug text-subtle"
                 >
                   {{ cleanWhere(issue.where) }}
                 </span>
               </p>
-              <p class="break-words text-sm leading-relaxed text-body">{{ issue.detail }}</p>
+              <p class="max-w-[44em] break-words text-sm leading-relaxed text-body">{{ issue.detail }}</p>
             </li>
           </ul>
         </section>

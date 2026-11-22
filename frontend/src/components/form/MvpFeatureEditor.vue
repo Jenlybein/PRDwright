@@ -111,7 +111,7 @@ function runImport(): void {
         <div>
           <label :for="`field-${errorKey(index, 'name')}`" class="mb-1.5 block text-xs font-medium text-muted ">
             功能名称
-            <span class="text-red-500" aria-hidden="true">*</span>
+            <span class="text-danger-fg" aria-hidden="true">*</span>
           </label>
           <input
             :id="`field-${errorKey(index, 'name')}`"
@@ -139,7 +139,7 @@ function runImport(): void {
         <div>
           <label :for="`field-${errorKey(index, 'description')}`" class="mb-1.5 block text-xs font-medium text-muted ">
             功能描述
-            <span class="text-red-500" aria-hidden="true">*</span>
+            <span class="text-danger-fg" aria-hidden="true">*</span>
           </label>
           <input
             :id="`field-${errorKey(index, 'description')}`"
@@ -193,7 +193,7 @@ function runImport(): void {
     <div class="pt-0.5">
       <button
         type="button"
-        class="text-xs text-subtle underline-offset-2 transition hover:text-accent hover:underline"
+        class="px-1 py-1 text-xs text-subtle underline-offset-2 transition hover:text-accent hover:underline"
         @click="showPaste = !showPaste"
       >
         {{ showPaste ? '收起批量粘贴' : '批量粘贴导入（可选）' }}

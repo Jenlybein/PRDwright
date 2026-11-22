@@ -39,12 +39,6 @@ const outlineTitle = computed(() =>
   props.phase === 'outlining' ? '大纲' : '大纲（已定结构）',
 )
 
-const outlineHint = computed(() =>
-  props.phase === 'outlining'
-    ? '从上游材料抽取结构；抽不到的标「待确认」'
-    : '正文正在写；标「待确认」的是材料里没给的部分',
-)
-
 const title = computed(() => (props.phase === 'rewriting' ? '改写稿' : '审核意见'))
 
 const hint = computed(() =>
@@ -80,10 +74,10 @@ watch(
         <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
         {{ outlineTitle }}
       </span>
-      <span class="shrink-0 text-[11px] text-subtle">{{ outlineHint }}</span>
+
     </div>
     <div
-      class="max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted"
+      class="max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-muted"
     >
       {{ outlineText }}
     </div>
@@ -100,11 +94,11 @@ watch(
         <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
         {{ title }}
       </span>
-      <span class="shrink-0 text-[11px] text-subtle">{{ hint }}</span>
+      <span class="shrink-0 text-xs text-subtle">{{ hint }}</span>
     </div>
     <div
       ref="scroller"
-      class="max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted"
+      class="max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-muted"
     >
       <span v-if="!text" class="text-subtle">等待模型首个输出…</span>
       <template v-else>{{ text }}</template>

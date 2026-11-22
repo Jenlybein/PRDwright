@@ -1,0 +1,259 @@
+<!--
+  对话页 · 需求澄清线程（进行中）
+  逐字取自 frontend/src/components/stages/ChatStage.vue（模板 196–325 行），并把
+  ChatThreadTabs / MessageList / ClarificationAskList / AppActionBar / ChatInput 全部展开成真实 HTML。
+
+  状态（均为源码里真实存在的分支）：
+  - 子标签停在「需求澄清」；availableTabs 在还没生成 PRD 时只含它，其余三条置灰不可点；
+  - canGeneratePrd 为真（已有 AI 正文且没有请求在跑）→ 底栏右端给「生成 PRD」；
+  - 需求澄清线程才有的「重新开始 │ 改需求」次操作照旧出现；
+  - 选择题已选 A、未提交 → 「提交回答」可用。
+
+  两处取舍（都因为消息区要在一屏内收得下）：
+  1. 只放一道结构化选择题，另外两个待定问题写在 AI 的列表追问里；
+  2. 最后一条 AI 消息挂着未作答的选择题（unansweredAsk 为真），源码在卡片顶部还有一条
+     黄色收口提醒条；本屏省略它，否则消息区再高出 30px，「提交回答」会被吸底栏压住。
+-->
+<section class="space-y-3">
+  <!-- 子标签栏（ui/ChatThreadTabs.vue）：四条线程常驻，未就绪的置灰并给出理由 -->
+  <div
+    class="flex flex-wrap items-center gap-1 rounded-xl bg-surface-2 p-1 ring-1 ring-line"
+    role="tablist"
+    aria-label="澄清线程"
+  >
+    <button
+      type="button"
+      role="tab"
+      class="rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed bg-surface text-fg shadow-sm"
+      aria-selected="true"
+    >
+      需求澄清
+    </button>
+    <button
+      type="button"
+      role="tab"
+      class="rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed text-subtle/60"
+      aria-selected="false"
+      disabled
+      title="这条澄清线程还用不了"
+    >
+      PRD 澄清
+    </button>
+    <button
+      type="button"
+      role="tab"
+      class="rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed text-subtle/60"
+      aria-selected="false"
+      disabled
+      title="这条澄清线程还用不了"
+    >
+      接口澄清
+    </button>
+    <button
+      type="button"
+      role="tab"
+      class="rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed text-subtle/60"
+      aria-selected="false"
+      disabled
+      title="这条澄清线程还用不了"
+    >
+      提示词澄清
+    </button>
+  </div>
+
+  <!-- 对话卡片：只负责消息区，输入框在页面级底栏的内容行里 -->
+  <div class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+    <div class="border-b border-line px-4 py-3 sm:px-6">
+      <h2 class="text-sm font-semibold text-fg">需求澄清对话</h2>
+    </div>
+
+    <!-- 消息区（MessageList.vue）：内部滚动。源码高度是 min(60vh, 560px)；
+         静态稿按设计工作台的 1280×800 画幅钉成 400px，让整张对话卡连同
+         「提交回答」都落在吸底操作栏之上，而不是被它压掉半截。 -->
+    <div class="flex flex-col bg-surface-2" style="height: 400px">
+      <div class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+        <div class="mx-auto flex max-w-3xl flex-col gap-5">
+          <!-- ① 用户：需求原话 -->
+          <div class="flex gap-3 flex-row-reverse">
+            <div
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold bg-primary-800 text-white"
+            >
+              我
+            </div>
+            <div class="min-w-0 max-w-[78%]">
+              <div
+                class="rounded-2xl rounded-tr-sm bg-primary-500 px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words text-white shadow-sm"
+              >想做一个小区内部的二手交易 App：邻居之间转闲置，重点是信任和安全。</div>
+            </div>
+          </div>
+
+          <!-- ② AI：确认理解 + 列表追问，随后接结构化选择题（Markdown → .prose） -->
+          <div class="flex gap-3 flex-row">
+            <div
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold bg-surface-2 text-muted ring-1 ring-line"
+            >
+              AI
+            </div>
+            <div class="min-w-0 max-w-[78%]">
+              <div
+                class="prose prose-sm prose-stone doc-reveal max-w-none rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm ring-1 ring-line dark:prose-invert"
+              >
+                <div>
+                  <p>读完了，理解没有偏差：地基是信任与安全。先把两件事摆出来——</p>
+                  <ol>
+                    <li><strong>认证门槛</strong>：发布要实名吗？</li>
+                    <li><strong>交易闭环</strong>：站内付款还是当面交割？</li>
+                  </ol>
+                </div>
+              </div>
+
+              <!-- 选择题：只有当前线程的最后一条消息可交互（最后一条即本条） -->
+              <div class="mt-3 space-y-3">
+                <div class="rounded-xl border border-line bg-surface-2 px-3 py-2.5">
+                  <p class="text-sm font-medium text-fg">发布商品需要实名认证吗？</p>
+
+                  <div class="mt-2 space-y-1.5" role="radiogroup" aria-label="发布商品需要实名认证吗？">
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked="true"
+                      class="flex w-full items-start gap-2.5 rounded-xl border bg-surface px-3 py-2.5 text-left text-sm shadow-sm transition border-primary-500 bg-accent-soft ring-1 ring-accent-soft-line"
+                    >
+                      <span
+                        class="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-xs font-semibold bg-primary-500 text-white"
+                        aria-hidden="true"
+                      >
+                        A
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span class="block break-words text-body">手机号 + 短信验证码</span>
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked="false"
+                      class="flex w-full items-start gap-2.5 rounded-xl border bg-surface px-3 py-2.5 text-left text-sm shadow-sm transition border-line"
+                    >
+                      <span
+                        class="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-xs font-semibold bg-surface-2 text-muted"
+                        aria-hidden="true"
+                      >
+                        B
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span class="block break-words text-body">手机号 + 实名认证</span>
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked="false"
+                      class="flex w-full items-start gap-2.5 rounded-xl border bg-surface px-3 py-2.5 text-left text-sm shadow-sm transition border-line"
+                    >
+                      <span
+                        class="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-xs font-semibold bg-surface-2 text-muted"
+                        aria-hidden="true"
+                      >
+                        C
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span class="block break-words text-body">手机号 + 小区居住证明</span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  class="sticky bottom-0 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line/60 bg-surface-2 px-3 py-2"
+                >
+                  <button
+                    type="button"
+                    class="rounded-lg bg-primary-500 px-3.5 py-1.5 text-xs font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    提交回答
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 页面级操作栏（ui/AppActionBar.vue）：内容行放输入框，流程行放「重新开始 │ 改需求 … 生成 PRD」 -->
+  <div
+    class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]"
+  >
+    <div class="border-b border-line bg-surface-2/60">
+      <div class="mx-auto w-full max-w-3xl px-4 py-2.5">
+        <!-- ChatInput（embedded 形态）：不重复自带分隔线、底色与提示行 -->
+        <div>
+          <div
+            class="flex items-end gap-2 rounded-2xl border bg-surface p-2 shadow-sm transition-colors border-line-strong focus-within:border-primary-400"
+          >
+            <textarea
+              rows="1"
+              placeholder="输入你的想法，回车发送，Shift+Enter 换行"
+              class="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed text-fg outline-none focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-subtle disabled:cursor-not-allowed disabled:opacity-60"
+            >同一个人反复放鸽子，有什么办法约束？</textarea>
+            <button
+              type="button"
+              class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 disabled:bg-surface-2 disabled:text-subtle disabled:shadow-none px-4 py-2 text-sm h-9 shrink-0"
+            >
+              <span>发送</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3"
+    >
+      <div class="flex min-w-0 flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 text-danger-fg hover:bg-danger-surface disabled:opacity-50 px-4 py-2 text-sm"
+        >
+          重新开始
+        </button>
+        <span class="h-5 w-px shrink-0 bg-line-strong" aria-hidden="true"></span>
+        <a
+          href="form.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 border border-line-strong bg-surface text-body hover:border-accent hover:text-accent disabled:opacity-50 px-4 py-2 text-sm"
+        >
+          改需求
+        </a>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <a
+          href="generating.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 disabled:bg-surface-2 disabled:text-subtle disabled:shadow-none px-4 py-2 text-sm"
+        >
+          <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          生成 PRD
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+
+
+
+
+
+
+

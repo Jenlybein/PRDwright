@@ -107,16 +107,9 @@ const heading = computed(() => {
 })
 
 /**
- * 头部副标题。
- *
- * 刻意不写具体数字：提问上限是后端提示词的口径，文案里再落一份数字
- * 就等于又多出一个需要手工同步的副本。
+ * 头部副标题已去掉：两句话都在解释「这个页面会怎么走」，而标题、子标签栏和底栏动作
+ * 已经把流程说清楚了。少一行解释，消息区就多一行正文（设计稿同步）。
  */
-const subheading = computed(() =>
-  onRequirement.value
-    ? 'AI 会追问关键细节，逐步澄清后再生成文档'
-    : '按 P0 → P6 逐级确认剩余问题；聊够了随时可以写回文档',
-)
 
 /** 改写按钮的禁用态：这一轮还没聊出结论、或正在改写中，都点不动 */
 const rewriteDisabled = computed(() => !props.canRewrite || Boolean(props.rewriting))
@@ -211,7 +204,6 @@ watch(
     <div class="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
       <div class="border-b border-line px-4 py-3 sm:px-6">
         <h2 class="text-sm font-semibold text-fg">{{ heading }}</h2>
-        <p class="mt-0.5 text-xs text-subtle">{{ subheading }}</p>
       </div>
 
       <!-- 澄清收口提醒：需求线程看「还有没有未答的提问」，文档线程看「还剩几条待确认」。

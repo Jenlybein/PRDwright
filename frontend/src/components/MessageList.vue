@@ -223,14 +223,14 @@ defineExpose({ scrollToBottom })
                 {{ item.question }}
               </p>
               <p class="mt-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
-                <span class="text-[11px] text-subtle">你选了</span>
+                <span class="text-xs text-subtle">你选了</span>
                 <span
                   v-for="(label, labelIndex) in item.labels"
                   :key="label"
                   class="flex items-center gap-1"
                 >
                   <span
-                    class="flex h-5 min-w-5 items-center justify-center rounded-full bg-surface px-1.5 text-[11px] font-semibold text-body ring-1 ring-line"
+                    class="flex h-5 min-w-5 items-center justify-center rounded-full bg-surface px-1.5 text-xs font-semibold text-body ring-1 ring-line"
                   >
                     {{ label }}
                   </span>

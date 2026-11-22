@@ -1,0 +1,7 @@
+{
+  "title": "审阅 PRD · 暗色 · PRDwright",
+  "progress": { "current": "review-prd", "reached": "review-prd" },
+  "barHeight": 114,
+  "dark": true,
+  "bodyFrom": "review"
+}

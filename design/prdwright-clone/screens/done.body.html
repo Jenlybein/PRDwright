@@ -1,0 +1,168 @@
+<!-- 交付页：逐字取自 frontend/src/components/stages/DoneStage.vue（三份文档齐全 / 完整流程落点，故不显示「返回」） -->
+<section class="space-y-4">
+  <!-- 完成提示头 -->
+  <div class="rounded-2xl border border-line bg-surface p-6 text-center shadow-sm">
+    <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary-50 dark:bg-primary-950/40">
+      <svg class="h-6 w-6 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path
+          fill-rule="evenodd"
+          d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 1 1-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z"
+          clip-rule="evenodd"
+        />
+      </svg>
+    </div>
+    <h2 class="mt-3 text-base font-semibold text-fg">3 份文档已全部完成</h2>
+  </div>
+
+  <!-- 三份文档卡片：图标与配色按 DoneStage 的 ALL_CARDS 配置区分 -->
+  <div class="grid gap-4">
+    <article class="flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-4 shadow-sm">
+      <div class="flex min-w-0 items-center gap-3">
+        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary-50 dark:bg-primary-950/40">
+          <svg class="h-5 w-5 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <h3 class="text-sm font-semibold text-fg">PRD 文档</h3>
+          <p class="truncate text-xs text-subtle">12480 字符 · 11-21 21:40 更新</p>
+        </div>
+      </div>
+      <div class="flex shrink-0 gap-2">
+        <a
+          href="review.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg border border-line-strong bg-surface text-body hover:border-accent hover:text-accent px-3 py-1.5 text-xs"
+        >
+          查看
+        </a>
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-3 py-1.5 text-xs"
+        >
+          <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          下载
+        </button>
+      </div>
+    </article>
+
+    <article class="flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-4 shadow-sm">
+      <div class="flex min-w-0 items-center gap-3">
+        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary-50 dark:bg-primary-950/40">
+          <svg class="h-5 w-5 text-primary-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M2 4.75A2.75 2.75 0 0 1 4.75 2h6.5A.75.75 0 0 1 12 2v3.25h3.25a.75.75 0 0 1 .75.75v9.25A2.75 2.75 0 0 1 13.25 18h-8.5A2.75 2.75 0 0 1 2 15.25V4.75Zm8.5 3.5h3.5v-2.5h-3.5v2.5ZM6 7.75A.75.75 0 0 0 5.25 8.5v3a.75.75 0 0 0 1.5 0v-3A.75.75 0 0 0 6 7.75Zm3 0a.75.75 0 0 0-.75.75v3a.75.75 0 0 0 1.5 0v-3A.75.75 0 0 0 9 7.75Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <h3 class="text-sm font-semibold text-fg">接口文档</h3>
+          <p class="truncate text-xs text-subtle">4612 字符 · 11-21 21:52 更新</p>
+        </div>
+      </div>
+      <div class="flex shrink-0 gap-2">
+        <a
+          href="review.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg border border-line-strong bg-surface text-body hover:border-accent hover:text-accent px-3 py-1.5 text-xs"
+        >
+          查看
+        </a>
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-3 py-1.5 text-xs"
+        >
+          <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          下载
+        </button>
+      </div>
+    </article>
+
+    <article class="flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-4 shadow-sm">
+      <div class="flex min-w-0 items-center gap-3">
+        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-success-surface">
+          <svg class="h-5 w-5 text-success-fg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M9.25 2.5a.75.75 0 0 1 .75.75v6.94l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 1 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75Zm-6.5 10a.75.75 0 0 1 .75.75v1h13v-1a.75.75 0 0 1 1.5 0v1.75a.75.75 0 0 1-.75.75h-14.5a.75.75 0 0 1-.75-.75v-1.75a.75.75 0 0 1 .75-.75Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <h3 class="text-sm font-semibold text-fg">提示词套件</h3>
+          <p class="truncate text-xs text-subtle">8240 字符 · 11-21 22:05 更新</p>
+        </div>
+      </div>
+      <div class="flex shrink-0 gap-2">
+        <a
+          href="review.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg border border-line-strong bg-surface text-body hover:border-accent hover:text-accent px-3 py-1.5 text-xs"
+        >
+          查看
+        </a>
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-3 py-1.5 text-xs"
+        >
+          <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          下载
+        </button>
+      </div>
+    </article>
+  </div>
+
+  <!-- 页面级操作栏：左「重新开始」，右主操作「下载交付包」（AppActionBar 流程行，无内容工具行） -->
+  <div
+    class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]"
+  >
+    <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3">
+      <div class="flex min-w-0 flex-wrap items-center gap-2">
+        <a
+          href="entry.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg text-danger-fg hover:bg-danger-surface px-4 py-2 text-sm"
+        >
+          重新开始
+        </a>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm"
+        >
+          <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path
+              fill-rule="evenodd"
+              d="M10 2a.75.75 0 0 1 .75.75v7.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.75A.75.75 0 0 1 10 2ZM5.25 12.5a.75.75 0 0 1 .75.75v2.25h8v-2.25a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75Z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          下载交付包
+        </button>
+      </div>
+    </div>
+  </div>
+</section>

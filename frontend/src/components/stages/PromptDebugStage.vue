@@ -74,7 +74,7 @@ const previewLine = computed(() => {
       <div>
         <label for="field-debug-prd" class="mb-1.5 block text-xs font-medium text-muted ">
           PRD 正文（Markdown）
-          <span class="ml-1 text-rose-500">*</span>
+          <span class="ml-1 text-danger-fg">*</span>
         </label>
         <textarea
           id="field-debug-prd"
@@ -98,7 +98,6 @@ const previewLine = computed(() => {
           <p v-else-if="!looksLikeMarkdown" class="text-xs text-warning-fg">
             没检测到 Markdown 标题（`#`）。纯文本也能生成，只是章节结构可能不如原文清晰。
           </p>
-          <p v-else class="text-xs text-subtle">支持任意 Markdown 文本，不做格式校验。</p>
           <span class="shrink-0 text-xs text-subtle">{{ prdText.length }} 字</span>
         </div>
       </div>

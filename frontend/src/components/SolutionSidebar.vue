@@ -123,9 +123,10 @@ function open(item: SolutionSummary): void {
         >
           H
         </div>
+        <!-- 只留产品名：副标题那句「需求 → PRD / 接口 / 提示词」是标语，
+             11px 又低于可读下限，去掉后品牌区反而更稳（与设计稿一致）。 -->
         <div class="min-w-0 leading-tight">
           <div class="truncate text-sm font-bold text-fg">PRDwright</div>
-          <div class="truncate text-[11px] text-subtle">需求 → PRD / 接口 / 提示词</div>
         </div>
       </div>
 

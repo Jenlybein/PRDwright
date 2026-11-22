@@ -94,7 +94,7 @@ onBeforeUnmount(() => document.removeEventListener('click', handleOutsideClick))
       >
         <div class="border-b border-line px-3 py-2">
           <div class="truncate text-xs font-semibold text-fg">{{ auth.displayName }}</div>
-          <div class="text-[11px] text-subtle">已登录</div>
+          <div class="text-xs text-subtle">已登录</div>
         </div>
         <button
           type="button"

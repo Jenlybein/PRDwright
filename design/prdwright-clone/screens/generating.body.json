@@ -1,0 +1,9 @@
+{
+  "title": "生成 PRD · PRDwright",
+  "progress": {
+    "current": "review-prd",
+    "reached": "review-prd",
+    "generating": true
+  },
+  "barHeight": 63
+}

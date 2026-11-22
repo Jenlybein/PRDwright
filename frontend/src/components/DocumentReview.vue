@@ -207,7 +207,7 @@ defineExpose({
       <!-- 生成中：只读展示流式内容（Markdown 实时渲染） -->
       <div v-else-if="generating" class="space-y-2">
         <div
-          class="prose prose-sm prose-stone max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
+          class="prose prose-sm prose-stone max-w-none rounded-xl bg-surface px-[clamp(1.25rem,8vw,3.75rem)] py-4 shadow-sm ring-1 ring-line dark:prose-invert"
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
           <div v-html="renderMarkdown(streamingContent)" />
@@ -222,7 +222,7 @@ defineExpose({
         <!-- 预览视图：渲染缓存后的 HTML；`locked` 期间编辑视图不可达，恒停在这里 -->
         <div
           v-if="effectiveViewMode === 'preview'"
-          class="prose prose-sm prose-stone max-w-none rounded-xl bg-surface px-5 py-4 shadow-sm ring-1 ring-line dark:prose-invert"
+          class="prose prose-sm prose-stone max-w-none rounded-xl bg-surface px-[clamp(1.25rem,8vw,3.75rem)] py-4 shadow-sm ring-1 ring-line dark:prose-invert"
         >
           <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it 渲染且已关闭原始 HTML -->
           <div v-html="renderedHtml" />

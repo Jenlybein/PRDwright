@@ -1,0 +1,70 @@
+<!-- 左侧方案侧边栏 · 未登录态：取自 SolutionSidebar.vue 的 v-else 分支（「登录后查看你的方案列表」+ 登录按钮） -->
+<button
+  type="button"
+  class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-white shadow-lg lg:hidden"
+  aria-label="打开方案列表"
+>
+  <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path
+      fill-rule="evenodd"
+      d="M2 5.75A.75.75 0 0 1 2.75 5h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 5.75Zm0 4.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm.75 3.5a.75.75 0 0 0 0 1.5h14.5a.75.75 0 0 0 0-1.5H2.75Z"
+      clip-rule="evenodd"
+    />
+  </svg>
+</button>
+
+<aside
+  class="sidebar-surface flex flex-col border-line bg-surface/80 backdrop-blur fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform duration-[260ms] ease-[var(--ease-drawer)] overscroll-contain lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0 -translate-x-full"
+  aria-label="方案列表"
+>
+  <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+    <div class="flex min-w-0 items-center gap-2.5">
+      <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary-700 text-sm font-bold text-white">
+        H
+      </div>
+      <div class="min-w-0 leading-tight">
+        <div class="truncate text-sm font-bold text-fg">PRDwright</div>
+      </div>
+    </div>
+
+    <div class="relative">
+      <button
+        type="button"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed text-body hover:bg-surface-2 hover:text-accent disabled:opacity-40 px-3 py-1.5 text-xs !px-2"
+        aria-label="主题：跟随系统，点击切换"
+        title="主题：跟随系统"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M3.5 3A1.5 1.5 0 0 0 2 4.5v7A1.5 1.5 0 0 0 3.5 13h4v1.5H6a.75.75 0 0 0 0 1.5h8a.75.75 0 0 0 0-1.5h-1.5V13h4A1.5 1.5 0 0 0 18 11.5v-7A1.5 1.5 0 0 0 16.5 3h-13Zm.5 1.5h12v6H4v-6ZM8.75 13h2.5v1.5h-2.5V13Z"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 未登录占位 -->
+  <div class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+    <p class="px-2 py-6 text-center text-xs leading-relaxed text-subtle">
+      登录后查看<br />你的方案列表
+    </p>
+  </div>
+
+  <!-- 底端：登录入口 -->
+  <div class="border-t border-line px-3 py-3">
+    <div class="relative">
+      <button
+        type="button"
+        class="flex w-full items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-body shadow-sm transition hover:border-accent hover:text-fg"
+        aria-label="登录"
+      >
+        <svg class="h-4 w-4 text-subtle" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M10 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM3.465 14.493a1.23 1.23 0 0 0 .41 1.412A9.957 9.957 0 0 0 10 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 0 0-13.074.003Z"
+          />
+        </svg>
+        <span class="min-w-0 flex-1 truncate text-left">登录</span>
+      </button>
+    </div>
+  </div>
+</aside>

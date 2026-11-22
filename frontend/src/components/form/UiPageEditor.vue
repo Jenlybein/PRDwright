@@ -125,7 +125,7 @@ function runImport(): void {
         <div>
           <label :for="`field-${errorKey(index, 'name')}`" class="mb-1.5 block text-xs font-medium text-muted ">
             页面名称
-            <span class="text-red-500" aria-hidden="true">*</span>
+            <span class="text-danger-fg" aria-hidden="true">*</span>
           </label>
           <input
             :id="`field-${errorKey(index, 'name')}`"
@@ -154,7 +154,7 @@ function runImport(): void {
         <div>
           <label :for="`field-${errorKey(index, 'modules')}`" class="mb-1.5 block text-xs font-medium text-muted ">
             模块 / 区块
-            <span class="text-red-500" aria-hidden="true">*</span>
+            <span class="text-danger-fg" aria-hidden="true">*</span>
             <span class="ml-1 font-normal text-subtle">回车或逗号确认一个模块</span>
           </label>
 
@@ -169,7 +169,7 @@ function runImport(): void {
               <button
                 type="button"
                 :title="`移除模块：${module}`"
-                class="text-primary-400 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
+                class="px-2 py-1 text-primary-600 transition hover:text-red-600 dark:text-primary-300/70 dark:hover:text-red-400"
                 @click="removeModule(index, moduleIndex)"
               >
                 ×
@@ -241,7 +241,7 @@ function runImport(): void {
     <div class="pt-0.5">
       <button
         type="button"
-        class="text-xs text-subtle underline-offset-2 transition hover:text-accent hover:underline"
+        class="px-1 py-1 text-xs text-subtle underline-offset-2 transition hover:text-accent hover:underline"
         @click="showPaste = !showPaste"
       >
         {{ showPaste ? '收起批量粘贴' : '批量粘贴导入（可选）' }}

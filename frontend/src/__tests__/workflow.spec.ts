@@ -651,7 +651,6 @@ describe('入口模式登记表：完整流程一行', () => {
     expect(spec.mode).toBe('structured')
     expect(spec.card.groupId).toBe('from-scratch')
     expect(spec.card.groupTitle).toBe('从零创建 PRD')
-    expect(spec.card.groupDescription).toBe('还没有任何材料，从这里把需求说清楚。')
     expect(spec.card.title).toBe('完整流程')
     expect(spec.card.description).toBe('逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。')
 
@@ -745,7 +744,6 @@ describe('入口模式登记表：快捷流程一行', () => {
     expect(spec.mode).toBe('prd-quick')
     expect(spec.card.groupId).toBe('from-scratch')
     expect(spec.card.groupTitle).toBe('从零创建 PRD')
-    expect(spec.card.groupDescription).toBe('还没有任何材料，从这里把需求说清楚。')
     expect(spec.card.title).toBe('快捷流程')
     expect(spec.card.description).toBe('一段话说清想法，跳过表单与对话，直接逐章生成 PRD。')
 
@@ -808,7 +806,6 @@ describe('入口模式登记表：我有 PRD 一行', () => {
     expect(spec.mode).toBe('prompt-debug')
     expect(spec.card.groupId).toBe('with-material')
     expect(spec.card.groupTitle).toBe('导入已有素材')
-    expect(spec.card.groupDescription).toBe('手头已经有写好的材料，别重复劳动。')
     expect(spec.card.title).toBe('我有 PRD')
     expect(spec.card.description).toBe('贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。')
 
@@ -869,7 +866,6 @@ describe('入口模式登记表：我有 PRD + 接口文档一行', () => {
     expect(spec.mode).toBe('prd-and-api-paste')
     expect(spec.card.groupId).toBe('with-material')
     expect(spec.card.groupTitle).toBe('导入已有素材')
-    expect(spec.card.groupDescription).toBe('手头已经有写好的材料，别重复劳动。')
     expect(spec.card.title).toBe('我有 PRD + 接口文档')
     expect(spec.card.description).toBe('两份都贴进来，提示词因此能对齐真实的接口路径与字段名。')
 
@@ -986,7 +982,6 @@ describe('入口登记表完整性：漏行漏列当场失败', () => {
       card: {
         groupId: 'from-scratch',
         groupTitle: '从零创建 PRD',
-        groupDescription: '还没有任何材料，从这里把需求说清楚。',
         title: '第五入口',
         description: '维护者新加的一行。',
       },

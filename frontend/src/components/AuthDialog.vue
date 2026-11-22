@@ -179,12 +179,10 @@ watch(
               <h2 :id="titleId" class="text-base font-bold text-fg">
                 {{ isRegister ? '注册账号' : '登录' }}
               </h2>
-              <p class="mt-1 text-xs text-subtle">
-                {{
-                  isRegister
-                    ? '注册需要邀请码，成功后会自动登录'
-                    : '登录后才能创建任务并调用模型'
-                }}
+              <!-- 登录态不再叠一句「登录后才能创建任务并调用模型」：被动弹出时
+                   下面那条黄条已经说了为什么，这里是重复的。注册态保留邀请码说明（真信息）。 -->
+              <p v-if="isRegister" class="mt-1 text-xs text-subtle">
+                注册需要邀请码，成功后会自动登录
               </p>
             </div>
             <AppButton variant="ghost" size="sm" class="-mr-1 -mt-1 !px-1.5 !py-1.5" aria-label="关闭" @click="close">

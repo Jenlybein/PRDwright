@@ -456,7 +456,7 @@ function submitOptimize(): void {
         <span>
           请求号
           <code
-            class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px] text-muted"
+            class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-xs text-muted"
             title="选中即可复制"
             >{{ runSummary.requestId }}</code
           >
@@ -469,7 +469,7 @@ function submitOptimize(): void {
         <span>
           技能包 {{ skill.name }} v{{ skill.version }}
           <code
-            class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-[11px] text-muted"
+            class="select-all rounded bg-surface-2 px-1 py-0.5 font-mono text-xs text-muted"
             title="三份技能资源的内容指纹"
             >{{ skill.fingerprint }}</code
           >

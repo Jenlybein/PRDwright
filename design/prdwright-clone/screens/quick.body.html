@@ -1,0 +1,86 @@
+<!-- 快捷流程录入页：逐字取自 frontend/src/components/stages/QuickPrdStage.vue（已填状态：需求描述非空 → 文本框描边为 accent） -->
+<section class="space-y-4">
+  <header>
+    <h1 class="text-lg font-bold text-fg">直接生成 PRD</h1>
+  </header>
+
+  <div class="space-y-3 rounded-2xl border border-line bg-surface p-5 shadow-sm">
+    <!-- 产品名称（可选） -->
+    <div>
+      <label for="field-quick-product-name" class="mb-1.5 block text-xs font-medium text-muted">
+        产品名称
+        <span class="ml-1 font-normal text-subtle">可选</span>
+      </label>
+      <input
+        id="field-quick-product-name"
+        type="text"
+        class="w-full rounded-lg border border-line-strong px-3 py-2 text-sm text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+        placeholder="例如：小账本"
+        value="社区二手交易 App"
+      />
+    </div>
+
+    <!-- 需求描述（必填，已填） -->
+    <div>
+      <label for="field-quick-requirements" class="mb-1.5 block text-xs font-medium text-muted">
+        需求描述
+        <span class="ml-1 text-danger-fg">*</span>
+      </label>
+      <textarea
+        id="field-quick-requirements"
+        rows="8"
+        class="w-full resize-y rounded-lg border border-accent px-3 py-2 text-sm leading-relaxed text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+        placeholder="干什么用的、给谁用、要有哪些功能、有什么技术或范围的约束……没提到的会被标成「待确认」。"
+      >做一个社区二手交易 App，让同一小区的邻居之间安全、快速地完成闲置物品的转让，主要用户是 25–40 岁的城市社区住户。
+MVP 要有发布闲置（图片、价格、成色）、附近在售列表、站内私信、交易评价，以及举报与拉黑。
+登录用手机号 + 短信验证码，不做第三方登录；社区范围按小区划分，列表默认只展示同小区和三公里内的物品。
+平台先做 iOS / Android App 和微信小程序，三端共用同一份后端接口。
+后端 FastAPI + SQLModel，数据存 Postgres，图片和头像放对象存储，部署用 Docker Compose + Nginx。</textarea>
+      <div class="mt-1.5 flex items-start justify-between gap-3">
+        <span class="shrink-0 text-xs text-subtle">278 字</span>
+      </div>
+    </div>
+
+    <!-- 快捷操作（工具类，留在卡片内） -->
+    <div class="flex flex-wrap items-center gap-2 border-t border-line pt-3">
+      <button
+        type="button"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg border border-line-strong bg-surface text-body hover:border-accent hover:text-accent px-3 py-1.5 text-xs"
+      >
+        填充示例
+      </button>
+    </div>
+  </div>
+
+  <!-- 页面级操作栏：左「清空」│「返回入口」，右主操作「生成 PRD」 -->
+  <div
+    class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]"
+  >
+    <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3">
+      <div class="flex min-w-0 flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg text-danger-fg hover:bg-danger-surface px-4 py-2 text-sm"
+        >
+          清空
+        </button>
+        <span class="h-5 w-px shrink-0 bg-line-strong" aria-hidden="true"></span>
+        <a
+          href="entry.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg border border-line-strong bg-surface text-body hover:border-accent hover:text-accent px-4 py-2 text-sm"
+        >
+          返回入口
+        </a>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <a
+          href="generating.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm"
+        >
+          生成 PRD
+        </a>
+      </div>
+    </div>
+  </div>
+</section>

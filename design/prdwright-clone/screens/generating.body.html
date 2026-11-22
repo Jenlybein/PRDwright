@@ -1,0 +1,175 @@
+<!--
+  文档生成中：逐字取自 frontend/src/components/stages/GeneratingStage.vue 的 <template>
+  （生成中分支：DocPhaseProgress → 续写提示 → StageOutputStream → 已用时 → DocumentReview → AppActionBar），
+  子组件按各自 .vue 模板展开成真实 HTML：
+    ui/DocPhaseProgress.vue         phase="writing"、withReview=true 时的五格阶段条
+    ui/StageOutputStream.vue        phase="writing" 只出大纲块（审核 / 改写块此时不渲染）
+    DocumentReview.vue              generating=true 的只读流式正文（prose + 呼吸光标）
+    ui/AppActionBar.vue             吸底流程行：左「取消生成」│「查看当前版本」+ 说明，右侧无主操作
+  采用「逐章撰写 + 自动续写」这一态：第 3 章正在写，正文已吐出第 1–3 章的部分。
+-->
+<section class="space-y-3">
+  <!-- DocPhaseProgress：phase=writing → 「大纲」已过（primary-100）、「生成」当前（primary-500 + ring-4），后三格未到 -->
+  <div class="rounded-2xl border border-line bg-surface p-3 shadow-sm">
+    <ol class="flex items-center gap-1.5" aria-label="文档生成阶段">
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-primary-100 text-primary-700 dark:bg-primary-900/60 dark:text-primary-300">
+          大纲
+        </span>
+        <span class="h-px flex-1 bg-primary-300"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-primary-500 text-white ring-4 ring-primary-100 dark:ring-primary-900/50">
+          生成
+        </span>
+        <span class="h-px flex-1 bg-line"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-surface-2 text-subtle">
+          审核
+        </span>
+        <span class="h-px flex-1 bg-line"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-surface-2 text-subtle">
+          改写
+        </span>
+        <span class="h-px flex-1 bg-line"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-surface-2 text-subtle">
+          完成
+        </span>
+      </li>
+    </ol>
+  </div>
+
+  <!-- 逐章进度 + 续写解释（票 #93）：正文继续长时要有一句话说明它不是卡住 -->
+  <p class="flex items-center gap-1.5 px-1 text-xs tabular-nums text-subtle" role="status">
+    <span class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary-500"></span>
+    <span>正在写第 3 章 / 共 7 章</span>
+  </p>
+
+  <!-- 续写提示（票 #93）：与上面的进度行是两个独立元素，这句只说「还在写，不是卡住」 -->
+  <p class="flex items-center gap-1.5 px-1 text-xs tabular-nums text-subtle" role="status">
+    <span class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary-500"></span>
+    <span>正文较长，已自动续写到第 2 段（进度与正文不重置）</span>
+  </p>
+
+  <!-- StageOutputStream：撰写阶段只渲染大纲块，且不随阶段切换清空 -->
+  <div class="rounded-2xl border border-line bg-surface-2 px-3 py-2.5" aria-label="大纲输出">
+    <div class="mb-1.5 flex items-baseline justify-between gap-3">
+      <span class="flex items-center gap-1.5 text-xs font-medium text-fg">
+        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
+        大纲（已定结构）
+      </span>
+    </div>
+    <div class="overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-muted" style="max-height: 200px">
+一、产品概述
+二、目标用户与场景
+三、核心功能
+   发布闲置 / 附近在售 / 站内私信 / 交易评价 / 举报与拉黑
+四、技术方案
+   FastAPI + SQLModel + Postgres / React Native + Taro 小程序
+五、数据模型（待确认：字段清单材料里没给）
+六、接口清单（待确认）
+七、验收与里程碑（待确认：上线时间未定）
+    </div>
+  </div>
+
+  <!-- 已用时：只在确实计过时出现，比转圈更有信息量 -->
+  <p class="text-xs tabular-nums text-subtle">
+    已用时 1 分 24 秒
+  </p>
+
+  <!-- DocumentReview（generating=true）：只读流式正文，Markdown 实时渲染（markdown-it 产出无类名） -->
+  <div class="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+    <!-- 头部：只有标题与状态徽章 -->
+    <div class="flex items-center gap-3 border-b border-line px-4 py-3 sm:px-6">
+      <div class="flex min-w-0 items-center gap-2">
+        <h2 class="truncate text-sm font-semibold text-fg">PRD 文档</h2>
+        <span class="inline-flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent ring-1 ring-accent-soft-line">
+          <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
+          生成中
+        </span>
+      </div>
+    </div>
+
+    <!-- 正文区域 -->
+    <div class="flex-1 overflow-y-auto bg-surface-2/40 p-4 dark:bg-bg/40 sm:p-6">
+      <div class="space-y-2">
+        <div class="prose prose-sm prose-stone max-w-none rounded-xl bg-surface py-4 shadow-sm ring-1 ring-line dark:prose-invert" style="padding-inline: clamp(1.25rem, 8vw, 3.75rem)">
+          <div>
+            <h1>社区二手交易 App 产品需求文档</h1>
+            <p>版本 v0.3 ｜ 适用范围：iOS / Android / 微信小程序</p>
+            <h2>1. 产品概述</h2>
+            <h3>1.1 一句话定义</h3>
+            <p>把「同一个小区、能下楼见面」当成二手交易的前提：买卖双方的距离以米计，交易从「先付款、等快递」变成「下楼看一眼，当场验货」。</p>
+            <h3>1.2 要解决的问题</h3>
+            <ul>
+              <li><strong>跨城交易没有验货机会。</strong>先付款后收货，货不对板时维权成本远高于商品本身。</li>
+              <li><strong>同城也懒得跑。</strong>距离十几公里、时间对不上，闲置最终被扔进垃圾站。</li>
+              <li><strong>发布成本高。</strong>拍照、想标题、定价、选分类，四步劝退一半人。</li>
+            </ul>
+            <h3>1.3 本期不做的</h3>
+            <ul>
+              <li>担保交易与平台垫付：本期只做见面交易，资金不经过平台。</li>
+              <li>跨城物流与快递下单。</li>
+              <li>直播带货、拍卖与竞价。</li>
+            </ul>
+            <h2>2. 目标用户与场景</h2>
+            <h3>2.1 用户画像</h3>
+            <ul>
+              <li><strong>搬家或毕业的租客。</strong>一屋子东西带不走，只求一周内清空：对价格不敏感，对速度敏感。</li>
+              <li><strong>带娃家庭。</strong>孩子长得快，童车、玩具、绘本大量剩余，愿意低价换空间。</li>
+              <li><strong>退休业主。</strong>家里有闲置，但不熟悉信用分与快递流程，更信「当面看一眼」。</li>
+            </ul>
+            <h3>2.2 典型场景</h3>
+            <ol>
+              <li>晚上九点，用户在客厅拍下一辆婴儿车，30 秒内发布；第二天上午，同栋楼的邻居上门取走。</li>
+              <li>买家在「附近在售」按距离排序，看到 200 米外的一台显示器，站内私信约在地下车库验货。</li>
+              <li>卖家临时反悔，买家一键举报并拉黑，此后不再看到该用户的任何在售商品。</li>
+            </ol>
+            <h2>3. 核心功能</h2>
+            <p>核心功能围绕一条主线展开：<strong>发布 → 附近曝光 → 私信约看 → 当面交易 → 评价与治理</strong>。</p>
+            <h3>3.1 发布闲置</h3>
+            <p>把「拍照 → 自动识别分类 → 定价建议 → 同小区可见」四个动作收敛成一条流水线：</p>
+            <ul>
+              <li><strong>拍照即发布。</strong>一次最多 9 张，第一张自动作为封面，拍完直接进预填页，不再单独设「新建商品」入口。</li>
+              <li><strong>自动识别分类。</strong>模型给出 Top 3 类目并预填标题关键词，用户可一键改选；置信度低于阈值时不预填，避免把错类目写进标题。</li>
+              <li><strong>定价建议。</strong>取同小区同类目近 90 天成交价的中位数，给出「好卖 / 均衡 / 高卖」三档与各自的预计成交时长。</li>
+              <li><strong>同小区可见。</strong>默认仅同小区加周边 1 公里，可按需放开到同城；可见范围写在商品卡片上，不做隐藏设置。</li>
+            </ul>
+            <h3>3.2 附近在售列表</h3>
+            <p>按距离分三档（500 米、1 公里、3 公里），默认展示 1 公里内、按发布时间倒序；同一小区单独成组置顶，避免和隔壁小区的信息混在一起。</p>
+            <h3>3.3 站内私信</h3>
+            <p>私信与商品强绑定：从商品卡片直接进入会话，会话头固定展示该商品与价格，聊天中可以一键发起「约看」并附上可选时间段。消息发出后</p>
+          </div>
+          <span class="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-primary-500 align-text-bottom"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    AppActionBar（吸底）：流程行三段式 —— 左「破坏性操作 │ 次操作 + 说明」，右「主操作」。
+    生成中没有主操作（源码里这一栏要么不渲染、要么只留退路），因此右侧留空。
+  -->
+  <div class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]">
+    <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3">
+      <div class="flex min-w-0 flex-wrap items-center gap-2">
+        <a
+          href="chat.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 text-danger-fg hover:bg-danger-surface disabled:opacity-50 px-4 py-2 text-sm"
+        >取消生成</a>
+        <span class="h-5 w-px shrink-0 bg-line-strong" aria-hidden="true"></span>
+        <a
+          href="review.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 border border-line-strong bg-surface text-body hover:border-accent hover:text-accent disabled:opacity-50 px-4 py-2 text-sm"
+        >查看当前版本</a>
+        <span class="text-xs text-subtle">停止后已写出的内容会保留</span>
+      </div>
+      <div class="flex flex-wrap items-center gap-2"></div>
+    </div>
+  </div>
+</section>

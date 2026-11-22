@@ -116,9 +116,6 @@ const headline = computed(() =>
         </svg>
       </div>
       <h2 class="mt-3 text-base font-semibold text-fg ">{{ headline }}</h2>
-      <p class="mx-auto mt-1 max-w-md text-sm text-subtle">
-        可分别下载为 Markdown，或返回查看与修改。
-      </p>
     </div>
 
     <!-- 三份文档卡片 -->

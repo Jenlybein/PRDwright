@@ -180,7 +180,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <h2 class="truncate text-sm font-semibold text-fg">
           {{ previewing ? '版本预览' : '版本历史' }}
         </h2>
-        <p class="truncate text-[11px] text-subtle">{{ title }}</p>
+        <p class="truncate text-xs text-subtle">{{ title }}</p>
       </div>
       <button
         type="button"
@@ -218,7 +218,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             </AppButton>
           </template>
           <template v-else>
-            <span class="text-[11px] text-muted">恢复这一版？</span>
+            <span class="text-xs text-muted">恢复这一版？</span>
             <AppButton
               variant="primary"
               size="sm"
@@ -243,10 +243,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <!-- 部分完成（票 #85）：与完整版本区分开。它只说明「这一版不完整」，
                恢复 / 删除 / 预览这些动作照旧可用（标记不是禁用理由）。 -->
           <AppBadge v-if="preview.partial" variant="warning">部分完成</AppBadge>
-          <span class="text-[11px] text-subtle">{{ relativeTime(preview.createdAt) }}</span>
-          <span class="text-[11px] text-subtle">· 约 {{ preview.content.length }} 字</span>
+          <span class="text-xs text-subtle">{{ relativeTime(preview.createdAt) }}</span>
+          <span class="text-xs text-subtle">· 约 {{ preview.content.length }} 字</span>
         </div>
-        <p v-if="preview.note" class="text-[11px] text-muted">{{ preview.note }}</p>
+        <p v-if="preview.note" class="text-xs text-muted">{{ preview.note }}</p>
       </div>
 
       <div class="flex-1 overflow-y-auto bg-surface-2/40 p-4 dark:bg-bg/40">
@@ -274,7 +274,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     <template v-else>
       <!-- 存为新版本：把用户眼前的正文留档，备注可有可无 -->
       <div class="space-y-2 border-b border-line bg-surface-2/60 px-4 py-3">
-        <p class="text-[11px] text-subtle">
+        <p class="text-xs text-subtle">
           把当前正文存为一个新版本留档；之后可以随时恢复回这一版。
         </p>
         <div class="flex items-center gap-2">
@@ -346,28 +346,28 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                        但恢复 / 删除照旧可用——标记不是禁用理由。 -->
                   <AppBadge v-if="version.partial" variant="warning">部分完成</AppBadge>
                 </div>
-                <span class="shrink-0 text-[11px] text-subtle">
+                <span class="shrink-0 text-xs text-subtle">
                   {{ relativeTime(version.createdAt) }}
                 </span>
               </div>
 
-              <p v-if="version.note" class="mt-1.5 text-[11px] text-muted">{{ version.note }}</p>
+              <p v-if="version.note" class="mt-1.5 text-xs text-muted">{{ version.note }}</p>
 
-              <div class="mt-2 flex items-center justify-between gap-2">
-                <span class="text-[11px] text-subtle">约 {{ version.contentLength }} 字</span>
+              <div class="mt-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                <span class="text-xs text-subtle">约 {{ version.contentLength }} 字</span>
 
                 <!-- 当前版本：只说一句为什么没有动作，不摆两个点了没用的按钮 -->
-                <span v-if="version.isCurrent" class="text-[11px] text-subtle">
+                <span v-if="version.isCurrent" class="text-xs text-subtle">
                   当前版本不能删除或覆盖
                 </span>
 
                 <!-- 历史版本：恢复 / 删除。两者都要先问一句，确认了才抛出去 -->
                 <div
                   v-else
-                  class="pointer-events-auto flex items-center gap-2"
+                  class="pointer-events-auto flex flex-wrap items-center gap-2"
                 >
                   <template v-if="pendingRestoreId === version.versionId">
-                    <span class="text-[11px] text-muted">恢复这一版？</span>
+                    <span class="text-xs text-muted">恢复这一版？</span>
                     <AppButton
                       variant="primary"
                       size="sm"
@@ -380,7 +380,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                   </template>
 
                   <template v-else-if="pendingRemoveId === version.versionId">
-                    <span class="text-[11px] text-muted">删除这一版？</span>
+                    <span class="text-xs text-muted">删除这一版？</span>
                     <AppButton
                       variant="danger"
                       size="sm"

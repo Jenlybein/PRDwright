@@ -17,7 +17,7 @@ withDefaults(
 
 <template>
   <span
-    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1"
+    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1"
     :class="{
       'bg-surface-2 text-muted ring-line': variant === 'neutral',
       'bg-accent-soft text-accent ring-accent-soft-line': variant === 'primary',

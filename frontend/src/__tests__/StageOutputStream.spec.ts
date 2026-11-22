@@ -67,7 +67,7 @@ describe('StageOutputStream：阶段输出面板', () => {
 
     expect(wrapper.find('[aria-label="大纲输出"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('F-01 用户登录')
-    expect(wrapper.text()).toContain('正文正在写')
+    expect(wrapper.text()).not.toContain('正文正在写')
   })
 
   it('「待确认」项原样展示（与待确认清单同一口径，不另起说法）', () => {

@@ -231,8 +231,6 @@ export interface EntryCardSpec {
   readonly groupId: string
   /** 组标题 */
   readonly groupTitle: string
-  /** 组说明 */
-  readonly groupDescription: string
   /** 卡片标题（也就是列表里的入口名） */
   readonly title: string
   /** 卡片上的一句说明 */
@@ -382,7 +380,6 @@ const STRUCTURED_ENTRY_SPEC: EntrySpec = {
   card: {
     groupId: 'from-scratch',
     groupTitle: '从零创建 PRD',
-    groupDescription: '还没有任何材料，从这里把需求说清楚。',
     title: '完整流程',
     description: '逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。',
   },
@@ -426,7 +423,6 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     card: {
       groupId: 'from-scratch',
       groupTitle: '从零创建 PRD',
-      groupDescription: '还没有任何材料，从这里把需求说清楚。',
       title: '快捷流程',
       description: '一段话说清想法，跳过表单与对话，直接逐章生成 PRD。',
     },
@@ -464,7 +460,6 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     card: {
       groupId: 'with-material',
       groupTitle: '导入已有素材',
-      groupDescription: '手头已经有写好的材料，别重复劳动。',
       title: '我有 PRD',
       description: '贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。',
     },
@@ -503,7 +498,6 @@ export const ENTRY_REGISTRY: Partial<Record<EntryMode, EntrySpec>> = {
     card: {
       groupId: 'with-material',
       groupTitle: '导入已有素材',
-      groupDescription: '手头已经有写好的材料，别重复劳动。',
       title: '我有 PRD + 接口文档',
       description: '两份都贴进来，提示词因此能对齐真实的接口路径与字段名。',
     },
@@ -627,7 +621,6 @@ export function assertEntrySpecComplete(
   if (!card) missingEntrySpec(key, 'card', '整列缺失')
   requireEntrySpecText(key, 'card.groupId', card.groupId)
   requireEntrySpecText(key, 'card.groupTitle', card.groupTitle)
-  requireEntrySpecText(key, 'card.groupDescription', card.groupDescription)
   requireEntrySpecText(key, 'card.title', card.title)
   requireEntrySpecText(key, 'card.description', card.description)
 

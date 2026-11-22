@@ -122,7 +122,7 @@ const CHAT_ICON =
   -->
   <nav
     v-if="displaySteps.length > 1"
-    class="sticky top-0 z-20 -mx-4 mb-6 border-b border-line bg-bg px-4 pb-3 pt-3"
+    class="sticky top-0 z-20 -mx-4 mb-6 overflow-x-auto border-b border-line bg-bg px-4 pb-3 pt-3"
     aria-label="生成进度"
   >
     <ol class="flex items-start">
@@ -180,7 +180,7 @@ const CHAT_ICON =
             <template v-else>{{ item.ordinal }}</template>
           </span>
           <span
-            class="whitespace-nowrap text-[11px] font-medium transition"
+            class="whitespace-nowrap text-xs font-medium transition"
             :class="[
               item.index <= reachedIndex ? 'text-accent' : 'text-subtle',
               canClick(item.index) ? 'group-hover:text-accent' : '',

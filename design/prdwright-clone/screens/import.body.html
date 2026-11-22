@@ -1,0 +1,110 @@
+<!-- 导入素材页（PRD + 接口文档）：逐字取自 frontend/src/components/stages/PastePairStage.vue（两份都已贴 → PRD 有 Markdown 标题、接口文档非空） -->
+<section class="space-y-4">
+  <header>
+    <h1 class="text-lg font-bold text-fg">从现有 PRD 与接口文档生成提示词套件</h1>
+  </header>
+
+  <div class="space-y-4 rounded-2xl border border-line bg-surface p-5 shadow-sm">
+    <div class="grid gap-4 sm:grid-cols-2">
+      <!-- 左：PRD（必填，已贴） -->
+      <div>
+        <label for="field-pair-prd" class="mb-1.5 block text-xs font-medium text-muted">
+          PRD 正文（Markdown）
+          <span class="ml-1 text-danger-fg">*</span>
+        </label>
+        <textarea
+          id="field-pair-prd"
+          rows="14"
+          class="w-full resize-y rounded-lg border border-accent px-3 py-2 font-mono text-xs leading-relaxed text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="# 小账本 产品需求文档（PRD）&#10;&#10;## 1. 产品概述&#10;…"
+        ># 社区二手交易 App 产品需求文档（PRD）
+
+## 1. 产品概述
+让同一小区的邻居之间安全、快速地转让闲置物品。
+目标用户：25–40 岁城市社区住户。
+平台：iOS / Android App + 微信小程序。
+
+## 2. 功能范围（MVP）
+- 发布闲置：图片、标题、价格、成色。
+- 附近在售列表：按小区与距离排序。
+- 站内私信：全程不暴露手机号。
+- 交易评价：成交后双向评价。
+- 举报与拉黑：举报进入人工审核队列。
+- 认证：手机号 + 短信验证码。</textarea>
+
+        <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
+          <span class="shrink-0 text-xs text-subtle">237 字</span>
+        </div>
+      </div>
+
+      <!-- 右：接口文档（选填，已贴） -->
+      <div>
+        <label for="field-pair-api-docs" class="mb-1.5 block text-xs font-medium text-muted">
+          接口文档正文（Markdown）
+          <span class="ml-1 text-subtle">选填</span>
+        </label>
+        <textarea
+          id="field-pair-api-docs"
+          rows="14"
+          class="w-full resize-y rounded-lg border border-line-strong px-3 py-2 font-mono text-xs leading-relaxed text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="# 小账本 接口文档&#10;&#10;## 1. 记账&#10;POST /api/ledgers&#10;…"
+        ># 社区二手交易 App 接口文档
+
+## 1. 认证
+POST /api/auth/sms-code
+POST /api/auth/login
+
+## 2. 闲置物品
+GET /api/items?lat=&lng=&radius=3&category=
+POST /api/items
+GET /api/items/{item_id}
+PATCH /api/items/{item_id}/status
+
+## 3. 私信
+POST /api/items/{item_id}/threads</textarea>
+
+        <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
+          <span class="shrink-0 text-xs text-subtle">247 字</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 已录入内容的确认条 -->
+    <p class="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-subtle">
+      已录入：社区二手交易 App 产品需求文档（PRD）…
+      <span class="text-muted">｜接口文档：社区二手交易 App 接口文档…</span>
+    </p>
+  </div>
+
+  <!-- 页面级操作栏：左「清空」│「返回入口」，右主操作「生成提示词套件」 -->
+  <div
+    class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]"
+  >
+    <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3">
+      <div class="flex min-w-0 flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg text-danger-fg hover:bg-danger-surface px-4 py-2 text-sm"
+        >
+          清空
+        </button>
+        <span class="h-5 w-px shrink-0 bg-line-strong" aria-hidden="true"></span>
+        <a
+          href="entry.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg border border-line-strong bg-surface text-body hover:border-accent hover:text-accent px-4 py-2 text-sm"
+        >
+          返回入口
+        </a>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <a
+          href="generating.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm"
+        >
+          生成提示词套件
+        </a>
+      </div>
+    </div>
+  </div>
+</section>

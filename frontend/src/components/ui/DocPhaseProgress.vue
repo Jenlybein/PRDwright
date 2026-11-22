@@ -87,7 +87,7 @@ function chipClass(stepIndex: number): string {
     <ol class="flex items-center gap-1.5" aria-label="文档生成阶段">
       <li v-for="(step, index) in steps" :key="step.id" class="flex flex-1 items-center gap-1.5">
         <span
-          class="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition"
+          class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition"
           :class="chipClass(index)"
         >
           {{ step.label }}

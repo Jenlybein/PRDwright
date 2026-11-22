@@ -1,0 +1,162 @@
+<!-- 入口选择页：逐字取自 frontend/src/components/stages/EntryStage.vue + utils/workflow.ts 的 ENTRY_REGISTRY 文案 -->
+<section class="flex min-h-[calc(100vh_-_var(--shell-action-bar-h)_-_5rem)] flex-col justify-center space-y-9">
+  <header class="text-center">
+    <h1 class="text-2xl font-bold tracking-tight text-fg">新建 PRD 方案</h1>
+  </header>
+
+  <div class="grid gap-x-6 gap-y-9 sm:grid-cols-2">
+    <section class="flex flex-col" aria-label="从零创建 PRD">
+      <header class="mb-3.5">
+        <div class="flex items-center gap-2">
+          <span class="h-4 w-1 rounded-full bg-accent" aria-hidden="true"></span>
+          <h2 class="text-sm font-semibold text-fg">从零创建 PRD</h2>
+        </div>
+      </header>
+
+      <div class="flex flex-1 flex-col gap-3">
+        <a
+          href="form.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M4 4a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293L15.707 5.5a1 1 0 0 1 .293.707V16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4Zm7 1.5V7h1.5L11 5.5ZM7 9a1 1 0 0 0 0 2h6a1 1 0 1 0 0-2H7Zm0 3a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H7Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">完整流程</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            逐项填表 + 和 AI 对话把细节问清楚，再依次生成三份文档。
+          </span>
+        </a>
+
+        <a
+          href="quick.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M11.3 1.046A1 1 0 0 1 12 2v5h4a1 1 0 0 1 .82 1.573l-7 10A1 1 0 0 1 8 18v-5H4a1 1 0 0 1-.82-1.573l7-10a1 1 0 0 1 1.12-.381Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">快捷流程</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            一段话说清想法，跳过表单与对话，直接逐章生成 PRD。
+          </span>
+        </a>
+      </div>
+    </section>
+
+    <section class="flex flex-col" aria-label="导入已有素材">
+      <header class="mb-3.5">
+        <div class="flex items-center gap-2">
+          <span class="h-4 w-1 rounded-full bg-accent" aria-hidden="true"></span>
+          <h2 class="text-sm font-semibold text-fg">导入已有素材</h2>
+        </div>
+      </header>
+
+      <div class="flex flex-1 flex-col gap-3">
+        <a
+          href="import.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M6.28 5.22a.75.75 0 0 1 0 1.06L2.56 10l3.72 3.72a.75.75 0 0 1-1.06 1.06L.97 10.53a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Zm7.44 0a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L17.44 10l-3.72-3.72a.75.75 0 0 1 0-1.06Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">我有 PRD</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            贴一份现成 PRD，直接生成提示词套件，之后可用 AI 优化反复调。
+          </span>
+        </a>
+
+        <a
+          href="import.html"
+          class="group entry-card p-4 block w-full rounded-2xl border border-line bg-surface text-left shadow-card transition-[border-color,box-shadow,transform] dark:shadow-none cursor-pointer hover:border-accent hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span class="flex items-center gap-3">
+            <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors bg-surface-2 group-hover:bg-primary-100">
+              <svg class="shrink-0 h-6 w-6 text-primary-700" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path
+                  fill-rule="evenodd"
+                  d="M4 3h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm0 9h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+            </span>
+            <span class="min-w-0 flex-1 text-[15px] font-semibold leading-snug text-fg">我有 PRD + 接口文档</span>
+            <svg
+              class="h-4 w-4 shrink-0 text-subtle transition group-hover:translate-x-0.5 group-hover:text-accent"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </span>
+          <span class="mt-2 block min-h-[2.875rem] text-balance text-sm leading-relaxed text-muted">
+            两份都贴进来，提示词因此能对齐真实的接口路径与字段名。
+          </span>
+        </a>
+      </div>
+    </section>
+  </div>
+</section>

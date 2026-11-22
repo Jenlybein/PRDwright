@@ -771,3 +771,42 @@ spec 见 [`state-flow-design.md`](./state-flow-design.md)：把任务状态从�
 
 - 文档：本节、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §5.13、[`../agents/conventions.md`](../agents/conventions.md) §6（动效令牌与 reduced-motion 策略）。
 - **未执行**：提交与推送（由用户确认）。
+
+---
+
+## 15. 本轮：用户端可读性与文案纪律（ADR 0004，无票）
+
+由「设计复刻稿体检」驱动的一轮收口：先把 `frontend/` 逐屏复刻成静态稿（`design/prdwright-clone`），用无头浏览器实测出问题，再回到真实前端修。
+
+### 15.1 范围
+
+| 组 | 落点 | 处数 |
+| --- | --- | --- |
+| 字号下限 12px | 14 个组件（`VersionDrawer` 12 处、`ReviewConclusionPanel` 5 处、`StageOutputStream` 4 处、`PendingItemsPanel` 3 处等） | 38 |
+| 文案纪律 | 删标语与「解释已知内容」的提示：侧栏副标题、入口页说明与分组副标题、登录副标题、表单页说明与区块提示、对话页副标题与指路句、生成页大纲图例、交付页说明、快捷/粘贴/粘贴 PRD 页说明 | 17 句 |
+| 语义色 | 必填星号与「必填」徽标改 `danger-*` 令牌；计数徽标去 `opacity-75`；chip「×」`primary-400 → primary-600` | 19 |
+| 暗色令牌 | `src/index.css`：`--ui-on-accent: #ffffff`、`--ui-subtle: #a8a29a` | 2 |
+| 行长 | `ReviewConclusionPanel` 缺陷描述 `max-w-[44em]`；`DocumentReview` 正文 `px-[clamp(1.25rem,8vw,3.75rem)]` | 3 |
+| 点击区 / 窄屏 | 模块 chip「×」24×24、「批量粘贴导入」补内边距、`ProgressSteps` nav `overflow-x-auto` | 3 |
+
+登记表同步：`EntryCardSpec.groupDescription` 下架（类型 + 完整性校验 + `EntryStage` 渲染 + `workflow.spec` 四行断言）。
+
+### 15.2 本期不做
+
+- 管理端（`frontend_admin/`，零共享的独立体系）。
+- `max-w-3xl` 骨架与整页版心（会连带所有卡片重排，且 2xl 仍不达 45 字）。
+- 完整 WCAG 审计、内页真机验收（本地无 Postgres，`vite dev` 只能到入口页与登录弹窗）。
+
+### 15.3 验收与证据
+
+- 前端：`cd frontend && npx vitest run` → **779 passed / 45 文件**（基线 776 / 44）。
+- `npm run type-check` 通过；`vite build` 通过，CSS **72.56 kB**（改动前 73.1 kB）。
+- 新增守卫：`src/__tests__/readability.spec.ts`（3 条：10/11px 归零、裸红归零、暗色两条令牌取值）。
+- 改写断言：`ClarificationAskList` / `PastePairStage`（2 条）/ `StageOutputStream` / `workflow`（4 条）由「含某句」改为「不含某句」或删掉已下架字段。
+- 设计稿同步：`design/prdwright-clone` 重新 `node build.mjs`，`check_design` 1280×800 与 1440×900 均为 0 问题。
+
+### 15.4 复测与收口
+
+- 文档：本节、[`ARCHITECTURE.md`](./ARCHITECTURE.md) §5.14、[`../adr/0004-user-ui-readability-and-copy-discipline.md`](../adr/0004-user-ui-readability-and-copy-discipline.md)、`design/prdwright-clone/README.md`（文案纪律与改法）。
+- **未执行**：提交与推送（由用户确认）。
+

@@ -66,11 +66,10 @@ interface EntryOption {
   iconPath: string
 }
 
-/** 一组入口：同属一类起点，组标题与组说明是这一层的语义 */
+/** 一组入口：同属一类起点，组标题是这一层的语义（组说明已下架：标题已说明这组是什么） */
 interface EntryGroup {
   id: string
   title: string
-  description: string
   options: EntryOption[]
 }
 
@@ -130,7 +129,6 @@ const GROUPS: EntryGroup[] = GROUP_IDS.map((groupId) => {
   return {
     id: groupId,
     title: head?.card.groupTitle ?? '',
-    description: head?.card.groupDescription ?? '',
     options: rows.map((row) => ({
       mode: row.mode,
       title: row.card.title,
@@ -152,11 +150,10 @@ const ARROW_ICON =
   <section
     class="flex min-h-[calc(100vh_-_var(--shell-action-bar-h)_-_5rem)] flex-col justify-center space-y-9"
   >
+    <!-- 页首只有标题：四入口的差别由「两组 + 各卡标题与说明」表达，
+         那段「四条路最终都通向同一套写作规范……」是标语，删掉后视线直接落到选项上。 -->
     <header class="text-center">
       <h1 class="text-2xl font-bold tracking-tight text-fg">新建 PRD 方案</h1>
-      <p class="mx-auto mt-2.5 max-w-lg text-sm leading-relaxed text-subtle">
-        选择起点。四条路最终都通向同一套写作规范，选错了随时可以重新开始。
-      </p>
     </header>
 
     <!-- 两组并排：一眼看出「两条路，每条路两个入口」。组间距（gap）约为组内选项间距的两倍 -->
@@ -173,7 +170,6 @@ const ARROW_ICON =
             <span class="h-4 w-1 rounded-full bg-accent" aria-hidden="true"></span>
             <h2 class="text-sm font-semibold text-fg">{{ group.title }}</h2>
           </div>
-          <p class="mt-1.5 pl-3 text-xs leading-relaxed text-muted">{{ group.description }}</p>
         </header>
 
         <div class="flex flex-1 flex-col gap-3">

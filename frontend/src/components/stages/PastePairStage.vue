@@ -74,9 +74,6 @@ function previewLine(text: string): string {
   <section class="space-y-4">
     <header>
       <h1 class="text-lg font-bold text-fg">从现有 PRD 与接口文档生成提示词套件</h1>
-      <p class="mt-1 text-sm text-subtle">
-        两份都贴进来，提示词同时参考它们；只填 PRD 也能生成。
-      </p>
     </header>
 
     <div class="space-y-4 rounded-2xl border border-line bg-surface p-5 shadow-sm">
@@ -85,7 +82,7 @@ function previewLine(text: string): string {
         <div>
           <label for="field-pair-prd" class="mb-1.5 block text-xs font-medium text-muted">
             PRD 正文（Markdown）
-            <span class="ml-1 text-rose-500">*</span>
+            <span class="ml-1 text-danger-fg">*</span>
           </label>
           <textarea
             id="field-pair-prd"
@@ -109,7 +106,6 @@ function previewLine(text: string): string {
             <p v-else-if="!looksLikeMarkdown" class="text-xs text-warning-fg">
               没检测到 Markdown 标题（`#`）。纯文本也能生成，只是章节结构可能不如原文清晰。
             </p>
-            <p v-else class="text-xs text-subtle">支持任意 Markdown 文本，不做格式校验。</p>
             <span class="shrink-0 text-xs text-subtle">{{ prdText.length }} 字</span>
           </div>
         </div>
@@ -130,12 +126,6 @@ function previewLine(text: string): string {
           ></textarea>
 
           <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
-            <p v-if="hasApiDocs" class="text-xs text-subtle">
-              提示词里涉及的接口路径与字段名会与它保持一致。
-            </p>
-            <p v-else class="text-xs text-subtle">
-              留空即按「只有 PRD」生成。
-            </p>
             <span class="shrink-0 text-xs text-subtle">{{ apiDocsText.length }} 字</span>
           </div>
         </div>

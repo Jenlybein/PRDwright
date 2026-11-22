@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="dsh-design" content="web" />
+    <title>生成 PRD · PRDwright</title>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="tokens.css" />
+    <style>
+      :root {
+        --shell-action-bar-h: 63px;
+      }
+    </style>
+  </head>
+  <body class="bg-bg text-body">
+    <div class="flex min-h-screen bg-bg text-body">
+      <!-- 左侧方案侧边栏：逐字取自 frontend/src/components/SolutionSidebar.vue（登录态 / 抽屉收起态） -->
+<button
+  type="button"
+  class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-white shadow-lg lg:hidden"
+  aria-label="打开方案列表"
+>
+  <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path
+      fill-rule="evenodd"
+      d="M2 5.75A.75.75 0 0 1 2.75 5h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 5.75Zm0 4.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm.75 3.5a.75.75 0 0 0 0 1.5h14.5a.75.75 0 0 0 0-1.5H2.75Z"
+      clip-rule="evenodd"
+    />
+  </svg>
+</button>
+
+<aside
+  class="sidebar-surface flex flex-col border-line bg-surface/80 backdrop-blur fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform duration-[260ms] ease-[var(--ease-drawer)] overscroll-contain lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0 -translate-x-full"
+  aria-label="方案列表"
+>
+  <!-- 顶端：品牌 + 主题切换 -->
+  <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+    <div class="flex min-w-0 items-center gap-2.5">
+      <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary-700 text-sm font-bold text-white">
+        H
+      </div>
+      <div class="min-w-0 leading-tight">
+        <div class="truncate text-sm font-bold text-fg">PRDwright</div>
+      </div>
+    </div>
+
+    <!-- 主题切换（AppButton variant=ghost size=sm + 《!px-2》；这里只画按钮，不画下拉） -->
+    <div class="relative">
+      <button
+        type="button"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed text-body hover:bg-surface-2 hover:text-accent disabled:opacity-40 px-3 py-1.5 text-xs !px-2"
+        aria-label="主题：跟随系统，点击切换"
+        title="主题：跟随系统"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M3.5 3A1.5 1.5 0 0 0 2 4.5v7A1.5 1.5 0 0 0 3.5 13h4v1.5H6a.75.75 0 0 0 0 1.5h8a.75.75 0 0 0 0-1.5h-1.5V13h4A1.5 1.5 0 0 0 18 11.5v-7A1.5 1.5 0 0 0 16.5 3h-13Zm.5 1.5h12v6H4v-6ZM8.75 13h2.5v1.5h-2.5V13Z"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 新建任务 -->
+  <div class="px-3 pt-4">
+    <a
+      href="entry.html"
+      class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm w-full"
+    >
+      <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path
+          d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
+        />
+      </svg>
+      新建任务
+    </a>
+  </div>
+
+  <!-- 方案列表 -->
+  <div class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+    <div class="mb-2 flex items-center justify-between px-2">
+      <span class="text-xs font-medium text-muted">我的方案</span>
+    </div>
+
+    <ul class="space-y-1">
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-primary-500 bg-accent-soft ring-1 ring-accent-soft-line">
+          <a href="review.html" class="block w-full text-left" aria-current="true">
+            <span class="block truncate text-sm font-medium text-fg">社区二手交易 App</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已出提示词</span>
+              <span aria-hidden="true">·</span>
+              <span>2 小时前</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 社区二手交易 App"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="review.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">企业差旅报销流程</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已出 PRD</span>
+              <span aria-hidden="true">·</span>
+              <span>3 小时前</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 企业差旅报销流程"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="chat.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">校园活动报名小程序</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>AI 对话</span>
+              <span aria-hidden="true">·</span>
+              <span>11-20 14:05</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 校园活动报名小程序"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="done.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">咖啡店会员积分系统</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已完成</span>
+              <span aria-hidden="true">·</span>
+              <span>11-18 09:30</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 咖啡店会员积分系统"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <!-- 底端：登录入口（已登录显示昵称） -->
+  <div class="border-t border-line px-3 py-3">
+    <div class="relative">
+      <button
+        type="button"
+        class="flex w-full items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-body shadow-sm transition hover:border-accent hover:text-fg"
+        aria-label="已登录：林间"
+      >
+        <svg class="h-4 w-4 text-subtle" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M10 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM3.465 14.493a1.23 1.23 0 0 0 .41 1.412A9.957 9.957 0 0 0 10 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 0 0-13.074.003Z"
+          />
+        </svg>
+        <span class="min-w-0 flex-1 truncate text-left">林间</span>
+        <svg class="h-3 w-3 text-subtle transition" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            fill-rule="evenodd"
+            d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+</aside>
+
+      <div class="flex min-w-0 flex-1 flex-col">
+        <main class="mx-auto w-full max-w-3xl px-4 pt-10 pb-[calc(var(--shell-action-bar-h)+2.5rem)]">
+          <nav class="sticky top-0 z-20 -mx-4 mb-6 border-b border-line bg-bg px-4 pb-3 pt-3" style="overflow-x: auto" aria-label="生成进度">
+      <ol class="flex items-start">
+      <li class="mr-4 flex items-center border-r border-line-strong pr-4">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5 cursor-pointer group">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-primary-500 text-on-accent group-hover:ring-4 group-hover:ring-accent-soft-line"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M6 1.5h8a2.5 2.5 0 0 1 2.5 2.5v6a2.5 2.5 0 0 1-2.5 2.5H9l-5.5 2.6V4A2.5 2.5 0 0 1 6 1.5Z" clip-rule="evenodd" /></svg></span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-accent group-hover:text-accent">AI 对话</span>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5 cursor-pointer group">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-primary-500 text-on-accent group-hover:ring-4 group-hover:ring-accent-soft-line"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M16.704 5.29a1 1 0 0 1 .006 1.414l-7.5 7.5a1 1 0 0 1-1.414 0l-4-4a1 1 0 1 1 1.414-1.414l3.293 3.293 6.793-6.793a1 1 0 0 1 1.408 0Z" clip-rule="evenodd" /></svg></span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-accent group-hover:text-accent">描述产品</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 0 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5 cursor-pointer group">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-accent-soft text-accent ring-2 ring-accent animate-pulse group-hover:ring-4 group-hover:ring-accent-soft-line">2</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-accent group-hover:text-accent">PRD</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 100% 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle">3</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">接口文档</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 100% 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle">4</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">提示词</span>
+        </div>
+        <div class="mx-1 mb-5 h-0.5 flex-1 overflow-hidden rounded-full bg-line-strong">
+          <div class="h-full origin-left bg-primary-500 transition-[clip-path] duration-200 ease-[var(--ease-smooth)]" style="clip-path: inset(0 100% 0 0)"></div>
+        </div>
+      </li>
+      <li class="flex flex-1 items-center">
+        <div class="flex w-16 shrink-0 flex-col items-center gap-1.5">
+          <span class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition bg-surface-2 text-subtle">5</span>
+          <span class="whitespace-nowrap text-xs font-medium transition text-subtle">交付</span>
+        </div>
+      </li>
+      </ol>
+    </nav>
+          <!--
+  文档生成中：逐字取自 frontend/src/components/stages/GeneratingStage.vue 的 <template>
+  （生成中分支：DocPhaseProgress → 续写提示 → StageOutputStream → 已用时 → DocumentReview → AppActionBar），
+  子组件按各自 .vue 模板展开成真实 HTML：
+    ui/DocPhaseProgress.vue         phase="writing"、withReview=true 时的五格阶段条
+    ui/StageOutputStream.vue        phase="writing" 只出大纲块（审核 / 改写块此时不渲染）
+    DocumentReview.vue              generating=true 的只读流式正文（prose + 呼吸光标）
+    ui/AppActionBar.vue             吸底流程行：左「取消生成」│「查看当前版本」+ 说明，右侧无主操作
+  采用「逐章撰写 + 自动续写」这一态：第 3 章正在写，正文已吐出第 1–3 章的部分。
+-->
+<section class="space-y-3">
+  <!-- DocPhaseProgress：phase=writing → 「大纲」已过（primary-100）、「生成」当前（primary-500 + ring-4），后三格未到 -->
+  <div class="rounded-2xl border border-line bg-surface p-3 shadow-sm">
+    <ol class="flex items-center gap-1.5" aria-label="文档生成阶段">
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-primary-100 text-primary-700 dark:bg-primary-900/60 dark:text-primary-300">
+          大纲
+        </span>
+        <span class="h-px flex-1 bg-primary-300"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-primary-500 text-white ring-4 ring-primary-100 dark:ring-primary-900/50">
+          生成
+        </span>
+        <span class="h-px flex-1 bg-line"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-surface-2 text-subtle">
+          审核
+        </span>
+        <span class="h-px flex-1 bg-line"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-surface-2 text-subtle">
+          改写
+        </span>
+        <span class="h-px flex-1 bg-line"></span>
+      </li>
+      <li class="flex flex-1 items-center gap-1.5">
+        <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium transition bg-surface-2 text-subtle">
+          完成
+        </span>
+      </li>
+    </ol>
+  </div>
+
+  <!-- 逐章进度 + 续写解释（票 #93）：正文继续长时要有一句话说明它不是卡住 -->
+  <p class="flex items-center gap-1.5 px-1 text-xs tabular-nums text-subtle" role="status">
+    <span class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary-500"></span>
+    <span>正在写第 3 章 / 共 7 章</span>
+  </p>
+
+  <!-- 续写提示（票 #93）：与上面的进度行是两个独立元素，这句只说「还在写，不是卡住」 -->
+  <p class="flex items-center gap-1.5 px-1 text-xs tabular-nums text-subtle" role="status">
+    <span class="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary-500"></span>
+    <span>正文较长，已自动续写到第 2 段（进度与正文不重置）</span>
+  </p>
+
+  <!-- StageOutputStream：撰写阶段只渲染大纲块，且不随阶段切换清空 -->
+  <div class="rounded-2xl border border-line bg-surface-2 px-3 py-2.5" aria-label="大纲输出">
+    <div class="mb-1.5 flex items-baseline justify-between gap-3">
+      <span class="flex items-center gap-1.5 text-xs font-medium text-fg">
+        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
+        大纲（已定结构）
+      </span>
+    </div>
+    <div class="overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-muted" style="max-height: 200px">
+一、产品概述
+二、目标用户与场景
+三、核心功能
+   发布闲置 / 附近在售 / 站内私信 / 交易评价 / 举报与拉黑
+四、技术方案
+   FastAPI + SQLModel + Postgres / React Native + Taro 小程序
+五、数据模型（待确认：字段清单材料里没给）
+六、接口清单（待确认）
+七、验收与里程碑（待确认：上线时间未定）
+    </div>
+  </div>
+
+  <!-- 已用时：只在确实计过时出现，比转圈更有信息量 -->
+  <p class="text-xs tabular-nums text-subtle">
+    已用时 1 分 24 秒
+  </p>
+
+  <!-- DocumentReview（generating=true）：只读流式正文，Markdown 实时渲染（markdown-it 产出无类名） -->
+  <div class="flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+    <!-- 头部：只有标题与状态徽章 -->
+    <div class="flex items-center gap-3 border-b border-line px-4 py-3 sm:px-6">
+      <div class="flex min-w-0 items-center gap-2">
+        <h2 class="truncate text-sm font-semibold text-fg">PRD 文档</h2>
+        <span class="inline-flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent ring-1 ring-accent-soft-line">
+          <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500"></span>
+          生成中
+        </span>
+      </div>
+    </div>
+
+    <!-- 正文区域 -->
+    <div class="flex-1 overflow-y-auto bg-surface-2/40 p-4 dark:bg-bg/40 sm:p-6">
+      <div class="space-y-2">
+        <div class="prose prose-sm prose-stone max-w-none rounded-xl bg-surface py-4 shadow-sm ring-1 ring-line dark:prose-invert" style="padding-inline: clamp(1.25rem, 8vw, 3.75rem)">
+          <div>
+            <h1>社区二手交易 App 产品需求文档</h1>
+            <p>版本 v0.3 ｜ 适用范围：iOS / Android / 微信小程序</p>
+            <h2>1. 产品概述</h2>
+            <h3>1.1 一句话定义</h3>
+            <p>把「同一个小区、能下楼见面」当成二手交易的前提：买卖双方的距离以米计，交易从「先付款、等快递」变成「下楼看一眼，当场验货」。</p>
+            <h3>1.2 要解决的问题</h3>
+            <ul>
+              <li><strong>跨城交易没有验货机会。</strong>先付款后收货，货不对板时维权成本远高于商品本身。</li>
+              <li><strong>同城也懒得跑。</strong>距离十几公里、时间对不上，闲置最终被扔进垃圾站。</li>
+              <li><strong>发布成本高。</strong>拍照、想标题、定价、选分类，四步劝退一半人。</li>
+            </ul>
+            <h3>1.3 本期不做的</h3>
+            <ul>
+              <li>担保交易与平台垫付：本期只做见面交易，资金不经过平台。</li>
+              <li>跨城物流与快递下单。</li>
+              <li>直播带货、拍卖与竞价。</li>
+            </ul>
+            <h2>2. 目标用户与场景</h2>
+            <h3>2.1 用户画像</h3>
+            <ul>
+              <li><strong>搬家或毕业的租客。</strong>一屋子东西带不走，只求一周内清空：对价格不敏感，对速度敏感。</li>
+              <li><strong>带娃家庭。</strong>孩子长得快，童车、玩具、绘本大量剩余，愿意低价换空间。</li>
+              <li><strong>退休业主。</strong>家里有闲置，但不熟悉信用分与快递流程，更信「当面看一眼」。</li>
+            </ul>
+            <h3>2.2 典型场景</h3>
+            <ol>
+              <li>晚上九点，用户在客厅拍下一辆婴儿车，30 秒内发布；第二天上午，同栋楼的邻居上门取走。</li>
+              <li>买家在「附近在售」按距离排序，看到 200 米外的一台显示器，站内私信约在地下车库验货。</li>
+              <li>卖家临时反悔，买家一键举报并拉黑，此后不再看到该用户的任何在售商品。</li>
+            </ol>
+            <h2>3. 核心功能</h2>
+            <p>核心功能围绕一条主线展开：<strong>发布 → 附近曝光 → 私信约看 → 当面交易 → 评价与治理</strong>。</p>
+            <h3>3.1 发布闲置</h3>
+            <p>把「拍照 → 自动识别分类 → 定价建议 → 同小区可见」四个动作收敛成一条流水线：</p>
+            <ul>
+              <li><strong>拍照即发布。</strong>一次最多 9 张，第一张自动作为封面，拍完直接进预填页，不再单独设「新建商品」入口。</li>
+              <li><strong>自动识别分类。</strong>模型给出 Top 3 类目并预填标题关键词，用户可一键改选；置信度低于阈值时不预填，避免把错类目写进标题。</li>
+              <li><strong>定价建议。</strong>取同小区同类目近 90 天成交价的中位数，给出「好卖 / 均衡 / 高卖」三档与各自的预计成交时长。</li>
+              <li><strong>同小区可见。</strong>默认仅同小区加周边 1 公里，可按需放开到同城；可见范围写在商品卡片上，不做隐藏设置。</li>
+            </ul>
+            <h3>3.2 附近在售列表</h3>
+            <p>按距离分三档（500 米、1 公里、3 公里），默认展示 1 公里内、按发布时间倒序；同一小区单独成组置顶，避免和隔壁小区的信息混在一起。</p>
+            <h3>3.3 站内私信</h3>
+            <p>私信与商品强绑定：从商品卡片直接进入会话，会话头固定展示该商品与价格，聊天中可以一键发起「约看」并附上可选时间段。消息发出后</p>
+          </div>
+          <span class="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-primary-500 align-text-bottom"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    AppActionBar（吸底）：流程行三段式 —— 左「破坏性操作 │ 次操作 + 说明」，右「主操作」。
+    生成中没有主操作（源码里这一栏要么不渲染、要么只留退路），因此右侧留空。
+  -->
+  <div class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]">
+    <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3">
+      <div class="flex min-w-0 flex-wrap items-center gap-2">
+        <a
+          href="chat.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 text-danger-fg hover:bg-danger-surface disabled:opacity-50 px-4 py-2 text-sm"
+        >取消生成</a>
+        <span class="h-5 w-px shrink-0 bg-line-strong" aria-hidden="true"></span>
+        <a
+          href="review.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 border border-line-strong bg-surface text-body hover:border-accent hover:text-accent disabled:opacity-50 px-4 py-2 text-sm"
+        >查看当前版本</a>
+        <span class="text-xs text-subtle">停止后已写出的内容会保留</span>
+      </div>
+      <div class="flex flex-wrap items-center gap-2"></div>
+    </div>
+  </div>
+</section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

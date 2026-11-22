@@ -72,9 +72,6 @@ function clearAll(): void {
   <section class="space-y-4">
     <header>
       <h1 class="text-lg font-bold text-fg ">直接生成 PRD</h1>
-      <p class="mt-1 text-sm text-subtle">
-        一段话把想法说清楚就行，不会追问；没提到的会标「待确认」。
-      </p>
     </header>
 
     <div class="space-y-3 rounded-2xl border border-line bg-surface p-5 shadow-sm  ">
@@ -82,7 +79,7 @@ function clearAll(): void {
       <div>
         <label for="field-quick-product-name" class="mb-1.5 block text-xs font-medium text-muted ">
           产品名称
-          <span class="ml-1 font-normal text-subtle">可选，会用于文档标题与下载文件名</span>
+          <span class="ml-1 font-normal text-subtle">可选</span>
         </label>
         <input
           id="field-quick-product-name"
@@ -98,7 +95,7 @@ function clearAll(): void {
       <div>
         <label for="field-quick-requirements" class="mb-1.5 block text-xs font-medium text-muted ">
           需求描述
-          <span class="ml-1 text-rose-500">*</span>
+          <span class="ml-1 text-danger-fg">*</span>
         </label>
         <textarea
           id="field-quick-requirements"
@@ -117,9 +114,6 @@ function clearAll(): void {
         <div class="mt-1.5 flex items-start justify-between gap-3">
           <p v-if="requirementMissing" class="text-xs text-warning-fg" role="status">
             请至少写一句需求描述，否则没有可依据的内容。
-          </p>
-          <p v-else class="text-xs text-subtle">
-            纯文本即可，换行、列表、甚至粘一整段会议记录都可以。
           </p>
           <span class="shrink-0 text-xs text-subtle">{{ requirements.length }} 字</span>
         </div>

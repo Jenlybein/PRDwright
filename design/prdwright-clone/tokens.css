@@ -1,0 +1,104 @@
+/*
+ * 设计令牌 · PRDwright 用户端
+ * ---------------------------------------------------------------------------
+ * 取值逐字抄自 frontend/src/index.css（L1 原始色阶 / L2 语义令牌 / 外壳几何），
+ * 编译器产出的 app.css 里也有同一份，这里重复声明一遍是为了：
+ *   1. 让这套复刻稿有一处可改的「风格总开关」（改这里，八屏一起变）；
+ *   2. 右侧工作台的调节滑块能挂到真实变量上。
+ * 两条声明取值完全相同，因此重复不会改变渲染结果。
+ *
+ * 色相：陶土赭（clay）主色 + 暖灰（stone）中性色 + 米白纸面。
+ * 对比度基线（WCAG AA）：正文 / 次要 / 提示文字 >= 4.5:1。
+ */
+
+/* 外壳几何：与主题无关 */
+:root {
+  --shell-sidebar-w: 16rem;
+  /* 吸底操作栏的实时高度：开发时由 AppActionBar 用 ResizeObserver 写进来，
+     静态稿按每屏实际高度在 build 时写入（见 build.mjs 的 barHeight）。 */
+  --shell-action-bar-h: 0px;
+
+  --font-sans: "Inter", "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
+
+  --radius-card: 0.875rem;
+  --radius-control: 0.5rem;
+
+  --shadow-card: 0 1px 2px 0 rgb(28 25 23 / 0.04), 0 4px 12px -2px rgb(28 25 23 / 0.07);
+  --shadow-pop: 0 10px 30px -6px rgb(28 25 23 / 0.2);
+
+  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* L1：陶土赭色阶 */
+  --color-primary: #b8502b;
+  --color-primary-50: #fdf6f3;
+  --color-primary-100: #fbede6;
+  --color-primary-200: #f5d5c8;
+  --color-primary-300: #ebb49f;
+  --color-primary-400: #de8b6c;
+  --color-primary-500: #b8502b;
+  --color-primary-600: #a8451f;
+  --color-primary-700: #9a3412;
+  --color-primary-800: #7c2d12;
+  --color-primary-900: #63240f;
+  --color-primary-950: #38140a;
+}
+
+/* L2：亮色主题（默认） */
+:root {
+  --ui-bg: #faf8f5;
+  --ui-surface: #ffffff;
+  --ui-surface-2: #f2eee8;
+  --ui-field: #ffffff;
+  --ui-line: #e5dfd5;
+  --ui-line-strong: #857c73;
+  --ui-fg: #1c1917;
+  --ui-body: #44403c;
+  --ui-muted: #57534e;
+  --ui-subtle: #6b6360;
+  --ui-on-accent: #ffffff;
+  --ui-accent: #9a3412;
+  --ui-accent-soft: #fbede6;
+  --ui-accent-soft-line: #e3bfa9;
+  --ui-danger: #b3261e;
+  --ui-danger-surface: #fdecea;
+  --ui-danger-line: #f0c4bd;
+  --ui-danger-fg: #9b1c12;
+  --ui-warning-surface: #fdf3e2;
+  --ui-warning-line: #ecd0a4;
+  --ui-warning-fg: #8a5300;
+  --ui-success-surface: #edf4e8;
+  --ui-success-line: #c3d8b4;
+  --ui-success-fg: #3f6212;
+  color-scheme: light;
+}
+
+/* L2：暗色主题（<html class="dark"> 触发） */
+.dark {
+  --ui-bg: #0d0c0b;
+  --ui-surface: #221e1a;
+  --ui-surface-2: #2d2824;
+  --ui-field: #26221f;
+  --ui-line: #494138;
+  --ui-line-strong: #8a7e72;
+  --ui-fg: #e6e0d6;
+  --ui-body: #d5cec3;
+  --ui-muted: #b4ada1;
+  --ui-subtle: #a8a29a;
+  --ui-on-accent: #ffffff;
+  --ui-accent: #e89667;
+  --ui-accent-soft: rgb(232 150 103 / 0.16);
+  --ui-accent-soft-line: #8a3a1c;
+  --ui-danger: #f87171;
+  --ui-danger-surface: rgb(127 29 29 / 0.3);
+  --ui-danger-line: #7f1d1d;
+  --ui-danger-fg: #fca5a5;
+  --ui-warning-surface: rgb(120 53 15 / 0.3);
+  --ui-warning-line: #92400e;
+  --ui-warning-fg: #fcd34d;
+  --ui-success-surface: rgb(63 98 18 / 0.3);
+  --ui-success-line: #4d7c0f;
+  --ui-success-fg: #bef264;
+  color-scheme: dark;
+}

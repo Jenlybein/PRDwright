@@ -91,7 +91,6 @@ const SECTIONS: SectionConfig[] = [
     key: 'product-users',
     no: 1,
     title: '产品与用户',
-    hint: '必填，AI 主要依据这些信息生成文档',
     required: true,
     fields: [
       {
@@ -774,11 +773,9 @@ defineExpose({ getSummary: () => currentSummary.value })
       <h1 class="text-2xl font-bold tracking-tight text-fg  sm:text-3xl">
         告诉我们你的产品想法
       </h1>
-      <p class="mt-2 max-w-xl text-sm leading-relaxed text-muted">
-        列表类内容逐条添加即可，<span class="font-medium text-muted ">不需要自己拼格式</span>。
-        带 <span class="text-red-500">*</span> 的字段为必填。
-        <template v-if="restored">已恢复上次填写的内容。</template>
-      </p>
+      <!-- 标题下只留状态，不留「怎么填」的说明：列表编辑器的「添加一行」、
+           必填星号和「必填」徽标已经把该怎么做摆在界面上了。 -->
+      <p v-if="restored" class="mt-2 text-xs text-subtle">已恢复上次填写的内容。</p>
     </div>
 
     <!-- 工具条：JSON 预览开关 / 填充示例（流程操作已下沉到底部吸底操作栏） -->
@@ -874,19 +871,19 @@ defineExpose({ getSummary: () => currentSummary.value })
                 {{ section.title }}
                 <span
                   v-if="section.required"
-                  class="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-400 dark:ring-red-900/50"
+                  class="rounded-full bg-danger-surface px-2 py-0.5 text-xs font-medium text-danger-fg ring-1 ring-danger-line"
                   >必填</span
                 >
                 <span
                   v-if="!expanded[section.key] && hasError(section)"
-                  class="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-400 dark:ring-red-900/50"
+                  class="rounded-full bg-danger-surface px-2 py-0.5 text-xs font-medium text-danger-fg ring-1 ring-danger-line"
                   >有错误</span
                 >
               </span>
               <span class="block text-xs text-subtle">
-                {{ section.hint }}
+                <template v-if="section.hint">{{ section.hint }} · </template>
                 <template v-if="!expanded[section.key]">
-                  · 已填 {{ filledCount(section) }}/{{ section.fields.length }}
+                  已填 {{ filledCount(section) }}/{{ section.fields.length }}
                 </template>
               </span>
             </span>
@@ -919,14 +916,14 @@ defineExpose({ getSummary: () => currentSummary.value })
               class="mb-2 block text-sm font-medium text-fg "
             >
               {{ field.label }}
-              <span v-if="field.required" class="ml-0.5 text-red-500" aria-hidden="true">*</span>
+              <span v-if="field.required" class="ml-0.5 text-danger-fg" aria-hidden="true">*</span>
             </label>
 
             <!-- 结构化编辑器：整体作为一组，label 不加 for -->
             <div v-else class="mb-2 flex flex-wrap items-baseline gap-x-2">
               <span class="text-sm font-medium text-fg ">
                 {{ field.label }}
-                <span v-if="field.required" class="ml-0.5 text-red-500" aria-hidden="true">*</span>
+                <span v-if="field.required" class="ml-0.5 text-danger-fg" aria-hidden="true">*</span>
               </span>
               <span v-if="field.hint" class="text-xs text-subtle">{{ field.hint }}</span>
             </div>

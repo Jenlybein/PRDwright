@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="dsh-design" content="web" />
+    <title>导入素材 · PRDwright</title>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="tokens.css" />
+    <style>
+      :root {
+        --shell-action-bar-h: 63px;
+      }
+    </style>
+  </head>
+  <body class="bg-bg text-body">
+    <div class="flex min-h-screen bg-bg text-body">
+      <!-- 左侧方案侧边栏：逐字取自 frontend/src/components/SolutionSidebar.vue（登录态 / 抽屉收起态） -->
+<button
+  type="button"
+  class="shell-fab fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-white shadow-lg lg:hidden"
+  aria-label="打开方案列表"
+>
+  <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path
+      fill-rule="evenodd"
+      d="M2 5.75A.75.75 0 0 1 2.75 5h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 5.75Zm0 4.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm.75 3.5a.75.75 0 0 0 0 1.5h14.5a.75.75 0 0 0 0-1.5H2.75Z"
+      clip-rule="evenodd"
+    />
+  </svg>
+</button>
+
+<aside
+  class="sidebar-surface flex flex-col border-line bg-surface/80 backdrop-blur fixed inset-y-0 left-0 z-40 w-[var(--shell-sidebar-w)] border-r transition-transform duration-[260ms] ease-[var(--ease-drawer)] overscroll-contain lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:z-auto lg:translate-x-0 -translate-x-full"
+  aria-label="方案列表"
+>
+  <!-- 顶端：品牌 + 主题切换 -->
+  <div class="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
+    <div class="flex min-w-0 items-center gap-2.5">
+      <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-primary-700 text-sm font-bold text-white">
+        H
+      </div>
+      <div class="min-w-0 leading-tight">
+        <div class="truncate text-sm font-bold text-fg">PRDwright</div>
+      </div>
+    </div>
+
+    <!-- 主题切换（AppButton variant=ghost size=sm + 《!px-2》；这里只画按钮，不画下拉） -->
+    <div class="relative">
+      <button
+        type="button"
+        class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg disabled:cursor-not-allowed text-body hover:bg-surface-2 hover:text-accent disabled:opacity-40 px-3 py-1.5 text-xs !px-2"
+        aria-label="主题：跟随系统，点击切换"
+        title="主题：跟随系统"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M3.5 3A1.5 1.5 0 0 0 2 4.5v7A1.5 1.5 0 0 0 3.5 13h4v1.5H6a.75.75 0 0 0 0 1.5h8a.75.75 0 0 0 0-1.5h-1.5V13h4A1.5 1.5 0 0 0 18 11.5v-7A1.5 1.5 0 0 0 16.5 3h-13Zm.5 1.5h12v6H4v-6ZM8.75 13h2.5v1.5h-2.5V13Z"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 新建任务 -->
+  <div class="px-3 pt-4">
+    <a
+      href="entry.html"
+      class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm w-full"
+    >
+      <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path
+          d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
+        />
+      </svg>
+      新建任务
+    </a>
+  </div>
+
+  <!-- 方案列表 -->
+  <div class="mt-4 flex-1 overflow-y-auto px-3 pb-4">
+    <div class="mb-2 flex items-center justify-between px-2">
+      <span class="text-xs font-medium text-muted">我的方案</span>
+    </div>
+
+    <ul class="space-y-1">
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-primary-500 bg-accent-soft ring-1 ring-accent-soft-line">
+          <a href="review.html" class="block w-full text-left" aria-current="true">
+            <span class="block truncate text-sm font-medium text-fg">社区二手交易 App</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已出提示词</span>
+              <span aria-hidden="true">·</span>
+              <span>2 小时前</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 社区二手交易 App"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="review.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">企业差旅报销流程</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已出 PRD</span>
+              <span aria-hidden="true">·</span>
+              <span>3 小时前</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 企业差旅报销流程"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="chat.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">校园活动报名小程序</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>AI 对话</span>
+              <span aria-hidden="true">·</span>
+              <span>11-20 14:05</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 校园活动报名小程序"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+
+      <li>
+        <div class="group relative rounded-lg border-l-2 py-2 pl-2 pr-2.5 transition border-transparent hover:bg-surface-2">
+          <a href="done.html" class="block w-full text-left">
+            <span class="block truncate text-sm font-medium text-fg">咖啡店会员积分系统</span>
+            <span class="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
+              <span>已完成</span>
+              <span aria-hidden="true">·</span>
+              <span>11-18 09:30</span>
+            </span>
+          </a>
+          <button
+            type="button"
+            class="absolute right-1.5 top-1.5 rounded-md p-1 text-subtle opacity-0 transition hover:bg-danger-surface hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            aria-label="删除方案 咖啡店会员积分系统"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M8.75 1a1 1 0 0 0-.95.68L7.42 2.5H4.25a.75.75 0 0 0 0 1.5h11.5a.75.75 0 0 0 0-1.5h-3.17l-.38-.82A1 1 0 0 0 11.25 1h-2.5ZM5.5 5.5l.6 9.06A1.75 1.75 0 0 0 7.84 16.2h4.32a1.75 1.75 0 0 0 1.74-1.64l.6-9.06H5.5Zm3 2.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm3 0a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <!-- 底端：登录入口（已登录显示昵称） -->
+  <div class="border-t border-line px-3 py-3">
+    <div class="relative">
+      <button
+        type="button"
+        class="flex w-full items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-body shadow-sm transition hover:border-accent hover:text-fg"
+        aria-label="已登录：林间"
+      >
+        <svg class="h-4 w-4 text-subtle" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            d="M10 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM3.465 14.493a1.23 1.23 0 0 0 .41 1.412A9.957 9.957 0 0 0 10 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 0 0-13.074.003Z"
+          />
+        </svg>
+        <span class="min-w-0 flex-1 truncate text-left">林间</span>
+        <svg class="h-3 w-3 text-subtle transition" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path
+            fill-rule="evenodd"
+            d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z"
+            clip-rule="evenodd"
+          />
+        </svg>
+      </button>
+    </div>
+  </div>
+</aside>
+
+      <div class="flex min-w-0 flex-1 flex-col">
+        <main class="mx-auto w-full max-w-3xl px-4 pt-10 pb-[calc(var(--shell-action-bar-h)+2.5rem)]">
+          
+          <!-- 导入素材页（PRD + 接口文档）：逐字取自 frontend/src/components/stages/PastePairStage.vue（两份都已贴 → PRD 有 Markdown 标题、接口文档非空） -->
+<section class="space-y-4">
+  <header>
+    <h1 class="text-lg font-bold text-fg">从现有 PRD 与接口文档生成提示词套件</h1>
+  </header>
+
+  <div class="space-y-4 rounded-2xl border border-line bg-surface p-5 shadow-sm">
+    <div class="grid gap-4 sm:grid-cols-2">
+      <!-- 左：PRD（必填，已贴） -->
+      <div>
+        <label for="field-pair-prd" class="mb-1.5 block text-xs font-medium text-muted">
+          PRD 正文（Markdown）
+          <span class="ml-1 text-danger-fg">*</span>
+        </label>
+        <textarea
+          id="field-pair-prd"
+          rows="14"
+          class="w-full resize-y rounded-lg border border-accent px-3 py-2 font-mono text-xs leading-relaxed text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="# 小账本 产品需求文档（PRD）&#10;&#10;## 1. 产品概述&#10;…"
+        ># 社区二手交易 App 产品需求文档（PRD）
+
+## 1. 产品概述
+让同一小区的邻居之间安全、快速地转让闲置物品。
+目标用户：25–40 岁城市社区住户。
+平台：iOS / Android App + 微信小程序。
+
+## 2. 功能范围（MVP）
+- 发布闲置：图片、标题、价格、成色。
+- 附近在售列表：按小区与距离排序。
+- 站内私信：全程不暴露手机号。
+- 交易评价：成交后双向评价。
+- 举报与拉黑：举报进入人工审核队列。
+- 认证：手机号 + 短信验证码。</textarea>
+
+        <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
+          <span class="shrink-0 text-xs text-subtle">237 字</span>
+        </div>
+      </div>
+
+      <!-- 右：接口文档（选填，已贴） -->
+      <div>
+        <label for="field-pair-api-docs" class="mb-1.5 block text-xs font-medium text-muted">
+          接口文档正文（Markdown）
+          <span class="ml-1 text-subtle">选填</span>
+        </label>
+        <textarea
+          id="field-pair-api-docs"
+          rows="14"
+          class="w-full resize-y rounded-lg border border-line-strong px-3 py-2 font-mono text-xs leading-relaxed text-fg outline-none transition placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent-soft-line"
+          placeholder="# 小账本 接口文档&#10;&#10;## 1. 记账&#10;POST /api/ledgers&#10;…"
+        ># 社区二手交易 App 接口文档
+
+## 1. 认证
+POST /api/auth/sms-code
+POST /api/auth/login
+
+## 2. 闲置物品
+GET /api/items?lat=&lng=&radius=3&category=
+POST /api/items
+GET /api/items/{item_id}
+PATCH /api/items/{item_id}/status
+
+## 3. 私信
+POST /api/items/{item_id}/threads</textarea>
+
+        <div class="mt-1.5 flex flex-wrap items-start justify-between gap-2">
+          <span class="shrink-0 text-xs text-subtle">247 字</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 已录入内容的确认条 -->
+    <p class="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-subtle">
+      已录入：社区二手交易 App 产品需求文档（PRD）…
+      <span class="text-muted">｜接口文档：社区二手交易 App 接口文档…</span>
+    </p>
+  </div>
+
+  <!-- 页面级操作栏：左「清空」│「返回入口」，右主操作「生成提示词套件」 -->
+  <div
+    class="shell-action-bar fixed bottom-0 left-0 right-0 z-30 border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:left-[var(--shell-sidebar-w)]"
+  >
+    <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mx-auto w-full max-w-3xl px-4 py-3">
+      <div class="flex min-w-0 flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg text-danger-fg hover:bg-danger-surface px-4 py-2 text-sm"
+        >
+          清空
+        </button>
+        <span class="h-5 w-px shrink-0 bg-line-strong" aria-hidden="true"></span>
+        <a
+          href="entry.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg border border-line-strong bg-surface text-body hover:border-accent hover:text-accent px-4 py-2 text-sm"
+        >
+          返回入口
+        </a>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <a
+          href="generating.html"
+          class="inline-flex items-center justify-center gap-2 rounded-control font-medium transition-[background-color,box-shadow,transform,color] duration-150 ease-smooth active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg bg-primary-600 text-on-accent shadow-sm hover:bg-primary-700 px-4 py-2 text-sm"
+        >
+          生成提示词套件
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>
